@@ -42,6 +42,7 @@ from .search_query import (
     normalize_search_sort,
     requires_like_fallback,
     sanitize_fts5_query,
+    sanitize_like_terms_query,
     should_apply_directness_rank_adjustment,
 )
 from .store import _normalize_source_value, _UNKNOWN_SOURCE, _legacy_blank_source_clause
@@ -501,7 +502,9 @@ class SummaryDAG:
     def _search_like(self, query: str, session_id: str | None = None,
                      limit: int = 20, sort: str | None = None,
                      source: str | None = None) -> List[SummaryNode]:
-        safe_query = sanitize_fts5_query(query)
+        # LIKE matches raw stored content, so keep characters the FTS5
+        # sanitizer would strip (apostrophes, emoji, CJK punctuation, ...).
+        safe_query = sanitize_like_terms_query(query)
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
         if not terms:

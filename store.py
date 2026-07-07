@@ -41,6 +41,7 @@ from .search_query import (
     normalize_search_sort,
     requires_like_fallback,
     sanitize_fts5_query,
+    sanitize_like_terms_query,
     AGE_DECAY_RATE,
     should_apply_directness_rank_adjustment,
 )
@@ -1046,7 +1047,9 @@ class MessageStore:
                      role: str | None = None,
                      time_from: float | None = None,
                      time_to: float | None = None) -> List[Dict[str, Any]]:
-        safe_query = sanitize_fts5_query(query)
+        # LIKE matches raw stored content, so keep characters the FTS5
+        # sanitizer would strip (apostrophes, emoji, CJK punctuation, ...).
+        safe_query = sanitize_like_terms_query(query)
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
         if not terms:

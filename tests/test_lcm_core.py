@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 import sys
@@ -1692,6 +1693,41 @@ class TestMessageStore:
 
         assert results == []
 
+    def test_search_apostrophe_query_stays_on_fts_path(self, store, caplog):
+        store.append("sess1", {"role": "user", "content": "no, don't reschedule the meeting"})
+
+        with caplog.at_level(logging.WARNING):
+            results = store.search("don't", session_id="sess1")
+
+        assert len(results) == 1
+        assert results[0]["content"] == "no, don't reschedule the meeting"
+        assert "falling back to LIKE" not in caplog.text
+
+    def test_search_conversational_query_does_not_crash_fts(self, store, caplog):
+        store.append(
+            "sess1",
+            {"role": "user", "content": "what did I tell you, don't you remember?"},
+        )
+
+        with caplog.at_level(logging.WARNING):
+            results = store.search(
+                "what did I tell you, don't you remember?", session_id="sess1"
+            )
+
+        assert len(results) == 1
+        assert "falling back to LIKE" not in caplog.text
+
+    def test_search_quoted_phrase_with_conversational_punctuation(self, store, caplog):
+        store.append("sess1", {"role": "user", "content": "the vendoring external plan, remember?"})
+        store.append("sess1", {"role": "user", "content": "external vendoring is different"})
+
+        with caplog.at_level(logging.WARNING):
+            results = store.search('"vendoring external", remember?', session_id="sess1")
+
+        assert len(results) == 1
+        assert results[0]["content"] == "the vendoring external plan, remember?"
+        assert "falling back to LIKE" not in caplog.text
+
     def test_init_low_disk_degrades_without_leaving_broken_message_fts_triggers(self, tmp_path, monkeypatch):
         db_path = tmp_path / "low-disk-broken-message-fts.db"
         conn = sqlite3.connect(db_path)
@@ -2994,6 +3030,22 @@ class TestDbBootstrapGuards:
         assert sanitize_fts5_query("v2.21") == "v2 21"
         assert sanitize_fts5_query("api.v2") == "api v2"
         assert sanitize_fts5_query("hermes.lcm") == "hermes lcm"
+
+    def test_sanitize_fts5_query_neutralizes_apostrophes_and_commas(self):
+        # An unquoted apostrophe or comma is an FTS5 syntax error; the
+        # unicode61 tokenizer indexed them as separators, so spaces match
+        # the index instead of crashing the query into the LIKE fallback.
+        assert sanitize_fts5_query("don't") == "don t"
+        assert (
+            sanitize_fts5_query("what did I tell you, don't you remember?")
+            == "what did I tell you  don t you remember"
+        )
+
+    def test_sanitize_fts5_query_keeps_quoted_phrases_verbatim(self):
+        assert (
+            sanitize_fts5_query('"plugin-only support" yes, really')
+            == '"plugin-only support" yes  really'
+        )
 
     def test_ensure_external_content_fts_skips_rebuild_when_disk_is_low(self, tmp_path, monkeypatch):
         conn = sqlite3.connect(tmp_path / "low-disk.db")

@@ -26,16 +26,28 @@ _BOOLEAN_OPERATORS = {"AND", "OR", "NOT", "NEAR"}
 _RISKY_FTS_TOKEN_RE = re.compile(r"[A-Za-z0-9][\-:/][A-Za-z0-9]")
 _SPLIT_PUNCT_RE = re.compile(r"[-:/]+")
 _STRIP_EDGE_PUNCT = "\"'()[]{}.,;"
-# Characters that are special in FTS5 query syntax
+# Characters that are special in FTS5 query syntax. This set is kept for the
+# risky-token checks and the LIKE-fallback cleanup, but FTS sanitization no
+# longer relies on it alone: outside quoted phrases, ANY non-word character
+# is a potential FTS5 syntax error (a bare apostrophe or comma each produce
+# "fts5: syntax error near ..."), and the unicode61 tokenizer treats every
+# one of them as a separator when indexing — so replacing them with spaces
+# matches the index instead of crashing the whole query into the LIKE
+# fallback.
 _FTS5_SPECIAL_CHARS = frozenset('"()*^-:{}.')
 
 
-def _sanitize_unquoted_fts5_fragment(text: str) -> str:
-    return "".join(" " if char in _FTS5_SPECIAL_CHARS else char for char in text)
+def _fts5_bareword_safe(char: str) -> bool:
+    return char.isalnum() or char == "_" or char.isspace()
 
 
-def sanitize_fts5_query(query: str) -> str:
-    """Strip FTS5 syntax operators while preserving balanced phrase quotes."""
+def _like_term_safe(char: str) -> bool:
+    return char not in _FTS5_SPECIAL_CHARS
+
+
+def _sanitize_query(query: str, is_safe) -> str:
+    """Replace unsafe characters with spaces while preserving balanced
+    phrase quotes (quoted phrase contents pass through verbatim)."""
     if not query:
         return ""
 
@@ -59,10 +71,24 @@ def sanitize_fts5_query(query: str) -> str:
         if in_quote:
             quote_buffer.append(char)
             continue
-        result.append(" " if char in _FTS5_SPECIAL_CHARS else char)
+        result.append(char if is_safe(char) else " ")
     if in_quote and quote_buffer:
-        result.extend(_sanitize_unquoted_fts5_fragment("".join(quote_buffer)))
+        result.extend(char if is_safe(char) else " " for char in quote_buffer)
     return "".join(result).strip()
+
+
+def sanitize_fts5_query(query: str) -> str:
+    """Sanitize a query for FTS5 MATCH: outside quoted phrases keep only
+    bareword-safe characters (alnum/underscore/whitespace) — exactly what
+    the unicode61 tokenizer indexed. Quoted phrases pass through unchanged."""
+    return _sanitize_query(query, _fts5_bareword_safe)
+
+
+def sanitize_like_terms_query(query: str) -> str:
+    """Lighter cleanup for LIKE-fallback term extraction: only strip FTS5
+    operator characters. LIKE matches raw stored content, so apostrophes,
+    emoji, CJK, etc. must survive for the fallback to find them."""
+    return _sanitize_query(query, _like_term_safe)
 
 
 _WORD_RE = re.compile(r"[\w-]+", re.UNICODE)
