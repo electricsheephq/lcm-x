@@ -265,6 +265,8 @@ def _parse_model_thresholds_env(raw: str) -> dict[str, float]:
             continue
         key, _, val = pair.rpartition(":")
         key = key.strip()
+        if not key:
+            continue
         try:
             result[key] = float(val.strip())
         except ValueError:
@@ -866,7 +868,7 @@ class LCMConfig:
         # key:value pairs). Env overrides config.yaml.
         c.model_thresholds = _load_model_thresholds_from_yaml()
         _raw_env_thresholds = os.environ.get("LCM_MODEL_THRESHOLDS")
-        if _raw_env_thresholds:
+        if _raw_env_thresholds is not None:
             c.model_thresholds = _parse_model_thresholds_env(_raw_env_thresholds)
         c.codex_gpt55_autoraise_enabled, source = _hermes_codex_gpt55_autoraise_with_source(
             c.codex_gpt55_autoraise_enabled

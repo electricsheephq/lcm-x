@@ -1,8 +1,5 @@
 """Tests for per-model compression threshold overrides in LCM."""
 
-import os
-import pytest
-
 from hermes_lcm.config import LCMConfig, _parse_model_thresholds_env
 
 
