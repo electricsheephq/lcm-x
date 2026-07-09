@@ -220,6 +220,40 @@ def ensure_lifecycle_state_table(conn: sqlite3.Connection) -> None:
     )
 
 
+def ensure_ignored_messages_table(conn: sqlite3.Connection) -> None:
+    """Create the lossless sidecar for ignore-pattern-dropped messages.
+
+    Rows that ``ignore_message_patterns`` would otherwise drop are persisted
+    here instead of being discarded, so their audit/recall value survives.
+    The sidecar is deliberately NOT the ``messages`` table: replay, FTS, token
+    counts, and cursor reconciliation all run over ``messages`` only, so a
+    stored ignored row can never pollute active context or a summary. This
+    table is additive and carries no schema-version bump — an older build
+    simply ignores it and keeps dropping, so downgrades stay safe.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ignored_messages (
+            ignored_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            source TEXT DEFAULT '',
+            conversation_id TEXT DEFAULT '',
+            role TEXT NOT NULL,
+            content TEXT,
+            tool_call_id TEXT,
+            tool_calls TEXT,
+            tool_name TEXT,
+            timestamp REAL NOT NULL,
+            token_estimate INTEGER DEFAULT 0,
+            matched_pattern TEXT DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ignored_session ON ignored_messages(session_id, ignored_id)"
+    )
+
+
 def ensure_lifecycle_state_columns(conn: sqlite3.Connection) -> None:
     ensure_lifecycle_state_table(conn)
     columns = {
@@ -699,5 +733,9 @@ def run_versioned_migrations(conn: sqlite3.Connection) -> None:
     if current_version < 5:
         mark_migration_step_complete(conn, "v5_message_conversation_id")
         current_version = 5
+
+    # Additive lossless-ignored sidecar. Ensured unconditionally (idempotent)
+    # and intentionally version-fenceless so older builds stay downgrade-safe.
+    ensure_ignored_messages_table(conn)
 
     set_schema_version(conn, current_version)

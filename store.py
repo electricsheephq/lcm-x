@@ -407,6 +407,104 @@ class MessageStore:
                 ids.append(cur.lastrowid)
         return ids
 
+    # -- Lossless ignored sidecar ------------------------------------------
+
+    def append_ignored_batch(self, session_id: str,
+                             messages: List[Dict[str, Any]],
+                             token_estimates: List[int] | None = None,
+                             source: str = "",
+                             conversation_id: str = "",
+                             matched_patterns: List[str] | None = None) -> List[int]:
+        """Persist ignore-pattern-dropped messages into the sidecar losslessly.
+
+        Rows go through the same ingest protection as ``append_batch`` so
+        sensitive payloads are redacted/externalized before they land in the
+        durable store. These rows live only in ``ignored_messages`` and are
+        never read back into replay, FTS, token totals, or cursor
+        reconciliation, so persisting them cannot change active-context
+        behavior.
+        """
+        if not messages:
+            return []
+        protected_messages = protect_messages_for_ingest(
+            messages,
+            config=self._ingest_protection_config,
+            hermes_home=self._hermes_home,
+            session_id=session_id,
+        )
+        if token_estimates is None:
+            token_estimates = [0] * len(protected_messages)
+        if matched_patterns is None:
+            matched_patterns = [""] * len(protected_messages)
+
+        ids: List[int] = []
+        with self._write_lock, self._conn:
+            for msg, est, pattern in zip(protected_messages, token_estimates, matched_patterns):
+                tc = msg.get("tool_calls")
+                tc_json = json.dumps(tc) if tc else None
+                cur = self._conn.execute(
+                    """INSERT INTO ignored_messages
+                       (session_id, source, conversation_id, role, content, tool_call_id,
+                        tool_calls, tool_name, timestamp, token_estimate, matched_pattern)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        session_id,
+                        _normalize_source_value(source),
+                        _normalize_conversation_id_value(conversation_id),
+                        msg.get("role", "unknown"),
+                        _normalize_content_value(msg.get("content")),
+                        msg.get("tool_call_id"),
+                        tc_json,
+                        msg.get("tool_name"),
+                        time.time(),
+                        est,
+                        pattern or "",
+                    ),
+                )
+                ids.append(cur.lastrowid)
+        return ids
+
+    def _ignored_row_to_dict(self, row) -> Dict[str, Any]:
+        if row is None:
+            return {}
+        cols = [
+            "ignored_id", "session_id", "source", "conversation_id", "role",
+            "content", "tool_call_id", "tool_calls", "tool_name", "timestamp",
+            "token_estimate", "matched_pattern",
+        ]
+        d = dict(zip(cols, row[: len(cols)]))
+        d["source"] = _normalize_source_value(d.get("source"))
+        d["conversation_id"] = _normalize_conversation_id_value(d.get("conversation_id"))
+        if d.get("tool_calls"):
+            try:
+                d["tool_calls"] = json.loads(d["tool_calls"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return d
+
+    def get_ignored_session_messages(self, session_id: str,
+                                     limit: int | None = None) -> List[Dict[str, Any]]:
+        """Return sidecar-stored ignored messages for a session, oldest first."""
+        sql = (
+            "SELECT ignored_id, session_id, source, conversation_id, role, content, "
+            "tool_call_id, tool_calls, tool_name, timestamp, token_estimate, matched_pattern "
+            "FROM ignored_messages WHERE session_id = ? ORDER BY ignored_id ASC"
+        )
+        params: tuple[Any, ...] = (session_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (session_id, limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [self._ignored_row_to_dict(row) for row in rows]
+
+    def get_ignored_session_count(self, session_id: str) -> int:
+        """Count sidecar-stored ignored messages for a session."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM ignored_messages WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return row[0] if row else 0
+
     def reassign_session_messages(self, old_session_id: str, new_session_id: str) -> int:
         """Move all persisted messages from one session_id to another."""
         if not old_session_id or not new_session_id or old_session_id == new_session_id:
@@ -414,6 +512,12 @@ class MessageStore:
         with self._write_lock:
             cur = self._conn.execute(
                 "UPDATE messages SET session_id = ? WHERE session_id = ?",
+                (new_session_id, old_session_id),
+            )
+            # Keep the lossless-ignored sidecar bound to the same session so a
+            # rebind never strands ignored rows under the old id.
+            self._conn.execute(
+                "UPDATE ignored_messages SET session_id = ? WHERE session_id = ?",
                 (new_session_id, old_session_id),
             )
             self._conn.commit()
@@ -424,6 +528,10 @@ class MessageStore:
         with self._write_lock:
             cur = self._conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
+                (session_id,),
+            )
+            self._conn.execute(
+                "DELETE FROM ignored_messages WHERE session_id = ?",
                 (session_id,),
             )
             self._conn.commit()
