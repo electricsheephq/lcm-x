@@ -273,6 +273,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("max_assembly_tokens", "LCM_MAX_ASSEMBLY_TOKENS", int),
     _EnvFieldSpec("reserve_tokens_floor", "LCM_RESERVE_TOKENS_FLOOR", int),
     _EnvFieldSpec("custom_instructions", "LCM_CUSTOM_INSTRUCTIONS", str),
+    _EnvFieldSpec("lossless_ignored_enabled", "LCM_LOSSLESS_IGNORED_ENABLED", bool),
     _EnvFieldSpec("extraction_enabled", "LCM_EXTRACTION_ENABLED", bool),
     _EnvFieldSpec("extraction_model", "LCM_EXTRACTION_MODEL", str),
     _EnvFieldSpec("extraction_output_path", "LCM_EXTRACTION_OUTPUT_PATH", str),
@@ -426,6 +427,14 @@ class LCMConfig:
     # When enabled, already-externalized summarized tool-result transcript rows may
     # be rewritten to compact GC placeholders after successful leaf compaction.
     large_output_transcript_gc_enabled: bool = False
+
+    # -- Lossless ignored capture ---
+    # When enabled, messages that match ``ignore_message_patterns`` are persisted
+    # into the ``ignored_messages`` sidecar instead of being discarded. They stay
+    # out of replay/FTS/token-counts/reconciliation exactly as before; only their
+    # durable audit/recall value is preserved. Off by default so the drop path is
+    # unchanged unless an operator opts in.
+    lossless_ignored_enabled: bool = False
 
     # -- Models ---
     summary_model: str = ""       # empty = use Hermes auxiliary model

@@ -2595,9 +2595,12 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         if not session_id or not suffix:
             return []
         kept: list[Dict[str, Any]] = []
+        ignored_sidecar_messages: list[Dict[str, Any]] = []
         for msg in suffix:
             if self._matches_ignore_message_patterns(msg):
                 self._ignored_message_count += 1
+                if self._config.lossless_ignored_enabled:
+                    ignored_sidecar_messages.append(msg)
                 excerpt = (text_content_for_pattern_matching(msg.get("content")) or "")[:80].replace("\n", " ")
                 logger.debug(
                     "LCM ignore_message_patterns dropped late session-end %s message: %r",
@@ -2606,6 +2609,13 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 )
                 continue
             kept.append(msg)
+        if ignored_sidecar_messages:
+            self._persist_ignored_sidecar_messages_for(
+                session_id,
+                ignored_sidecar_messages,
+                source=source,
+                conversation_id=conversation_id,
+            )
         if not kept:
             return []
         protected_messages = protect_messages_for_ingest(
@@ -3254,6 +3264,12 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             status["ignore_message_patterns_source"] = self._config.ignore_message_patterns_source
             status["ignored_message_count"] = self._ignored_message_count
             status["ignore_pattern_dropped_count"] = self._ignore_pattern_dropped_count
+            status["lossless_ignored_enabled"] = bool(self._config.lossless_ignored_enabled)
+            if self._config.lossless_ignored_enabled and session_id:
+                try:
+                    status["ignored_sidecar_count"] = self._store.get_ignored_session_count(session_id)
+                except Exception:  # pragma: no cover - defensive; audit surface only
+                    status["ignored_sidecar_count"] = -1
             status["ingest_reconciliation"] = dict(self._last_ingest_reconciliation)
             status["overflow_recovery_failed"] = self._last_overflow_recovery_failed
             status["condensation_suppressed_reason"] = self._last_condensation_suppressed_reason
@@ -3402,6 +3418,43 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
             self._ingest_cursor_needs_reconcile = False
+
+    def _persist_ignored_sidecar_messages(self, messages: List[Dict[str, Any]]) -> None:
+        """Persist current-session ignore-pattern drops into the durable sidecar."""
+        self._persist_ignored_sidecar_messages_for(
+            self._session_id,
+            messages,
+            source=self._session_platform,
+            conversation_id=self._conversation_id,
+        )
+
+    def _persist_ignored_sidecar_messages_for(
+        self,
+        session_id: str,
+        messages: List[Dict[str, Any]],
+        *,
+        source: str,
+        conversation_id: str,
+    ) -> None:
+        """Persist ignore-pattern-dropped raw messages into the durable sidecar.
+
+        Best-effort and fully decoupled from the active-context path: a sidecar
+        write failure must never break ingest, and these rows are never read
+        back into replay/FTS/counts, so losing one degrades only audit value.
+        """
+        if not messages or not session_id:
+            return
+        try:
+            estimates = [count_message_tokens(msg) for msg in messages]
+            self._store.append_ignored_batch(
+                session_id,
+                messages,
+                estimates,
+                source=source,
+                conversation_id=conversation_id,
+            )
+        except Exception:  # pragma: no cover - defensive; audit path only
+            logger.debug("LCM lossless-ignored sidecar persist failed", exc_info=True)
 
     def _stored_row_externalized_text_parts_for_pattern_matching(self, msg: Dict[str, Any]) -> list[str]:
         ref_sources: list[str] = []
@@ -3889,6 +3942,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         ]
         if messages_to_store_with_index:
             kept: list[tuple[int, Dict[str, Any]]] = []
+            ignored_sidecar_messages: list[Dict[str, Any]] = []
             boundary_placeholder_seen: dict[str, int] = {}
             boundary_seen_synthetic_summary_before = False
             empty_session_placeholder_seen: dict[str, int] = {}
@@ -4061,10 +4115,13 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                         active_replay_messages[absolute_idx] = active_message
                     excerpt = original_text[:80].replace("\n", " ")
                     if ignored_original_messages[absolute_idx]:
-                        # A raw message matched ignore_message_patterns and is
-                        # discarded here - never persisted anywhere. Count and
-                        # log it (INFO) so an over-broad pattern silently eating
-                        # substantive turns is at least visible to the operator.
+                        # A raw message matched ignore_message_patterns. It stays
+                        # out of replay/FTS/counts either way; when lossless
+                        # capture is enabled we additionally persist the raw form
+                        # into the ignored_messages sidecar so its audit/recall
+                        # value survives instead of being discarded outright.
+                        if self._config.lossless_ignored_enabled:
+                            ignored_sidecar_messages.append(original_msg)
                         self._ignore_pattern_dropped_count += 1
                         logger.info(
                             "LCM ignore_message_patterns dropped %s message "
@@ -4090,6 +4147,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     store_msg = original_msg
                 kept.append((absolute_idx, store_msg))
             messages_to_store_with_index = kept
+            if ignored_sidecar_messages:
+                self._persist_ignored_sidecar_messages(ignored_sidecar_messages)
 
         if not messages_to_store_with_index:
             self._ingest_cursor = n
