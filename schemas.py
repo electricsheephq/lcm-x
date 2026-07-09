@@ -219,7 +219,10 @@ LCM_EXPAND = {
                     "content paged by content_offset. If the row references an externalized payload, "
                     "the ref is surfaced via 'externalized_ref'; payload metadata and content are "
                     "session-scoped, so a cross-session row also includes 'externalized_note' "
-                    "explaining that the ref is for traceability only and cannot be expanded in this version."
+                    "explaining that the ref is for traceability only and cannot be expanded in this version. "
+                    "If the row is a read-tool truncation marker whose source file was losslessly recovered, "
+                    "the primary content is hydrated and the response also includes an independently pageable "
+                    "'recovered_tool_content' object."
                 ),
             },
             "max_tokens": {
@@ -239,6 +242,16 @@ LCM_EXPAND = {
             "content_offset": {
                 "type": "integer",
                 "description": "Character offset used to continue an oversized raw message, externalized payload, or store_id-mode message. Use next_content_offset from the previous response.",
+                "default": 0,
+            },
+            "recovered_content_offset": {
+                "type": "integer",
+                "description": (
+                    "Character offset into losslessly recovered read-tool content (store_id mode). When a "
+                    "store_id row is a read-tool truncation marker whose source file was re-read, the response "
+                    "includes a 'recovered_tool_content' object; page it with this offset "
+                    "using its next_content_offset."
+                ),
                 "default": 0,
             },
         },

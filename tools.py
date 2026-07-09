@@ -1537,6 +1537,23 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
                     "Externalized payload metadata is session-scoped; "
                     "cross-session ref is surfaced for traceability only and cannot be expanded in this version."
                 )
+        # PR #364 hydrates the primary content. This stacked change adds an
+        # independently pageable object using that same already-hydrated text.
+        if recovered is not None:
+            recovered_offset = _parse_non_negative_int(args.get("recovered_content_offset", 0), 0)
+            recovered_text = recovered.get("content") or ""
+            rec_sliced = _slice_content_for_response(recovered_text, max_tokens, recovered_offset)
+            result["recovered_tool_content"] = {
+                "source_type": "recovered_read_tool_content",
+                "source_path": recovered.get("source_path") or "",
+                "recovered_chars": recovered.get("recovered_chars", len(recovered_text)),
+                "content": rec_sliced["content"],
+                "content_offset": rec_sliced["content_offset"],
+                "content_returned_chars": rec_sliced["content_returned_chars"],
+                "content_truncated": rec_sliced["content_truncated"],
+                "next_content_offset": rec_sliced["next_content_offset"],
+                "has_more": rec_sliced["has_more"],
+            }
         return json.dumps(result)
 
     node_id = raw_node_id_arg
