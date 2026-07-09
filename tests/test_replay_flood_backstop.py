@@ -1,0 +1,134 @@
+import pytest
+
+from hermes_lcm.config import LCMConfig
+from hermes_lcm.engine import LCMEngine
+from hermes_lcm.store import MessageStore, ReplayFloodError
+
+
+def _store(tmp_path, **config_overrides):
+    config = LCMConfig(database_path=str(tmp_path / "lcm.db"), **config_overrides)
+    return MessageStore(tmp_path / "lcm.db", ingest_protection_config=config)
+
+
+class TestStoreReplayFloodBackstop:
+    def test_refuses_user_replay_flood_batch(self, tmp_path):
+        store = _store(tmp_path)
+        stored = [{"role": "user", "content": f"durable message {i}"} for i in range(10)]
+        store.append_batch("flood-session", stored)
+        before = store.get_session_count("flood-session")
+
+        flood = [dict(msg) for msg in stored[:8]]
+        flood.append({"role": "user", "content": "new message riding the flood"})
+
+        with pytest.raises(ReplayFloodError):
+            store.append_batch("flood-session", flood)
+        assert store.get_session_count("flood-session") == before
+
+    def test_allows_fresh_bulk_batch_without_priors(self, tmp_path):
+        store = _store(tmp_path)
+        batch = [{"role": "user", "content": f"brand new message {i}"} for i in range(20)]
+
+        ids = store.append_batch("fresh-session", batch)
+
+        assert len(ids) == len(batch)
+
+    def test_allows_small_duplicate_delta_below_threshold(self, tmp_path):
+        store = _store(tmp_path)
+        stored = [{"role": "user", "content": f"durable message {i}"} for i in range(10)]
+        store.append_batch("delta-session", stored)
+
+        delta = [dict(stored[-2]), dict(stored[-1]), {"role": "user", "content": "new turn"}]
+        ids = store.append_batch("delta-session", delta)
+
+        assert len(ids) == len(delta)
+
+    def test_refuses_internal_identical_identity_burst(self, tmp_path):
+        store = _store(tmp_path)
+        store.append_batch(
+            "internal-session",
+            [{"role": "assistant", "content": "repeated assistant row"}],
+        )
+
+        burst = [{"role": "assistant", "content": "repeated assistant row"} for _ in range(32)]
+        with pytest.raises(ReplayFloodError):
+            store.append_batch("internal-session", burst)
+
+    def test_allows_internal_distinct_duplicate_rows(self, tmp_path):
+        store = _store(tmp_path)
+        stored = [{"role": "assistant", "content": f"assistant row {i}"} for i in range(40)]
+        store.append_batch("distinct-session", stored)
+
+        # Distinct internal identities never accumulate against the internal
+        # threshold even when every row duplicates stored content.
+        ids = store.append_batch("distinct-session", [dict(msg) for msg in stored])
+
+        assert len(ids) == len(stored)
+
+    def test_zero_threshold_disables_guard(self, tmp_path):
+        store = _store(
+            tmp_path,
+            replay_flood_threshold_external=0,
+            replay_flood_threshold_internal=0,
+        )
+        stored = [{"role": "user", "content": f"durable message {i}"} for i in range(10)]
+        store.append_batch("disabled-session", stored)
+
+        ids = store.append_batch("disabled-session", [dict(msg) for msg in stored])
+
+        assert len(ids) == len(stored)
+
+
+class TestEngineReplayFloodBackstop:
+    def test_engine_survives_and_reports_replay_flood_refusal(self, tmp_path):
+        db_path = tmp_path / "flood-engine.db"
+        config = LCMConfig(database_path=str(db_path))
+        before_restart = LCMEngine(config=config)
+        before_restart.on_session_start(
+            "flood-engine-session",
+            platform="cli",
+            conversation_id="flood-engine-conversation",
+            context_length=200000,
+        )
+        persisted_messages = [{"role": "system", "content": "You are concise."}]
+        persisted_messages.extend(
+            {"role": "user", "content": f"durable message {i}"}
+            for i in range(20)
+        )
+        before_restart._ingest_messages(persisted_messages)
+        before_restart._store.close()
+        before_restart._dag.close()
+        before_restart._lifecycle.close()
+
+        after_restart = LCMEngine(config=config)
+        after_restart.on_session_start(
+            "flood-engine-session",
+            platform="cli",
+            conversation_id="flood-engine-conversation",
+            context_length=200000,
+        )
+        # A middle chunk of the durable history is not anchored at the tail,
+        # so reconciliation stays ambiguous and tries to append the whole
+        # batch; the store-level backstop refuses it.
+        flood = [dict(msg) for msg in persisted_messages[3:11]]
+        flood.append({"role": "user", "content": "new turn riding the flood"})
+
+        after_restart._ingest_messages(flood)
+
+        assert after_restart._store.get_session_count("flood-engine-session") == len(
+            persisted_messages
+        )
+        assert after_restart._replay_flood_refusal_count == 1
+        status = after_restart.get_status()
+        assert status["replay_flood_refusals"]["count"] == 1
+        assert "refused replay-like message batch" in status["replay_flood_refusals"]["last"]
+
+
+class TestReplayFloodConfig:
+    def test_env_overrides_parse(self, monkeypatch):
+        monkeypatch.setenv("LCM_REPLAY_FLOOD_THRESHOLD_EXTERNAL", "5")
+        monkeypatch.setenv("LCM_REPLAY_FLOOD_THRESHOLD_INTERNAL", "64")
+
+        config = LCMConfig.from_env()
+
+        assert config.replay_flood_threshold_external == 5
+        assert config.replay_flood_threshold_internal == 64

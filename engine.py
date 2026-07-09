@@ -117,7 +117,7 @@ from .sqlite_util import (
     _is_sqlite_locked_error,
     _temporary_sqlite_busy_timeout,
 )
-from .store import MessageStore
+from .store import MessageStore, ReplayFloodError
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 from . import tools as lcm_tools
 
@@ -221,6 +221,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             "action": "none",
             "reason": "not run",
         }
+        self._replay_flood_refusal_count: int = 0
+        self._last_replay_flood_refusal: str = ""
 
         # State required by ContextEngine ABC and run_agent.py compatibility
         self.model = ""
@@ -2614,13 +2616,17 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             config=self._config,
             hermes_home=self._hermes_home,
         )
-        return self._store._append_protected_batch(
-            session_id,
-            protected_messages,
-            [count_message_tokens(msg) for msg in protected_messages],
-            source=source,
-            conversation_id=conversation_id,
-        )
+        try:
+            return self._store._append_protected_batch(
+                session_id,
+                protected_messages,
+                [count_message_tokens(msg) for msg in protected_messages],
+                source=source,
+                conversation_id=conversation_id,
+            )
+        except ReplayFloodError as exc:
+            self._record_replay_flood_refusal(exc, incoming=len(protected_messages))
+            return []
 
     def on_session_end(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
         ended_generation = self._in_process_auxiliary_caller_generation(session_id)
@@ -3255,6 +3261,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             status["ignored_message_count"] = self._ignored_message_count
             status["ignore_pattern_dropped_count"] = self._ignore_pattern_dropped_count
             status["ingest_reconciliation"] = dict(self._last_ingest_reconciliation)
+            if self._replay_flood_refusal_count:
+                status["replay_flood_refusals"] = {
+                    "count": self._replay_flood_refusal_count,
+                    "last": self._last_replay_flood_refusal,
+                }
             status["overflow_recovery_failed"] = self._last_overflow_recovery_failed
             status["condensation_suppressed_reason"] = self._last_condensation_suppressed_reason
             status["conversation_id"] = conversation_id
@@ -3402,6 +3413,16 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
             self._ingest_cursor_needs_reconcile = False
+
+    def _record_replay_flood_refusal(self, exc: ReplayFloodError, *, incoming: int) -> None:
+        self._replay_flood_refusal_count += 1
+        self._last_replay_flood_refusal = str(exc)
+        logger.error(
+            "LCM store refused replay-flood batch (refusal #%d, incoming=%d): %s",
+            self._replay_flood_refusal_count,
+            incoming,
+            exc,
+        )
 
     def _stored_row_externalized_text_parts_for_pattern_matching(self, msg: Dict[str, Any]) -> list[str]:
         ref_sources: list[str] = []
@@ -4120,13 +4141,20 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 active_replay_messages[absolute_idx] = active_message
 
         estimates = [count_message_tokens(m) for m in protected_messages]
-        self._store._append_protected_batch(
-            self._session_id,
-            protected_messages,
-            estimates,
-            source=self._session_platform,
-            conversation_id=self._conversation_id,
-        )
+        try:
+            self._store._append_protected_batch(
+                self._session_id,
+                protected_messages,
+                estimates,
+                source=self._session_platform,
+                conversation_id=self._conversation_id,
+            )
+        except ReplayFloodError as exc:
+            # Fail loud, persist nothing of the flood batch, and keep the
+            # cursor where it is so a later reconcile can still recover a
+            # genuinely new tail. Active replay stays usable for the host.
+            self._record_replay_flood_refusal(exc, incoming=len(protected_messages))
+            return self._remember_active_replay_messages(messages, active_replay_messages)
         self._ingest_cursor = n
         self._compression_boundary_ingest_pending = False
         self._compression_boundary_active_placeholder_digest_budget = {}

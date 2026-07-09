@@ -67,6 +67,16 @@ def _legacy_blank_source_clause(column: str) -> str:
     return f"({column} IS NULL OR TRIM({column}, {whitespace_chars}) = '')"
 
 
+class ReplayFloodError(RuntimeError):
+    """A single ingest batch re-appends already-stored rows in bulk.
+
+    Raised by the store-level anti-replay backstop before any row of the
+    offending batch is written. The cursor/reconcile layer is the primary
+    duplicate gate; this guard turns a misjudgement that would silently
+    flood the durable session with replayed rows into a loud refusal.
+    """
+
+
 def _normalize_source_value(source: str | None) -> str:
     normalized = (source or "").strip()
     return normalized or _UNKNOWN_SOURCE
@@ -381,6 +391,7 @@ class MessageStore:
 
         ids = []
         with self._write_lock, self._conn:
+            self._assert_no_replay_identity_flood(session_id, messages)
             for msg, est in zip(messages, token_estimates):
                 tc = msg.get("tool_calls")
                 tc_json = json.dumps(tc) if tc else None
@@ -406,6 +417,77 @@ class MessageStore:
                 )
                 ids.append(cur.lastrowid)
         return ids
+
+    def _row_identity_already_stored(self, session_id: str, msg: Dict[str, Any],
+                                     content: str) -> bool:
+        row = self._conn.execute(
+            """SELECT 1 FROM messages
+               WHERE session_id = ? AND role = ? AND content = ?
+                 AND COALESCE(tool_call_id, '') = ?
+               LIMIT 1""",
+            (
+                session_id,
+                msg.get("role", "unknown"),
+                content,
+                str(msg.get("tool_call_id") or ""),
+            ),
+        ).fetchone()
+        return row is not None
+
+    def _assert_no_replay_identity_flood(self, session_id: str,
+                                         messages: List[Dict[str, Any]]) -> None:
+        """Refuse a batch that re-appends already-stored rows in bulk.
+
+        Counts rows of the incoming batch whose identity already exists in
+        the session. The user role is the host rebroadcast surface, so any
+        mix of already-stored user rows counts against the external
+        threshold; internal roles (assistant/tool/system) only count when
+        one identical identity repeats within the batch, so legitimately
+        recurring internal rows with distinct content never accumulate.
+        Small deliberate re-appends (ambiguous restart deltas, heartbeat
+        repeats) stay far below the thresholds and are unaffected.
+        """
+        external_threshold = int(
+            getattr(self._ingest_protection_config, "replay_flood_threshold_external", 0) or 0
+        )
+        internal_threshold = int(
+            getattr(self._ingest_protection_config, "replay_flood_threshold_internal", 0) or 0
+        )
+        user_rows: List[tuple[Dict[str, Any], str]] = []
+        internal_groups: Dict[tuple[str, str, str], List[tuple[Dict[str, Any], str]]] = {}
+        for msg in messages:
+            content = _normalize_content_value(msg.get("content")) or ""
+            if not content:
+                continue
+            role = str(msg.get("role", "unknown"))
+            if role == "user":
+                user_rows.append((msg, content))
+            else:
+                key = (role, content, str(msg.get("tool_call_id") or ""))
+                internal_groups.setdefault(key, []).append((msg, content))
+
+        if external_threshold > 0 and len(user_rows) >= external_threshold:
+            replicated = 0
+            for msg, content in user_rows:
+                if self._row_identity_already_stored(session_id, msg, content):
+                    replicated += 1
+                    if replicated >= external_threshold:
+                        raise ReplayFloodError(
+                            f"refused replay-like message batch: session={session_id} "
+                            f"role=user replicated_rows>={replicated} "
+                            f"threshold={external_threshold} batch={len(messages)}"
+                        )
+        if internal_threshold > 0:
+            for (role, _content, _tool_call_id), rows in internal_groups.items():
+                if len(rows) < internal_threshold:
+                    continue
+                probe_msg, probe_content = rows[0]
+                if self._row_identity_already_stored(session_id, probe_msg, probe_content):
+                    raise ReplayFloodError(
+                        f"refused replay-like message batch: session={session_id} "
+                        f"role={role} identical_rows={len(rows)} "
+                        f"threshold={internal_threshold} batch={len(messages)}"
+                    )
 
     def reassign_session_messages(self, old_session_id: str, new_session_id: str) -> int:
         """Move all persisted messages from one session_id to another."""

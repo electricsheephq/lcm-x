@@ -273,6 +273,8 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("max_assembly_tokens", "LCM_MAX_ASSEMBLY_TOKENS", int),
     _EnvFieldSpec("reserve_tokens_floor", "LCM_RESERVE_TOKENS_FLOOR", int),
     _EnvFieldSpec("custom_instructions", "LCM_CUSTOM_INSTRUCTIONS", str),
+    _EnvFieldSpec("replay_flood_threshold_external", "LCM_REPLAY_FLOOD_THRESHOLD_EXTERNAL", int),
+    _EnvFieldSpec("replay_flood_threshold_internal", "LCM_REPLAY_FLOOD_THRESHOLD_INTERNAL", int),
     _EnvFieldSpec("extraction_enabled", "LCM_EXTRACTION_ENABLED", bool),
     _EnvFieldSpec("extraction_model", "LCM_EXTRACTION_MODEL", str),
     _EnvFieldSpec("extraction_output_path", "LCM_EXTRACTION_OUTPUT_PATH", str),
@@ -452,6 +454,13 @@ class LCMConfig:
 
     # -- Storage ---
     database_path: str = ""       # empty = HERMES_HOME/lcm.db; LCM_DATABASE_PATH may override
+    # Store-level anti-replay backstop: refuse a single ingest batch that
+    # re-appends already-stored rows in bulk. Thresholds count rows in one
+    # batch whose identity already exists in the session. ``external`` guards
+    # the user role (the host rebroadcast surface); ``internal`` guards
+    # assistant/tool/system rows grouped by identical identity. 0 disables.
+    replay_flood_threshold_external: int = 8
+    replay_flood_threshold_internal: int = 32
 
     # -- Session carry-over ---
     # Depth retained after /new (-1 = all, 0 = nothing, 2 = keep d2+)
