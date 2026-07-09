@@ -254,6 +254,30 @@ class ReconcileMixin:
         return stored_tail[-len(candidate_prefix) :] == candidate_prefix
 
     @staticmethod
+    def _matches_unique_store_tail_suffix(
+        stored_tail: list[tuple[str, str, str, str]],
+        candidate_prefix: list[tuple[str, str, str, str]],
+    ) -> bool:
+        """True when the prefix matches the tail suffix and occurs exactly once.
+
+        Sequence uniqueness inside the tail window distinguishes a restart
+        replay of the durable tail from repeat-prone traffic (heartbeats,
+        retries) whose fresh rows can coincidentally equal the last stored
+        rows.  Repeated sequences stay ambiguous and are preserved.
+        """
+        if not candidate_prefix or len(candidate_prefix) > len(stored_tail):
+            return False
+        if stored_tail[-len(candidate_prefix) :] != candidate_prefix:
+            return False
+        occurrences = 0
+        for start in range(len(stored_tail) - len(candidate_prefix) + 1):
+            if stored_tail[start : start + len(candidate_prefix)] == candidate_prefix:
+                occurrences += 1
+                if occurrences > 1:
+                    return False
+        return True
+
+    @staticmethod
     def _strip_inline_persisted_output_generation_identity(
         identity: tuple[str, str, str, str],
     ) -> tuple[str, str, str, str]:
@@ -712,6 +736,43 @@ class ReconcileMixin:
                 and len(candidate_prefix) >= max(1, self._config.fresh_tail_count)
                 and raw_suffix_needs_cleanup_equivalence
             )
+            # Partial-tail overlap: a restarted host can replay only the last
+            # few durable rows plus new turns.  Full-replay proof fails there,
+            # and appending the whole batch duplicates the overlapping rows.
+            # Accept the overlap as replay only with strong evidence: at least
+            # two rows matching the durable tail anchored at its end, that
+            # sequence occurring exactly once in the tail window (repeat-prone
+            # traffic stays ambiguous and is preserved), and a genuine delta
+            # following the overlap.
+            has_unique_partial_tail_replay = False
+            if (
+                has_persisted_marker_specific_replay_evidence
+                and cursor < len(messages)
+                and len(candidate_prefix) >= 2
+            ):
+                # Raw-tail matches only count when the overlapping stored
+                # suffix is cleanup-neutral: a true replay of cleanup-sensitive
+                # rows arrives sanitized, so exact raw equality there is
+                # evidence of a fresh delta, not of replay (see the
+                # cleanup-sensitive reconciliation guards above).
+                matched_unique_partial_tail = (
+                    matches_sanitized_tail
+                    and len(candidate_prefix) < len(sanitized_replay_tail)
+                    and self._matches_unique_store_tail_suffix(
+                        sanitized_replay_tail, candidate_prefix
+                    )
+                ) or (
+                    matches_raw_tail
+                    and not raw_suffix_needs_cleanup_equivalence
+                    and len(candidate_prefix) < len(stored_tail)
+                    and self._matches_unique_store_tail_suffix(
+                        stored_tail, candidate_prefix
+                    )
+                )
+                if matched_unique_partial_tail:
+                    has_unique_partial_tail_replay = bool(
+                        self._effective_replay_identities(messages[cursor:])
+                    )
             if (
                 has_effective_full_replay
                 or has_externalized_singleton_replay
@@ -723,6 +784,7 @@ class ReconcileMixin:
                 or has_raw_full_replay
                 or has_scaffold_suffix_replay
                 or has_raw_cleanup_replay
+                or has_unique_partial_tail_replay
             ):
                 return cursor
         return empty_prefix_cursor if allow_empty_prefix else None

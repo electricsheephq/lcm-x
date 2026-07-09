@@ -3600,10 +3600,10 @@ class TestEngineABC:
         after_restart._ingest_messages(active_context)
 
         rows = after_restart._store.get_session_messages("compacted-session")
+        # The replayed fresh tail matches the durable tail uniquely, so it is
+        # reconciled as replay instead of being appended a second time.
         assert [row["role"] for row in rows] == [
             "system",
-            "user",
-            "assistant",
             "user",
             "assistant",
             "assistant",
@@ -4521,6 +4521,144 @@ class TestEngineABC:
         reconciliation = after_restart.get_status()["ingest_reconciliation"]
         assert reconciliation["reason"] == "persisted ambiguous delta"
         assert reconciliation["action"] == "persisted batch"
+
+    def test_existing_session_restart_skips_unique_partial_tail_overlap(self, tmp_path):
+        db_path = tmp_path / "restart-partial-tail-overlap.db"
+        config = LCMConfig(database_path=str(db_path))
+        before_restart = LCMEngine(config=config)
+        before_restart.on_session_start(
+            "partial-overlap-session",
+            platform="cli",
+            conversation_id="partial-overlap-conversation",
+            context_length=200000,
+        )
+        persisted_messages = [{"role": "system", "content": "You are concise."}]
+        persisted_messages.extend(
+            {"role": "user", "content": f"durable message {i}"}
+            for i in range(80)
+        )
+        before_restart._ingest_messages(persisted_messages)
+        before_restart._store.close()
+        before_restart._dag.close()
+        before_restart._lifecycle.close()
+
+        after_restart = LCMEngine(config=config)
+        after_restart.on_session_start(
+            "partial-overlap-session",
+            platform="cli",
+            conversation_id="partial-overlap-conversation",
+            context_length=200000,
+        )
+        replayed_tail = persisted_messages[-4:]
+        delta = [{"role": "user", "content": "fresh turn after restart"}]
+
+        after_restart._ingest_messages(replayed_tail + delta)
+
+        rows = after_restart._store.get_session_messages(
+            "partial-overlap-session",
+            limit=len(persisted_messages) + len(delta) + 4,
+        )
+        assert len(rows) == len(persisted_messages) + len(delta)
+        assert rows[-1]["content"] == "fresh turn after restart"
+        assert after_restart._ingest_cursor == len(replayed_tail) + len(delta)
+        reconciliation = after_restart.get_status()["ingest_reconciliation"]
+        assert reconciliation["action"] == "advanced cursor"
+        assert reconciliation["reason"] == "replayed durable tail"
+
+    def test_existing_session_restart_repeated_tail_sequence_stays_ambiguous(self, tmp_path):
+        db_path = tmp_path / "restart-repeated-tail-sequence.db"
+        config = LCMConfig(database_path=str(db_path))
+        before_restart = LCMEngine(config=config)
+        before_restart.on_session_start(
+            "repeated-tail-session",
+            platform="cli",
+            conversation_id="repeated-tail-conversation",
+            context_length=200000,
+        )
+        persisted_messages = [
+            {"role": "system", "content": "You are concise."},
+            {"role": "user", "content": "heartbeat ping"},
+            {"role": "assistant", "content": "heartbeat pong"},
+            {"role": "user", "content": "heartbeat ping"},
+            {"role": "assistant", "content": "heartbeat pong"},
+        ]
+        before_restart._ingest_messages(persisted_messages)
+        before_restart._store.close()
+        before_restart._dag.close()
+        before_restart._lifecycle.close()
+
+        after_restart = LCMEngine(config=config)
+        after_restart.on_session_start(
+            "repeated-tail-session",
+            platform="cli",
+            conversation_id="repeated-tail-conversation",
+            context_length=200000,
+        )
+        # A fresh heartbeat round repeats the durable tail verbatim; the
+        # repeated sequence must stay ambiguous so the new rows are preserved.
+        delta = [
+            {"role": "user", "content": "heartbeat ping"},
+            {"role": "assistant", "content": "heartbeat pong"},
+            {"role": "user", "content": "new instruction"},
+        ]
+
+        after_restart._ingest_messages(delta)
+
+        rows = after_restart._store.get_session_messages(
+            "repeated-tail-session",
+            limit=len(persisted_messages) + len(delta),
+        )
+        assert len(rows) == len(persisted_messages) + len(delta)
+        assert rows[-1]["content"] == "new instruction"
+        reconciliation = after_restart.get_status()["ingest_reconciliation"]
+        assert reconciliation["action"] == "persisted batch"
+        assert reconciliation["reason"] == "persisted ambiguous delta"
+
+    def test_existing_session_restart_singleton_partial_overlap_stays_ambiguous(self, tmp_path):
+        db_path = tmp_path / "restart-singleton-partial-overlap.db"
+        config = LCMConfig(database_path=str(db_path))
+        before_restart = LCMEngine(config=config)
+        before_restart.on_session_start(
+            "singleton-overlap-session",
+            platform="cli",
+            conversation_id="singleton-overlap-conversation",
+            context_length=200000,
+        )
+        persisted_messages = [{"role": "system", "content": "You are concise."}]
+        persisted_messages.extend(
+            {"role": "user", "content": f"durable message {i}"}
+            for i in range(10)
+        )
+        before_restart._ingest_messages(persisted_messages)
+        before_restart._store.close()
+        before_restart._dag.close()
+        before_restart._lifecycle.close()
+
+        after_restart = LCMEngine(config=config)
+        after_restart.on_session_start(
+            "singleton-overlap-session",
+            platform="cli",
+            conversation_id="singleton-overlap-conversation",
+            context_length=200000,
+        )
+        # One overlapping row is not enough replay evidence; the batch could
+        # be a fresh delta whose first row repeats the durable tail.
+        delta = [
+            dict(persisted_messages[-1]),
+            {"role": "user", "content": "fresh turn after singleton overlap"},
+        ]
+
+        after_restart._ingest_messages(delta)
+
+        rows = after_restart._store.get_session_messages(
+            "singleton-overlap-session",
+            limit=len(persisted_messages) + len(delta),
+        )
+        assert len(rows) == len(persisted_messages) + len(delta)
+        assert rows[-1]["content"] == "fresh turn after singleton overlap"
+        reconciliation = after_restart.get_status()["ingest_reconciliation"]
+        assert reconciliation["action"] == "persisted batch"
+        assert reconciliation["reason"] == "persisted ambiguous delta"
 
     def test_existing_session_restart_scaffold_prefix_does_not_skip_unrelated_new_rows(self, tmp_path):
         db_path = tmp_path / "restart-scaffold-prefix-unrelated.db"
