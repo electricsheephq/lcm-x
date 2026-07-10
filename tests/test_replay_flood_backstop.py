@@ -64,6 +64,31 @@ class TestStoreReplayFloodBackstop:
 
         assert len(ids) == len(stored)
 
+    def test_allows_same_content_with_distinct_assistant_tool_calls(self, tmp_path):
+        store = _store(tmp_path)
+        store.append_batch(
+            "tool-call-session",
+            [{"role": "assistant", "content": "calling a tool"}],
+        )
+        batch = [
+            {
+                "role": "assistant",
+                "content": "calling a tool",
+                "tool_calls": [
+                    {
+                        "id": f"call-{idx}",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": {"index": idx}},
+                    }
+                ],
+            }
+            for idx in range(32)
+        ]
+
+        ids = store.append_batch("tool-call-session", batch)
+
+        assert len(ids) == len(batch)
+
     def test_zero_threshold_disables_guard(self, tmp_path):
         store = _store(
             tmp_path,
@@ -79,7 +104,7 @@ class TestStoreReplayFloodBackstop:
 
 
 class TestEngineReplayFloodBackstop:
-    def test_engine_survives_and_reports_replay_flood_refusal(self, tmp_path):
+    def test_engine_recovers_new_tail_and_subsequent_ingests_after_refusal(self, tmp_path):
         db_path = tmp_path / "flood-engine.db"
         config = LCMConfig(database_path=str(db_path))
         before_restart = LCMEngine(config=config)
@@ -114,13 +139,26 @@ class TestEngineReplayFloodBackstop:
 
         after_restart._ingest_messages(flood)
 
-        assert after_restart._store.get_session_count("flood-engine-session") == len(
-            persisted_messages
-        )
+        assert after_restart._store.get_session_count("flood-engine-session") == len(persisted_messages) + 1
         assert after_restart._replay_flood_refusal_count == 1
         status = after_restart.get_status()
         assert status["replay_flood_refusals"]["count"] == 1
         assert "refused replay-like message batch" in status["replay_flood_refusals"]["last"]
+
+        continued = flood + [
+            {"role": "assistant", "content": "response after recovered turn"},
+            {"role": "user", "content": "subsequent turn"},
+        ]
+        after_restart._ingest_messages(continued)
+
+        rows = after_restart._store.get_session_messages("flood-engine-session")
+        assert len(rows) == len(persisted_messages) + 3
+        assert [row["content"] for row in rows[-3:]] == [
+            "new turn riding the flood",
+            "response after recovered turn",
+            "subsequent turn",
+        ]
+        assert after_restart._replay_flood_refusal_count == 1
 
 
 class TestReplayFloodConfig:

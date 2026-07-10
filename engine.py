@@ -3424,6 +3424,63 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             exc,
         )
 
+    def _replay_flood_recovery_prefix_length(self, messages: List[Dict[str, Any]]) -> int:
+        """Return a safely proven durable prefix after a flood refusal."""
+        external_threshold = int(
+            getattr(self._config, "replay_flood_threshold_external", 0) or 0
+        )
+        internal_threshold = int(
+            getattr(self._config, "replay_flood_threshold_internal", 0) or 0
+        )
+        if not messages or (external_threshold <= 0 and internal_threshold <= 0):
+            return 0
+
+        stored_rows: list[Dict[str, Any]] = []
+        after_store_id = 0
+        while True:
+            page = self._store.get_session_messages_after(
+                self._session_id,
+                after_store_id=after_store_id,
+            )
+            if not page:
+                break
+            stored_rows.extend(page)
+            after_store_id = int(page[-1]["store_id"])
+
+        incoming_identities = [self._message_replay_identity(msg) for msg in messages]
+        stored_identities = [
+            self._message_replay_identity(row, stored_row=True) for row in stored_rows
+        ]
+        best = 0
+        for start, stored_identity in enumerate(stored_identities):
+            if stored_identity != incoming_identities[0]:
+                continue
+            matched = 0
+            while (
+                matched < len(incoming_identities)
+                and start + matched < len(stored_identities)
+                and stored_identities[start + matched] == incoming_identities[matched]
+            ):
+                matched += 1
+            best = max(best, matched)
+
+        if best <= 0:
+            return 0
+        prefix = messages[:best]
+        external_replay_proven = external_threshold > 0 and sum(
+            str(msg.get("role") or "unknown") == "user" for msg in prefix
+        ) >= external_threshold
+        internal_identity_counts: dict[tuple[str, str, str, str], int] = {}
+        for msg in prefix:
+            if str(msg.get("role") or "unknown") == "user":
+                continue
+            identity = self._message_replay_identity(msg)
+            internal_identity_counts[identity] = internal_identity_counts.get(identity, 0) + 1
+        internal_replay_proven = internal_threshold > 0 and any(
+            count >= internal_threshold for count in internal_identity_counts.values()
+        )
+        return best if external_replay_proven or internal_replay_proven else 0
+
     def _stored_row_externalized_text_parts_for_pattern_matching(self, msg: Dict[str, Any]) -> list[str]:
         ref_sources: list[str] = []
         content = msg.get("content")
@@ -4150,11 +4207,44 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 conversation_id=self._conversation_id,
             )
         except ReplayFloodError as exc:
-            # Fail loud, persist nothing of the flood batch, and keep the
-            # cursor where it is so a later reconcile can still recover a
-            # genuinely new tail. Active replay stays usable for the host.
             self._record_replay_flood_refusal(exc, incoming=len(protected_messages))
-            return self._remember_active_replay_messages(messages, active_replay_messages)
+            try:
+                recovery_prefix = self._replay_flood_recovery_prefix_length(protected_messages)
+            except Exception as recovery_exc:  # pragma: no cover - defensive only
+                logger.error("LCM replay-flood recovery probe failed: %s", recovery_exc)
+                recovery_prefix = 0
+            if recovery_prefix > 0:
+                recovery_messages = protected_messages[recovery_prefix:]
+                try:
+                    if recovery_messages:
+                        self._store._append_protected_batch(
+                            self._session_id,
+                            recovery_messages,
+                            estimates[recovery_prefix:],
+                            source=self._session_platform,
+                            conversation_id=self._conversation_id,
+                        )
+                except ReplayFloodError as recovery_exc:
+                    logger.error(
+                        "LCM store refused replay-flood recovery tail; dropping refused batch: %s",
+                        recovery_exc,
+                    )
+                    recovery_prefix = 0
+                else:
+                    logger.warning(
+                        "LCM recovered replay-flood batch by trimming %d proven durable prefix rows",
+                        recovery_prefix,
+                    )
+            if recovery_prefix <= 0:
+                # A refused batch is terminal when no contiguous durable
+                # prefix proves a safe tail. Advance past it so later turns
+                # can still persist instead of retrying the same flood forever.
+                self._ingest_cursor = n
+                self._compression_boundary_ingest_pending = False
+                self._compression_boundary_active_placeholder_digest_budget = {}
+                self._compression_boundary_active_placeholder_digest_ordinals = {}
+                self._compression_boundary_stored_placeholder_digest_counts = {}
+                return self._remember_active_replay_messages(messages, active_replay_messages)
         self._ingest_cursor = n
         self._compression_boundary_ingest_pending = False
         self._compression_boundary_active_placeholder_digest_budget = {}

@@ -77,6 +77,11 @@ class ReplayFloodError(RuntimeError):
     """
 
 
+def _serialized_tool_calls(message: Dict[str, Any]) -> str:
+    tool_calls = message.get("tool_calls")
+    return json.dumps(tool_calls) if tool_calls else ""
+
+
 def _normalize_source_value(source: str | None) -> str:
     normalized = (source or "").strip()
     return normalized or _UNKNOWN_SOURCE
@@ -393,8 +398,7 @@ class MessageStore:
         with self._write_lock, self._conn:
             self._assert_no_replay_identity_flood(session_id, messages)
             for msg, est in zip(messages, token_estimates):
-                tc = msg.get("tool_calls")
-                tc_json = json.dumps(tc) if tc else None
+                tc_json = _serialized_tool_calls(msg) or None
                 ts = time.time()
                 cur = self._conn.execute(
                     """INSERT INTO messages
@@ -424,12 +428,14 @@ class MessageStore:
             """SELECT 1 FROM messages
                WHERE session_id = ? AND role = ? AND content = ?
                  AND COALESCE(tool_call_id, '') = ?
+                 AND COALESCE(tool_calls, '') = ?
                LIMIT 1""",
             (
                 session_id,
                 msg.get("role", "unknown"),
                 content,
                 str(msg.get("tool_call_id") or ""),
+                _serialized_tool_calls(msg),
             ),
         ).fetchone()
         return row is not None
@@ -454,7 +460,7 @@ class MessageStore:
             getattr(self._ingest_protection_config, "replay_flood_threshold_internal", 0) or 0
         )
         user_rows: List[tuple[Dict[str, Any], str]] = []
-        internal_groups: Dict[tuple[str, str, str], List[tuple[Dict[str, Any], str]]] = {}
+        internal_groups: Dict[tuple[str, str, str, str], List[tuple[Dict[str, Any], str]]] = {}
         for msg in messages:
             content = _normalize_content_value(msg.get("content")) or ""
             if not content:
@@ -463,7 +469,12 @@ class MessageStore:
             if role == "user":
                 user_rows.append((msg, content))
             else:
-                key = (role, content, str(msg.get("tool_call_id") or ""))
+                key = (
+                    role,
+                    content,
+                    str(msg.get("tool_call_id") or ""),
+                    _serialized_tool_calls(msg),
+                )
                 internal_groups.setdefault(key, []).append((msg, content))
 
         if external_threshold > 0 and len(user_rows) >= external_threshold:
@@ -478,7 +489,7 @@ class MessageStore:
                             f"threshold={external_threshold} batch={len(messages)}"
                         )
         if internal_threshold > 0:
-            for (role, _content, _tool_call_id), rows in internal_groups.items():
+            for (role, _content, _tool_call_id, _tool_calls), rows in internal_groups.items():
                 if len(rows) < internal_threshold:
                     continue
                 probe_msg, probe_content = rows[0]
