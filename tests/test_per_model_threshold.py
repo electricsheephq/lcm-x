@@ -34,7 +34,8 @@ class TestLCMConfigModelThresholds:
         c = LCMConfig.from_env()
         assert c.model_thresholds == {"glm-5.2": 0.70, "glm-5.2-1M": 0.25}
 
-    def test_no_env_keeps_default(self, monkeypatch):
+    def test_no_env_keeps_default(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
         monkeypatch.delenv("LCM_MODEL_THRESHOLDS", raising=False)
         c = LCMConfig.from_env()
         assert c.model_thresholds == {}
