@@ -260,10 +260,9 @@ class ReconcileMixin:
     ) -> bool:
         """True when the prefix matches the tail suffix and occurs exactly once.
 
-        Sequence uniqueness inside the tail window distinguishes a restart
-        replay of the durable tail from repeat-prone traffic (heartbeats,
-        retries) whose fresh rows can coincidentally equal the last stored
-        rows.  Repeated sequences stay ambiguous and are preserved.
+        Sequence uniqueness narrows an explicitly scaffolded restart replay to
+        one durable suffix.  It is not replay proof by itself: a fresh delta
+        can legitimately repeat even a unique durable suffix.
         """
         if not candidate_prefix or len(candidate_prefix) > len(stored_tail):
             return False
@@ -736,17 +735,16 @@ class ReconcileMixin:
                 and len(candidate_prefix) >= max(1, self._config.fresh_tail_count)
                 and raw_suffix_needs_cleanup_equivalence
             )
-            # Partial-tail overlap: a restarted host can replay only the last
-            # few durable rows plus new turns.  Full-replay proof fails there,
-            # and appending the whole batch duplicates the overlapping rows.
-            # Accept the overlap as replay only with strong evidence: at least
-            # two rows matching the durable tail anchored at its end, that
-            # sequence occurring exactly once in the tail window (repeat-prone
-            # traffic stays ambiguous and is preserved), and a genuine delta
-            # following the overlap.
-            has_unique_partial_tail_replay = False
+            # A synthetic replay scaffold proves that this batch contains
+            # reconstructed active context rather than only fresh delta rows.
+            # Under that anchor, reconcile a unique, cleanup-neutral multi-row
+            # durable suffix followed by a genuine delta.  Without the scaffold
+            # the same shape is ambiguous: users can legitimately repeat even a
+            # unique previous exchange, so preserve the whole batch.
+            has_scaffolded_unique_partial_tail_replay = False
             if (
                 has_persisted_marker_specific_replay_evidence
+                and has_scaffold_evidence
                 and cursor < len(messages)
                 and len(candidate_prefix) >= 2
             ):
@@ -770,7 +768,7 @@ class ReconcileMixin:
                     )
                 )
                 if matched_unique_partial_tail:
-                    has_unique_partial_tail_replay = bool(
+                    has_scaffolded_unique_partial_tail_replay = bool(
                         self._effective_replay_identities(messages[cursor:])
                     )
             if (
@@ -784,7 +782,7 @@ class ReconcileMixin:
                 or has_raw_full_replay
                 or has_scaffold_suffix_replay
                 or has_raw_cleanup_replay
-                or has_unique_partial_tail_replay
+                or has_scaffolded_unique_partial_tail_replay
             ):
                 return cursor
         return empty_prefix_cursor if allow_empty_prefix else None

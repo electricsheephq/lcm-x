@@ -4522,7 +4522,7 @@ class TestEngineABC:
         assert reconciliation["reason"] == "persisted ambiguous delta"
         assert reconciliation["action"] == "persisted batch"
 
-    def test_existing_session_restart_skips_unique_partial_tail_overlap(self, tmp_path):
+    def test_existing_session_restart_preserves_fresh_delta_repeating_unique_tail_suffix(self, tmp_path):
         db_path = tmp_path / "restart-partial-tail-overlap.db"
         config = LCMConfig(database_path=str(db_path))
         before_restart = LCMEngine(config=config)
@@ -4549,21 +4549,27 @@ class TestEngineABC:
             conversation_id="partial-overlap-conversation",
             context_length=200000,
         )
-        replayed_tail = persisted_messages[-4:]
-        delta = [{"role": "user", "content": "fresh turn after restart"}]
+        repeated_fresh_messages = [dict(message) for message in persisted_messages[-4:]]
+        delta = [
+            *repeated_fresh_messages,
+            {"role": "user", "content": "fresh turn after repeated exchange"},
+        ]
 
-        after_restart._ingest_messages(replayed_tail + delta)
+        after_restart._ingest_messages(delta)
 
         rows = after_restart._store.get_session_messages(
             "partial-overlap-session",
-            limit=len(persisted_messages) + len(delta) + 4,
+            limit=len(persisted_messages) + len(delta),
         )
         assert len(rows) == len(persisted_messages) + len(delta)
-        assert rows[-1]["content"] == "fresh turn after restart"
-        assert after_restart._ingest_cursor == len(replayed_tail) + len(delta)
+        assert [row["content"] for row in rows[-len(delta) :]] == [
+            *[message["content"] for message in repeated_fresh_messages],
+            "fresh turn after repeated exchange",
+        ]
+        assert after_restart._ingest_cursor == len(delta)
         reconciliation = after_restart.get_status()["ingest_reconciliation"]
-        assert reconciliation["action"] == "advanced cursor"
-        assert reconciliation["reason"] == "replayed durable tail"
+        assert reconciliation["action"] == "persisted batch"
+        assert reconciliation["reason"] == "persisted ambiguous delta"
 
     def test_existing_session_restart_repeated_tail_sequence_stays_ambiguous(self, tmp_path):
         db_path = tmp_path / "restart-repeated-tail-sequence.db"
