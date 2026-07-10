@@ -1387,6 +1387,34 @@ def test_lcm_doctor_clean_prefers_ignore_over_stateless_when_both_match(tmp_path
     assert "class=ignored-pattern" in result
 
 
+def test_lcm_doctor_clean_discovers_and_deletes_ignored_only_session(tmp_path):
+    config = LCMConfig(
+        database_path=str(tmp_path / "lcm_ignored_only_clean.db"),
+        ignore_session_patterns=["cron*"],
+        doctor_clean_apply_enabled=True,
+    )
+    engine = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes_home"))
+    engine._session_id = "live-session"
+    engine._store.append_ignored_batch(
+        "cron_ignored_only",
+        [{"role": "assistant", "content": "ignored scheduled report detail"}],
+    )
+
+    preview = handle_lcm_command("doctor clean", engine)
+
+    assert "status: candidates-found" in preview
+    assert "cron_ignored_only" in preview
+    assert "messages=0" in preview
+    assert engine._store.get_ignored_session_count("cron_ignored_only") == 1
+
+    applied = handle_lcm_command("doctor clean apply", engine)
+
+    assert "status: ok" in applied
+    assert "candidate_sessions: 1" in applied
+    assert "ignored_messages_deleted: 1" in applied
+    assert engine._store.get_ignored_session_count("cron_ignored_only") == 0
+
+
 def test_lcm_doctor_clean_returns_error_on_schema_problem(engine):
     engine._store._conn = _FakeConn()
 

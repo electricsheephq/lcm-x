@@ -792,7 +792,7 @@ class MessageStore:
 
     def scan_session_cleanup_stats(self) -> List[tuple]:
         """Per-session ``(session_id, message_count, token_total, node_count)``
-        rows across messages and summary nodes, for ``/lcm doctor clean``
+        rows across messages, summary nodes, and the ignored sidecar, for ``/lcm doctor clean``
         candidate scanning. Callers own the pattern/protection policy."""
         return self._conn.execute(
             """
@@ -800,6 +800,8 @@ class MessageStore:
                 SELECT session_id FROM messages
                 UNION
                 SELECT session_id FROM summary_nodes
+                UNION
+                SELECT session_id FROM ignored_messages
             ),
             message_stats AS (
                 SELECT session_id,
