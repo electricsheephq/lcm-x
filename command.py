@@ -1255,6 +1255,7 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
     if not session_ids:
         return {
             "messages_deleted": 0,
+            "ignored_messages_deleted": 0,
             "nodes_deleted": 0,
             "lifecycle_deleted": 0,
             "lifecycle_skipped": 0,
@@ -1289,6 +1290,10 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
     try:
         conn.execute("BEGIN IMMEDIATE")
         msg_cur = conn.execute(f"DELETE FROM messages WHERE session_id IN ({placeholders})", params)
+        ignored_cur = conn.execute(
+            f"DELETE FROM ignored_messages WHERE session_id IN ({placeholders})",
+            params,
+        )
         node_cur = conn.execute(f"DELETE FROM summary_nodes WHERE session_id IN ({placeholders})", params)
         lifecycle_deleted = 0
         for conversation_id in lifecycle_delete_conversation_ids:
@@ -1304,6 +1309,7 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
 
     return {
         "messages_deleted": msg_cur.rowcount if msg_cur.rowcount is not None else 0,
+        "ignored_messages_deleted": ignored_cur.rowcount if ignored_cur.rowcount is not None else 0,
         "nodes_deleted": node_cur.rowcount if node_cur.rowcount is not None else 0,
         "lifecycle_deleted": lifecycle_deleted,
         "lifecycle_skipped": lifecycle_skipped,
@@ -1371,6 +1377,7 @@ def _doctor_clean_apply_text(engine) -> str:
         f"backup_size: {_fmt_size(int(backup['backup_size']))}",
         f"candidate_sessions: {len(candidates)}",
         f"messages_deleted: {deleted['messages_deleted']}",
+        f"ignored_messages_deleted: {deleted['ignored_messages_deleted']}",
         f"nodes_deleted: {deleted['nodes_deleted']}",
         f"lifecycle_rows_deleted: {deleted['lifecycle_deleted']}",
         f"lifecycle_rows_skipped: {deleted['lifecycle_skipped']}",

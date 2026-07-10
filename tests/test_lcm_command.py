@@ -1435,6 +1435,10 @@ def test_lcm_doctor_clean_apply_is_backup_first_and_deletes_safe_candidates(tmp_
     engine._lifecycle.bind_session("live-session")
 
     engine._store.append("cron_20260414", {"role": "user", "content": "scheduled report"}, token_estimate=12)
+    engine._store.append_ignored_batch(
+        "cron_20260414",
+        [{"role": "assistant", "content": "ignored scheduled report detail"}],
+    )
     engine._store.append("normal_session", {"role": "user", "content": "real conversation"}, token_estimate=20)
     engine._dag.add_node(SummaryNode(
         session_id="cron_20260414",
@@ -1457,6 +1461,7 @@ def test_lcm_doctor_clean_apply_is_backup_first_and_deletes_safe_candidates(tmp_
     backup_path = Path(backup_line.split(": ", 1)[1])
     assert backup_path.exists()
     assert engine._store.get_range("cron_20260414") == []
+    assert engine._store.get_ignored_session_messages("cron_20260414") == []
     assert engine._dag.get_session_nodes("cron_20260414") == []
     assert engine._lifecycle.get_by_conversation("cron_20260414") is None
     assert len(engine._store.get_range("normal_session")) == 1
@@ -1501,6 +1506,10 @@ def test_lcm_doctor_clean_apply_rolls_back_if_delete_fails_after_backup(tmp_path
     engine._lifecycle.bind_session("live-session")
 
     store_id = engine._store.append("cron_20260414", {"role": "user", "content": "scheduled report"}, token_estimate=12)
+    engine._store.append_ignored_batch(
+        "cron_20260414",
+        [{"role": "assistant", "content": "ignored scheduled report detail"}],
+    )
     engine._dag.add_node(SummaryNode(
         session_id="cron_20260414",
         depth=0,
@@ -1534,6 +1543,7 @@ def test_lcm_doctor_clean_apply_rolls_back_if_delete_fails_after_backup(tmp_path
     backup_line = next(line for line in result.splitlines() if line.startswith("backup_path: "))
     assert Path(backup_line.split(": ", 1)[1]).exists()
     assert len(engine._store.get_range("cron_20260414")) == 1
+    assert engine._store.get_ignored_session_count("cron_20260414") == 1
     assert len(engine._dag.get_session_nodes("cron_20260414")) == 1
     assert engine._lifecycle.get_by_conversation("cron_20260414") is not None
 
