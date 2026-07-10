@@ -53,6 +53,27 @@ class TestStoreReplayFloodBackstop:
         with pytest.raises(ReplayFloodError):
             store.append_batch("internal-session", burst)
 
+    def test_refuses_contentless_assistant_tool_call_replay_burst(self, tmp_path):
+        store = _store(tmp_path)
+        tool_call = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-replayed",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": {"index": 1}},
+                }
+            ],
+        }
+        store.append_batch("contentless-tool-call-session", [tool_call])
+
+        with pytest.raises(ReplayFloodError):
+            store.append_batch(
+                "contentless-tool-call-session",
+                [dict(tool_call) for _ in range(32)],
+            )
+
     def test_allows_internal_distinct_duplicate_rows(self, tmp_path):
         store = _store(tmp_path)
         stored = [{"role": "assistant", "content": f"assistant row {i}"} for i in range(40)]

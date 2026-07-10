@@ -426,7 +426,7 @@ class MessageStore:
                                      content: str) -> bool:
         row = self._conn.execute(
             """SELECT 1 FROM messages
-               WHERE session_id = ? AND role = ? AND content = ?
+               WHERE session_id = ? AND role = ? AND COALESCE(content, '') = ?
                  AND COALESCE(tool_call_id, '') = ?
                  AND COALESCE(tool_calls, '') = ?
                LIMIT 1""",
@@ -463,7 +463,9 @@ class MessageStore:
         internal_groups: Dict[tuple[str, str, str, str], List[tuple[Dict[str, Any], str]]] = {}
         for msg in messages:
             content = _normalize_content_value(msg.get("content")) or ""
-            if not content:
+            tool_call_id = str(msg.get("tool_call_id") or "")
+            tool_calls = _serialized_tool_calls(msg)
+            if not content and not tool_call_id and not tool_calls:
                 continue
             role = str(msg.get("role", "unknown"))
             if role == "user":
@@ -472,8 +474,8 @@ class MessageStore:
                 key = (
                     role,
                     content,
-                    str(msg.get("tool_call_id") or ""),
-                    _serialized_tool_calls(msg),
+                    tool_call_id,
+                    tool_calls,
                 )
                 internal_groups.setdefault(key, []).append((msg, content))
 
