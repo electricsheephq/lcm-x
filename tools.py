@@ -131,7 +131,17 @@ def _get_recovered_read_tool_content(
         return None
 
     recovered_content = recovered.get("content") or ""
-    externalized_ref = str(recovered.get("externalized_ref") or "").strip()
+    restored_content = restore_ingest_payload_placeholders(
+        recovered_content,
+        config=engine._config,
+        hermes_home=engine._hermes_home,
+        session_id=stored_session_id,
+    )
+    if restored_content != recovered_content:
+        recovered_content = restored_content
+        externalized_ref = ""
+    else:
+        externalized_ref = str(recovered.get("externalized_ref") or "").strip()
     if externalized_ref:
         refs = [externalized_ref]
     else:

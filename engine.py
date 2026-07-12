@@ -209,10 +209,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         # visible; full lossless retention (store with ignored=1) is a larger
         # follow-up that touches cursor reconciliation and FTS.
         self._ignore_pattern_dropped_count: int = 0
-        # Marker-identity digests already attempted for read-tool recovery this
-        # process, so an unrecoverable truncation marker replayed every turn is
-        # re-read from disk at most once instead of on each ingest.
-        self._attempted_read_tool_recovery_markers: set[str] = set()
+        # Session/marker pairs already attempted for read-tool recovery this
+        # process, so replay is suppressed without one session preventing the
+        # same marker identity from being recovered into another session's row.
+        self._attempted_read_tool_recovery_markers: set[tuple[str, str]] = set()
         self._recovered_read_tool_content_count: int = 0
 
         # Track which store_ids have been ingested into the DAG
@@ -3429,7 +3429,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         by the marker's identity. The parent messages row is never touched, so
         replay/FTS/reconciliation stay identical; recovery is expand-on-demand
         only. Best-effort: any failure is swallowed so ingest never breaks, and
-        each marker is attempted at most once per process.
+        each marker is attempted at most once per session per process.
         """
         if not self._config.read_tool_recovery_enabled or not self._session_id:
             return
@@ -3453,9 +3453,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             identity = _read_tool_marker_identity_sha(
                 "tool", candidate["content"], candidate["tool_call_id"]
             )
-            if identity in self._attempted_read_tool_recovery_markers:
+            attempt_key = (self._session_id, identity)
+            if attempt_key in self._attempted_read_tool_recovery_markers:
                 continue
-            self._attempted_read_tool_recovery_markers.add(identity)
+            self._attempted_read_tool_recovery_markers.add(attempt_key)
             try:
                 # Keep identity tied to the durable marker, but validate source
                 # bytes against the original pre-protection marker when present.

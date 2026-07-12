@@ -465,6 +465,52 @@ class TestEngineRecovery:
         assert result["content"] == file_content
         assert result["recovered_chars"] == len(file_content)
 
+    def test_store_id_expansion_restores_embedded_externalized_payload_in_place(self, tmp_path):
+        encoded = "QUJD" * 1_500
+        file_content = f"prefix remains\n{encoded}\nsuffix remains"
+        source = tmp_path / "embedded-payload.txt"
+        source.write_text(file_content, encoding="utf-8")
+        engine = self._engine(
+            tmp_path,
+            enabled=True,
+            large_output_externalization_enabled=True,
+            large_output_externalization_threshold_chars=500,
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        )
+        engine.ingest([
+            {"role": "user", "content": "read it"},
+            {
+                "role": "assistant",
+                "content": "reading",
+                "tool_calls": [{
+                    "id": "call-embedded",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": str(source)}),
+                    },
+                }],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-embedded",
+                "content": _marker_for_content(file_content),
+            },
+        ])
+        tool_row = next(
+            row for row in engine._store.get_session_messages("chat-1")
+            if row["role"] == "tool"
+        )
+
+        result = json.loads(lcm_tools.lcm_expand(
+            {"store_id": tool_row["store_id"], "max_tokens": 1_000_000},
+            engine=engine,
+        ))
+
+        assert result["content"] == file_content
+        assert result["content"].startswith("prefix remains\n")
+        assert result["content"].endswith("\nsuffix remains")
+
     def test_node_expansion_hydrates_recovered_content(self, tmp_path):
         engine = self._engine(tmp_path, enabled=True)
         f, turn = self._turn(tmp_path)
@@ -548,6 +594,33 @@ class TestEngineRecovery:
         recovered = engine._store.get_recovered_tool_content("chat-1", sha)
         assert recovered["content"] == "the full 2MB file content that the host truncated"
         assert engine._store.get_recovered_tool_content_count("chat-1") == 1
+
+    def test_identical_marker_attempted_in_another_session_is_recovered(self, tmp_path):
+        engine = self._engine(tmp_path, enabled=True)
+        source, turn = self._turn(tmp_path)
+        engine.ingest(turn)
+        first_session_attempts = set(engine._attempted_read_tool_recovery_markers)
+
+        engine.on_session_start(
+            "chat-2", platform="cli", conversation_id="c2", context_length=200000
+        )
+        # Preserve the process-level attempt cache to model another active
+        # session having already encountered this identical marker identity.
+        engine._attempted_read_tool_recovery_markers = first_session_attempts
+        engine.ingest(turn)
+
+        identity = marker_identity_sha("tool", turn[-1]["content"], "call_1")
+        assert engine._store.get_recovered_tool_content("chat-1", identity) is not None
+        assert engine._store.get_recovered_tool_content("chat-2", identity) is not None
+        tool_row = next(
+            row for row in engine._store.get_session_messages("chat-2")
+            if row["role"] == "tool"
+        )
+        result = json.loads(lcm_tools.lcm_expand(
+            {"store_id": tool_row["store_id"], "max_tokens": 1_000_000},
+            engine=engine,
+        ))
+        assert result["content"] == source.read_text(encoding="utf-8")
 
     def test_changed_source_is_not_stored_as_lossless_recovery(self, tmp_path):
         engine = self._engine(tmp_path, enabled=True)
