@@ -426,6 +426,16 @@ class MessageStore:
         """
         if not messages:
             return []
+        if token_estimates is not None and len(token_estimates) != len(messages):
+            raise ValueError(
+                "token_estimates length must match messages length "
+                f"({len(token_estimates)} != {len(messages)})"
+            )
+        if matched_patterns is not None and len(matched_patterns) != len(messages):
+            raise ValueError(
+                "matched_patterns length must match messages length "
+                f"({len(matched_patterns)} != {len(messages)})"
+            )
         protected_messages = protect_messages_for_ingest(
             messages,
             config=self._ingest_protection_config,

@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.db_bootstrap import ensure_ignored_messages_table, run_versioned_migrations
 from hermes_lcm.store import MessageStore
@@ -116,6 +118,27 @@ class TestIgnoredSidecarStore:
     def test_empty_batch_is_noop(self, tmp_path):
         store = _store(tmp_path)
         assert store.append_ignored_batch("s1", []) == []
+        assert store.get_ignored_session_count("s1") == 0
+
+    @pytest.mark.parametrize(
+        ("metadata", "value"),
+        [
+            ("token_estimates", [1]),
+            ("matched_patterns", ["heartbeat"]),
+        ],
+    )
+    def test_rejects_metadata_length_mismatch_without_partial_write(
+        self, tmp_path, metadata, value
+    ):
+        store = _store(tmp_path)
+        messages = [
+            {"role": "user", "content": "noisy heartbeat 1"},
+            {"role": "assistant", "content": "noisy heartbeat 2"},
+        ]
+
+        with pytest.raises(ValueError, match=f"{metadata} length"):
+            store.append_ignored_batch("s1", messages, **{metadata: value})
+
         assert store.get_ignored_session_count("s1") == 0
 
 
