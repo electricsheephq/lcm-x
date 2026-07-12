@@ -26,7 +26,12 @@ from .db_bootstrap import (
     run_versioned_migrations,
 )
 from .config import LCMConfig
-from .ingest_protection import protect_message_for_ingest, protect_messages_for_ingest
+from .externalize import extract_externalized_ref
+from .ingest_protection import (
+    extract_ingest_externalized_refs,
+    protect_message_for_ingest,
+    protect_messages_for_ingest,
+)
 from .search_query import (
     build_snippet,
     compute_search_candidate_cap,
@@ -430,6 +435,12 @@ class MessageStore:
             session_id=session_id,
         )
         protected_content = _normalize_content_value(protected.get("content"))
+        externalized_refs = extract_ingest_externalized_refs(protected_content or "")
+        externalized_ref = (
+            externalized_refs[0]
+            if externalized_refs
+            else extract_externalized_ref(protected_content or "") or ""
+        )
         with self._write_lock, self._conn:
             cur = self._conn.execute(
                 """INSERT INTO recovered_tool_content
@@ -442,8 +453,8 @@ class MessageStore:
                     tool_call_id or "",
                     marker_identity_sha,
                     source_path or "",
-                    len(protected_content or ""),
-                    "",
+                    len(content or ""),
+                    externalized_ref,
                     protected_content,
                     time.time(),
                 ),

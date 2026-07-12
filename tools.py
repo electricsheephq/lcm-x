@@ -36,6 +36,10 @@ from .ingest_protection import (
 )
 from .model_routing import apply_lcm_model_route
 from .presets import preset_status_payload
+from .read_tool_recovery import (
+    is_recoverable_read_tool_marker,
+    marker_identity_sha as _read_tool_marker_identity_sha,
+)
 from .search_query import AGE_DECAY_RATE, normalize_search_sort
 from .session_patterns import build_session_match_keys, compile_session_pattern
 from .store import build_message_fts_spec
@@ -104,6 +108,52 @@ def _get_externalized_payload(
     if payload_session_id and payload_session_id not in allowed:
         return None
     return payload
+
+
+def _get_recovered_read_tool_content(
+    engine: "LCMEngine", stored: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Resolve a recovered read-tool sidecar, including protected externalization."""
+    transcript_content = stored.get("content", "") or ""
+    if not is_recoverable_read_tool_marker(transcript_content):
+        return None
+    stored_session_id = str(stored.get("session_id") or "")
+    identity = _read_tool_marker_identity_sha(
+        str(stored.get("role") or "tool"),
+        transcript_content,
+        str(stored.get("tool_call_id") or ""),
+    )
+    try:
+        recovered = engine._store.get_recovered_tool_content(stored_session_id, identity)
+    except Exception:  # pragma: no cover - expansion remains best-effort
+        return None
+    if recovered is None:
+        return None
+
+    recovered_content = recovered.get("content") or ""
+    externalized_ref = str(recovered.get("externalized_ref") or "").strip()
+    if externalized_ref:
+        refs = [externalized_ref]
+    else:
+        refs = extract_ingest_externalized_refs(recovered_content)
+        legacy_ref = extract_externalized_ref(recovered_content)
+        if legacy_ref and legacy_ref not in refs:
+            refs.append(legacy_ref)
+    for ref in refs:
+        if not ref:
+            continue
+        payload = _get_externalized_payload(
+            engine,
+            ref,
+            allowed_session_ids={engine.current_session_id, stored_session_id},
+        )
+        if payload is not None and payload.get("kind") in {"ingest_payload", "tool_result"}:
+            recovered_content = payload.get("content") or ""
+            break
+
+    resolved = dict(recovered)
+    resolved["content"] = recovered_content
+    return resolved
 
 
 def _truncate_text_to_token_budget(text: str, max_tokens: int) -> tuple[str, bool]:
@@ -405,6 +455,10 @@ def _expand_message_sources(
         transcript_content = stored.get("content", "")
         content = transcript_content
         content_source = "message"
+        recovered = _get_recovered_read_tool_content(engine, stored)
+        if recovered is not None:
+            content = recovered.get("content") or ""
+            content_source = "recovered_read_tool_content"
         externalized = None
         ref_payload = None
         ingest_refs = extract_ingest_externalized_refs(transcript_content)
@@ -440,8 +494,11 @@ def _expand_message_sources(
             "next_content_offset": sliced["next_content_offset"],
             "content_source": content_source,
         }
-        if content_source == "externalized_payload":
+        if content_source != "message":
             expanded["transcript_content"] = transcript_content
+        if recovered is not None:
+            expanded["recovered_source_path"] = recovered.get("source_path") or ""
+            expanded["recovered_chars"] = recovered.get("recovered_chars", len(content))
         if stored.get("role") == "tool":
             if externalized is not None:
                 externalized_summary = dict(externalized)
@@ -1401,7 +1458,9 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
         if stored is None:
             return json.dumps({"error": f"Message store_id {store_id} not found"})
         transcript_content = stored.get("content", "") or ""
-        sliced = _slice_content_for_response(transcript_content, max_tokens, content_offset)
+        recovered = _get_recovered_read_tool_content(engine, stored)
+        content = recovered.get("content") or "" if recovered is not None else transcript_content
+        sliced = _slice_content_for_response(content, max_tokens, content_offset)
         engine_session_id = engine.current_session_id
         stored_session_id = stored.get("session_id", "")
         result: Dict[str, Any] = {
@@ -1422,6 +1481,11 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
             "next_content_offset": sliced["next_content_offset"],
             "has_more": sliced["has_more"],
         }
+        if recovered is not None:
+            result["content_source"] = "recovered_read_tool_content"
+            result["transcript_content"] = transcript_content
+            result["recovered_source_path"] = recovered.get("source_path") or ""
+            result["recovered_chars"] = recovered.get("recovered_chars", len(content))
         # Surface externalized-payload metadata when the row references one. Content
         # is not hydrated by default, mirroring the existing _expand_message_sources
         # default. Externalized lookup remains session-scoped (per the existing

@@ -6,9 +6,11 @@ import os
 import re
 import sqlite3
 
+import hermes_lcm.tools as lcm_tools
 from hermes_lcm import message_patterns as message_patterns_mod
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.db_bootstrap import ensure_recovered_tool_content_table
+from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.read_tool_recovery import (
     build_read_tool_call_path_map,
@@ -400,6 +402,96 @@ class TestEngineRecovery:
         assert recovered is not None
         assert recovered["content"] == f.read_text(encoding="utf-8")
         assert recovered["source_path"] == str(f)
+
+    def test_store_id_expansion_hydrates_recovered_content(self, tmp_path):
+        engine = self._engine(tmp_path, enabled=True)
+        f, turn = self._turn(tmp_path)
+        engine.ingest(turn)
+        tool_row = next(
+            row for row in engine._store.get_session_messages("chat-1")
+            if row["role"] == "tool"
+        )
+
+        result = json.loads(lcm_tools.lcm_expand(
+            {"store_id": tool_row["store_id"], "max_tokens": 1_000_000},
+            engine=engine,
+        ))
+
+        assert result["content"] == f.read_text(encoding="utf-8")
+        assert result["content_source"] == "recovered_read_tool_content"
+        assert result["transcript_content"] == tool_row["content"]
+
+    def test_store_id_expansion_hydrates_externalized_recovered_content(self, tmp_path):
+        file_content = "LINE ONE\nLINE TWO\n" * 200
+        source = tmp_path / "large-source.txt"
+        source.write_text(file_content, encoding="utf-8")
+        engine = self._engine(
+            tmp_path,
+            enabled=True,
+            large_output_externalization_enabled=True,
+            large_output_externalization_threshold_chars=500,
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        )
+        engine.ingest([
+            {"role": "user", "content": "read it"},
+            {
+                "role": "assistant",
+                "content": "reading",
+                "tool_calls": [{
+                    "id": "call-large",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps({"path": str(source)}),
+                    },
+                }],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-large",
+                "content": _marker_for_content(file_content),
+            },
+        ])
+        tool_row = next(
+            row for row in engine._store.get_session_messages("chat-1")
+            if row["role"] == "tool"
+        )
+
+        result = json.loads(lcm_tools.lcm_expand(
+            {"store_id": tool_row["store_id"], "max_tokens": 1_000_000},
+            engine=engine,
+        ))
+
+        assert result["content"] == file_content
+        assert result["recovered_chars"] == len(file_content)
+
+    def test_node_expansion_hydrates_recovered_content(self, tmp_path):
+        engine = self._engine(tmp_path, enabled=True)
+        f, turn = self._turn(tmp_path)
+        engine.ingest(turn)
+        tool_row = next(
+            row for row in engine._store.get_session_messages("chat-1")
+            if row["role"] == "tool"
+        )
+        node_id = engine._dag.add_node(SummaryNode(
+            session_id="chat-1",
+            depth=0,
+            summary="Recovered read output",
+            token_count=10,
+            source_token_count=10,
+            source_ids=[tool_row["store_id"]],
+            source_type="messages",
+        ))
+
+        result = json.loads(lcm_tools.lcm_expand(
+            {"node_id": node_id, "max_tokens": 1_000_000},
+            engine=engine,
+        ))
+        expanded = result["expanded"][0]
+
+        assert expanded["content"] == f.read_text(encoding="utf-8")
+        assert expanded["content_source"] == "recovered_read_tool_content"
+        assert expanded["transcript_content"] == tool_row["content"]
 
     def test_ignored_marker_is_not_recovered(self, tmp_path, monkeypatch):
         monkeypatch.setattr(message_patterns_mod, "_regex_engine", _TimeoutRegexEngine)
