@@ -3414,7 +3414,13 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         if not self._session_id or self._session_ignored or self._session_stateless:
             return
         try:
-            self._ingest_cursor_needs_reconcile = self._store.get_session_count(self._session_id) > 0
+            active_count = self._store.get_session_count(self._session_id)
+            ignored_count = (
+                self._store.get_ignored_session_count(self._session_id)
+                if self._config.lossless_ignored_enabled
+                else 0
+            )
+            self._ingest_cursor_needs_reconcile = active_count > 0 or ignored_count > 0
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
             self._ingest_cursor_needs_reconcile = False

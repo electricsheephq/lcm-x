@@ -798,6 +798,33 @@ class ReconcileMixin:
             logger.debug("LCM ingest cursor reconciliation count failed: %s", exc)
             return 0
         if session_count <= 0:
+            if self._config.lossless_ignored_enabled:
+                ignored_rows = self._store.get_ignored_session_messages(self._session_id)
+                incoming_ignored = all(
+                    self._matches_ignore_message_patterns(message)
+                    for message in messages
+                )
+                compared_count = min(len(messages), len(ignored_rows))
+                if incoming_ignored and compared_count > 0:
+                    incoming_prefix = [
+                        self._message_replay_identity(message)
+                        for message in messages[:compared_count]
+                    ]
+                    stored_prefix = [
+                        self._message_replay_identity(row, stored_row=True)
+                        for row in ignored_rows[:compared_count]
+                    ]
+                    if incoming_prefix == stored_prefix:
+                        self._record_ingest_reconciliation(
+                            action="advanced cursor",
+                            reason="replayed ignored-only sidecar prefix",
+                            cursor=compared_count,
+                            incoming=len(messages),
+                            session_count=session_count,
+                            stored_tail_count=len(ignored_rows),
+                            effective_incoming=0,
+                        )
+                        return compared_count
             placeholder_budget = self._load_generated_ignored_placeholder_hash_counts()
             placeholder_ordinals = self._load_generated_ignored_placeholder_hash_ordinals()
             if placeholder_budget and placeholder_ordinals:

@@ -137,3 +137,18 @@ class TestLosslessIgnoredCapture:
         engine._ingest_messages(list(_TURN))
         assert engine._store.get_ignored_session_count("chat-1") == 0
         assert engine._store.get_session_count("chat-1") == len(_TURN)
+
+    def test_ignored_only_replay_after_restart_does_not_duplicate_sidecar_rows(self, tmp_path):
+        ignored_turn = [{"role": "user", "content": "Cronjob Response: heartbeat noise"}]
+        first = _engine(tmp_path, lossless=True)
+        first._ingest_messages(list(ignored_turn))
+        assert first._store.get_session_count("chat-1") == 0
+        assert first._store.get_ignored_session_count("chat-1") == 1
+
+        restarted = _engine(tmp_path, lossless=True)
+        assert restarted._ingest_cursor_needs_reconcile is True
+        restarted._ingest_messages(list(ignored_turn))
+
+        assert restarted._ingest_cursor == 1
+        assert restarted._store.get_session_count("chat-1") == 0
+        assert restarted._store.get_ignored_session_count("chat-1") == 1
