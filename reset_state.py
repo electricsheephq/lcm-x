@@ -50,6 +50,7 @@ class ResetStateMixin:
         self._reset_compaction_progress()
         self._generated_ignored_active_replay_placeholder_hashes = set()
         self._generated_ignored_active_replay_placeholder_message_ids = set()
+        self._attempted_read_tool_recovery_markers = set()
         self._compression_boundary_ingest_pending = False
         self._compression_boundary_active_placeholder_digest_budget = {}
         self._compression_boundary_active_placeholder_digest_ordinals = {}

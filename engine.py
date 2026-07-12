@@ -118,6 +118,11 @@ from .sqlite_util import (
     _temporary_sqlite_busy_timeout,
 )
 from .store import MessageStore
+from .read_tool_recovery import (
+    marker_identity_sha as _read_tool_marker_identity_sha,
+    plan_read_tool_recovery,
+    recover_read_tool_file,
+)
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 from . import tools as lcm_tools
 
@@ -204,6 +209,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         # visible; full lossless retention (store with ignored=1) is a larger
         # follow-up that touches cursor reconciliation and FTS.
         self._ignore_pattern_dropped_count: int = 0
+        # Marker-identity digests already attempted for read-tool recovery this
+        # process, so an unrecoverable truncation marker replayed every turn is
+        # re-read from disk at most once instead of on each ingest.
+        self._attempted_read_tool_recovery_markers: set[str] = set()
+        self._recovered_read_tool_content_count: int = 0
 
         # Track which store_ids have been ingested into the DAG
         self._last_compacted_store_id: int = 0
@@ -1194,6 +1204,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     conversation_id=self._conversation_id,
                 )
                 self._ingest_messages(messages)
+                self._maybe_recover_truncated_read_tool_content()
                 self._record_ingest_success()
                 self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
                 logger.debug(
@@ -3254,6 +3265,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             status["ignore_message_patterns_source"] = self._config.ignore_message_patterns_source
             status["ignored_message_count"] = self._ignored_message_count
             status["ignore_pattern_dropped_count"] = self._ignore_pattern_dropped_count
+            if self._config.read_tool_recovery_enabled:
+                status["read_tool_recovery_enabled"] = True
+                status["recovered_read_tool_content_count"] = self._recovered_read_tool_content_count
             status["ingest_reconciliation"] = dict(self._last_ingest_reconciliation)
             status["overflow_recovery_failed"] = self._last_overflow_recovery_failed
             status["condensation_suppressed_reason"] = self._last_condensation_suppressed_reason
@@ -3402,6 +3416,62 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
             self._ingest_cursor_needs_reconcile = False
+
+    def _maybe_recover_truncated_read_tool_content(self) -> None:
+        """Recover read-tool results the host truncated unrecoverably.
+
+        For each stored tool message carrying an unrecoverable truncation marker
+        that pairs to a stored read-tool call with an absolute path, re-read the
+        source file
+        (hardened, size-capped) and store the full content in the sidecar keyed
+        by the marker's identity. The parent messages row is never touched, so
+        replay/FTS/reconciliation stay identical; recovery is expand-on-demand
+        only. Best-effort: any failure is swallowed so ingest never breaks, and
+        each marker is attempted at most once per process.
+        """
+        if not self._config.read_tool_recovery_enabled or not self._session_id:
+            return
+        try:
+            # Plan from durable rows after ingest filtering and protection. This
+            # prevents ignored markers from creating orphan sidecar rows and
+            # keys recovery by the exact marker bytes later expansion sees.
+            stored_messages = self._store.get_session_tail(self._session_id, limit=10_000)
+            candidates = plan_read_tool_recovery(stored_messages)
+        except Exception:  # pragma: no cover - defensive; recovery is best-effort
+            logger.debug("LCM read-tool recovery planning failed", exc_info=True)
+            return
+        max_bytes = int(getattr(self._config, "read_tool_recovery_max_bytes", 0) or 0)
+        if max_bytes <= 0:
+            return
+        for candidate in candidates:
+            identity = _read_tool_marker_identity_sha(
+                "tool", candidate["content"], candidate["tool_call_id"]
+            )
+            if identity in self._attempted_read_tool_recovery_markers:
+                continue
+            self._attempted_read_tool_recovery_markers.add(identity)
+            try:
+                recovered = recover_read_tool_file(candidate["path"], max_bytes=max_bytes)
+                if recovered is None:
+                    continue
+                recovered_content, _file_stat = recovered
+                stored_id = self._store.append_recovered_tool_content(
+                    self._session_id,
+                    tool_call_id=candidate["tool_call_id"],
+                    marker_identity_sha=identity,
+                    source_path=candidate["path"],
+                    content=recovered_content,
+                )
+                if stored_id is not None:
+                    self._recovered_read_tool_content_count += 1
+                    logger.info(
+                        "LCM recovered truncated read-tool content: session=%s path=%s chars=%d",
+                        self._session_id,
+                        candidate["path"],
+                        len(recovered_content),
+                    )
+            except Exception:  # pragma: no cover - defensive; recovery is best-effort
+                logger.debug("LCM read-tool recovery failed", exc_info=True)
 
     def _stored_row_externalized_text_parts_for_pattern_matching(self, msg: Dict[str, Any]) -> list[str]:
         ref_sources: list[str] = []

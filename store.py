@@ -407,6 +407,77 @@ class MessageStore:
                 ids.append(cur.lastrowid)
         return ids
 
+    # -- Recovered read-tool content sidecar --------------------------------
+
+    def append_recovered_tool_content(self, session_id: str, *,
+                                      tool_call_id: str,
+                                      marker_identity_sha: str,
+                                      source_path: str,
+                                      content: str) -> int | None:
+        """Store recovered read-tool content keyed by the marker's identity.
+
+        The content is run through ingest protection (redaction/inline payload
+        externalization) before persist, exactly like a normal tool row, so a
+        recovered file's sensitive substrings never land unredacted. Idempotent
+        per (session, marker): a second recovery of the same marker is skipped.
+        """
+        if not session_id or not marker_identity_sha:
+            return None
+        protected = protect_message_for_ingest(
+            {"role": "tool", "content": content, "tool_call_id": tool_call_id},
+            config=self._ingest_protection_config,
+            hermes_home=self._hermes_home,
+            session_id=session_id,
+        )
+        protected_content = _normalize_content_value(protected.get("content"))
+        with self._write_lock, self._conn:
+            cur = self._conn.execute(
+                """INSERT INTO recovered_tool_content
+                   (session_id, tool_call_id, marker_identity_sha, source_path,
+                    recovered_chars, externalized_ref, content, timestamp)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(session_id, marker_identity_sha) DO NOTHING""",
+                (
+                    session_id,
+                    tool_call_id or "",
+                    marker_identity_sha,
+                    source_path or "",
+                    len(protected_content or ""),
+                    "",
+                    protected_content,
+                    time.time(),
+                ),
+            )
+            if cur.rowcount == 0:
+                return None
+            return cur.lastrowid
+
+    def get_recovered_tool_content(self, session_id: str,
+                                   marker_identity_sha: str) -> Dict[str, Any] | None:
+        """Return the recovered content row for a marker, or None."""
+        row = self._conn.execute(
+            "SELECT recovered_id, session_id, tool_call_id, marker_identity_sha, "
+            "source_path, recovered_chars, externalized_ref, content, timestamp "
+            "FROM recovered_tool_content WHERE session_id = ? AND marker_identity_sha = ? "
+            "ORDER BY recovered_id DESC LIMIT 1",
+            (session_id, marker_identity_sha),
+        ).fetchone()
+        if row is None:
+            return None
+        cols = [
+            "recovered_id", "session_id", "tool_call_id", "marker_identity_sha",
+            "source_path", "recovered_chars", "externalized_ref", "content", "timestamp",
+        ]
+        return dict(zip(cols, row))
+
+    def get_recovered_tool_content_count(self, session_id: str) -> int:
+        """Count recovered read-tool rows for a session."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM recovered_tool_content WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return row[0] if row else 0
+
     def reassign_session_messages(self, old_session_id: str, new_session_id: str) -> int:
         """Move all persisted messages from one session_id to another."""
         if not old_session_id or not new_session_id or old_session_id == new_session_id:
@@ -414,6 +485,11 @@ class MessageStore:
         with self._write_lock:
             cur = self._conn.execute(
                 "UPDATE messages SET session_id = ? WHERE session_id = ?",
+                (new_session_id, old_session_id),
+            )
+            # Keep the recovered-content sidecar bound to the same session.
+            self._conn.execute(
+                "UPDATE recovered_tool_content SET session_id = ? WHERE session_id = ?",
                 (new_session_id, old_session_id),
             )
             self._conn.commit()
@@ -424,6 +500,10 @@ class MessageStore:
         with self._write_lock:
             cur = self._conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
+                (session_id,),
+            )
+            self._conn.execute(
+                "DELETE FROM recovered_tool_content WHERE session_id = ?",
                 (session_id,),
             )
             self._conn.commit()

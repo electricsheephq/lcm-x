@@ -220,6 +220,55 @@ def ensure_lifecycle_state_table(conn: sqlite3.Connection) -> None:
     )
 
 
+def ensure_recovered_tool_content_table(conn: sqlite3.Connection) -> None:
+    """Create the sidecar for recovered read-tool-truncated content.
+
+    When the host truncates an oversized read-tool result to an unrecoverable
+    marker (sandbox write failed) and LCM can re-read the source file, the full
+    content is stored here keyed by the marker's identity digest. The parent
+    ``messages`` row keeps the byte-identical truncation marker, so replay, FTS,
+    and cursor reconciliation are untouched -- recovery is an expand-on-demand
+    lookup, never a stored-vs-replay divergence. Additive and version-fenceless
+    like the other sidecars, so downgrades stay safe.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS recovered_tool_content (
+            recovered_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            tool_call_id TEXT DEFAULT '',
+            marker_identity_sha TEXT NOT NULL,
+            source_path TEXT DEFAULT '',
+            recovered_chars INTEGER DEFAULT 0,
+            externalized_ref TEXT DEFAULT '',
+            content TEXT,
+            timestamp REAL NOT NULL
+        )
+        """
+    )
+    index_rows = conn.execute("PRAGMA index_list(recovered_tool_content)").fetchall()
+    marker_index = next(
+        (row for row in index_rows if row[1] == "idx_recovered_session_marker"),
+        None,
+    )
+    if marker_index is not None and not bool(marker_index[2]):
+        conn.execute("DROP INDEX idx_recovered_session_marker")
+        marker_index = None
+    if marker_index is None:
+        # Pre-unique builds could race and create duplicate rows. Preserve the
+        # newest recovery, matching the lookup's existing newest-row behavior,
+        # before enforcing the durable idempotency invariant.
+        conn.execute(
+            "DELETE FROM recovered_tool_content WHERE recovered_id NOT IN ("
+            "SELECT MAX(recovered_id) FROM recovered_tool_content "
+            "GROUP BY session_id, marker_identity_sha)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX idx_recovered_session_marker "
+            "ON recovered_tool_content(session_id, marker_identity_sha)"
+        )
+
+
 def ensure_lifecycle_state_columns(conn: sqlite3.Connection) -> None:
     ensure_lifecycle_state_table(conn)
     columns = {
@@ -699,5 +748,9 @@ def run_versioned_migrations(conn: sqlite3.Connection) -> None:
     if current_version < 5:
         mark_migration_step_complete(conn, "v5_message_conversation_id")
         current_version = 5
+
+    # Additive read-tool recovery sidecar. Ensured unconditionally (idempotent)
+    # and intentionally version-fenceless so older builds stay downgrade-safe.
+    ensure_recovered_tool_content_table(conn)
 
     set_schema_version(conn, current_version)

@@ -515,7 +515,9 @@ def _stat_generation_metadata(stats: os.stat_result) -> dict[str, int]:
     }
 
 
-def _read_regular_file_no_symlink(path: Path) -> tuple[str, dict[str, int]] | None:
+def _read_regular_file_no_symlink(
+    path: Path, *, max_bytes: int = _MAX_RECOVERED_PERSISTED_OUTPUT_BYTES
+) -> tuple[str, dict[str, int]] | None:
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -526,13 +528,13 @@ def _read_regular_file_no_symlink(path: Path) -> tuple[str, dict[str, int]] | No
         lstat_result = os.lstat(str(path))
         if not stat.S_ISREG(lstat_result.st_mode):
             return None
-        if lstat_result.st_size > _MAX_RECOVERED_PERSISTED_OUTPUT_BYTES:
+        if lstat_result.st_size > max_bytes:
             return None
         fd = os.open(str(path), flags)
         stats_before = os.fstat(fd)
         if not stat.S_ISREG(stats_before.st_mode):
             return None
-        if stats_before.st_size > _MAX_RECOVERED_PERSISTED_OUTPUT_BYTES:
+        if stats_before.st_size > max_bytes:
             return None
         with os.fdopen(fd, "rb") as handle:
             fd = None

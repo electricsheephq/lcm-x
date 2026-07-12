@@ -273,6 +273,8 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("max_assembly_tokens", "LCM_MAX_ASSEMBLY_TOKENS", int),
     _EnvFieldSpec("reserve_tokens_floor", "LCM_RESERVE_TOKENS_FLOOR", int),
     _EnvFieldSpec("custom_instructions", "LCM_CUSTOM_INSTRUCTIONS", str),
+    _EnvFieldSpec("read_tool_recovery_enabled", "LCM_READ_TOOL_RECOVERY_ENABLED", bool),
+    _EnvFieldSpec("read_tool_recovery_max_bytes", "LCM_READ_TOOL_RECOVERY_MAX_BYTES", int),
     _EnvFieldSpec("extraction_enabled", "LCM_EXTRACTION_ENABLED", bool),
     _EnvFieldSpec("extraction_model", "LCM_EXTRACTION_MODEL", str),
     _EnvFieldSpec("extraction_output_path", "LCM_EXTRACTION_OUTPUT_PATH", str),
@@ -426,6 +428,16 @@ class LCMConfig:
     # When enabled, already-externalized summarized tool-result transcript rows may
     # be rewritten to compact GC placeholders after successful leaf compaction.
     large_output_transcript_gc_enabled: bool = False
+
+    # -- Read-tool truncation recovery ---
+    # When enabled, an unrecoverable read-tool truncation marker whose source
+    # file is still readable on the local host is recovered: the full content is
+    # stored in the recovered_tool_content sidecar (keyed by marker identity) so
+    # it survives losslessly. The parent messages row keeps the marker, so replay
+    # and reconciliation are unaffected. Off by default.
+    read_tool_recovery_enabled: bool = False
+    # Upper bound (bytes) on a source file re-read for recovery.
+    read_tool_recovery_max_bytes: int = 8 * 1024 * 1024
 
     # -- Models ---
     summary_model: str = ""       # empty = use Hermes auxiliary model
