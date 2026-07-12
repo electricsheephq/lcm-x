@@ -1204,7 +1204,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     conversation_id=self._conversation_id,
                 )
                 self._ingest_messages(messages)
-                self._maybe_recover_truncated_read_tool_content()
+                self._maybe_recover_truncated_read_tool_content(messages)
                 self._record_ingest_success()
                 self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
                 logger.debug(
@@ -3417,7 +3417,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
             self._ingest_cursor_needs_reconcile = False
 
-    def _maybe_recover_truncated_read_tool_content(self) -> None:
+    def _maybe_recover_truncated_read_tool_content(
+        self, original_messages: List[Dict[str, Any]] | None = None
+    ) -> None:
         """Recover read-tool results the host truncated unrecoverably.
 
         For each stored tool message carrying an unrecoverable truncation marker
@@ -3437,6 +3439,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             # keys recovery by the exact marker bytes later expansion sees.
             stored_messages = self._store.get_session_tail(self._session_id, limit=10_000)
             candidates = plan_read_tool_recovery(stored_messages)
+            original_candidates = {
+                (candidate["tool_call_id"], candidate["path"]): candidate["content"]
+                for candidate in plan_read_tool_recovery(original_messages or [])
+            }
         except Exception:  # pragma: no cover - defensive; recovery is best-effort
             logger.debug("LCM read-tool recovery planning failed", exc_info=True)
             return
@@ -3451,7 +3457,17 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 continue
             self._attempted_read_tool_recovery_markers.add(identity)
             try:
-                recovered = recover_read_tool_file(candidate["path"], max_bytes=max_bytes)
+                # Keep identity tied to the durable marker, but validate source
+                # bytes against the original pre-protection marker when present.
+                validation_marker = original_candidates.get(
+                    (candidate["tool_call_id"], candidate["path"]),
+                    candidate["content"],
+                )
+                recovered = recover_read_tool_file(
+                    candidate["path"],
+                    marker_content=validation_marker,
+                    max_bytes=max_bytes,
+                )
                 if recovered is None:
                     continue
                 recovered_content, _file_stat = recovered

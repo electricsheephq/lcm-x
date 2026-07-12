@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -29,6 +30,11 @@ from .message_content import normalize_content_value
 
 READ_TOOL_NAMES = frozenset({"read_file"})
 DEFAULT_READ_TOOL_RECOVERY_MAX_BYTES = 8 * 1024 * 1024
+_UNRECOVERABLE_TRUNCATION_DETAILS_RE = re.compile(
+    r"\[Truncated:\s*tool response was (?P<count>[\d,]+) chars\.\s*"
+    r"Full output could not be saved to sandbox\.\]",
+    re.IGNORECASE,
+)
 
 
 def is_recoverable_read_tool_marker(text: str | None) -> bool:
@@ -108,16 +114,47 @@ def build_read_tool_call_path_map(messages: List[Dict[str, Any]]) -> Dict[str, s
 def recover_read_tool_file(
     path: str,
     *,
+    marker_content: str,
     max_bytes: int = DEFAULT_READ_TOOL_RECOVERY_MAX_BYTES,
 ) -> tuple[str, dict[str, int]] | None:
     """Re-read an absolute source path with the hardened no-symlink primitive.
 
     Returns ``(content, file_stat)`` or ``None`` when the path is unsafe,
-    non-regular, oversized, a symlink, or changed mid-read (TOCTOU).
+    non-regular, oversized, a symlink, changed mid-read (TOCTOU), or no longer
+    matches the original marker's character count and preview prefix.
     """
     if not path or not Path(path).is_absolute():
         return None
-    return _read_regular_file_no_symlink(Path(path), max_bytes=max_bytes)
+    recovered = _read_regular_file_no_symlink(Path(path), max_bytes=max_bytes)
+    if recovered is None:
+        return None
+    content, _file_stat = recovered
+    if not recovered_content_matches_marker(content, marker_content):
+        return None
+    return recovered
+
+
+def recovered_content_matches_marker(content: str, marker_content: str) -> bool:
+    """Validate recovered text against the original host truncation marker."""
+    if not isinstance(content, str) or not isinstance(marker_content, str):
+        return False
+    match = _UNRECOVERABLE_TRUNCATION_DETAILS_RE.search(marker_content)
+    if match is None:
+        return False
+    try:
+        expected_chars = int(match.group("count").replace(",", ""))
+    except ValueError:
+        return False
+    if len(content) != expected_chars:
+        return False
+    preview = marker_content[:match.start()]
+    # Hermes inserts a blank line between the original preview and its marker;
+    # it is framing, not part of the source file prefix.
+    if preview.endswith("\r\n\r\n"):
+        preview = preview[:-4]
+    elif preview.endswith("\n\n"):
+        preview = preview[:-2]
+    return bool(preview) and content.startswith(preview)
 
 
 def plan_read_tool_recovery(

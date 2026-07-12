@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
+import re
 import sqlite3
 
+from hermes_lcm import message_patterns as message_patterns_mod
 from hermes_lcm.config import LCMConfig
+from hermes_lcm.db_bootstrap import ensure_recovered_tool_content_table
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.read_tool_recovery import (
     build_read_tool_call_path_map,
     is_recoverable_read_tool_marker,
     marker_identity_sha,
     plan_read_tool_recovery,
+    recovered_content_matches_marker,
     recover_read_tool_file,
 )
 from hermes_lcm.store import MessageStore
@@ -22,6 +27,44 @@ def _marker(chars: int = 5000) -> str:
         f"[Truncated: tool response was {chars:,} chars. "
         "Full output could not be saved to sandbox.]"
     )
+
+
+def _marker_for_content(content: str, preview_chars: int = 16) -> str:
+    return (
+        content[:preview_chars]
+        + "\n\n"
+        + f"[Truncated: tool response was {len(content):,} chars. "
+        + "Full output could not be saved to sandbox.]"
+    )
+
+
+def _run_recovered_content_migration(db_path: str, start, results) -> None:
+    try:
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        conn.execute("PRAGMA busy_timeout=10000")
+        start.wait(timeout=10)
+        ensure_recovered_tool_content_table(conn)
+        conn.commit()
+        conn.close()
+        results.put(None)
+    except Exception as exc:
+        results.put(repr(exc))
+
+
+class _TimeoutPattern:
+    def __init__(self, pattern: str):
+        self._compiled = re.compile(pattern)
+        self.pattern = pattern
+
+    def search(self, text: str, *, timeout=None):
+        assert timeout is not None
+        return self._compiled.search(text)
+
+
+class _TimeoutRegexEngine:
+    @staticmethod
+    def compile(pattern: str):
+        return _TimeoutPattern(pattern)
 
 
 def _read_call(call_id: str, path: str) -> dict:
@@ -69,8 +112,11 @@ class TestPureHelpers:
 
     def test_recover_reads_absolute_regular_file(self, tmp_path):
         f = tmp_path / "src.txt"
-        f.write_text("hello lossless world", encoding="utf-8")
-        recovered = recover_read_tool_file(str(f))
+        content = "hello lossless world"
+        f.write_text(content, encoding="utf-8")
+        recovered = recover_read_tool_file(
+            str(f), marker_content=_marker_for_content(content)
+        )
         assert recovered is not None
         content, _stat = recovered
         assert content == "hello lossless world"
@@ -83,15 +129,31 @@ class TestPureHelpers:
             os.symlink(target, link)
         except (OSError, NotImplementedError):
             return  # platform without symlink support
-        assert recover_read_tool_file(str(link)) is None
+        assert recover_read_tool_file(
+            str(link), marker_content=_marker_for_content("secret")
+        ) is None
 
     def test_recover_rejects_oversized(self, tmp_path):
         f = tmp_path / "big.txt"
         f.write_text("x" * 100, encoding="utf-8")
-        assert recover_read_tool_file(str(f), max_bytes=10) is None
+        assert recover_read_tool_file(
+            str(f), marker_content=_marker_for_content("x" * 100), max_bytes=10
+        ) is None
 
     def test_recover_rejects_relative_path(self):
-        assert recover_read_tool_file("relative.txt") is None
+        assert recover_read_tool_file(
+            "relative.txt", marker_content=_marker_for_content("irrelevant")
+        ) is None
+
+    def test_recovered_content_matches_original_marker(self):
+        content = "the complete original file"
+        assert recovered_content_matches_marker(content, _marker_for_content(content))
+
+    def test_recovered_content_rejects_changed_source(self):
+        original = "the complete original file"
+        changed = "the complete modified file"
+        assert len(changed) == len(original)
+        assert not recovered_content_matches_marker(changed, _marker_for_content(original))
 
     def test_plan_pairs_marker_to_path(self, tmp_path):
         f = tmp_path / "src.txt"
@@ -209,6 +271,60 @@ class TestStoreSidecar:
         assert rows == [("newer",)]
         assert any(row[1] == "idx_recovered_session_marker" and row[2] == 1 for row in index_rows)
 
+    def test_bootstrap_legacy_index_migration_is_process_safe(self, tmp_path):
+        db_path = tmp_path / "lcm.db"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE recovered_tool_content (
+                recovered_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                tool_call_id TEXT DEFAULT '',
+                marker_identity_sha TEXT NOT NULL,
+                source_path TEXT DEFAULT '',
+                recovered_chars INTEGER DEFAULT 0,
+                externalized_ref TEXT DEFAULT '',
+                content TEXT,
+                timestamp REAL NOT NULL
+            );
+            CREATE INDEX idx_recovered_session_marker
+                ON recovered_tool_content(session_id, marker_identity_sha);
+            INSERT INTO recovered_tool_content
+                (session_id, marker_identity_sha, content, timestamp)
+                VALUES ('s1', 'same', 'older', 1), ('s1', 'same', 'newer', 2);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        context = multiprocessing.get_context("fork")
+        start = context.Event()
+        results = context.Queue()
+        processes = [
+            context.Process(
+                target=_run_recovered_content_migration,
+                args=(str(db_path), start, results),
+            )
+            for _ in range(6)
+        ]
+        for process in processes:
+            process.start()
+        start.set()
+        for process in processes:
+            process.join(timeout=15)
+            assert process.exitcode == 0
+        assert [results.get(timeout=2) for _ in processes] == [None] * len(processes)
+
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute(
+            "SELECT content FROM recovered_tool_content "
+            "WHERE session_id = 's1' AND marker_identity_sha = 'same'"
+        ).fetchall()
+        indexes = conn.execute("PRAGMA index_list(recovered_tool_content)").fetchall()
+        conn.close()
+        assert rows == [("newer",)]
+        assert any(row[1] == "idx_recovered_session_marker" and row[2] == 1 for row in indexes)
+
     def test_sensitive_content_redacted(self, tmp_path):
         store = self._store(tmp_path, large_output_externalization_path=str(tmp_path / "ext"))
         setattr(store._ingest_protection_config, "sensitive_patterns_enabled", True)
@@ -249,11 +365,16 @@ class TestEngineRecovery:
 
     def _turn(self, tmp_path):
         f = tmp_path / "source.txt"
-        f.write_text("the full 2MB file content that the host truncated", encoding="utf-8")
+        content = "the full 2MB file content that the host truncated"
+        f.write_text(content, encoding="utf-8")
         return f, [
             {"role": "user", "content": "read the file"},
             _read_call("call_1", str(f)),
-            {"role": "tool", "tool_call_id": "call_1", "content": _marker()},
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": _marker_for_content(content),
+            },
         ]
 
     def test_disabled_recovers_nothing(self, tmp_path):
@@ -274,13 +395,14 @@ class TestEngineRecovery:
         assert is_recoverable_read_tool_marker(tool_rows[0]["content"])
 
         # ...but the full file content is recovered into the sidecar.
-        sha = marker_identity_sha("tool", _marker(), "call_1")
+        sha = marker_identity_sha("tool", turn[-1]["content"], "call_1")
         recovered = engine._store.get_recovered_tool_content("chat-1", sha)
         assert recovered is not None
         assert recovered["content"] == f.read_text(encoding="utf-8")
         assert recovered["source_path"] == str(f)
 
-    def test_ignored_marker_is_not_recovered(self, tmp_path):
+    def test_ignored_marker_is_not_recovered(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(message_patterns_mod, "_regex_engine", _TimeoutRegexEngine)
         engine = self._engine(
             tmp_path,
             enabled=True,
@@ -302,7 +424,9 @@ class TestEngineRecovery:
             sensitive_patterns=["api_key"],
         )
         f, turn = self._turn(tmp_path)
-        turn[-1]["content"] = 'api_key="supersecretvalue"\n' + _marker()
+        content = 'api_key="supersecretvalue"\n' + f.read_text(encoding="utf-8")
+        f.write_text(content, encoding="utf-8")
+        turn[-1]["content"] = _marker_for_content(content, preview_chars=28)
         engine.ingest(turn)
         tool_row = next(
             row for row in engine._store.get_session_messages("chat-1")
@@ -313,7 +437,11 @@ class TestEngineRecovery:
         assert stored_sha != raw_sha
         recovered = engine._store.get_recovered_tool_content("chat-1", stored_sha)
         assert recovered is not None
-        assert recovered["content"] == f.read_text(encoding="utf-8")
+        assert "[LCM sensitive redaction:" in recovered["content"]
+        assert "supersecretvalue" not in recovered["content"]
+        assert recovered["content"].endswith(
+            "the full 2MB file content that the host truncated"
+        )
         assert engine._store.get_recovered_tool_content("chat-1", raw_sha) is None
 
     def test_recovery_is_attempted_once_per_marker(self, tmp_path):
@@ -324,10 +452,20 @@ class TestEngineRecovery:
         # must prevent a second re-read, so the first recovery is preserved.
         f.write_text("changed content", encoding="utf-8")
         engine.ingest(turn)
-        sha = marker_identity_sha("tool", _marker(), "call_1")
+        sha = marker_identity_sha("tool", turn[-1]["content"], "call_1")
         recovered = engine._store.get_recovered_tool_content("chat-1", sha)
         assert recovered["content"] == "the full 2MB file content that the host truncated"
         assert engine._store.get_recovered_tool_content_count("chat-1") == 1
+
+    def test_changed_source_is_not_stored_as_lossless_recovery(self, tmp_path):
+        engine = self._engine(tmp_path, enabled=True)
+        f, turn = self._turn(tmp_path)
+        original = f.read_text(encoding="utf-8")
+        changed = original.replace("full", "fake")
+        assert len(changed) == len(original)
+        f.write_text(changed, encoding="utf-8")
+        engine.ingest(turn)
+        assert engine._store.get_recovered_tool_content_count("chat-1") == 0
 
     def test_status_surfaces_recovery_count_when_enabled(self, tmp_path):
         engine = self._engine(tmp_path, enabled=True)

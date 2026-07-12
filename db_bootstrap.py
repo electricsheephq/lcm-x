@@ -246,27 +246,41 @@ def ensure_recovered_tool_content_table(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    index_rows = conn.execute("PRAGMA index_list(recovered_tool_content)").fetchall()
-    marker_index = next(
-        (row for row in index_rows if row[1] == "idx_recovered_session_marker"),
-        None,
-    )
-    if marker_index is not None and not bool(marker_index[2]):
-        conn.execute("DROP INDEX idx_recovered_session_marker")
-        marker_index = None
-    if marker_index is None:
-        # Pre-unique builds could race and create duplicate rows. Preserve the
-        # newest recovery, matching the lookup's existing newest-row behavior,
-        # before enforcing the durable idempotency invariant.
+    # Acquire SQLite's writer reservation before inspecting the legacy index.
+    # Without this, two startup processes can both observe the non-unique index;
+    # one drops it and the other's unguarded DROP then aborts startup. A savepoint
+    # works both in autocommit mode and inside a caller-owned transaction.
+    conn.execute("SAVEPOINT ensure_recovered_tool_content_unique")
+    try:
         conn.execute(
-            "DELETE FROM recovered_tool_content WHERE recovered_id NOT IN ("
-            "SELECT MAX(recovered_id) FROM recovered_tool_content "
-            "GROUP BY session_id, marker_identity_sha)"
+            "UPDATE recovered_tool_content SET recovered_id = recovered_id WHERE 0"
         )
-        conn.execute(
-            "CREATE UNIQUE INDEX idx_recovered_session_marker "
-            "ON recovered_tool_content(session_id, marker_identity_sha)"
+        index_rows = conn.execute("PRAGMA index_list(recovered_tool_content)").fetchall()
+        marker_index = next(
+            (row for row in index_rows if row[1] == "idx_recovered_session_marker"),
+            None,
         )
+        if marker_index is not None and not bool(marker_index[2]):
+            conn.execute("DROP INDEX IF EXISTS idx_recovered_session_marker")
+            marker_index = None
+        if marker_index is None:
+            # Pre-unique builds could race and create duplicate rows. Preserve the
+            # newest recovery, matching the lookup's existing newest-row behavior,
+            # before enforcing the durable idempotency invariant.
+            conn.execute(
+                "DELETE FROM recovered_tool_content WHERE recovered_id NOT IN ("
+                "SELECT MAX(recovered_id) FROM recovered_tool_content "
+                "GROUP BY session_id, marker_identity_sha)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_recovered_session_marker "
+                "ON recovered_tool_content(session_id, marker_identity_sha)"
+            )
+        conn.execute("RELEASE SAVEPOINT ensure_recovered_tool_content_unique")
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT ensure_recovered_tool_content_unique")
+        conn.execute("RELEASE SAVEPOINT ensure_recovered_tool_content_unique")
+        raise
 
 
 def ensure_lifecycle_state_columns(conn: sqlite3.Connection) -> None:
