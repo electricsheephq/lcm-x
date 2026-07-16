@@ -1413,6 +1413,17 @@ def test_lcm_doctor_clean_discovers_and_deletes_ignored_only_session(tmp_path):
     assert "candidate_sessions: 1" in applied
     assert "ignored_messages_deleted: 1" in applied
     assert engine._store.get_ignored_session_count("cron_ignored_only") == 0
+    backup_line = next(line for line in applied.splitlines() if line.startswith("backup_path: "))
+    backup_path = Path(backup_line.split(": ", 1)[1])
+    assert backup_path.exists()
+    backup_conn = sqlite3.connect(str(backup_path))
+    try:
+        assert backup_conn.execute(
+            "SELECT COUNT(*) FROM ignored_messages WHERE session_id = ?",
+            ("cron_ignored_only",),
+        ).fetchone()[0] == 1
+    finally:
+        backup_conn.close()
 
 
 def test_lcm_doctor_clean_returns_error_on_schema_problem(engine):
@@ -1574,6 +1585,46 @@ def test_lcm_doctor_clean_apply_rolls_back_if_delete_fails_after_backup(tmp_path
     assert engine._store.get_ignored_session_count("cron_20260414") == 1
     assert len(engine._dag.get_session_nodes("cron_20260414")) == 1
     assert engine._lifecycle.get_by_conversation("cron_20260414") is not None
+
+
+def test_lcm_doctor_clean_apply_rolls_back_normal_rows_if_sidecar_delete_fails(tmp_path):
+    config = LCMConfig(
+        database_path=str(tmp_path / "lcm_clean_sidecar_rollback.db"),
+        ignore_session_patterns=["cron*"],
+        doctor_clean_apply_enabled=True,
+    )
+    engine = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes_home"))
+    engine._session_id = "live-session"
+    engine._store.append(
+        "cron_20260414",
+        {"role": "user", "content": "scheduled report"},
+        token_estimate=12,
+    )
+    engine._store.append_ignored_batch(
+        "cron_20260414",
+        [{"role": "assistant", "content": "ignored scheduled report detail"}],
+    )
+    engine._store._conn.execute(
+        """
+        CREATE TRIGGER fail_ignored_cleanup_delete
+        BEFORE DELETE ON ignored_messages
+        WHEN old.session_id = 'cron_20260414'
+        BEGIN
+            SELECT RAISE(ABORT, 'ignored cleanup delete failed');
+        END
+        """
+    )
+    engine._store._conn.commit()
+
+    result = handle_lcm_command("doctor clean apply", engine)
+
+    assert "status: error" in result
+    assert "ignored cleanup delete failed" in result
+    assert "cleanup apply rolled back" in result
+    backup_line = next(line for line in result.splitlines() if line.startswith("backup_path: "))
+    assert Path(backup_line.split(": ", 1)[1]).exists()
+    assert engine._store.get_session_count("cron_20260414") == 1
+    assert engine._store.get_ignored_session_count("cron_20260414") == 1
 
 
 def test_lcm_doctor_clean_apply_denied_by_default(tmp_path):

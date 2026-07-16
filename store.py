@@ -519,34 +519,48 @@ class MessageStore:
         """Move all persisted messages from one session_id to another."""
         if not old_session_id or not new_session_id or old_session_id == new_session_id:
             return 0
+        conn = self._conn
+        if conn is None:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
         with self._write_lock:
-            cur = self._conn.execute(
-                "UPDATE messages SET session_id = ? WHERE session_id = ?",
-                (new_session_id, old_session_id),
-            )
-            # Keep the lossless-ignored sidecar bound to the same session so a
-            # rebind never strands ignored rows under the old id.
-            self._conn.execute(
-                "UPDATE ignored_messages SET session_id = ? WHERE session_id = ?",
-                (new_session_id, old_session_id),
-            )
-            self._conn.commit()
-            return cur.rowcount if cur.rowcount is not None else 0
+            try:
+                cur = conn.execute(
+                    "UPDATE messages SET session_id = ? WHERE session_id = ?",
+                    (new_session_id, old_session_id),
+                )
+                # Keep the lossless-ignored sidecar bound to the same session so a
+                # rebind never strands ignored rows under the old id.
+                conn.execute(
+                    "UPDATE ignored_messages SET session_id = ? WHERE session_id = ?",
+                    (new_session_id, old_session_id),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return cur.rowcount if cur.rowcount is not None else 0
 
     def delete_session_messages(self, session_id: str) -> int:
         """Delete all messages for a session. Returns count deleted."""
+        conn = self._conn
+        if conn is None:
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
         with self._write_lock:
-            cur = self._conn.execute(
-                "DELETE FROM messages WHERE session_id = ?",
-                (session_id,),
-            )
-            self._conn.execute(
-                "DELETE FROM ignored_messages WHERE session_id = ?",
-                (session_id,),
-            )
-            self._conn.commit()
-            deleted = cur.rowcount if cur.rowcount is not None else 0
-            return deleted
+            try:
+                cur = conn.execute(
+                    "DELETE FROM messages WHERE session_id = ?",
+                    (session_id,),
+                )
+                conn.execute(
+                    "DELETE FROM ignored_messages WHERE session_id = ?",
+                    (session_id,),
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        deleted = cur.rowcount if cur.rowcount is not None else 0
+        return deleted
 
     def gc_externalized_tool_result(self, store_id: int, placeholder: str) -> bool:
         """Rewrite one unpinned tool-result row to a compact GC placeholder."""
