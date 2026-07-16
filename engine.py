@@ -213,7 +213,6 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         # process, so replay is suppressed without one session preventing the
         # same marker identity from being recovered into another session's row.
         self._attempted_read_tool_recovery_markers: set[tuple[str, str]] = set()
-        self._recovered_read_tool_content_count: int = 0
 
         # Track which store_ids have been ingested into the DAG
         self._last_compacted_store_id: int = 0
@@ -3269,7 +3268,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             status["ignore_pattern_dropped_count"] = self._ignore_pattern_dropped_count
             if self._config.read_tool_recovery_enabled:
                 status["read_tool_recovery_enabled"] = True
-                status["recovered_read_tool_content_count"] = self._recovered_read_tool_content_count
+                status["recovered_read_tool_content_count"] = (
+                    self._store.get_recovered_tool_content_count(session_id)
+                )
             status["ingest_reconciliation"] = dict(self._last_ingest_reconciliation)
             status["overflow_recovery_failed"] = self._last_overflow_recovery_failed
             status["condensation_suppressed_reason"] = self._last_condensation_suppressed_reason
@@ -3482,7 +3483,6 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     content=recovered_content,
                 )
                 if stored_id is not None:
-                    self._recovered_read_tool_content_count += 1
                     logger.info(
                         "LCM recovered truncated read-tool content: session=%s path=%s chars=%d",
                         self._session_id,

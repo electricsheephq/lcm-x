@@ -2508,6 +2508,16 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
             "messages": store_messages,
             "estimated_tokens": store_tokens,
         },
+        **(
+            {
+                "read_tool_recovery_enabled": True,
+                "recovered_read_tool_content_count": full_status.get(
+                    "recovered_read_tool_content_count", 0
+                ),
+            }
+            if engine._config.read_tool_recovery_enabled
+            else {}
+        ),
         "dag": {
             "total_nodes": total_dag_nodes,
             "total_tokens": total_dag_tokens,
