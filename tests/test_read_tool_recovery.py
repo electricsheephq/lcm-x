@@ -138,6 +138,52 @@ class TestPureHelpers:
             str(link), marker_content=_marker_for_content("secret")
         ) is None
 
+    def test_recover_rejects_symlinked_ancestor(self, tmp_path):
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        content = "content reached through a symlinked ancestor"
+        (real_dir / "source.txt").write_text(content, encoding="utf-8")
+        linked_dir = tmp_path / "linked"
+        try:
+            os.symlink(real_dir, linked_dir, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            return  # platform without symlink support
+
+        assert recover_read_tool_file(
+            str(linked_dir / "source.txt"), marker_content=_marker_for_content(content)
+        ) is None
+
+    def test_recover_rejects_final_path_replacement_between_stat_and_open(
+        self, tmp_path, monkeypatch
+    ):
+        source = tmp_path / "source.txt"
+        original = "shared prefix original-data"
+        replacement = "shared prefix attacker-data"
+        assert len(original) == len(replacement)
+        source.write_text(original, encoding="utf-8")
+        replacement_path = tmp_path / "replacement.txt"
+        replacement_path.write_text(replacement, encoding="utf-8")
+        parked_path = tmp_path / "parked.txt"
+        original_open = ingest_protection_mod.os.open
+        replaced = False
+
+        def replace_before_open(path, flags, *args, **kwargs):
+            nonlocal replaced
+            is_final_open = str(path) in {str(source), source.name}
+            if is_final_open and not replaced:
+                replaced = True
+                os.replace(source, parked_path)
+                os.replace(replacement_path, source)
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(ingest_protection_mod.os, "open", replace_before_open)
+
+        assert recover_read_tool_file(
+            str(source),
+            marker_content=_marker_for_content(original, preview_chars=len("shared prefix ")),
+        ) is None
+        assert replaced is True
+
     def test_recover_rejects_oversized(self, tmp_path):
         f = tmp_path / "big.txt"
         f.write_text("x" * 100, encoding="utf-8")
@@ -539,6 +585,68 @@ class TestEngineRecovery:
 
         assert result["content"] == file_content
         assert result["recovered_chars"] == len(file_content)
+
+    def test_cross_session_expansion_does_not_hydrate_protected_recovered_content(
+        self, tmp_path
+    ):
+        protected = "PROTECTED_RECOVERED_PAYLOAD_" + ("QUJD" * 1_500)
+        source = tmp_path / "protected-source.txt"
+        source.write_text(protected, encoding="utf-8")
+        engine = self._engine(
+            tmp_path,
+            enabled=True,
+            large_output_externalization_enabled=True,
+            large_output_externalization_threshold_chars=500,
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        )
+        engine.ingest([
+            {"role": "user", "content": "read protected content"},
+            _read_call("call-protected", str(source)),
+            {
+                "role": "tool",
+                "tool_call_id": "call-protected",
+                "content": _marker_for_content(protected),
+            },
+        ])
+        tool_row = next(
+            row for row in engine._store.get_session_messages("chat-1")
+            if row["role"] == "tool"
+        )
+
+        config = engine._config
+        engine.shutdown()
+        engine = LCMEngine(config=config)
+        engine.on_session_start(
+            "chat-2", platform="cli", conversation_id="c2", context_length=200000
+        )
+        node_id = engine._dag.add_node(SummaryNode(
+            session_id="chat-2",
+            depth=0,
+            summary="Foreign protected source",
+            token_count=10,
+            source_token_count=10,
+            source_ids=[tool_row["store_id"]],
+            source_type="messages",
+        ))
+
+        by_store_id = json.loads(lcm_tools.lcm_expand(
+            {"store_id": tool_row["store_id"], "max_tokens": 1_000_000},
+            engine=engine,
+        ))
+        by_node_id = json.loads(lcm_tools.lcm_expand(
+            {"node_id": node_id, "max_tokens": 1_000_000},
+            engine=engine,
+        ))
+
+        assert by_store_id["from_current_session"] is False
+        assert "PROTECTED_RECOVERED_PAYLOAD_" not in json.dumps(by_store_id)
+        assert by_store_id["content"].startswith("[Externalized tool output:")
+        assert by_store_id["externalized_ref"]
+        assert "cannot be expanded" in by_store_id["externalized_note"]
+        assert "PROTECTED_RECOVERED_PAYLOAD_" not in json.dumps(by_node_id)
+        assert by_node_id["expanded"][0]["content"].startswith(
+            "[Externalized tool output:"
+        )
 
     def test_store_id_expansion_restores_embedded_externalized_payload_in_place(self, tmp_path):
         encoded_one = "QUJD" * 1_500

@@ -515,23 +515,66 @@ def _stat_generation_metadata(stats: os.stat_result) -> dict[str, int]:
     }
 
 
+def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        int(left.st_dev),
+        int(left.st_ino),
+        stat.S_IFMT(left.st_mode),
+    ) == (
+        int(right.st_dev),
+        int(right.st_ino),
+        stat.S_IFMT(right.st_mode),
+    )
+
+
 def _read_regular_file_no_symlink(
     path: Path, *, max_bytes: int = _MAX_RECOVERED_PERSISTED_OUTPUT_BYTES
 ) -> tuple[str, dict[str, int]] | None:
+    if not path.is_absolute() or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        return None
     flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+    flags |= os.O_NOFOLLOW
     if hasattr(os, "O_NONBLOCK"):
         flags |= os.O_NONBLOCK
+    directory_flags = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW
+    parts = path.parts[1:]
+    if not parts:
+        return None
+    directory_fd: int | None = None
     fd: int | None = None
     try:
-        lstat_result = os.lstat(str(path))
-        if not stat.S_ISREG(lstat_result.st_mode):
+        directory_fd = os.open(os.sep, directory_flags)
+        for component in parts[:-1]:
+            component_lstat = os.stat(
+                component,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            if not stat.S_ISDIR(component_lstat.st_mode):
+                return None
+            next_directory_fd = os.open(
+                component,
+                directory_flags,
+                dir_fd=directory_fd,
+            )
+            opened_directory_stat = os.fstat(next_directory_fd)
+            if not _same_file_identity(component_lstat, opened_directory_stat):
+                os.close(next_directory_fd)
+                return None
+            os.close(directory_fd)
+            directory_fd = next_directory_fd
+
+        final_lstat = os.stat(
+            parts[-1],
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        if not stat.S_ISREG(final_lstat.st_mode) or final_lstat.st_size > max_bytes:
             return None
-        if lstat_result.st_size > max_bytes:
-            return None
-        fd = os.open(str(path), flags)
+        fd = os.open(parts[-1], flags, dir_fd=directory_fd)
         stats_before = os.fstat(fd)
+        if not _same_file_identity(final_lstat, stats_before):
+            return None
         if not stat.S_ISREG(stats_before.st_mode):
             return None
         if stats_before.st_size > max_bytes:
@@ -549,6 +592,11 @@ def _read_regular_file_no_symlink(
         if fd is not None:
             try:
                 os.close(fd)
+            except OSError:
+                pass
+        if directory_fd is not None:
+            try:
+                os.close(directory_fd)
             except OSError:
                 pass
 

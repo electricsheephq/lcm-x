@@ -113,7 +113,7 @@ def _get_externalized_payload(
 def _get_recovered_read_tool_content(
     engine: "LCMEngine", stored: dict[str, Any]
 ) -> dict[str, Any] | None:
-    """Resolve a recovered read-tool sidecar, including protected externalization."""
+    """Resolve a recovered read-tool sidecar within the current session's protection scope."""
     transcript_content = stored.get("content", "") or ""
     if not is_recoverable_read_tool_marker(transcript_content):
         return None
@@ -131,35 +131,36 @@ def _get_recovered_read_tool_content(
         return None
 
     recovered_content = recovered.get("content") or ""
-    restored_content = restore_ingest_payload_placeholders(
-        recovered_content,
-        config=engine._config,
-        hermes_home=engine._hermes_home,
-        session_id=stored_session_id,
+    may_hydrate_protected_content = (
+        bool(engine.current_session_id)
+        and stored_session_id == engine.current_session_id
     )
-    if restored_content != recovered_content:
-        recovered_content = restored_content
-        externalized_ref = ""
-    else:
-        externalized_ref = str(recovered.get("externalized_ref") or "").strip()
-    if externalized_ref:
-        refs = [externalized_ref]
-    else:
-        refs = extract_ingest_externalized_refs(recovered_content)
-        legacy_ref = extract_externalized_ref(recovered_content)
-        if legacy_ref and legacy_ref not in refs:
-            refs.append(legacy_ref)
-    for ref in refs:
-        if not ref:
-            continue
-        payload = _get_externalized_payload(
-            engine,
-            ref,
-            allowed_session_ids={engine.current_session_id, stored_session_id},
+    if may_hydrate_protected_content:
+        restored_content = restore_ingest_payload_placeholders(
+            recovered_content,
+            config=engine._config,
+            hermes_home=engine._hermes_home,
+            session_id=engine.current_session_id,
         )
-        if payload is not None and payload.get("kind") in {"ingest_payload", "tool_result"}:
-            recovered_content = payload.get("content") or ""
-            break
+        if restored_content != recovered_content:
+            recovered_content = restored_content
+            externalized_ref = ""
+        else:
+            externalized_ref = str(recovered.get("externalized_ref") or "").strip()
+        if externalized_ref:
+            refs = [externalized_ref]
+        else:
+            refs = extract_ingest_externalized_refs(recovered_content)
+            legacy_ref = extract_externalized_ref(recovered_content)
+            if legacy_ref and legacy_ref not in refs:
+                refs.append(legacy_ref)
+        for ref in refs:
+            if not ref:
+                continue
+            payload = _get_externalized_payload(engine, ref)
+            if payload is not None and payload.get("kind") in {"ingest_payload", "tool_result"}:
+                recovered_content = payload.get("content") or ""
+                break
 
     resolved = dict(recovered)
     resolved["content"] = recovered_content
@@ -1502,6 +1503,11 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
         # _get_externalized_payload contract); cross-session rows surface only the
         # ref string, with a hint pointing at the same-session expansion path.
         ref_values = [transcript_content]
+        if recovered is not None:
+            ref_values.append(str(recovered.get("content") or ""))
+            recovered_ref = str(recovered.get("externalized_ref") or "").strip()
+            if recovered_ref:
+                ref_values.append(recovered_ref)
         if stored.get("tool_calls"):
             try:
                 ref_values.append(json.dumps(stored.get("tool_calls"), ensure_ascii=False, sort_keys=True))
