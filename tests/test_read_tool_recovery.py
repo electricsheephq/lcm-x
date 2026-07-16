@@ -6,7 +6,10 @@ import os
 import re
 import sqlite3
 
+import pytest
+
 import hermes_lcm.tools as lcm_tools
+from hermes_lcm import ingest_protection as ingest_protection_mod
 from hermes_lcm import message_patterns as message_patterns_mod
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.db_bootstrap import ensure_recovered_tool_content_table
@@ -145,6 +148,36 @@ class TestPureHelpers:
     def test_recover_rejects_relative_path(self):
         assert recover_read_tool_file(
             "relative.txt", marker_content=_marker_for_content("irrelevant")
+        ) is None
+
+    def test_recover_rejects_non_regular_file(self, tmp_path):
+        assert recover_read_tool_file(
+            str(tmp_path), marker_content=_marker_for_content("irrelevant")
+        ) is None
+
+    def test_recover_rejects_malformed_marker(self, tmp_path):
+        source = tmp_path / "source.txt"
+        source.write_text("complete content", encoding="utf-8")
+        assert recover_read_tool_file(
+            str(source), marker_content="[Truncated: malformed]"
+        ) is None
+
+    def test_recover_rejects_changed_file_generation(self, tmp_path, monkeypatch):
+        source = tmp_path / "changed-during-read.txt"
+        content = "content whose generation changes during recovery"
+        source.write_text(content, encoding="utf-8")
+        generations = iter([
+            {"dev": 1, "ino": 2, "size": len(content), "mtime_ns": 3},
+            {"dev": 1, "ino": 2, "size": len(content), "mtime_ns": 4},
+        ])
+        monkeypatch.setattr(
+            ingest_protection_mod,
+            "_stat_generation_metadata",
+            lambda _stat: next(generations),
+        )
+
+        assert recover_read_tool_file(
+            str(source), marker_content=_marker_for_content(content)
         ) is None
 
     def test_recovered_content_matches_original_marker(self):
@@ -353,6 +386,48 @@ class TestStoreSidecar:
         store.delete_session_messages("new")
         assert store.get_recovered_tool_content_count("new") == 0
 
+    def test_reassign_rolls_back_parent_when_sidecar_update_fails(self, tmp_path):
+        store = self._store(tmp_path)
+        store.append("old", {"role": "user", "content": "keep me"})
+        sha = marker_identity_sha("tool", _marker(), "c1")
+        store.append_recovered_tool_content(
+            "old", tool_call_id="c1", marker_identity_sha=sha,
+            source_path="/abs/f.txt", content="content",
+        )
+        store._conn.execute(
+            "CREATE TRIGGER fail_recovered_reassign BEFORE UPDATE "
+            "ON recovered_tool_content BEGIN SELECT RAISE(ABORT, 'sidecar update failed'); END"
+        )
+        store._conn.commit()
+
+        with pytest.raises(sqlite3.IntegrityError, match="sidecar update failed"):
+            store.reassign_session_messages("old", "new")
+
+        assert store.get_session_count("old") == 1
+        assert store.get_session_count("new") == 0
+        assert store.get_recovered_tool_content_count("old") == 1
+        assert store.get_recovered_tool_content_count("new") == 0
+
+    def test_delete_rolls_back_parent_when_sidecar_delete_fails(self, tmp_path):
+        store = self._store(tmp_path)
+        store.append("session", {"role": "user", "content": "keep me"})
+        sha = marker_identity_sha("tool", _marker(), "c1")
+        store.append_recovered_tool_content(
+            "session", tool_call_id="c1", marker_identity_sha=sha,
+            source_path="/abs/f.txt", content="content",
+        )
+        store._conn.execute(
+            "CREATE TRIGGER fail_recovered_delete BEFORE DELETE "
+            "ON recovered_tool_content BEGIN SELECT RAISE(ABORT, 'sidecar delete failed'); END"
+        )
+        store._conn.commit()
+
+        with pytest.raises(sqlite3.IntegrityError, match="sidecar delete failed"):
+            store.delete_session_messages("session")
+
+        assert store.get_session_count("session") == 1
+        assert store.get_recovered_tool_content_count("session") == 1
+
 
 class TestEngineRecovery:
     def _engine(self, tmp_path, *, enabled: bool, **overrides):
@@ -466,8 +541,12 @@ class TestEngineRecovery:
         assert result["recovered_chars"] == len(file_content)
 
     def test_store_id_expansion_restores_embedded_externalized_payload_in_place(self, tmp_path):
-        encoded = "QUJD" * 1_500
-        file_content = f"prefix remains\n{encoded}\nsuffix remains"
+        encoded_one = "QUJD" * 1_500
+        encoded_two = "REVG" * 1_500
+        file_content = (
+            f"prefix remains\n{encoded_one}\nmiddle remains\n"
+            f"{encoded_two}\nsuffix remains"
+        )
         source = tmp_path / "embedded-payload.txt"
         source.write_text(file_content, encoding="utf-8")
         engine = self._engine(
@@ -510,6 +589,22 @@ class TestEngineRecovery:
         assert result["content"] == file_content
         assert result["content"].startswith("prefix remains\n")
         assert result["content"].endswith("\nsuffix remains")
+
+    def test_live_tool_call_recovers_before_same_turn_expand(self, tmp_path, monkeypatch):
+        engine = self._engine(tmp_path, enabled=True)
+        source, turn = self._turn(tmp_path)
+
+        def expand_after_live_ingest(_args, *, engine):
+            return json.dumps({
+                "recovered": engine._store.get_recovered_tool_content_count("chat-1"),
+                "content": source.read_text(encoding="utf-8"),
+            })
+
+        monkeypatch.setattr(lcm_tools, "lcm_expand", expand_after_live_ingest)
+        result = json.loads(engine.handle_tool_call("lcm_expand", {}, messages=turn))
+
+        assert result["recovered"] == 1
+        assert result["content"] == source.read_text(encoding="utf-8")
 
     def test_node_expansion_hydrates_recovered_content(self, tmp_path):
         engine = self._engine(tmp_path, enabled=True)

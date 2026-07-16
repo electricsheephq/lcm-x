@@ -3101,6 +3101,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             ):
                 try:
                     self._ingest_messages(messages)
+                    self._maybe_recover_truncated_read_tool_content(messages)
                     self._record_ingest_success()
                     self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
                 except Exception as e:
