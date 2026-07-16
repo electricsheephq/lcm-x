@@ -557,12 +557,16 @@ def _read_regular_file_no_symlink(
                 directory_flags,
                 dir_fd=directory_fd,
             )
-            opened_directory_stat = os.fstat(next_directory_fd)
-            if not _same_file_identity(component_lstat, opened_directory_stat):
-                os.close(next_directory_fd)
-                return None
-            os.close(directory_fd)
-            directory_fd = next_directory_fd
+            try:
+                opened_directory_stat = os.fstat(next_directory_fd)
+                if not _same_file_identity(component_lstat, opened_directory_stat):
+                    return None
+                os.close(directory_fd)
+                directory_fd = next_directory_fd
+                next_directory_fd = None
+            finally:
+                if next_directory_fd is not None:
+                    os.close(next_directory_fd)
 
         final_lstat = os.stat(
             parts[-1],

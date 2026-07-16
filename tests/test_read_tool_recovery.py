@@ -184,6 +184,35 @@ class TestPureHelpers:
         ) is None
         assert replaced is True
 
+    def test_recover_closes_new_directory_fd_when_fstat_fails(self, tmp_path, monkeypatch):
+        nested = tmp_path / "unique-fstat-failure-directory"
+        nested.mkdir()
+        source = nested / "source.txt"
+        source.write_text("content", encoding="utf-8")
+        original_open = ingest_protection_mod.os.open
+        original_fstat = ingest_protection_mod.os.fstat
+        opened_directory_fd = None
+
+        def track_directory_open(path, flags, *args, **kwargs):
+            nonlocal opened_directory_fd
+            fd = original_open(path, flags, *args, **kwargs)
+            if path == nested.name:
+                opened_directory_fd = fd
+            return fd
+
+        def fail_opened_directory_fstat(fd):
+            if fd == opened_directory_fd:
+                raise OSError("injected directory fstat failure")
+            return original_fstat(fd)
+
+        monkeypatch.setattr(ingest_protection_mod.os, "open", track_directory_open)
+        monkeypatch.setattr(ingest_protection_mod.os, "fstat", fail_opened_directory_fstat)
+
+        assert ingest_protection_mod._read_regular_file_no_symlink(source) is None
+        assert opened_directory_fd is not None
+        with pytest.raises(OSError):
+            original_fstat(opened_directory_fd)
+
     def test_recover_rejects_oversized(self, tmp_path):
         f = tmp_path / "big.txt"
         f.write_text("x" * 100, encoding="utf-8")
@@ -587,7 +616,7 @@ class TestEngineRecovery:
         assert result["recovered_chars"] == len(file_content)
 
     def test_cross_session_expansion_does_not_hydrate_protected_recovered_content(
-        self, tmp_path
+        self, tmp_path, monkeypatch
     ):
         protected = "PROTECTED_RECOVERED_PAYLOAD_" + ("QUJD" * 1_500)
         source = tmp_path / "protected-source.txt"
@@ -633,20 +662,46 @@ class TestEngineRecovery:
             {"store_id": tool_row["store_id"], "max_tokens": 1_000_000},
             engine=engine,
         ))
+        hydration_calls = []
+        original_recover = lcm_tools._get_recovered_read_tool_content
+        original_load = lcm_tools.load_externalized_payload
+        original_restore = lcm_tools.restore_ingest_payload_placeholders
+        original_find = lcm_tools.find_externalized_payload_for_message
+
+        def record_recover(*args, **kwargs):
+            hydration_calls.append("_get_recovered_read_tool_content")
+            return original_recover(*args, **kwargs)
+
+        def record_load(*args, **kwargs):
+            hydration_calls.append("load_externalized_payload")
+            return original_load(*args, **kwargs)
+
+        def record_restore(*args, **kwargs):
+            hydration_calls.append("restore_ingest_payload_placeholders")
+            return original_restore(*args, **kwargs)
+
+        def record_find(*args, **kwargs):
+            hydration_calls.append("find_externalized_payload_for_message")
+            return original_find(*args, **kwargs)
+
+        monkeypatch.setattr(lcm_tools, "_get_recovered_read_tool_content", record_recover)
+        monkeypatch.setattr(lcm_tools, "load_externalized_payload", record_load)
+        monkeypatch.setattr(lcm_tools, "restore_ingest_payload_placeholders", record_restore)
+        monkeypatch.setattr(lcm_tools, "find_externalized_payload_for_message", record_find)
         by_node_id = json.loads(lcm_tools.lcm_expand(
             {"node_id": node_id, "max_tokens": 1_000_000},
             engine=engine,
         ))
 
+        assert hydration_calls == []
         assert by_store_id["from_current_session"] is False
         assert "PROTECTED_RECOVERED_PAYLOAD_" not in json.dumps(by_store_id)
         assert by_store_id["content"].startswith("[Externalized tool output:")
         assert by_store_id["externalized_ref"]
         assert "cannot be expanded" in by_store_id["externalized_note"]
         assert "PROTECTED_RECOVERED_PAYLOAD_" not in json.dumps(by_node_id)
-        assert by_node_id["expanded"][0]["content"].startswith(
-            "[Externalized tool output:"
-        )
+        assert by_node_id["expanded"][0]["content"] == tool_row["content"]
+        assert by_node_id["expanded"][0]["content_source"] == "message"
 
     def test_store_id_expansion_restores_embedded_externalized_payload_in_place(self, tmp_path):
         encoded_one = "QUJD" * 1_500

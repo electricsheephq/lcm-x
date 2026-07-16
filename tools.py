@@ -464,9 +464,18 @@ def _expand_message_sources(
             has_more = next_source_offset < total_sources
             continue
         transcript_content = stored.get("content", "")
+        stored_session_id = str(stored.get("session_id") or "")
+        owns_protected_payload = (
+            bool(engine.current_session_id)
+            and stored_session_id == engine.current_session_id
+        )
         content = transcript_content
         content_source = "message"
-        recovered = _get_recovered_read_tool_content(engine, stored)
+        recovered = (
+            _get_recovered_read_tool_content(engine, stored)
+            if owns_protected_payload
+            else None
+        )
         if recovered is not None:
             content = recovered.get("content") or ""
             content_source = "recovered_read_tool_content"
@@ -474,11 +483,10 @@ def _expand_message_sources(
         ref_payload = None
         ingest_refs = extract_ingest_externalized_refs(transcript_content)
         ref = ingest_refs[0] if ingest_refs else extract_externalized_ref(transcript_content)
-        if ref:
+        if ref and owns_protected_payload:
             ref_payload = _get_externalized_payload(
                 engine,
                 ref,
-                allowed_session_ids={engine.current_session_id, stored.get("session_id", "")},
             )
             if ref_payload is not None and ref_payload.get("kind") != "ingest_payload":
                 externalized = ref_payload
@@ -510,7 +518,7 @@ def _expand_message_sources(
         if recovered is not None:
             expanded["recovered_source_path"] = recovered.get("source_path") or ""
             expanded["recovered_chars"] = recovered.get("recovered_chars", len(content))
-        if stored.get("role") == "tool":
+        if stored.get("role") == "tool" and owns_protected_payload:
             if externalized is not None:
                 externalized_summary = dict(externalized)
                 externalized_summary.pop("content", None)
