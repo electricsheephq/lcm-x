@@ -27,15 +27,18 @@ def _json_has_duplicate_object_keys(value: str) -> bool:
     return duplicate
 
 
-def canonicalize_tool_call_identity_value(value: Any) -> Any:
-    """Canonicalize mappings recursively while preserving list order and values."""
+def _canonicalize_plain_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {
-            key: canonicalize_tool_call_identity_value(item)
+            key: _canonicalize_plain_value(item)
             for key, item in value.items()
         }
     if isinstance(value, list):
-        return [canonicalize_tool_call_identity_value(item) for item in value]
+        return [_canonicalize_plain_value(item) for item in value]
+    return value
+
+
+def _canonicalize_function_arguments(value: Any) -> Any:
     if isinstance(value, str):
         stripped = value.strip()
         if stripped and stripped[0] in "[{" and not _json_has_duplicate_object_keys(value):
@@ -44,7 +47,7 @@ def canonicalize_tool_call_identity_value(value: Any) -> Any:
             except (TypeError, ValueError, json.JSONDecodeError):
                 return value
             if isinstance(parsed, (dict, list)):
-                canonical = canonicalize_tool_call_identity_value(parsed)
+                canonical = _canonicalize_plain_value(parsed)
                 return json.dumps(
                     canonical,
                     sort_keys=True,
@@ -52,11 +55,30 @@ def canonicalize_tool_call_identity_value(value: Any) -> Any:
                     ensure_ascii=False,
                 )
         return value
-    return value
+    return _canonicalize_plain_value(value)
+
+
+def _canonicalize_tool_call(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return _canonicalize_plain_value(value)
+    canonical = _canonicalize_plain_value(value)
+    function = value.get("function")
+    if isinstance(function, dict) and "arguments" in function:
+        canonical["function"]["arguments"] = _canonicalize_function_arguments(
+            function["arguments"]
+        )
+    return canonical
+
+
+def canonicalize_tool_call_identity_value(value: Any) -> Any:
+    """Canonicalize tool-call structure and direct function arguments only."""
+    if isinstance(value, list):
+        return [_canonicalize_tool_call(item) for item in value]
+    return _canonicalize_tool_call(value)
 
 
 def stable_tool_calls_identity(tool_calls: Any) -> str:
-    """Serialize tool calls for durable storage and replay identity comparisons."""
+    """Serialize tool calls for replay identity comparisons."""
     if not tool_calls:
         return ""
     try:
@@ -69,3 +91,14 @@ def stable_tool_calls_identity(tool_calls: Any) -> str:
         )
     except (TypeError, ValueError):
         return str(tool_calls)
+
+
+def stable_serialized_tool_calls_identity(tool_calls: str | None) -> str:
+    """Parse a durable legacy value before deriving its comparison identity."""
+    if not tool_calls:
+        return ""
+    try:
+        parsed = json.loads(tool_calls)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return tool_calls
+    return stable_tool_calls_identity(parsed)

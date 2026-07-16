@@ -46,7 +46,10 @@ from .search_query import (
     should_apply_directness_rank_adjustment,
 )
 from .message_content import normalize_content_value as _normalize_content_value
-from .message_identity import stable_tool_calls_identity
+from .message_identity import (
+    stable_serialized_tool_calls_identity,
+    stable_tool_calls_identity,
+)
 from .tokens import count_message_tokens
 
 logger = logging.getLogger(__name__)
@@ -79,6 +82,11 @@ class ReplayFloodError(RuntimeError):
 
 
 def _serialized_tool_calls(message: Dict[str, Any]) -> str:
+    tool_calls = message.get("tool_calls")
+    return json.dumps(tool_calls) if tool_calls else ""
+
+
+def _tool_calls_identity(message: Dict[str, Any]) -> str:
     return stable_tool_calls_identity(message.get("tool_calls"))
 
 
@@ -424,21 +432,23 @@ class MessageStore:
 
     def _row_identity_already_stored(self, session_id: str, msg: Dict[str, Any],
                                      content: str) -> bool:
-        row = self._conn.execute(
-            """SELECT 1 FROM messages
+        rows = self._conn.execute(
+            """SELECT tool_calls FROM messages
                WHERE session_id = ? AND role = ? AND COALESCE(content, '') = ?
                  AND COALESCE(tool_call_id, '') = ?
-                 AND COALESCE(tool_calls, '') = ?
-               LIMIT 1""",
+            """,
             (
                 session_id,
                 msg.get("role", "unknown"),
                 content,
                 str(msg.get("tool_call_id") or ""),
-                _serialized_tool_calls(msg),
             ),
-        ).fetchone()
-        return row is not None
+        ).fetchall()
+        identity = _tool_calls_identity(msg)
+        return any(
+            stable_serialized_tool_calls_identity(row[0]) == identity
+            for row in rows
+        )
 
     def _assert_no_replay_identity_flood(self, session_id: str,
                                          messages: List[Dict[str, Any]]) -> None:
@@ -464,7 +474,7 @@ class MessageStore:
         for msg in messages:
             content = _normalize_content_value(msg.get("content")) or ""
             tool_call_id = str(msg.get("tool_call_id") or "")
-            tool_calls = _serialized_tool_calls(msg)
+            tool_calls = _tool_calls_identity(msg)
             if not content and not tool_call_id and not tool_calls:
                 continue
             role = str(msg.get("role", "unknown"))

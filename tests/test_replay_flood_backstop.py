@@ -1,3 +1,6 @@
+import json
+import time
+
 import pytest
 
 from hermes_lcm.config import LCMConfig
@@ -115,6 +118,119 @@ class TestStoreReplayFloodBackstop:
         fresh = {**reordered, "tool_calls": [{**reordered["tool_calls"][0], "id": "call-fresh"}]}
         assert len(store.append_batch(session_id, [fresh])) == 1
         assert store.get_session_count(session_id) == before + 1
+
+    @pytest.mark.parametrize("distinct_field", ["json-looking id", "json-looking argument leaf"])
+    def test_json_looking_strings_remain_distinct(self, tmp_path, distinct_field):
+        store = _store(tmp_path)
+        session_id = f"distinct-json-string-{distinct_field}"
+        stored_call = {
+            "id": '{"key":1}',
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "arguments": {"payload": '{"key":1}'},
+            },
+        }
+        incoming_call = {
+            **stored_call,
+            "function": {**stored_call["function"]},
+        }
+        if distinct_field == "json-looking id":
+            incoming_call["id"] = '{"key": 1}'
+        else:
+            incoming_call["function"]["arguments"] = {"payload": '{"key": 1}'}
+        store.append_batch(
+            session_id,
+            [{"role": "assistant", "content": None, "tool_calls": [stored_call]}],
+        )
+
+        batch = [
+            {"role": "assistant", "content": None, "tool_calls": [incoming_call]}
+            for _ in range(32)
+        ]
+
+        assert len(store.append_batch(session_id, batch)) == len(batch)
+
+    def test_refuses_reordered_replay_against_legacy_serialized_row_atomically(self, tmp_path):
+        store = _store(tmp_path)
+        session_id = "legacy-canonical-tool-call-session"
+        stored = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-legacy",
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "arguments": '{"filters":{"site":"docs","lang":"en"},"limit":5}',
+                    },
+                }
+            ],
+        }
+        reordered = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "function": {
+                        "arguments": '{"limit":5,"filters":{"lang":"en","site":"docs"}}',
+                        "name": "lookup",
+                    },
+                    "type": "function",
+                    "id": "call-legacy",
+                }
+            ],
+        }
+        legacy_tool_calls = json.dumps(stored["tool_calls"])
+        store._conn.execute(
+            """INSERT INTO messages
+               (session_id, role, content, tool_call_id, tool_calls, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (session_id, "assistant", None, None, legacy_tool_calls, time.time()),
+        )
+        store._conn.commit()
+        before = store.get_session_count(session_id)
+        before_cursor = store._conn.execute(
+            "SELECT MAX(store_id) FROM messages WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()[0]
+        assert store.get_session_messages(session_id)[0]["tool_calls"] == stored["tool_calls"]
+
+        with pytest.raises(ReplayFloodError):
+            store.append_batch(session_id, [reordered for _ in range(32)])
+
+        assert store.get_session_count(session_id) == before
+        assert store._conn.execute(
+            "SELECT MAX(store_id) FROM messages WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()[0] == before_cursor
+        fresh = {**reordered, "tool_calls": [{**reordered["tool_calls"][0], "id": "call-fresh"}]}
+        fresh_id = store.append_batch(session_id, [fresh])[0]
+        assert fresh_id > before_cursor
+        assert store.get_session_count(session_id) == before + 1
+
+    def test_batch_preserves_legacy_tool_call_serialization(self, tmp_path):
+        store = _store(tmp_path)
+        message = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-durable",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": {"z": 1, "a": 2}},
+                }
+            ],
+        }
+
+        store.append_batch("durable-serialization-session", [message])
+
+        stored_value = store._conn.execute(
+            "SELECT tool_calls FROM messages WHERE session_id = ?",
+            ("durable-serialization-session",),
+        ).fetchone()[0]
+        assert stored_value == json.dumps(message["tool_calls"])
 
     def test_allows_internal_distinct_duplicate_rows(self, tmp_path):
         store = _store(tmp_path)
