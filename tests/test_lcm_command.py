@@ -1436,6 +1436,13 @@ def test_lcm_doctor_clean_apply_is_backup_first_and_deletes_safe_candidates(tmp_
 
     engine._store.append("cron_20260414", {"role": "user", "content": "scheduled report"}, token_estimate=12)
     engine._store.append("normal_session", {"role": "user", "content": "real conversation"}, token_estimate=20)
+    engine._store.append_recovered_tool_content(
+        "cron_20260414",
+        tool_call_id="read-1",
+        marker_identity_sha="cron-marker",
+        source_path="/tmp/scheduled-report.txt",
+        content="recovered scheduled report",
+    )
     engine._dag.add_node(SummaryNode(
         session_id="cron_20260414",
         depth=0,
@@ -1457,6 +1464,7 @@ def test_lcm_doctor_clean_apply_is_backup_first_and_deletes_safe_candidates(tmp_
     backup_path = Path(backup_line.split(": ", 1)[1])
     assert backup_path.exists()
     assert engine._store.get_range("cron_20260414") == []
+    assert engine._store.get_recovered_tool_content_count("cron_20260414") == 0
     assert engine._dag.get_session_nodes("cron_20260414") == []
     assert engine._lifecycle.get_by_conversation("cron_20260414") is None
     assert len(engine._store.get_range("normal_session")) == 1

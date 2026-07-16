@@ -2913,6 +2913,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     # host gateways call session-end hooks from lifecycle paths
                     # that must not wait through SQLite's normal busy timeout.
                     self._ingest_messages(messages)
+                    self._maybe_recover_truncated_read_tool_content(messages)
                 except KeyboardInterrupt:
                     logger.warning(
                         "LCM session-end raw-message ingest interrupted; "

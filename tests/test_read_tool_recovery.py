@@ -606,6 +606,17 @@ class TestEngineRecovery:
         assert result["recovered"] == 1
         assert result["content"] == source.read_text(encoding="utf-8")
 
+    def test_session_end_final_flush_recovers_content(self, tmp_path):
+        engine = self._engine(tmp_path, enabled=True)
+        source, turn = self._turn(tmp_path)
+
+        engine.on_session_end("chat-1", turn)
+
+        identity = marker_identity_sha("tool", turn[-1]["content"], "call_1")
+        recovered = engine._store.get_recovered_tool_content("chat-1", identity)
+        assert recovered is not None
+        assert recovered["content"] == source.read_text(encoding="utf-8")
+
     def test_node_expansion_hydrates_recovered_content(self, tmp_path):
         engine = self._engine(tmp_path, enabled=True)
         f, turn = self._turn(tmp_path)
