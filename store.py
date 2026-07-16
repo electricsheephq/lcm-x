@@ -493,7 +493,7 @@ class MessageStore:
         """Move all persisted messages from one session_id to another."""
         if not old_session_id or not new_session_id or old_session_id == new_session_id:
             return 0
-        with self._write_lock:
+        with self._write_lock, self._conn:
             cur = self._conn.execute(
                 "UPDATE messages SET session_id = ? WHERE session_id = ?",
                 (new_session_id, old_session_id),
@@ -503,12 +503,11 @@ class MessageStore:
                 "UPDATE recovered_tool_content SET session_id = ? WHERE session_id = ?",
                 (new_session_id, old_session_id),
             )
-            self._conn.commit()
             return cur.rowcount if cur.rowcount is not None else 0
 
     def delete_session_messages(self, session_id: str) -> int:
         """Delete all messages for a session. Returns count deleted."""
-        with self._write_lock:
+        with self._write_lock, self._conn:
             cur = self._conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
                 (session_id,),
@@ -517,7 +516,6 @@ class MessageStore:
                 "DELETE FROM recovered_tool_content WHERE session_id = ?",
                 (session_id,),
             )
-            self._conn.commit()
             deleted = cur.rowcount if cur.rowcount is not None else 0
             return deleted
 

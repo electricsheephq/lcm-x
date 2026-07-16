@@ -6,7 +6,10 @@ import os
 import re
 import sqlite3
 
+import pytest
+
 import hermes_lcm.tools as lcm_tools
+from hermes_lcm import ingest_protection as ingest_protection_mod
 from hermes_lcm import message_patterns as message_patterns_mod
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.db_bootstrap import ensure_recovered_tool_content_table
@@ -135,6 +138,81 @@ class TestPureHelpers:
             str(link), marker_content=_marker_for_content("secret")
         ) is None
 
+    def test_recover_rejects_symlinked_ancestor(self, tmp_path):
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        content = "content reached through a symlinked ancestor"
+        (real_dir / "source.txt").write_text(content, encoding="utf-8")
+        linked_dir = tmp_path / "linked"
+        try:
+            os.symlink(real_dir, linked_dir, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            return  # platform without symlink support
+
+        assert recover_read_tool_file(
+            str(linked_dir / "source.txt"), marker_content=_marker_for_content(content)
+        ) is None
+
+    def test_recover_rejects_final_path_replacement_between_stat_and_open(
+        self, tmp_path, monkeypatch
+    ):
+        source = tmp_path / "source.txt"
+        original = "shared prefix original-data"
+        replacement = "shared prefix attacker-data"
+        assert len(original) == len(replacement)
+        source.write_text(original, encoding="utf-8")
+        replacement_path = tmp_path / "replacement.txt"
+        replacement_path.write_text(replacement, encoding="utf-8")
+        parked_path = tmp_path / "parked.txt"
+        original_open = ingest_protection_mod.os.open
+        replaced = False
+
+        def replace_before_open(path, flags, *args, **kwargs):
+            nonlocal replaced
+            is_final_open = str(path) in {str(source), source.name}
+            if is_final_open and not replaced:
+                replaced = True
+                os.replace(source, parked_path)
+                os.replace(replacement_path, source)
+            return original_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(ingest_protection_mod.os, "open", replace_before_open)
+
+        assert recover_read_tool_file(
+            str(source),
+            marker_content=_marker_for_content(original, preview_chars=len("shared prefix ")),
+        ) is None
+        assert replaced is True
+
+    def test_recover_closes_new_directory_fd_when_fstat_fails(self, tmp_path, monkeypatch):
+        nested = tmp_path / "unique-fstat-failure-directory"
+        nested.mkdir()
+        source = nested / "source.txt"
+        source.write_text("content", encoding="utf-8")
+        original_open = ingest_protection_mod.os.open
+        original_fstat = ingest_protection_mod.os.fstat
+        opened_directory_fd = None
+
+        def track_directory_open(path, flags, *args, **kwargs):
+            nonlocal opened_directory_fd
+            fd = original_open(path, flags, *args, **kwargs)
+            if path == nested.name:
+                opened_directory_fd = fd
+            return fd
+
+        def fail_opened_directory_fstat(fd):
+            if fd == opened_directory_fd:
+                raise OSError("injected directory fstat failure")
+            return original_fstat(fd)
+
+        monkeypatch.setattr(ingest_protection_mod.os, "open", track_directory_open)
+        monkeypatch.setattr(ingest_protection_mod.os, "fstat", fail_opened_directory_fstat)
+
+        assert ingest_protection_mod._read_regular_file_no_symlink(source) is None
+        assert opened_directory_fd is not None
+        with pytest.raises(OSError):
+            original_fstat(opened_directory_fd)
+
     def test_recover_rejects_oversized(self, tmp_path):
         f = tmp_path / "big.txt"
         f.write_text("x" * 100, encoding="utf-8")
@@ -145,6 +223,36 @@ class TestPureHelpers:
     def test_recover_rejects_relative_path(self):
         assert recover_read_tool_file(
             "relative.txt", marker_content=_marker_for_content("irrelevant")
+        ) is None
+
+    def test_recover_rejects_non_regular_file(self, tmp_path):
+        assert recover_read_tool_file(
+            str(tmp_path), marker_content=_marker_for_content("irrelevant")
+        ) is None
+
+    def test_recover_rejects_malformed_marker(self, tmp_path):
+        source = tmp_path / "source.txt"
+        source.write_text("complete content", encoding="utf-8")
+        assert recover_read_tool_file(
+            str(source), marker_content="[Truncated: malformed]"
+        ) is None
+
+    def test_recover_rejects_changed_file_generation(self, tmp_path, monkeypatch):
+        source = tmp_path / "changed-during-read.txt"
+        content = "content whose generation changes during recovery"
+        source.write_text(content, encoding="utf-8")
+        generations = iter([
+            {"dev": 1, "ino": 2, "size": len(content), "mtime_ns": 3},
+            {"dev": 1, "ino": 2, "size": len(content), "mtime_ns": 4},
+        ])
+        monkeypatch.setattr(
+            ingest_protection_mod,
+            "_stat_generation_metadata",
+            lambda _stat: next(generations),
+        )
+
+        assert recover_read_tool_file(
+            str(source), marker_content=_marker_for_content(content)
         ) is None
 
     def test_recovered_content_matches_original_marker(self):
@@ -353,6 +461,48 @@ class TestStoreSidecar:
         store.delete_session_messages("new")
         assert store.get_recovered_tool_content_count("new") == 0
 
+    def test_reassign_rolls_back_parent_when_sidecar_update_fails(self, tmp_path):
+        store = self._store(tmp_path)
+        store.append("old", {"role": "user", "content": "keep me"})
+        sha = marker_identity_sha("tool", _marker(), "c1")
+        store.append_recovered_tool_content(
+            "old", tool_call_id="c1", marker_identity_sha=sha,
+            source_path="/abs/f.txt", content="content",
+        )
+        store._conn.execute(
+            "CREATE TRIGGER fail_recovered_reassign BEFORE UPDATE "
+            "ON recovered_tool_content BEGIN SELECT RAISE(ABORT, 'sidecar update failed'); END"
+        )
+        store._conn.commit()
+
+        with pytest.raises(sqlite3.IntegrityError, match="sidecar update failed"):
+            store.reassign_session_messages("old", "new")
+
+        assert store.get_session_count("old") == 1
+        assert store.get_session_count("new") == 0
+        assert store.get_recovered_tool_content_count("old") == 1
+        assert store.get_recovered_tool_content_count("new") == 0
+
+    def test_delete_rolls_back_parent_when_sidecar_delete_fails(self, tmp_path):
+        store = self._store(tmp_path)
+        store.append("session", {"role": "user", "content": "keep me"})
+        sha = marker_identity_sha("tool", _marker(), "c1")
+        store.append_recovered_tool_content(
+            "session", tool_call_id="c1", marker_identity_sha=sha,
+            source_path="/abs/f.txt", content="content",
+        )
+        store._conn.execute(
+            "CREATE TRIGGER fail_recovered_delete BEFORE DELETE "
+            "ON recovered_tool_content BEGIN SELECT RAISE(ABORT, 'sidecar delete failed'); END"
+        )
+        store._conn.commit()
+
+        with pytest.raises(sqlite3.IntegrityError, match="sidecar delete failed"):
+            store.delete_session_messages("session")
+
+        assert store.get_session_count("session") == 1
+        assert store.get_recovered_tool_content_count("session") == 1
+
 
 class TestEngineRecovery:
     def _engine(self, tmp_path, *, enabled: bool, **overrides):
@@ -421,6 +571,42 @@ class TestEngineRecovery:
         assert result["content_source"] == "recovered_read_tool_content"
         assert result["transcript_content"] == tool_row["content"]
 
+    def test_cross_session_store_id_does_not_fetch_plaintext_recovered_sidecar(
+        self, tmp_path, monkeypatch
+    ):
+        engine = self._engine(tmp_path, enabled=True)
+        _source, turn = self._turn(tmp_path)
+        engine.ingest(turn)
+        tool_row = next(
+            row for row in engine._store.get_session_messages("chat-1")
+            if row["role"] == "tool"
+        )
+
+        config = engine._config
+        engine.shutdown()
+        engine = LCMEngine(config=config)
+        engine.on_session_start(
+            "chat-2", platform="cli", conversation_id="c2", context_length=200000
+        )
+        sidecar_fetches = []
+        original_fetch = engine._store.get_recovered_tool_content
+
+        def record_fetch(*args, **kwargs):
+            sidecar_fetches.append((args, kwargs))
+            return original_fetch(*args, **kwargs)
+
+        monkeypatch.setattr(engine._store, "get_recovered_tool_content", record_fetch)
+        result = json.loads(lcm_tools.lcm_expand(
+            {"store_id": tool_row["store_id"], "max_tokens": 1_000_000},
+            engine=engine,
+        ))
+
+        assert sidecar_fetches == []
+        assert result["from_current_session"] is False
+        assert result["content"] == tool_row["content"]
+        assert "full 2MB file content" not in json.dumps(result)
+        assert "content_source" not in result
+
     def test_store_id_expansion_hydrates_externalized_recovered_content(self, tmp_path):
         file_content = "LINE ONE\nLINE TWO\n" * 200
         source = tmp_path / "large-source.txt"
@@ -465,9 +651,127 @@ class TestEngineRecovery:
         assert result["content"] == file_content
         assert result["recovered_chars"] == len(file_content)
 
+    def test_cross_session_expansion_does_not_hydrate_protected_recovered_content(
+        self, tmp_path, monkeypatch
+    ):
+        protected = "PROTECTED_RECOVERED_PAYLOAD_" + ("QUJD" * 1_500)
+        source = tmp_path / "protected-source.txt"
+        source.write_text(protected, encoding="utf-8")
+        engine = self._engine(
+            tmp_path,
+            enabled=True,
+            large_output_externalization_enabled=True,
+            large_output_externalization_threshold_chars=500,
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        )
+        engine.ingest([
+            {"role": "user", "content": "read protected content"},
+            _read_call("call-protected", str(source)),
+            {
+                "role": "tool",
+                "tool_call_id": "call-protected",
+                "content": _marker_for_content(protected),
+            },
+        ])
+        tool_row = next(
+            row for row in engine._store.get_session_messages("chat-1")
+            if row["role"] == "tool"
+        )
+        externalized_ref = next((tmp_path / "externalized").glob("*.json")).name
+        ref_store_id = engine._store.append(
+            "chat-1",
+            {
+                "role": "tool",
+                "tool_call_id": "call-protected-ref",
+                "content": (
+                    "[Externalized tool output: tool_call_id=call-protected-ref; "
+                    f"chars={len(protected)}; bytes={len(protected.encode())}; "
+                    f"ref={externalized_ref}]"
+                ),
+            },
+        )
+
+        config = engine._config
+        engine.shutdown()
+        engine = LCMEngine(config=config)
+        engine.on_session_start(
+            "chat-2", platform="cli", conversation_id="c2", context_length=200000
+        )
+        node_id = engine._dag.add_node(SummaryNode(
+            session_id="chat-2",
+            depth=0,
+            summary="Foreign protected source",
+            token_count=10,
+            source_token_count=10,
+            source_ids=[tool_row["store_id"], ref_store_id],
+            source_type="messages",
+        ))
+
+        hydration_calls = []
+        original_sidecar_fetch = engine._store.get_recovered_tool_content
+        original_recover = lcm_tools._get_recovered_read_tool_content
+        original_load = lcm_tools._get_externalized_payload
+        original_restore = lcm_tools._restore_ingest_placeholder_for_lookup
+        original_find = lcm_tools.find_externalized_payload_for_message
+
+        def record_sidecar_fetch(*args, **kwargs):
+            hydration_calls.append("get_recovered_tool_content")
+            return original_sidecar_fetch(*args, **kwargs)
+
+        def record_recover(*args, **kwargs):
+            hydration_calls.append("_get_recovered_read_tool_content")
+            return original_recover(*args, **kwargs)
+
+        def record_load(*args, **kwargs):
+            hydration_calls.append("_get_externalized_payload")
+            return original_load(*args, **kwargs)
+
+        def record_restore(*args, **kwargs):
+            hydration_calls.append("_restore_ingest_placeholder_for_lookup")
+            return original_restore(*args, **kwargs)
+
+        def record_find(*args, **kwargs):
+            hydration_calls.append("find_externalized_payload_for_message")
+            return original_find(*args, **kwargs)
+
+        monkeypatch.setattr(
+            engine._store, "get_recovered_tool_content", record_sidecar_fetch
+        )
+        monkeypatch.setattr(lcm_tools, "_get_recovered_read_tool_content", record_recover)
+        monkeypatch.setattr(lcm_tools, "_get_externalized_payload", record_load)
+        monkeypatch.setattr(lcm_tools, "_restore_ingest_placeholder_for_lookup", record_restore)
+        monkeypatch.setattr(lcm_tools, "find_externalized_payload_for_message", record_find)
+        by_store_id = json.loads(lcm_tools.lcm_expand(
+            {"store_id": tool_row["store_id"], "max_tokens": 1_000_000},
+            engine=engine,
+        ))
+        by_node_id = json.loads(lcm_tools.lcm_expand(
+            {"node_id": node_id, "max_tokens": 1_000_000},
+            engine=engine,
+        ))
+
+        assert hydration_calls == []
+        assert by_store_id["from_current_session"] is False
+        assert "PROTECTED_RECOVERED_PAYLOAD_" not in json.dumps(by_store_id)
+        assert by_store_id["content"] == tool_row["content"]
+        assert "content_source" not in by_store_id
+        assert "PROTECTED_RECOVERED_PAYLOAD_" not in json.dumps(by_node_id)
+        assert by_node_id["expanded"][0]["content"] == tool_row["content"]
+        assert by_node_id["expanded"][0]["content_source"] == "message"
+        assert by_node_id["expanded"][1]["content"].startswith("[Externalized tool output:")
+        assert by_node_id["expanded"][1]["externalized"] == {
+            "ref": externalized_ref,
+            "session_id": "chat-1",
+            "tool_call_id": "call-protected-ref",
+        }
+
     def test_store_id_expansion_restores_embedded_externalized_payload_in_place(self, tmp_path):
-        encoded = "QUJD" * 1_500
-        file_content = f"prefix remains\n{encoded}\nsuffix remains"
+        encoded_one = "QUJD" * 1_500
+        encoded_two = "REVG" * 1_500
+        file_content = (
+            f"prefix remains\n{encoded_one}\nmiddle remains\n"
+            f"{encoded_two}\nsuffix remains"
+        )
         source = tmp_path / "embedded-payload.txt"
         source.write_text(file_content, encoding="utf-8")
         engine = self._engine(
@@ -510,6 +814,33 @@ class TestEngineRecovery:
         assert result["content"] == file_content
         assert result["content"].startswith("prefix remains\n")
         assert result["content"].endswith("\nsuffix remains")
+
+    def test_live_tool_call_recovers_before_same_turn_expand(self, tmp_path, monkeypatch):
+        engine = self._engine(tmp_path, enabled=True)
+        source, turn = self._turn(tmp_path)
+
+        def expand_after_live_ingest(_args, *, engine):
+            return json.dumps({
+                "recovered": engine._store.get_recovered_tool_content_count("chat-1"),
+                "content": source.read_text(encoding="utf-8"),
+            })
+
+        monkeypatch.setattr(lcm_tools, "lcm_expand", expand_after_live_ingest)
+        result = json.loads(engine.handle_tool_call("lcm_expand", {}, messages=turn))
+
+        assert result["recovered"] == 1
+        assert result["content"] == source.read_text(encoding="utf-8")
+
+    def test_session_end_final_flush_recovers_content(self, tmp_path):
+        engine = self._engine(tmp_path, enabled=True)
+        source, turn = self._turn(tmp_path)
+
+        engine.on_session_end("chat-1", turn)
+
+        identity = marker_identity_sha("tool", turn[-1]["content"], "call_1")
+        recovered = engine._store.get_recovered_tool_content("chat-1", identity)
+        assert recovered is not None
+        assert recovered["content"] == source.read_text(encoding="utf-8")
 
     def test_node_expansion_hydrates_recovered_content(self, tmp_path):
         engine = self._engine(tmp_path, enabled=True)
