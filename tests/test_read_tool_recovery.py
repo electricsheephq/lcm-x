@@ -641,6 +641,19 @@ class TestEngineRecovery:
             row for row in engine._store.get_session_messages("chat-1")
             if row["role"] == "tool"
         )
+        externalized_ref = next((tmp_path / "externalized").glob("*.json")).name
+        ref_store_id = engine._store.append(
+            "chat-1",
+            {
+                "role": "tool",
+                "tool_call_id": "call-protected-ref",
+                "content": (
+                    "[Externalized tool output: tool_call_id=call-protected-ref; "
+                    f"chars={len(protected)}; bytes={len(protected.encode())}; "
+                    f"ref={externalized_ref}]"
+                ),
+            },
+        )
 
         config = engine._config
         engine.shutdown()
@@ -654,7 +667,7 @@ class TestEngineRecovery:
             summary="Foreign protected source",
             token_count=10,
             source_token_count=10,
-            source_ids=[tool_row["store_id"]],
+            source_ids=[tool_row["store_id"], ref_store_id],
             source_type="messages",
         ))
 
@@ -664,8 +677,8 @@ class TestEngineRecovery:
         ))
         hydration_calls = []
         original_recover = lcm_tools._get_recovered_read_tool_content
-        original_load = lcm_tools.load_externalized_payload
-        original_restore = lcm_tools.restore_ingest_payload_placeholders
+        original_load = lcm_tools._get_externalized_payload
+        original_restore = lcm_tools._restore_ingest_placeholder_for_lookup
         original_find = lcm_tools.find_externalized_payload_for_message
 
         def record_recover(*args, **kwargs):
@@ -673,11 +686,11 @@ class TestEngineRecovery:
             return original_recover(*args, **kwargs)
 
         def record_load(*args, **kwargs):
-            hydration_calls.append("load_externalized_payload")
+            hydration_calls.append("_get_externalized_payload")
             return original_load(*args, **kwargs)
 
         def record_restore(*args, **kwargs):
-            hydration_calls.append("restore_ingest_payload_placeholders")
+            hydration_calls.append("_restore_ingest_placeholder_for_lookup")
             return original_restore(*args, **kwargs)
 
         def record_find(*args, **kwargs):
@@ -685,8 +698,8 @@ class TestEngineRecovery:
             return original_find(*args, **kwargs)
 
         monkeypatch.setattr(lcm_tools, "_get_recovered_read_tool_content", record_recover)
-        monkeypatch.setattr(lcm_tools, "load_externalized_payload", record_load)
-        monkeypatch.setattr(lcm_tools, "restore_ingest_payload_placeholders", record_restore)
+        monkeypatch.setattr(lcm_tools, "_get_externalized_payload", record_load)
+        monkeypatch.setattr(lcm_tools, "_restore_ingest_placeholder_for_lookup", record_restore)
         monkeypatch.setattr(lcm_tools, "find_externalized_payload_for_message", record_find)
         by_node_id = json.loads(lcm_tools.lcm_expand(
             {"node_id": node_id, "max_tokens": 1_000_000},
@@ -702,6 +715,12 @@ class TestEngineRecovery:
         assert "PROTECTED_RECOVERED_PAYLOAD_" not in json.dumps(by_node_id)
         assert by_node_id["expanded"][0]["content"] == tool_row["content"]
         assert by_node_id["expanded"][0]["content_source"] == "message"
+        assert by_node_id["expanded"][1]["content"].startswith("[Externalized tool output:")
+        assert by_node_id["expanded"][1]["externalized"] == {
+            "ref": externalized_ref,
+            "session_id": "chat-1",
+            "tool_call_id": "call-protected-ref",
+        }
 
     def test_store_id_expansion_restores_embedded_externalized_payload_in_place(self, tmp_path):
         encoded_one = "QUJD" * 1_500

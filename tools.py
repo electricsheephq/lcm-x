@@ -518,6 +518,12 @@ def _expand_message_sources(
         if recovered is not None:
             expanded["recovered_source_path"] = recovered.get("source_path") or ""
             expanded["recovered_chars"] = recovered.get("recovered_chars", len(content))
+        if ref and not owns_protected_payload:
+            expanded["externalized"] = {
+                "ref": ref,
+                "session_id": stored_session_id,
+                "tool_call_id": stored.get("tool_call_id", ""),
+            }
         if stored.get("role") == "tool" and owns_protected_payload:
             if externalized is not None:
                 externalized_summary = dict(externalized)
