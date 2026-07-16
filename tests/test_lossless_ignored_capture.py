@@ -53,6 +53,20 @@ def _engine(tmp_path: Path, *, lossless: bool, session: str = "chat-1") -> LCMEn
     return engine
 
 
+def _protected_engine(tmp_path: Path, *, session: str = "chat-1") -> LCMEngine:
+    config = LCMConfig(
+        database_path=str(tmp_path / "lcm.db"),
+        ignore_message_patterns=["^Cronjob Response:"],
+        ignore_message_patterns_source="env",
+        lossless_ignored_enabled=True,
+        sensitive_patterns_enabled=True,
+        sensitive_patterns=["api_key"],
+    )
+    engine = LCMEngine(config=config)
+    engine.on_session_start(session, platform="telegram", conversation_id="c1", context_length=200000)
+    return engine
+
+
 _TURN = [
     {"role": "user", "content": "real question"},
     {"role": "assistant", "content": "real answer"},
@@ -152,3 +166,68 @@ class TestLosslessIgnoredCapture:
         assert restarted._ingest_cursor == 1
         assert restarted._store.get_session_count("chat-1") == 0
         assert restarted._store.get_ignored_session_count("chat-1") == 1
+
+    def test_ignored_restart_compares_protected_stored_identity(self, tmp_path):
+        synthetic_value = "synthetic-" + "canary-123456"
+        ignored_turn = [
+            {
+                "role": "user",
+                "content": f"Cronjob Response: api_key={synthetic_value}",
+            }
+        ]
+        first = _protected_engine(tmp_path)
+        first._ingest_messages(list(ignored_turn))
+        stored = first._store.get_ignored_session_messages("chat-1")
+        assert len(stored) == 1
+        assert synthetic_value not in stored[0]["content"]
+
+        restarted = _protected_engine(tmp_path)
+        restarted._ingest_messages(list(ignored_turn))
+
+        assert restarted._ingest_cursor == 1
+        assert restarted._store.get_ignored_session_count("chat-1") == 1
+
+    def test_mixed_restart_advances_only_replayed_ignored_prefix(self, tmp_path):
+        replayed = [
+            {"role": "user", "content": "real question"},
+            {"role": "user", "content": "Cronjob Response: old heartbeat"},
+            {"role": "assistant", "content": "real answer"},
+        ]
+        first = _engine(tmp_path, lossless=True)
+        first._ingest_messages(list(replayed))
+
+        fresh_ignored = {"role": "user", "content": "Cronjob Response: fresh heartbeat"}
+        fresh_active = {"role": "user", "content": "new question"}
+        restarted = _engine(tmp_path, lossless=True)
+        restarted._ingest_messages([*replayed, fresh_ignored, fresh_active])
+
+        assert restarted._ingest_cursor == 5
+        assert [
+            row["content"] for row in restarted._store.get_ignored_session_messages("chat-1")
+        ] == [
+            "Cronjob Response: old heartbeat",
+            "Cronjob Response: fresh heartbeat",
+        ]
+        assert [row["content"] for row in restarted._store.get_session_messages("chat-1")] == [
+            "real question",
+            "real answer",
+            "new question",
+        ]
+
+    def test_pattern_timeout_preserves_message_without_sidecar_capture(self, tmp_path):
+        class TimedOutPattern:
+            pattern = "^Cronjob Response:"
+
+            def search(self, text, *, timeout=None):
+                assert timeout is not None
+                raise TimeoutError("synthetic timeout")
+
+        engine = _engine(tmp_path, lossless=True)
+        engine._compiled_ignore_message_patterns = [TimedOutPattern()]
+        message = {"role": "user", "content": "Cronjob Response: preserve me"}
+        engine._ingest_messages([message])
+
+        assert [row["content"] for row in engine._store.get_session_messages("chat-1")] == [
+            "Cronjob Response: preserve me"
+        ]
+        assert engine._store.get_ignored_session_count("chat-1") == 0

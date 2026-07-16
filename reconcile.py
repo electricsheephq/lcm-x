@@ -39,6 +39,7 @@ from .ingest_protection import (
     _json_has_duplicate_object_keys,
     _persisted_output_marker_identity_digest,
     _persisted_output_saved_path,
+    protect_messages_for_ingest,
     recover_hermes_persisted_output_with_file_stat,
     redact_sensitive_value,
 )
@@ -424,6 +425,7 @@ class ReconcileMixin:
         stored_tail: list[tuple[str, str, str, str]],
         *,
         stored_tail_rows: list[Dict[str, Any]] | None = None,
+        ignored_sidecar_rows: list[Dict[str, Any]] | None = None,
         allow_empty_prefix: bool,
         session_count: int,
         raw_session_count: int,
@@ -431,9 +433,31 @@ class ReconcileMixin:
         sanitized_replay_tail = self._stored_tail_for_sanitized_active_replay(stored_tail)
         effective_session_count = len(sanitized_replay_tail)
         sanitized_tail_collapsed = len(sanitized_replay_tail) < len(stored_tail)
+        ignored_prefix_matches_by_cursor = [True] * (len(messages) + 1)
+        if ignored_sidecar_rows is not None:
+            ignored_prefix_matches_by_cursor = [True]
+            stored_ignored_identities = [
+                self._message_replay_identity(row, stored_row=True)
+                for row in ignored_sidecar_rows
+            ]
+            ignored_seen = 0
+            ignored_prefix_matches = True
+            for message in messages:
+                if self._matches_ignore_message_patterns(message):
+                    incoming_identity = self._protected_ignored_replay_identity(message)
+                    ignored_prefix_matches = (
+                        ignored_prefix_matches
+                        and incoming_identity is not None
+                        and ignored_seen < len(stored_ignored_identities)
+                        and incoming_identity == stored_ignored_identities[ignored_seen]
+                    )
+                    ignored_seen += 1
+                ignored_prefix_matches_by_cursor.append(ignored_prefix_matches)
         empty_prefix_cursor: int | None = None
         for cursor in range(len(messages), -1, -1):
             candidate_messages = messages[:cursor]
+            if not ignored_prefix_matches_by_cursor[cursor]:
+                continue
             candidate_visible_messages = [
                 msg
                 for msg in candidate_messages
@@ -760,6 +784,42 @@ class ReconcileMixin:
             and not self._matches_ignore_message_patterns(msg)
         ]
 
+    def _protected_ignored_replay_identity(
+        self,
+        message: Dict[str, Any],
+    ) -> tuple[str, str, str, str] | None:
+        """Return the identity an ignored row has after durable protection."""
+        try:
+            protected = protect_messages_for_ingest(
+                [message],
+                config=self._config,
+                hermes_home=self._hermes_home,
+                session_id=self._session_id,
+            )[0]
+        except Exception as exc:  # pragma: no cover - defensive fail-safe
+            logger.debug("LCM ignored replay identity protection failed: %s", exc)
+            return None
+        return self._message_replay_identity(protected, stored_row=True)
+
+    def _matching_ignored_sidecar_prefix_count(
+        self,
+        messages: List[Dict[str, Any]],
+        ignored_rows: list[Dict[str, Any]],
+    ) -> int:
+        """Count only a contiguous, identity-proven ignored prefix."""
+        matched = 0
+        for incoming, stored in zip(messages, ignored_rows):
+            if not self._matches_ignore_message_patterns(incoming):
+                break
+            incoming_identity = self._protected_ignored_replay_identity(incoming)
+            if incoming_identity is None or incoming_identity != self._message_replay_identity(
+                stored,
+                stored_row=True,
+            ):
+                break
+            matched += 1
+        return matched
+
     def _is_suspicious_stale_no_overlap_snapshot(
         self,
         incoming_identities: list[tuple[str, str, str, str]],
@@ -797,34 +857,25 @@ class ReconcileMixin:
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation count failed: %s", exc)
             return 0
-        if session_count <= 0:
-            if self._config.lossless_ignored_enabled:
+        ignored_rows: list[Dict[str, Any]] = []
+        if self._config.lossless_ignored_enabled:
+            try:
                 ignored_rows = self._store.get_ignored_session_messages(self._session_id)
-                incoming_ignored = all(
-                    self._matches_ignore_message_patterns(message)
-                    for message in messages
+            except Exception as exc:  # pragma: no cover - defensive only
+                logger.debug("LCM ignored ingest cursor reconciliation read failed: %s", exc)
+        if session_count <= 0:
+            compared_count = self._matching_ignored_sidecar_prefix_count(messages, ignored_rows)
+            if compared_count > 0:
+                self._record_ingest_reconciliation(
+                    action="advanced cursor",
+                    reason="replayed ignored-only sidecar prefix",
+                    cursor=compared_count,
+                    incoming=len(messages),
+                    session_count=session_count,
+                    stored_tail_count=len(ignored_rows),
+                    effective_incoming=0,
                 )
-                compared_count = min(len(messages), len(ignored_rows))
-                if incoming_ignored and compared_count > 0:
-                    incoming_prefix = [
-                        self._message_replay_identity(message)
-                        for message in messages[:compared_count]
-                    ]
-                    stored_prefix = [
-                        self._message_replay_identity(row, stored_row=True)
-                        for row in ignored_rows[:compared_count]
-                    ]
-                    if incoming_prefix == stored_prefix:
-                        self._record_ingest_reconciliation(
-                            action="advanced cursor",
-                            reason="replayed ignored-only sidecar prefix",
-                            cursor=compared_count,
-                            incoming=len(messages),
-                            session_count=session_count,
-                            stored_tail_count=len(ignored_rows),
-                            effective_incoming=0,
-                        )
-                        return compared_count
+                return compared_count
             placeholder_budget = self._load_generated_ignored_placeholder_hash_counts()
             placeholder_ordinals = self._load_generated_ignored_placeholder_hash_ordinals()
             if placeholder_budget and placeholder_ordinals:
@@ -871,6 +922,7 @@ class ReconcileMixin:
             messages,
             stored_tail,
             stored_tail_rows=stored_tail_rows,
+            ignored_sidecar_rows=ignored_rows if self._config.lossless_ignored_enabled else None,
             allow_empty_prefix=True,
             session_count=len(stored_tail),
             raw_session_count=session_count,
