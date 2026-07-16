@@ -74,6 +74,48 @@ class TestStoreReplayFloodBackstop:
                 [dict(tool_call) for _ in range(32)],
             )
 
+    def test_refuses_reordered_contentless_tool_call_replay_atomically(self, tmp_path):
+        store = _store(tmp_path)
+        stored = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call-canonical",
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "arguments": {"filters": {"site": "docs", "lang": "en"}, "limit": 5},
+                    },
+                }
+            ],
+        }
+        reordered = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "function": {
+                        "arguments": {"limit": 5, "filters": {"lang": "en", "site": "docs"}},
+                        "name": "lookup",
+                    },
+                    "id": "call-canonical",
+                }
+            ],
+        }
+        session_id = "canonical-tool-call-session"
+        store.append_batch(session_id, [stored])
+        before = store.get_session_count(session_id)
+
+        with pytest.raises(ReplayFloodError):
+            store.append_batch(session_id, [reordered for _ in range(32)])
+
+        assert store.get_session_count(session_id) == before
+        fresh = {**reordered, "tool_calls": [{**reordered["tool_calls"][0], "id": "call-fresh"}]}
+        assert len(store.append_batch(session_id, [fresh])) == 1
+        assert store.get_session_count(session_id) == before + 1
+
     def test_allows_internal_distinct_duplicate_rows(self, tmp_path):
         store = _store(tmp_path)
         stored = [{"role": "assistant", "content": f"assistant row {i}"} for i in range(40)]
@@ -107,6 +149,35 @@ class TestStoreReplayFloodBackstop:
         ]
 
         ids = store.append_batch("tool-call-session", batch)
+
+        assert len(ids) == len(batch)
+
+    @pytest.mark.parametrize("distinct_field", ["id", "function", "arguments"])
+    def test_contentless_tool_call_identity_preserves_distinct_fields(self, tmp_path, distinct_field):
+        store = _store(tmp_path)
+        session_id = f"distinct-tool-call-{distinct_field}"
+        base_call = {
+            "id": "call-stable",
+            "type": "function",
+            "function": {"name": "lookup", "arguments": {"index": 0}},
+        }
+        store.append_batch(
+            session_id,
+            [{"role": "assistant", "content": None, "tool_calls": [base_call]}],
+        )
+        batch = []
+        for idx in range(32):
+            call = {
+                "id": f"call-{idx}" if distinct_field == "id" else "call-stable",
+                "type": "function",
+                "function": {
+                    "name": f"lookup-{idx}" if distinct_field == "function" else "lookup",
+                    "arguments": {"index": idx} if distinct_field == "arguments" else {"index": 0},
+                },
+            }
+            batch.append({"role": "assistant", "content": None, "tool_calls": [call]})
+
+        ids = store.append_batch(session_id, batch)
 
         assert len(ids) == len(batch)
 

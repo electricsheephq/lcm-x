@@ -36,13 +36,13 @@ from .ingest_protection import (
     _has_inline_persisted_output_generation_metadata,
     _has_lossy_sensitive_redaction,
     _is_hermes_persisted_output_marker,
-    _json_has_duplicate_object_keys,
     _persisted_output_marker_identity_digest,
     _persisted_output_saved_path,
     recover_hermes_persisted_output_with_file_stat,
     redact_sensitive_value,
 )
 from .message_content import normalize_content_value, text_content_for_pattern_matching
+from .message_identity import canonicalize_tool_call_identity_value, stable_tool_calls_identity
 from .sanitize import _clean_active_assistant_message
 
 import logging
@@ -55,37 +55,11 @@ _PRESERVED_OBJECTIVE_CONTEXT_PREFIX = "[Current user objective preserved from co
 class ReconcileMixin:
     @staticmethod
     def _canonicalize_tool_call_identity_value(value: Any) -> Any:
-        if isinstance(value, dict):
-            return {
-                key: ReconcileMixin._canonicalize_tool_call_identity_value(val)
-                for key, val in value.items()
-            }
-        if isinstance(value, list):
-            return [ReconcileMixin._canonicalize_tool_call_identity_value(item) for item in value]
-        if isinstance(value, str):
-            stripped = value.strip()
-            if stripped and stripped[0] in "[{":
-                if _json_has_duplicate_object_keys(value):
-                    return value
-                try:
-                    parsed = json.loads(value)
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    return value
-                if isinstance(parsed, (dict, list)):
-                    canonical = ReconcileMixin._canonicalize_tool_call_identity_value(parsed)
-                    return json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-            return value
-        return value
+        return canonicalize_tool_call_identity_value(value)
 
     @staticmethod
     def _stable_tool_calls_identity(tool_calls: Any) -> str:
-        if not tool_calls:
-            return ""
-        try:
-            canonical = ReconcileMixin._canonicalize_tool_call_identity_value(tool_calls)
-            return json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        except (TypeError, ValueError):
-            return str(tool_calls)
+        return stable_tool_calls_identity(tool_calls)
 
     def _has_durable_persisted_output_replay_identity(self, msg: Dict[str, Any]) -> bool:
         role = str(msg.get("role") or "unknown")

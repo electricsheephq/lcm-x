@@ -46,6 +46,7 @@ from .search_query import (
     should_apply_directness_rank_adjustment,
 )
 from .message_content import normalize_content_value as _normalize_content_value
+from .message_identity import stable_tool_calls_identity
 from .tokens import count_message_tokens
 
 logger = logging.getLogger(__name__)
@@ -78,8 +79,7 @@ class ReplayFloodError(RuntimeError):
 
 
 def _serialized_tool_calls(message: Dict[str, Any]) -> str:
-    tool_calls = message.get("tool_calls")
-    return json.dumps(tool_calls) if tool_calls else ""
+    return stable_tool_calls_identity(message.get("tool_calls"))
 
 
 def _normalize_source_value(source: str | None) -> str:
