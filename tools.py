@@ -118,6 +118,9 @@ def _get_recovered_read_tool_content(
     if not is_recoverable_read_tool_marker(transcript_content):
         return None
     stored_session_id = str(stored.get("session_id") or "")
+    current_session_id = str(engine.current_session_id or "")
+    if not current_session_id or stored_session_id != current_session_id:
+        return None
     identity = _read_tool_marker_identity_sha(
         str(stored.get("role") or "tool"),
         transcript_content,
@@ -1483,11 +1486,18 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
         if stored is None:
             return json.dumps({"error": f"Message store_id {store_id} not found"})
         transcript_content = stored.get("content", "") or ""
-        recovered = _get_recovered_read_tool_content(engine, stored)
-        content = recovered.get("content") or "" if recovered is not None else transcript_content
-        sliced = _slice_content_for_response(content, max_tokens, content_offset)
         engine_session_id = engine.current_session_id
         stored_session_id = stored.get("session_id", "")
+        owns_protected_payload = (
+            bool(engine_session_id) and stored_session_id == engine_session_id
+        )
+        recovered = (
+            _get_recovered_read_tool_content(engine, stored)
+            if owns_protected_payload
+            else None
+        )
+        content = recovered.get("content") or "" if recovered is not None else transcript_content
+        sliced = _slice_content_for_response(content, max_tokens, content_offset)
         result: Dict[str, Any] = {
             "store_id": store_id,
             "source_type": "raw_message",

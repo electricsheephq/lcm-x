@@ -571,6 +571,42 @@ class TestEngineRecovery:
         assert result["content_source"] == "recovered_read_tool_content"
         assert result["transcript_content"] == tool_row["content"]
 
+    def test_cross_session_store_id_does_not_fetch_plaintext_recovered_sidecar(
+        self, tmp_path, monkeypatch
+    ):
+        engine = self._engine(tmp_path, enabled=True)
+        _source, turn = self._turn(tmp_path)
+        engine.ingest(turn)
+        tool_row = next(
+            row for row in engine._store.get_session_messages("chat-1")
+            if row["role"] == "tool"
+        )
+
+        config = engine._config
+        engine.shutdown()
+        engine = LCMEngine(config=config)
+        engine.on_session_start(
+            "chat-2", platform="cli", conversation_id="c2", context_length=200000
+        )
+        sidecar_fetches = []
+        original_fetch = engine._store.get_recovered_tool_content
+
+        def record_fetch(*args, **kwargs):
+            sidecar_fetches.append((args, kwargs))
+            return original_fetch(*args, **kwargs)
+
+        monkeypatch.setattr(engine._store, "get_recovered_tool_content", record_fetch)
+        result = json.loads(lcm_tools.lcm_expand(
+            {"store_id": tool_row["store_id"], "max_tokens": 1_000_000},
+            engine=engine,
+        ))
+
+        assert sidecar_fetches == []
+        assert result["from_current_session"] is False
+        assert result["content"] == tool_row["content"]
+        assert "full 2MB file content" not in json.dumps(result)
+        assert "content_source" not in result
+
     def test_store_id_expansion_hydrates_externalized_recovered_content(self, tmp_path):
         file_content = "LINE ONE\nLINE TWO\n" * 200
         source = tmp_path / "large-source.txt"
@@ -671,15 +707,16 @@ class TestEngineRecovery:
             source_type="messages",
         ))
 
-        by_store_id = json.loads(lcm_tools.lcm_expand(
-            {"store_id": tool_row["store_id"], "max_tokens": 1_000_000},
-            engine=engine,
-        ))
         hydration_calls = []
+        original_sidecar_fetch = engine._store.get_recovered_tool_content
         original_recover = lcm_tools._get_recovered_read_tool_content
         original_load = lcm_tools._get_externalized_payload
         original_restore = lcm_tools._restore_ingest_placeholder_for_lookup
         original_find = lcm_tools.find_externalized_payload_for_message
+
+        def record_sidecar_fetch(*args, **kwargs):
+            hydration_calls.append("get_recovered_tool_content")
+            return original_sidecar_fetch(*args, **kwargs)
 
         def record_recover(*args, **kwargs):
             hydration_calls.append("_get_recovered_read_tool_content")
@@ -697,10 +734,17 @@ class TestEngineRecovery:
             hydration_calls.append("find_externalized_payload_for_message")
             return original_find(*args, **kwargs)
 
+        monkeypatch.setattr(
+            engine._store, "get_recovered_tool_content", record_sidecar_fetch
+        )
         monkeypatch.setattr(lcm_tools, "_get_recovered_read_tool_content", record_recover)
         monkeypatch.setattr(lcm_tools, "_get_externalized_payload", record_load)
         monkeypatch.setattr(lcm_tools, "_restore_ingest_placeholder_for_lookup", record_restore)
         monkeypatch.setattr(lcm_tools, "find_externalized_payload_for_message", record_find)
+        by_store_id = json.loads(lcm_tools.lcm_expand(
+            {"store_id": tool_row["store_id"], "max_tokens": 1_000_000},
+            engine=engine,
+        ))
         by_node_id = json.loads(lcm_tools.lcm_expand(
             {"node_id": node_id, "max_tokens": 1_000_000},
             engine=engine,
@@ -709,9 +753,8 @@ class TestEngineRecovery:
         assert hydration_calls == []
         assert by_store_id["from_current_session"] is False
         assert "PROTECTED_RECOVERED_PAYLOAD_" not in json.dumps(by_store_id)
-        assert by_store_id["content"].startswith("[Externalized tool output:")
-        assert by_store_id["externalized_ref"]
-        assert "cannot be expanded" in by_store_id["externalized_note"]
+        assert by_store_id["content"] == tool_row["content"]
+        assert "content_source" not in by_store_id
         assert "PROTECTED_RECOVERED_PAYLOAD_" not in json.dumps(by_node_id)
         assert by_node_id["expanded"][0]["content"] == tool_row["content"]
         assert by_node_id["expanded"][0]["content_source"] == "message"
