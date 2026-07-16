@@ -3600,10 +3600,13 @@ class TestEngineABC:
         after_restart._ingest_messages(active_context)
 
         rows = after_restart._store.get_session_messages("compacted-session")
-        # The replayed fresh tail matches the durable tail uniquely, so it is
-        # reconciled as replay instead of being appended a second time.
+        # A scaffold proves that synthetic context was prepended, but does not
+        # prove whether matching durable-tail rows are replay or fresh input.
+        # Preserve the ambiguous fresh rows rather than risk dropping them.
         assert [row["role"] for row in rows] == [
             "system",
+            "user",
+            "assistant",
             "user",
             "assistant",
             "assistant",

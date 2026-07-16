@@ -253,28 +253,6 @@ class ReconcileMixin:
             return False
         return stored_tail[-len(candidate_prefix) :] == candidate_prefix
 
-    @staticmethod
-    def _matches_unique_store_tail_suffix(
-        stored_tail: list[tuple[str, str, str, str]],
-        candidate_prefix: list[tuple[str, str, str, str]],
-    ) -> bool:
-        """True when the prefix matches the tail suffix and occurs exactly once.
-
-        Sequence uniqueness narrows an explicitly scaffolded restart replay to
-        one durable suffix.  It is not replay proof by itself: a fresh delta
-        can legitimately repeat even a unique durable suffix.
-        """
-        if not candidate_prefix or len(candidate_prefix) > len(stored_tail):
-            return False
-        if stored_tail[-len(candidate_prefix) :] != candidate_prefix:
-            return False
-        occurrences = 0
-        for start in range(len(stored_tail) - len(candidate_prefix) + 1):
-            if stored_tail[start : start + len(candidate_prefix)] == candidate_prefix:
-                occurrences += 1
-                if occurrences > 1:
-                    return False
-        return True
 
     @staticmethod
     def _strip_inline_persisted_output_generation_identity(
@@ -735,42 +713,6 @@ class ReconcileMixin:
                 and len(candidate_prefix) >= max(1, self._config.fresh_tail_count)
                 and raw_suffix_needs_cleanup_equivalence
             )
-            # A synthetic replay scaffold proves that this batch contains
-            # reconstructed active context rather than only fresh delta rows.
-            # Under that anchor, reconcile a unique, cleanup-neutral multi-row
-            # durable suffix followed by a genuine delta.  Without the scaffold
-            # the same shape is ambiguous: users can legitimately repeat even a
-            # unique previous exchange, so preserve the whole batch.
-            has_scaffolded_unique_partial_tail_replay = False
-            if (
-                has_persisted_marker_specific_replay_evidence
-                and has_scaffold_evidence
-                and cursor < len(messages)
-                and len(candidate_prefix) >= 2
-            ):
-                # Raw-tail matches only count when the overlapping stored
-                # suffix is cleanup-neutral: a true replay of cleanup-sensitive
-                # rows arrives sanitized, so exact raw equality there is
-                # evidence of a fresh delta, not of replay (see the
-                # cleanup-sensitive reconciliation guards above).
-                matched_unique_partial_tail = (
-                    matches_sanitized_tail
-                    and len(candidate_prefix) < len(sanitized_replay_tail)
-                    and self._matches_unique_store_tail_suffix(
-                        sanitized_replay_tail, candidate_prefix
-                    )
-                ) or (
-                    matches_raw_tail
-                    and not raw_suffix_needs_cleanup_equivalence
-                    and len(candidate_prefix) < len(stored_tail)
-                    and self._matches_unique_store_tail_suffix(
-                        stored_tail, candidate_prefix
-                    )
-                )
-                if matched_unique_partial_tail:
-                    has_scaffolded_unique_partial_tail_replay = bool(
-                        self._effective_replay_identities(messages[cursor:])
-                    )
             if (
                 has_effective_full_replay
                 or has_externalized_singleton_replay
@@ -782,7 +724,6 @@ class ReconcileMixin:
                 or has_raw_full_replay
                 or has_scaffold_suffix_replay
                 or has_raw_cleanup_replay
-                or has_scaffolded_unique_partial_tail_replay
             ):
                 return cursor
         return empty_prefix_cursor if allow_empty_prefix else None
