@@ -52,8 +52,6 @@ from .extraction import (
     strip_injected_context_blocks,
 )
 from .ingest_protection import (
-    _expected_persisted_output_chars,
-    _has_lossy_sensitive_redaction,
     _contains_media_payload,
     _is_hermes_persisted_output_marker,
     extract_ingest_externalized_refs,
@@ -94,7 +92,7 @@ from .message_analysis import (
     _tool_call_id,
 )
 from .fresh_tail import FreshTailBoundary, resolve_fresh_tail_boundary
-from .message_patterns import compile_message_patterns, matches_message_pattern
+from .message_patterns import compile_message_patterns
 from .aux_session import AuxiliarySessionMixin
 from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
