@@ -155,6 +155,26 @@ def test_lcm_inspect_reports_bounded_metadata_without_content(tmp_path):
         engine.shutdown()
 
 
+def test_lcm_inspect_reports_effective_token_bounded_tail(tmp_path):
+    engine = _make_engine(
+        tmp_path,
+        fresh_tail_count=10,
+        fresh_tail_max_tokens=5,
+    )
+    try:
+        _seed_messages(engine)
+
+        result = json.loads(engine.handle_tool_call("lcm_inspect", {"limit": 10}))
+
+        assert result["messages"]["fresh_tail_count"] == 10
+        assert result["messages"]["fresh_tail_max_tokens"] == 5
+        assert result["messages"]["effective_fresh_tail_count"] == 1
+        assert result["messages"]["pre_tail_message_count"] == 4
+        assert result["messages"]["fresh_tail"]["token_limited"] is True
+    finally:
+        engine.shutdown()
+
+
 def test_lcm_inspect_includes_sensitive_pattern_status(tmp_path):
     engine = _make_engine(
         tmp_path,

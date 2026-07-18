@@ -9,6 +9,22 @@ The benchmark harness is offline by default:
 - no live Hermes config mutation
 - writes isolated to the requested output directory
 
+## Active tool-result stubbing benchmark
+
+The focused active-replay benchmark builds ten deterministic synthetic tool
+results near 30K tokens each, protects the newest two pairs as the fresh tail,
+and compares provider-visible assembly with stubbing disabled and enabled. It
+verifies that every emitted ref recovers byte-identical normalized content and
+prints aggregate-only JSON:
+
+```bash
+python benchmarks/benchmark_active_tool_stubbing.py \
+  --output /tmp/hermes-lcm-active-tool-stubbing.json
+```
+
+The result measures provider-visible prompt tokens and local assembly latency.
+It is not a provider billing-cost measurement and contains no raw payload text.
+
 ## Run the default replay suite
 
 ```bash

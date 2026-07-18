@@ -453,6 +453,20 @@ class ReconcileMixin:
                     )
                     ignored_seen += 1
                 ignored_prefix_matches_by_cursor.append(ignored_prefix_matches)
+        boundary_messages = list(stored_tail_rows or [])
+        if not boundary_messages:
+            for role, content, tool_call_id, tool_calls in stored_tail:
+                try:
+                    decoded_tool_calls = json.loads(tool_calls) if tool_calls else []
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    decoded_tool_calls = []
+                boundary_messages.append({
+                    "role": role,
+                    "content": content,
+                    "tool_call_id": tool_call_id,
+                    "tool_calls": decoded_tool_calls,
+                })
+        effective_fresh_tail_count = self._fresh_tail_boundary(boundary_messages).count
         empty_prefix_cursor: int | None = None
         for cursor in range(len(messages), -1, -1):
             candidate_messages = messages[:cursor]
@@ -733,7 +747,7 @@ class ReconcileMixin:
                 and matches_raw_tail
                 and has_scaffold_evidence
                 and cursor < len(messages)
-                and len(candidate_prefix) >= max(1, self._config.fresh_tail_count)
+                and len(candidate_prefix) >= max(1, effective_fresh_tail_count)
                 and raw_suffix_needs_cleanup_equivalence
             )
             if (

@@ -2195,10 +2195,11 @@ def lcm_inspect(args: Dict[str, Any], **kwargs) -> str:
     max_store_id = store_totals_row[2] if store_totals_row else None
     estimated_tokens = int(store_totals_row[3] or 0) if store_totals_row else 0
     fresh_tail_count = max(0, int(engine._config.fresh_tail_count or 0))
-    fresh_tail_limit = min(limit, fresh_tail_count) if fresh_tail_count > 0 else 0
+    fresh_tail_rows, fresh_tail_boundary = engine._get_session_fresh_tail(session_id)
+    fresh_tail_display_rows = fresh_tail_rows[-limit:]
     fresh_tail_items = [
         _inspect_message_metadata(row)
-        for row in engine._store.get_session_tail(session_id, fresh_tail_limit)
+        for row in fresh_tail_display_rows
     ]
 
     depth_stats = engine._dag.get_session_depth_stats(session_id)
@@ -2265,9 +2266,14 @@ def lcm_inspect(args: Dict[str, Any], **kwargs) -> str:
             "min_store_id": min_store_id,
             "max_store_id": max_store_id,
             "fresh_tail_count": fresh_tail_count,
-            "pre_tail_message_count": max(0, message_total - fresh_tail_count),
+            "fresh_tail_max_tokens": engine._config.fresh_tail_max_tokens,
+            "effective_fresh_tail_count": len(fresh_tail_rows),
+            "effective_fresh_tail_tokens": fresh_tail_boundary.tokens,
+            "pre_tail_message_count": max(0, message_total - len(fresh_tail_rows)),
             "fresh_tail": {
                 "returned": len(fresh_tail_items),
+                "token_limited": fresh_tail_boundary.token_limited,
+                "tool_group_extended": fresh_tail_boundary.tool_group_extended,
                 "items": fresh_tail_items,
             },
         },
@@ -2397,6 +2403,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         },
         "config": {
             "fresh_tail_count": engine._config.fresh_tail_count,
+            "fresh_tail_max_tokens": engine._config.fresh_tail_max_tokens,
             "leaf_chunk_tokens": engine._config.leaf_chunk_tokens,
             "dynamic_leaf_chunk_enabled": engine._config.dynamic_leaf_chunk_enabled,
             "dynamic_leaf_chunk_max": engine._config.dynamic_leaf_chunk_max,
