@@ -926,6 +926,39 @@ class TestEngineRecovery:
         assert recovered["content"] == "the full 2MB file content that the host truncated"
         assert engine._store.get_recovered_tool_content_count("chat-1") == 1
 
+    def test_persisted_recovery_skips_file_reread_after_restart(self, tmp_path, monkeypatch):
+        """A marker recovered by an earlier process must not trigger the
+        expensive file re-read again: the sidecar row is the durable guard,
+        checked before recover_read_tool_file, not after via the insert's
+        unique constraint."""
+        import hermes_lcm.engine as engine_module
+
+        engine = self._engine(tmp_path, enabled=True)
+        f, turn = self._turn(tmp_path)
+        engine.ingest(turn)
+        sha = marker_identity_sha("tool", turn[-1]["content"], "call_1")
+        assert engine._store.get_recovered_tool_content("chat-1", sha) is not None
+
+        # Simulate a process restart: the in-memory attempt cache is empty.
+        engine._attempted_read_tool_recovery_markers = set()
+        reread_calls = []
+        original_recover = engine_module.recover_read_tool_file
+
+        def _spy_recover(path, **kwargs):
+            reread_calls.append(path)
+            return original_recover(path, **kwargs)
+
+        monkeypatch.setattr(
+            engine_module, "recover_read_tool_file", _spy_recover
+        )
+        f.write_text("changed content", encoding="utf-8")
+        engine.ingest(turn)
+
+        assert reread_calls == [], "sidecar row must preempt the file re-read"
+        recovered = engine._store.get_recovered_tool_content("chat-1", sha)
+        assert recovered["content"] == "the full 2MB file content that the host truncated"
+        assert engine._store.get_recovered_tool_content_count("chat-1") == 1
+
     def test_identical_marker_attempted_in_another_session_is_recovered(self, tmp_path):
         engine = self._engine(tmp_path, enabled=True)
         source, turn = self._turn(tmp_path)

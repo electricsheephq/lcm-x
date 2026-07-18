@@ -3460,6 +3460,12 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 continue
             self._attempted_read_tool_recovery_markers.add(attempt_key)
             try:
+                # Persisted idempotency: a marker recovered by an earlier
+                # process already has a sidecar row — skip the file re-read
+                # instead of relying on the insert's unique constraint after
+                # the expensive I/O.
+                if self._store.has_recovered_tool_content(self._session_id, identity):
+                    continue
                 # Keep identity tied to the durable marker, but validate source
                 # bytes against the original pre-protection marker when present.
                 validation_marker = original_candidates.get(

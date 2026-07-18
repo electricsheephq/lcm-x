@@ -463,6 +463,22 @@ class MessageStore:
                 return None
             return cur.lastrowid
 
+    def has_recovered_tool_content(self, session_id: str,
+                                   marker_identity_sha: str) -> bool:
+        """Whether a recovered row already exists for a marker.
+
+        Cheap persisted-idempotency probe so recovery planning can skip the
+        file re-read entirely for markers recovered in an earlier process
+        (the in-memory attempted-marker set is empty after a restart)."""
+        if not session_id or not marker_identity_sha:
+            return False
+        row = self._conn.execute(
+            "SELECT 1 FROM recovered_tool_content "
+            "WHERE session_id = ? AND marker_identity_sha = ? LIMIT 1",
+            (session_id, marker_identity_sha),
+        ).fetchone()
+        return row is not None
+
     def get_recovered_tool_content(self, session_id: str,
                                    marker_identity_sha: str) -> Dict[str, Any] | None:
         """Return the recovered content row for a marker, or None."""
