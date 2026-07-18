@@ -1598,9 +1598,14 @@ class TestEngineABC:
             {"role": "assistant", "content": "fresh " + "y" * 500},
             {"role": "user", "content": "fresh " + "z" * 500},
         ]
+        # Use repeated word-like segments rather than a single-character run:
+        # both cl100k_base and the char fallback must keep this backlog eligible.
         eligible_messages = [
             {"role": "system", "content": "system"},
-            {"role": "user", "content": "old backlog " + "x" * 600},
+            {
+                "role": "user",
+                "content": "old backlog " + "compressible backlog segment " * 100,
+            },
             {"role": "assistant", "content": "old answer " + "y" * 600},
             {"role": "user", "content": "fresh " + "a" * 200},
             {"role": "assistant", "content": "fresh " + "b" * 200},

@@ -532,6 +532,7 @@ class TestConfig:
     def test_defaults(self):
         c = LCMConfig()
         assert c.fresh_tail_count == 32
+        assert c.fresh_tail_max_tokens == 0
         assert c.leaf_chunk_tokens == 20_000
         assert c.context_threshold == 0.35
         assert c.incremental_max_depth == 3
@@ -550,6 +551,8 @@ class TestConfig:
         assert c.large_output_externalization_enabled is False
         assert c.large_output_externalization_threshold_chars == 12_000
         assert c.large_output_externalization_path == ""
+        assert c.large_output_active_replay_stubbing_enabled is False
+        assert c.large_output_active_replay_stub_threshold_tokens == 25_000
         assert c.large_output_transcript_gc_enabled is False
         assert c.deferred_maintenance_enabled is False
         assert c.deferred_maintenance_max_passes == 4
@@ -571,6 +574,7 @@ class TestConfig:
 
     def test_from_env(self, monkeypatch):
         monkeypatch.setenv("LCM_FRESH_TAIL_COUNT", "32")
+        monkeypatch.setenv("LCM_FRESH_TAIL_MAX_TOKENS", "12000")
         monkeypatch.setenv("LCM_CONTEXT_THRESHOLD", "0.80")
         monkeypatch.setenv("LCM_IGNORE_SESSION_PATTERNS", "cron:*,subagent:**")
         monkeypatch.setenv("LCM_STATELESS_SESSION_PATTERNS", "telegram:*, cli:debug")
@@ -599,9 +603,12 @@ class TestConfig:
         monkeypatch.setenv("LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED", "true")
         monkeypatch.setenv("LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS", "4096")
         monkeypatch.setenv("LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH", "/tmp/lcm-large-outputs")
+        monkeypatch.setenv("LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED", "true")
+        monkeypatch.setenv("LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS", "8192")
         monkeypatch.setenv("LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED", "true")
         c = LCMConfig.from_env()
         assert c.fresh_tail_count == 32
+        assert c.fresh_tail_max_tokens == 12_000
         assert c.context_threshold == 0.80
         assert c.ignore_session_patterns == ["cron:*", "subagent:**"]
         assert c.stateless_session_patterns == ["telegram:*", "cli:debug"]
@@ -634,11 +641,14 @@ class TestConfig:
         assert c.large_output_externalization_enabled is True
         assert c.large_output_externalization_threshold_chars == 4096
         assert c.large_output_externalization_path == "/tmp/lcm-large-outputs"
+        assert c.large_output_active_replay_stubbing_enabled is True
+        assert c.large_output_active_replay_stub_threshold_tokens == 8192
         assert c.large_output_transcript_gc_enabled is True
 
     def test_from_env_invalid_numeric_values_fall_back_to_defaults(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "empty-hermes-home"))
         monkeypatch.setenv("LCM_FRESH_TAIL_COUNT", "not-a-number")
+        monkeypatch.setenv("LCM_FRESH_TAIL_MAX_TOKENS", "not-a-number")
         monkeypatch.setenv("LCM_LEAF_CHUNK_TOKENS", "")
         monkeypatch.setenv("LCM_CONTEXT_THRESHOLD", "bad-float")
         monkeypatch.setenv("LCM_MAX_ASSEMBLY_TOKENS", "nope")
@@ -649,6 +659,7 @@ class TestConfig:
         c = LCMConfig.from_env()
 
         assert c.fresh_tail_count == 32
+        assert c.fresh_tail_max_tokens == 0
         assert c.leaf_chunk_tokens == 20_000
         assert c.context_threshold == 0.35
         assert c.max_assembly_tokens == 0

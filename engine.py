@@ -52,6 +52,9 @@ from .extraction import (
     strip_injected_context_blocks,
 )
 from .ingest_protection import (
+    _expected_persisted_output_chars,
+    _has_lossy_sensitive_redaction,
+    _contains_media_payload,
     _is_hermes_persisted_output_marker,
     extract_ingest_externalized_refs,
     protect_inline_payloads_in_text,
@@ -90,7 +93,8 @@ from .message_analysis import (
     _matched_tool_call_ids,
     _tool_call_id,
 )
-from .message_patterns import compile_message_patterns
+from .fresh_tail import FreshTailBoundary, resolve_fresh_tail_boundary
+from .message_patterns import compile_message_patterns, matches_message_pattern
 from .aux_session import AuxiliarySessionMixin
 from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
@@ -296,6 +300,9 @@ class LCMEngine(
         # Cooldown timestamp to prevent compression cascade after boundary skip.
         # Set when skip-carry-over path is taken in _continue_compression_boundary.
         self._last_boundary_skip_time: float = 0
+        # One-shot handoff from preflight: adopt an already-durable replay
+        # cleanup during boundary cooldown without running summary work.
+        self._preflight_cleanup_only_due_to_boundary_cooldown = False
         # Temporary source window used only while compress() assembles context.
         # _assemble_context also serves tests and recovery paths directly, so
         # keep anchoring opt-in rather than changing its public behavior.
@@ -1478,12 +1485,58 @@ class LCMEngine(
         self._clear_pending_reset_boundary()
 
     def _raw_backlog_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        n = len(messages)
-        fresh_tail_start = max(0, n - self._config.fresh_tail_count)
+        fresh_tail_start = self._fresh_tail_start(messages)
         leading_anchor_count = self._leading_anchor_count(messages)
         if fresh_tail_start <= leading_anchor_count:
             return []
         return messages[leading_anchor_count:fresh_tail_start]
+
+    def _fresh_tail_boundary(self, messages: List[Dict[str, Any]]) -> FreshTailBoundary:
+        return resolve_fresh_tail_boundary(
+            messages,
+            fresh_tail_count=self._config.fresh_tail_count,
+            fresh_tail_max_tokens=self._config.fresh_tail_max_tokens,
+        )
+
+    def _fresh_tail_start(self, messages: List[Dict[str, Any]]) -> int:
+        return self._fresh_tail_boundary(messages).start
+
+    def _get_session_fresh_tail(
+        self,
+        session_id: str,
+        *,
+        minimum_count: int = 0,
+    ) -> tuple[List[Dict[str, Any]], FreshTailBoundary]:
+        """Load and resolve a stored tail, expanding backward for tool pairing."""
+        total_count = int(self._store.get_session_count(session_id))
+        configured_count = max(minimum_count, int(self._config.fresh_tail_count or 0))
+        if self._config.fresh_tail_max_tokens > 0:
+            configured_count = max(1, configured_count)
+        if total_count <= 0 or configured_count <= 0:
+            return [], resolve_fresh_tail_boundary(
+                [],
+                fresh_tail_count=configured_count,
+                fresh_tail_max_tokens=self._config.fresh_tail_max_tokens,
+            )
+
+        load_limit = min(total_count, configured_count)
+        while True:
+            rows = self._store.get_session_tail(session_id, load_limit)
+            boundary = resolve_fresh_tail_boundary(
+                rows,
+                fresh_tail_count=configured_count,
+                fresh_tail_max_tokens=self._config.fresh_tail_max_tokens,
+            )
+            selected = rows[boundary.start:]
+            unresolved_tool_boundary = bool(
+                selected
+                and selected[0].get("role") == "tool"
+                and not boundary.tool_group_extended
+                and load_limit < total_count
+            )
+            if not unresolved_tool_boundary:
+                return selected, boundary
+            load_limit = min(total_count, max(load_limit + 1, load_limit * 2))
 
     @staticmethod
     def _leading_anchor_count(messages: List[Dict[str, Any]]) -> int:
@@ -3759,6 +3812,9 @@ class LCMEngine(
             config=self._config,
             hermes_home=self._hermes_home,
         )
+        recovery_tool_call_ids = self._active_replay_recovery_tool_call_ids(
+            active_replay_messages
+        )
         for (absolute_idx, _replay_msg), protected_msg in zip(
             messages_to_store_with_index,
             protected_messages,
@@ -3771,6 +3827,19 @@ class LCMEngine(
                 active_message = dict(active_replay_messages[absolute_idx])
                 active_message["content"] = protected_msg["content"]
                 active_replay_messages[absolute_idx] = active_message
+                continue
+
+            active_message = active_replay_messages[absolute_idx]
+            stubbed_message = self._maybe_stub_active_tool_result(
+                active_message,
+                recovery_tool_call_ids=recovery_tool_call_ids,
+            )
+            if stubbed_message is not None:
+                if active_replay_messages is replay_messages:
+                    active_replay_messages = self._copy_active_replay_messages_preserving_generated_ids(
+                        replay_messages
+                    )
+                active_replay_messages[absolute_idx] = stubbed_message
 
         estimates = [count_message_tokens(m) for m in protected_messages]
         self._store._append_protected_batch(
@@ -3787,11 +3856,10 @@ class LCMEngine(
         self._compression_boundary_stored_placeholder_digest_counts = {}
         logger.debug("Ingested %d messages into LCM store", len(messages_to_store_with_index))
         self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
-        # Most ``protected_messages`` changes are storage-only: inline media,
-        # tool results, and data/base64 substrings must stay provider-usable in
-        # active replay. Whole-message ``raw_payload`` externalization is the
-        # exception: it intentionally returns a compact active stub so the host
-        # does not replay huge opaque text while SQLite stores only the stub.
+        # Most ``protected_messages`` changes are storage-only: inline media and
+        # data/base64 substrings stay provider-usable in active replay. The
+        # exceptions are whole-message ``raw_payload`` externalization and the
+        # separately opt-in textual tool-result interceptor above.
         return self._remember_active_replay_messages(messages, active_replay_messages)
 
     @staticmethod
@@ -4003,6 +4071,188 @@ class LCMEngine(
             cleaned,
             insert_missing_tool_stubs=insert_missing_tool_stubs,
         )
+
+    @staticmethod
+    def _active_tool_stub_content(original_content: Any, placeholder: str) -> Any:
+        """Preserve compatible structured text-block shape when inserting a ref."""
+        if not isinstance(original_content, list):
+            return placeholder
+        for block in original_content:
+            if isinstance(block, str):
+                return [placeholder]
+            if not isinstance(block, dict):
+                continue
+            block_type = str(block.get("type") or "").lower()
+            if block_type not in {"text", "input_text", "output_text"}:
+                continue
+            for value_key in ("text", "content"):
+                text_value = block.get(value_key)
+                if isinstance(text_value, str):
+                    return [{"type": block_type, value_key: placeholder}]
+                if not isinstance(text_value, dict):
+                    continue
+                for nested_key in ("value", "content"):
+                    if isinstance(text_value.get(nested_key), str):
+                        return [{
+                            "type": block_type,
+                            value_key: {nested_key: placeholder},
+                        }]
+        # _is_textual_tool_result_content() only admits supported shapes, so
+        # this fallback is defensive rather than a normal provider path.
+        return [{"type": "text", "text": placeholder}]
+
+    @staticmethod
+    def _structured_text_block_value(block: Dict[str, Any]) -> str | None:
+        for value_key in ("text", "content"):
+            text_value = block.get(value_key)
+            if isinstance(text_value, str):
+                return text_value
+            if not isinstance(text_value, dict):
+                continue
+            for nested_key in ("value", "content"):
+                nested = text_value.get(nested_key)
+                if isinstance(nested, str):
+                    return nested
+        return None
+
+    @staticmethod
+    def _is_textual_tool_result_content(content: Any) -> bool:
+        """Return whether active stubbing can preserve provider semantics."""
+        if _contains_media_payload(content):
+            return False
+        if isinstance(content, str):
+            return True
+        if not isinstance(content, list) or not content:
+            return False
+        for block in content:
+            if isinstance(block, str):
+                continue
+            if not isinstance(block, dict):
+                return False
+            if str(block.get("type") or "").lower() not in {
+                "text",
+                "input_text",
+                "output_text",
+            }:
+                return False
+            if LCMEngine._structured_text_block_value(block) is None:
+                return False
+        return True
+
+    def _active_replay_recovery_tool_call_ids(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> set[str]:
+        recovery_tool_call_ids: set[str] = set()
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            for tool_call in message.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                call_id = _tool_call_id(tool_call)
+                function = tool_call.get("function") or {}
+                tool_name = str(function.get("name") or "") if isinstance(function, dict) else ""
+                if call_id and tool_name in {"lcm_describe", "lcm_expand"}:
+                    recovery_tool_call_ids.add(call_id)
+        return recovery_tool_call_ids
+
+    def _maybe_stub_active_tool_result(
+        self,
+        message: Dict[str, Any],
+        *,
+        recovery_tool_call_ids: set[str],
+    ) -> Dict[str, Any] | None:
+        if not getattr(self._config, "large_output_active_replay_stubbing_enabled", False):
+            return None
+        if not getattr(self._config, "large_output_externalization_enabled", False):
+            return None
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            return None
+        tool_call_id = str(message.get("tool_call_id") or "").strip()
+        if not tool_call_id or tool_call_id in recovery_tool_call_ids:
+            return None
+        content = message.get("content")
+        if not self._is_textual_tool_result_content(content):
+            return None
+        normalized_content = normalize_content_value(content) or ""
+        if not normalized_content or is_externalized_placeholder(normalized_content):
+            return None
+        threshold = max(
+            1,
+            int(
+                getattr(
+                    self._config,
+                    "large_output_active_replay_stub_threshold_tokens",
+                    25_000,
+                )
+                or 0
+            ),
+        )
+        if count_tokens(normalized_content) <= threshold:
+            return None
+        externalized = maybe_externalize_tool_output(
+            normalized_content,
+            tool_call_id=tool_call_id,
+            session_id=self._session_id,
+            config=self._config,
+            hermes_home=self._hermes_home,
+            force=True,
+        )
+        if externalized is None:
+            return None
+        replacement = dict(message)
+        replacement["content"] = self._active_tool_stub_content(
+            content,
+            externalized["placeholder"],
+        )
+        return replacement
+
+    def _stub_large_tool_results_for_active_replay(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Replace eligible old tool payloads with durable refs for assembly.
+
+        This is provider-replay-only. It never mutates the input messages, raw
+        SQLite rows, or DAG lineage. The newest ``fresh_tail_count`` messages
+        stay inline, matching Lossless Claw's protected-tail contract.
+        """
+        if not getattr(self._config, "large_output_active_replay_stubbing_enabled", False):
+            return messages
+        if not getattr(self._config, "large_output_externalization_enabled", False):
+            return messages
+        protected_tail_count = max(0, int(getattr(self._config, "fresh_tail_count", 0) or 0))
+        eligible_end = max(0, len(messages) - protected_tail_count)
+        if eligible_end <= 0:
+            return messages
+
+        recovery_tool_call_ids = self._active_replay_recovery_tool_call_ids(messages)
+
+        result = list(messages)
+        stubbed_count = 0
+        tokens_saved = 0
+        for idx, message in enumerate(messages[:eligible_end]):
+            replacement = self._maybe_stub_active_tool_result(
+                message,
+                recovery_tool_call_ids=recovery_tool_call_ids,
+            )
+            if replacement is None:
+                continue
+            result[idx] = replacement
+            stubbed_count += 1
+            tokens_saved += max(
+                0,
+                count_message_tokens(message) - count_message_tokens(replacement),
+            )
+
+        if stubbed_count:
+            logger.info(
+                "LCM active replay stubbing: replaced %d evictable tool result(s), saved about %d tokens",
+                stubbed_count,
+                tokens_saved,
+            )
+        return result
 
     def _sanitize_tool_pairs(
         self,
@@ -4350,7 +4600,11 @@ class LCMEngine(
             else self._effective_assembly_token_cap()
         )
 
-        tail_selected = tail_messages
+        # Stub durably externalized evictable tool payloads before the assembly
+        # budget pass so the selector sees their reduced provider-visible cost.
+        # The helper protects the configured fresh tail and is fail-open.
+        assembly_tail_messages = self._stub_large_tool_results_for_active_replay(tail_messages)
+        tail_selected = assembly_tail_messages
         anchor_source = getattr(self, "_pending_context_anchor_messages", None)
         if anchor_source is None:
             anchor_source = tail_messages
@@ -4361,7 +4615,7 @@ class LCMEngine(
             kept_tail_reversed: list[Dict[str, Any]] = []
             tail_token_total = 0
             tail_for_selection = self._sanitize_active_context_messages(
-                tail_messages,
+                assembly_tail_messages,
                 insert_missing_tool_stubs=False,
             )
             skipped_tail_gap = False
@@ -4491,8 +4745,9 @@ class LCMEngine(
         original_messages: List[Dict[str, Any]],
         compressed: List[Dict[str, Any]],
         assembly_cap_override: Optional[int] = None,
+        ingest_cleanup_changed_active_context: bool = False,
     ) -> List[Dict[str, Any]]:
-        if compressed != original_messages:
+        if compressed != original_messages or ingest_cleanup_changed_active_context:
             self._last_compression_status = "overflow_recovery"
             self._last_compression_noop_reason = ""
             self._ingest_cursor = len(compressed)
@@ -4810,8 +5065,8 @@ class LCMEngine(
           ``LCM_IGNORE_SESSION_PATTERNS``.
         - ``session_stateless``: foreground session matched
           ``LCM_STATELESS_SESSION_PATTERNS``.
-        - ``no_pre_tail_content``: total stored messages do not exceed
-          ``fresh_tail_count``; nothing to rotate.
+        - ``no_pre_tail_content``: no stored messages precede the resolved
+          count/token-bounded fresh tail; nothing to rotate.
         - ``empty_tail``: tail query returned no rows despite a non-zero
           count (concurrent deletion race); rotate cannot compute a boundary.
         - ``frontier_already_ahead``: lifecycle frontier is already at or
@@ -4832,6 +5087,11 @@ class LCMEngine(
 
         fresh_tail_count = max(1, int(self._config.fresh_tail_count))
         total_count = int(self._store.get_session_count(session_id))
+        tail, fresh_tail_boundary = self._get_session_fresh_tail(
+            session_id,
+            minimum_count=1,
+        )
+        effective_fresh_tail_count = len(tail)
 
         state = self._lifecycle.get_by_conversation(conversation_id)
         current_frontier = int(state.current_frontier_store_id) if state else 0
@@ -4842,11 +5102,16 @@ class LCMEngine(
             "conversation_id": conversation_id,
             "total_message_count": total_count,
             "fresh_tail_count": fresh_tail_count,
+            "fresh_tail_max_tokens": self._config.fresh_tail_max_tokens,
+            "effective_fresh_tail_count": effective_fresh_tail_count,
+            "effective_fresh_tail_tokens": fresh_tail_boundary.tokens,
+            "fresh_tail_token_limited": fresh_tail_boundary.token_limited,
+            "fresh_tail_tool_group_extended": fresh_tail_boundary.tool_group_extended,
             "current_frontier_store_id": current_frontier,
             "mode": "apply" if apply else "preview",
         }
 
-        if total_count <= fresh_tail_count:
+        if total_count <= effective_fresh_tail_count:
             return {
                 **base,
                 "noop": True,
@@ -4855,7 +5120,6 @@ class LCMEngine(
                 "new_frontier_store_id": current_frontier,
             }
 
-        tail = self._store.get_session_tail(session_id, fresh_tail_count)
         if not tail:
             # Concurrent deletion can empty the tail after the count check.
             # Surface the same shape callers expect for any other no-op so

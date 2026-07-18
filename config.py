@@ -257,6 +257,7 @@ class _EnvFieldSpec:
 # duplicated. Order mirrors the historical ``from_env`` order for readability.
 ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("fresh_tail_count", "LCM_FRESH_TAIL_COUNT", int),
+    _EnvFieldSpec("fresh_tail_max_tokens", "LCM_FRESH_TAIL_MAX_TOKENS", int),
     _EnvFieldSpec("leaf_chunk_tokens", "LCM_LEAF_CHUNK_TOKENS", int),
     _EnvFieldSpec("context_threshold", "LCM_CONTEXT_THRESHOLD", float),
     _EnvFieldSpec("incremental_max_depth", "LCM_INCREMENTAL_MAX_DEPTH", int),
@@ -280,6 +281,8 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("large_output_externalization_enabled", "LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED", bool),
     _EnvFieldSpec("large_output_externalization_threshold_chars", "LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS", int),
     _EnvFieldSpec("large_output_externalization_path", "LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH", str),
+    _EnvFieldSpec("large_output_active_replay_stubbing_enabled", "LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED", bool),
+    _EnvFieldSpec("large_output_active_replay_stub_threshold_tokens", "LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS", int),
     _EnvFieldSpec("large_output_transcript_gc_enabled", "LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED", bool),
     _EnvFieldSpec("summary_model", "LCM_SUMMARY_MODEL", str),
     _EnvFieldSpec("summary_circuit_breaker_failure_threshold", "LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD", int),
@@ -309,6 +312,7 @@ _PARSER_BY_TYPE = {
 # ``from_env`` handles these explicitly, so the uniform loop skips them.
 _SOURCE_TRACKED_ENV_FIELDS = frozenset({
     "fresh_tail_count",
+    "fresh_tail_max_tokens",
     "leaf_chunk_tokens",
     "context_threshold",
     "summary_spend_max_calls",
@@ -333,6 +337,8 @@ class LCMConfig:
 
     # -- Fresh tail: recent messages never compacted ---
     fresh_tail_count: int = 32
+    # Optional token cap for the protected suffix (0 = disabled)
+    fresh_tail_max_tokens: int = 0
 
     # -- Compaction thresholds ---
     # Max source tokens in a leaf chunk before summarization triggers
@@ -423,6 +429,15 @@ class LCMConfig:
     large_output_externalization_threshold_chars: int = 12_000
     # Explicit storage directory for externalized payloads (empty = auto under hermes home).
     large_output_externalization_path: str = ""
+    # Replace eligible textual tool results with durable compact refs in
+    # provider-visible replay. Current-turn ingest is intercepted immediately;
+    # historical assembly separately respects the protected fresh tail. This
+    # remains opt-in and requires large-output externalization.
+    large_output_active_replay_stubbing_enabled: bool = False
+    # Token-aware active-replay threshold. The character threshold above still
+    # controls ordinary ingest externalization; this threshold controls when a
+    # provider-visible textual tool result is replaced by its durable ref.
+    large_output_active_replay_stub_threshold_tokens: int = 25_000
     # When enabled, already-externalized summarized tool-result transcript rows may
     # be rewritten to compact GC placeholders after successful leaf compaction.
     large_output_transcript_gc_enabled: bool = False
@@ -501,6 +516,11 @@ class LCMConfig:
             "LCM_FRESH_TAIL_COUNT", c.fresh_tail_count
         )
         _record("fresh_tail_count", source, warning)
+        c.fresh_tail_max_tokens, source, warning = _parse_int_env_with_source(
+            "LCM_FRESH_TAIL_MAX_TOKENS", c.fresh_tail_max_tokens
+        )
+        c.fresh_tail_max_tokens = max(0, c.fresh_tail_max_tokens)
+        _record("fresh_tail_max_tokens", source, warning)
         c.leaf_chunk_tokens, source, warning = _parse_int_env_with_source(
             "LCM_LEAF_CHUNK_TOKENS", c.leaf_chunk_tokens
         )

@@ -315,6 +315,7 @@ Most installs only need `plugins.enabled` and `context.engine: lcm`.
 |----------|---------|-----|
 | `LCM_CONTEXT_THRESHOLD` | `0.35` | Fraction of the context window that triggers LCM compaction |
 | `LCM_FRESH_TAIL_COUNT` | `32` | Recent messages protected from compaction |
+| `LCM_FRESH_TAIL_MAX_TOKENS` | `0` | Optional token cap for the protected fresh tail (`0` disables it); always retains the newest message and complete assistant/tool-result groups |
 | `LCM_INCREMENTAL_MAX_DEPTH` | `3` | Max DAG condensation depth (`-1` = unlimited, `0` = leaf only); enables hierarchical summarization |
 | `LCM_LEAF_CHUNK_TOKENS` | `20000` | Raw-backlog floor before leaf compaction; with dynamic chunking enabled, the base chunk target |
 | `LCM_DYNAMIC_LEAF_CHUNK_ENABLED` | `false` | Enable chunk-sized leaf compaction passes instead of compacting the whole non-tail raw backlog per pass |
@@ -323,6 +324,11 @@ Most installs only need `plugins.enabled` and `context.engine: lcm`.
 | `LCM_DATABASE_PATH` | auto | SQLite database path. Empty config resolves to `HERMES_HOME/lcm.db`; plugin installs or operators may set this env var to another profile-scoped path such as `~/.hermes/hermes-lcm.db`. |
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `24` | Minimum hours between startup FTS5 deep integrity-checks (O(index size)). `0` checks every startup; a negative value never checks on startup. Structural checks always run regardless. |
 | `LCM_ENABLE_SLASH_COMMAND` | `false` | Enable the optional `/lcm` operator command surface |
+
+When `LCM_FRESH_TAIL_MAX_TOKENS` is enabled, the protected suffix must satisfy
+both the message-count and token bounds. The newest message is never dropped,
+and a boundary that would begin inside an assistant tool-call/result group is
+moved back to that assistant even when doing so exceeds a configured bound.
 
 ### Filtering and storage settings
 
@@ -335,6 +341,8 @@ Most installs only need `plugins.enabled` and `context.engine: lcm`.
 | `LCM_SENSITIVE_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Comma-separated named sensitive pattern catalog entries to apply when redaction is enabled |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `false` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS` | `12000` | Externalization threshold for normalized payload text |
+| `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `false` | Replace token-heavy textual tool results with recoverable externalized refs in active replay; current-turn ingest is immediate and historical assembly respects the protected fresh tail; requires large-output externalization |
+| `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `25000` | Token-aware threshold for active-replay tool-result stubbing |
 | `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `false` | Rewrite already-externalized summarized tool rows to compact placeholders |
 | `LCM_DOCTOR_CLEAN_APPLY_ENABLED` | `false` | Permit destructive `/lcm doctor clean apply` in trusted operator contexts |
 | `LCM_EMPTY_LIFECYCLE_GC_ENABLED` | `true` | Master toggle for automatic pruning of lifecycle rows for sessions that never ingested any messages or summary nodes |
@@ -513,6 +521,21 @@ oversized tool results are written to plugin-managed JSON files and referenced
 from summaries. They remain inspectable through
 `lcm_describe(externalized_ref=...)` and `lcm_expand(externalized_ref=...)`.
 
+Active-replay stubbing is a second, independently opt-in replay policy. When
+both externalization and active-replay stubbing are enabled, newly ingested
+textual tool results above the token threshold are durably externalized and
+replaced immediately in provider-visible replay, including results in the
+protected fresh tail. This lets a stub-only replay change converge even when no
+leaf is eligible for compaction. A historical assembly pass applies the same
+policy to older tool results before budgeting, while respecting the protected
+fresh tail. Tool-call ids and compatible structured text block types/keys are
+retained; raw SQLite rows and DAG lineage are not rewritten by the historical
+pass. Structured image/media results remain inline, preserving the provider
+replay contract established by Hermes-LCM PR #226. If durable externalization
+cannot be confirmed, replay keeps the original payload inline. Results from
+`lcm_describe` and `lcm_expand` also remain inline so recovery does not
+recursively produce another ref.
+
 The storage-boundary payload guard is separate from that opt-in. LCM always
 scans messages at the store boundary before writing `messages.content` or
 `messages.tool_calls` to SQLite. Inline `data:*;base64,...` payloads and
@@ -652,6 +675,12 @@ The script is intentionally conservative:
 This is a local archive migration path. It does not make LCM a general memory
 provider, and it does not change the current-session retrieval contract for
 agent tools.
+
+For databases that already contain large historical tool rows,
+`scripts/backfill_externalized_tool_outputs.py` can pre-create native recovery
+sidecars without rewriting SQLite. It is dry-run by default, writes a scrubbed
+digest/count manifest, is idempotent on repeat apply, and supports guarded
+manifest-based rollback. See the [operator guide](docs/operator-guide.md#historical-tool-output-sidecars).
 
 ## Troubleshooting
 

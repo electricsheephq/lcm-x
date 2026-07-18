@@ -139,6 +139,7 @@ environment variables:
 |----------|---------|-----|
 | `LCM_CONTEXT_THRESHOLD` | `0.35` | Fraction of the context window that triggers LCM compaction |
 | `LCM_FRESH_TAIL_COUNT` | `32` | Recent messages protected from compaction |
+| `LCM_FRESH_TAIL_MAX_TOKENS` | `0` | Optional token cap for the protected fresh tail (`0` disables it); always retains the newest message and complete assistant/tool-result groups |
 | `LCM_INCREMENTAL_MAX_DEPTH` | `3` | Max DAG condensation depth (`-1` = unlimited, `0` = leaf only); enables hierarchical summarization |
 | `LCM_LEAF_CHUNK_TOKENS` | `20000` | Raw-backlog floor before leaf compaction; with dynamic chunking enabled, the base chunk target |
 | `LCM_DYNAMIC_LEAF_CHUNK_ENABLED` | `false` | Enable chunk-sized leaf compaction passes instead of compacting the whole non-tail raw backlog per pass |
@@ -151,6 +152,8 @@ environment variables:
 | `LCM_SENSITIVE_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Comma-separated named sensitive pattern catalog entries to apply when redaction is enabled |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `false` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS` | `12000` | Externalization threshold for normalized payload text |
+| `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `false` | Replace token-heavy textual tool results with recoverable externalized refs in active replay; current-turn ingest is immediate and historical assembly respects the protected fresh tail; requires large-output externalization |
+| `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `25000` | Token-aware threshold for active-replay tool-result stubbing |
 | `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `false` | Rewrite already-externalized summarized tool rows to compact placeholders |
 | `LCM_CRITICAL_BUDGET_PRESSURE_RATIO` | `0.0` | Disabled at `0.0`; when set, permits critical-pressure bypasses for bounded deferred catch-up and cache-friendly follow-on condensation only |
 | `LCM_SUMMARY_MODEL` | auxiliary | Override summarization model |
@@ -448,6 +451,20 @@ oversized tool results are written to plugin-managed JSON files and referenced
 from summaries. They remain inspectable later through
 `lcm_describe(externalized_ref=...)` and `lcm_expand(externalized_ref=...)`.
 
+Active-replay stubbing is separately opt-in and requires ordinary large-output
+externalization. Newly ingested textual tool results above the token threshold
+are durably externalized and immediately replaced in provider-visible replay,
+including results in the protected fresh tail. Preflight adopts that replay
+change even if no leaf compaction is eligible. A second historical assembly
+pass replaces older eligible results before evaluating the assembly budget and
+respects the protected fresh tail. Tool roles, `tool_call_id` values, and
+compatible structured text block types/keys are retained; the historical pass
+does not rewrite raw SQLite/DAG lineage. Structured image/media tool results
+remain inline, preserving the provider-replay contract established by PR #226.
+Failure to durably externalize is fail-open: the provider receives the original
+inline payload. Results from `lcm_describe` and `lcm_expand` also stay inline so
+recovery does not recursively create another drilldown step.
+
 The storage-boundary payload guard is separate from that opt-in. LCM always
 scans messages at the store boundary before writing `messages.content` or
 `messages.tool_calls` to SQLite. Inline `data:*;base64,...` payloads and
@@ -564,6 +581,84 @@ A no-op apply does not write a new rolling backup, so the previous
 known-good `*-rotate-latest.sqlite3` snapshot survives idempotent retries.
 
 ## Import and backfill
+
+### Historical tool-output sidecars
+
+`scripts/backfill_externalized_tool_outputs.py` pre-creates Hermes-native
+externalized-payload sidecars for large textual tool rows already in an LCM
+database. It opens SQLite read-only and never rewrites messages or summaries.
+The default is a dry run:
+
+```bash
+python scripts/backfill_externalized_tool_outputs.py \
+  --database ~/.hermes/lcm.db \
+  --hermes-home ~/.hermes \
+  --manifest ./externalization-backfill.json
+
+# Create only eligible sidecars after reviewing the scrubbed manifest.
+python scripts/backfill_externalized_tool_outputs.py \
+  --database ~/.hermes/lcm.db \
+  --hermes-home ~/.hermes \
+  --manifest ./externalization-backfill.json \
+  --apply
+```
+
+Sidecar retention and redaction: before a historical tool result is written to
+the externalized-payload directory the command applies the currently enabled
+`LCM_SENSITIVE_PATTERNS` policy to its content, exactly as live ingest does, so no
+un-redacted secret is copied onto the new retention surface. Every manifest digest,
+ref, and provenance proof is derived from the redacted content that is actually
+stored. Each sidecar mirrors the live externalized-payload shape (kind, role,
+session id, tool-call id, and the redacted content) so recovery through
+`lcm_expand(externalized_ref=...)` keeps working. The manifest records the active
+redaction policy and refuses to resume a journal written under a different policy.
+
+The manifest is a durable ownership journal containing references, digests,
+provenance proofs, target-identity hashes, the redaction policy, counts, sizes, and
+token estimates, not raw payload content, session ids, or tool-call ids; the refs
+carry a `historical-backfill` marker rather than a tool-call stub. Reusing the same
+manifest path preserves every sidecar created by earlier apply runs. An interrupted apply
+can be rerun with the same path to recover its pending journal entries. The
+journal is bound to one database file and one externalized-payload storage root;
+the command refuses reuse or rollback against another target. Manifest files and
+sidecars are opened without following their final symlink and rollback rechecks
+file identity before deletion. A new manifest is published with a no-clobber
+link; an existing journal is updated with an atomic name exchange and restored
+if the displaced inode is not the validated manifest. A regular file or symlink
+that races into the manifest leaf is therefore preserved and the command fails
+closed. Existing-journal updates require atomic name-exchange support from the
+host OS and filesystem. Apply and rollback require the storage directory to be
+owned by the current user and not writable by group or other users. They also
+hold an advisory lock on the opened directory so concurrent invocations of this
+script cannot mutate it together.
+
+The command also refuses database schemas newer than this build before scanning
+rows or writing sidecars. Apply failures are recorded in `counts.failed` and
+`failed_paths` and cause a nonzero exit status. Rollback is dry-run by default
+and accepts only a complete, applied ownership journal for the historical-
+externalization operation; `--apply` deletes a sidecar only when its backfill
+provenance binds it to that journal, its content still matches the recorded
+digest, and no message content, nested `messages.tool_calls` value, or summary
+references it:
+
+```bash
+python scripts/backfill_externalized_tool_outputs.py \
+  --database ~/.hermes/lcm.db \
+  --hermes-home ~/.hermes \
+  --rollback ./externalization-backfill.json
+```
+
+Stop the profile that owns the target database and every other process running
+as that account that can write the externalized-payload directory before an
+operator apply or rollback. The directory lock coordinates this script only;
+writers that ignore it are outside the supported integrity boundary. POSIX has
+no unlink-by-open-file-descriptor primitive, so rollback moves an owned sidecar
+to a random quarantine name, checks that inode again immediately before the
+name-based unlink, and fails closed with the quarantine entry retained if a
+replacement is detected. This quiescent, owner-controlled directory is the
+precondition that makes the final unlink safe.
+
+### OpenClaw/lossless-claw history
 
 `scripts/import_lossless_claw.py` is the local, dry-run-by-default operator path
 for moving OpenClaw history into a Hermes-LCM `lcm.db`. It supports two source

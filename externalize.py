@@ -858,6 +858,7 @@ def maybe_externalize_tool_output(
     session_id: str = "",
     config,
     hermes_home: str = "",
+    force: bool = False,
 ) -> Dict[str, Any] | None:
     return maybe_externalize_payload(
         content,
@@ -867,6 +868,7 @@ def maybe_externalize_tool_output(
         role="tool",
         config=config,
         hermes_home=hermes_home,
+        force=force,
     )
 
 
