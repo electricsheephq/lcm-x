@@ -18,6 +18,7 @@ avoid an import cycle (staticmethod resolution is identical).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -242,6 +243,102 @@ class ReconcileMixin:
             tool_calls_identity,
         )
 
+    def _compacted_active_replay_snapshot_digest(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> str:
+        """Fingerprint only an unmistakable LCM-generated compacted snapshot.
+
+        Repeated content alone is never replay proof: a fresh delta may
+        legitimately repeat the durable tail.  Requiring both the generated LCM
+        system note and a generated summary marker limits durable fingerprints
+        to contexts the engine itself assembled after compaction.
+        """
+        has_lcm_system_note = any(
+            str(message.get("role") or "") == "system"
+            and "[Note: This conversation uses Lossless Context Management (LCM)." in (
+                normalize_content_value(message.get("content")) or ""
+            )
+            and "Earlier turns have been compacted into hierarchical summaries below." in (
+                normalize_content_value(message.get("content")) or ""
+            )
+            for message in messages
+        )
+        has_generated_summary = any(
+            str(message.get("role") or "") != "system"
+            and "[Expand for details:" in (normalize_content_value(message.get("content")) or "")
+            and bool(
+                re.search(
+                    r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d\d+, node \d+\)\]",
+                    normalize_content_value(message.get("content")) or "",
+                )
+            )
+            for message in messages
+        )
+        if not has_lcm_system_note or not has_generated_summary:
+            return ""
+        identities = [list(self._message_replay_identity(message)) for message in messages]
+        payload = json.dumps(
+            {"version": 1, "messages": identities},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _active_replay_snapshot_metadata_key(self) -> str:
+        return f"compacted_active_replay_snapshot_digests:{getattr(self, '_session_id', '')}"
+
+    def _load_compacted_active_replay_snapshot_digests(self) -> list[str]:
+        if not getattr(self, "_session_id", ""):
+            return []
+        store = getattr(self, "_store", None)
+        if store is None:
+            return []
+        try:
+            data = store.read_metadata_json(self._active_replay_snapshot_metadata_key())
+        except Exception:
+            logger.debug("LCM active replay snapshot metadata load failed", exc_info=True)
+            return []
+        if not isinstance(data, dict) or data.get("version") != 1:
+            return []
+        raw_digests = data.get("digests")
+        if not isinstance(raw_digests, list):
+            return []
+        ordered: list[str] = []
+        for digest in raw_digests:
+            normalized = str(digest)
+            if re.fullmatch(r"[0-9a-f]{64}", normalized) and normalized not in ordered:
+                ordered.append(normalized)
+        return ordered[-16:]
+
+    def _remember_compacted_active_replay_snapshot(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> None:
+        if not getattr(self, "_session_id", ""):
+            return
+        store = getattr(self, "_store", None)
+        if store is None:
+            return
+        digest = self._compacted_active_replay_snapshot_digest(messages)
+        if not digest:
+            return
+        ordered = self._load_compacted_active_replay_snapshot_digests()
+        ordered = [item for item in ordered if item != digest]
+        ordered.append(digest)
+        ordered = ordered[-16:]
+        try:
+            store.write_metadata_json(
+                [self._active_replay_snapshot_metadata_key()],
+                json.dumps({"version": 1, "digests": ordered}, sort_keys=True),
+                skip_unchanged=True,
+            )
+        except Exception:
+            # Missing metadata must fail toward duplicate preservation, never
+            # toward silently dropping an ambiguous incoming delta.
+            logger.debug("LCM active replay snapshot metadata write failed", exc_info=True)
+
     @staticmethod
     def _matches_store_tail_suffix(
         stored_tail: list[tuple[str, str, str, str]],
@@ -445,6 +542,7 @@ class ReconcileMixin:
                     "tool_calls": decoded_tool_calls,
                 })
         effective_fresh_tail_count = self._fresh_tail_boundary(boundary_messages).count
+        compacted_snapshot_digests = set(self._load_compacted_active_replay_snapshot_digests())
         empty_prefix_cursor: int | None = None
         for cursor in range(len(messages), -1, -1):
             candidate_messages = messages[:cursor]
@@ -509,6 +607,12 @@ class ReconcileMixin:
                 and self._matches_store_tail_suffix(sanitized_replay_tail, candidate_prefix)
             )
             matches_raw_tail = self._matches_store_tail_suffix(stored_tail, candidate_prefix)
+            candidate_snapshot_digest = self._compacted_active_replay_snapshot_digest(candidate_messages)
+            has_durable_compacted_snapshot_replay = (
+                bool(candidate_snapshot_digest)
+                and candidate_snapshot_digest in compacted_snapshot_digests
+                and (matches_sanitized_tail or matches_raw_tail)
+            )
             matches_visible_sanitized_tail = (
                 filtered_candidate_placeholders
                 and bool(candidate_visible_prefix)
@@ -737,6 +841,7 @@ class ReconcileMixin:
                 or has_raw_full_replay
                 or has_scaffold_suffix_replay
                 or has_raw_cleanup_replay
+                or has_durable_compacted_snapshot_replay
             ):
                 return cursor
         return empty_prefix_cursor if allow_empty_prefix else None

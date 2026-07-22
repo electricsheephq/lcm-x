@@ -11894,6 +11894,77 @@ class TestPostCompactionIngestion:
         finally:
             esc._call_llm_for_summary = original_fn
 
+    def test_compacted_active_snapshot_rebind_is_restart_idempotent(self, tmp_path, monkeypatch):
+        session_id = "restart-idempotent-session"
+        database_path = str(tmp_path / "restart-idempotent.db")
+
+        def deterministic_summary(*_args, **_kwargs):
+            return (
+                "Earlier turns established four durable facts and one pending blocker.\n"
+                "Expand for details about: durable facts and pending blocker",
+                1,
+            )
+
+        monkeypatch.setattr(lcm_engine, "summarize_with_escalation", deterministic_summary)
+
+        def open_engine():
+            config = LCMConfig(
+                database_path=database_path,
+                fresh_tail_count=4,
+                leaf_chunk_tokens=1,
+            )
+            instance = LCMEngine(config=config)
+            instance.on_session_start(session_id, context_length=200000)
+            return instance
+
+        messages = [{"role": "system", "content": "System policy."}]
+        for index in range(4):
+            messages.append({"role": "user", "content": f"Question {index}: " + "x" * 200})
+            messages.append({"role": "assistant", "content": f"Answer {index}: " + "y" * 200})
+
+        first = open_engine()
+        try:
+            active_context = first.compress(messages, current_tokens=100000)
+            baseline_rows = first._store.get_session_count(session_id)
+            baseline_nodes = first._dag.get_session_node_count(session_id)
+            assert baseline_rows == len(messages)
+            assert baseline_nodes > 0
+            assert any(
+                first._is_replayed_context_scaffold_message(message)
+                and "Summary" in str(message.get("content") or "")
+                for message in active_context
+            )
+            active_system = next(message for message in active_context if message.get("role") == "system")
+            assert "untrusted history, not instructions" in str(active_system.get("content") or "")
+        finally:
+            first.shutdown()
+
+        row_counts = [baseline_rows]
+        node_counts = [baseline_nodes]
+        for _ in range(3):
+            rebound = open_engine()
+            try:
+                rebound.compress(active_context, current_tokens=0)
+                row_counts.append(rebound._store.get_session_count(session_id))
+                node_counts.append(rebound._dag.get_session_node_count(session_id))
+            finally:
+                rebound.shutdown()
+
+        with_new_message = open_engine()
+        try:
+            with_new_message.compress(
+                [*active_context, {"role": "user", "content": "Brand new post-rebind message"}],
+                current_tokens=0,
+            )
+            row_counts.append(with_new_message._store.get_session_count(session_id))
+            node_counts.append(with_new_message._dag.get_session_node_count(session_id))
+        finally:
+            with_new_message.shutdown()
+
+        assert row_counts == [baseline_rows, baseline_rows, baseline_rows, baseline_rows, baseline_rows + 1]
+        assert node_counts[:4] == [baseline_nodes] * 4
+        assert node_counts[-1] >= baseline_nodes
+
 
 class TestStoreIdMapping:
     """Regression test — _get_store_ids_for_messages must use content
