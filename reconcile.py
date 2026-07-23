@@ -673,6 +673,19 @@ class ReconcileMixin:
                 and matches_raw_tail
                 and candidate_prefix == stored_tail[-len(candidate_prefix) :]
             )
+            # Tool-call IDs are stable execution identities. If an exact durable
+            # suffix includes the same non-empty tool result ID after a process
+            # restart, it is proven replay even when the host only retained a
+            # partial active window shorter than the full durable session. A
+            # genuinely new delta cannot reuse an already persisted call ID.
+            has_tool_anchored_suffix_replay = (
+                not candidate_has_persisted_marker
+                and (matches_sanitized_tail or matches_raw_tail)
+                and any(
+                    role == "tool" and bool(tool_call_id)
+                    for role, _content, tool_call_id, _tool_calls in candidate_prefix
+                )
+            )
             has_persisted_marker_specific_replay_evidence = (
                 not candidate_has_persisted_marker
                 or has_durable_persisted_marker_suffix_replay
@@ -734,6 +747,7 @@ class ReconcileMixin:
                 or matches_durable_persisted_output_full_replay
                 or has_inline_generation_cleanup_replay
                 or has_inline_persisted_generation_suffix_replay
+                or has_tool_anchored_suffix_replay
                 or has_raw_full_replay
                 or has_scaffold_suffix_replay
                 or has_raw_cleanup_replay

@@ -4254,6 +4254,47 @@ class TestAssemblyBudgetSelection:
         assert [row["content"] for row in rows].count("repeat user intent") == 1
         assert rows[-1]["content"] == "new user after restart"
 
+    def test_partial_tool_anchored_tail_replay_after_restart_does_not_duplicate_rows(self, tmp_path, monkeypatch):
+        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=450)
+        persisted_messages = [{"role": "system", "content": "sys"}]
+        for idx in range(40):
+            persisted_messages.extend([
+                {"role": "user", "content": f"historical user {idx}"},
+                {"role": "assistant", "content": f"historical answer {idx}"},
+            ])
+        tool_call = {
+            "id": "call_restart_anchor",
+            "type": "function",
+            "function": {"name": "search_files", "arguments": "{}"},
+        }
+        replayed_tail = [
+            {"role": "assistant", "content": "", "tool_calls": [tool_call]},
+            {
+                "role": "tool",
+                "tool_call_id": "call_restart_anchor",
+                "tool_name": "search_files",
+                "content": "durable tool result",
+            },
+            {"role": "assistant", "content": "durable answer"},
+        ]
+        persisted_messages.extend(replayed_tail)
+        engine._ingest_messages(persisted_messages)
+        original_count = engine._store.get_session_count("assembly-session")
+
+        from hermes_lcm.engine import LCMEngine
+
+        replay = LCMEngine(config=engine._config, hermes_home=str(tmp_path / "hermes"))
+        replay._session_id = "assembly-session"
+        replay._ingest_cursor_needs_reconcile = True
+        replay._ingest_messages(
+            replayed_tail + [{"role": "user", "content": "new user after restart"}]
+        )
+
+        rows = replay._store.get_session_messages("assembly-session")
+        assert len(rows) == original_count + 1
+        assert [row["tool_call_id"] for row in rows].count("call_restart_anchor") == 1
+        assert rows[-1]["content"] == "new user after restart"
+
     def test_non_contiguous_preserved_prompt_replay_does_not_duplicate_durable_rows(self, tmp_path, monkeypatch):
         engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=450)
         messages = [
