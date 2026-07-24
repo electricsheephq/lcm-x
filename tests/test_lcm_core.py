@@ -4463,6 +4463,9 @@ class TestAssemblyBudgetSelection:
         ])
 
         rows = replay._store.get_session_messages("assembly-session")
+        assert len(rows) == original_count + 2
+        assert [row["tool_call_id"] for row in rows].count("call_multi_anchor_a") == 1
+        assert [row["tool_call_id"] for row in rows].count("call_multi_anchor_b") == 1
         assert any(row["content"] == "brand-new assistant between tools" for row in rows[original_count:])
         assert rows[-1]["content"] == "new user after multiple tools"
 
@@ -4501,6 +4504,45 @@ class TestAssemblyBudgetSelection:
         assert len(rows) == original_count + 1
         assert [row["tool_call_id"] for row in rows].count("call_repeated_user_anchor") == 1
         assert rows[-1]["content"] == "repeat me"
+
+    def test_reconcile_filters_later_exact_tool_pair_after_preserved_new_assistant(self, tmp_path, monkeypatch):
+        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=450)
+        call_a = {"id": "call_multi_a", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}
+        call_b = {"id": "call_multi_b", "type": "function", "function": {"name": "search_files", "arguments": "{}"}}
+        pair_a = [
+            {"role": "assistant", "content": "", "tool_calls": [call_a]},
+            {"role": "tool", "tool_call_id": "call_multi_a", "tool_name": "read_file", "content": "A"},
+        ]
+        pair_b = [
+            {"role": "assistant", "content": "", "tool_calls": [call_b]},
+            {"role": "tool", "tool_call_id": "call_multi_b", "tool_name": "search_files", "content": "B"},
+        ]
+        engine._ingest_messages([
+            {"role": "system", "content": "sys"},
+            *pair_a,
+            {"role": "assistant", "content": "old durable assistant"},
+            *pair_b,
+            {"role": "user", "content": "intervening durable user"},
+        ])
+        original_count = engine._store.get_session_count("assembly-session")
+
+        from hermes_lcm.engine import LCMEngine
+
+        replay = LCMEngine(config=engine._config, hermes_home=str(tmp_path / "hermes"))
+        replay._session_id = "assembly-session"
+        replay._ingest_cursor_needs_reconcile = True
+        replay._ingest_messages([
+            *pair_a,
+            {"role": "assistant", "content": "genuinely new assistant"},
+            *pair_b,
+            {"role": "user", "content": "new user"},
+        ])
+
+        rows = replay._store.get_session_messages("assembly-session")
+        assert len(rows) == original_count + 2
+        assert [row["tool_call_id"] for row in rows].count("call_multi_a") == 1
+        assert [row["tool_call_id"] for row in rows].count("call_multi_b") == 1
+        assert [row["content"] for row in rows[-2:]] == ["genuinely new assistant", "new user"]
 
     def test_non_contiguous_preserved_prompt_replay_does_not_duplicate_durable_rows(self, tmp_path, monkeypatch):
         engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=450)

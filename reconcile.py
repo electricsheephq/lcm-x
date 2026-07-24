@@ -1010,6 +1010,60 @@ class ReconcileMixin:
         )
         return 0
 
+    def _replayed_tool_segment_indexes_after_cursor(
+        self,
+        messages: List[Dict[str, Any]],
+        cursor: int,
+    ) -> set[int]:
+        """Find exact durable tool pairs replayed after a preserved new delta."""
+        if not self._session_id or cursor >= len(messages):
+            return set()
+        session_count = self._store.get_session_count(self._session_id)
+        if session_count <= 0:
+            return set()
+        tail_limit = min(max(len(messages) * 4, 64), session_count)
+        stored_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
+        stored_identities = {
+            self._message_replay_identity(row, stored_row=True)
+            for row in stored_rows
+            if not self._matches_ignore_message_patterns(row, stored_row=True)
+        }
+        replayed: set[int] = set()
+        index = max(0, cursor)
+        while index < len(messages):
+            assistant = messages[index]
+            if str(assistant.get("role") or "") != "assistant" or not assistant.get("tool_calls"):
+                index += 1
+                continue
+            assistant_identity = self._message_replay_identity(assistant)
+            call_ids = {
+                str(call.get("id") or "")
+                for call in assistant.get("tool_calls") or []
+                if isinstance(call, dict) and str(call.get("id") or "")
+            }
+            result_indexes: dict[str, int] = {}
+            probe = index + 1
+            while probe < len(messages) and str(messages[probe].get("role") or "") == "tool":
+                result = messages[probe]
+                tool_call_id = str(result.get("tool_call_id") or "")
+                content = normalize_content_value(result.get("content")) or ""
+                if (
+                    tool_call_id in call_ids
+                    and not _is_hermes_persisted_output_marker(content)
+                    and self._message_replay_identity(result) in stored_identities
+                ):
+                    result_indexes[tool_call_id] = probe
+                probe += 1
+            if (
+                call_ids
+                and assistant_identity in stored_identities
+                and call_ids.issubset(result_indexes)
+            ):
+                replayed.add(index)
+                replayed.update(result_indexes.values())
+            index = max(index + 1, probe)
+        return replayed
+
     def _raw_externalized_placeholder_replay_identity(self, msg: Dict[str, Any]) -> tuple[str, str, str, str]:
         return (
             str(msg.get("role") or "unknown"),
