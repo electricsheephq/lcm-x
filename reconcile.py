@@ -445,6 +445,12 @@ class ReconcileMixin:
                     "tool_calls": decoded_tool_calls,
                 })
         effective_fresh_tail_count = self._fresh_tail_boundary(boundary_messages).count
+        stored_tool_identities = {
+            identity
+            for identity in stored_tail
+            for role, _content, tool_call_id, _tool_calls in [identity]
+            if role == "tool" and tool_call_id
+        }
         empty_prefix_cursor: int | None = None
         for cursor in range(len(messages), -1, -1):
             candidate_messages = messages[:cursor]
@@ -509,6 +515,47 @@ class ReconcileMixin:
                 and self._matches_store_tail_suffix(sanitized_replay_tail, candidate_prefix)
             )
             matches_raw_tail = self._matches_store_tail_suffix(stored_tail, candidate_prefix)
+            candidate_has_tool_anchor = any(
+                role == "tool" and bool(tool_call_id)
+                for role, _content, tool_call_id, _tool_calls in candidate_prefix
+            )
+            candidate_tool_anchor_indexes = [
+                index
+                for index, (role, _content, tool_call_id, _tool_calls) in enumerate(candidate_prefix)
+                if role == "tool" and bool(tool_call_id)
+            ]
+            candidate_tool_identities = {
+                candidate_prefix[index]
+                for index in candidate_tool_anchor_indexes
+            }
+            candidate_ends_with_replayed_tool_result = (
+                len(candidate_tool_anchor_indexes) == 1
+                and candidate_tool_identities.issubset(stored_tool_identities)
+                and candidate_tool_anchor_indexes[0] == len(candidate_prefix) - 1
+                and all(
+                    identity[0] == "assistant" and not identity[1]
+                    for identity in candidate_prefix[: candidate_tool_anchor_indexes[0]]
+                )
+            )
+            candidate_has_user_after_tool_anchor = any(
+                identity[0] == "user"
+                for identity in candidate_prefix[candidate_tool_anchor_indexes[-1] + 1 :]
+            ) if candidate_tool_anchor_indexes else False
+            matches_tool_anchored_stale_window = (
+                candidate_has_tool_anchor
+                and not candidate_has_user_after_tool_anchor
+                and (
+                    any(
+                        sanitized_replay_tail[start : start + len(candidate_prefix)] == candidate_prefix
+                        for start in range(len(sanitized_replay_tail) - len(candidate_prefix) + 1)
+                    )
+                    or any(
+                        stored_tail[start : start + len(candidate_prefix)] == candidate_prefix
+                        for start in range(len(stored_tail) - len(candidate_prefix) + 1)
+                    )
+                )
+            )
+
             matches_visible_sanitized_tail = (
                 filtered_candidate_placeholders
                 and bool(candidate_visible_prefix)
@@ -573,6 +620,8 @@ class ReconcileMixin:
             if (
                 not matches_sanitized_tail
                 and not matches_raw_tail
+                and not candidate_ends_with_replayed_tool_result
+                and not matches_tool_anchored_stale_window
                 and not matches_inline_generation_cleanup_tail
                 and not matches_durable_persisted_output_full_replay
             ):
@@ -673,19 +722,22 @@ class ReconcileMixin:
                 and matches_raw_tail
                 and candidate_prefix == stored_tail[-len(candidate_prefix) :]
             )
-            # Tool-call IDs are stable execution identities. If an exact durable
-            # suffix includes the same non-empty tool result ID after a process
-            # restart, it is proven replay even when the host only retained a
-            # partial active window shorter than the full durable session. A
-            # genuinely new delta cannot reuse an already persisted call ID.
-            has_tool_anchored_suffix_replay = (
+            # Tool results carry stable execution identities. A stale exact
+            # window may be skipped through matching assistant rows, but never
+            # through a user turn after the final tool anchor. If surrounding
+            # content changed, only skip through the final durable tool result;
+            # later assistant/user messages may be genuinely new after recovery.
+            has_tool_id_anchored_replay = (
                 not candidate_has_persisted_marker
-                and (matches_sanitized_tail or matches_raw_tail)
-                and any(
-                    role == "tool" and bool(tool_call_id)
-                    for role, _content, tool_call_id, _tool_calls in candidate_prefix
+                and candidate_has_tool_anchor
+                and (
+                    matches_sanitized_tail
+                    or matches_raw_tail
+                    or matches_tool_anchored_stale_window
+                    or candidate_ends_with_replayed_tool_result
                 )
             )
+
             has_persisted_marker_specific_replay_evidence = (
                 not candidate_has_persisted_marker
                 or has_durable_persisted_marker_suffix_replay
@@ -747,7 +799,7 @@ class ReconcileMixin:
                 or matches_durable_persisted_output_full_replay
                 or has_inline_generation_cleanup_replay
                 or has_inline_persisted_generation_suffix_replay
-                or has_tool_anchored_suffix_replay
+                or has_tool_id_anchored_replay
                 or has_raw_full_replay
                 or has_scaffold_suffix_replay
                 or has_raw_cleanup_replay
