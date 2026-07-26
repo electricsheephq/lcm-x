@@ -323,6 +323,11 @@ _LCM_INSPECT_REF_SCAN_MESSAGE_LIMIT = 10_000
 _LCM_INSPECT_PAYLOAD_METADATA_READ_BYTES = 16_384
 _LCM_INSPECT_MAX_RESPONSE_CHARS = 20_000
 _OPERATOR_TEXT_FIELD_MAX_CHARS = 1_000
+_LCM_RECENT_PROJECT_ID_MAX_CHARS = _OPERATOR_TEXT_FIELD_MAX_CHARS
+
+
+class _RecentFrontierLimitExceeded(RuntimeError):
+    pass
 
 
 def _bounded_operator_field(value: object) -> tuple[str, bool]:
@@ -1438,6 +1443,8 @@ def _recent_leaf_sections(
     window: RecentPeriodWindow,
     requested_scope: str,
     limit: int,
+    *,
+    project_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Load fallback nodes without retaining their TEMP-staging snapshot."""
     with engine._dag._db_lock:
@@ -1450,6 +1457,7 @@ def _recent_leaf_sections(
                 window,
                 requested_scope,
                 limit,
+                project_id=project_id,
             )
 
 
@@ -1458,6 +1466,8 @@ def _recent_leaf_sections_staged(
     window: RecentPeriodWindow,
     requested_scope: str,
     limit: int,
+    *,
+    project_id: str | None = None,
 ) -> list[dict[str, Any]]:
     connection = engine._dag.connection
     if connection is None:
@@ -1480,6 +1490,13 @@ def _recent_leaf_sections_staged(
         placeholders = ",".join("?" for _ in session_ids)
         where.append(f"session_id IN ({placeholders})")
         params.extend(session_ids)
+    elif requested_scope == "project":
+        where.append(
+            "EXISTS (SELECT 1 FROM session_project_metadata project "
+            "WHERE project.session_id = summary_nodes.session_id "
+            "AND project.project_id = ?)"
+        )
+        params.append(project_id)
     # Probe one sentinel row beyond the work cap without an expression ORDER BY.
     # The session index can stop at the sentinel instead of scanning/sorting the
     # full matching corpus; ordering happens only after this set is proven small.
@@ -1501,6 +1518,8 @@ def _recent_leaf_sections_staged(
                     "bound; returning no partial frontier",
                     _LCM_RECENT_FRONTIER_WORK_LIMIT,
                 )
+                if requested_scope != "conversation":
+                    raise _RecentFrontierLimitExceeded
                 return []
             if not id_rows:
                 return []
@@ -1536,6 +1555,8 @@ def _recent_leaf_sections_staged(
                 [int(row[0]) for row in rows],
                 limit=_LCM_RECENT_FRONTIER_WORK_LIMIT,
             )
+    except _RecentFrontierLimitExceeded:
+        raise
     except Exception:
         logger.debug(
             "LCM recent fallback or transitive lineage read failed closed",
@@ -1626,11 +1647,20 @@ def _bounded_recent_json(response: dict[str, Any], sections: list[dict[str, Any]
         # of provenance rows outside the char budget (maintainer #389 C2). Because
         # this runs inside every fit check, the per-section provenance entry is
         # counted against the cap in lockstep with its section.
-        provenance["rollups"] = [
-            {"rollup_id": int(section["rollup_id"]), "status": str(section["status"])}
-            for section in response["sections"]
-            if section.get("kind") == "rollup"
-        ]
+        if "fallback" in provenance:
+            provenance["rollups"] = [
+                {"rollup_id": int(section["rollup_id"]), "status": str(section["status"])}
+                for section in response["sections"]
+                if section.get("kind") == "rollup"
+            ]
+        else:
+            provenance["summaries"] = [
+                {
+                    "node_id": int(section["node_id"]),
+                    "session_id": str(section["session_id"]),
+                }
+                for section in response["sections"]
+            ]
         return json.dumps(response, ensure_ascii=False)
 
     for section in sections:
@@ -1671,7 +1701,7 @@ def _bounded_recent_json(response: dict[str, Any], sections: list[dict[str, Any]
 
 
 def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
-    """Serve conversation rollups or fall back; cross-session rollups are future work."""
+    """Serve conversation rollups or bounded cross-session DAG summaries."""
     engine = _require_engine(kwargs)
     if engine is None:
         return json.dumps({"error": "LCM engine not initialized"})
@@ -1682,8 +1712,10 @@ def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps({"error": str(exc)})
 
     requested_scope = str(args.get("scope", "conversation")).strip().lower()
-    if requested_scope != "conversation":
-        return json.dumps({"error": "scope must be one of: conversation"})
+    if requested_scope not in {"conversation", "project", "all"}:
+        return json.dumps({"error": "scope must be one of: conversation, project, all"})
+    if "project_id" in args and requested_scope != "project":
+        return json.dumps({"error": "project_id is only valid when scope=project"})
 
     parsed_limit, limit_error = _parse_strict_int(
         args.get("limit", _LCM_RECENT_DEFAULT_LIMIT),
@@ -1695,6 +1727,67 @@ def lcm_recent(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps({"error": "limit must be a positive integer"})
     requested_limit = parsed_limit
     limit = min(requested_limit, _LCM_RECENT_HARD_LIMIT_CAP)
+
+    if requested_scope != "conversation":
+        project_id: str | None = None
+        if requested_scope == "project":
+            if "project_id" in args:
+                project_id = args["project_id"]
+            else:
+                metadata = engine._store.get_session_project_metadata(
+                    engine.current_session_id
+                )
+                if metadata is None:
+                    return json.dumps(
+                        {
+                            "error": "scope=project requires project metadata for the active session"
+                        }
+                    )
+                project_id = metadata.project_id
+            if not isinstance(project_id, str):
+                return json.dumps({"error": "project_id must be a string"})
+            if not project_id.strip():
+                return json.dumps({"error": "project_id must not be empty"})
+            if len(project_id) > _LCM_RECENT_PROJECT_ID_MAX_CHARS:
+                return json.dumps(
+                    {
+                        "error": "project_id must be at most "
+                        f"{_LCM_RECENT_PROJECT_ID_MAX_CHARS} characters"
+                    }
+                )
+
+        try:
+            sections = _recent_leaf_sections(
+                engine,
+                window,
+                requested_scope,
+                limit,
+                project_id=project_id,
+            )
+        except _RecentFrontierLimitExceeded:
+            return json.dumps(
+                {
+                    "error": "recent summary frontier exceeds bounded work limit "
+                    f"({_LCM_RECENT_FRONTIER_WORK_LIMIT}); narrow period or scope"
+                }
+            )
+        response: dict[str, Any] = {
+            "period": window.period,
+            "scope": requested_scope,
+            "window": {
+                "start": _recent_iso(window.start),
+                "end": _recent_iso(window.end),
+            },
+            "limit": limit,
+            "char_limit": _LCM_RECENT_MAX_RESPONSE_CHARS,
+            "mode": "dag_summaries",
+            "provenance": {},
+        }
+        if project_id is not None:
+            response["project_id"] = project_id
+        if requested_limit > _LCM_RECENT_HARD_LIMIT_CAP:
+            response["limit_clamped_from"] = requested_limit
+        return _bounded_recent_json(response, sections)
 
     rollup_scope = engine.current_session_id
     rollups, fallback_reason = _recent_ready_rollups(engine, window, rollup_scope)
