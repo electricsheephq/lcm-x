@@ -466,6 +466,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             "reason": "not run",
         }
 
+        # Transient token bound applied to the fresh tail while the current
+        # compress/preflight call runs with the pressure yield engaged
+        # (0 = inactive). Reset at each entry point, never persisted.
+        self._pressure_yield_tail_token_limit: int = 0
+
         # State required by ContextEngine ABC and run_agent.py compatibility
         self.model = ""
         self.base_url = ""
@@ -1929,11 +1934,81 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         return messages[leading_anchor_count:fresh_tail_start]
 
     def _fresh_tail_boundary(self, messages: List[Dict[str, Any]]) -> FreshTailBoundary:
+        max_tokens = self._config.fresh_tail_max_tokens
+        if self._pressure_yield_tail_token_limit > 0:
+            max_tokens = (
+                min(max_tokens, self._pressure_yield_tail_token_limit)
+                if max_tokens > 0
+                else self._pressure_yield_tail_token_limit
+            )
         return resolve_fresh_tail_boundary(
             messages,
             fresh_tail_count=self._config.fresh_tail_count,
-            fresh_tail_max_tokens=self._config.fresh_tail_max_tokens,
+            fresh_tail_max_tokens=max_tokens,
         )
+
+    def _maybe_engage_fresh_tail_pressure_yield(
+        self,
+        messages: List[Dict[str, Any]],
+        observed_tokens: Optional[int] = None,
+    ) -> bool:
+        """Arm a derived token bound for the fresh tail, or return False.
+
+        The count-protected tail can cover the entire token mass of a
+        tool-heavy session (an operator-tuned ``fresh_tail_count`` protects
+        more tokens than the compaction threshold allows), leaving compaction
+        permanently no-opping while the host reports over-threshold pressure
+        every turn — a fatal loop ending at the provider hard limit (#441,
+        same class as #414). This helper detects exactly that state: real
+        pressure, and less than one working leaf chunk of raw backlog outside
+        the resolved tail. It then bounds the tail so the backlog can fit the
+        observed overage plus one working leaf chunk, and the caller retries.
+
+        Fires at most once per entry point (the transient bound stays armed
+        for the rest of the call), never when disabled, and never without
+        host-observed pressure, so healthy sessions see no behavior change.
+        """
+        if not self._config.fresh_tail_pressure_yield_enabled:
+            return False
+        if self._pressure_yield_tail_token_limit > 0:
+            return False
+        if self.threshold_tokens <= 0 or not messages:
+            return False
+        # Only host-reported pressure counts: the caller must pass the tokens
+        # it actually observed for this attempt. Falling back to stale usage
+        # numbers would arm the yield outside the deadlock it exists for.
+        observed = int(observed_tokens or 0)
+        if observed < self.threshold_tokens:
+            return False
+        boundary = self._fresh_tail_boundary(messages)
+        leading_anchor_count = self._leading_anchor_count(messages)
+        raw_messages = messages[leading_anchor_count:]
+        raw_tokens = count_messages_tokens(raw_messages)
+        eligible_tokens = max(0, raw_tokens - boundary.tokens)
+        working_leaf_chunk_tokens = self._working_leaf_chunk_tokens(eligible_tokens)
+        if eligible_tokens >= working_leaf_chunk_tokens:
+            return False
+        needed = (observed - self.threshold_tokens) + working_leaf_chunk_tokens
+        tail_token_limit = max(1, raw_tokens - needed)
+        if tail_token_limit >= boundary.tokens:
+            return False
+        self._pressure_yield_tail_token_limit = tail_token_limit
+        logger.warning(
+            "LCM fresh tail yielded under pressure: observed=%d >= threshold=%d "
+            "with only %d eligible raw tokens outside a %d-message/%d-token tail "
+            "(fresh_tail_count=%d); bounding tail to %d tokens so compaction can progress",
+            observed,
+            self.threshold_tokens,
+            eligible_tokens,
+            boundary.count,
+            boundary.tokens,
+            self._config.fresh_tail_count,
+            tail_token_limit,
+        )
+        return True
+
+    def _reset_fresh_tail_pressure_yield(self) -> None:
+        self._pressure_yield_tail_token_limit = 0
 
     def _fresh_tail_start(self, messages: List[Dict[str, Any]]) -> int:
         return self._fresh_tail_boundary(messages).start
