@@ -143,6 +143,11 @@ _UNRECOVERABLE_TRUNCATION_RE = re.compile(
 _HERMES_RESULTS_DIRNAME = "hermes-results"
 _MAX_RECOVERED_PERSISTED_OUTPUT_BYTES = 64 * 1024 * 1024
 _SENSITIVE_PLACEHOLDER_PREFIX = "[LCM sensitive redaction:"
+# Sidecar key carrying pre-redaction content from `protect_message_for_ingest`
+# to `MessageStore`, which persists it in the non-indexed `content_raw` column.
+# It is stripped before the row is written and never appears in a stored
+# message dict, so no reader can pick it up by accident.
+SENSITIVE_RAW_CONTENT_KEY = "_lcm_raw_content"
 _SENSITIVE_PATTERN_CATALOG: dict[str, re.Pattern[str]] = {
     "api_key": re.compile(
         r"(?P<prefix>(?:\\?[\"']?)\b(?:api[_-]?key|api[_-]?token|access[_-]?token|secret[_-]?key|client[_-]?secret)\b\s*(?:\\?[\"']?)\s*[:=]\s*(?:\\?[\"']?))"
@@ -766,6 +771,7 @@ def sensitive_pattern_status(config) -> dict[str, Any]:
     """Return metadata-only status for opt-in sensitive redaction."""
     configured, active, unknown = _configured_sensitive_pattern_names(config)
     enabled = bool(getattr(config, "sensitive_patterns_enabled", False))
+    retain_raw = sensitive_raw_content_retention_enabled(config)
     return {
         "sensitive_patterns_enabled": enabled,
         "enabled": enabled,
@@ -775,7 +781,10 @@ def sensitive_pattern_status(config) -> dict[str, Any]:
         "unknown_patterns": unknown,
         "source": getattr(config, "sensitive_patterns_source", "default"),
         "placeholder_format": "[LCM sensitive redaction: name=<pattern>; chars=<n>; bytes=<n>; sha256=<16 for non-password>]",
-        "lossless_recovery": False if enabled and active else None,
+        "retain_raw_content": retain_raw,
+        "lossless_recovery": (
+            None if not (enabled and active) else bool(retain_raw)
+        ),
     }
 
 
@@ -813,6 +822,21 @@ def _active_sensitive_pattern_names(config) -> list[str]:
         return []
     _configured, active, _unknown = _configured_sensitive_pattern_names(config)
     return active
+
+
+def sensitive_raw_content_retention_enabled(config) -> bool:
+    """True when redacted rows should also retain their pre-redaction content.
+
+    Requires both ``sensitive_patterns_enabled`` and
+    ``sensitive_retain_raw_content``: with redaction off there is nothing to
+    retain, and the retention column is only meaningful for rows a pattern
+    actually rewrote.
+    """
+    if not bool(getattr(config, "sensitive_patterns_enabled", False)):
+        return False
+    if not bool(getattr(config, "sensitive_retain_raw_content", False)):
+        return False
+    return bool(_active_sensitive_pattern_names(config))
 
 
 def _has_mixed_alnum(value: str) -> bool:
@@ -1529,6 +1553,12 @@ def protect_message_for_ingest(
     strings before they hit ``messages.content`` or ``messages.tool_calls``.
     When the opt-in generic large-output externalization setting is enabled,
     whole-message content still follows the existing threshold-based behavior.
+
+    When ``sensitive_retain_raw_content`` is enabled alongside sensitive
+    patterns, the pre-redaction content is attached under the
+    ``SENSITIVE_RAW_CONTENT_KEY`` sidecar key so ``MessageStore`` can persist it
+    in the non-indexed ``messages.content_raw`` column. ``content`` itself is
+    unchanged, so every downstream reader keeps seeing only the redacted form.
     """
     msg = dict(message or {})
     role = str(msg.get("role") or "unknown")
@@ -1681,7 +1711,53 @@ def protect_message_for_ingest(
             hermes_home=hermes_home,
         )
 
+    _attach_retained_raw_content(msg, config, raw_normalized_content)
     return msg
+
+
+def attach_retained_raw_content(
+    msg: Dict[str, Any], config, original_content: Any
+) -> None:
+    """Attach the pre-redaction content sidecar to an already-protected message.
+
+    Public entry point for callers that redact before ``protect_*_for_ingest``
+    sees the message. ``LCMEngine._ingest_messages`` redacts once up front to
+    build active replay, so by the time ingest protection runs the original
+    characters are already gone from its input; it re-supplies them here from
+    the untouched caller-provided message.
+
+    A sidecar already attached by ``protect_message_for_ingest`` wins, so
+    calling this twice is safe.
+    """
+    if SENSITIVE_RAW_CONTENT_KEY in msg:
+        return
+    _attach_retained_raw_content(msg, config, normalize_content_value(original_content) or "")
+
+
+def _attach_retained_raw_content(
+    msg: Dict[str, Any], config, raw_normalized_content: str
+) -> None:
+    """Attach the pre-redaction content sidecar when raw retention is on.
+
+    Only sensitive-pattern redaction is irreversible; externalization keeps a
+    recoverable payload behind its reference, so retaining raw content is
+    limited to rows a sensitive pattern actually rewrote. The sidecar is set
+    only when the redacted content genuinely differs from the original, so an
+    unmatched message costs nothing.
+    """
+    if not sensitive_raw_content_retention_enabled(config):
+        return
+    if not raw_normalized_content:
+        return
+    protected_content = normalize_content_value(msg.get("content")) or ""
+    if protected_content == raw_normalized_content:
+        return
+    if _SENSITIVE_PLACEHOLDER_PREFIX not in protected_content:
+        # The content changed for a reason other than sensitive redaction
+        # (externalization, truncation markers). Those paths are already
+        # recoverable; do not duplicate their payload here.
+        return
+    msg[SENSITIVE_RAW_CONTENT_KEY] = raw_normalized_content
 
 
 def quarantine_suspicious_assistant_message(
