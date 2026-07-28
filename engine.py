@@ -5,6 +5,7 @@ with a DAG-based summarization system that preserves every message.
 """
 
 import asyncio
+import contextlib
 import copy
 import hashlib
 import json
@@ -436,9 +437,21 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         }
 
         # Transient token bound applied to the fresh tail while the current
-        # compress/preflight call runs with the pressure yield engaged
-        # (0 = inactive). Reset at each entry point, never persisted.
+        # compress/preflight invocation runs with the pressure yield engaged
+        # (0 = inactive). Lives strictly inside a
+        # _fresh_tail_pressure_yield_invocation scope: cleared on scope exit
+        # (success or exception), saved/restored across nested invocations,
+        # never persisted.
         self._pressure_yield_tail_token_limit: int = 0
+        # Consecutive entry-point invocations blocked by the fresh tail while
+        # the host observed over-threshold pressure. This is the "sustained"
+        # evidence the yield requires; it survives across invocations by
+        # design and resets on relief (pressure below threshold, a successful
+        # compaction, or session reset).
+        self._pressure_yield_blocked_streak: int = 0
+        # Scope bookkeeping for _fresh_tail_pressure_yield_invocation.
+        self._pressure_yield_scope_depth: int = 0
+        self._pressure_yield_streak_counted: bool = False
 
         # State required by ContextEngine ABC and run_agent.py compatibility
         self.model = ""
@@ -1857,10 +1870,43 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             fresh_tail_max_tokens=max_tokens,
         )
 
+    @contextlib.contextmanager
+    def _fresh_tail_pressure_yield_invocation(self):
+        """Invocation scope for the transient pressure-yield tail bound.
+
+        Entered by every public compaction entry point (``compress`` and
+        ``should_compress_preflight``). The bound armed inside a scope is
+        cleared on exit through every path — success, exception, and early
+        return — and a nested (reentrant) invocation gets its own clean scope
+        while the outer invocation's bound is restored when the inner one
+        exits. Nothing outside a scope ever observes a bounded tail.
+        """
+        saved_limit = self._pressure_yield_tail_token_limit
+        saved_counted = self._pressure_yield_streak_counted
+        self._pressure_yield_tail_token_limit = 0
+        self._pressure_yield_streak_counted = False
+        self._pressure_yield_scope_depth += 1
+        try:
+            yield
+        finally:
+            self._pressure_yield_scope_depth -= 1
+            self._pressure_yield_tail_token_limit = saved_limit
+            self._pressure_yield_streak_counted = saved_counted
+
+    def _note_fresh_tail_pressure_relieved(self) -> None:
+        """Reset the sustained-pressure evidence.
+
+        Called when an entry point observes the session under threshold or a
+        compaction pass makes real progress: either way the deadlock the yield
+        exists for is not happening, so the streak starts over.
+        """
+        self._pressure_yield_blocked_streak = 0
+
     def _maybe_engage_fresh_tail_pressure_yield(
         self,
         messages: List[Dict[str, Any]],
         observed_tokens: Optional[int] = None,
+        eligible_tokens: Optional[int] = None,
     ) -> bool:
         """Arm a derived token bound for the fresh tail, or return False.
 
@@ -1870,13 +1916,27 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         permanently no-opping while the host reports over-threshold pressure
         every turn — a fatal loop ending at the provider hard limit (#441,
         same class as #414). This helper detects exactly that state: real
-        pressure, and less than one working leaf chunk of raw backlog outside
-        the resolved tail. It then bounds the tail so the backlog can fit the
-        observed overage plus one working leaf chunk, and the caller retries.
+        pressure, and less than one working leaf chunk of eligible raw backlog
+        outside the resolved tail. It then bounds the tail so the backlog can
+        fit the observed overage plus one working leaf chunk, and the caller
+        retries.
 
-        Fires at most once per entry point (the transient bound stays armed
-        for the rest of the call), never when disabled, and never without
-        host-observed pressure, so healthy sessions see no behavior change.
+        Sustained-pressure gate: ``fresh_tail_count`` softens only after
+        ``fresh_tail_pressure_yield_min_observations`` consecutive entry-point
+        invocations were blocked by the tail under host-observed over-threshold
+        pressure (each invocation counts once). A single over-threshold
+        observation therefore does NOT make the tail a soft suffix at the
+        default setting; operators who want first-observation yielding set the
+        knob to 1. The armed bound itself stays invocation-scoped (see
+        ``_fresh_tail_pressure_yield_invocation``); only the blocked-streak
+        evidence persists across invocations, and it resets on relief.
+
+        ``eligible_tokens`` is the caller's already-filtered view of the raw
+        backlog outside the tail (ignored messages and persisted placeholders
+        excluded), so this check agrees with the candidate-status/compress
+        filtering; when omitted it falls back to the unfiltered boundary math.
+        Never arms when disabled, and never without host-observed pressure, so
+        healthy sessions see no behavior change.
         """
         if not self._config.fresh_tail_pressure_yield_enabled:
             return False
@@ -1889,12 +1949,14 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         # numbers would arm the yield outside the deadlock it exists for.
         observed = int(observed_tokens or 0)
         if observed < self.threshold_tokens:
+            self._note_fresh_tail_pressure_relieved()
             return False
         boundary = self._fresh_tail_boundary(messages)
         leading_anchor_count = self._leading_anchor_count(messages)
         raw_messages = messages[leading_anchor_count:]
         raw_tokens = count_messages_tokens(raw_messages)
-        eligible_tokens = max(0, raw_tokens - boundary.tokens)
+        if eligible_tokens is None:
+            eligible_tokens = max(0, raw_tokens - boundary.tokens)
         working_leaf_chunk_tokens = self._working_leaf_chunk_tokens(eligible_tokens)
         if eligible_tokens >= working_leaf_chunk_tokens:
             return False
@@ -1902,11 +1964,36 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         tail_token_limit = max(1, raw_tokens - needed)
         if tail_token_limit >= boundary.tokens:
             return False
+        if (
+            self._pressure_yield_scope_depth == 1
+            and not self._pressure_yield_streak_counted
+        ):
+            self._pressure_yield_blocked_streak += 1
+            self._pressure_yield_streak_counted = True
+        min_observations = max(
+            1, int(self._config.fresh_tail_pressure_yield_min_observations)
+        )
+        if self._pressure_yield_blocked_streak < min_observations:
+            logger.info(
+                "LCM fresh tail blocked under pressure (observation %d/%d): "
+                "observed=%d >= threshold=%d with only %d eligible raw tokens "
+                "outside a %d-message/%d-token tail; yielding once pressure is sustained",
+                self._pressure_yield_blocked_streak,
+                min_observations,
+                observed,
+                self.threshold_tokens,
+                eligible_tokens,
+                boundary.count,
+                boundary.tokens,
+            )
+            return False
         self._pressure_yield_tail_token_limit = tail_token_limit
         logger.warning(
-            "LCM fresh tail yielded under pressure: observed=%d >= threshold=%d "
-            "with only %d eligible raw tokens outside a %d-message/%d-token tail "
-            "(fresh_tail_count=%d); bounding tail to %d tokens so compaction can progress",
+            "LCM fresh tail yielded under sustained pressure (%d blocked observation(s)): "
+            "observed=%d >= threshold=%d with only %d eligible raw tokens outside "
+            "a %d-message/%d-token tail (fresh_tail_count=%d); bounding tail to "
+            "%d tokens so compaction can progress",
+            self._pressure_yield_blocked_streak,
             observed,
             self.threshold_tokens,
             eligible_tokens,
@@ -1917,8 +2004,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         )
         return True
 
-    def _reset_fresh_tail_pressure_yield(self) -> None:
+    def _clear_fresh_tail_pressure_yield_state(self) -> None:
+        """Session-reset clearing: drop the bound and the sustained evidence."""
         self._pressure_yield_tail_token_limit = 0
+        self._pressure_yield_blocked_streak = 0
 
     def _fresh_tail_start(self, messages: List[Dict[str, Any]]) -> int:
         return self._fresh_tail_boundary(messages).start
