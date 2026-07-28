@@ -9,6 +9,7 @@ degrade matrix (embeddings-off) still returns the FTS arm.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 import time
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ import hermes_lcm.tools as lcm_tools
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, SummaryNode
 from hermes_lcm.store import MessageStore
+from hermes_lcm.tokens import count_tokens
 from hermes_lcm.vector_store import EmbeddingIdentity, VectorStore
 
 CURRENT = "session-cur"
@@ -484,6 +486,183 @@ def test_answer_ready_is_opt_in_and_default_response_is_byte_compatible(
     assert len(payload["hits"][0]["snippet"]) == 300
     assert "content" not in payload["hits"][0]
     assert "answer_ready" not in payload["provenance"]
+
+
+def test_session_expand_v1_off_answer_ready_delivery_snapshot(
+    recall_engine, monkeypatch
+):
+    summary = "kanban dashboard sprint " + "stable evidence " * 20
+    node = _add_summary(
+        recall_engine,
+        summary,
+        session_id="session-a",
+        created_at=10.0,
+    )
+    _patch_summary_arm(
+        monkeypatch,
+        [_summary_hit(recall_engine, node)],
+    )
+    monkeypatch.setattr(
+        lcm_tools, "resolve_provider", lambda _config: MockProvider()
+    )
+    monkeypatch.setattr(lcm_tools.time, "time", lambda: 10.0)
+    recall_engine._config.session_expand_v1 = False
+
+    raw = lcm_tools.lcm_recall(
+        {
+            "query": "kanban dashboard sprint",
+            "include": "summaries",
+            "detail": "answer_ready",
+            "scope_bias": 0.0,
+            "limit": 1,
+        },
+        engine=recall_engine,
+    )
+
+    assert hashlib.sha256(raw.encode()).hexdigest() == (
+        "d46423464ce8c542a9489f85b2c47cc730ae5fa4caf211642bf3b2914d84cad7"
+    )
+
+
+def test_session_expand_v1_config_defaults_and_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    default = LCMConfig()
+    assert default.session_expand_v1 is False
+    assert default.session_expand_v1_per_session_tokens == 3_500
+
+    monkeypatch.setenv("LCM_SESSION_EXPAND_V1", "true")
+    monkeypatch.setenv("LCM_SESSION_EXPAND_V1_PER_SESSION_TOKENS", "4200")
+    configured = LCMConfig.from_env()
+    assert configured.session_expand_v1 is True
+    assert configured.session_expand_v1_per_session_tokens == 4_200
+
+
+def test_session_expand_v1_appends_top_three_session_windows_with_exact_refs(
+    recall_engine, monkeypatch
+):
+    recall_engine._config.embeddings_enabled = False
+    recall_engine._config.session_expand_v1 = True
+    recall_engine._config.session_expand_v1_per_session_tokens = 140
+    session_ids = tuple(f"session-{letter}" for letter in "abcdefghij")
+    recall_engine._session_occurrence_dates = {
+        session_id: f"2024-01-{session_index + 1:02d}"
+        for session_index, session_id in enumerate(session_ids)
+    }
+    ranked_hits = []
+    anchor_ids = []
+    for session_index, session_id in enumerate(session_ids):
+        session_rows = []
+        for turn_index in range(5):
+            content = (
+                f"{session_id} turn {turn_index} "
+                + ("context " * 50)
+                + (
+                    "kanban dashboard sprint"
+                    if turn_index == 2
+                    else "surrounding evidence"
+                )
+            )
+            session_rows.append(
+                recall_engine._store.append(
+                    session_id,
+                    {
+                        "role": "assistant" if turn_index % 2 else "user",
+                        "content": content,
+                        "timestamp": 100.0 + session_index,
+                    },
+                    source="benchmark",
+                )
+            )
+        anchor_id = session_rows[2]
+        anchor_ids.append(anchor_id)
+        anchor_row = recall_engine._store.get(anchor_id)
+        assert anchor_row is not None
+        ranked_hits.append(
+            {
+                "kind": "message_excerpt",
+                "store_id": anchor_id,
+                "session_id": session_id,
+                "source": "benchmark",
+                "role": anchor_row["role"],
+                "timestamp": anchor_row["timestamp"],
+                "content_offset": 0,
+                "snippet": anchor_row["content"][:300],
+                "from_current_session": False,
+                "expand_hint": (
+                    f"lcm_expand(store_id={anchor_id}, content_offset=0)"
+                ),
+            }
+        )
+
+    monkeypatch.setattr(
+        lcm_tools,
+        "_lcm_recall_fts_arm",
+        lambda *_args, **_kwargs: (list(ranked_hits), None),
+    )
+    monkeypatch.setattr(lcm_tools.time, "time", lambda: 200.0)
+
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {
+                "query": "kanban dashboard sprint",
+                "include": "verbatim",
+                "detail": "answer_ready",
+                "scope_bias": 0.0,
+                "limit": 10,
+            },
+            engine=recall_engine,
+        )
+    )
+
+    assert [hit["store_id"] for hit in payload["hits"][:10]] == anchor_ids
+    assert all(
+        hit["content_returned_chars"] <= 300
+        for hit in payload["hits"][8:10]
+    )
+    additional = [
+        hit for hit in payload["hits"] if hit.get("session_expanded")
+    ]
+    assert additional
+    assert {hit["session_id"] for hit in additional} == {
+        "session-a",
+        "session-b",
+        "session-c",
+    }
+    required = {
+        "content_offset",
+        "content_returned_chars",
+        "content_chars",
+        "exact_ref",
+        "store_id",
+        "session_id",
+        "date",
+        "role",
+    }
+    assert all(required <= hit.keys() for hit in payload["hits"])
+    assert all(
+        hit["exact_ref"]
+        == (
+            f"lcm:{hit['store_id']}:{hit['content_offset']}-"
+            f"{hit['content_offset'] + hit['content_returned_chars']}"
+        )
+        for hit in payload["hits"]
+    )
+    assert len(
+        {(hit["store_id"], hit["content"]) for hit in payload["hits"]}
+    ) == len(payload["hits"])
+    for session_id in ("session-a", "session-b", "session-c"):
+        assert sum(
+            count_tokens(hit["content"])
+            for hit in additional
+            if hit["session_id"] == session_id
+        ) <= recall_engine._config.session_expand_v1_per_session_tokens
+
+    policy = payload["provenance"]["answer_ready"]["session_expand_v1"]
+    assert policy["top_session_limit"] == 3
+    assert policy["expanded_session_count"] == 3
+    assert policy["per_session_token_budget"] == 140
+    assert policy["additional_hit_count"] == len(additional)
+    assert policy["delivered_additional_hit_count"] == len(additional)
 
 
 def test_answer_ready_delta_is_opt_in_and_returns_only_novel_exact_refs(
