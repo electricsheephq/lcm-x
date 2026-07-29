@@ -33,8 +33,12 @@ from hermes_lcm.db_bootstrap import (
 from hermes_lcm.search_query import (
     build_fts5_match_query,
     compute_directness_score,
+    extract_prose_search_terms,
     extract_search_terms,
+    resolve_prose_sort,
     sanitize_fts5_query,
+    sanitize_like_query,
+    should_use_fts_prose_mode,
 )
 from hermes_lcm.session_patterns import (
     build_session_match_keys,
@@ -1945,6 +1949,63 @@ class TestMessageStore:
             == "alpha OR beta"
         )
 
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "docker deploy?",
+            "api timeout?",
+            "error 500?",
+            "port 8080?",
+        ],
+    )
+    def test_search_prose_mode_keeps_compact_question_keywords_conjunctive(
+        self,
+        query,
+    ):
+        assert should_use_fts_prose_mode(query) is False
+        assert build_fts5_match_query(query, prose_mode=True) == sanitize_fts5_query(
+            query
+        )
+
+    def test_search_prose_mode_keeps_conversational_question_disjunctive(self):
+        query = "What did I say about the deploy?"
+
+        assert should_use_fts_prose_mode(query) is True
+        assert build_fts5_match_query(query, prose_mode=True) == "deploy"
+
+    def test_search_prose_sort_promotion_is_centralized(self):
+        query = "What did I say about the deploy?"
+
+        assert resolve_prose_sort(None, True, query) == "relevance"
+        assert resolve_prose_sort(None, False, query) is None
+        assert resolve_prose_sort("recency", True, query) == "recency"
+        assert resolve_prose_sort(None, True, "docker deploy?") is None
+
+    def test_search_prose_classifier_ignores_possessive_s_tokens(self):
+        assert (
+            should_use_fts_prose_mode(
+                "dog's vet's appointment records today"
+            )
+            is False
+        )
+
+    def test_search_prose_mode_preserves_stoplisted_subject_signal(self, store):
+        target = store.append(
+            "sess1",
+            {
+                "role": "user",
+                "content": "my will is stored in the blue safe",
+            },
+        )
+
+        results = store.search(
+            "What did I say about my will?",
+            session_id="sess1",
+            fts_prose_mode=True,
+        )
+
+        assert [row["store_id"] for row in results] == [target]
+
     @pytest.mark.parametrize("lead_word", ["find", "please", "recall", "remember"])
     def test_search_prose_mode_drops_conversational_lead_words(self, lead_word):
         assert (
@@ -1982,8 +2043,14 @@ class TestMessageStore:
 
         match_query = build_fts5_match_query(query, prose_mode=True)
         terms = extract_search_terms(match_query)
+        like_query = f"{query} ©?"
+        like_terms = extract_prose_search_terms(
+            like_query,
+            sanitize_like_query(like_query),
+        )
 
         assert len(terms) <= search_query_module._PROSE_TERM_LIMIT
+        assert len(like_terms) <= search_query_module._PROSE_TERM_LIMIT
 
     def test_search_keeps_hyphenated_compound_on_the_fts_path(self, store):
         """Review finding 1: a compound token sanitizes to ordinary terms, so it
@@ -2018,14 +2085,16 @@ class TestMessageStore:
         )
         store.append(
             "sess1",
-            {"role": "user", "content": "licensed material without the mark"},
+            {
+                "role": "user",
+                "content": "What did I say about licensed material",
+            },
         )
 
         results = store.search(
-            f"licensed {symbol}?",
+            f"What did I say about licensed {symbol}?",
             session_id="sess1",
             limit=1,
-            sort="relevance",
             fts_prose_mode=True,
         )
 
@@ -3631,6 +3700,27 @@ class TestSummaryDAG:
         )
 
         assert results
+
+    def test_search_prose_mode_filters_summary_symbol_like_terms(self, dag):
+        target = dag.add_node(SummaryNode(
+            session_id="s1", depth=0,
+            summary="licensed © archive",
+            token_count=4, source_ids=[1], source_type="messages",
+        ))
+        dag.add_node(SummaryNode(
+            session_id="s1", depth=0,
+            summary="What did I say about licensed material",
+            token_count=7, source_ids=[2], source_type="messages",
+        ))
+
+        results = dag.search(
+            "What did I say about licensed ©?",
+            session_id="s1",
+            limit=1,
+            fts_prose_mode=True,
+        )
+
+        assert [node.node_id for node in results] == [target]
 
     def test_search_empty_session_id_does_not_search_all_sessions(self, dag):
         dag.add_node(SummaryNode(

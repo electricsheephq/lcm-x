@@ -81,7 +81,7 @@ from .rollup_store import RollupStore
 from .search_query import (
     AGE_DECAY_RATE,
     normalize_search_sort,
-    should_use_fts_prose_mode,
+    resolve_prose_sort,
 )
 from .session_patterns import build_session_match_keys, compile_session_pattern
 from .sqlite_util import _sqlite_savepoint
@@ -2372,14 +2372,9 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     limit = min(requested_limit, limit_cap)
     fts_prose_mode = bool(getattr(engine._config, "fts_prose_mode", False))
     requested_sort = args.get("sort")
-    if (
-        requested_sort is None
-        and fts_prose_mode
-        and should_use_fts_prose_mode(query)
-    ):
-        sort = "relevance"
-    else:
-        sort = normalize_search_sort(requested_sort)
+    sort = normalize_search_sort(
+        resolve_prose_sort(requested_sort, fts_prose_mode, query)
+    )
     source_limit = max(limit * 4, limit, 20)
 
     content_scope = str(args.get("content_scope") or "history").strip().lower()

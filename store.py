@@ -41,9 +41,11 @@ from .search_query import (
     count_term_matches,
     escape_like,
     extract_quoted_phrases,
+    extract_prose_search_terms,
     extract_search_terms,
     normalize_search_sort,
     requires_like_fallback,
+    resolve_prose_sort,
     sanitize_like_query,
     AGE_DECAY_RATE,
     should_apply_directness_rank_adjustment,
@@ -1123,13 +1125,12 @@ class MessageStore:
             allow_operators=allow_operators,
             prose_mode=fts_prose_mode,
         )
-        if (
-            sort is None
-            and fts_prose_mode
-            and not allow_operators
-            and should_use_fts_prose_mode(query)
-        ):
-            sort = "relevance"
+        sort = resolve_prose_sort(
+            sort,
+            fts_prose_mode,
+            query,
+            allow_operators=allow_operators,
+        )
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
         # LIKE is the fallback for text sanitization LOSES (CJK/emoji) and for a
@@ -1151,6 +1152,7 @@ class MessageStore:
                 role=role,
                 time_from=time_from,
                 time_to=time_to,
+                prose_mode=fts_prose_mode and not allow_operators,
             )
 
         order_by = _build_search_order_by(
@@ -1215,6 +1217,7 @@ class MessageStore:
                     role=role,
                     time_from=time_from,
                     time_to=time_to,
+                    prose_mode=fts_prose_mode and not allow_operators,
                 )
 
             raw_primary_values: list[float] = []
@@ -1255,11 +1258,16 @@ class MessageStore:
                      conversation_id: str | None = None,
                      role: str | None = None,
                      time_from: float | None = None,
-                     time_to: float | None = None) -> List[Dict[str, Any]]:
+                     time_to: float | None = None,
+                     prose_mode: bool = False) -> List[Dict[str, Any]]:
         # LIKE keeps every character the index cannot spell (emoji, punctuation)
         # because substring matching is the only way to find those rows.
         safe_query = sanitize_like_query(query)
-        terms = extract_search_terms(safe_query)
+        terms = (
+            extract_prose_search_terms(query, safe_query)
+            if prose_mode and should_use_fts_prose_mode(query)
+            else extract_search_terms(safe_query)
+        )
         phrases = extract_quoted_phrases(safe_query)
         if not terms:
             return []

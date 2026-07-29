@@ -151,17 +151,63 @@ def should_use_fts_prose_mode(
     # Classification retains ordinary lowercase conjunctions. The scoring
     # extractor intentionally drops boolean-looking tokens, which previously
     # hid "and"/"or" from the prose stopword threshold.
-    terms = _WORD_RE.findall(safe)
+    # Apostrophe tokenization yields a bare ``s`` for possessives. It remains a
+    # stopword during extraction, but is not a word for classification counts.
+    terms = [
+        term
+        for term in _WORD_RE.findall(safe)
+        if term.casefold() != "s"
+    ]
     if len(terms) < 2:
         return False
     lowered = [term.casefold() for term in terms]
     stopword_count = sum(term in _PROSE_STOPWORDS for term in lowered)
     starts_like_prose = lowered[0] in _PROSE_LEAD_WORDS
     return (
-        "?" in raw
+        (
+            "?" in raw
+            and (
+                stopword_count >= 1
+                or starts_like_prose
+                or len(terms) >= 6
+            )
+        )
         or starts_like_prose
         or (len(terms) >= 6 and stopword_count >= 2)
     )
+
+
+def _extract_bounded_prose_terms(sanitized: str) -> List[str]:
+    """Drop conversational framing while retaining one subject fallback."""
+    candidates = extract_search_terms(sanitized)
+    prose_terms: list[str] = []
+    seen: set[str] = set()
+    for term in candidates:
+        folded = term.casefold()
+        if folded in _PROSE_STOPWORDS or folded in seen:
+            continue
+        seen.add(folded)
+        prose_terms.append(term)
+        if len(prose_terms) >= _PROSE_TERM_LIMIT:
+            return prose_terms
+
+    if prose_terms:
+        return prose_terms
+
+    # A broad stoplist can also contain the grammatical subject (for example,
+    # ``will``). Prefer the last non-lead token instead of restoring the full
+    # conversational frame and its implicit-AND semantics.
+    for term in reversed(candidates):
+        folded = term.casefold()
+        if folded not in _PROSE_LEAD_WORDS and folded != "s":
+            return [term]
+    return candidates[-1:]
+
+
+def extract_prose_search_terms(query: str, sanitized: str | None = None) -> List[str]:
+    """Return the bounded signal terms shared by FTS and LIKE prose routes."""
+    safe = sanitize_fts5_query(query) if sanitized is None else sanitized
+    return _extract_bounded_prose_terms(safe)
 
 
 def build_fts5_match_query(
@@ -185,19 +231,7 @@ def build_fts5_match_query(
     ):
         return sanitized
 
-    prose_terms: list[str] = []
-    seen: set[str] = set()
-    for term in extract_search_terms(sanitized):
-        folded = term.casefold()
-        if folded in _PROSE_STOPWORDS or folded in seen:
-            continue
-        seen.add(folded)
-        prose_terms.append(term)
-        if len(prose_terms) >= _PROSE_TERM_LIMIT:
-            break
-    if not prose_terms:
-        return sanitized
-    return " OR ".join(prose_terms)
+    return " OR ".join(extract_prose_search_terms(query, sanitized))
 
 
 def sanitize_like_query(query: str) -> str:
@@ -488,6 +522,24 @@ def normalize_search_sort(sort: str | None) -> str:
     """Normalize sort parameter to one of: recency, relevance, hybrid."""
     normalized = (sort or "recency").strip().lower()
     return normalized if normalized in {"recency", "relevance", "hybrid"} else "recency"
+
+
+def resolve_prose_sort(
+    sort: str | None,
+    fts_prose_mode: bool,
+    query: str,
+    *,
+    allow_operators: bool = False,
+) -> str | None:
+    """Promote implicit prose searches to relevance without changing defaults."""
+    if (
+        sort is None
+        and fts_prose_mode
+        and not allow_operators
+        and should_use_fts_prose_mode(query)
+    ):
+        return "relevance"
+    return sort
 
 
 def build_snippet(text: str, terms: List[str], width: int = 80) -> str:

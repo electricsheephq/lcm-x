@@ -43,9 +43,11 @@ from .search_query import (
     count_term_matches,
     escape_like,
     extract_quoted_phrases,
+    extract_prose_search_terms,
     extract_search_terms,
     normalize_search_sort,
     requires_like_fallback,
+    resolve_prose_sort,
     sanitize_like_query,
     should_apply_directness_rank_adjustment,
     should_use_fts_prose_mode,
@@ -565,12 +567,7 @@ class SummaryDAG:
         - mixed-source nodes may match more than one ``source`` filter
         """
         safe_query = build_fts5_match_query(query, prose_mode=fts_prose_mode)
-        if (
-            sort is None
-            and fts_prose_mode
-            and should_use_fts_prose_mode(query)
-        ):
-            sort = "relevance"
+        sort = resolve_prose_sort(sort, fts_prose_mode, query)
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
         # LIKE is the fallback for text sanitization LOSES (CJK/emoji) and for a
@@ -582,7 +579,14 @@ class SummaryDAG:
             safe_query,
             preserve_unicode_symbols=fts_prose_mode,
         ):
-            return self._search_like(query, session_id=session_id, limit=limit, sort=sort, source=source)
+            return self._search_like(
+                query,
+                session_id=session_id,
+                limit=limit,
+                sort=sort,
+                source=source,
+                prose_mode=fts_prose_mode,
+            )
 
         order_by = _build_search_order_by(sort, "COALESCE(n.latest_at, n.created_at)")
         fetch_limit = compute_search_fetch_limit(limit, terms, phrases)
@@ -615,7 +619,14 @@ class SummaryDAG:
                 scanned_rows += len(rows)
             except sqlite3.Error as exc:
                 logger.warning("FTS node search failed, falling back to LIKE: %s", exc)
-                return self._search_like(query, session_id=session_id, limit=limit, sort=sort, source=source)
+                return self._search_like(
+                    query,
+                    session_id=session_id,
+                    limit=limit,
+                    sort=sort,
+                    source=source,
+                    prose_mode=fts_prose_mode,
+                )
 
             raw_nodes = [self._row_to_node(r) for r in rows]
             for node in raw_nodes:
@@ -654,11 +665,16 @@ class SummaryDAG:
 
     def _search_like(self, query: str, session_id: str | None = None,
                      limit: int = 20, sort: str | None = None,
-                     source: str | None = None) -> List[SummaryNode]:
+                     source: str | None = None,
+                     prose_mode: bool = False) -> List[SummaryNode]:
         # LIKE keeps every character the index cannot spell (emoji, punctuation)
         # because substring matching is the only way to find those rows.
         safe_query = sanitize_like_query(query)
-        terms = extract_search_terms(safe_query)
+        terms = (
+            extract_prose_search_terms(query, safe_query)
+            if prose_mode and should_use_fts_prose_mode(query)
+            else extract_search_terms(safe_query)
+        )
         phrases = extract_quoted_phrases(safe_query)
         if not terms:
             return []

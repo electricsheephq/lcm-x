@@ -1,10 +1,12 @@
 # PR #183 bot findings — verdicts
 
-- Reviewed head: `418db28bcc85f24581cec6de75d6e8e91073f3b0`
+- Round 1 reviewed head: `418db28bcc85f24581cec6de75d6e8e91073f3b0`
+- Round 2 source head: `af0f14226ee61fc9c18a2abfbab8cf4acbdb8516`
 - Base: `cb92bf40c1d4c862cb56090792113b69d88660d4`
 - Mode: validate-then-fix; two Highs first; no push
-- Raw source: `/Volumes/LEXAR/Codex/session-notes/2026-07-29/hermes-r3-1/artifacts/prbots-raw/pr183_{comments,reviews}.json`
-- Logs: `/Volumes/LEXAR/Codex/session-notes/2026-07-29/hermes-r3-1/artifacts/lane183bots-logs/`
+- Review source commands: `gh api repos/stephenschoettler/hermes-lcm/pulls/183/comments --paginate`
+  and `gh api repos/stephenschoettler/hermes-lcm/pulls/183/reviews --paginate`
+- Raw review JSON and command logs are retained off-repo by the operator.
 
 ## 1. High — injected `OR` glue becomes a scored term
 
@@ -106,7 +108,7 @@ smart-quoted prose remains conjunctive instead of becoming an OR query.
 Evidence: `medium-low-precheck.log`, `medium-low-postcheck.log`,
 `medium-low-fixed.log`.
 
-## Final gates
+## Round 1 final gates
 
 - Focused parity: **411 passed** (`focused-parity-rerun.log`).
 - Full isolated CI replica, Python 3.11 and `ulimit -n 1024`:
@@ -120,5 +122,49 @@ Evidence: `medium-low-precheck.log`, `medium-low-postcheck.log`,
   SHA-256
   `d9cf3621ed51669eeaff13642b8805d393e45838e351fd1bf236defd0b9e3219`
   (`flag-off-byte-identity-final.log`).
+- No commit, push, PR reply, thread resolution, merge, deploy, or release was
+  performed.
+
+## Round 2
+
+Validated against source head `af0f14226ee61fc9c18a2abfbab8cf4acbdb8516`
+before editing. All seven raw findings remained applicable.
+
+| Raw comment ID | Terminal disposition | Change and reproducible validation |
+|---|---|---|
+| `3674835828` | **Fixed.** | A question mark now requires a stopword, lead word, or at least six terms before prose routing. Compact technical questions remain conjunctive. Run: `python3 -m pytest tests/test_lcm_core.py -q -k "compact_question_keywords or conversational_question_disjunctive"` |
+| `3674839099` | **Fixed with `3674835828`.** | The four named compact-query boundaries and the conversational positive boundary are covered by the same classifier fix. Run: `python3 -m pytest tests/test_lcm_core.py -q -k "compact_question_keywords or conversational_question_disjunctive"` |
+| `3674835822` | **Fixed.** | Stopword-empty prose normalization retains the last non-lead subject candidate, so `will` remains searchable instead of restoring the full framing query. Run: `python3 -m pytest tests/test_lcm_core.py -q -k "stoplisted_subject_signal"` |
+| `3674835811` | **Fixed.** | Message and summary Unicode-symbol LIKE routes now share bounded prose term extraction, including stopword/lead-word filtering and the term cap. Run: `python3 -m pytest tests/test_lcm_core.py -q -k "preserves_non_ascii_symbol_signal or filters_summary_symbol_like_terms or caps_disjunctive_terms"` |
+| `3674839106` | **Fixed.** | `resolve_prose_sort()` owns implicit relevance promotion and is used by tools, message-store, and summary-DAG search. Run: `python3 -m pytest tests/test_lcm_core.py -q -k "prose_sort_promotion_is_centralized"` |
+| `3674839116` | **Fixed.** | Bare possessive `s` tokens are excluded from both classifier counts while extraction behavior is unchanged. Run: `python3 -m pytest tests/test_lcm_core.py -q -k "possessive_s_tokens"` |
+| `3674829341` | **Fixed.** | Machine-local artifact paths were replaced by reproducible `gh api` commands; raw logs are explicitly retained off-repo. Run: `python3 -c 'from pathlib import Path; text = Path("FINDINGS-VERDICTS-BOTS.md").read_text(); assert chr(47) + "Volumes" + chr(47) not in text'` |
+
+### Round 2 validation
+
+- Focused prose cases: **18 passed**.
+  Command: `python3 -m pytest tests/test_lcm_core.py -q -k "prose"`.
+- Focused prose/search/grep selector over the directly relevant modules:
+  **20 passed, 400 deselected**.
+  Command: `python3 -m pytest tests/test_lcm_core.py tests/test_lcm_recall.py -q -k "prose or search_query or grep"`.
+- Full focused core and recall parity: **420 passed**.
+  Command: `python3 -m pytest tests/test_lcm_core.py tests/test_lcm_recall.py -q`.
+- Flag-off regression corpus: **byte-identical to the recorded source-head
+  baseline**, 2,104 bytes, SHA-256
+  `d9cf3621ed51669eeaff13642b8805d393e45838e351fd1bf236defd0b9e3219`.
+  Command:
+  `probe_dir="$(mktemp -d)"; python3 tests/probes/fts_prose_flag_off_probe.py . "$probe_dir/probe.db" "$probe_dir/output.json"`.
+  The unchanged zero-score operator-glue regression also passed in the
+  420-test focused parity run.
+- Changed-file Ruff: **passed**.
+  Command:
+  `python3 -m ruff check search_query.py store.py dag.py tools.py tests/test_lcm_core.py`.
+- The broader command `python3 -m pytest tests/ -q -k "prose or search_query or grep"`
+  cannot collect in this standalone checkout because unrelated test modules
+  require the absent host `agent` package/exported `LCMEngine`. It produced
+  22 collection errors before selecting tests; this is not claimed green.
+- Delivery checkpoint: **COMPLETE** for the local Round 2 disposition-batch
+  gate; primary verdict **ADVANCE** to the orchestrator-owned Git/current-head
+  CI lane. This does not claim PR merge readiness or current-head remote CI.
 - No commit, push, PR reply, thread resolution, merge, deploy, or release was
   performed.
