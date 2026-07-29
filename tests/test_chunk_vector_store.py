@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import sqlite3
 
 import pytest
@@ -60,7 +61,7 @@ def store(tmp_path):
     vs.close()
 
 
-def _write(store, chunk_id, store_id, chunk_index, vec):
+def _write(store, chunk_id, store_id, chunk_index, vec, *, identity=None):
     store.record_chunk_embedding(
         chunk_id,
         MODEL,
@@ -70,7 +71,7 @@ def _write(store, chunk_id, store_id, chunk_index, vec):
         char_start=0,
         char_end=10,
         token_estimate=5,
-        identity=_chunk_identity(),
+        identity=identity or _chunk_identity(),
     )
 
 
@@ -188,8 +189,11 @@ class TestCoexistence:
         assert int(summary["active"]) == 1
 
 
-def test_chunk_vectorized_multibatch_ranking_matches_legacy_loader(tmp_path):
+def test_chunk_vectorized_multibatch_ranking_matches_legacy_loader(
+    tmp_path, monkeypatch
+):
     numpy = pytest.importorskip("numpy")
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
     db_path = tmp_path / "chunk-r1-parity.db"
     _seed_messages(
         db_path,
@@ -198,7 +202,11 @@ def test_chunk_vectorized_multibatch_ranking_matches_legacy_loader(tmp_path):
             for i in range(6)
         ],
     )
-    store = VectorStore(db_path, bounded_scan_rows=2)
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=0),
+        bounded_scan_rows=2,
+    )
     store.register_profile(MODEL, PROVIDER, DIM, task="chunk")
     try:
         for i, vec in enumerate(
@@ -270,9 +278,168 @@ def test_chunk_vectorized_multibatch_ranking_matches_legacy_loader(tmp_path):
         store.close()
 
 
+def test_float32_residency_overlaps_exact_top_k_with_quantized_scores(
+    tmp_path, monkeypatch
+):
+    numpy = pytest.importorskip("numpy")
+    dim = 32
+    count = 64
+    k = 12
+    db_path = tmp_path / "chunk-float-resident.db"
+    _seed_messages(
+        db_path,
+        [
+            (i, "s", "history", "user", "m", float(i))
+            for i in range(count)
+        ],
+    )
+    rng = numpy.random.default_rng(171)
+    vectors = rng.standard_normal((count, dim)).astype(numpy.float32)
+    vectors /= numpy.linalg.norm(vectors, axis=1, keepdims=True)
+    query = rng.standard_normal(dim).astype(numpy.float32)
+    query /= numpy.linalg.norm(query)
+
+    exact_store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=0),
+        bounded_scan_rows=7,
+    )
+    exact_store.register_profile(MODEL, PROVIDER, dim, task="chunk")
+    identity = EmbeddingIdentity.canonical(
+        PROVIDER, MODEL, "", dim, "float32", "little", "chunk"
+    )
+    try:
+        for index, vector in enumerate(vectors):
+            _write(
+                exact_store,
+                f"{index}:0",
+                index,
+                0,
+                vector.tolist(),
+                identity=identity,
+            )
+        monkeypatch.setattr(
+            vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0
+        )
+        exact = exact_store.knn_chunks(
+            query.tolist(),
+            k=k,
+            model=MODEL,
+            provider=PROVIDER,
+            full_scan=True,
+        )
+    finally:
+        exact_store.close()
+
+    resident_store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=1),
+        bounded_scan_rows=7,
+    )
+    try:
+        resident = resident_store.knn_chunks(
+            query.tolist(),
+            k=k,
+            model=MODEL,
+            provider=PROVIDER,
+            full_scan=True,
+        )
+
+        exact_ids = {row[0] for row in exact}
+        resident_ids = {row[0] for row in resident}
+        assert exact.coverage == resident.coverage == "full"
+        assert len(exact_ids & resident_ids) / k >= 0.9
+        exact_scores = dict((row[0], row[1]) for row in exact)
+        assert any(
+            not math.isclose(
+                exact_scores[row[0]], row[1], rel_tol=0.0, abs_tol=0.0
+            )
+            for row in resident
+            if row[0] in exact_scores
+        )
+        assert len(resident_store._resident_matrix_cache) == 1
+    finally:
+        resident_store.close()
+
+
+def test_size_aware_scan_routes_below_and_at_threshold(tmp_path, monkeypatch):
+    db_path = tmp_path / "chunk-size-route.db"
+    _seed_messages(
+        db_path,
+        [
+            (i, "s", "history", "user", "m", float(i))
+            for i in range(4)
+        ],
+    )
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 4)
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=0),
+        bounded_scan_rows=2,
+    )
+    store.register_profile(MODEL, PROVIDER, DIM, task="chunk")
+    simple_calls: list[int] = []
+    streaming_calls: list[int] = []
+    original_simple = store._load_chunk_vectors_for_ids
+    original_streaming = store._scan_vectorized_ranked
+
+    def counted_simple(identity_hash, dim, ids, dtype="float32"):
+        simple_calls.append(len(ids))
+        return original_simple(identity_hash, dim, ids, dtype)
+
+    def counted_streaming(**kwargs):
+        streaming_calls.append(len(kwargs["candidate_ids"]))
+        return original_streaming(**kwargs)
+
+    monkeypatch.setattr(store, "_load_chunk_vectors_for_ids", counted_simple)
+    monkeypatch.setattr(store, "_scan_vectorized_ranked", counted_streaming)
+    try:
+        for index in range(3):
+            _write(
+                store,
+                f"{index}:0",
+                index,
+                0,
+                [1.0, float(index), 0.0, 0.0],
+            )
+
+        below = store.knn_chunks(
+            [1.0, 0.0, 0.0, 0.0],
+            k=3,
+            model=MODEL,
+            provider=PROVIDER,
+            full_scan=True,
+        )
+        assert below.coverage == "full"
+        assert simple_calls
+        assert streaming_calls == []
+
+        simple_calls.clear()
+        _write(
+            store,
+            "3:0",
+            3,
+            0,
+            [1.0, 3.0, 0.0, 0.0],
+        )
+        at_threshold = store.knn_chunks(
+            [1.0, 0.0, 0.0, 0.0],
+            k=4,
+            model=MODEL,
+            provider=PROVIDER,
+            full_scan=True,
+        )
+        assert at_threshold.coverage == "full"
+        assert simple_calls == []
+        assert streaming_calls == [4]
+    finally:
+        store.close()
+
+
 def test_int8_residency_reuses_matrix_and_write_forces_full_reload(
     tmp_path, monkeypatch
 ):
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
     db_path = tmp_path / "chunk-resident.db"
     _seed_messages(
         db_path,
@@ -371,7 +538,10 @@ def test_int8_residency_reuses_matrix_and_write_forces_full_reload(
         store.close()
 
 
-def test_int8_over_resident_budget_falls_back_to_exact_r1(tmp_path):
+def test_int8_over_resident_budget_falls_back_to_exact_r1(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
     db_path = tmp_path / "chunk-over-budget.db"
     _seed_messages(
         db_path,

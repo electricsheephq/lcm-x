@@ -462,7 +462,11 @@ def test_multi_batch_scan_does_not_populate_or_thrash_the_matrix_cache(tmp_path)
     Multi-batch sweeps therefore stream past the cache entirely."""
     db_path = tmp_path / "cache-thrash.db"
     dag = SummaryDAG(db_path)
-    store = VectorStore(db_path, bounded_scan_rows=2)  # 2-row batches, 12 vectors
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=0),
+        bounded_scan_rows=2,
+    )  # 2-row batches, 12 vectors
     try:
         _seed_scan_corpus(
             dag, store, 12, gold_vector=[1.0, 0.0, 0.0], filler_vector=[0.0, 1.0, 0.0]
@@ -486,9 +490,14 @@ def test_multi_batch_scan_releases_matrices_warmed_before_it(tmp_path, monkeypat
     streamed batch. The invariant: at first-batch allocation, nothing is left.
     """
     numpy = pytest.importorskip("numpy")
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
     db_path = tmp_path / "cache-release.db"
     dag = SummaryDAG(db_path)
-    store = VectorStore(db_path, bounded_scan_rows=2)  # 2-row batches, 8 vectors
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=0),
+        bounded_scan_rows=2,
+    )  # 2-row batches, 8 vectors
     try:
         _seed_scan_corpus(
             dag, store, 8, gold_vector=[1.0, 0.0, 0.0], filler_vector=[0.0, 1.0, 0.0]
@@ -541,7 +550,11 @@ def test_single_batch_scan_still_caches_its_matrix(tmp_path):
     """The warm pooled-store path is unchanged when one batch covers the corpus."""
     db_path = tmp_path / "cache-single.db"
     dag = SummaryDAG(db_path)
-    store = VectorStore(db_path, bounded_scan_rows=50)  # one batch covers all 5
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=0),
+        bounded_scan_rows=50,
+    )  # one batch covers all 5
     try:
         _seed_scan_corpus(
             dag, store, 5, gold_vector=[1.0, 0.0, 0.0], filler_vector=[0.0, 1.0, 0.0]
@@ -555,12 +568,19 @@ def test_single_batch_scan_still_caches_its_matrix(tmp_path):
         dag.close()
 
 
-def test_vectorized_multibatch_ranking_is_bit_identical_to_legacy_loader(tmp_path):
+def test_vectorized_multibatch_ranking_is_bit_identical_to_legacy_loader(
+    tmp_path, monkeypatch
+):
     """Frozen #171 parity: the R1 cursor produces the old exact top-k bytes."""
     numpy = pytest.importorskip("numpy")
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
     db_path = tmp_path / "r1-parity.db"
     dag = SummaryDAG(db_path)
-    store = VectorStore(db_path, bounded_scan_rows=2)
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=0),
+        bounded_scan_rows=2,
+    )
     try:
         _seed_scan_corpus(
             dag,
@@ -622,7 +642,8 @@ def test_vectorized_multibatch_ranking_is_bit_identical_to_legacy_loader(tmp_pat
         dag.close()
 
 
-def test_summary_int8_full_scan_uses_exact_residency(tmp_path):
+def test_summary_int8_full_scan_uses_exact_residency(tmp_path, monkeypatch):
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
     db_path = tmp_path / "summary-resident.db"
     dag = SummaryDAG(db_path)
     store = VectorStore(
@@ -675,7 +696,11 @@ def test_full_scan_max_rows_caps_the_scan_and_discloses_it(tmp_path):
     """scan_max_rows is the pathological-corpus escape hatch, and it discloses."""
     db_path = tmp_path / "full-scan-capped.db"
     dag = SummaryDAG(db_path)
-    store = VectorStore(db_path, bounded_scan_rows=2)
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=0),
+        bounded_scan_rows=2,
+    )
     try:
         _seed_scan_corpus(
             dag, store, 6, gold_vector=[1.0, 0.0, 0.0], filler_vector=[0.0, 1.0, 0.0]
@@ -698,8 +723,13 @@ def test_full_scan_budget_stops_early_and_reports_bounded(tmp_path, monkeypatch)
     """An exhausted latency budget is the only thing that truncates a default
     scan, and it degrades to the same disclosed 'bounded' coverage."""
     db_path = tmp_path / "full-scan-budget.db"
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
     dag = SummaryDAG(db_path)
-    store = VectorStore(db_path, bounded_scan_rows=2)
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=0),
+        bounded_scan_rows=2,
+    )
     try:
         _seed_scan_corpus(
             dag, store, 6, gold_vector=[1.0, 0.0, 0.0], filler_vector=[0.0, 1.0, 0.0]
@@ -784,8 +814,13 @@ def test_full_scan_absolute_deadline_stops_between_batches(tmp_path, monkeypatch
     """The operation deadline remains a hard stop when the relative scan budget
     is disabled (zero), so recall cannot start another full batch after expiry."""
     db_path = tmp_path / "full-scan-deadline.db"
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
     dag = SummaryDAG(db_path)
-    store = VectorStore(db_path, bounded_scan_rows=2)
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=0),
+        bounded_scan_rows=2,
+    )
     try:
         _seed_scan_corpus(
             dag, store, 6, gold_vector=[1.0, 0.0, 0.0], filler_vector=[0.0, 1.0, 0.0]
