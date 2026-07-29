@@ -1273,9 +1273,10 @@ class MessageStore:
         # Classification always keys off the canonical FTS-sanitized view
         # (should_use_fts_prose_mode sanitizes internally); extraction stays on
         # the LIKE-sanitized form so unindexable characters remain searchable.
+        prose_branch = prose_mode and should_use_fts_prose_mode(query)
         terms = (
             extract_prose_search_terms(query, safe_query)
-            if prose_mode and should_use_fts_prose_mode(query)
+            if prose_branch
             else extract_search_terms(safe_query)
         )
         phrases = extract_quoted_phrases(safe_query)
@@ -1314,7 +1315,9 @@ class MessageStore:
         base_args = list(args)
         normalized_sort = normalize_search_sort(sort)
         results: List[Dict[str, Any]] = []
-        collapse_risky_repeats = contains_risky_fts_ascii(query)
+        collapse_term_repeats = (
+            prose_branch or contains_risky_fts_ascii(query)
+        )
         order_by = ""
         order_args: list[Any] = []
         role_bias = "CASE role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 WHEN 'tool' THEN 2 ELSE 1 END"
@@ -1329,7 +1332,7 @@ class MessageStore:
         if normalized_sort == "recency":
             score_exprs: list[str] = []
             for term in terms:
-                if collapse_risky_repeats:
+                if collapse_term_repeats:
                     score_exprs.append("CASE WHEN content LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END")
                     order_args.append(f"%{escape_like(term)}%")
                 else:
@@ -1391,7 +1394,7 @@ class MessageStore:
                 result = self._row_to_dict(row)
                 content = result.get("content") or ""
                 score = sum(
-                    min(count_term_matches(content, term), 1) if collapse_risky_repeats else count_term_matches(content, term)
+                    min(count_term_matches(content, term), 1) if collapse_term_repeats else count_term_matches(content, term)
                     for term in terms
                 )
                 if score <= 0:
@@ -1458,7 +1461,7 @@ class MessageStore:
             score_exprs: list[str] = []
             order_args = []
             for term in terms:
-                if collapse_risky_repeats:
+                if collapse_term_repeats:
                     score_exprs.append("CASE WHEN content LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END")
                     order_args.append(f"%{escape_like(term)}%")
                 else:

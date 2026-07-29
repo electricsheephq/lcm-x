@@ -30,6 +30,7 @@ _SPLIT_PUNCT_RE = re.compile(r"[-:/]+")
 _STRIP_EDGE_PUNCT = "\"'()[]{}.,;"
 _TRAILING_SENTENCE_PUNCT = "?!"
 _PROSE_TERM_LIMIT = 12
+_PROSE_SYMBOL_SLOTS = 2
 _PROSE_STOPWORDS = frozenset({
     "a", "about", "an", "and", "are", "as", "at", "be", "been", "but", "by",
     "can", "could", "did", "do", "does", "find", "for", "from", "had", "has",
@@ -182,6 +183,14 @@ def should_use_fts_prose_mode(
         for term in _WORD_RE.findall(safe)
         if term.casefold() not in _PROSE_FRAGMENTS
     ]
+    # unicode61 drops these symbols, but in a raw prose request they can be the
+    # subject itself (``Find ©?``). Count them for classification without
+    # putting them into the FTS query; the prose LIKE extractor retains them.
+    terms.extend(
+        char
+        for char in raw
+        if contains_unindexed_unicode_symbol(char)
+    )
     if len(terms) < 2:
         return False
     lowered = [term.casefold() for term in terms]
@@ -203,8 +212,11 @@ def should_use_fts_prose_mode(
 
 def _extract_bounded_prose_terms(sanitized: str) -> List[str]:
     """Drop conversational framing while retaining one subject fallback."""
-    candidates = extract_search_terms(sanitized)
-    prose_terms: list[str] = []
+    candidates = extract_search_terms(
+        sanitized,
+        normalize_sentence_punctuation=True,
+    )
+    eligible_terms: list[str] = []
     seen: set[str] = set()
     for term in candidates:
         folded = term.casefold()
@@ -215,13 +227,24 @@ def _extract_bounded_prose_terms(sanitized: str) -> List[str]:
         ):
             continue
         seen.add(folded)
-        if len(prose_terms) < _PROSE_TERM_LIMIT:
-            prose_terms.append(term)
-        elif contains_unindexed_unicode_symbol(term):
-            # An unindexable symbol is the ROUTING SIGNAL that sent this
-            # query to LIKE; it must survive the cap or the route cannot
-            # match its own reason for existing.
-            prose_terms.append(term)
+        eligible_terms.append(term)
+
+    # Reserve a bounded number of slots for the unindexable routing signals
+    # that sent the query to LIKE. When the ordinary cap is full, the first
+    # symbols evict the lowest-priority (latest) ordinary terms.
+    symbol_terms = [
+        term
+        for term in eligible_terms
+        if contains_unindexed_unicode_symbol(term)
+    ][:_PROSE_SYMBOL_SLOTS]
+    ordinary_limit = _PROSE_TERM_LIMIT - len(symbol_terms)
+    ordinary_terms = [
+        term
+        for term in eligible_terms
+        if not contains_unindexed_unicode_symbol(term)
+    ][:ordinary_limit]
+    selected = set(ordinary_terms) | set(symbol_terms)
+    prose_terms = [term for term in eligible_terms if term in selected]
 
     if prose_terms:
         return prose_terms
@@ -393,11 +416,16 @@ def requires_like_fallback(
     return contains_risky_fts_ascii(safe)
 
 
-def _token_variants(token: str) -> List[str]:
+def _token_variants(
+    token: str,
+    *,
+    normalize_sentence_punctuation: bool = False,
+) -> List[str]:
     cleaned = (token or "").strip().strip(_STRIP_EDGE_PUNCT)
-    without_sentence_punct = cleaned.strip(_TRAILING_SENTENCE_PUNCT)
-    if without_sentence_punct:
-        cleaned = without_sentence_punct
+    if normalize_sentence_punctuation:
+        without_sentence_punct = cleaned.strip(_TRAILING_SENTENCE_PUNCT)
+        if without_sentence_punct:
+            cleaned = without_sentence_punct
     if not cleaned:
         return []
     if cleaned.upper() in _BOOLEAN_OPERATORS:
@@ -418,7 +446,11 @@ def _token_variants(token: str) -> List[str]:
     return deduped
 
 
-def extract_search_terms(query: str) -> List[str]:
+def extract_search_terms(
+    query: str,
+    *,
+    normalize_sentence_punctuation: bool = False,
+) -> List[str]:
     text = (query or "").strip()
     if not text:
         return []
@@ -431,7 +463,12 @@ def extract_search_terms(query: str) -> List[str]:
 
     text_without_phrases = _QUOTED_PHRASE_RE.sub(" ", text)
     for token in text_without_phrases.split():
-        terms.extend(_token_variants(token))
+        terms.extend(
+            _token_variants(
+                token,
+                normalize_sentence_punctuation=normalize_sentence_punctuation,
+            )
+        )
 
     if not terms:
         fallback_text = text.strip().strip(_STRIP_EDGE_PUNCT)

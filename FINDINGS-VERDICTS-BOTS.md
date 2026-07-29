@@ -207,3 +207,22 @@ flag-off probe byte-identical (2,104 bytes, SHA-256 `d9cf3621ed51669eeaff13642b8
 
 Round-4 validation: focused 93 passed + recall 90 passed; flag-off probe byte-identical
 (2,104 bytes, SHA-256 `d9cf3621…e3219`).
+
+## Round 5 — nine raw findings on head a7986ae
+
+| Raw comment ID | Terminal disposition | Change and validation |
+|---|---|---|
+| `3677176251` | **Fixed now** | Trailing sentence-punctuation normalization is prose-extraction-only. Default extraction retains the merge-base literal `🚀?`; the flag-off byte-identity probe remains the acceptance gate. |
+| `3677176246` | **Fixed now** | Total prose terms are capped at `_PROSE_TERM_LIMIT`, with up to `_PROSE_SYMBOL_SLOTS = 2` reserved for the first unindexable routing-signal symbols. |
+| `3677148375` | **Fixed with `3677176246`** | The pathological 1,100-symbol query is bounded to the reserved symbol slots and completes without SQLite's expression-tree error. |
+| `3677176241` | **Fixed now** | Raw unindexable Unicode symbols count as subject terms for prose classification, so `Find ©?` reaches LIKE and retrieves `copyright © archive`; compact symbol-free queries retain their prior classification. |
+| `3677176257` | **Fixed now** | Message-store and summary-DAG prose LIKE relevance count each distinct term at most once, so distinct coverage outranks repetition; flag-off scoring is unchanged. |
+| `3677148380` | **Fixed now** | Summary-DAG LIKE batch pagination now uses explicit `ORDER BY rowid`. |
+| `3677148370` | **Fixed now** | Added the DAG end-to-end FTS-route analog proving flag-on prose disjunction recovers a node that implicit AND misses. |
+| `3677176262` | **Declined in-PR; filed as fork issue** | fork issue (rank fusion) |
+| `3677148385` | **Refuted** | Refuted — contradicts the round-3 R3-2 disposition the same reviewer requested; LCMConfig defines the field with a default (config.py:656); loud failure on a malformed config is the contract. |
+
+Round-5 validation: focused core selector 100 passed; recall module 90 passed;
+flag-off probe byte-identical (2,104 bytes, SHA-256
+`d9cf3621ed51669eeaff13642b8805d393e45838e351fd1bf236defd0b9e3219`);
+changed-file Ruff passed. No Git mutation was performed.

@@ -678,9 +678,10 @@ class SummaryDAG:
         # Classification always keys off the canonical FTS-sanitized view
         # (should_use_fts_prose_mode sanitizes internally); extraction stays on
         # the LIKE-sanitized form so unindexable characters remain searchable.
+        prose_branch = prose_mode and should_use_fts_prose_mode(query)
         terms = (
             extract_prose_search_terms(query, safe_query)
-            if prose_mode and should_use_fts_prose_mode(query)
+            if prose_branch
             else extract_search_terms(safe_query)
         )
         phrases = extract_quoted_phrases(safe_query)
@@ -700,7 +701,9 @@ class SummaryDAG:
         where.append("(" + " OR ".join(like_clauses) + ")")
         fetch_limit = compute_like_fallback_fetch_limit(limit, terms, phrases)
         base_args = list(args)
-        collapse_risky_repeats = contains_risky_fts_ascii(query)
+        collapse_term_repeats = (
+            prose_branch or contains_risky_fts_ascii(query)
+        )
         candidate_cap = compute_search_candidate_cap(limit)
         offset = 0
         scanned_rows = 0
@@ -711,6 +714,7 @@ class SummaryDAG:
                 rows = self._conn.execute(
                     f"""SELECT * FROM summary_nodes
                         WHERE {' AND '.join(where)}
+                        ORDER BY rowid
                         LIMIT ? OFFSET ?""",
                     [*base_args, fetch_limit, offset],
                 ).fetchall()
@@ -720,7 +724,7 @@ class SummaryDAG:
                 if source and not self._node_matches_source(node.node_id, source, cache=source_match_cache):
                     continue
                 score = sum(
-                    min(count_term_matches(node.summary, term), 1) if collapse_risky_repeats else count_term_matches(node.summary, term)
+                    min(count_term_matches(node.summary, term), 1) if collapse_term_repeats else count_term_matches(node.summary, term)
                     for term in terms
                 )
                 if score <= 0:
@@ -730,7 +734,7 @@ class SummaryDAG:
                 nodes.append(node)
 
             nodes.sort(key=lambda node: _fallback_result_sort_key(node, sort))
-            # The batch SQL is unordered, so truncating after the FIRST batch
+            # Truncating after the FIRST batch
             # can drop the best match at row fetch_limit+1. Always scan the
             # bounded candidate set (candidate_cap) before applying `limit`.
             if len(rows) < fetch_limit or scanned_rows >= candidate_cap:

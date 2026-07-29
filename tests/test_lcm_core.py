@@ -1967,6 +1967,10 @@ class TestMessageStore:
             query
         )
 
+    def test_search_prose_symbol_subject_changes_only_symbol_query_classification(self):
+        assert should_use_fts_prose_mode("Find ©?") is True
+        assert should_use_fts_prose_mode("docker deploy?") is False
+
     def test_search_prose_mode_keeps_conversational_question_disjunctive(self):
         query = "What did I say about the deploy?"
 
@@ -1995,6 +1999,13 @@ class TestMessageStore:
         terms = extract_prose_search_terms("What didn't we deploy?")
         assert terms == ["deploy"]
 
+    def test_search_flag_off_emoji_literal_keeps_trailing_question_mark(self):
+        """Round-5 regression: default LIKE extraction remains byte-identical
+        to the merge-base behavior for emoji-adjacent punctuation."""
+        assert extract_search_terms(
+            sanitize_like_query("launch 🚀?")
+        ) == ["launch", "🚀?"]
+
     def test_search_prose_all_framing_query_falls_back_to_conjunctive(self):
         """Round-4 finding: when nothing but framing survives, the MATCH
         query must fall back to the sanitized conjunctive form, not a lone
@@ -2007,12 +2018,13 @@ class TestMessageStore:
 
     def test_search_prose_term_cap_preserves_unicode_symbol_signal(self):
         """Round-4 finding: the routing-signal symbol must survive the
-        term cap on the LIKE route."""
+        total term cap on the LIKE route."""
         keywords = " ".join(f"keyword{i}" for i in range(12))
         terms = extract_prose_search_terms(
             f"What did I say about {keywords} ©?",
             sanitize_like_query(f"What did I say about {keywords} ©?"),
         )
+        assert len(terms) == search_query_module._PROSE_TERM_LIMIT
         assert any("©" in term for term in terms)
 
     def test_search_prose_mode_preserves_stoplisted_subject_signal(self, store):
@@ -2076,19 +2088,40 @@ class TestMessageStore:
         )
 
         assert len(terms) <= search_query_module._PROSE_TERM_LIMIT
-        # Round-4 amendment: the cap bounds ORDINARY terms; an unindexable
-        # symbol is the LIKE route's routing signal and rides on top.
-        ordinary_like_terms = [
+        assert len(like_terms) <= search_query_module._PROSE_TERM_LIMIT
+        symbol_like_terms = [
             term
             for term in like_terms
-            if not search_query_module.contains_unindexed_unicode_symbol(term)
+            if search_query_module.contains_unindexed_unicode_symbol(term)
         ]
-        assert len(ordinary_like_terms) <= search_query_module._PROSE_TERM_LIMIT
-        assert all(
-            search_query_module.contains_unindexed_unicode_symbol(term)
-            for term in like_terms
-            if term not in ordinary_like_terms
+        assert 1 <= len(symbol_like_terms) <= search_query_module._PROSE_SYMBOL_SLOTS
+
+    def test_search_prose_many_symbols_stays_bounded_and_avoids_sqlite_limit(
+        self,
+        store,
+    ):
+        symbols = [
+            chr(codepoint)
+            for codepoint in range(0xA0, 0x10000)
+            if unicodedata.category(chr(codepoint)).startswith("S")
+        ][:1100]
+        query = "Find " + " ".join(symbols) + "?"
+        terms = extract_prose_search_terms(query, sanitize_like_query(query))
+        target = store.append(
+            "sess1",
+            {"role": "user", "content": f"archive {symbols[0]} record"},
         )
+
+        results = store.search(
+            query,
+            session_id="sess1",
+            fts_prose_mode=True,
+        )
+
+        assert len(symbols) == 1100
+        assert len(terms) <= search_query_module._PROSE_TERM_LIMIT
+        assert len(terms) == search_query_module._PROSE_SYMBOL_SLOTS
+        assert target in {row["store_id"] for row in results}
 
     def test_search_keeps_hyphenated_compound_on_the_fts_path(self, store):
         """Review finding 1: a compound token sanitizes to ordinary terms, so it
@@ -2131,6 +2164,39 @@ class TestMessageStore:
 
         results = store.search(
             f"What did I say about licensed {symbol}?",
+            session_id="sess1",
+            limit=1,
+            fts_prose_mode=True,
+        )
+
+        assert [row["store_id"] for row in results] == [target]
+
+    def test_search_prose_mode_retrieves_symbol_only_subject(self, store):
+        target = store.append(
+            "sess1",
+            {"role": "user", "content": "copyright © archive"},
+        )
+
+        results = store.search(
+            "Find ©?",
+            session_id="sess1",
+            fts_prose_mode=True,
+        )
+
+        assert [row["store_id"] for row in results] == [target]
+
+    def test_search_prose_like_ranks_distinct_terms_above_repetition(self, store):
+        target = store.append(
+            "sess1",
+            {"role": "user", "content": "licensed © archive"},
+        )
+        store.append(
+            "sess1",
+            {"role": "user", "content": "licensed licensed licensed"},
+        )
+
+        results = store.search(
+            "Find licensed © archive?",
             session_id="sess1",
             limit=1,
             fts_prose_mode=True,
@@ -3741,6 +3807,38 @@ class TestSummaryDAG:
         results = dag.search("Docker", session_id="s1")
         assert len(results) >= 1
 
+    def test_search_prose_mode_restores_bounded_disjunctive_recall(self, dag):
+        target = dag.add_node(SummaryNode(
+            session_id="s1", depth=0,
+            summary="the dog vet appointment is Friday",
+            token_count=6, source_ids=[1], source_type="messages",
+        ))
+        dag.add_node(SummaryNode(
+            session_id="s1", depth=0,
+            summary="dog grooming supplies are in the hall",
+            token_count=7, source_ids=[2], source_type="messages",
+        ))
+        dag.add_node(SummaryNode(
+            session_id="s1", depth=0,
+            summary="the project appointment calendar changed",
+            token_count=5, source_ids=[3], source_type="messages",
+        ))
+        query = "What did I say about my dog's vet appointment?"
+        dag._search_like = lambda *args, **kwargs: pytest.fail(
+            "ASCII prose query left the FTS route"
+        )
+
+        assert dag.search(query, session_id="s1") == []
+
+        results = dag.search(
+            query,
+            session_id="s1",
+            limit=3,
+            fts_prose_mode=True,
+        )
+
+        assert results[0].node_id == target
+
     def test_search_flag_off_keeps_unicode_symbols_on_historical_fts_route(self, dag):
         dag.add_node(SummaryNode(
             session_id="s1", depth=0,
@@ -3773,6 +3871,30 @@ class TestSummaryDAG:
 
         results = dag.search(
             "What did I say about licensed ©?",
+            session_id="s1",
+            limit=1,
+            fts_prose_mode=True,
+        )
+
+        assert [node.node_id for node in results] == [target]
+
+    def test_search_summary_prose_like_ranks_distinct_terms_above_repetition(
+        self,
+        dag,
+    ):
+        target = dag.add_node(SummaryNode(
+            session_id="s1", depth=0,
+            summary="licensed © archive",
+            token_count=3, source_ids=[1], source_type="messages",
+        ))
+        dag.add_node(SummaryNode(
+            session_id="s1", depth=0,
+            summary="licensed licensed licensed",
+            token_count=3, source_ids=[2], source_type="messages",
+        ))
+
+        results = dag.search(
+            "Find licensed © archive?",
             session_id="s1",
             limit=1,
             fts_prose_mode=True,
