@@ -32,6 +32,7 @@ from .db_bootstrap import (
 _DELETE_SESSION_SCOPE_TABLE = "temp_lcm_delete_session_scope"
 _DELETE_SESSION_SCOPE_INSERT_CHUNK = 512
 from .search_query import (
+    build_fts5_match_query,
     AGE_DECAY_RATE,
     compute_search_candidate_cap,
     compute_directness_rank_bonus_upper_bound,
@@ -45,9 +46,9 @@ from .search_query import (
     extract_search_terms,
     normalize_search_sort,
     requires_like_fallback,
-    sanitize_fts5_query,
     sanitize_like_query,
     should_apply_directness_rank_adjustment,
+    should_use_fts_prose_mode,
 )
 from .store import _normalize_source_value, _UNKNOWN_SOURCE, _legacy_blank_source_clause
 
@@ -551,7 +552,8 @@ class SummaryDAG:
 
     def search(self, query: str, session_id: str | None = None,
                limit: int = 20, sort: str | None = None,
-               source: str | None = None) -> List[SummaryNode]:
+               source: str | None = None,
+               fts_prose_mode: bool = False) -> List[SummaryNode]:
         """FTS5 search across summary nodes.
 
         Retrieval contract:
@@ -562,7 +564,13 @@ class SummaryDAG:
           session-level source presence
         - mixed-source nodes may match more than one ``source`` filter
         """
-        safe_query = sanitize_fts5_query(query)
+        safe_query = build_fts5_match_query(query, prose_mode=fts_prose_mode)
+        if (
+            sort is None
+            and fts_prose_mode
+            and should_use_fts_prose_mode(query)
+        ):
+            sort = "relevance"
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
         # LIKE is the fallback for text sanitization LOSES (CJK/emoji) and for a

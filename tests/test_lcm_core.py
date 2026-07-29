@@ -29,7 +29,7 @@ from hermes_lcm.db_bootstrap import (
     SCHEMA_VERSION,
     ensure_external_content_fts,
 )
-from hermes_lcm.search_query import sanitize_fts5_query
+from hermes_lcm.search_query import build_fts5_match_query, sanitize_fts5_query
 from hermes_lcm.session_patterns import (
     build_session_match_keys,
     compile_session_pattern,
@@ -578,6 +578,7 @@ class TestConfig:
         assert c.expansion_context_tokens == 32_000
         assert c.summary_timeout_ms == 60_000
         assert c.expansion_timeout_ms == 120_000
+        assert c.fts_prose_mode is False
 
     def test_from_env(self, monkeypatch):
         monkeypatch.setenv("LCM_FRESH_TAIL_COUNT", "32")
@@ -615,6 +616,7 @@ class TestConfig:
         monkeypatch.setenv("LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED", "true")
         monkeypatch.setenv("LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS", "8192")
         monkeypatch.setenv("LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED", "true")
+        monkeypatch.setenv("LCM_FTS_PROSE_MODE", "true")
         c = LCMConfig.from_env()
         assert c.fresh_tail_count == 32
         assert c.fresh_tail_max_tokens == 12_000
@@ -655,6 +657,7 @@ class TestConfig:
         assert c.large_output_active_replay_stubbing_enabled is True
         assert c.large_output_active_replay_stub_threshold_tokens == 8192
         assert c.large_output_transcript_gc_enabled is True
+        assert c.fts_prose_mode is True
 
     def test_from_env_invalid_numeric_values_fall_back_to_defaults(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "empty-hermes-home"))
@@ -1876,6 +1879,65 @@ class TestMessageStore:
         assert len(results) == 1
         assert results[0]["content"] == "budget revenue q3 totals recorded"
 
+    def test_search_prose_mode_restores_bounded_disjunctive_recall(self, store):
+        """Issue #172: flag-on prose recovers a relevant row implicit AND loses."""
+        target = store.append(
+            "sess1",
+            {"role": "user", "content": "the dog vet appointment is Friday"},
+        )
+        store.append(
+            "sess1",
+            {"role": "user", "content": "dog grooming supplies are in the hall"},
+        )
+        store.append(
+            "sess1",
+            {"role": "user", "content": "the project appointment calendar changed"},
+        )
+        query = "What did I say about my dog's vet appointment?"
+
+        assert store.search(query, session_id="sess1") == []
+
+        results = store.search(
+            query,
+            session_id="sess1",
+            limit=3,
+            fts_prose_mode=True,
+        )
+
+        assert results
+        assert results[0]["store_id"] == target
+        assert {row["store_id"] for row in results}
+
+    def test_search_prose_mode_keeps_keyword_and_operator_semantics(self, store):
+        assert (
+            build_fts5_match_query(
+                "What did I say about my dog's vet appointment?",
+                prose_mode=True,
+            )
+            == "dog OR vet OR appointment"
+        )
+        assert (
+            build_fts5_match_query("docker deploy notes", prose_mode=True)
+            == "docker deploy notes"
+        )
+        assert (
+            build_fts5_match_query(
+                "alpha OR beta",
+                allow_operators=True,
+                prose_mode=True,
+            )
+            == "alpha OR beta"
+        )
+
+    def test_search_prose_mode_caps_disjunctive_terms(self):
+        query = "What did we say about " + " ".join(
+            f"keyword{index}" for index in range(20)
+        )
+
+        match_query = build_fts5_match_query(query, prose_mode=True)
+
+        assert len(match_query.split(" OR ")) == 12
+
     def test_search_keeps_hyphenated_compound_on_the_fts_path(self, store):
         """Review finding 1: a compound token sanitizes to ordinary terms, so it
         must NOT be routed to the full-table LIKE scan (6 of the 50 fixed Phase
@@ -1899,6 +1961,27 @@ class TestMessageStore:
 
         assert requires_like_fallback("東京") is True
         assert requires_like_fallback("launch \U0001F680") is True
+
+    @pytest.mark.parametrize("symbol", ["©", "€", "™"])
+    def test_search_preserves_non_ascii_symbol_signal(self, store, symbol):
+        """Issue #172 sibling: stripped Unicode symbols retain ranking signal."""
+        target = store.append(
+            "sess1",
+            {"role": "user", "content": f"licensed {symbol} archive"},
+        )
+        store.append(
+            "sess1",
+            {"role": "user", "content": "licensed material without the mark"},
+        )
+
+        results = store.search(
+            f"licensed {symbol}",
+            session_id="sess1",
+            limit=1,
+            sort="relevance",
+        )
+
+        assert [row["store_id"] for row in results] == [target]
 
     def test_search_matches_a_decomposed_accent_against_the_index(self, store):
         """Review finding 6: unicode61 folds `naïve` to `naive`, so a decomposed
@@ -1930,11 +2013,18 @@ class TestMessageStore:
         beta = store.append("sess1", {"role": "user", "content": "beta only here"})
 
         deliberate = store.search(
-            "alpha OR beta", session_id="sess1", allow_operators=True
+            "alpha OR beta",
+            session_id="sess1",
+            allow_operators=True,
+            fts_prose_mode=True,
         )
         assert {row["store_id"] for row in deliberate} == {alpha, beta}
 
-        raw = store.search("alpha OR beta", session_id="sess1")
+        raw = store.search(
+            "alpha OR beta",
+            session_id="sess1",
+            fts_prose_mode=True,
+        )
         assert raw == []  # conjunction of alpha, or, beta — nothing has all three
 
     def test_search_survives_a_leading_boolean_operator(self, store):

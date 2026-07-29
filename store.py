@@ -30,6 +30,7 @@ from .db_bootstrap import (
 from .config import LCMConfig
 from .ingest_protection import protect_message_for_ingest, protect_messages_for_ingest
 from .search_query import (
+    build_fts5_match_query,
     build_snippet,
     compute_search_candidate_cap,
     compute_directness_rank_bonus_upper_bound,
@@ -43,10 +44,10 @@ from .search_query import (
     extract_search_terms,
     normalize_search_sort,
     requires_like_fallback,
-    sanitize_fts5_query,
     sanitize_like_query,
     AGE_DECAY_RATE,
     should_apply_directness_rank_adjustment,
+    should_use_fts_prose_mode,
 )
 from .message_content import normalize_content_value as _normalize_content_value
 from .tokens import count_message_tokens
@@ -1100,7 +1101,8 @@ class MessageStore:
                role: str | None = None,
                time_from: float | None = None,
                time_to: float | None = None,
-               allow_operators: bool = False) -> List[Dict[str, Any]]:
+               allow_operators: bool = False,
+               fts_prose_mode: bool = False) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
         Retrieval contract:
@@ -1113,15 +1115,32 @@ class MessageStore:
         - ``conversation_id`` limits rows to one gateway conversation/session key
         - ``allow_operators`` marks a query the CALLER composed as FTS5 syntax,
           keeping its bare AND/OR/NOT/NEAR. Never set it for user or agent text
+        - ``fts_prose_mode`` enables bounded disjunctive routing for raw prose;
+          default-off preserves the historical conjunctive query byte-for-byte
         """
-        safe_query = sanitize_fts5_query(query, allow_operators=allow_operators)
+        safe_query = build_fts5_match_query(
+            query,
+            allow_operators=allow_operators,
+            prose_mode=fts_prose_mode,
+        )
+        if (
+            sort is None
+            and fts_prose_mode
+            and not allow_operators
+            and should_use_fts_prose_mode(query)
+        ):
+            sort = "relevance"
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
         # LIKE is the fallback for text sanitization LOSES (CJK/emoji) and for a
         # query with no term left after it. A raw natural-language question is
         # NOT one of those: it sanitizes to a term form the index answers, so it
         # stays on the FTS path (F31 §3).
-        if requires_like_fallback(query, safe_query):
+        if requires_like_fallback(
+            query,
+            safe_query,
+            preserve_unicode_symbols=not allow_operators,
+        ):
             return self._search_like(
                 query,
                 session_id=session_id,

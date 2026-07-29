@@ -374,6 +374,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("recall_scan_rows", "LCM_RECALL_SCAN_ROWS", int),
     _EnvFieldSpec("recall_scan_max_rows", "LCM_RECALL_SCAN_MAX_ROWS", int),
     _EnvFieldSpec("recall_scan_budget_s", "LCM_RECALL_SCAN_BUDGET_S", float),
+    _EnvFieldSpec("fts_prose_mode", "LCM_FTS_PROSE_MODE", bool),
     _EnvFieldSpec("recall_reference_strict", "LCM_RECALL_REFERENCE_STRICT", bool),
     _EnvFieldSpec("proactive_recall_enabled", "LCM_PROACTIVE_RECALL_ENABLED", bool),
     _EnvFieldSpec("proactive_recall_min_score", "LCM_PROACTIVE_RECALL_MIN_SCORE", float),
@@ -653,6 +654,9 @@ class LCMConfig:
     # batches and degrades to coverage='bounded' rather than silently paying an
     # unbounded cost. This is the ONLY thing that truncates a default scan.
     recall_scan_budget_s: float = 0.0
+    # Opt raw natural-language questions into a bounded disjunctive FTS5 form.
+    # Default-off preserves the existing implicit-AND query bytes and ranking.
+    fts_prose_mode: bool = False
     # Per-arm RRF fusion weights for lcm_recall's 3-arm hybrid (fts/summary/chunk).
     # Down-weighting the weak FTS arm keeps naive equal-weight fusion from dragging
     # fused recall below its best (vector) arm — measured −21 R@5 on LongMemEval.

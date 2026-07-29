@@ -27,10 +27,24 @@ _BOOLEAN_OPERATORS = {"AND", "OR", "NOT", "NEAR"}
 _RISKY_FTS_TOKEN_RE = re.compile(r"[A-Za-z0-9][\-:/][A-Za-z0-9]")
 _SPLIT_PUNCT_RE = re.compile(r"[-:/]+")
 _STRIP_EDGE_PUNCT = "\"'()[]{}.,;"
+_PROSE_TERM_LIMIT = 12
+_PROSE_STOPWORDS = frozenset({
+    "a", "about", "an", "and", "are", "as", "at", "be", "been", "but", "by",
+    "can", "could", "did", "do", "does", "for", "from", "had", "has", "have",
+    "how", "i", "in", "is", "it", "me", "my", "near", "not", "of", "on", "or",
+    "our", "s", "say", "said", "should", "tell", "that", "the", "their", "them",
+    "there", "these", "they", "this", "those", "to", "us", "was", "we", "were",
+    "what", "when", "where", "which", "who", "why", "will", "with", "would",
+    "you", "your",
+})
+_PROSE_LEAD_WORDS = frozenset({
+    "can", "could", "did", "do", "does", "find", "how", "please", "recall",
+    "remember", "tell", "what", "when", "where", "which", "who", "why", "would",
+})
 # Characters that are special in FTS5 QUERY SYNTAX (as opposed to characters
 # FTS5 simply cannot spell in a bareword). Only these have to go on the LIKE
 # path, which has no query grammar of its own.
-_FTS5_SPECIAL_CHARS = frozenset('"()*^-:{}.')
+_FTS5_SPECIAL_CHARS = frozenset('"()*^-:{}.')  # FTS5 query grammar
 
 
 def _like_safe_char(char: str) -> str:
@@ -117,6 +131,67 @@ def sanitize_fts5_query(query: str, *, allow_operators: bool = False) -> str:
     return sanitized if allow_operators else _neutralize_bare_operators(sanitized)
 
 
+def should_use_fts_prose_mode(
+    query: str,
+    sanitized: str | None = None,
+) -> bool:
+    """Distinguish conversational prose from compact keyword query shapes."""
+    raw = query or ""
+    safe = sanitize_fts5_query(raw) if sanitized is None else sanitized
+    # Balanced quotes are an explicit precision signal. Keep their conjunctive
+    # semantics even if the surrounding text happens to end in a question mark.
+    if raw.count('"') >= 2 and raw.count('"') % 2 == 0:
+        return False
+
+    terms = extract_search_terms(safe)
+    if len(terms) < 2:
+        return False
+    lowered = [term.casefold() for term in terms]
+    stopword_count = sum(term in _PROSE_STOPWORDS for term in lowered)
+    starts_like_prose = lowered[0] in _PROSE_LEAD_WORDS
+    return (
+        "?" in raw
+        or starts_like_prose
+        or (len(terms) >= 6 and stopword_count >= 2)
+    )
+
+
+def build_fts5_match_query(
+    query: str,
+    *,
+    allow_operators: bool = False,
+    prose_mode: bool = False,
+) -> str:
+    """Build the query passed to FTS5 while preserving the default byte path.
+
+    Flag-off and caller-composed queries are exactly the existing sanitized
+    form. Flag-on raw prose drops conversational framing, deduplicates terms,
+    caps work at ``_PROSE_TERM_LIMIT``, and lets FTS5/BM25 rank a disjunction.
+    Compact keyword queries and balanced quoted queries remain conjunctive.
+    """
+    sanitized = sanitize_fts5_query(query, allow_operators=allow_operators)
+    if (
+        not prose_mode
+        or allow_operators
+        or not should_use_fts_prose_mode(query, sanitized)
+    ):
+        return sanitized
+
+    prose_terms: list[str] = []
+    seen: set[str] = set()
+    for term in extract_search_terms(sanitized):
+        folded = term.casefold()
+        if folded in _PROSE_STOPWORDS or folded in seen:
+            continue
+        seen.add(folded)
+        prose_terms.append(term)
+        if len(prose_terms) >= _PROSE_TERM_LIMIT:
+            break
+    if not prose_terms:
+        return sanitized
+    return " OR ".join(prose_terms)
+
+
 def sanitize_like_query(query: str) -> str:
     """Strip FTS5 syntax operators, preserving every other character.
 
@@ -170,6 +245,20 @@ def contains_emoji(text: str) -> bool:
     return bool(_EMOJI_RE.search(text or ""))
 
 
+def contains_unindexed_unicode_symbol(text: str) -> bool:
+    """Whether raw text carries a non-ASCII symbol unicode61 will not index.
+
+    ASCII punctuation keeps the established tokenizer-parity path (notably
+    hyphens and ``$`` in prose). This catches the sibling finding's stripped
+    Unicode signal such as ©, €, and ™ without broadening ordinary punctuation
+    back onto the full-table LIKE scan.
+    """
+    return any(
+        ord(char) > 0x7F and unicodedata.category(char).startswith("S")
+        for char in (text or "")
+    )
+
+
 def contains_risky_fts_ascii(text: str) -> bool:
     raw = (text or "").strip()
     if not raw:
@@ -180,7 +269,12 @@ def contains_risky_fts_ascii(text: str) -> bool:
     return bool(_RISKY_FTS_TOKEN_RE.search(text_without_phrases))
 
 
-def requires_like_fallback(query: str, sanitized: str | None = None) -> bool:
+def requires_like_fallback(
+    query: str,
+    sanitized: str | None = None,
+    *,
+    preserve_unicode_symbols: bool = True,
+) -> bool:
     """Whether ``query`` must be answered by the LIKE scan instead of the index.
 
     The test is what SANITIZATION LOSES, not what the FTS5 query grammar cannot
@@ -191,16 +285,24 @@ def requires_like_fallback(query: str, sanitized: str | None = None) -> bool:
     check therefore runs against the SANITIZED form, which is what actually
     reaches ``MATCH``.
 
-    Genuine losses stay on LIKE: unicode61 does not segment CJK, it drops emoji
-    from the index entirely, and a query that sanitizes to nothing has no terms
-    left to match. Those two character classes are tested against the RAW query
-    because sanitization is exactly what removes them.
+    Genuine losses stay on LIKE: unicode61 does not segment CJK; it drops emoji
+    and non-ASCII Unicode symbols from the index entirely; and a query that
+    sanitizes to nothing has no terms left to match. Those character classes
+    are tested against the RAW query because sanitization is exactly what
+    removes them.
     """
     raw = query or ""
     safe = sanitize_fts5_query(raw) if sanitized is None else (sanitized or "")
     if not safe.strip():
         return True
-    if contains_cjk(raw) or contains_emoji(raw):
+    if (
+        contains_cjk(raw)
+        or contains_emoji(raw)
+        or (
+            preserve_unicode_symbols
+            and contains_unindexed_unicode_symbol(raw)
+        )
+    ):
         return True
     return contains_risky_fts_ascii(safe)
 
