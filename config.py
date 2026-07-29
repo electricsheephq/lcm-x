@@ -389,6 +389,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("embedding_store_dim", "LCM_EMBEDDING_STORE_DIM", int),
     _EnvFieldSpec("embedding_binary_prescreen", "LCM_EMBEDDING_BINARY_PRESCREEN", bool),
     _EnvFieldSpec("knn_prescreen_multiplier", "LCM_KNN_PRESCREEN_MULTIPLIER", int),
+    _EnvFieldSpec("knn_resident_max_mb", "LCM_KNN_RESIDENT_MAX_MB", int),
     _EnvFieldSpec("embedding_provider", "LCM_EMBEDDING_PROVIDER", str),
     _EnvFieldSpec("embedding_model", "LCM_EMBEDDING_MODEL", str),
     _EnvFieldSpec("embedding_content_policy", "LCM_EMBED_CONTENT_POLICY", str),
@@ -634,6 +635,10 @@ class LCMConfig:
     # rescore) KNN: M = knn_prescreen_multiplier x k survivors are rescored.
     # Larger widens the approximate prescreen toward exact recall at more cost.
     knn_prescreen_multiplier: int = 4
+    # Maximum RAM used by persistent int8 KNN matrices. A full-corpus int8
+    # matrix is retained across calls when it fits; 0 disables residency and
+    # over-budget corpora use the exact streaming scan.
+    knn_resident_max_mb: int = 128
     # lcm_recall candidate-scan BATCH SIZE. lcm_recall promises "all
     # conversations, all time", so it must NOT inherit the small
     # recency-truncating grep bound above (that structurally hides the oldest
