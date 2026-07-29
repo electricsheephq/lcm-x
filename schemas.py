@@ -557,25 +557,11 @@ LCM_COMPILE_EVIDENCE = {
                 "additionalProperties": False,
                 "required": [
                     "version",
-                    "operation",
                     "selections",
                     "missing_facets",
                 ],
                 "properties": {
                     "version": {"type": "string", "enum": ["evidence-selector-v1"]},
-                    "operation": {
-                        "type": "string",
-                        "enum": [
-                            "none",
-                            "date_interval",
-                            "date_filter",
-                            "count_distinct",
-                            "sum",
-                            "difference",
-                            "order",
-                            "latest_fact",
-                        ],
-                    },
                     "requested_facets": {
                         "type": "array",
                         "maxItems": 12,

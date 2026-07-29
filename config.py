@@ -372,6 +372,9 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("embeddings_enabled", "LCM_EMBEDDINGS_ENABLED", bool),
     _EnvFieldSpec("rerank_enabled", "LCM_RERANK_ENABLED", bool),
     _EnvFieldSpec("recall_scan_rows", "LCM_RECALL_SCAN_ROWS", int),
+    _EnvFieldSpec("recall_scan_max_rows", "LCM_RECALL_SCAN_MAX_ROWS", int),
+    _EnvFieldSpec("recall_scan_budget_s", "LCM_RECALL_SCAN_BUDGET_S", float),
+    _EnvFieldSpec("recall_reference_strict", "LCM_RECALL_REFERENCE_STRICT", bool),
     _EnvFieldSpec("proactive_recall_enabled", "LCM_PROACTIVE_RECALL_ENABLED", bool),
     _EnvFieldSpec("proactive_recall_min_score", "LCM_PROACTIVE_RECALL_MIN_SCORE", float),
     _EnvFieldSpec("proactive_recall_budget_tokens", "LCM_PROACTIVE_RECALL_BUDGET_TOKENS", int),
@@ -630,12 +633,26 @@ class LCMConfig:
     # rescore) KNN: M = knn_prescreen_multiplier x k survivors are rescored.
     # Larger widens the approximate prescreen toward exact recall at more cost.
     knn_prescreen_multiplier: int = 4
-    # lcm_recall candidate-scan bound. lcm_recall promises "all conversations,
-    # all time", so it must NOT inherit the small recency-truncating grep bound
-    # above (that structurally hides the oldest memories). This larger bound
-    # (still deadline-guarded) lets recall cover a realistic forever-memory
-    # corpus while capping worst-case cost on a very large one.
+    # lcm_recall candidate-scan BATCH SIZE. lcm_recall promises "all
+    # conversations, all time", so it must NOT inherit the small
+    # recency-truncating grep bound above (that structurally hides the oldest
+    # memories). It used to be a hard bound, which made the promise false at
+    # scale: at 185k vectors it scored only the 25k most-recent and recall for
+    # ageing content went to zero (FINDING-F31 §2). The scan now covers the
+    # WHOLE corpus and this value bounds only how many vectors are resident per
+    # batch (a running top-k spans the batches), so it trades peak memory, not
+    # coverage.
     recall_scan_rows: int = 25_000
+    # Hard candidate cap for the lcm_recall scan; 0 = unlimited (the default:
+    # cover everything). Set it only for a pathological corpus -- a capped scan
+    # reports coverage='bounded' and discloses the scanned/total ratio, exactly
+    # as the old recency window did.
+    recall_scan_max_rows: int = 0
+    # Optional hard latency budget for the lcm_recall scan, in seconds; 0 = no
+    # early stop (the default). When set, a scan that overruns it stops between
+    # batches and degrades to coverage='bounded' rather than silently paying an
+    # unbounded cost. This is the ONLY thing that truncates a default scan.
+    recall_scan_budget_s: float = 0.0
     # Per-arm RRF fusion weights for lcm_recall's 3-arm hybrid (fts/summary/chunk).
     # Down-weighting the weak FTS arm keeps naive equal-weight fusion from dragging
     # fused recall below its best (vector) arm — measured −21 R@5 on LongMemEval.
@@ -643,6 +660,16 @@ class LCMConfig:
     recall_arm_weights: dict[str, float] = field(
         default_factory=lambda: dict(_DEFAULT_RECALL_ARM_WEIGHTS)
     )
+    # Reference-strict delivery for detail='answer_ready' (FINDING-F35 §2): a hit
+    # that cannot carry a truthful (store_id, char_start, char_end) source span is
+    # never delivered as evidence; the next-ranked citable hit takes its slot and
+    # the omission count is surfaced in provenance.answer_ready. ON by default --
+    # delivering evidence the product cannot cite is a correctness defect, and the
+    # consumers that validate references fail CLOSED on an unreferenced card, so a
+    # single uncitable hit destroys the whole response. Set False only for a host
+    # that renders recall without citations and wants summary hits back; disabled,
+    # the answer_ready response is byte-identical to the pre-F35 delivery.
+    recall_reference_strict: bool = True
     # -- Proactive memory injection (SPEC F, default-OFF) ---
     # At active-context assembly, embed the newest user message and run the
     # lcm_recall pipeline to surface cross-session memories the model would

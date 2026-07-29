@@ -251,13 +251,16 @@ _V5_CORE_OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
 _V5_CORE_PRESENCE_ONLY = ("messages_fts", "nodes_fts")
 
 # Extra tables are tolerated only when they belong to a known opt-in feature
-# family (temporal-rollup / embedding / chunk / assertion) or are FTS5 shadow tables of the
-# core FTS indexes. Anything else means a newer build owns the schema.
+# family (temporal-rollup / embedding / chunk / assertion / query-view /
+# trajectory) or are FTS5 shadow tables of the core FTS indexes. Anything else
+# means a newer build owns the schema.
 _KNOWN_FEATURE_TABLE_PREFIXES = (
     "lcm_rollup",
     "lcm_embedding",
     "lcm_chunk",
     "lcm_assertion",
+    "lcm_query",
+    "lcm_trajectory",
 )
 
 # The known opt-in feature families whose derived tables an interim build may
@@ -289,6 +292,8 @@ _INTERIM_FEATURE_FAMILIES: tuple[dict[str, str], ...] = (
     },
 )
 
+_PRESERVED_FEATURE_FAMILIES = ("lcm_query", "lcm_trajectory")
+
 
 def _family_verifier(prefix: str):
     """Return the final-shape verifier for a feature-family prefix, or ``None``
@@ -302,6 +307,14 @@ def _family_verifier(prefix: str):
         return verify_chunk_schema
     if prefix == "lcm_assertion":
         return verify_assertion_schema
+    if prefix == "lcm_query":
+        from .query_view_store import _verify_query_view_schema
+
+        return _verify_query_view_schema
+    if prefix == "lcm_trajectory":
+        from .trajectory_store import _verify_trajectory_schema
+
+        return _verify_trajectory_schema
     return None
 
 
@@ -432,6 +445,23 @@ def classify_version_mismatch(conn: sqlite3.Connection) -> str:
         except sqlite3.DatabaseError:
             return VERSION_MISMATCH_GENUINELY_NEWER
         if _family_reports_newer_shape(findings, family_prefix=prefix):
+            return VERSION_MISMATCH_GENUINELY_NEWER
+
+    # Query views and trajectories are preserved source/derived records, not
+    # disposable caches. Their init paths cannot safely rebuild an unknown or
+    # partial shape after this routine lowers the numeric stamp, so every
+    # present family must match this build exactly before downgrade.
+    for prefix in _PRESERVED_FEATURE_FAMILIES:
+        if not any(table.startswith(prefix) for table in tables):
+            continue
+        verify = _family_verifier(prefix)
+        if verify is None:
+            return VERSION_MISMATCH_GENUINELY_NEWER
+        try:
+            findings = verify(conn)
+        except (ImportError, sqlite3.DatabaseError):
+            return VERSION_MISMATCH_GENUINELY_NEWER
+        if findings:
             return VERSION_MISMATCH_GENUINELY_NEWER
 
     return VERSION_MISMATCH_INTERIM_STAMP

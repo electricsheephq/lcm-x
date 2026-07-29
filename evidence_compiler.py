@@ -958,6 +958,7 @@ def _persist_compiled_view(result: dict[str, Any], *, engine: Any) -> None:
             {"status": "unavailable", "reason_code": "query_view_store_unavailable"}
         )
         return
+    token = None
     try:
         identity = _view_identity(request, candidates)
         dependencies = [
@@ -1010,7 +1011,14 @@ def _persist_compiled_view(result: dict[str, Any], *, engine: Any) -> None:
             {"status": "busy", "reason_code": "query_view_build_in_progress"}
         )
         return
-    except Exception:
+    except Exception as exc:
+        if token is not None:
+            try:
+                store.mark_failed(token, str(exc))
+            except Exception:
+                # Cleanup is best-effort and must never replace the publish
+                # failure that selected this response contract.
+                pass
         result["persistence"].update(
             {"status": "error", "reason_code": "query_view_publish_failed"}
         )

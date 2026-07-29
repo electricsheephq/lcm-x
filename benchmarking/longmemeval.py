@@ -463,7 +463,11 @@ def fts_hits(store, query: str, fetch: int) -> list[tuple[str, int]]:
     match_query = build_fts_query(query)
     if not match_query:
         return []
-    rows = store.search(match_query, session_id=None, limit=fetch)
+    # build_fts_query composes FTS5 syntax on purpose (barewords joined by OR),
+    # so it opts in to operator handling. Raw prose never does.
+    rows = store.search(
+        match_query, session_id=None, limit=fetch, allow_operators=True
+    )
     hits: list[tuple[str, int]] = []
     for row in rows:
         store_id = row.get("store_id")

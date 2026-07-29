@@ -17,6 +17,7 @@ from hermes_lcm.evidence_compiler import (
     derive_evidence_request,
 )
 from hermes_lcm.query_view_store import QueryViewStore
+from hermes_lcm.schemas import LCM_COMPILE_EVIDENCE
 from hermes_lcm.store import MessageStore
 from hermes_lcm.tools import lcm_compile_evidence
 
@@ -712,6 +713,52 @@ def test_registered_tool_uses_the_product_compiler_path(tmp_path):
     assert payload["provenance"]["final_prose_cached"] is False
 
 
+def test_public_proposal_schema_does_not_require_code_derived_operation(tmp_path):
+    """The proposal schema's required/allowed keys must match what
+    _validate_proposal actually accepts. operation is a deterministic,
+    code-derived field surfaced to the selector as input (via
+    selector_request["operation"]) -- it is never a selector output, so the
+    public schema must not require (or allow) callers to echo it back
+    (F-PR436-4: the schema required it while the runtime rejected it)."""
+    proposal_schema = LCM_COMPILE_EVIDENCE["parameters"]["properties"]["proposal"]
+    assert "operation" not in proposal_schema["required"]
+    assert "operation" not in proposal_schema["properties"]
+
+    engine = _engine(tmp_path)
+    source = _append(
+        engine,
+        "Maya owns the Atlas rollout.",
+        observed_at=datetime(2026, 7, 19, 9, tzinfo=timezone.utc).timestamp(),
+    )
+    # A caller who builds a proposal containing ONLY the schema's required
+    # keys (the honest, schema-compliant path) must succeed end to end.
+    schema_compliant_proposal = {
+        key: value
+        for key, value in _selector(
+            _claim("owner", source, "atlas-owner", entity="Maya", role="user")
+        )({}).items()
+        if key in proposal_schema["required"]
+    }
+    assert set(schema_compliant_proposal) == set(proposal_schema["required"])
+    try:
+        payload = json.loads(
+            lcm_compile_evidence(
+                {
+                    "question": "Who owns the Atlas rollout?",
+                    "question_date": "2026-07-20",
+                    "baseline_refs": [source],
+                    "proposal": schema_compliant_proposal,
+                },
+                engine=engine,
+            )
+        )
+    finally:
+        engine._store.close()
+
+    assert payload["status"] == "compiled"
+    assert payload["reason_code"] != "selector_schema_invalid"
+
+
 def test_selective_query_view_persistence_is_same_db_and_default_off(tmp_path):
     engine = _engine(tmp_path)
     query_views = QueryViewStore(engine._config.database_path)
@@ -748,6 +795,99 @@ def test_selective_query_view_persistence_is_same_db_and_default_off(tmp_path):
     assert persisted_result["provenance"]["persisted"] is True
     assert persisted_result["persistence"]["view_id"]
     assert count == 1
+
+
+def test_persist_compiled_view_releases_lease_on_publish_failure(tmp_path, monkeypatch):
+    """A claim_build() lease must not survive a post-claim publish_ready()
+    exception -- otherwise the view sits status='building' for the full
+    300s lease and an immediate, correct retry reports busy instead of
+    rebuilding (F-PR436-2)."""
+    engine = _engine(tmp_path)
+    query_views = QueryViewStore(engine._config.database_path)
+    engine._query_views = query_views
+    source = _append(engine, "Maya owns the Atlas rollout.")
+    selector = _selector(
+        _claim("owner", source, "atlas-owner", entity="Maya", role="user")
+    )
+    try:
+        monkeypatch.setattr(
+            QueryViewStore,
+            "publish_ready",
+            lambda self, token, **kwargs: (_ for _ in ()).throw(
+                ValueError("simulated manifest rejection")
+            ),
+        )
+        failed_result = compile_evidence(
+            "Who owns the Atlas rollout?",
+            engine=engine,
+            baseline_refs=[source],
+            selector=selector,
+            enabled=True,
+            persist_view=True,
+        )
+        assert failed_result["persistence"]["status"] == "error"
+        assert failed_result["persistence"]["reason_code"] == "query_view_publish_failed"
+
+        row = query_views._conn.execute(
+            "SELECT status, build_nonce FROM lcm_query_views"
+        ).fetchone()
+        assert row["status"] != "building"
+        assert row["build_nonce"] == ""
+
+        monkeypatch.undo()
+        retried_result = compile_evidence(
+            "Who owns the Atlas rollout?",
+            engine=engine,
+            baseline_refs=[source],
+            selector=selector,
+            enabled=True,
+            persist_view=True,
+        )
+    finally:
+        query_views.close()
+        engine._store.close()
+
+    assert retried_result["persistence"]["status"] == "published"
+
+
+def test_persist_compiled_view_cleanup_failure_does_not_escape(tmp_path, monkeypatch):
+    engine = _engine(tmp_path)
+    query_views = QueryViewStore(engine._config.database_path)
+    engine._query_views = query_views
+    source = _append(engine, "Maya owns the Atlas rollout.")
+    selector = _selector(
+        _claim("owner", source, "atlas-owner", entity="Maya", role="user")
+    )
+    try:
+        monkeypatch.setattr(
+            QueryViewStore,
+            "publish_ready",
+            lambda self, token, **kwargs: (_ for _ in ()).throw(
+                ValueError("original publish failure")
+            ),
+        )
+        monkeypatch.setattr(
+            QueryViewStore,
+            "mark_failed",
+            lambda self, token, error: (_ for _ in ()).throw(
+                RuntimeError("cleanup failure")
+            ),
+        )
+
+        result = compile_evidence(
+            "Who owns the Atlas rollout?",
+            engine=engine,
+            baseline_refs=[source],
+            selector=selector,
+            enabled=True,
+            persist_view=True,
+        )
+    finally:
+        query_views.close()
+        engine._store.close()
+
+    assert result["persistence"]["status"] == "error"
+    assert result["persistence"]["reason_code"] == "query_view_publish_failed"
 
 
 def test_selective_persistence_rejects_generic_or_ungrounded_state(tmp_path):

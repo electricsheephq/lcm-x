@@ -36,6 +36,8 @@ MAX_SEARCH_LEADS = 24
 MAX_CONTEXT_TOKENS = 7_500
 MAX_CONTEXT_CHARS = 40_000
 MAX_REQUIREMENTS = 12
+MAX_REQUIREMENT_SLOT_ID_CHARS = 64
+MAX_REQUIREMENT_DESCRIPTION_CHARS = 256
 MAX_ACTIVE_RETRIEVALS = 32
 RETRIEVAL_TTL_SECONDS = 15 * 60
 MAX_EVIDENCE_CHARS = 2_400
@@ -43,7 +45,9 @@ MAX_QUESTION_CHARS = 4_096
 MAX_TOOL_ARGS_CHARS = 2_048
 MAX_LEAD_FIELD_CHARS = 512
 
-_SLOT_ID_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
+_SLOT_ID_RE = re.compile(
+    rf"^[a-z][a-z0-9_.-]{{0,{MAX_REQUIREMENT_SLOT_ID_CHARS - 1}}}$"
+)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _FORBIDDEN_ARGUMENT_KEYS = frozenset({
     "question_id",
@@ -100,6 +104,30 @@ def _canonical_json(value: Any, *, field_name: str, max_chars: int) -> str:
     return encoded
 
 
+# Derived from MAX_REQUIREMENTS, the declared slot/description limits, and
+# MAX_CANDIDATE_REFS. NUL models the widest canonical JSON escape; one additional
+# max-sized item provides headroom if the identity shape gains small metadata.
+_REQUIREMENT_IDENTITY_ITEM_MAX_CHARS = len(
+    json.dumps(
+        {
+            "slot_id": "s" * MAX_REQUIREMENT_SLOT_ID_CHARS,
+            "description": "\0" * MAX_REQUIREMENT_DESCRIPTION_CHARS,
+            "minimum_refs": MAX_CANDIDATE_REFS,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+)
+_REQUIREMENTS_DIGEST_MAX_CHARS = (
+    2
+    + MAX_REQUIREMENTS * _REQUIREMENT_IDENTITY_ITEM_MAX_CHARS
+    + (MAX_REQUIREMENTS - 1)
+    + _REQUIREMENT_IDENTITY_ITEM_MAX_CHARS
+)
+
+
 def _normalize_question_date(value: Any) -> str:
     text = str(value or "").strip().replace("/", "-")
     if not text:
@@ -145,8 +173,18 @@ class EvidenceRequirement:
                 "letters, digits, dots, underscores, or hyphens"
             )
         description = " ".join(str(value.get("description") or "").split())
-        if not description or len(description) > 256:
-            raise ValueError("requirement description must contain 1..256 characters")
+        if (
+            not description
+            or len(description) > MAX_REQUIREMENT_DESCRIPTION_CHARS
+        ):
+            raise ValueError(
+                "requirement description must contain "
+                f"1..{MAX_REQUIREMENT_DESCRIPTION_CHARS} characters"
+            )
+        if any(0xD800 <= ord(char) <= 0xDFFF for char in description):
+            raise ValueError(
+                "requirement description must not contain surrogate code points"
+            )
         raw_minimum = value.get("minimum_refs", 1)
         if isinstance(raw_minimum, bool):
             raise ValueError("minimum_refs must be an integer")
@@ -172,13 +210,19 @@ class EvidenceRequirement:
 
 def requirements_digest(requirements: Sequence[EvidenceRequirement]) -> str:
     identity = [
-        {"slot_id": item.slot_id, "minimum_refs": item.minimum_refs}
+        {
+            "slot_id": item.slot_id,
+            "description": item.description,
+            "minimum_refs": item.minimum_refs,
+        }
         for item in sorted(requirements, key=lambda item: item.slot_id)
     ]
     return hashlib.sha256(
-        _canonical_json(identity, field_name="requirements", max_chars=4_096).encode(
-            "utf-8"
-        )
+        _canonical_json(
+            identity,
+            field_name="requirements",
+            max_chars=_REQUIREMENTS_DIGEST_MAX_CHARS,
+        ).encode("utf-8")
     ).hexdigest()
 
 

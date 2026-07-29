@@ -11,7 +11,10 @@ from hermes_lcm.adaptive_retrieval import (
     MAX_CANDIDATE_REFS,
     MAX_CONTEXT_CHARS,
     MAX_CONTEXT_TOKENS,
+    MAX_REQUIREMENTS,
     MAX_RETRIEVAL_ROUNDS,
+    EvidenceRequirement,
+    requirements_digest,
 )
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
@@ -238,12 +241,17 @@ def test_exact_slot_closure_compute_finish_and_warm_reuse(tmp_path):
         assert "candidate_answer" not in encoded_manifest
         assert "answer" not in persisted.view["computation_trace"]
 
+        # Reword the literal question but keep the requirement description
+        # identical to the original build: warm reuse must survive rephrasing
+        # the QUESTION, but requirements_digest() now folds in description
+        # (F-PR436-5), so varying the description here would correctly bust
+        # the cache -- that is exercised separately in
+        # test_cached_view_is_not_reused_across_different_requirement_descriptions.
         warm = _start(
             engine,
             question="How many different cities have I visited?",
             operation="count_distinct",
             minimum_refs=2,
-            description="distinct destinations",
         )
         assert warm["status"] == "ready"
         assert warm["query_view"]["status"] == "hit"
@@ -260,6 +268,97 @@ def test_exact_slot_closure_compute_finish_and_warm_reuse(tmp_path):
         )
         assert different_cardinality["status"] == "active"
         assert different_cardinality["query_view"]["status"] == "miss"
+    finally:
+        engine.shutdown()
+
+
+def test_requirements_digest_distinguishes_descriptions():
+    """requirements_digest() must not collide two requirements that share
+    slot_id/minimum_refs but describe different evidence -- description is
+    what defines the slot's meaning (F-PR436-5)."""
+    ceo = EvidenceRequirement.parse(
+        {"slot_id": "role_holder", "description": "the CEO of Acme", "minimum_refs": 1}
+    )
+    cfo = EvidenceRequirement.parse(
+        {"slot_id": "role_holder", "description": "the CFO of Acme", "minimum_refs": 1}
+    )
+    assert requirements_digest([ceo]) != requirements_digest([cfo])
+
+
+def test_requirement_description_rejects_surrogate_code_points():
+    with pytest.raises(ValueError, match="surrogate code points"):
+        EvidenceRequirement.parse({
+            "slot_id": "role_holder",
+            "description": "the CEO of \ud800Acme",
+            "minimum_refs": 1,
+        })
+
+
+def test_max_sized_requirements_validate_and_digest(tmp_path):
+    requirements = [
+        {
+            "slot_id": f"slot{index:02d}" + "x" * (64 - len(f"slot{index:02d}")),
+            "description": "d" * 256,
+            "minimum_refs": 1,
+        }
+        for index in range(MAX_REQUIREMENTS)
+    ]
+
+    parsed = [EvidenceRequirement.parse(item) for item in requirements]
+
+    assert len({item.slot_id for item in parsed}) == MAX_REQUIREMENTS
+    assert len(requirements_digest(parsed)) == 64
+    engine = _engine(tmp_path)
+    try:
+        started = _call(
+            engine,
+            action="start",
+            question="Find the requested evidence.",
+            identity=_identity(),
+            requirements=requirements,
+        )
+        assert started["status"] == "active"
+    finally:
+        engine.shutdown()
+
+
+def test_cached_view_is_not_reused_across_different_requirement_descriptions(tmp_path):
+    """Same identity + same slot_id + same minimum_refs, but a DIFFERENT
+    requirement description, must be a cache miss -- otherwise start()
+    pre-fills an unrelated question's slot with stale evidence for a
+    different meaning (F-PR436-5)."""
+    engine = _engine(tmp_path)
+    try:
+        ceo_id = _append(engine, "Maya is the CEO of Acme.")
+        _append(engine, "Ben is the CFO of Acme.")
+
+        ceo_started = _start(
+            engine,
+            question="Who is the CEO of Acme?",
+            description="the CEO of Acme",
+        )
+        assert ceo_started["query_view"]["status"] == "miss"
+        found = _search(engine, ceo_started["retrieval_id"], ceo_id)
+        ceo_citation = found["evidence"][0]["citation"]
+        finished = _call(
+            engine,
+            action="finish",
+            retrieval_id=ceo_started["retrieval_id"],
+            resolved_slots=[{"slot_id": "visits", "evidence_refs": [ceo_citation]}],
+            selected_refs=[ceo_citation],
+            computation=None,
+        )
+        assert finished["query_view"]["persistence"]["status"] == "published"
+
+        cfo_started = _start(
+            engine,
+            question="Who is the CFO of Acme?",
+            description="the CFO of Acme",
+        )
+        assert cfo_started["query_view"]["status"] == "miss"
+        assert ceo_citation not in [
+            item["citation"] for item in cfo_started.get("evidence", [])
+        ]
     finally:
         engine.shutdown()
 

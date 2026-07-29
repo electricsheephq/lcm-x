@@ -1139,7 +1139,7 @@ def test_get_status_exposes_runtime_identity_for_loaded_plugin_tree(tmp_path):
 
     assert identity["engine"] == "lcm"
     assert identity["plugin_name"] == "hermes-lcm"
-    assert identity["plugin_version"] == "0.19.0"
+    assert identity["plugin_version"] == "0.20.0"
     assert Path(identity["plugin_path"]) == repo_root
     assert Path(identity["module_path"]).name == "engine.py"
     assert Path(identity["database_path"]) == db_path
@@ -1165,11 +1165,11 @@ def test_plugin_metadata_refreshes_when_manifest_changes(tmp_path, monkeypatch):
 
     initial = identity_mod._plugin_metadata()
     assert initial["name"] == "hermes-lcm"
-    assert initial["version"] == "0.19.0"
+    assert initial["version"] == "0.20.0"
 
-    updated = original.replace('version: "0.19.0"', 'version: "9.9.9-test"')
+    updated = original.replace('version: "0.20.0"', 'version: "9.9.9-test"')
     if updated == original:
-        updated = original.replace('version: 0.19.0', 'version: 9.9.9-test')
+        updated = original.replace('version: 0.20.0', 'version: 9.9.9-test')
     assert updated != original
 
     try:
@@ -1207,7 +1207,7 @@ def test_lcm_doctor_json_includes_runtime_identity(engine):
     payload = json.loads(engine.handle_tool_call("lcm_doctor", {}))
 
     assert payload["runtime_identity"]["plugin_name"] == "hermes-lcm"
-    assert payload["runtime_identity"]["plugin_version"] == "0.19.0"
+    assert payload["runtime_identity"]["plugin_version"] == "0.20.0"
     assert "plugin_git_commit" in payload["runtime_identity"]
 
 
@@ -22236,7 +22236,7 @@ class TestEngineTools:
         assert result["results"][0]["store_id"] == best_id
         assert "best assistant" in result["results"][0]["snippet"]
 
-    def test_handle_grep_like_fallback_recency_sorts_tied_cap_by_directness(self, engine):
+    def test_handle_grep_like_fallback_recency_sorts_tied_cap_by_directness(self, engine, monkeypatch):
         best_id = engine._store.append(
             "test-session",
             {"role": "assistant", "content": "foo/bar baz direct assistant"},
@@ -22245,16 +22245,24 @@ class TestEngineTools:
             "UPDATE messages SET timestamp = ? WHERE store_id = ?",
             (5000.0, best_id),
         )
+        first_repeated_id = None
         for idx in range(600):
             store_id = engine._store.append(
                 "test-session",
                 {"role": "assistant", "content": f"foo/bar baz foo foo foo foo low assistant {idx}"},
             )
+            if first_repeated_id is None:
+                first_repeated_id = store_id
             engine._store._conn.execute(
                 "UPDATE messages SET timestamp = ? WHERE store_id = ?",
                 (5000.0, store_id),
             )
         engine._store._conn.commit()
+        monkeypatch.setattr(
+            engine._store,
+            "_search_like",
+            lambda *args, **kwargs: pytest.fail("compound query fell back to LIKE"),
+        )
 
         result = json.loads(engine.handle_tool_call(
             "lcm_grep",
@@ -22264,8 +22272,9 @@ class TestEngineTools:
         assert result["role"] == "assistant"
         assert len(result["results"]) == 1
         assert result["results"][0]["role"] == "assistant"
-        assert result["results"][0]["store_id"] == best_id
-        assert "direct assistant" in result["results"][0]["snippet"]
+        # #168: compound punctuation is sanitized to terms and stays on FTS.
+        assert result["results"][0]["store_id"] == first_repeated_id
+        assert "low assistant 0" in result["results"][0]["snippet"]
 
     def test_handle_grep_like_fallback_recency_extends_tied_cap_for_json_penalty(self, engine):
         best_id = engine._store.append(
@@ -23075,7 +23084,8 @@ class TestEngineTools:
 
         assert result["total_results"] == 1
         assert result["results"][0]["type"] == "message"
-        assert result["results"][0]["snippet"].startswith("Keep vendoring out")
+        # #168: the unmatched quote is sanitized and the FTS hit keeps markers.
+        assert result["results"][0]["snippet"] == "Keep >>>vendoring<<< out of hermes-agent."
 
     def test_handle_grep_recency_same_timestamp_pool_matches_store_ordering(self, engine):
         engine._store.append_batch(
@@ -23207,8 +23217,9 @@ class TestEngineTools:
 
         assert result["results"][0]["type"] == "summary"
         assert result["results"][0]["snippet"].startswith("Summary: keep hermes-lcm external")
-        assert result["results"][1]["type"] == "message"
-        assert result["results"][1]["role"] == "user"
+        # #168: the indexed conjunction excludes the vague partial message hit.
+        assert result["total_results"] == 1
+        assert [item["type"] for item in result["results"]] == ["summary"]
 
     def test_handle_grep_hybrid_prefers_much_better_summary_over_vague_recent_user_hit(self, engine):
         store_id = engine._store.append(
@@ -23239,8 +23250,9 @@ class TestEngineTools:
 
         assert result["results"][0]["type"] == "summary"
         assert result["results"][0]["snippet"].startswith("Summary: keep hermes-lcm external")
-        assert result["results"][1]["type"] == "message"
-        assert result["results"][1]["role"] == "user"
+        # #168: hybrid inherits the FTS arm's conjunctive filtering.
+        assert result["total_results"] == 1
+        assert [item["type"] for item in result["results"]] == ["summary"]
 
     def test_handle_grep_hybrid_does_not_let_weak_summary_beat_stronger_message_hit(self, engine):
         engine._store.append(
@@ -25360,6 +25372,16 @@ class TestEngineTools:
             lcm_tools, "_synthesize_expansion_answer",
             lambda **kwargs: "Recovered through normalized retrieval",
         )
+        monkeypatch.setattr(
+            engine._store,
+            "_search_like",
+            lambda *args, **kwargs: pytest.fail("compound query fell back to LIKE"),
+        )
+        monkeypatch.setattr(
+            engine._dag,
+            "_search_like",
+            lambda *args, **kwargs: pytest.fail("compound query fell back to LIKE"),
+        )
 
         result = json.loads(
             engine.handle_tool_call(
@@ -25372,9 +25394,26 @@ class TestEngineTools:
             )
         )
 
-        assert result["answer"] == "Recovered through normalized retrieval"
-        assert result["node_ids"] == [node_id]
-        assert result["matches"]
+        # #168: raw bare OR tokens are literals, so the full conjunction has no match.
+        assert result["answer"] == "No matching summaries or raw messages found in the current session."
+        assert result["node_ids"] == []
+        assert result["matches"] == []
+        assert result["raw_matches"] == []
+
+        indexed = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "query": "plugin-only context-engine hermes-lcm stays external",
+                    "prompt": "What were the agreements?",
+                    "max_tokens": 500,
+                },
+            )
+        )
+
+        assert indexed["answer"] == "Recovered through normalized retrieval"
+        assert indexed["node_ids"] == [node_id]
+        assert indexed["matches"]
 
     def test_handle_expand_query_rejects_non_numeric_limits(self, engine):
         result = json.loads(

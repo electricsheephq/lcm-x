@@ -44,6 +44,7 @@ from .search_query import (
     normalize_search_sort,
     requires_like_fallback,
     sanitize_fts5_query,
+    sanitize_like_query,
     AGE_DECAY_RATE,
     should_apply_directness_rank_adjustment,
 )
@@ -59,6 +60,7 @@ _MESSAGE_SELECT_COLUMNS = (
     "tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, "
     "ingested_at, observed_at, observed_at_source"
 )
+_MESSAGE_SELECT_COLUMN_COUNT = len(_MESSAGE_SELECT_COLUMNS.split(","))
 _UNKNOWN_SOURCE = "unknown"
 
 
@@ -629,7 +631,7 @@ class MessageStore:
                 "truncated": False,
                 "observed_at_missing_rows": 0,
             }
-        message_column_count = len(_MESSAGE_SELECT_COLUMNS.split(","))
+        message_column_count = _MESSAGE_SELECT_COLUMN_COUNT
         total_rows = int(rows[0][message_column_count] or 0)
         snapshot_max_store_id = int(rows[0][message_column_count + 1] or 0)
         observed_at_missing_rows = int(rows[0][message_column_count + 2] or 0)
@@ -1097,7 +1099,8 @@ class MessageStore:
                conversation_id: str | None = None,
                role: str | None = None,
                time_from: float | None = None,
-               time_to: float | None = None) -> List[Dict[str, Any]]:
+               time_to: float | None = None,
+               allow_operators: bool = False) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
         Retrieval contract:
@@ -1108,11 +1111,17 @@ class MessageStore:
         - ``source='unknown'`` means the explicit unknown-source bucket, with
           legacy blank-source rows treated as equivalent for back-compat
         - ``conversation_id`` limits rows to one gateway conversation/session key
+        - ``allow_operators`` marks a query the CALLER composed as FTS5 syntax,
+          keeping its bare AND/OR/NOT/NEAR. Never set it for user or agent text
         """
-        safe_query = sanitize_fts5_query(query)
+        safe_query = sanitize_fts5_query(query, allow_operators=allow_operators)
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
-        if requires_like_fallback(query):
+        # LIKE is the fallback for text sanitization LOSES (CJK/emoji) and for a
+        # query with no term left after it. A raw natural-language question is
+        # NOT one of those: it sanitizes to a term form the index answers, so it
+        # stays on the FTS path (F31 §3).
+        if requires_like_fallback(query, safe_query):
             return self._search_like(
                 query,
                 session_id=session_id,
@@ -1165,6 +1174,7 @@ class MessageStore:
                 rows = self._conn.execute(
                     f"""SELECT m.store_id, m.session_id, m.source, m.role, m.content, m.tool_call_id,
                               m.tool_calls, m.tool_name, m.timestamp, m.token_estimate, m.pinned, m.conversation_id,
+                              m.ingested_at, m.observed_at, m.observed_at_source,
                               rank as search_rank,
                               snippet(messages_fts, 0, '>>>', '<<<', '...', 40) as snippet
                        FROM messages_fts fts
@@ -1191,7 +1201,7 @@ class MessageStore:
             raw_primary_values: list[float] = []
             for r in rows:
                 d = self._row_to_dict(r)
-                base_columns = 12
+                base_columns = _MESSAGE_SELECT_COLUMN_COUNT
                 d["search_rank"] = r[base_columns] if len(r) > base_columns else None
                 d["snippet"] = r[base_columns + 1] if len(r) > (base_columns + 1) else ""
                 d["_directness_score"] = _message_directness_score(d.get("role"), d.get("content"), terms, phrases)
@@ -1227,7 +1237,9 @@ class MessageStore:
                      role: str | None = None,
                      time_from: float | None = None,
                      time_to: float | None = None) -> List[Dict[str, Any]]:
-        safe_query = sanitize_fts5_query(query)
+        # LIKE keeps every character the index cannot spell (emoji, punctuation)
+        # because substring matching is the only way to find those rows.
+        safe_query = sanitize_like_query(query)
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
         if not terms:

@@ -103,6 +103,30 @@ def test_legacy_row_migration_backfills_ingest_only(tmp_path):
     assert row["observed_at_source"] is None
 
 
+def test_fts_search_preserves_time_contract_fields(tmp_path):
+    """FTS-path search() rows must carry the same time-sidecar values as a
+    direct get() -- not the rank/snippet fields misread as ingested_at/
+    observed_at once _MESSAGE_SELECT_COLUMNS grew past the FTS query's
+    hardcoded column count."""
+    store = MessageStore(tmp_path / "fts-time.db")
+    try:
+        source_time = 1_710_000_000.25
+        store_id = store.append(
+            "session-a",
+            {"role": "user", "content": "the quick brown fox jumps over the lazy dog", "timestamp": source_time},
+        )
+        direct = store.get(store_id)
+        [fts_row] = store.search("quick fox")
+    finally:
+        store.close()
+
+    assert fts_row["store_id"] == store_id
+    assert fts_row["ingested_at"] == direct["ingested_at"]
+    assert isinstance(fts_row["ingested_at"], float)
+    assert fts_row["observed_at"] == direct["observed_at"] == source_time
+    assert fts_row["observed_at_source"] == direct["observed_at_source"] == "host_message_timestamp"
+
+
 def test_schema_classifier_accepts_only_declared_time_sidecars(tmp_path):
     db_path = tmp_path / "classified.db"
     dag = SummaryDAG(db_path)

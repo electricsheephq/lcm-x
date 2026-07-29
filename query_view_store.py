@@ -470,6 +470,17 @@ def _ensure_query_view_schema(conn: sqlite3.Connection) -> None:
 
 def _verify_query_view_schema(conn: sqlite3.Connection) -> list[str]:
     missing: list[str] = []
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name LIKE 'lcm_query%'"
+        )
+    }
+    missing.extend(
+        f"unexpected-table:{table}"
+        for table in sorted(tables - set(_REQUIRED_SCHEMA))
+    )
     for table, columns in _REQUIRED_SCHEMA.items():
         actual = {
             str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")
@@ -479,6 +490,10 @@ def _verify_query_view_schema(conn: sqlite3.Connection) -> list[str]:
         else:
             missing.extend(
                 f"column:{table}.{column}" for column in sorted(columns - actual)
+            )
+            missing.extend(
+                f"unexpected-column:{table}.{column}"
+                for column in sorted(actual - columns)
             )
     required_objects = {
         "index": {
@@ -501,6 +516,15 @@ def _verify_query_view_schema(conn: sqlite3.Connection) -> list[str]:
         }
         missing.extend(
             f"{object_type}:{name}" for name in sorted(names - actual)
+        )
+        # Real index names carry the idx_ prefix (idx_lcm_query_*); gating on
+        # the bare table prefix would make the index half of this fail-closed
+        # check unable to match any legitimately-named extra index.
+        gate_prefix = "idx_lcm_query" if object_type == "index" else "lcm_query"
+        gated = {name for name in actual if name.startswith(gate_prefix)}
+        missing.extend(
+            f"unexpected-{object_type}:{name}"
+            for name in sorted(gated - names)
         )
     return missing
 

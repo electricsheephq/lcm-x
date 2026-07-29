@@ -4,6 +4,14 @@ This repo also publishes GitHub Releases. This file is the repo-root release sur
 
 ## Unreleased
 
+## v0.20.0 - 2026-07-29
+
+Release focus: benchmark-driven retrieval scaling, evidence provenance, and bounded query embedding spend.
+
+- Removed the large-corpus recall ceilings by scanning the full summary and chunk corpora in bounded batches and sanitizing raw natural-language FTS queries before fallback. (#169)
+- Made the query-path embedding spend guard configurable with a generous default while preserving the exempt backfill contract. (stephenschoettler/hermes-lcm#434)
+- Preserved a direct source `store_id` on summary recall hits so strict evidence renderers can validate their source identity. (#164)
+
 ## v0.19.0 - 2026-07-07
 
 Release focus: data-safety hardening, operator diagnostics, import tooling, benchmarking, and the WS5 engine decomposition.

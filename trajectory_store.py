@@ -9,7 +9,7 @@ remain traceable to protected canonical source JSON.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import json
 import math
@@ -19,11 +19,12 @@ import sqlite3
 import struct
 import threading
 import time
-from typing import Any, Iterable, Protocol, Sequence
+from typing import Any, Callable, Iterable, Protocol, Sequence
 from urllib.parse import quote, unquote
 
 from .db_bootstrap import (
     configure_connection,
+    get_fts_shadow_table_names,
     mark_migration_step_complete,
     refuse_schema_version_too_new,
     run_versioned_migrations,
@@ -35,10 +36,177 @@ from .search_query import extract_search_terms
 TRAJECTORY_MIGRATION_STEP = "trajectory_store_v1"
 TRAJECTORY_SCHEMA_VERSION = 1
 TRAJECTORY_SEMANTIC_DOCUMENT_VERSION = "trajectory-semantic-document-v1"
+# Per-STATE semantic index (issue #142, Lane S / W3a). A separate, additive
+# embedding space keyed by state_id (the source-level index above is one coarse
+# vector per trajectory). Bumping this string invalidates a state backfill the
+# same way the source version does.
+TRAJECTORY_STATE_SEMANTIC_DOCUMENT_VERSION = "trajectory-state-semantic-document-v1"
+# Voyage single-request caps (mirrors embedding_provider's budgets, applied with
+# the same 0.9 safety factor the provider uses): one document <= 27K tokens, one
+# request <= 80K tokens. The state backfill packs 32 items / 72K tokens per
+# request (matches the #141 sizing simulation); a state above the per-document
+# budget takes the chunked path (token-window split, mean-pooled).
+_STATE_EMBED_MAX_BATCH_ITEMS = 32
+_STATE_EMBED_DOCUMENT_TOKEN_BUDGET = int(27_000 * 0.9)
+_STATE_EMBED_BATCH_TOKEN_BUDGET = int(80_000 * 0.9)
+
+_TRAJECTORY_BASE_SCHEMA: dict[str, frozenset[str]] = {
+    "lcm_trajectory_corpora": frozenset({
+        "singleton", "identity_digest", "identity_json", "schema_version",
+        "corpus_uid", "haystack_digest", "source_manifest_digest",
+        "trajectory_count", "ingest_cursor", "status", "created_at",
+        "completed_at",
+    }),
+    "lcm_trajectory_sources": frozenset({
+        "source_id", "trajectory_id", "ordinal", "source_json", "source_sha256",
+        "goal", "start_url", "outcome", "state_count", "inserted_at",
+    }),
+    "lcm_trajectory_states": frozenset({
+        "state_id", "source_id", "state_index", "sequence_ordinal", "step",
+        "url", "incoming_action", "thoughts", "text", "search_text",
+        "observed_at", "observed_at_source", "occurred_at",
+        "occurred_at_source", "ingested_at",
+    }),
+    "lcm_trajectory_assets": frozenset({
+        "asset_id", "state_id", "relative_path", "sha256", "byte_size",
+    }),
+    "lcm_trajectory_ingest_receipts": frozenset({
+        "ordinal", "trajectory_id", "source_sha256", "committed_at",
+    }),
+    "lcm_trajectory_transitions": frozenset({
+        "transition_id", "source_id", "sequence_ordinal", "pre_state_id",
+        "post_state_id", "incoming_action",
+    }),
+}
+_TRAJECTORY_OPTIONAL_SCHEMAS: tuple[dict[str, frozenset[str]], ...] = (
+    {
+        "lcm_trajectory_embedding_profiles": frozenset({
+            "profile_digest", "provider", "model_name", "dim",
+            "document_version", "source_manifest_digest", "document_count",
+            "index_digest", "active", "created_at",
+        }),
+        "lcm_trajectory_embeddings": frozenset({
+            "source_id", "profile_digest", "document_sha256", "vector",
+            "embedded_at",
+        }),
+    },
+    {
+        "lcm_trajectory_state_embedding_profiles": frozenset({
+            "profile_digest", "provider", "model_name", "dim",
+            "document_version", "source_manifest_digest", "state_count",
+            "active", "created_at",
+        }),
+        "lcm_trajectory_state_embeddings": frozenset({
+            "state_id", "profile_digest", "document_sha256", "vector",
+            "embedded_at",
+        }),
+    },
+)
+
+
+def _verify_trajectory_schema(conn: sqlite3.Connection) -> list[str]:
+    """Return any non-current trajectory shape without mutating source data."""
+    findings: list[str] = []
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name LIKE 'lcm_trajectory%'"
+        )
+    }
+    expected = dict(_TRAJECTORY_BASE_SCHEMA)
+    expected_fts = "lcm_trajectory_states_fts"
+    allowed = set(expected) | {expected_fts}
+    allowed.update(get_fts_shadow_table_names(expected_fts))
+    for optional in _TRAJECTORY_OPTIONAL_SCHEMAS:
+        if tables.intersection(optional):
+            expected.update(optional)
+            allowed.update(optional)
+
+    findings.extend(
+        f"unexpected-table:{table}" for table in sorted(tables - allowed)
+    )
+    for table, columns in expected.items():
+        actual = {
+            str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")
+        }
+        if not actual:
+            findings.append(f"table:{table}")
+            continue
+        findings.extend(
+            f"column:{table}.{column}" for column in sorted(columns - actual)
+        )
+        findings.extend(
+            f"unexpected-column:{table}.{column}"
+            for column in sorted(actual - columns)
+        )
+    if expected_fts not in tables:
+        findings.append(f"table:{expected_fts}")
+
+    required_objects = {
+        "index": {
+            "lcm_trajectory_states_source_sequence",
+            *(
+                {
+                    "lcm_trajectory_embedding_one_active",
+                    "lcm_trajectory_embeddings_profile",
+                }
+                if "lcm_trajectory_embeddings" in expected
+                else set()
+            ),
+            *(
+                {
+                    "lcm_trajectory_state_embedding_one_active",
+                    "lcm_trajectory_state_embeddings_profile",
+                }
+                if "lcm_trajectory_state_embeddings" in expected
+                else set()
+            ),
+        },
+        "trigger": {
+            "lcm_trajectory_fts_insert",
+            "lcm_trajectory_fts_delete",
+            "lcm_trajectory_fts_update",
+        },
+    }
+    for object_type, names in required_objects.items():
+        actual = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = ? "
+                "AND name LIKE 'lcm_trajectory%'",
+                (object_type,),
+            )
+        }
+        findings.extend(
+            f"{object_type}:{name}" for name in sorted(names - actual)
+        )
+        findings.extend(
+            f"unexpected-{object_type}:{name}" for name in sorted(actual - names)
+        )
+    return findings
 _MAX_CANDIDATES = 128
 _MAX_RESULTS = 24
 _MAX_IMAGES = 8
 _MAX_QUERY_TEXT_CHARS = 8_000
+_MAX_ADJACENCY_RADIUS = 8
+_MAX_DIVERSITY_CAP = 24
+_MAX_SHARP_TOKEN_BUDGET = 4_000
+# Knob G (HERMES_LCM_ANTIBOILERPLATE): additive re-weighting inside the C1
+# per-trajectory MMR survivor selection. A candidate is penalized by how much
+# it lexically resembles the OTHER pooled states of its own trajectory
+# (boilerplate looks like its siblings) and rewarded for query-term density, so
+# a trajectory's allotted seats go to query-relevant states rather than repeated
+# task headers / page furniture. Both terms are in [0, 1]; the weights keep the
+# base position-relevance signal dominant while giving the two signals real
+# re-ranking influence.
+_ANTIBOILERPLATE_BOILERPLATE_WEIGHT = 0.30
+_ANTIBOILERPLATE_DENSITY_WEIGHT = 0.30
+# Knob H (HERMES_LCM_TITLE_BOOST): contiguous question n-gram sizes matched
+# against a candidate's normalized title/heading/field-label text at the lexical
+# candidate stage.
+_TITLE_BOOST_MIN_GRAM = 2
+_TITLE_BOOST_MAX_GRAM = 4
 _MAX_SOURCE_JSON_CHARS = 16_000_000
 _MAX_TEXT_CHARS = 2_000_000
 _MAX_SEMANTIC_DOCUMENT_CHARS = 48_000
@@ -49,6 +217,17 @@ _STOPWORDS = frozenset({
     "does", "for", "from", "happen", "happened", "how", "i", "in", "is",
     "it", "of", "on", "or", "should", "the", "then", "to", "was", "were",
     "what", "when", "where", "which", "who", "why", "with", "would",
+})
+_TEMPORAL_TERMS = frozenset({
+    "after", "before", "current", "date", "day", "earliest", "first",
+    "initial", "last", "latest", "month", "newest", "previous", "recent",
+    "time", "timestamp", "today", "week", "when", "year", "yesterday",
+})
+_ACTION_TERMS = frozenset({
+    "add", "apply", "assign", "buy", "change", "choose", "click", "compare",
+    "configure", "create", "delete", "edit", "export", "filter", "insert",
+    "navigate", "open", "order", "remove", "retry", "save", "search",
+    "select", "set", "sort", "submit", "update", "view",
 })
 _EXACT_REF_RE = re.compile(
     r"^trajectory://(?P<corpus>[0-9a-f]{64})/"
@@ -401,6 +580,15 @@ class TrajectoryStore:
         }
         self._last_semantic_attempt: TrajectorySemanticAttempt | None = None
         self._last_query_telemetry: dict[str, Any] | None = None
+        # Lazily-populated per-STATE semantic matrix cache (issue #142): the
+        # tuple is ``(profile_digest, freshness, state_ids, matrix)`` where
+        # ``freshness`` is the profile row count/latest-write marker and
+        # ``matrix`` is a normalized float32 array (numpy when available, else a
+        # list of tuples). The marker also catches supported same-profile
+        # rewrites that occur outside this instance's explicit cache reset.
+        self._state_semantic_cache: (
+            tuple[str, tuple[int, float], list[int], Any] | None
+        ) = None
         self._lock = threading.RLock()
         self._conn = self._open_connection()
         try:
@@ -1276,6 +1464,456 @@ class TrajectoryStore:
     def semantic_metrics(self) -> dict[str, int]:
         return dict(self._semantic_usage)
 
+    # ------------------------------------------------------------------
+    # Per-STATE semantic index (issue #142, Lane S / W3a).
+    #
+    # An ADDITIVE second embedding space keyed by ``state_id`` -- the coarse
+    # per-trajectory index above cannot surface a lexically-invisible answer
+    # state, so the recall lane needs a per-state vector. The tables are created
+    # lazily/idempotently exactly like ``_ensure_semantic_schema`` (no change to
+    # any existing table); the backfill is resumable (skip embedded states) and
+    # drives its own request packing so a bulk run stays inside Voyage's caps.
+    # ------------------------------------------------------------------
+
+    def _ensure_state_semantic_schema(self) -> None:
+        self._require_writable()
+        self._conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS lcm_trajectory_state_embedding_profiles (
+                profile_digest TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                dim INTEGER NOT NULL CHECK(dim > 0),
+                document_version TEXT NOT NULL,
+                source_manifest_digest TEXT NOT NULL,
+                state_count INTEGER NOT NULL CHECK(state_count >= 0),
+                active INTEGER NOT NULL DEFAULT 0 CHECK(active IN (0, 1)),
+                created_at REAL NOT NULL
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS lcm_trajectory_state_embedding_one_active
+            ON lcm_trajectory_state_embedding_profiles(active) WHERE active = 1;
+
+            CREATE TABLE IF NOT EXISTS lcm_trajectory_state_embeddings (
+                state_id INTEGER PRIMARY KEY
+                    REFERENCES lcm_trajectory_states(state_id) ON DELETE CASCADE,
+                profile_digest TEXT NOT NULL
+                    REFERENCES lcm_trajectory_state_embedding_profiles(profile_digest)
+                    ON DELETE CASCADE,
+                document_sha256 TEXT NOT NULL,
+                vector BLOB NOT NULL,
+                embedded_at REAL NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS lcm_trajectory_state_embeddings_profile
+            ON lcm_trajectory_state_embeddings(profile_digest, state_id);
+            """
+        )
+        self._conn.commit()
+
+    def _state_semantic_profile_exists(self) -> bool:
+        return self._conn.execute(
+            """
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'lcm_trajectory_state_embedding_profiles'
+            """
+        ).fetchone() is not None
+
+    def active_state_semantic_profile(self) -> sqlite3.Row | None:
+        if not self._state_semantic_profile_exists():
+            return None
+        return self._conn.execute(
+            "SELECT * FROM lcm_trajectory_state_embedding_profiles WHERE active = 1"
+        ).fetchone()
+
+    @staticmethod
+    def _state_semantic_profile_digest(
+        provider_name: str, model_name: str, dim: int, source_manifest_digest: str
+    ) -> str:
+        return _sha256_text(_canonical_json({
+            "provider": provider_name,
+            "model": model_name,
+            "dim": int(dim),
+            "document_version": TRAJECTORY_STATE_SEMANTIC_DOCUMENT_VERSION,
+            "source_manifest_digest": source_manifest_digest,
+        }))
+
+    @staticmethod
+    def _state_embed_document(text: str, url: str, state_id: int) -> str:
+        """The per-state embedding document. ``states.text`` is the FTS-indexed
+        visible content (what the #141 sizing counted); an empty text falls back
+        to the URL, then a stable state marker, so the provider never receives an
+        empty input (Voyage rejects those)."""
+        candidate = str(text or "").strip()
+        if candidate:
+            return str(text)
+        candidate = str(url or "").strip()
+        if candidate:
+            return str(url)
+        return f"state-{int(state_id)}"
+
+    def _state_token_chunks(self, document: str, token_budget: int) -> list[str]:
+        """Split ``document`` into contiguous pieces each <= ``token_budget``
+        tokens (the chunked path for the ~228 states over Voyage's per-document
+        cap). Uses the shared cl100k encoder -- the same tokenizer the provider's
+        packing uses to gate the caps -- and falls back to a conservative
+        character window if the encoder is unavailable."""
+        from .tokens import _fallback_token_estimate, _get_encoder
+
+        encoder = _get_encoder()
+        if encoder is None:
+            # Use the shared estimator itself rather than ``budget * 4``:
+            # the estimator includes a rounding token and deliberately assigns
+            # denser budgets to non-ASCII text, so a flat character window can
+            # exceed the same limit that selected this path.
+            chunks: list[str] = []
+            start = 0
+            while start < len(document):
+                low = 1
+                high = min(len(document) - start, max(1, token_budget * 4))
+                accepted = 0
+                while low <= high:
+                    middle = (low + high) // 2
+                    piece = document[start:start + middle]
+                    if _fallback_token_estimate(piece) <= token_budget:
+                        accepted = middle
+                        low = middle + 1
+                    else:
+                        high = middle - 1
+                # A one-character piece always estimates to one token, but keep
+                # forward progress explicit if that estimator contract changes.
+                accepted = max(1, accepted)
+                chunks.append(document[start:start + accepted])
+                start += accepted
+            return chunks or [document]
+        token_ids = encoder.encode(document)
+        chunks: list[str] = []
+        for start in range(0, len(token_ids), token_budget):
+            piece = encoder.decode(token_ids[start:start + token_budget])
+            if piece:
+                chunks.append(piece)
+        return chunks or [document]
+
+    def build_state_semantic_index(
+        self,
+        provider: TrajectoryEmbeddingProvider | None = None,
+        *,
+        resume: bool = True,
+        batch_max_items: int = _STATE_EMBED_MAX_BATCH_ITEMS,
+        batch_token_budget: int = _STATE_EMBED_BATCH_TOKEN_BUDGET,
+        document_token_budget: int = _STATE_EMBED_DOCUMENT_TOKEN_BUDGET,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        """Resumable per-state embedding backfill (issue #142).
+
+        Embeds one vector per state (``states.text``) into
+        ``lcm_trajectory_state_embeddings`` under an active profile keyed by
+        provider/model/dim/document_version/source_manifest_digest. Requests are
+        packed to ``batch_max_items`` items / ``batch_token_budget`` tokens; a
+        state whose document exceeds ``document_token_budget`` is split into
+        token windows, each embedded, and the pieces mean-pooled + normalized
+        into a single state vector (same billed tokens, more requests).
+
+        Resumable + idempotent: with ``resume=True`` (default) states that
+        already carry a row under the active profile are skipped, so a re-run
+        after an interruption embeds only the remainder and a fully-embedded
+        store makes ZERO provider calls. ``progress_callback`` is invoked after
+        each dispatched request with a cumulative-stats dict (for a live ledger).
+        """
+        from .tokens import count_tokens
+
+        if self.status != "complete":
+            raise CorpusIdentityError(
+                "trajectory corpus must be finalized before state indexing"
+            )
+        active_provider = provider or self.embedding_provider
+        if active_provider is None:
+            raise TrajectoryStoreError("trajectory embedding provider is not configured")
+        self._ensure_state_semantic_schema()
+        corpus = self._conn.execute(
+            """
+            SELECT source_manifest_digest, trajectory_count
+            FROM lcm_trajectory_corpora WHERE singleton = 1
+            """
+        ).fetchone()
+        source_manifest_digest = str(corpus["source_manifest_digest"])
+        provider_name = str(getattr(active_provider, "provider_id", "unknown"))
+        model_name = str(getattr(active_provider, "model_id", "")).strip()
+        if not model_name:
+            raise ValueError("trajectory embedding model_id must not be empty")
+
+        batch_max_items = max(1, int(batch_max_items))
+        batch_token_budget = max(1, int(batch_token_budget))
+        document_token_budget = max(1, int(document_token_budget))
+
+        # Discover the embedding dimension without a wasted call when possible:
+        # the source-level active profile shares this provider/model, so its
+        # dim is authoritative; otherwise probe one state.
+        source_profile = self._semantic_profile()
+        dim: int | None = None
+        probe_provider_calls = 0
+        probe_billed_tokens = 0
+        if (
+            source_profile is not None
+            and str(source_profile["provider"]) == provider_name
+            and str(source_profile["model_name"]) == model_name
+        ):
+            dim = int(source_profile["dim"])
+
+        all_states = self._conn.execute(
+            """
+            SELECT s.state_id, s.text, s.url
+            FROM lcm_trajectory_states s
+            ORDER BY s.state_id
+            """
+        ).fetchall()
+        total_states = len(all_states)
+
+        if dim is None:
+            if not all_states:
+                raise ValueError("trajectory corpus has no states to index")
+            probe_doc = self._state_embed_document(
+                all_states[0]["text"], all_states[0]["url"], int(all_states[0]["state_id"])
+            )
+            probe_doc = self._state_token_chunks(
+                probe_doc, document_token_budget
+            )[0]
+            probe_vector = _normalized_vector(active_provider.embed_query(probe_doc))
+            dim = len(probe_vector)
+            probe_provider_calls = 1
+            probe_billed_tokens = max(
+                0, int(getattr(active_provider, "last_usage_tokens", 0) or 0)
+            )
+
+        profile_digest = self._state_semantic_profile_digest(
+            provider_name, model_name, dim, source_manifest_digest
+        )
+        now = time.time()
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                # Deactivate the serving profile BEFORE staging: the vector
+                # upsert below conflicts on state_id alone, so a staged rebuild
+                # progressively overwrites the previous profile's vectors — an
+                # "active" predecessor would keep serving a mixed index.
+                # Availability-during-rebuild needs profile-scoped embeddings
+                # ((profile_digest, state_id) identity) first; tracked in the
+                # fork issue for the next train.
+                self._conn.execute(
+                    "UPDATE lcm_trajectory_state_embedding_profiles "
+                    "SET active = 0 WHERE active = 1",
+                )
+                self._conn.execute(
+                    """
+                    INSERT INTO lcm_trajectory_state_embedding_profiles(
+                        profile_digest, provider, model_name, dim,
+                        document_version, source_manifest_digest,
+                        state_count, active, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
+                    ON CONFLICT(profile_digest) DO UPDATE SET
+                        state_count = excluded.state_count
+                    """,
+                    (
+                        profile_digest,
+                        provider_name,
+                        model_name,
+                        int(dim),
+                        TRAJECTORY_STATE_SEMANTIC_DOCUMENT_VERSION,
+                        source_manifest_digest,
+                        total_states,
+                        now,
+                    ),
+                )
+                if not resume:
+                    self._conn.execute(
+                        "DELETE FROM lcm_trajectory_state_embeddings "
+                        "WHERE profile_digest = ?",
+                        (profile_digest,),
+                    )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+        already: set[int] = set()
+        if resume:
+            already = {
+                int(row[0])
+                for row in self._conn.execute(
+                    "SELECT state_id FROM lcm_trajectory_state_embeddings "
+                    "WHERE profile_digest = ?",
+                    (profile_digest,),
+                )
+            }
+        pending = [row for row in all_states if int(row["state_id"]) not in already]
+
+        stats: dict[str, Any] = {
+            "profile_digest": profile_digest,
+            "dim": int(dim),
+            "total_states": total_states,
+            "already_embedded": len(already),
+            "pending": len(pending),
+            "states_embedded": 0,
+            "chunked_states": 0,
+            "provider_calls": probe_provider_calls,
+            "billed_tokens": probe_billed_tokens,
+        }
+
+        def _emit_progress() -> None:
+            if progress_callback is not None:
+                progress_callback(dict(stats))
+
+        if probe_provider_calls:
+            _emit_progress()
+
+        # Partition pending states into single-request documents and the
+        # oversize (chunked) minority, both packed to the same item/token caps.
+        request_document_token_budget = min(
+            document_token_budget, batch_token_budget
+        )
+        normal: list[tuple[int, str, str, int]] = []  # (state_id, doc, sha, tokens)
+        oversize: list[tuple[int, str, str]] = []  # (state_id, doc, sha)
+        for row in pending:
+            state_id = int(row["state_id"])
+            document = self._state_embed_document(row["text"], row["url"], state_id)
+            document_sha = _sha256_text(document)
+            tokens = count_tokens(document)
+            if tokens > request_document_token_budget:
+                oversize.append((state_id, document, document_sha))
+            else:
+                normal.append((state_id, document, document_sha, tokens))
+
+        def _persist(rows: list[tuple[int, str, bytes]]) -> None:
+            with self._lock:
+                self._conn.execute("BEGIN IMMEDIATE")
+                try:
+                    self._conn.executemany(
+                        """
+                        INSERT INTO lcm_trajectory_state_embeddings(
+                            state_id, profile_digest, document_sha256, vector, embedded_at
+                        ) VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(state_id) DO UPDATE SET
+                            profile_digest = excluded.profile_digest,
+                            document_sha256 = excluded.document_sha256,
+                            vector = excluded.vector,
+                            embedded_at = excluded.embedded_at
+                        """,
+                        [
+                            (sid, profile_digest, sha, vec, time.time())
+                            for sid, sha, vec in rows
+                        ],
+                    )
+                    self._conn.commit()
+                except Exception:
+                    self._conn.rollback()
+                    raise
+
+        # --- normal single-request states -------------------------------------
+        batch_ids: list[int] = []
+        batch_docs: list[str] = []
+        batch_shas: list[str] = []
+        batch_tokens = 0
+
+        def _flush_normal() -> None:
+            nonlocal batch_ids, batch_docs, batch_shas, batch_tokens
+            if not batch_docs:
+                return
+            vectors = active_provider.embed_documents(batch_docs)
+            stats["provider_calls"] += 1
+            stats["billed_tokens"] += max(
+                0, int(getattr(active_provider, "last_usage_tokens", 0) or 0)
+            )
+            _emit_progress()
+            if len(vectors) != len(batch_docs):
+                raise ValueError("state embedding count does not match batch size")
+            packed = []
+            for sid, sha, vector in zip(batch_ids, batch_shas, vectors):
+                normalized = _normalized_vector(vector, expected_dim=dim)
+                packed.append((sid, sha, _pack_vector(normalized)))
+            _persist(packed)
+            stats["states_embedded"] += len(packed)
+            batch_ids, batch_docs, batch_shas, batch_tokens = [], [], [], 0
+            _emit_progress()
+
+        for state_id, document, document_sha, tokens in normal:
+            if batch_docs and (
+                len(batch_docs) >= batch_max_items
+                or batch_tokens + tokens > batch_token_budget
+            ):
+                _flush_normal()
+            batch_ids.append(state_id)
+            batch_docs.append(document)
+            batch_shas.append(document_sha)
+            batch_tokens += tokens
+        _flush_normal()
+
+        # --- oversize (chunked) states ----------------------------------------
+        for state_id, document, document_sha in oversize:
+            chunks = self._state_token_chunks(
+                document, request_document_token_budget
+            )
+            chunk_vectors: list[tuple[float, ...]] = []
+            start = 0
+            while start < len(chunks):
+                sub: list[str] = []
+                sub_tokens = 0
+                while start < len(chunks) and len(sub) < batch_max_items:
+                    chunk = chunks[start]
+                    chunk_tokens = count_tokens(chunk)
+                    if sub and sub_tokens + chunk_tokens > batch_token_budget:
+                        break
+                    sub.append(chunk)
+                    sub_tokens += chunk_tokens
+                    start += 1
+                vectors = active_provider.embed_documents(sub)
+                if len(vectors) != len(sub):
+                    raise ValueError("chunk embedding count does not match batch size")
+                for vector in vectors:
+                    chunk_vectors.append(_normalized_vector(vector, expected_dim=dim))
+                stats["provider_calls"] += 1
+                stats["billed_tokens"] += max(
+                    0, int(getattr(active_provider, "last_usage_tokens", 0) or 0)
+                )
+                _emit_progress()
+            pooled = [sum(values) / len(chunk_vectors) for values in zip(*chunk_vectors)]
+            normalized = _normalized_vector(pooled, expected_dim=dim)
+            _persist([(state_id, document_sha, _pack_vector(normalized))])
+            stats["states_embedded"] += 1
+            stats["chunked_states"] += 1
+            _emit_progress()
+
+        # A rewrite invalidates any cached query-time matrix.
+        self._state_semantic_cache = None
+        embedded_count = int(
+            self._conn.execute(
+                "SELECT COUNT(*) FROM lcm_trajectory_state_embeddings "
+                "WHERE profile_digest = ?",
+                (profile_digest,),
+            ).fetchone()[0]
+        )
+        if embedded_count != total_states:
+            raise TrajectoryStoreError(
+                "state semantic profile is incomplete after backfill"
+            )
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    "UPDATE lcm_trajectory_state_embedding_profiles "
+                    "SET active = 0 WHERE active = 1"
+                )
+                self._conn.execute(
+                    "UPDATE lcm_trajectory_state_embedding_profiles "
+                    "SET active = 1 WHERE profile_digest = ?",
+                    (profile_digest,),
+                )
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+        stats["status"] = "current" if not pending else "built"
+        return stats
+
     @staticmethod
     def _safe_getattr(obj: Any, name: str) -> Any:
         """getattr that swallows EVERY exception, not just AttributeError.
@@ -1449,6 +2087,106 @@ class TrajectoryStore:
         ranked.sort(key=lambda item: (-item[1], item[0]))
         return ranked[: self.semantic_top_trajectories]
 
+    def _load_state_semantic_matrix(
+        self, profile_digest: str, dim: int
+    ) -> tuple[list[int], Any]:
+        """Cache and return ``(state_ids, matrix)`` for the active state profile.
+
+        ``matrix`` is a normalized ``float32`` numpy array when numpy is present
+        (a single mat-vec ranks all states) and otherwise a list of vector
+        tuples for a pure-Python fallback -- the state vectors were normalized at
+        backfill, so a query-vector dot product is cosine similarity either way.
+        """
+        freshness_row = self._conn.execute(
+            """
+            SELECT COUNT(*), COALESCE(MAX(embedded_at), 0.0)
+            FROM lcm_trajectory_state_embeddings
+            WHERE profile_digest = ?
+            """,
+            (profile_digest,),
+        ).fetchone()
+        freshness = (int(freshness_row[0]), float(freshness_row[1]))
+        cache = self._state_semantic_cache
+        if (
+            cache is not None
+            and cache[0] == profile_digest
+            and cache[1] == freshness
+        ):
+            return cache[2], cache[3]
+        rows = self._conn.execute(
+            """
+            SELECT state_id, vector FROM lcm_trajectory_state_embeddings
+            WHERE profile_digest = ?
+            ORDER BY state_id
+            """,
+            (profile_digest,),
+        ).fetchall()
+        state_ids = [int(row["state_id"]) for row in rows]
+        try:
+            import numpy as _np
+
+            if rows:
+                matrix: Any = _np.frombuffer(
+                    b"".join(bytes(row["vector"]) for row in rows), dtype="<f4"
+                ).reshape(len(rows), int(dim))
+            else:
+                matrix = _np.zeros((0, int(dim)), dtype="<f4")
+        except Exception:
+            matrix = [_unpack_vector(bytes(row["vector"]), int(dim)) for row in rows]
+        self._state_semantic_cache = (
+            profile_digest, freshness, state_ids, matrix
+        )
+        return state_ids, matrix
+
+    def _semantic_state_ranks(
+        self, query: str, top_k: int
+    ) -> list[tuple[int, float]]:
+        """Top-``top_k`` ``(state_id, similarity)`` for the query against the
+        active per-state semantic index (issue #142). Returns ``[]`` when no
+        provider or no active state profile is present (the arm is then inert)."""
+        provider = self.embedding_provider
+        profile = self.active_state_semantic_profile()
+        if provider is None or profile is None or top_k <= 0:
+            return []
+        if (
+            str(profile["provider"]) != str(getattr(provider, "provider_id", "unknown"))
+            or str(profile["model_name"]) != str(getattr(provider, "model_id", ""))
+        ):
+            return []
+        dim = int(profile["dim"])
+        state_ids, matrix = self._load_state_semantic_matrix(
+            str(profile["profile_digest"]), dim
+        )
+        if not state_ids:
+            return []
+        self._semantic_usage["query_calls"] += 1
+        query_vector = _normalized_vector(provider.embed_query(query), expected_dim=dim)
+        self._semantic_usage["query_tokens"] += max(
+            0,
+            int(getattr(provider, "last_usage_tokens", 0) or 0),
+        )
+        try:
+            import numpy as _np
+
+            query_array = _np.asarray(query_vector, dtype="<f4")
+            scores = matrix @ query_array
+            limit = min(int(top_k), scores.shape[0])
+            # argpartition for the top-k, then order that slice by score desc,
+            # state_id asc (a stable, deterministic tie-break).
+            top_idx = _np.argpartition(-scores, limit - 1)[:limit]
+            ordered = sorted(
+                (int(i) for i in top_idx),
+                key=lambda i: (-float(scores[i]), state_ids[i]),
+            )
+            return [(state_ids[i], float(scores[i])) for i in ordered]
+        except Exception:
+            ranked = [
+                (state_ids[i], sum(a * b for a, b in zip(query_vector, vector)))
+                for i, vector in enumerate(matrix)
+            ]
+            ranked.sort(key=lambda item: (-item[1], item[0]))
+            return ranked[: int(top_k)]
+
     @staticmethod
     def _fts_expression(query: str) -> str:
         terms: list[str] = []
@@ -1491,6 +2229,7 @@ class TrajectoryStore:
         include_image: bool,
         query: str | None = None,
         text_char_limit: int | None = None,
+        dense_excerpt: bool = False,
     ) -> TrajectoryHit:
         corpus_uid = self.corpus_uid
         if not corpus_uid:
@@ -1509,7 +2248,10 @@ class TrajectoryStore:
             text_offset = 0
             text_truncated = False
         else:
-            text, text_offset = self._exact_excerpt(
+            excerpt_fn = (
+                self._densest_exact_excerpt if dense_excerpt else self._exact_excerpt
+            )
+            text, text_offset = excerpt_fn(
                 full_text,
                 query or "",
                 text_char_limit,
@@ -1571,18 +2313,759 @@ class TrajectoryStore:
         return text[start:end], start
 
     @staticmethod
-    def _select_diverse(rows: Iterable[sqlite3.Row], limit: int) -> list[sqlite3.Row]:
+    def _densest_exact_excerpt(text: str, query: str, limit: int) -> tuple[str, int]:
+        """Return the deterministic window with the densest rare query terms.
+
+        The historical excerpt anchors on the first query match. Web AXTree
+        pages often repeat generic page-title terms near the top while the
+        answer-bearing field occurs below the fold. This scorer gives rarer
+        query terms more weight, then uses unique-term coverage, occurrence
+        count, and earliest offset as deterministic tie-breaks.
+        """
+        if len(text) <= limit:
+            return text, 0
+        folded = text.casefold()
+        terms: list[str] = []
+        seen: set[str] = set()
+        for raw in extract_search_terms(query):
+            term = raw.casefold().strip()
+            if len(term) < 2 or term in _STOPWORDS or term in seen:
+                continue
+            seen.add(term)
+            terms.append(term)
+        occurrences: list[tuple[int, str, float]] = []
+        for term in terms:
+            positions = [
+                match.start() for match in re.finditer(re.escape(term), folded)
+            ]
+            if not positions:
+                continue
+            weight = 1.0 / len(positions)
+            occurrences.extend((position, term, weight) for position in positions)
+        if not occurrences:
+            return text[:limit], 0
+        occurrences.sort(key=lambda item: (item[0], item[1]))
+        best: tuple[float, int, int, int] | None = None
+        right = 0
+        counts: dict[str, int] = {}
+        weighted = 0.0
+        for left, (left_pos, _left_term, _left_weight) in enumerate(occurrences):
+            while right < len(occurrences) and occurrences[right][0] - left_pos < limit:
+                _position, term, weight = occurrences[right]
+                if counts.get(term, 0) == 0:
+                    weighted += weight
+                counts[term] = counts.get(term, 0) + 1
+                right += 1
+            score = (weighted, len(counts), right - left, -left_pos)
+            if best is None or score > best:
+                best = score
+                # Anchor on the rarest term inside the winning window, leaving
+                # two thirds of the excerpt after it for answer values/columns.
+                anchor = max(
+                    occurrences[left:right],
+                    key=lambda item: (item[2], item[0]),
+                )[0]
+                best_start = max(0, anchor - (limit // 3))
+            _position, term, weight = occurrences[left]
+            counts[term] -= 1
+            if counts[term] == 0:
+                del counts[term]
+                weighted -= weight
+        start = min(best_start, len(text) - limit)
+        return text[start:start + limit], start
+
+    @staticmethod
+    def _candidate_term_set(row: Any) -> set[str]:
+        """Bounded lexical signature used by the per-trajectory MMR pass."""
+        text = " ".join(
+            str(row[key] or "")
+            for key in ("goal", "url", "incoming_action", "text")
+        )[:12_000]
+        return {
+            token
+            for token in re.findall(r"[a-z0-9][a-z0-9_-]+", text.casefold())
+            if len(token) >= 3 and token not in _STOPWORDS
+        }
+
+    @staticmethod
+    def _query_term_set(query: str) -> frozenset[str]:
+        """Tokenize a query into the same lexical signature space as states.
+
+        Mirrors ``_candidate_term_set`` tokenization so query-term density is
+        measured against the identical vocabulary the MMR signatures use.
+        """
+        return frozenset(
+            token
+            for token in re.findall(r"[a-z0-9][a-z0-9_-]+", query.casefold())
+            if len(token) >= 3 and token not in _STOPWORDS
+        )
+
+    @staticmethod
+    def _title_field_text(row: Any) -> str:
+        """Normalized title/heading/field-label text for the Knob H boost.
+
+        Punctuation folds to single spaces and the result is padded with a
+        leading/trailing space so a matched n-gram is checked at word
+        boundaries via a plain substring test.
+        """
+        raw = " ".join(
+            str(row[key] or "")
+            for key in ("goal", "url", "text")
+        )[:12_000].casefold()
+        collapsed = re.sub(r"[^a-z0-9]+", " ", raw)
+        return f" {' '.join(collapsed.split())} "
+
+    @staticmethod
+    def _query_title_ngrams(query: str) -> list[str]:
+        """Contiguous 2-4 gram question phrases for the Knob H title boost.
+
+        Grams composed entirely of stopwords are dropped (a pure ``what is
+        the`` gram carries no signal); the remaining grams are normalized the
+        same way as ``_title_field_text`` and returned in stable first-seen
+        order.
+        """
+        words = [
+            word.casefold()
+            for word in re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]*", query)
+        ]
+        grams: list[str] = []
+        seen: set[str] = set()
+        for size in range(_TITLE_BOOST_MIN_GRAM, _TITLE_BOOST_MAX_GRAM + 1):
+            for start in range(0, max(0, len(words) - size + 1)):
+                window = words[start:start + size]
+                if all(token in _STOPWORDS for token in window):
+                    continue
+                normalized = re.sub(r"[^a-z0-9]+", " ", " ".join(window)).strip()
+                if not normalized or normalized in seen:
+                    continue
+                seen.add(normalized)
+                grams.append(normalized)
+        return grams
+
+    @classmethod
+    def _apply_title_boost(
+        cls,
+        rows: Sequence[Any],
+        query: str,
+    ) -> tuple[list[Any], dict[str, Any]]:
+        """Knob H: stable-reorder the lexical pool by exact title n-gram hits.
+
+        A candidate is boosted by the number of DISTINCT contiguous question
+        2-4 grams that appear (case/punctuation-normalized) in its
+        title/heading/field-label text. The reorder is stable: candidates keep
+        their original relative order within an equal-boost band, so with no
+        matches the pool is byte-identical to the input. Pure-lexical and
+        deterministic -- no model calls.
+        """
+        grams = cls._query_title_ngrams(query)
+        boosts: dict[int, int] = {}
+        matched: list[dict[str, Any]] = []
+        if grams:
+            for row in rows:
+                field_text = cls._title_field_text(row)
+                hits = [gram for gram in grams if f" {gram} " in field_text]
+                if hits:
+                    state_id = int(row["state_id"])
+                    boosts[state_id] = len(hits)
+                    matched.append({"state_id": state_id, "phrases": hits})
+        reordered = [
+            row
+            for _key, row in sorted(
+                enumerate(rows),
+                key=lambda item: (
+                    -boosts.get(int(item[1]["state_id"]), 0),
+                    item[0],
+                ),
+            )
+        ]
+        telemetry = {
+            "ngrams": grams,
+            "boosted": matched,
+            "boosted_count": len(matched),
+        }
+        return reordered, telemetry
+
+    @staticmethod
+    def _cap_composed_pool(
+        rows: Sequence[Any],
+        cap: int,
+        *,
+        antiboilerplate: bool = False,
+        query_terms: frozenset[str] | None = None,
+    ) -> tuple[list[Any], dict[str, Any]]:
+        """Apply one global per-trajectory cap after all candidate arms compose.
+
+        Survivors are chosen independently within each trajectory by a bounded
+        MMR-style relevance/redundancy score. The returned pool preserves the
+        original cross-trajectory order, so the cap changes only which states
+        survive, not unrelated tie-breaking.
+
+        When ``antiboilerplate`` is set (Knob G, default-off) the per-candidate
+        MMR score is additionally penalized by the candidate's mean lexical
+        similarity to the OTHER pooled states of its own trajectory and rewarded
+        by its query-term density, so a trajectory's seats go to query-relevant
+        states rather than repeated task-header boilerplate. ``query_terms`` is
+        the tokenized query used for the density reward; both signals are inert
+        when ``antiboilerplate`` is ``False`` (byte-identical to the base cap).
+        """
+        query_terms = query_terms or frozenset()
+        unique_rows: list[Any] = []
+        seen_state_ids: set[int] = set()
+        for row in rows:
+            state_id = int(row["state_id"])
+            if state_id in seen_state_ids:
+                continue
+            seen_state_ids.add(state_id)
+            unique_rows.append(row)
+        grouped: dict[str, list[tuple[int, Any]]] = {}
+        for position, row in enumerate(unique_rows):
+            grouped.setdefault(str(row["trajectory_id"]), []).append((position, row))
+        survivor_ids: set[int] = set()
+        details: list[dict[str, Any]] = []
+        antiboilerplate_scores: list[dict[str, Any]] = []
+        for trajectory_id, candidates in grouped.items():
+            if len(candidates) <= cap:
+                survivor_ids.update(int(row["state_id"]) for _position, row in candidates)
+                continue
+            signatures = {
+                int(row["state_id"]): TrajectoryStore._candidate_term_set(row)
+                for _position, row in candidates
+            }
+            boilerplate: dict[int, float] = {}
+            density: dict[int, float] = {}
+            if antiboilerplate:
+                for _position, row in candidates:
+                    state_id = int(row["state_id"])
+                    signature = signatures[state_id]
+                    sibling_scores: list[float] = []
+                    for _other_position, other_row in candidates:
+                        other_id = int(other_row["state_id"])
+                        if other_id == state_id:
+                            continue
+                        other_signature = signatures[other_id]
+                        union = signature | other_signature
+                        sibling_scores.append(
+                            len(signature & other_signature) / len(union)
+                            if union else 0.0
+                        )
+                    boilerplate[state_id] = (
+                        sum(sibling_scores) / len(sibling_scores)
+                        if sibling_scores else 0.0
+                    )
+                    density[state_id] = (
+                        len(signature & query_terms) / len(signature)
+                        if signature else 0.0
+                    )
+            selected: list[tuple[int, Any]] = []
+            remaining = list(candidates)
+            while remaining and len(selected) < cap:
+                best_item: tuple[int, Any] | None = None
+                best_key: tuple[float, int, int] | None = None
+                for local_position, item in enumerate(remaining):
+                    original_position, row = item
+                    relevance = 1.0 - (
+                        original_position / max(1, len(unique_rows) - 1)
+                    )
+                    state_id = int(row["state_id"])
+                    signature = signatures[state_id]
+                    redundancy = 0.0
+                    for _selected_position, selected_row in selected:
+                        selected_signature = signatures[int(selected_row["state_id"])]
+                        union = signature | selected_signature
+                        similarity = (
+                            len(signature & selected_signature) / len(union)
+                            if union else 0.0
+                        )
+                        redundancy = max(redundancy, similarity)
+                    mmr_score = (0.72 * relevance) - (0.28 * redundancy)
+                    if antiboilerplate:
+                        mmr_score += (
+                            _ANTIBOILERPLATE_DENSITY_WEIGHT * density[state_id]
+                        ) - (
+                            _ANTIBOILERPLATE_BOILERPLATE_WEIGHT
+                            * boilerplate[state_id]
+                        )
+                    key = (mmr_score, -original_position, -state_id)
+                    if best_key is None or key > best_key:
+                        best_key = key
+                        best_item = item
+                assert best_item is not None
+                selected.append(best_item)
+                remaining.remove(best_item)
+            if antiboilerplate:
+                antiboilerplate_scores.extend(
+                    {
+                        "state_id": int(row["state_id"]),
+                        "boilerplate": round(boilerplate[int(row["state_id"])], 6),
+                        "density": round(density[int(row["state_id"])], 6),
+                        "selected": int(row["state_id"]) in {
+                            int(sel_row["state_id"]) for _pos, sel_row in selected
+                        },
+                    }
+                    for _position, row in candidates
+                )
+            selected_ids = [int(row["state_id"]) for _position, row in selected]
+            removed_ids = [
+                int(row["state_id"])
+                for _position, row in candidates
+                if int(row["state_id"]) not in set(selected_ids)
+            ]
+            survivor_ids.update(selected_ids)
+            details.append({
+                "trajectory_id": trajectory_id,
+                "before": len(candidates),
+                "after": len(selected_ids),
+                "capped_out": len(removed_ids),
+                "selected_state_ids": selected_ids,
+                "removed_state_ids": removed_ids,
+            })
+        filtered = [
+            row for row in unique_rows if int(row["state_id"]) in survivor_ids
+        ]
+        telemetry: dict[str, Any] = {
+            "cap": cap,
+            "pool_before": len(unique_rows),
+            "pool_after": len(filtered),
+            "capped_out": len(unique_rows) - len(filtered),
+            "trajectories": details,
+            "survivor_state_ids": [int(row["state_id"]) for row in filtered],
+        }
+        if antiboilerplate:
+            telemetry["antiboilerplate"] = {
+                "density_weight": _ANTIBOILERPLATE_DENSITY_WEIGHT,
+                "boilerplate_weight": _ANTIBOILERPLATE_BOILERPLATE_WEIGHT,
+                "scored": antiboilerplate_scores,
+            }
+        return filtered, telemetry
+
+    @staticmethod
+    def _exact_query_phrases(query: str) -> list[str]:
+        phrases: list[str] = []
+        seen: set[str] = set()
+        for match in re.finditer(r"`([^`]+)`|\"([^\"]+)\"|'([^']+)'", query):
+            phrase = next(group for group in match.groups() if group is not None)
+            normalized = " ".join(phrase.casefold().split())
+            if len(normalized) < 3 or normalized in seen:
+                continue
+            seen.add(normalized)
+            phrases.append(normalized)
+        return phrases[:8]
+
+    @staticmethod
+    def _typed_subqueries(query: str) -> list[dict[str, str]]:
+        """Deterministically decompose one question into typed FTS queries."""
+        words = re.findall(r"[A-Za-z0-9][A-Za-z0-9_-]*", query)
+        folded_words = [word.casefold() for word in words]
+        candidates: list[tuple[str, str]] = [("raw_state", query)]
+        exact = TrajectoryStore._exact_query_phrases(query)
+        if exact:
+            candidates.append(("entity", " ".join(exact)))
+        entity_clauses = [
+            clause.strip()
+            for clause in re.split(r"\s+(?:vs\.?|versus)\s+|[,;]", query)
+            if 2 <= len(clause.split()) <= 18
+        ]
+        if len(entity_clauses) >= 2:
+            candidates.extend(("entity", clause) for clause in entity_clauses[:3])
+        temporal: list[str] = []
+        actions: list[str] = []
+        for index, word in enumerate(folded_words):
+            if word in _TEMPORAL_TERMS:
+                temporal.extend(folded_words[max(0, index - 1):index + 2])
+            if word in _ACTION_TERMS:
+                actions.extend(folded_words[index:index + 3])
+        if temporal:
+            candidates.append(("time", " ".join(temporal)))
+        if actions:
+            candidates.append(("action", " ".join(actions)))
+        result: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for pool_type, subquery in candidates:
+            normalized = " ".join(subquery.split())
+            key = normalized.casefold()
+            if not normalized or key in seen:
+                continue
+            seen.add(key)
+            result.append({"pool_type": pool_type, "query": normalized})
+            if len(result) >= 6:
+                break
+        return result
+
+    def _sharp_fts_rows(
+        self,
+        query: str,
+        candidate_limit: int,
+    ) -> tuple[list[sqlite3.Row], dict[str, Any]]:
+        subqueries = self._typed_subqueries(query)
+        row_by_id: dict[int, sqlite3.Row] = {}
+        score_by_id: dict[int, float] = {}
+        exact_phrases = self._exact_query_phrases(query)
+        weights = {"raw_state": 1.0, "entity": 1.2, "time": 1.1, "action": 1.1}
+        for entry in subqueries:
+            expression = self._fts_expression(entry["query"])
+            if not expression:
+                continue
+            rows = self._fts_rows(expression, candidate_limit)
+            weight = weights.get(entry["pool_type"], 1.0)
+            for rank, row in enumerate(rows, start=1):
+                state_id = int(row["state_id"])
+                row_by_id[state_id] = row
+                score_by_id[state_id] = score_by_id.get(state_id, 0.0) + (
+                    weight / (60.0 + rank)
+                )
+        boosted: list[dict[str, Any]] = []
+        for state_id, row in row_by_id.items():
+            title_text = f"{row['goal']} {row['url']}".casefold()
+            matches = [phrase for phrase in exact_phrases if phrase in title_text]
+            if matches:
+                score_by_id[state_id] += 0.05 * len(matches)
+                boosted.append({"state_id": state_id, "phrases": matches})
+        ordered = sorted(
+            row_by_id.values(),
+            key=lambda row: (
+                -score_by_id[int(row["state_id"])],
+                int(row["ordinal"]),
+                int(row["sequence_ordinal"]),
+            ),
+        )[:candidate_limit]
+        return ordered, {
+            "subqueries": subqueries,
+            "exact_title_boosts": boosted,
+            "lexical_pool_size": len(ordered),
+        }
+
+    @staticmethod
+    def _question_template(query: str) -> str:
+        folded = query.casefold()
+        if any(term in folded for term in ("protocol", "workflow", "procedure", "steps")):
+            return "procedure"
+        words = set(re.findall(r"[a-z0-9]+", folded))
+        if words.intersection(_TEMPORAL_TERMS):
+            return "temporal"
+        if (
+            any(character in query for character in ",;")
+            or " among " in folded
+            or " across " in folded
+            or " both " in folded
+        ):
+            return "multi_entity"
+        if any(
+            term in folded
+            for term in ("page", "url", "tab", "button", "column", "field", "link")
+        ):
+            return "navigation"
+        return "generic"
+
+    @staticmethod
+    def _template_order(
+        rows: Sequence[sqlite3.Row],
+        query: str,
+        template: str,
+    ) -> list[sqlite3.Row]:
+        """Apply small question-type priors without replacing retrieval rank."""
+        query_terms = {
+            term.casefold()
+            for term in extract_search_terms(query)
+            if len(term.strip()) >= 2 and term.casefold() not in _STOPWORDS
+        }
+        exact_phrases = TrajectoryStore._exact_query_phrases(query)
+
+        def _key(item: tuple[int, sqlite3.Row]) -> tuple[float, int, int]:
+            position, row = item
+            goal_url = f"{row['goal']} {row['url']}".casefold()
+            action = str(row["incoming_action"] or "").casefold()
+            text = str(row["text"] or "")[:4_000].casefold()
+            exact = sum(1 for phrase in exact_phrases if phrase in goal_url)
+            goal_density = sum(1 for term in query_terms if term in goal_url)
+            action_density = sum(1 for term in query_terms if term in action)
+            text_density = sum(1 for term in query_terms if term in text)
+            prior = exact * 8.0
+            if template in {"navigation", "procedure"}:
+                prior += goal_density * 0.6 + action_density * 0.4
+            elif template == "temporal":
+                prior += (
+                    (1.0 if row["observed_at"] is not None else 0.0)
+                    + (1.0 if row["occurred_at"] is not None else 0.0)
+                    + text_density * 0.15
+                )
+            elif template == "multi_entity":
+                prior += goal_density * 0.35
+            return (-prior, position, int(row["state_id"]))
+
+        return [
+            row for _position, row in sorted(enumerate(rows), key=_key)
+        ]
+
+    @staticmethod
+    def _adaptive_excerpt_limits(
+        rows: Sequence[sqlite3.Row],
+        base_limit: int,
+        enabled: bool,
+    ) -> tuple[dict[int, int], dict[str, Any] | None]:
+        limits = {int(row["state_id"]): base_limit for row in rows}
+        if not enabled or not rows:
+            return limits, None
+        counts: dict[str, int] = {}
+        for row in rows:
+            trajectory_id = str(row["trajectory_id"])
+            counts[trajectory_id] = counts.get(trajectory_id, 0) + 1
+        total_budget = base_limit * len(rows)
+        floor = max(256, (base_limit * 3) // 4)
+        for row in rows:
+            if counts[str(row["trajectory_id"])] > 1:
+                limits[int(row["state_id"])] = floor
+        used = sum(
+            min(len(str(row["text"])), limits[int(row["state_id"])])
+            for row in rows
+        )
+        bank = max(0, total_budget - used)
+        raised: list[dict[str, int]] = []
+        for row in rows:
+            if bank <= 0:
+                break
+            if counts[str(row["trajectory_id"])] != 1:
+                continue
+            state_id = int(row["state_id"])
+            current = limits[state_id]
+            ceiling = min(_MAX_QUERY_TEXT_CHARS, base_limit * 2)
+            desired = min(len(str(row["text"])), ceiling)
+            extra = min(bank, max(0, desired - current))
+            if extra:
+                limits[state_id] += extra
+                bank -= extra
+                raised.append({"state_id": state_id, "chars": limits[state_id]})
+        return limits, {
+            "base_char_limit": base_limit,
+            "total_char_budget": total_budget,
+            "raised_only_hits": raised,
+        }
+
+    @staticmethod
+    def _rendered_hit_text(hit: TrajectoryHit) -> str:
+        """Mirror the official adapter's text rendering for token budgeting."""
+        lines = [
+            f"[{hit.exact_ref}]",
+            f"Trajectory: {hit.trajectory_id}",
+            f"Goal: {hit.goal}",
+            f"Outcome: {hit.outcome or '<unknown>'}",
+            (
+                f"State: {hit.state_index} "
+                f"(sequence {hit.sequence_ordinal}, step {hit.step})"
+            ),
+            f"URL: {hit.url}",
+            f"Incoming action: {hit.incoming_action or '<none>'}",
+        ]
+        if hit.thoughts:
+            lines.append(f"Thought: {hit.thoughts}")
+        label = (
+            f"Visible state excerpt (offset {hit.text_offset})"
+            if hit.text_truncated else "Visible state"
+        )
+        lines.append(f"{label}: {hit.text}")
+        if hit.observed_at is not None:
+            lines.append(
+                f"Observed at: {hit.observed_at} (source: {hit.observed_at_source})"
+            )
+        if hit.occurred_at is not None:
+            lines.append(
+                f"Occurred at: {hit.occurred_at} (source: {hit.occurred_at_source})"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _trim_hit_text(hit: TrajectoryHit, target_tokens: int) -> TrajectoryHit:
+        from .tokens import count_tokens
+
+        if count_tokens(hit.text) <= target_tokens:
+            return hit
+        low, high = 0, len(hit.text)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if count_tokens(hit.text[:middle]) <= target_tokens:
+                low = middle
+            else:
+                high = middle - 1
+        keep = max(0, low)
+        start = max(0, (len(hit.text) - keep) // 2)
+        return replace(
+            hit,
+            text=hit.text[start:start + keep],
+            text_offset=hit.text_offset + start,
+            text_truncated=True,
+        )
+
+    @staticmethod
+    def _apply_sharp_token_budget(
+        hits: Sequence[TrajectoryHit],
+        token_budget: int,
+    ) -> tuple[list[TrajectoryHit], dict[str, Any]]:
+        from .tokens import count_tokens
+
+        working = list(hits)
+        original_tokens = sum(
+            count_tokens(TrajectoryStore._rendered_hit_text(hit)) for hit in working
+        )
+        dropped: list[str] = []
+        while working:
+            fixed_tokens = sum(
+                count_tokens(
+                    TrajectoryStore._rendered_hit_text(replace(hit, text=""))
+                )
+                for hit in working
+            )
+            if fixed_tokens <= token_budget:
+                break
+            dropped.append(working.pop().exact_ref)
+        if working:
+            fixed_tokens = sum(
+                count_tokens(
+                    TrajectoryStore._rendered_hit_text(replace(hit, text=""))
+                )
+                for hit in working
+            )
+            available = max(0, token_budget - fixed_tokens)
+            per_hit = max(0, available // len(working))
+            working = [
+                TrajectoryStore._trim_hit_text(hit, per_hit) for hit in working
+            ]
+        final_tokens = sum(
+            count_tokens(TrajectoryStore._rendered_hit_text(hit)) for hit in working
+        )
+        while working and final_tokens > token_budget:
+            largest_index = max(
+                range(len(working)),
+                key=lambda index: count_tokens(working[index].text),
+            )
+            current = count_tokens(working[largest_index].text)
+            if current <= 0:
+                dropped.append(working.pop().exact_ref)
+            else:
+                working[largest_index] = TrajectoryStore._trim_hit_text(
+                    working[largest_index], max(0, current - 8)
+                )
+            final_tokens = sum(
+                count_tokens(TrajectoryStore._rendered_hit_text(hit))
+                for hit in working
+            )
+        return working, {
+            "text_token_budget": token_budget,
+            "rendered_text_tokens_before": original_tokens,
+            "rendered_text_tokens_after": final_tokens,
+            "dropped_evidence_refs": dropped,
+        }
+
+    @staticmethod
+    def _select_diverse(
+        rows: Iterable[sqlite3.Row],
+        limit: int,
+        max_per_trajectory: int = 5,
+    ) -> list[sqlite3.Row]:
         selected: list[sqlite3.Row] = []
         per_trajectory: dict[str, int] = {}
         for row in rows:
             trajectory_id = str(row["trajectory_id"])
-            if per_trajectory.get(trajectory_id, 0) >= 5:
+            if per_trajectory.get(trajectory_id, 0) >= max_per_trajectory:
                 continue
             selected.append(row)
             per_trajectory[trajectory_id] = per_trajectory.get(trajectory_id, 0) + 1
             if len(selected) >= limit:
                 break
         return selected
+
+    @staticmethod
+    def _select_with_floor(
+        fused_rows: Sequence[sqlite3.Row],
+        global_rows: Sequence[sqlite3.Row],
+        limit: int,
+        floor_k: int,
+        max_per_trajectory: int = 5,
+    ) -> list[sqlite3.Row]:
+        """Policy A -- reserve ``floor_k`` nucleus slots for the top pure-BM25
+        states, then fill the remainder from the fused order.
+
+        The lexical floor guarantees the strongest lexical winners a slot even
+        when the semantic boost would otherwise let a few semantic-top
+        trajectories monopolise the nucleus. Both the floor and the fill honour
+        the same 5-per-trajectory diversity cap as ``_select_diverse``.
+        """
+        selected = list(TrajectoryStore._select_diverse(
+            global_rows,
+            floor_k,
+            max_per_trajectory=max_per_trajectory,
+        ))
+        selected_ids = {int(row["state_id"]) for row in selected}
+        per_trajectory: dict[str, int] = {}
+        for row in selected:
+            trajectory_id = str(row["trajectory_id"])
+            per_trajectory[trajectory_id] = per_trajectory.get(trajectory_id, 0) + 1
+        for row in fused_rows:
+            if len(selected) >= limit:
+                break
+            state_id = int(row["state_id"])
+            if state_id in selected_ids:
+                continue
+            trajectory_id = str(row["trajectory_id"])
+            if per_trajectory.get(trajectory_id, 0) >= max_per_trajectory:
+                continue
+            selected.append(row)
+            selected_ids.add(state_id)
+            per_trajectory[trajectory_id] = per_trajectory.get(trajectory_id, 0) + 1
+        return selected[:limit]
+
+    @staticmethod
+    def _merge_arms(
+        arm_lex: Sequence[sqlite3.Row],
+        arm_sem: Sequence[sqlite3.Row],
+        limit: int,
+        q_lex: int,
+        q_sem: int,
+        floor_k: int = 0,
+    ) -> list[sqlite3.Row]:
+        """Policy D -- round-robin a pure-lexical arm and the semantic/fused arm
+        into the nucleus by a ``q_lex:q_sem`` quota.
+
+        Strictly generalises Policy A: the lexical arm is guaranteed its quota
+        (serving the SOURCE_MISS bucket) while the semantic arm keeps its own
+        quota (preserving the semantic gains). Deduped by ``state_id``; a short
+        arm is backfilled by the other (a skipped duplicate does not consume a
+        quota slot). Arm order is the deterministic tie-break.
+
+        ``floor_k`` composes Policy A on top (the A+D hybrid, issue #127): the
+        top ``floor_k`` pure-lexical (BM25) states are reserved a nucleus slot
+        FIRST -- protecting the strongest lexical incumbents as Policy A does --
+        and the quota round-robin then fills the remaining slots. ``floor_k == 0``
+        (default) is byte-identical to the pure Policy D round-robin. The floor
+        is drawn from the head of ``arm_lex`` (already 5-per-trajectory
+        diversity-capped), matching ``_select_with_floor``'s guaranteed slots.
+        """
+        selected: list[sqlite3.Row] = []
+        seen: set[int] = set()
+
+        def _pull(arm: Sequence[sqlite3.Row], start: int, quota: int) -> int:
+            added = 0
+            index = start
+            while index < len(arm) and added < quota and len(selected) < limit:
+                row = arm[index]
+                index += 1
+                state_id = int(row["state_id"])
+                if state_id in seen:
+                    continue
+                selected.append(row)
+                seen.add(state_id)
+                added += 1
+            return index
+
+        lex_i = sem_i = 0
+        floor_k = min(max(0, int(floor_k)), limit)
+        if floor_k:
+            lex_i = _pull(arm_lex, lex_i, floor_k)
+        while len(selected) < limit and (lex_i < len(arm_lex) or sem_i < len(arm_sem)):
+            next_lex = _pull(arm_lex, lex_i, q_lex)
+            next_sem = _pull(arm_sem, sem_i, q_sem)
+            if next_lex == lex_i and next_sem == sem_i:
+                break
+            lex_i, sem_i = next_lex, next_sem
+        return selected[:limit]
 
     def _fts_rows(
         self,
@@ -1615,6 +3098,107 @@ class TrajectoryStore:
             tuple(params),
         ).fetchall()
 
+    def _adjacency_expansion_arm(
+        self,
+        seed_rows: Sequence[sqlite3.Row],
+        radius: int,
+    ) -> list[tuple[int, int, int]]:
+        """H5(b) pool-expansion arm (issue #135): sequence neighbors of the
+        lexical seed hits, as ``(state_id, seed_state_id, distance)`` triples.
+
+        Every pool row IS a lexical seed (it entered via ``global_rows`` /
+        ``scoped_rows`` FTS), so the seeds are exactly ``seed_rows`` in pool
+        (fused-rank) order. For each seed, the states at ``sequence_ordinal
+        +/- 1..radius`` WITHIN THE SAME SOURCE are candidates, giving a
+        non-lexical recall path: a target state with no query-term match of
+        its own is reachable when any state of its trajectory seeds.
+
+        Deterministic arm order is DISTANCE-major, then seed pool rank, then
+        ordinal ascending (``-d`` before ``+d``): a +/-1 neighbor of any seed
+        outranks a +/-2 neighbor of a stronger seed, mirroring the
+        ``ORDER BY ABS(...)`` discipline of the delivery-stage adjacency
+        backfill. States already in the pool are excluded; expanded neighbors
+        earn NO semantic boost and no BM25 rank of their own (anti-magnet
+        control -- they are admitted by the caller only through the
+        quota-capped ``_merge_arms`` tail).
+
+        Returns LIGHTWEIGHT id triples (a batched index-only probe): the full
+        rows -- state text is large -- are fetched by the caller for the
+        ADMITTED quota subset only, keeping the expansion inside the latency
+        budget (gate iv).
+        """
+        pool_ids = {int(row["state_id"]) for row in seed_rows}
+        positions: list[tuple[int, int]] = []
+        wanted: set[tuple[int, int]] = set()
+        occupied = {
+            (int(row["source_id"]), int(row["sequence_ordinal"]))
+            for row in seed_rows
+        }
+        for row in seed_rows:
+            source_id = int(row["source_id"])
+            ordinal = int(row["sequence_ordinal"])
+            for distance in range(1, radius + 1):
+                for neighbor in (ordinal - distance, ordinal + distance):
+                    key = (source_id, neighbor)
+                    if neighbor < 0 or key in occupied or key in wanted:
+                        continue
+                    wanted.add(key)
+                    positions.append(key)
+        id_by_position: dict[tuple[int, int], int] = {}
+        chunk = 400  # 2 bound params per pair; stay far below SQLite limits
+        for start in range(0, len(positions), chunk):
+            batch = positions[start : start + chunk]
+            values = ",".join("(?,?)" for _ in batch)
+            params: list[int] = []
+            for source_id, neighbor in batch:
+                params.extend((source_id, neighbor))
+            fetched = self._conn.execute(
+                f"""
+                SELECT s.state_id, s.source_id, s.sequence_ordinal
+                FROM lcm_trajectory_states s
+                WHERE (s.source_id, s.sequence_ordinal) IN (VALUES {values})
+                """,
+                params,
+            ).fetchall()
+            for fetched_row in fetched:
+                id_by_position[
+                    (int(fetched_row["source_id"]), int(fetched_row["sequence_ordinal"]))
+                ] = int(fetched_row["state_id"])
+        arm: list[tuple[int, int, int]] = []
+        emitted: set[int] = set(pool_ids)
+        for distance in range(1, radius + 1):
+            for row in seed_rows:
+                source_id = int(row["source_id"])
+                ordinal = int(row["sequence_ordinal"])
+                for neighbor in (ordinal - distance, ordinal + distance):
+                    state_id = id_by_position.get((source_id, neighbor))
+                    if state_id is None or state_id in emitted:
+                        continue
+                    emitted.add(state_id)
+                    arm.append((state_id, int(row["state_id"]), distance))
+        return arm
+
+    def _state_rows_by_ids(self, state_ids: Sequence[int]) -> dict[int, sqlite3.Row]:
+        """Full candidate-shaped rows (text, source join, asset join) for the
+        given state ids -- the same column shape as ``_fts_rows`` with a
+        placeholder rank, fetched only for the quota-admitted expansion
+        states."""
+        if not state_ids:
+            return {}
+        placeholders = ",".join("?" for _ in state_ids)
+        rows = self._conn.execute(
+            f"""
+            SELECT s.*, src.trajectory_id, src.goal, src.outcome, src.ordinal,
+                   a.relative_path, a.sha256 AS asset_sha256, 0.0 AS rank
+            FROM lcm_trajectory_states s
+            JOIN lcm_trajectory_sources src ON src.source_id = s.source_id
+            LEFT JOIN lcm_trajectory_assets a ON a.state_id = s.state_id
+            WHERE s.state_id IN ({placeholders})
+            """,
+            [int(state_id) for state_id in state_ids],
+        ).fetchall()
+        return {int(row["state_id"]): row for row in rows}
+
     def query(
         self,
         query: str,
@@ -1624,18 +3208,40 @@ class TrajectoryStore:
         image_limit: int = 8,
         include_adjacent: bool = True,
         text_char_limit: int = 2_000,
+        lexical_floor: int = 0,
+        arm_quota: tuple[int, int] | None = None,
+        adjacency_radius: int = 0,
+        adjacency_quota: int = 0,
+        state_semantic_quota: int = 0,
+        diversity_cap: int = 0,
+        adaptive_excerpt: bool = False,
+        sharp_token_budget: int = 0,
+        antiboilerplate: bool = False,
+        title_boost: bool = False,
     ) -> tuple[TrajectoryHit, ...]:
         if self.status != "complete":
             raise CorpusIdentityError("trajectory corpus must be finalized before query")
         candidate_limit = min(max(1, int(candidate_limit)), _MAX_CANDIDATES)
         limit = min(max(1, int(limit)), _MAX_RESULTS)
         image_limit = min(max(0, int(image_limit)), _MAX_IMAGES)
+        lexical_floor = min(max(0, int(lexical_floor)), _MAX_RESULTS)
+        adjacency_radius = min(max(0, int(adjacency_radius)), _MAX_ADJACENCY_RADIUS)
+        adjacency_quota = min(max(0, int(adjacency_quota)), _MAX_CANDIDATES)
+        state_semantic_quota = min(max(0, int(state_semantic_quota)), _MAX_CANDIDATES)
+        diversity_cap = min(max(0, int(diversity_cap)), _MAX_DIVERSITY_CAP)
+        sharp_token_budget = min(
+            max(0, int(sharp_token_budget)),
+            _MAX_SHARP_TOKEN_BUDGET,
+        )
+        adaptive_excerpt = bool(adaptive_excerpt)
+        antiboilerplate = bool(antiboilerplate)
+        title_boost = bool(title_boost)
         text_char_limit = min(
             max(256, int(text_char_limit)),
             _MAX_QUERY_TEXT_CHARS,
         )
         expression = self._fts_expression(query)
-        if not expression:
+        if not expression and state_semantic_quota == 0:
             self._last_query_telemetry = {
                 "semantic_attempt": None,
                 "source_candidate_ranks": [],
@@ -1643,49 +3249,68 @@ class TrajectoryStore:
                 "delivered_evidence_refs": [],
             }
             return ()
-        global_rows = self._fts_rows(expression, candidate_limit)
+        sharp_telemetry: dict[str, Any] | None = None
+        if not expression:
+            global_rows = []
+        elif sharp_token_budget > 0:
+            global_rows, sharp_telemetry = self._sharp_fts_rows(
+                query, candidate_limit
+            )
+        else:
+            global_rows = self._fts_rows(expression, candidate_limit)
+        # Knob H (title boost, default-off): stable-reorder the lexical
+        # candidate pool so states whose title/heading/field-label text exactly
+        # contains a 2-4 gram question phrase rank ahead of same-band peers.
+        # ``title_boost is False`` (default) leaves ``global_rows`` untouched and
+        # reproduces current bytes.
+        title_boost_telemetry: dict[str, Any] | None = None
+        if title_boost:
+            global_rows, title_boost_telemetry = self._apply_title_boost(
+                global_rows, query
+            )
         semantic_ranks: list[tuple[int, float]] = []
         semantic_attempt: TrajectorySemanticAttempt | None = None
-        attempt_started = time.monotonic()
-        calls_before = self._semantic_usage["query_calls"]
-        try:
-            semantic_ranks = self._semantic_source_ranks(query)
-        except Exception as exc:
-            # Restore historical semantics FIRST, unconditionally, before any
-            # introspection can fail: the fallback counter must bump even if the
-            # (hostile) exception explodes during telemetry recording.
-            self._semantic_usage["fallbacks"] += 1
-            fallback_latency_ms = (time.monotonic() - attempt_started) * 1000.0
+        if expression:
+            attempt_started = time.monotonic()
+            calls_before = self._semantic_usage["query_calls"]
             try:
-                # Was a bare ``except Exception: fallbacks += 1`` that discarded
-                # the failure class/status. Now the typed reason survives -- and
-                # the whole record step is itself fenced so an exotic exception
-                # (kind/status_code/retry_after as raising properties) degrades
-                # to a clean FTS fallback instead of failing the query.
-                semantic_attempt = self._record_semantic_attempt(
-                    outcome="fallback",
-                    latency_ms=fallback_latency_ms,
-                    exception=exc,
-                )
-            except Exception:
-                semantic_attempt = self._record_minimal_fallback_attempt(
-                    latency_ms=fallback_latency_ms,
-                )
-        else:
-            # Only record a success when an embed was actually dispatched; an
-            # early return (no provider / profile mismatch) is a skip, not an
-            # attempt, and must not inflate the success count.
-            if self._semantic_usage["query_calls"] > calls_before:
-                semantic_attempt = self._record_semantic_attempt(
-                    outcome="success",
-                    latency_ms=(time.monotonic() - attempt_started) * 1000.0,
-                    exception=None,
-                )
+                semantic_ranks = self._semantic_source_ranks(query)
+            except Exception as exc:
+                # Restore historical semantics FIRST, unconditionally, before any
+                # introspection can fail: the fallback counter must bump even if the
+                # (hostile) exception explodes during telemetry recording.
+                self._semantic_usage["fallbacks"] += 1
+                fallback_latency_ms = (time.monotonic() - attempt_started) * 1000.0
+                try:
+                    # Was a bare ``except Exception: fallbacks += 1`` that discarded
+                    # the failure class/status. Now the typed reason survives -- and
+                    # the whole record step is itself fenced so an exotic exception
+                    # (kind/status_code/retry_after as raising properties) degrades
+                    # to a clean FTS fallback instead of failing the query.
+                    semantic_attempt = self._record_semantic_attempt(
+                        outcome="fallback",
+                        latency_ms=fallback_latency_ms,
+                        exception=exc,
+                    )
+                except Exception:
+                    semantic_attempt = self._record_minimal_fallback_attempt(
+                        latency_ms=fallback_latency_ms,
+                    )
+            else:
+                # Only record a success when an embed was actually dispatched; an
+                # early return (no provider / profile mismatch) is a skip, not an
+                # attempt, and must not inflate the success count.
+                if self._semantic_usage["query_calls"] > calls_before:
+                    semantic_attempt = self._record_semantic_attempt(
+                        outcome="success",
+                        latency_ms=(time.monotonic() - attempt_started) * 1000.0,
+                        exception=None,
+                    )
         scoped_rows = self._fts_rows(
             expression,
             candidate_limit,
             source_ids=[source_id for source_id, _score in semantic_ranks],
-        ) if semantic_ranks else []
+        ) if expression and semantic_ranks else []
 
         if semantic_ranks and scoped_rows:
             row_by_id: dict[int, sqlite3.Row] = {}
@@ -1732,9 +3357,190 @@ class TrajectoryStore:
                 for row in rows
             }
 
+        # H5(b) lexical-seed adjacency pool-expansion (issue #135): pull the
+        # sequence neighbors of the lexical seed hits INTO the state pool,
+        # pre-selection, as a QUOTA-CAPPED ADDITIVE arm through the existing
+        # ``_merge_arms`` machinery. The arm is appended strictly AFTER the
+        # ranked pool (no semantic boost, no BM25 rank of its own), so the
+        # nucleus selection -- and therefore delivery -- only changes when the
+        # ranked pool alone cannot fill the nucleus; the 5-per-trajectory
+        # diversity cap at selection is untouched. ``adjacency_radius == 0``
+        # or ``adjacency_quota == 0`` (defaults) skip this path entirely and
+        # reproduce current bytes.
+        adjacency_admitted: list[dict[str, int]] = []
+        if adjacency_radius > 0 and adjacency_quota > 0 and rows:
+            arm_triples = self._adjacency_expansion_arm(rows, adjacency_radius)
+            if arm_triples:
+                seed_by_state = {
+                    state_id: (seed_state_id, distance)
+                    for state_id, seed_state_id, distance in arm_triples
+                }
+                arm_adjacent = [
+                    {"state_id": state_id} for state_id, _seed, _dist in arm_triples
+                ]
+                merged = self._merge_arms(
+                    rows,
+                    arm_adjacent,  # type: ignore[arg-type]  # only "state_id" is read
+                    len(rows) + adjacency_quota,
+                    len(rows),
+                    adjacency_quota,
+                )
+                admitted_ids = [int(row["state_id"]) for row in merged[len(rows):]]
+                full_by_id = self._state_rows_by_ids(admitted_ids)
+                expanded = list(rows)
+                for state_id in admitted_ids:
+                    seed_state_id, distance = seed_by_state[state_id]
+                    expanded.append(full_by_id[state_id])
+                    candidate_kind[state_id] = "adjacent"
+                    candidate_score[state_id] = (
+                        candidate_score[seed_state_id] + 0.000001 * distance
+                    )
+                    adjacency_admitted.append({
+                        "state_id": state_id,
+                        "seed_state_id": seed_state_id,
+                        "distance": distance,
+                    })
+                rows = expanded
+
+        # State-level semantic pool-expansion (issue #142, Lane S / W3a): rank
+        # the per-state semantic index against the query and admit up to
+        # ``state_semantic_quota`` states that are NOT already in the pool, as a
+        # STRICTLY ADDITIVE tail through the same ``_merge_arms`` machinery as the
+        # adjacency arm -- no semantic boost, no BM25 rank of their own, appended
+        # AFTER the ranked pool so the nucleus (and delivery) only changes when
+        # the ranked pool alone underfills. ``state_semantic_quota == 0``
+        # (default), no provider, or no active state index skip this entirely and
+        # reproduce current bytes. Independent of the adjacency arm above.
+        state_semantic_admitted: list[dict[str, Any]] = []
+        if state_semantic_quota > 0:
+            pool_ids = {int(row["state_id"]) for row in rows}
+            state_attempt_started = time.monotonic()
+            try:
+                ranked_states = self._semantic_state_ranks(
+                    query, state_semantic_quota + len(pool_ids) + 16
+                )
+            except Exception as exc:
+                self._semantic_usage["fallbacks"] += 1
+                fallback_latency_ms = (
+                    time.monotonic() - state_attempt_started
+                ) * 1000.0
+                try:
+                    semantic_attempt = self._record_semantic_attempt(
+                        outcome="fallback",
+                        latency_ms=fallback_latency_ms,
+                        exception=exc,
+                    )
+                except Exception:
+                    semantic_attempt = self._record_minimal_fallback_attempt(
+                        latency_ms=fallback_latency_ms,
+                    )
+                ranked_states = []
+            score_by_state = {sid: score for sid, score in ranked_states}
+            arm_semantic = [
+                {"state_id": sid}
+                for sid, _score in ranked_states
+                if sid not in pool_ids
+            ]
+            if arm_semantic:
+                merged = self._merge_arms(
+                    rows,
+                    arm_semantic,  # type: ignore[arg-type]  # only "state_id" is read
+                    len(rows) + state_semantic_quota,
+                    len(rows),
+                    state_semantic_quota,
+                )
+                admitted_ids = [int(row["state_id"]) for row in merged[len(rows):]]
+                full_by_id = self._state_rows_by_ids(admitted_ids)
+                expanded = list(rows)
+                for rank, state_id in enumerate(admitted_ids, start=1):
+                    similarity = float(score_by_state.get(state_id, 0.0))
+                    expanded.append(full_by_id[state_id])
+                    candidate_kind[state_id] = "state_semantic"
+                    candidate_score[state_id] = similarity
+                    state_semantic_admitted.append({
+                        "state_id": state_id,
+                        "rank": rank,
+                        "score": similarity,
+                    })
+                rows = expanded
+
+        question_template: str | None = None
+        if sharp_token_budget > 0:
+            question_template = self._question_template(query)
+            rows = self._template_order(rows, query, question_template)
+
+        diversity_telemetry: dict[str, Any] | None = None
+        diversity_survivors: set[int] | None = None
+        if diversity_cap > 0:
+            # C1 is deliberately applied once, after lexical, source-semantic,
+            # adjacency, and state-semantic arms have composed. Filtering each
+            # arm independently would allow a capped hub to re-enter through a
+            # different arm.
+            rows, diversity_telemetry = self._cap_composed_pool(
+                rows,
+                diversity_cap,
+                antiboilerplate=antiboilerplate,
+                query_terms=(
+                    self._query_term_set(query) if antiboilerplate else None
+                ),
+            )
+            diversity_survivors = {
+                int(row["state_id"]) for row in rows
+            }
+
         adjacent_reserve = min(6, limit // 3) if include_adjacent else 0
         nucleus_limit = max(1, limit - adjacent_reserve)
-        selected = self._select_diverse(rows, nucleus_limit)
+        lexical_candidates = (
+            [
+                row for row in global_rows
+                if int(row["state_id"]) in diversity_survivors
+            ]
+            if diversity_survivors is not None else global_rows
+        )
+        per_trajectory = diversity_cap or 5
+        if arm_quota is not None:
+            # Policy D (candidate-composition repair, issue #127): round-robin a
+            # pure-lexical arm and the semantic/fused arm into the nucleus by the
+            # requested quota. Superset of Policy A; ``arm_quota is None``
+            # (default) is byte-identical to the historical selection below.
+            # When ``lexical_floor > 0`` is ALSO supplied this becomes the A+D
+            # hybrid: the top ``lexical_floor`` pure-BM25 incumbents are reserved
+            # a slot first, then the quota round-robin fills the rest
+            # (``lexical_floor == 0`` reproduces the pure Policy D bytes).
+            q_lex = max(0, int(arm_quota[0]))
+            q_sem = max(0, int(arm_quota[1]))
+            arm_lex = self._select_diverse(
+                lexical_candidates,
+                nucleus_limit,
+                max_per_trajectory=per_trajectory,
+            )
+            arm_sem = self._select_diverse(
+                rows,
+                nucleus_limit,
+                max_per_trajectory=per_trajectory,
+            )
+            selected = self._merge_arms(
+                arm_lex, arm_sem, nucleus_limit, q_lex, q_sem,
+                floor_k=lexical_floor,
+            )
+        elif lexical_floor > 0:
+            # Policy A (candidate-composition repair, issue #127): guarantee the
+            # top pure-BM25 states a nucleus slot before the fused order fills
+            # the rest. ``lexical_floor == 0`` (default) is byte-identical to the
+            # historical fused-only selection below.
+            selected = self._select_with_floor(
+                rows,
+                lexical_candidates,
+                nucleus_limit,
+                lexical_floor,
+                max_per_trajectory=per_trajectory,
+            )
+        else:
+            selected = self._select_diverse(
+                rows,
+                nucleus_limit,
+                max_per_trajectory=diversity_cap or 5,
+            )
         selected_ids = {int(row["state_id"]) for row in selected}
         match_kind_by_id = {
             int(row["state_id"]): candidate_kind.get(int(row["state_id"]), "fts")
@@ -1747,6 +3553,12 @@ class TrajectoryStore:
 
         if include_adjacent and selected and len(selected) < limit:
             nucleus_rows = list(selected)
+            selected_per_trajectory: dict[str, int] = {}
+            for row in selected:
+                trajectory_id = str(row["trajectory_id"])
+                selected_per_trajectory[trajectory_id] = (
+                    selected_per_trajectory.get(trajectory_id, 0) + 1
+                )
             adjacent_by_nucleus: list[list[sqlite3.Row]] = []
             for nucleus in nucleus_rows:
                 adjacent_rows = self._conn.execute(
@@ -1775,8 +3587,18 @@ class TrajectoryStore:
                         state_id = int(row["state_id"])
                         if state_id in selected_ids:
                             continue
+                        trajectory_id = str(row["trajectory_id"])
+                        if (
+                            diversity_cap > 0
+                            and selected_per_trajectory.get(trajectory_id, 0)
+                            >= diversity_cap
+                        ):
+                            continue
                         selected.append(row)
                         selected_ids.add(state_id)
+                        selected_per_trajectory[trajectory_id] = (
+                            selected_per_trajectory.get(trajectory_id, 0) + 1
+                        )
                         match_kind_by_id[state_id] = "adjacent"
                         score_by_id[state_id] = score_by_id[int(nucleus["state_id"])] + 0.000001
                         made_progress = True
@@ -1786,6 +3608,15 @@ class TrajectoryStore:
                 if not made_progress:
                     break
 
+        adaptive_active = (
+            adaptive_excerpt
+            and str(self.identity_payload.get("domain", "")).casefold() == "web"
+        )
+        excerpt_limits, excerpt_telemetry = self._adaptive_excerpt_limits(
+            selected[:limit],
+            text_char_limit,
+            adaptive_active,
+        )
         hits: list[TrajectoryHit] = []
         for index, row in enumerate(selected[:limit]):
             state_id = int(row["state_id"])
@@ -1795,8 +3626,14 @@ class TrajectoryStore:
                 match_kind=match_kind_by_id[state_id],
                 include_image=index < image_limit,
                 query=query,
-                text_char_limit=text_char_limit,
+                text_char_limit=excerpt_limits[state_id],
+                dense_excerpt=adaptive_active,
             ))
+        budget_telemetry: dict[str, Any] | None = None
+        if sharp_token_budget > 0:
+            hits, budget_telemetry = self._apply_sharp_token_budget(
+                hits, sharp_token_budget
+            )
 
         # Side-channel per-query telemetry (does not affect the returned hits).
         self._last_query_telemetry = {
@@ -1819,6 +3656,38 @@ class TrajectoryStore:
             ],
             "delivered_evidence_refs": [hit.exact_ref for hit in hits],
         }
+        if diversity_telemetry is not None:
+            # Present only when C1 is active; the complete survivor ids let the
+            # provider-free replay harness measure exact pool coverage without
+            # relying on the historical 64-row telemetry display bound.
+            self._last_query_telemetry["diversity_cap"] = diversity_telemetry
+        if excerpt_telemetry is not None:
+            self._last_query_telemetry["adaptive_excerpt"] = excerpt_telemetry
+        if sharp_telemetry is not None:
+            self._last_query_telemetry["sharp_compilation"] = {
+                **sharp_telemetry,
+                **(budget_telemetry or {}),
+                "question_template": question_template,
+            }
+        if adjacency_radius > 0 and adjacency_quota > 0:
+            # Present only when the H5(b) knob is active so the default
+            # telemetry payload stays byte-identical (golden 451/451).
+            self._last_query_telemetry["adjacency_expansion"] = {
+                "radius": adjacency_radius,
+                "quota": adjacency_quota,
+                "admitted": adjacency_admitted,
+            }
+        if state_semantic_quota > 0:
+            # Present only when the state-semantic knob is active so the default
+            # telemetry payload stays byte-identical (golden 451/451).
+            self._last_query_telemetry["state_semantic_expansion"] = {
+                "quota": state_semantic_quota,
+                "admitted": state_semantic_admitted,
+            }
+        if title_boost_telemetry is not None:
+            # Knob H: present only when title boost is active so the default
+            # telemetry payload stays byte-identical (golden 451/451).
+            self._last_query_telemetry["title_boost"] = title_boost_telemetry
         return tuple(hits)
 
     def resolve_exact_ref(self, exact_ref: str) -> TrajectoryHit:
