@@ -527,12 +527,49 @@ def test_session_expand_v1_config_defaults_and_environment(monkeypatch, tmp_path
     default = LCMConfig()
     assert default.session_expand_v1 is False
     assert default.session_expand_v1_per_session_tokens == 3_500
+    assert default.session_expand_v1_response_char_cap == 512_000
+    assert (
+        lcm_tools._lcm_recall_session_expand_v1_response_char_hard_ceiling(
+            80_000
+        )
+        == 80_000
+    )
+    assert (
+        lcm_tools._lcm_recall_session_expand_v1_response_char_hard_ceiling(
+            9_000_000
+        )
+        == 512_000
+    )
 
     monkeypatch.setenv("LCM_SESSION_EXPAND_V1", "true")
     monkeypatch.setenv("LCM_SESSION_EXPAND_V1_PER_SESSION_TOKENS", "4200")
+    monkeypatch.setenv("LCM_SESSION_EXPAND_V1_RESPONSE_CHAR_CAP", "420000")
     configured = LCMConfig.from_env()
     assert configured.session_expand_v1 is True
     assert configured.session_expand_v1_per_session_tokens == 4_200
+    assert configured.session_expand_v1_response_char_cap == 420_000
+
+
+def test_session_expand_v1_date_is_date_only_and_fails_closed_out_of_range(
+    recall_engine,
+):
+    dated = lcm_tools._lcm_recall_session_expand_v1_date(
+        recall_engine,
+        {
+            "session_id": "session-a",
+            "source": "host",
+            "observed_at": 1_700_000_000,
+        },
+    )
+    assert dated == "2023-11-14"
+    assert lcm_tools._lcm_recall_session_expand_v1_date(
+        recall_engine,
+        {
+            "session_id": "session-a",
+            "source": "host",
+            "observed_at": 1e308,
+        },
+    ) is None
 
 
 def test_session_expand_v1_appends_top_three_session_windows_with_exact_refs(
@@ -685,6 +722,11 @@ def test_session_expand_v1_routes_stale_window_rows_through_strict_backstop(
         {"role": "assistant", "content": "current authoritative neighbour"},
         source="benchmark",
     )
+    farther_id = recall_engine._store.append(
+        "session-a",
+        {"role": "user", "content": "farther still-citable neighbour"},
+        source="benchmark",
+    )
     anchor_row = recall_engine._store.get(anchor_id)
     assert anchor_row is not None
 
@@ -695,10 +737,24 @@ def test_session_expand_v1_routes_stale_window_rows_through_strict_backstop(
         def __getattr__(self, name):
             return getattr(self._store, name)
 
-        def get_session_messages(self, session_id, limit=10_000):
-            rows = self._store.get_session_messages(session_id, limit=limit)
+        def load_session_window(
+            self,
+            session_id,
+            *,
+            anchor_store_id,
+            before=2,
+            after=3,
+        ):
+            rows = self._store.load_session_window(
+                session_id,
+                anchor_store_id=anchor_store_id,
+                before=before,
+                after=after,
+            )
             stale = [dict(row) for row in rows]
-            stale[1]["content"] = "stale bytes that are no longer in the row"
+            for row in stale:
+                if row["store_id"] == neighbour_id:
+                    row["content"] = "stale bytes that are no longer in the row"
             return stale
 
     engine = SimpleNamespace(
@@ -735,10 +791,104 @@ def test_session_expand_v1_routes_stale_window_rows_through_strict_backstop(
     )
 
     assert delivered == ranked
-    assert policy["candidate_additional_hit_count"] == 1
+    assert policy["candidate_additional_hit_count"] == 2
     assert policy["strict_uncitable_dropped_count"] == 1
     assert policy["additional_hit_count"] == 0
+    assert policy["contiguity_dropped_after_strict_count"] == 1
     assert neighbour_id not in {hit.get("store_id") for hit in delivered}
+    assert farther_id not in {hit.get("store_id") for hit in delivered}
+
+
+def test_session_expand_v1_pages_from_anchor_without_full_session_reads(
+    recall_engine,
+):
+    store_ids = [
+        recall_engine._store.append(
+            "session-long",
+            {
+                "role": "user",
+                "content": f"turn {turn} compact context",
+            },
+            source="benchmark",
+        )
+        for turn in range(31)
+    ]
+    anchor_id = store_ids[15]
+    anchor_row = recall_engine._store.get(anchor_id)
+    assert anchor_row is not None
+
+    class BoundedSessionView:
+        def __init__(self, store):
+            self._store = store
+            self.windows = []
+
+        def __getattr__(self, name):
+            return getattr(self._store, name)
+
+        def get_session_count(self, _session_id):
+            raise AssertionError("session expansion must not count the full session")
+
+        def get_session_messages(self, _session_id, limit=10_000):
+            raise AssertionError("session expansion must not read the full session")
+
+        def load_session_window(
+            self,
+            session_id,
+            *,
+            anchor_store_id,
+            before=2,
+            after=3,
+        ):
+            self.windows.append((anchor_store_id, before, after))
+            return self._store.load_session_window(
+                session_id,
+                anchor_store_id=anchor_store_id,
+                before=before,
+                after=after,
+            )
+
+    bounded_store = BoundedSessionView(recall_engine._store)
+    engine = SimpleNamespace(
+        _config=recall_engine._config,
+        _store=bounded_store,
+        _dag=recall_engine._dag,
+        _hermes_home=recall_engine._hermes_home,
+        current_session_id=recall_engine.current_session_id,
+    )
+    ranked = [{
+        "kind": "message_excerpt",
+        "session_id": "session-long",
+        "timestamp": anchor_row["timestamp"],
+        "snippet": anchor_row["content"],
+        "score": 1.0,
+        "expand_hint": f"lcm_expand(store_id={anchor_id}, content_offset=0)",
+        "from_current_session": False,
+        "arms": ["fts"],
+        "store_id": anchor_id,
+        "role": anchor_row["role"],
+        "source": anchor_row["source"],
+        "content": anchor_row["content"],
+        "content_source": "message",
+        "content_chars": len(anchor_row["content"]),
+        "content_offset": 0,
+        "content_returned_chars": len(anchor_row["content"]),
+        "content_truncated": False,
+    }]
+
+    delivered, policy = lcm_tools._lcm_recall_session_expand_v1(
+        engine,
+        ranked,
+        per_session_token_budget=10_000,
+    )
+
+    assert len(delivered) == len(store_ids)
+    assert policy["additional_hit_count"] == len(store_ids) - 1
+    assert len(bounded_store.windows) > 1
+    assert all(
+        before <= lcm_tools._LCM_RECALL_SESSION_EXPAND_V1_PAGE_ROWS
+        and after <= lcm_tools._LCM_RECALL_SESSION_EXPAND_V1_PAGE_ROWS
+        for _, before, after in bounded_store.windows
+    )
 
 
 def test_session_expand_v1_summary_fail_close_is_arm_symmetric(
@@ -976,6 +1126,71 @@ def test_session_expand_v1_ranked_tier_text_is_byte_identical_between_arms(
     assert treatment["hits"][0] == control["hits"][0]
     assert treatment["hits"][0]["snippet"] == marked_snippet
     assert any(hit.get("session_expanded") for hit in treatment["hits"][1:])
+
+
+def test_session_expand_v1_clamps_the_treatment_response_envelope(
+    recall_engine, monkeypatch
+):
+    recall_engine._config.embeddings_enabled = False
+    recall_engine._config.session_expand_v1 = True
+    recall_engine._config.session_expand_v1_per_session_tokens = 50_000
+    hard_ceiling = 80_000
+    recall_engine._config.session_expand_v1_response_char_cap = hard_ceiling
+    store_ids = [
+        recall_engine._store.append(
+            "session-cap",
+            {
+                "role": "user",
+                "content": (
+                    f"turn {turn} kanban dashboard sprint exact evidence "
+                    + ("payload " * 500)
+                ),
+            },
+            source="benchmark",
+        )
+        for turn in range(25)
+    ]
+    anchor = recall_engine._store.get(store_ids[2])
+    assert anchor is not None
+    ranked = [{
+        "kind": "message_excerpt",
+        "store_id": store_ids[2],
+        "session_id": "session-cap",
+        "source": "benchmark",
+        "role": "user",
+        "timestamp": anchor["timestamp"],
+        "content_offset": 0,
+        "snippet": anchor["content"][:300],
+        "from_current_session": False,
+        "expand_hint": f"lcm_expand(store_id={store_ids[2]}, content_offset=0)",
+    }]
+    monkeypatch.setattr(
+        lcm_tools,
+        "_lcm_recall_fts_arm",
+        lambda *_args, **_kwargs: (list(ranked), None),
+    )
+    raw = lcm_tools.lcm_recall(
+        {
+            "query": "kanban dashboard sprint exact evidence",
+            "include": "verbatim",
+            "detail": "answer_ready",
+            "scope_bias": 0.0,
+            "limit": 1,
+        },
+        engine=recall_engine,
+    )
+    payload = json.loads(raw)
+    expansion = payload["provenance"]["answer_ready"]
+    policy = expansion["session_expand_v1"]
+
+    assert len(raw) <= hard_ceiling
+    assert expansion["response_char_cap"] == hard_ceiling
+    assert expansion["response_truncated"] is True
+    assert policy["response_char_cap_configured"] == hard_ceiling
+    assert policy["response_char_cap_hard_ceiling"] == hard_ceiling
+    assert policy["response_char_cap_configuration_clamped"] is False
+    assert policy["response_char_cap_calculated"] > hard_ceiling
+    assert policy["response_char_cap_clamped"] is True
 
 
 def test_answer_ready_delta_is_opt_in_and_returns_only_novel_exact_refs(

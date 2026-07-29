@@ -297,13 +297,15 @@ class Bridge:
             cache_key = (self.provider_name.strip().lower(), str(self.embedder.model_id).strip())
             engine._lcm_embedding_provider_cache = (cache_key, self.embedder)
 
+            recall_request = {
+                "query": query,
+                "limit": limit,
+            }
+            if config.session_expand_v1:
+                recall_request["detail"] = "answer_ready"
             payload = json.loads(
                 lcm_tools.lcm_recall(
-                    {
-                        "query": query,
-                        "limit": limit,
-                        "detail": "answer_ready",
-                    },
+                    recall_request,
                     engine=engine,
                 )
             )

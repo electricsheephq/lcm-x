@@ -119,6 +119,54 @@ def test_real_bridge_preserves_expansion_past_ranked_limit(
     assert all(result["metadata"]["exact_ref"] for result in expanded)
 
 
+def test_real_bridge_flag_off_uses_historical_recall_mode(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("LCM_SESSION_EXPAND_V1", raising=False)
+    module = _load_bridge_module()
+    bridge = module.Bridge.__new__(module.Bridge)
+    bridge.repo_root = Path(__file__).parents[1]
+    bridge.workdir = tmp_path
+    bridge.provider_name = "mock"
+    bridge.model = "mock-model"
+    bridge.embedder = _MockEmbedder()
+    bridge.dim = 2
+    bridge._order = {}
+
+    container_tag = "stage2-flag-off-wire-probe"
+    db_path = bridge._db_path(container_tag)
+    config = bridge._config(db_path)
+    assert config.session_expand_v1 is False
+    store = MessageStore(str(db_path), ingest_protection_config=config)
+    store.close()
+
+    import hermes_lcm.tools as lcm_tools
+
+    captured = {}
+
+    def fake_recall(args, *, engine):
+        captured.update(args)
+        assert engine._config.session_expand_v1 is False
+        return json.dumps({"hits": []})
+
+    monkeypatch.setattr(lcm_tools, "lcm_recall", fake_recall)
+
+    response = bridge.search(
+        {
+            "containerTag": container_tag,
+            "query": "historical control query",
+            "limit": 7,
+        }
+    )
+
+    assert captured == {
+        "query": "historical control query",
+        "limit": 7,
+    }
+    assert response["results"] == []
+    assert response["delivered_additional_result_count"] == 0
+
+
 def test_real_bridge_expansion_reaches_build_evidence_card_answer_prompt(
     tmp_path, monkeypatch
 ):
@@ -152,6 +200,7 @@ process.stdout.write(JSON.stringify(result));
         check=True,
         capture_output=True,
         text=True,
+        timeout=120,
     )
     rendered = json.loads(completed.stdout)
 

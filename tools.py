@@ -276,6 +276,8 @@ _LCM_RECALL_LIMIT_CAP = 25
 _LCM_RECALL_DEFAULT_SCOPE_BIAS = 0.5
 _LCM_RECALL_SNIPPET_CHARS = 300
 _LCM_RECALL_RESPONSE_CHAR_CAP = 64_000
+_LCM_RECALL_SESSION_EXPAND_V1_RESPONSE_CHAR_HARD_CAP = 512_000
+_LCM_RECALL_SESSION_EXPAND_V1_PAGE_ROWS = 12
 _LCM_QUERY_STATE_DEFAULT_LIMIT = 25
 _LCM_QUERY_STATE_LIMIT_CAP = 50
 _LCM_QUERY_STATE_RESPONSE_CHAR_CAP = 64_000
@@ -4175,10 +4177,21 @@ def _lcm_recall_session_expand_v1_date(
         timestamp = 0
     if timestamp <= 0:
         return None
-    return (
-        datetime.fromtimestamp(timestamp, tz=timezone.utc)
-        .isoformat()
-        .replace("+00:00", "Z")
+    try:
+        return datetime.fromtimestamp(
+            timestamp, tz=timezone.utc
+        ).date().isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _lcm_recall_session_expand_v1_response_char_hard_ceiling(
+    configured_cap: int,
+) -> int:
+    """Clamp the operator ceiling between historical and absolute bounds."""
+    return min(
+        _LCM_RECALL_SESSION_EXPAND_V1_RESPONSE_CHAR_HARD_CAP,
+        max(_LCM_RECALL_RESPONSE_CHAR_CAP, int(configured_cap)),
     )
 
 
@@ -4313,19 +4326,8 @@ def _lcm_recall_session_expand_v1(
     session_state: dict[str, dict[str, Any]] = {}
     containment_dropped = 0
     for session_id in top_sessions:
-        session_count = engine._store.get_session_count(session_id)
-        rows = engine._store.get_session_messages(
-            session_id, limit=max(1, session_count)
-        )
-        index_by_store_id = {
-            int(row["store_id"]): index for index, row in enumerate(rows)
-        }
-        anchor_indices = [
-            index_by_store_id[store_id]
-            for store_id in anchors_by_session.get(session_id, [])
-            if store_id in index_by_store_id
-        ]
-        if not anchor_indices:
+        anchor_store_ids = anchors_by_session.get(session_id, [])
+        if not anchor_store_ids:
             session_state[session_id] = {
                 "session_id": session_id,
                 "token_budget": token_budget,
@@ -4338,34 +4340,114 @@ def _lcm_recall_session_expand_v1(
             }
             continue
 
-        primary_anchor = anchor_indices[0]
-        baseline_indices = set(anchor_indices)
+        primary_anchor_store_id = anchor_store_ids[0]
+        snapshot_tail = engine._store.get_session_tail(session_id, limit=1)
+        snapshot_max_store_id = (
+            int(snapshot_tail[-1]["store_id"])
+            if snapshot_tail
+            else primary_anchor_store_id
+        )
+        initial_rows = engine._store.load_session_window(
+            session_id,
+            anchor_store_id=primary_anchor_store_id,
+            before=_LCM_RECALL_SESSION_EXPAND_V1_PAGE_ROWS,
+            after=_LCM_RECALL_SESSION_EXPAND_V1_PAGE_ROWS,
+        )
+        side_rows = {
+            "left": list(
+                reversed(
+                    [
+                        row
+                        for row in initial_rows
+                        if int(row["store_id"]) < primary_anchor_store_id
+                    ]
+                )
+            ),
+            "right": [
+                row
+                for row in initial_rows
+                if primary_anchor_store_id
+                < int(row["store_id"])
+                <= snapshot_max_store_id
+            ],
+        }
+        side_cursor = {
+            "left": primary_anchor_store_id,
+            "right": primary_anchor_store_id,
+        }
+        side_exhausted = {
+            side: len(rows) < _LCM_RECALL_SESSION_EXPAND_V1_PAGE_ROWS
+            for side, rows in side_rows.items()
+        }
+        baseline_indices = {0}
+        anchor_store_id_set = set(anchor_store_ids)
         remaining_tokens = token_budget
         budget_skipped = 0
         containment_for_session = 0
-        side_next = {"left": primary_anchor - 1, "right": primary_anchor + 1}
+        side_next = {"left": -1, "right": 1}
         side_open = {"left": True, "right": True}
         while side_open["left"] or side_open["right"]:
             made_progress = False
             for side, step in (("left", -1), ("right", 1)):
                 if not side_open[side]:
                     continue
-                index = side_next[side]
-                if index < 0 or index >= len(rows):
+                if not side_rows[side] and not side_exhausted[side]:
+                    cursor = side_cursor[side]
+                    page = engine._store.load_session_window(
+                        session_id,
+                        anchor_store_id=cursor,
+                        before=(
+                            _LCM_RECALL_SESSION_EXPAND_V1_PAGE_ROWS
+                            if side == "left"
+                            else 0
+                        ),
+                        after=(
+                            _LCM_RECALL_SESSION_EXPAND_V1_PAGE_ROWS
+                            if side == "right"
+                            else 0
+                        ),
+                    )
+                    if side == "left":
+                        page = list(
+                            reversed(
+                                [
+                                    row
+                                    for row in page
+                                    if int(row["store_id"]) < cursor
+                                ]
+                            )
+                        )
+                    else:
+                        page = [
+                            row
+                            for row in page
+                            if cursor
+                            < int(row["store_id"])
+                            <= snapshot_max_store_id
+                        ]
+                    side_rows[side].extend(page)
+                    side_exhausted[side] = (
+                        len(page) < _LCM_RECALL_SESSION_EXPAND_V1_PAGE_ROWS
+                    )
+                if not side_rows[side]:
                     side_open[side] = False
                     continue
-                row = rows[index]
+                index = side_next[side]
+                row = side_rows[side].pop(0)
+                store_id = int(row["store_id"])
+                side_cursor[side] = store_id
+                side_next[side] += step
+                if store_id in anchor_store_id_set:
+                    baseline_indices.add(index)
                 content = str(row.get("content") or "")
                 if not content:
                     side_open[side] = False
                     continue
-                store_id = int(row["store_id"])
                 if _lcm_recall_session_expand_v1_is_containment_duplicate(
                     store_id, content, delivered_text_by_store
                 ):
                     containment_dropped += 1
                     containment_for_session += 1
-                    side_next[side] += step
                     made_progress = True
                     continue
                 content_tokens = count_tokens(content)
@@ -4393,7 +4475,6 @@ def _lcm_recall_session_expand_v1(
                     }
                 )
                 remaining_tokens -= content_tokens
-                side_next[side] += step
                 made_progress = True
             if not made_progress:
                 break
@@ -4401,14 +4482,18 @@ def _lcm_recall_session_expand_v1(
         session_state[session_id] = {
             "session_id": session_id,
             "token_budget": token_budget,
-            "primary_anchor_store_id": int(rows[primary_anchor]["store_id"]),
-            "primary_anchor_index": primary_anchor,
+            "primary_anchor_store_id": primary_anchor_store_id,
+            "primary_anchor_index": 0,
             "baseline_indices": baseline_indices,
             "budget_skipped_count": budget_skipped,
             "containment_duplicate_dropped_count": containment_for_session,
-            "anchor_store_ids": anchors_by_session.get(session_id, []),
+            "anchor_store_ids": anchor_store_ids,
         }
 
+    records_by_session_index = {
+        (record["session_id"], record["index"]): record
+        for record in candidate_records
+    }
     candidate_entries = [record["entry"] for record in candidate_records]
     strict_selector = _LcmRecallStrictSelector(
         candidate_entries,
@@ -4438,25 +4523,20 @@ def _lcm_recall_session_expand_v1(
         baseline_indices = state["baseline_indices"]
         for step in (-1, 1):
             index = anchor + step
-            while 0 <= index < engine._store.get_session_count(session_id):
+            while True:
                 if index in baseline_indices:
                     index += step
                     continue
-                if index not in accepted_indices:
+                record = records_by_session_index.get((session_id, index))
+                if record is None or index not in accepted_indices:
                     break
-                for record in candidate_records:
-                    if (
-                        record["session_id"] == session_id
-                        and record["index"] == index
-                    ):
-                        kept_entry_ids.add(id(record["entry"]))
-                        break
+                kept_entry_ids.add(id(record["entry"]))
                 index += step
         dropped_here = len(accepted_indices) - sum(
             1
-            for record in candidate_records
-            if record["session_id"] == session_id
-            and id(record["entry"]) in kept_entry_ids
+            for index in accepted_indices
+            if id(records_by_session_index[(session_id, index)]["entry"])
+            in kept_entry_ids
         )
         contiguity_dropped += max(0, dropped_here)
 
@@ -5516,7 +5596,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         # The historical 64k cap remains byte-identical when the flag is off.
         # The treatment is bounded by three explicit token budgets, so size the
         # response envelope to carry those bounded additional hits whole.
-        response_char_cap = max(
+        calculated_response_char_cap = max(
             _LCM_RECALL_RESPONSE_CHAR_CAP,
             sum(
                 len(json.dumps(hit, ensure_ascii=False))
@@ -5524,6 +5604,37 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             )
             + min(len(query), 4_096)
             + 16_384,
+        )
+        configured_response_char_cap = int(
+            getattr(
+                engine._config,
+                "session_expand_v1_response_char_cap",
+                _LCM_RECALL_SESSION_EXPAND_V1_RESPONSE_CHAR_HARD_CAP,
+            )
+        )
+        response_char_hard_ceiling = (
+            _lcm_recall_session_expand_v1_response_char_hard_ceiling(
+                configured_response_char_cap
+            )
+        )
+        response_char_cap = min(
+            calculated_response_char_cap,
+            response_char_hard_ceiling,
+        )
+        session_expand_metrics["response_char_cap_configured"] = (
+            configured_response_char_cap
+        )
+        session_expand_metrics["response_char_cap_calculated"] = (
+            calculated_response_char_cap
+        )
+        session_expand_metrics["response_char_cap_hard_ceiling"] = (
+            response_char_hard_ceiling
+        )
+        session_expand_metrics["response_char_cap_configuration_clamped"] = (
+            response_char_hard_ceiling != configured_response_char_cap
+        )
+        session_expand_metrics["response_char_cap_clamped"] = (
+            response_char_cap < calculated_response_char_cap
         )
 
     degraded = bool(degraded_reasons)

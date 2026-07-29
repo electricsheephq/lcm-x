@@ -377,6 +377,11 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
         "LCM_SESSION_EXPAND_V1_PER_SESSION_TOKENS",
         int,
     ),
+    _EnvFieldSpec(
+        "session_expand_v1_response_char_cap",
+        "LCM_SESSION_EXPAND_V1_RESPONSE_CHAR_CAP",
+        int,
+    ),
     _EnvFieldSpec("recall_scan_rows", "LCM_RECALL_SCAN_ROWS", int),
     _EnvFieldSpec("recall_scan_max_rows", "LCM_RECALL_SCAN_MAX_ROWS", int),
     _EnvFieldSpec("recall_scan_budget_s", "LCM_RECALL_SCAN_BUDGET_S", float),
@@ -624,6 +629,10 @@ class LCMConfig:
     # session. Three sessions x 3,500 tokens targets the pre-declared ~10-13k
     # treatment context from the Stage-2 cost curve.
     session_expand_v1_per_session_tokens: int = 3_500
+    # Operator ceiling for the expanded response. Runtime also applies an
+    # absolute 512k maximum so a mistyped value cannot create an unbounded tool
+    # result.
+    session_expand_v1_response_char_cap: int = 512_000
     embedding_bounded_scan_rows: int = 2_000
     # Vector storage dtype for NEWLY-registered embedding profiles: float32
     # (default; a stock install keeps summary vectors byte-identical) or int8
