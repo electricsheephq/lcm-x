@@ -1139,7 +1139,7 @@ class MessageStore:
         if requires_like_fallback(
             query,
             safe_query,
-            preserve_unicode_symbols=not allow_operators,
+            preserve_unicode_symbols=fts_prose_mode and not allow_operators,
         ):
             return self._search_like(
                 query,

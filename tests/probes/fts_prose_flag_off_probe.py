@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Emit one deterministic flag-off recall response for byte comparison."""
+"""Emit deterministic flag-off recall responses for byte comparison.
+
+The original probe covered only an ASCII prose question, so it could not catch
+a flag-independent Unicode-symbol fallback. The symbol case below distinguishes
+the historical flag-off FTS route from the opt-in LIKE preservation route.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -49,6 +54,14 @@ try:
         "session-b",
         {"role": "user", "content": "dog grooming supplies are in the hall"},
     )
+    store.append(
+        "session-a",
+        {"role": "user", "content": "licensed © archive"},
+    )
+    store.append(
+        "session-a",
+        {"role": "user", "content": "licensed material without the mark"},
+    )
     engine = SimpleNamespace(
         _config=config,
         _store=store,
@@ -57,15 +70,31 @@ try:
         current_session_id="session-a",
         _session_occurrence_dates={},
     )
-    raw = lcm_tools.lcm_recall(
-        {
-            "query": "What did I say about my dog's vet appointment?",
-            "limit": 8,
-            "include": "verbatim",
-            "detail": "snippets",
-            "scope_bias": 0.0,
-        },
-        engine=engine,
+    raw = json.dumps(
+        [
+            lcm_tools.lcm_recall(
+                {
+                    "query": "What did I say about my dog's vet appointment?",
+                    "limit": 8,
+                    "include": "verbatim",
+                    "detail": "snippets",
+                    "scope_bias": 0.0,
+                },
+                engine=engine,
+            ),
+            lcm_tools.lcm_recall(
+                {
+                    "query": "licensed ©",
+                    "limit": 8,
+                    "include": "verbatim",
+                    "detail": "snippets",
+                    "scope_bias": 0.0,
+                },
+                engine=engine,
+            ),
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
 finally:
     dag.close()

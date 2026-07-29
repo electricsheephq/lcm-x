@@ -23,19 +23,21 @@ _EMOJI_RE = re.compile(
     r"]"
 )
 _QUOTED_PHRASE_RE = re.compile(r'"([^"]+)"')
+_CURLY_QUOTED_PHRASE_RE = re.compile(r"“([^”]+)”")
 _BOOLEAN_OPERATORS = {"AND", "OR", "NOT", "NEAR"}
 _RISKY_FTS_TOKEN_RE = re.compile(r"[A-Za-z0-9][\-:/][A-Za-z0-9]")
 _SPLIT_PUNCT_RE = re.compile(r"[-:/]+")
 _STRIP_EDGE_PUNCT = "\"'()[]{}.,;"
+_TRAILING_SENTENCE_PUNCT = "?!"
 _PROSE_TERM_LIMIT = 12
 _PROSE_STOPWORDS = frozenset({
     "a", "about", "an", "and", "are", "as", "at", "be", "been", "but", "by",
-    "can", "could", "did", "do", "does", "for", "from", "had", "has", "have",
-    "how", "i", "in", "is", "it", "me", "my", "near", "not", "of", "on", "or",
-    "our", "s", "say", "said", "should", "tell", "that", "the", "their", "them",
-    "there", "these", "they", "this", "those", "to", "us", "was", "we", "were",
-    "what", "when", "where", "which", "who", "why", "will", "with", "would",
-    "you", "your",
+    "can", "could", "did", "do", "does", "find", "for", "from", "had", "has",
+    "have", "how", "i", "in", "is", "it", "me",
+    "my", "near", "not", "of", "on", "or", "our", "please", "recall", "remember",
+    "s", "say", "said", "should", "tell", "that", "the", "their", "them", "there",
+    "these", "they", "this", "those", "to", "us", "was", "we", "were", "what",
+    "when", "where", "which", "who", "why", "will", "with", "would", "you", "your",
 })
 _PROSE_LEAD_WORDS = frozenset({
     "can", "could", "did", "do", "does", "find", "how", "please", "recall",
@@ -138,12 +140,18 @@ def should_use_fts_prose_mode(
     """Distinguish conversational prose from compact keyword query shapes."""
     raw = query or ""
     safe = sanitize_fts5_query(raw) if sanitized is None else sanitized
-    # Balanced quotes are an explicit precision signal. Keep their conjunctive
-    # semantics even if the surrounding text happens to end in a question mark.
-    if raw.count('"') >= 2 and raw.count('"') % 2 == 0:
+    # A retained ASCII phrase or a balanced smart-quoted phrase is an explicit
+    # precision signal. Keep it conjunctive even when the query ends in "?".
+    if (
+        _QUOTED_PHRASE_RE.search(safe)
+        or _CURLY_QUOTED_PHRASE_RE.search(raw)
+    ):
         return False
 
-    terms = extract_search_terms(safe)
+    # Classification retains ordinary lowercase conjunctions. The scoring
+    # extractor intentionally drops boolean-looking tokens, which previously
+    # hid "and"/"or" from the prose stopword threshold.
+    terms = _WORD_RE.findall(safe)
     if len(terms) < 2:
         return False
     lowered = [term.casefold() for term in terms]
@@ -309,6 +317,9 @@ def requires_like_fallback(
 
 def _token_variants(token: str) -> List[str]:
     cleaned = (token or "").strip().strip(_STRIP_EDGE_PUNCT)
+    without_sentence_punct = cleaned.strip(_TRAILING_SENTENCE_PUNCT)
+    if without_sentence_punct:
+        cleaned = without_sentence_punct
     if not cleaned:
         return []
     if cleaned.upper() in _BOOLEAN_OPERATORS:

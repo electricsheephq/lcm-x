@@ -577,7 +577,11 @@ class SummaryDAG:
         # query with no term left after it. A raw natural-language question is
         # NOT one of those: it sanitizes to a term form the index answers, so it
         # stays on the FTS path (F31 §3).
-        if requires_like_fallback(query, safe_query):
+        if requires_like_fallback(
+            query,
+            safe_query,
+            preserve_unicode_symbols=fts_prose_mode,
+        ):
             return self._search_like(query, session_id=session_id, limit=limit, sort=sort, source=source)
 
         order_by = _build_search_order_by(sort, "COALESCE(n.latest_at, n.created_at)")
