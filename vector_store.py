@@ -16,6 +16,7 @@ import struct
 import threading
 import time
 import uuid
+import weakref
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -107,6 +108,42 @@ _STREAM_ID_FILTER_MAX = 10_000
 # setup regression found by F39. See the R2-prime benchmark manifest.
 _FAST_SCAN_STREAMING_MIN_ROWS = 2_500
 _SOURCE_LINEAGE_WORK_LIMIT = 4096
+
+# Full-corpus resident matrices outlive the per-query VectorStore instances that
+# use them. The key is (resolved db_path, data_version, identity_hash, budget_mb);
+# the registry itself is one process-wide LRU governed by the active budget.
+_RESIDENT_MATRIX_REGISTRY_LOCK = threading.RLock()
+_RESIDENT_MATRIX_REGISTRY: "OrderedDict[tuple[str, int, str, int], tuple[list[int], list[str], list[str], Any, Any]]" = OrderedDict()
+_RESIDENT_MATRIX_INSTANCES: "weakref.WeakSet[VectorStore]" = weakref.WeakSet()
+
+
+def _drop_resident_registry_entry_locked(
+    key: tuple[str, int, str, int],
+) -> tuple[list[int], list[str], list[str], Any, Any] | None:
+    """Drop one pooled entry and every instance-local reference to it."""
+    entry = _RESIDENT_MATRIX_REGISTRY.pop(key, None)
+    for store in list(_RESIDENT_MATRIX_INSTANCES):
+        if (
+            getattr(store, "_resident_registry_db_path", None) != key[0]
+            or getattr(store, "knn_resident_max_mb", None) != key[3]
+        ):
+            continue
+        local_cache = getattr(store, "_resident_matrix_cache", {})
+        for local_key in list(local_cache):
+            if local_key[1:] == (key[2], key[1]):
+                local_cache.pop(local_key, None)
+    return entry
+
+
+def _drop_resident_registry_db_locked(db_path: str) -> None:
+    """Invalidate pooled residency and local references for one database."""
+    for key in list(_RESIDENT_MATRIX_REGISTRY):
+        if key[0] == db_path:
+            _drop_resident_registry_entry_locked(key)
+    for store in list(_RESIDENT_MATRIX_INSTANCES):
+        if getattr(store, "_resident_registry_db_path", None) == db_path:
+            store._resident_matrix_cache.clear()
+            store._resident_ineligible_cache.clear()
 
 
 class _UnverifiableProvenance(RuntimeError):
@@ -322,6 +359,7 @@ class VectorStore:
     ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._resident_registry_db_path = str(self.db_path.resolve())
         resolved_config = config or LCMConfig.from_env()
         self.bounded_scan_rows = (
             resolved_config.embedding_bounded_scan_rows
@@ -334,9 +372,10 @@ class VectorStore:
         self.knn_prescreen_multiplier = max(
             1, int(getattr(resolved_config, "knn_prescreen_multiplier", 4) or 4)
         )
-        self.knn_resident_max_bytes = max(
+        self.knn_resident_max_mb = max(
             0, int(getattr(resolved_config, "knn_resident_max_mb", 128) or 0)
-        ) * 1024 * 1024
+        )
+        self.knn_resident_max_bytes = self.knn_resident_max_mb * 1024 * 1024
         # Opt-in: also write the sign-bit prescreen for float32 identities (not
         # just int8). A float32-vec identity carrying the prescreen gets the
         # full-corpus two-stage path with EXACT float rescore of survivors — the
@@ -373,14 +412,15 @@ class VectorStore:
         # two-stage cost) — the same amortization the float matrix cache gives.
         self._binary_matrix_cache: "OrderedDict[tuple[str, int], tuple[list[str], Any]]" = OrderedDict()
         self._chunk_binary_matrix_cache: "OrderedDict[tuple[str, int], tuple[list[str], Any]]" = OrderedDict()
-        # Exact full-corpus int8 matrices, shared across summary/chunk arms and
-        # bounded by one process-wide-per-store byte budget. Keys mirror the
-        # binary caches' durable invalidation scheme, with the corpus kind added:
+        # Instance-local references into the process-wide resident registry.
+        # Keys retain their pre-R2-double-prime shape for diagnostics/tests:
         # (is_chunk, identity_hash, data_version).
         self._resident_matrix_cache: "OrderedDict[tuple[bool, str, int], tuple[list[int], list[str], list[str], Any, Any]]" = OrderedDict()
         self._resident_ineligible_cache: set[tuple[bool, str, int]] = set()
         self._chunk_schema_ready = False
         self._init_db()
+        with _RESIDENT_MATRIX_REGISTRY_LOCK:
+            _RESIDENT_MATRIX_INSTANCES.add(self)
 
     def _init_db(self) -> None:
         # isolation_level=None (autocommit) so every read runs as its own
@@ -484,8 +524,10 @@ class VectorStore:
                     self._chunk_binary_matrix_cache.clear()
                     # Accepted #171 cost: every vector write drops residency;
                     # the next eligible full scan reloads the complete matrix.
-                    self._resident_matrix_cache.clear()
-                    self._resident_ineligible_cache.clear()
+                    with _RESIDENT_MATRIX_REGISTRY_LOCK:
+                        _drop_resident_registry_db_locked(
+                            self._resident_registry_db_path
+                        )
         except sqlite3.Error as exc:
             if _is_sqlite_locked_error(exc):
                 logger.warning("Embedding write blocked by SQLite lock contention")
@@ -1348,7 +1390,7 @@ class VectorStore:
     def _mark_resident_ineligible(
         self, key: tuple[bool, str, int]
     ) -> None:
-        with self._cache_lock:
+        with _RESIDENT_MATRIX_REGISTRY_LOCK:
             self._resident_ineligible_cache = {
                 cached_key
                 for cached_key in self._resident_ineligible_cache
@@ -1373,13 +1415,42 @@ class VectorStore:
             raise _PrescreenDeadlineExpired()
         data_version = self._data_version(identity_hash)
         key = (bool(chunk), str(identity_hash), data_version)
-        with self._cache_lock:
-            cached = self._resident_matrix_cache.get(key)
+        registry_key = (
+            self._resident_registry_db_path,
+            data_version,
+            str(identity_hash),
+            self.knn_resident_max_mb,
+        )
+        with _RESIDENT_MATRIX_REGISTRY_LOCK:
+            for stale_key in list(_RESIDENT_MATRIX_REGISTRY):
+                if (
+                    stale_key[0] == registry_key[0]
+                    and stale_key[2] == registry_key[2]
+                    and stale_key[1] != registry_key[1]
+                ):
+                    _drop_resident_registry_entry_locked(stale_key)
+            cached = _RESIDENT_MATRIX_REGISTRY.get(registry_key)
             if cached is not None:
-                self._resident_matrix_cache.move_to_end(key)
-                if _prescreen_deadline_expired(deadline, len(cached[1])):
-                    raise _PrescreenDeadlineExpired(len(cached[1]))
-                return cached
+                _RESIDENT_MATRIX_REGISTRY.move_to_end(registry_key)
+                used = sum(
+                    self._resident_entry_bytes(value)
+                    for value in _RESIDENT_MATRIX_REGISTRY.values()
+                )
+                while (
+                    _RESIDENT_MATRIX_REGISTRY
+                    and used > self.knn_resident_max_bytes
+                ):
+                    oldest_key = next(iter(_RESIDENT_MATRIX_REGISTRY))
+                    evicted = _drop_resident_registry_entry_locked(oldest_key)
+                    if evicted is not None:
+                        used -= self._resident_entry_bytes(evicted)
+                cached = _RESIDENT_MATRIX_REGISTRY.get(registry_key)
+                if cached is not None:
+                    self._resident_matrix_cache[key] = cached
+                    self._resident_matrix_cache.move_to_end(key)
+                    if _prescreen_deadline_expired(deadline, len(cached[1])):
+                        raise _PrescreenDeadlineExpired(len(cached[1]))
+                    return cached
             if key in self._resident_ineligible_cache:
                 return None
 
@@ -1455,21 +1526,35 @@ class VectorStore:
         entry_bytes = self._resident_entry_bytes(entry)
         if entry_bytes > self.knn_resident_max_bytes:
             return None
-        with self._cache_lock:
-            for stale_key in list(self._resident_matrix_cache):
-                if stale_key[:2] == key[:2] and stale_key != key:
-                    self._resident_matrix_cache.pop(stale_key)
+        with _RESIDENT_MATRIX_REGISTRY_LOCK:
+            for stale_key in list(_RESIDENT_MATRIX_REGISTRY):
+                if (
+                    stale_key[0] == registry_key[0]
+                    and stale_key[2] == registry_key[2]
+                    and stale_key[1] != registry_key[1]
+                ):
+                    _drop_resident_registry_entry_locked(stale_key)
+            cached = _RESIDENT_MATRIX_REGISTRY.get(registry_key)
+            if cached is not None:
+                _RESIDENT_MATRIX_REGISTRY.move_to_end(registry_key)
+                self._resident_matrix_cache[key] = cached
+                self._resident_ineligible_cache.discard(key)
+                return cached
             used = sum(
                 self._resident_entry_bytes(value)
-                for value in self._resident_matrix_cache.values()
+                for value in _RESIDENT_MATRIX_REGISTRY.values()
             )
             while (
-                self._resident_matrix_cache
+                _RESIDENT_MATRIX_REGISTRY
                 and used + entry_bytes > self.knn_resident_max_bytes
             ):
-                _, evicted = self._resident_matrix_cache.popitem(last=False)
+                oldest_key = next(iter(_RESIDENT_MATRIX_REGISTRY))
+                evicted = _drop_resident_registry_entry_locked(oldest_key)
+                if evicted is None:
+                    continue
                 used -= self._resident_entry_bytes(evicted)
             self._resident_ineligible_cache.discard(key)
+            _RESIDENT_MATRIX_REGISTRY[registry_key] = entry
             self._resident_matrix_cache[key] = entry
         return entry
 
@@ -3619,8 +3704,10 @@ class VectorStore:
             self._chunk_matrix_cache.clear()
             self._binary_matrix_cache.clear()
             self._chunk_binary_matrix_cache.clear()
+        with _RESIDENT_MATRIX_REGISTRY_LOCK:
             self._resident_matrix_cache.clear()
             self._resident_ineligible_cache.clear()
+            _RESIDENT_MATRIX_INSTANCES.discard(self)
 
     def __del__(self) -> None:  # pragma: no cover - defensive resource cleanup
         try:

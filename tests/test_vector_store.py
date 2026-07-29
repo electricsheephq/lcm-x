@@ -692,6 +692,157 @@ def test_summary_int8_full_scan_uses_exact_residency(tmp_path, monkeypatch):
         dag.close()
 
 
+@pytest.fixture
+def empty_resident_registry():
+    registry = vector_store_module._RESIDENT_MATRIX_REGISTRY
+    with vector_store_module._RESIDENT_MATRIX_REGISTRY_LOCK:
+        registry.clear()
+    try:
+        yield registry
+    finally:
+        with vector_store_module._RESIDENT_MATRIX_REGISTRY_LOCK:
+            registry.clear()
+
+
+def test_residency_survives_close_and_invalidates_on_data_version(
+    tmp_path, monkeypatch, empty_resident_registry
+):
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
+    db_path = tmp_path / "pooled-resident.db"
+    dag = SummaryDAG(db_path)
+    config = LCMConfig(knn_resident_max_mb=1)
+    first = VectorStore(db_path, config=config, bounded_scan_rows=1)
+    second = None
+    builds: list[str] = []
+    original = VectorStore._vector_rows_cursor
+
+    def counted(store, identity_hash, *, chunk, candidate_ids=None):
+        builds.append(store._resident_registry_db_path)
+        return original(
+            store,
+            identity_hash,
+            chunk=chunk,
+            candidate_ids=candidate_ids,
+        )
+
+    monkeypatch.setattr(VectorStore, "_vector_rows_cursor", counted)
+    try:
+        _seed_scan_corpus(
+            dag,
+            first,
+            3,
+            gold_vector=[1.0, 0.0, 0.0],
+            filler_vector=[0.0, 1.0, 0.0],
+        )
+        cold = first.knn(
+            [1.0, 0.0, 0.0], k=2, model="scan", full_scan=True
+        )
+        assert cold.coverage == "full"
+        assert len(builds) == 1
+        pooled_key = next(iter(empty_resident_registry))
+        assert pooled_key == (
+            str(db_path.resolve()),
+            3,
+            first.capture_identity("scan").identity_hash,
+            1,
+        )
+
+        first.close()
+        assert list(empty_resident_registry) == [pooled_key]
+
+        second = VectorStore(db_path, config=config, bounded_scan_rows=1)
+        warm = second.knn(
+            [1.0, 0.0, 0.0], k=2, model="scan", full_scan=True
+        )
+        assert list(warm) == list(cold)
+        assert len(builds) == 1  # second instance performed zero rebuilds
+
+        node = _add_summary(dag, created_at=4.0)
+        _record_embedding(
+            second,
+            node,
+            "summary",
+            "scan",
+            [0.5, 0.5, 0.0],
+        )
+        assert empty_resident_registry == {}
+        refreshed = second.knn(
+            [1.0, 0.0, 0.0], k=4, model="scan", full_scan=True
+        )
+        assert refreshed.coverage == "full"
+        assert len(builds) == 2
+        assert next(iter(empty_resident_registry))[1] == 4
+    finally:
+        first.close()
+        if second is not None:
+            second.close()
+        dag.close()
+
+
+def test_resident_registry_evicts_lru_across_databases(
+    tmp_path, monkeypatch, empty_resident_registry
+):
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
+    stores_and_dags = []
+    builds: list[str] = []
+    original = VectorStore._vector_rows_cursor
+
+    def counted(store, identity_hash, *, chunk, candidate_ids=None):
+        builds.append(store._resident_registry_db_path)
+        return original(
+            store,
+            identity_hash,
+            chunk=chunk,
+            candidate_ids=candidate_ids,
+        )
+
+    monkeypatch.setattr(VectorStore, "_vector_rows_cursor", counted)
+    try:
+        for name in ("first", "second"):
+            db_path = tmp_path / f"{name}.db"
+            dag = SummaryDAG(db_path)
+            store = VectorStore(
+                db_path,
+                config=LCMConfig(knn_resident_max_mb=1),
+                bounded_scan_rows=1,
+            )
+            _seed_scan_corpus(
+                dag,
+                store,
+                2,
+                gold_vector=[1.0, 0.0, 0.0],
+                filler_vector=[0.0, 1.0, 0.0],
+            )
+            store.knn_resident_max_bytes = 20
+            stores_and_dags.append((store, dag))
+
+        first, _ = stores_and_dags[0]
+        second, _ = stores_and_dags[1]
+        first.knn([1.0, 0.0, 0.0], k=1, model="scan", full_scan=True)
+        second.knn([1.0, 0.0, 0.0], k=1, model="scan", full_scan=True)
+
+        assert len(empty_resident_registry) == 1
+        assert next(iter(empty_resident_registry))[0] == str(
+            second.db_path.resolve()
+        )
+        assert len(first._resident_matrix_cache) == 0
+        assert builds == [
+            str(first.db_path.resolve()),
+            str(second.db_path.resolve()),
+        ]
+
+        first.knn([1.0, 0.0, 0.0], k=1, model="scan", full_scan=True)
+        assert next(iter(empty_resident_registry))[0] == str(
+            first.db_path.resolve()
+        )
+        assert len(second._resident_matrix_cache) == 0
+        assert builds[-1] == str(first.db_path.resolve())
+    finally:
+        for store, dag in stores_and_dags:
+            store.close()
+            dag.close()
+
+
 def test_full_scan_max_rows_caps_the_scan_and_discloses_it(tmp_path):
     """scan_max_rows is the pathological-corpus escape hatch, and it discloses."""
     db_path = tmp_path / "full-scan-capped.db"
