@@ -1537,9 +1537,9 @@ class TrajectoryStore:
     def _migrate_state_semantic_embeddings_to_profile_scope(self) -> None:
         """Replace the legacy ``state_id`` primary key with a profile-scoped key.
 
-        Legacy rows belong to the active profile when one exists. If there is no
-        active profile, a sole stored digest is unambiguous and is adopted.
-        Multiple stored digests without an active profile describe an interrupted
+        Legacy rows belong to the active profile only when every stored digest
+        matches it. If there is no active profile, a sole stored digest is
+        unambiguous and is adopted. Any mixed digests describe an interrupted
         legacy rebuild whose overwritten vectors cannot be reconstructed, so the
         migration fails closed instead of assigning mixed vectors to a profile.
 
@@ -1594,7 +1594,16 @@ class TrajectoryStore:
         if adopted_digest is None and len(stored_digests) > 1:
             raise TrajectoryStoreError(
                 "cannot migrate legacy state embeddings with multiple profile "
-                "digests and no active profile; rebuild the state semantic index"
+                "digests and no active profile; discard the legacy state "
+                "embeddings and run a fresh backfill to recover"
+            )
+        if adopted_digest is not None and any(
+            digest != adopted_digest for digest in stored_digests
+        ):
+            raise TrajectoryStoreError(
+                "cannot migrate because legacy state embeddings do not all "
+                "match the active profile; discard the legacy state embeddings "
+                "and run a fresh backfill to recover"
             )
 
         self._conn.execute(
@@ -1813,20 +1822,21 @@ class TrajectoryStore:
         profile_digest = self._state_semantic_profile_digest(
             provider_name, model_name, dim, source_manifest_digest
         )
-        serving_profile = self.active_state_semantic_profile()
-        if (
-            not resume
-            and serving_profile is not None
-            and str(serving_profile["profile_digest"]) == profile_digest
-        ):
-            raise TrajectoryStoreError(
-                "cannot rebuild the active state semantic profile in place; "
-                "use a distinct profile identity so the serving vectors remain intact"
-            )
         now = time.time()
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
+                serving_profile = self.active_state_semantic_profile()
+                if (
+                    not resume
+                    and serving_profile is not None
+                    and str(serving_profile["profile_digest"]) == profile_digest
+                ):
+                    raise TrajectoryStoreError(
+                        "cannot rebuild the active state semantic profile in place; "
+                        "use a distinct profile identity so the serving vectors "
+                        "remain intact"
+                    )
                 # The profile-scoped embedding key keeps the serving profile
                 # complete and untouched while this inactive profile is staged.
                 # Readers remain on the predecessor until the atomic flag flip

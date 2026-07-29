@@ -216,7 +216,7 @@ def _downgrade_state_embeddings_to_legacy_primary_key(store) -> None:
         store._conn.execute(
             """
             ALTER TABLE lcm_trajectory_state_embeddings
-            RENAME TO lcm_trajectory_state_embeddings_profile_scoped
+            RENAME TO lcm_trajectory_state_embeddings_legacy_stage
             """
         )
         store._conn.execute(
@@ -241,11 +241,11 @@ def _downgrade_state_embeddings_to_legacy_primary_key(store) -> None:
                 state_id, profile_digest, document_sha256, vector, embedded_at
             )
             SELECT state_id, profile_digest, document_sha256, vector, embedded_at
-            FROM lcm_trajectory_state_embeddings_profile_scoped
+            FROM lcm_trajectory_state_embeddings_legacy_stage
             """
         )
         store._conn.execute(
-            "DROP TABLE lcm_trajectory_state_embeddings_profile_scoped"
+            "DROP TABLE lcm_trajectory_state_embeddings_legacy_stage"
         )
         store._conn.execute(
             """
@@ -663,7 +663,54 @@ def test_legacy_state_embedding_migration_refuses_ambiguous_inactive_rows(
 
     with pytest.raises(
         TrajectoryStoreError,
-        match="multiple profile digests and no active profile",
+        match="multiple profile digests and no active profile.*fresh backfill",
+    ):
+        store._ensure_state_semantic_schema()
+
+    primary_key = tuple(
+        str(row[1])
+        for row in store._conn.execute(
+            "PRAGMA table_info(lcm_trajectory_state_embeddings)"
+        ).fetchall()
+        if int(row[5]) > 0
+    )
+    assert primary_key == ("state_id",)
+
+
+def test_legacy_state_embedding_migration_refuses_mixed_active_rows(tmp_path):
+    store = _build_invisible_semantic_store(tmp_path)
+    prior = store.active_state_semantic_profile()
+    assert prior is not None
+    _downgrade_state_embeddings_to_legacy_primary_key(store)
+    alternate_digest = "alternate-profile"
+    store._conn.execute(
+        """
+        INSERT INTO lcm_trajectory_state_embedding_profiles(
+            profile_digest, provider, model_name, dim, document_version,
+            source_manifest_digest, state_count, active, created_at
+        )
+        SELECT ?, provider, ?, dim, document_version, source_manifest_digest,
+               state_count, 0, created_at
+        FROM lcm_trajectory_state_embedding_profiles
+        WHERE profile_digest = ?
+        """,
+        (alternate_digest, "alternate-model", prior["profile_digest"]),
+    )
+    store._conn.execute(
+        """
+        UPDATE lcm_trajectory_state_embeddings
+        SET profile_digest = ?
+        WHERE state_id = (
+            SELECT MAX(state_id) FROM lcm_trajectory_state_embeddings
+        )
+        """,
+        (alternate_digest,),
+    )
+    store._conn.commit()
+
+    with pytest.raises(
+        TrajectoryStoreError,
+        match="legacy state embeddings do not all match the active profile",
     ):
         store._ensure_state_semantic_schema()
 
@@ -758,7 +805,9 @@ def test_interrupted_profile_rebuild_keeps_prior_profile_serving_until_cutover(
     assert _profile_embedding_rows(store, prior_digest) == prior_rows
 
 
-def test_forced_same_profile_rebuild_refuses_to_mutate_serving_rows(tmp_path):
+def test_forced_same_profile_rebuild_refuses_to_mutate_serving_rows(
+    tmp_path, monkeypatch,
+):
     asset_root = tmp_path / "assets"
     asset_root.mkdir()
     initial = StateVectorProvider()
@@ -785,6 +834,18 @@ def test_forced_same_profile_rebuild_refuses_to_mutate_serving_rows(tmp_path):
     interrupted = InterruptingStateVectorProvider(
         model_id=initial.model_id, fail_after=1
     )
+    original_active_profile = store.active_state_semantic_profile
+    guard_transaction_states = []
+
+    def active_profile_with_transaction_probe():
+        guard_transaction_states.append(store._conn.in_transaction)
+        return original_active_profile()
+
+    monkeypatch.setattr(
+        store,
+        "active_state_semantic_profile",
+        active_profile_with_transaction_probe,
+    )
     with pytest.raises(
         TrajectoryStoreError,
         match="cannot rebuild the active state semantic profile in place",
@@ -796,6 +857,11 @@ def test_forced_same_profile_rebuild_refuses_to_mutate_serving_rows(tmp_path):
             batch_token_budget=100_000,
         )
 
+    assert guard_transaction_states == [True]
+    assert not store._conn.in_transaction
+    monkeypatch.setattr(
+        store, "active_state_semantic_profile", original_active_profile
+    )
     assert interrupted.document_calls == 0
     assert _profile_embedding_rows(store, completed["profile_digest"]) == prior_rows
     assert _ranking_bytes(store) == prior_rankings
