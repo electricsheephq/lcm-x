@@ -168,3 +168,16 @@ before editing. All seven raw findings remained applicable.
   CI lane. This does not claim PR merge readiness or current-head remote CI.
 - No commit, push, PR reply, thread resolution, merge, deploy, or release was
   performed.
+
+## Round 3 — re-review findings on head d073426 (4 semantic rows, 4 raw IDs)
+
+| Row | Priority | Raw comment IDs | Terminal disposition | Validation and result |
+|---:|---|---|---|---|
+| R3-1 | P2 | 3676882648 | Documented (no code change) | The classifier input is already canonical on both routes: `should_use_fts_prose_mode` sanitizes via the FTS form internally, so FTS and LIKE paths classify identically by construction; LIKE-route EXTRACTION deliberately stays on the LIKE-sanitized form so unindexable characters remain searchable (the round-1 emoji lesson). Invariant now stated in comments at both `_search_like` prose branches. |
+| R3-2 | P3 | 3676882656 | Fixed now | Both `getattr(engine._config, "fts_prose_mode", False)` reads replaced with direct attribute access; a missing field now fails loudly instead of silently disabling prose routing. |
+| R3-3 | P3 | 3676882661 | Fixed now | `build_fts5_match_query` restores the pre-refactor guard: an empty prose-term list falls back to the sanitized form, so an empty disjunction can never reach FTS5 MATCH. |
+| R3-4 | P2 | 3676904019 | Fixed now | `preserve_unicode_symbols` is now gated on the prose CLASSIFICATION (not the flag alone) in both `MessageStore.search` and `SummaryDAG.search`; a compact classifier-negative symbol query keeps the historical FTS route flag-on. Regression test `test_search_flag_on_compact_symbol_query_keeps_flag_off_route` added. |
+
+Round-3 validation: focused suite 89 passed
+(`python3 -m pytest tests/test_lcm_core.py -q -k "prose or search or grep"`);
+flag-off probe byte-identical (2,104 bytes, SHA-256 `d9cf3621ed51669eeaff13642b8805d393e45838e351fd1bf236defd0b9e3219`).

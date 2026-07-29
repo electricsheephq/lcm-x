@@ -231,7 +231,12 @@ def build_fts5_match_query(
     ):
         return sanitized
 
-    return " OR ".join(extract_prose_search_terms(query, sanitized))
+    prose_terms = extract_prose_search_terms(query, sanitized)
+    if not prose_terms:
+        # An empty disjunction would be an FTS5 MATCH syntax error; keep the
+        # pre-prose sanitized form as the fallback exactly as flag-off does.
+        return sanitized
+    return " OR ".join(prose_terms)
 
 
 def sanitize_like_query(query: str) -> str:

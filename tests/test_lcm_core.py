@@ -2117,6 +2117,26 @@ class TestMessageStore:
 
         assert results
 
+    def test_search_flag_on_compact_symbol_query_keeps_flag_off_route(self, store):
+        """Round-3 finding: symbol preservation keys on prose CLASSIFICATION,
+        not the flag alone — a compact classifier-negative query must keep the
+        historical FTS route (and its conjunctive semantics) even flag-on."""
+        store.append(
+            "sess1",
+            {"role": "user", "content": "licensed © archive"},
+        )
+        store._search_like = lambda *args, **kwargs: pytest.fail(
+            "flag-on compact classifier-negative query escaped to LIKE"
+        )
+
+        results = store.search(
+            "licensed ©",
+            session_id="sess1",
+            fts_prose_mode=True,
+        )
+
+        assert results
+
     def test_search_matches_a_decomposed_accent_against_the_index(self, store):
         """Review finding 6: unicode61 folds `naïve` to `naive`, so a decomposed
         query must compose rather than split into `nai ve` and match nothing."""

@@ -1140,7 +1140,14 @@ class MessageStore:
         if requires_like_fallback(
             query,
             safe_query,
-            preserve_unicode_symbols=fts_prose_mode and not allow_operators,
+            # Symbol preservation is gated on the PROSE CLASSIFICATION, not the
+            # flag alone: a compact classifier-negative query must keep its
+            # flag-off route and conjunctive semantics.
+            preserve_unicode_symbols=(
+                fts_prose_mode
+                and not allow_operators
+                and should_use_fts_prose_mode(query)
+            ),
         ):
             return self._search_like(
                 query,
@@ -1263,6 +1270,9 @@ class MessageStore:
         # LIKE keeps every character the index cannot spell (emoji, punctuation)
         # because substring matching is the only way to find those rows.
         safe_query = sanitize_like_query(query)
+        # Classification always keys off the canonical FTS-sanitized view
+        # (should_use_fts_prose_mode sanitizes internally); extraction stays on
+        # the LIKE-sanitized form so unindexable characters remain searchable.
         terms = (
             extract_prose_search_terms(query, safe_query)
             if prose_mode and should_use_fts_prose_mode(query)

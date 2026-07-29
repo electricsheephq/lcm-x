@@ -2370,7 +2370,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     requested_limit = parsed_limit
     limit_cap = int(kwargs.get("_limit_cap", _LCM_GREP_HARD_LIMIT_CAP))
     limit = min(requested_limit, limit_cap)
-    fts_prose_mode = bool(getattr(engine._config, "fts_prose_mode", False))
+    fts_prose_mode = bool(engine._config.fts_prose_mode)
     requested_sort = args.get("sort")
     sort = normalize_search_sort(
         resolve_prose_sort(requested_sort, fts_prose_mode, query)
@@ -5553,7 +5553,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             if node is not None:
                 nodes.append(node)
     elif query:
-        fts_prose_mode = bool(getattr(engine._config, "fts_prose_mode", False))
+        fts_prose_mode = bool(engine._config.fts_prose_mode)
         search_kwargs = {
             "session_id": engine.current_session_id,
             "limit": max_results,
