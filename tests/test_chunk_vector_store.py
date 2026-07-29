@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 import hermes_lcm.vector_store as vector_store_module
+from hermes_lcm.config import LCMConfig
 from hermes_lcm.vector_store import EmbeddingIdentity, VectorStore
 
 MODEL = "voyage-context-4"
@@ -185,3 +186,258 @@ class TestCoexistence:
         # Both remain active.
         assert int(chunk["active"]) == 1
         assert int(summary["active"]) == 1
+
+
+def test_chunk_vectorized_multibatch_ranking_matches_legacy_loader(tmp_path):
+    numpy = pytest.importorskip("numpy")
+    db_path = tmp_path / "chunk-r1-parity.db"
+    _seed_messages(
+        db_path,
+        [
+            (i, "s", "history", "user", "m", float(i))
+            for i in range(6)
+        ],
+    )
+    store = VectorStore(db_path, bounded_scan_rows=2)
+    store.register_profile(MODEL, PROVIDER, DIM, task="chunk")
+    try:
+        for i, vec in enumerate(
+            (
+                [1.0, 0.0, 0.0, 0.0],
+                [0.5, 0.5, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [-1.0, 0.0, 0.0, 0.0],
+                [0.5, 0.5, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            )
+        ):
+            _write(store, f"{i}:0", i, 0, vec)
+        identity = str(store._current_chunk_profile()["identity_hash"])
+        ids = store._bounded_chunk_candidate_ids(
+            identity,
+            since=None,
+            until=None,
+            conversation_ids=None,
+            source=None,
+            limit=vector_store_module._SCAN_ALL_ROWS,
+        )
+        old_rowids: list[int] = []
+        old_ids: list[str] = []
+        old_scores: list[float] = []
+        query = numpy.asarray([1.0, 0.0, 0.0, 0.0], dtype=numpy.float32)
+        for start in range(0, len(ids), 2):
+            with store._temp_id_table(ids[start:start + 2]) as table:
+                rows = store.connection.execute(
+                    f"""
+                    SELECT v.rowid, v.chunk_id, v.vec
+                    FROM {table} t
+                    JOIN lcm_chunk_vectors v
+                      ON v.chunk_id = t.id AND v.identity_hash = ?
+                    JOIN lcm_chunk_meta m
+                      ON m.chunk_id = v.chunk_id
+                     AND m.identity_hash = v.identity_hash
+                    WHERE m.archived = 0
+                    """,
+                    (identity,),
+                ).fetchall()
+            vectors = [
+                list(store._decode_stored_vec(bytes(row["vec"]), DIM, "float32"))
+                for row in rows
+            ]
+            scores = numpy.asarray(vectors, dtype=numpy.float32) @ query
+            old_rowids.extend(int(row["rowid"]) for row in rows)
+            old_ids.extend(str(row["chunk_id"]) for row in rows)
+            old_scores.extend(float(score) for score in scores)
+        expected = store._ranked(
+            old_rowids,
+            old_ids,
+            ["chunk"] * len(old_ids),
+            old_scores,
+            limit=4,
+        )
+
+        actual = store.knn_chunks(
+            query.tolist(),
+            k=4,
+            model=MODEL,
+            provider=PROVIDER,
+            full_scan=True,
+        )
+
+        assert actual.coverage == "full"
+        assert list(actual) == expected
+    finally:
+        store.close()
+
+
+def test_int8_residency_reuses_matrix_and_write_forces_full_reload(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "chunk-resident.db"
+    _seed_messages(
+        db_path,
+        [
+            (i, "s", "history", "user", "m", float(i))
+            for i in range(4)
+        ],
+    )
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=1),
+        bounded_scan_rows=2,
+    )
+    identity = EmbeddingIdentity.canonical(
+        PROVIDER, MODEL, "", DIM, "int8", "little", "chunk"
+    )
+    store.register_profile(
+        MODEL, PROVIDER, DIM, dtype="int8", task="chunk"
+    )
+    try:
+        for i, vec in enumerate(
+            (
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            )
+        ):
+            store.record_chunk_embedding(
+                f"{i}:0",
+                MODEL,
+                vec,
+                store_id=i,
+                chunk_index=0,
+                char_start=0,
+                char_end=1,
+                token_estimate=1,
+                identity=identity,
+            )
+        calls: list[bool] = []
+        original = store._vector_rows_cursor
+
+        def counted(identity_hash, *, chunk, candidate_ids=None):
+            calls.append(chunk)
+            return original(
+                identity_hash,
+                chunk=chunk,
+                candidate_ids=candidate_ids,
+            )
+
+        monkeypatch.setattr(store, "_vector_rows_cursor", counted)
+        cold = store.knn_chunks(
+            [1.0, 0.0, 0.0, 0.0],
+            k=2,
+            model=MODEL,
+            provider=PROVIDER,
+            full_scan=True,
+        )
+        warm = store.knn_chunks(
+            [1.0, 0.0, 0.0, 0.0],
+            k=2,
+            model=MODEL,
+            provider=PROVIDER,
+            full_scan=True,
+        )
+
+        assert cold.coverage == warm.coverage == "full"
+        assert list(cold) == list(warm)
+        assert calls == [True]
+        assert len(store._resident_matrix_cache) == 1
+
+        store.record_chunk_embedding(
+            "3:0",
+            MODEL,
+            [0.9, 0.1, 0.0, 0.0],
+            store_id=3,
+            chunk_index=0,
+            char_start=0,
+            char_end=1,
+            token_estimate=1,
+            identity=identity,
+        )
+        assert len(store._resident_matrix_cache) == 0
+        reloaded = store.knn_chunks(
+            [1.0, 0.0, 0.0, 0.0],
+            k=4,
+            model=MODEL,
+            provider=PROVIDER,
+            full_scan=True,
+        )
+        assert reloaded.coverage == "full"
+        assert calls == [True, True]
+        assert {row[0] for row in reloaded} == {
+            "0:0", "1:0", "2:0", "3:0"
+        }
+    finally:
+        store.close()
+
+
+def test_int8_over_resident_budget_falls_back_to_exact_r1(tmp_path):
+    db_path = tmp_path / "chunk-over-budget.db"
+    _seed_messages(
+        db_path,
+        [
+            (i, "s", "history", "user", "m", float(i))
+            for i in range(3)
+        ],
+    )
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=1),
+        bounded_scan_rows=1,
+    )
+    identity = EmbeddingIdentity.canonical(
+        PROVIDER, MODEL, "", DIM, "int8", "little", "chunk"
+    )
+    store.register_profile(
+        MODEL, PROVIDER, DIM, dtype="int8", task="chunk"
+    )
+    try:
+        for i in range(3):
+            store.record_chunk_embedding(
+                f"{i}:0",
+                MODEL,
+                [1.0, float(i), 0.0, 0.0],
+                store_id=i,
+                chunk_index=0,
+                char_start=0,
+                char_end=1,
+                token_estimate=1,
+                identity=identity,
+            )
+        store.knn_resident_max_bytes = 2 * (DIM + 4)
+
+        result = store.knn_chunks(
+            [1.0, 0.0, 0.0, 0.0],
+            k=3,
+            model=MODEL,
+            provider=PROVIDER,
+            full_scan=True,
+        )
+
+        assert result.coverage == "full"
+        assert len(result) == 3
+        assert len(store._resident_matrix_cache) == 0
+    finally:
+        store.close()
+
+
+def test_exact_scan_does_not_overstate_coverage_for_unscorable_live_vector(
+    store,
+):
+    _write(store, "10:0", 10, 0, [1.0, 0.0, 0.0, 0.0])
+    _write(store, "11:0", 11, 0, [0.0, 1.0, 0.0, 0.0])
+    store.connection.execute(
+        "UPDATE lcm_chunk_vectors SET vec = X'00' WHERE chunk_id = '11:0'"
+    )
+
+    result = store.knn_chunks(
+        [1.0, 0.0, 0.0, 0.0],
+        k=2,
+        model=MODEL,
+        provider=PROVIDER,
+        full_scan=True,
+    )
+
+    assert result.coverage == "bounded"
+    assert result.scanned == 1
+    assert result.total == 2

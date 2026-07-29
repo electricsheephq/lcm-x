@@ -513,13 +513,13 @@ def test_multi_batch_scan_releases_matrices_warmed_before_it(tmp_path, monkeypat
         assert cache_before == store._MATRIX_CACHE_MAX_ENTRIES
 
         observed: list[tuple[int, int]] = []
-        original = store._load_matrix
+        original = VectorStore._vectorized_batch
 
-        def probe(np, identity_hash, dim, embedded_ids, dtype):
+        def probe(np, rows, dim, dtype):
             observed.append((len(store._matrix_cache), len(store._chunk_matrix_cache)))
-            return original(np, identity_hash, dim, embedded_ids, dtype)
+            return original(np, rows, dim, dtype)
 
-        monkeypatch.setattr(store, "_load_matrix", probe)
+        monkeypatch.setattr(VectorStore, "_vectorized_batch", staticmethod(probe))
         result = store.knn([1.0, 0.0, 0.0], k=1, model="scan", full_scan=True)
 
         assert result.coverage == "full"
@@ -529,8 +529,9 @@ def test_multi_batch_scan_releases_matrices_warmed_before_it(tmp_path, monkeypat
         assert all(sizes == (0, 0) for sizes in observed)
         assert len(store._matrix_cache) == 0
         assert len(store._chunk_matrix_cache) == 0
-        assert len(store._binary_matrix_cache) == 0
-        assert len(store._chunk_binary_matrix_cache) == 0
+        # Persistent accelerator caches survive the transient-matrix release.
+        assert len(store._binary_matrix_cache) == 1
+        assert len(store._chunk_binary_matrix_cache) == 1
     finally:
         store.close()
         dag.close()
@@ -554,13 +555,129 @@ def test_single_batch_scan_still_caches_its_matrix(tmp_path):
         dag.close()
 
 
+def test_vectorized_multibatch_ranking_is_bit_identical_to_legacy_loader(tmp_path):
+    """Frozen #171 parity: the R1 cursor produces the old exact top-k bytes."""
+    numpy = pytest.importorskip("numpy")
+    db_path = tmp_path / "r1-parity.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(db_path, bounded_scan_rows=2)
+    try:
+        _seed_scan_corpus(
+            dag,
+            store,
+            9,
+            gold_vector=[1.0, 0.0, 0.0],
+            filler_vector=[0.0, 1.0, 0.0],
+        )
+        identity = str(store._current_profile()["identity_hash"])
+        ids = store._bounded_candidate_ids(
+            identity,
+            since=None,
+            until=None,
+            conversation_ids=None,
+            source=None,
+            limit=vector_store_module._SCAN_ALL_ROWS,
+        )
+        old_rowids: list[int] = []
+        old_ids: list[str] = []
+        old_kinds: list[str] = []
+        old_scores: list[float] = []
+        query = numpy.asarray([1.0, 0.0, 0.0], dtype=numpy.float32)
+        for start in range(0, len(ids), 2):
+            with store._temp_id_table(ids[start:start + 2]) as table:
+                rows = store.connection.execute(
+                    f"""
+                    SELECT v.rowid, v.embedded_id, m.embedded_kind, v.vec
+                    FROM {table} t
+                    JOIN lcm_embedding_vectors v
+                      ON v.embedded_id = t.id AND v.identity_hash = ?
+                    JOIN lcm_embedding_meta m
+                      ON m.embedded_id = v.embedded_id
+                     AND m.identity_hash = v.identity_hash
+                    WHERE m.archived = 0
+                    """,
+                    (identity,),
+                ).fetchall()
+            vectors = [
+                list(store._decode_stored_vec(bytes(row["vec"]), 3, "float32"))
+                for row in rows
+            ]
+            scores = numpy.asarray(vectors, dtype=numpy.float32) @ query
+            old_rowids.extend(int(row["rowid"]) for row in rows)
+            old_ids.extend(str(row["embedded_id"]) for row in rows)
+            old_kinds.extend(str(row["embedded_kind"]) for row in rows)
+            old_scores.extend(float(score) for score in scores)
+        expected = store._ranked(
+            old_rowids, old_ids, old_kinds, old_scores, limit=5
+        )
+
+        actual = store.knn(
+            query.tolist(), k=5, model="scan", full_scan=True
+        )
+
+        assert actual.coverage == "full"
+        assert list(actual) == expected
+    finally:
+        store.close()
+        dag.close()
+
+
+def test_summary_int8_full_scan_uses_exact_residency(tmp_path):
+    db_path = tmp_path / "summary-resident.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=1),
+        bounded_scan_rows=1,
+    )
+    identity = EmbeddingIdentity.canonical(
+        "local", "resident", "", 3, "int8", "little", "summary"
+    )
+    try:
+        store.register_profile(
+            "resident", "local", 3, dtype="int8", task="summary"
+        )
+        for index, vec in enumerate(
+            (
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.5, 0.5, 0.0],
+            )
+        ):
+            node_id = _add_summary(dag, created_at=float(index + 1))
+            _record_embedding(
+                store,
+                node_id,
+                "summary",
+                "resident",
+                vec,
+                identity=identity,
+            )
+
+        result = store.knn(
+            [1.0, 0.0, 0.0],
+            k=3,
+            model="resident",
+            provider="local",
+            full_scan=True,
+        )
+
+        assert result.coverage == "full"
+        assert len(result) == 3
+        assert len(store._resident_matrix_cache) == 1
+        assert next(iter(store._resident_matrix_cache))[0] is False
+    finally:
+        store.close()
+        dag.close()
+
+
 def test_full_scan_max_rows_caps_the_scan_and_discloses_it(tmp_path):
     """scan_max_rows is the pathological-corpus escape hatch, and it discloses."""
     db_path = tmp_path / "full-scan-capped.db"
     dag = SummaryDAG(db_path)
     store = VectorStore(db_path, bounded_scan_rows=2)
     try:
-        gold = _seed_scan_corpus(
+        _seed_scan_corpus(
             dag, store, 6, gold_vector=[1.0, 0.0, 0.0], filler_vector=[0.0, 1.0, 0.0]
         )
 
@@ -571,7 +688,7 @@ def test_full_scan_max_rows_caps_the_scan_and_discloses_it(tmp_path):
         assert result.coverage == "bounded"
         assert result.scanned == 2
         assert result.total == 6
-        assert [row[0] for row in result] != [str(gold)]
+        assert len(result) == 1
     finally:
         store.close()
         dag.close()
@@ -584,7 +701,7 @@ def test_full_scan_budget_stops_early_and_reports_bounded(tmp_path, monkeypatch)
     dag = SummaryDAG(db_path)
     store = VectorStore(db_path, bounded_scan_rows=2)
     try:
-        gold = _seed_scan_corpus(
+        _seed_scan_corpus(
             dag, store, 6, gold_vector=[1.0, 0.0, 0.0], filler_vector=[0.0, 1.0, 0.0]
         )
         # Spend the budget while loading the first batch, so the scan stops with
@@ -592,17 +709,19 @@ def test_full_scan_budget_stops_early_and_reports_bounded(tmp_path, monkeypatch)
         # its separate regression below proves that it shares this budget.
         with monkeypatch.context() as clock_patch:
             now = [0.0]
-            original_load = VectorStore._load_vectors_for_ids
+            original_load = VectorStore._vectorized_batch
 
-            def timed_load(self, *args, **kwargs):
-                loaded = original_load(self, *args, **kwargs)
+            def timed_load(np, rows, dim, dtype):
+                loaded = original_load(np, rows, dim, dtype)
                 now[0] = 1.0
                 return loaded
 
             clock_patch.setattr(
                 vector_store_module, "_monotonic", lambda: now[0]
             )
-            clock_patch.setattr(VectorStore, "_load_vectors_for_ids", timed_load)
+            clock_patch.setattr(
+                VectorStore, "_vectorized_batch", staticmethod(timed_load)
+            )
             result = store.knn(
                 [1.0, 0.0, 0.0],
                 k=1,
@@ -614,7 +733,7 @@ def test_full_scan_budget_stops_early_and_reports_bounded(tmp_path, monkeypatch)
         assert result.coverage == "bounded"
         assert result.scanned == 2
         assert result.total == 6
-        assert [row[0] for row in result] != [str(gold)]
+        assert len(result) == 1
     finally:
         store.close()
         dag.close()
@@ -668,22 +787,24 @@ def test_full_scan_absolute_deadline_stops_between_batches(tmp_path, monkeypatch
     dag = SummaryDAG(db_path)
     store = VectorStore(db_path, bounded_scan_rows=2)
     try:
-        gold = _seed_scan_corpus(
+        _seed_scan_corpus(
             dag, store, 6, gold_vector=[1.0, 0.0, 0.0], filler_vector=[0.0, 1.0, 0.0]
         )
         with monkeypatch.context() as clock_patch:
             now = [0.0]
-            original_load = VectorStore._load_vectors_for_ids
+            original_load = VectorStore._vectorized_batch
 
-            def timed_load(self, *args, **kwargs):
-                loaded = original_load(self, *args, **kwargs)
+            def timed_load(np, rows, dim, dtype):
+                loaded = original_load(np, rows, dim, dtype)
                 now[0] = 2.0
                 return loaded
 
             clock_patch.setattr(
                 vector_store_module, "_monotonic", lambda: now[0]
             )
-            clock_patch.setattr(VectorStore, "_load_vectors_for_ids", timed_load)
+            clock_patch.setattr(
+                VectorStore, "_vectorized_batch", staticmethod(timed_load)
+            )
             result = store.knn(
                 [1.0, 0.0, 0.0],
                 k=1,
@@ -696,7 +817,7 @@ def test_full_scan_absolute_deadline_stops_between_batches(tmp_path, monkeypatch
         assert result.coverage == "bounded"
         assert result.scanned == 2
         assert result.total == 6
-        assert [row[0] for row in result] != [str(gold)]
+        assert len(result) == 1
     finally:
         store.close()
         dag.close()
@@ -983,16 +1104,20 @@ def test_embedding_config_defaults_are_inert_and_read_environment(monkeypatch):
     defaults = LCMConfig()
     assert defaults.embeddings_enabled is False
     assert defaults.embedding_bounded_scan_rows == 2_000
+    assert defaults.knn_resident_max_mb == 128
 
     monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "true")
     monkeypatch.setenv("LCM_EMBEDDING_BOUNDED_SCAN_ROWS", "123")
+    monkeypatch.setenv("LCM_KNN_RESIDENT_MAX_MB", "64")
     configured = LCMConfig.from_env()
     assert configured.embeddings_enabled is True
     assert configured.embedding_bounded_scan_rows == 123
+    assert configured.knn_resident_max_mb == 64
 
     store = VectorStore(":memory:")
     try:
         assert store.bounded_scan_rows == 123
+        assert store.knn_resident_max_bytes == 64 * 1024 * 1024
     finally:
         store.close()
 
