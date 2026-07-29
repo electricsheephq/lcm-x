@@ -181,3 +181,10 @@ before editing. All seven raw findings remained applicable.
 Round-3 validation: focused suite 89 passed
 (`python3 -m pytest tests/test_lcm_core.py -q -k "prose or search or grep"`);
 flag-off probe byte-identical (2,104 bytes, SHA-256 `d9cf3621ed51669eeaff13642b8805d393e45838e351fd1bf236defd0b9e3219`).
+
+## Round 3.5 — two evaos P3s on head ac21666
+
+| Row | Priority | Raw comment IDs | Terminal disposition | Validation and result |
+|---:|---|---|---|---|
+| R35-1 | P3 | 3676937640 | Declined behavior change; contract documented | A lone curly quote inside a prose-shaped query is overwhelmingly a typing accident; forcing conjunctive mode on it would degrade the common case. The balanced-only contract (both quote styles) is now stated at the classifier's precision-signal comment, as the finding offered. |
+| R35-2 | P3 | 3676937641 | Fixed now | `_lcm_grep_full_text` passes `allow_operators=False` explicitly and documents the invariant that grep-level and store/dag-level promotion must agree. No behavior change (downstream kwargs already defaulted False). |

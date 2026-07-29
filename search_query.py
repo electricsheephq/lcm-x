@@ -142,6 +142,9 @@ def should_use_fts_prose_mode(
     safe = sanitize_fts5_query(raw) if sanitized is None else sanitized
     # A retained ASCII phrase or a balanced smart-quoted phrase is an explicit
     # precision signal. Keep it conjunctive even when the query ends in "?".
+    # BALANCED-ONLY by contract (both quote styles): a lone curly quote is far
+    # more often a typing accident inside a real question than precision
+    # intent, so it must not force a prose-shaped query onto the narrow route.
     if (
         _QUOTED_PHRASE_RE.search(safe)
         or _CURLY_QUOTED_PHRASE_RE.search(raw)

@@ -2372,8 +2372,12 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     limit = min(requested_limit, limit_cap)
     fts_prose_mode = bool(engine._config.fts_prose_mode)
     requested_sort = args.get("sort")
+    # allow_operators is pinned False here to mirror the downstream store/dag
+    # searches (their kwargs omit it); the two promotion sites must agree.
     sort = normalize_search_sort(
-        resolve_prose_sort(requested_sort, fts_prose_mode, query)
+        resolve_prose_sort(
+            requested_sort, fts_prose_mode, query, allow_operators=False
+        )
     )
     source_limit = max(limit * 4, limit, 20)
 
