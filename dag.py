@@ -730,7 +730,10 @@ class SummaryDAG:
                 nodes.append(node)
 
             nodes.sort(key=lambda node: _fallback_result_sort_key(node, sort))
-            if not source or len(rows) < fetch_limit or scanned_rows >= candidate_cap:
+            # The batch SQL is unordered, so truncating after the FIRST batch
+            # can drop the best match at row fetch_limit+1. Always scan the
+            # bounded candidate set (candidate_cap) before applying `limit`.
+            if len(rows) < fetch_limit or scanned_rows >= candidate_cap:
                 return nodes[:limit]
 
             offset += len(rows)

@@ -3742,6 +3742,31 @@ class TestSummaryDAG:
 
         assert [node.node_id for node in results] == [target]
 
+    def test_search_summary_like_scans_past_first_batch_for_best_match(self, dag):
+        """Round-3 finding: the unordered LIKE batch SQL must scan the whole
+        bounded candidate set before truncating to `limit`, or the best match
+        sitting past the first fetch batch is silently dropped."""
+        for i in range(20):
+            dag.add_node(SummaryNode(
+                session_id="s1", depth=0,
+                summary=f"generic © note {i}",
+                token_count=4, source_ids=[i + 1], source_type="messages",
+            ))
+        target = dag.add_node(SummaryNode(
+            session_id="s1", depth=0,
+            summary="licensed © archive",
+            token_count=4, source_ids=[21], source_type="messages",
+        ))
+
+        results = dag.search(
+            "What did I say about licensed ©?",
+            session_id="s1",
+            limit=1,
+            fts_prose_mode=True,
+        )
+
+        assert [node.node_id for node in results] == [target]
+
     def test_search_empty_session_id_does_not_search_all_sessions(self, dag):
         dag.add_node(SummaryNode(
             session_id="s1", depth=0,

@@ -188,3 +188,9 @@ flag-off probe byte-identical (2,104 bytes, SHA-256 `d9cf3621ed51669eeaff13642b8
 |---:|---|---|---|---|
 | R35-1 | P3 | 3676937640 | Declined behavior change; contract documented | A lone curly quote inside a prose-shaped query is overwhelmingly a typing accident; forcing conjunctive mode on it would degrade the common case. The balanced-only contract (both quote styles) is now stated at the classifier's precision-signal comment, as the finding offered. |
 | R35-2 | P3 | 3676937641 | Fixed now | `_lcm_grep_full_text` passes `allow_operators=False` explicitly and documents the invariant that grep-level and store/dag-level promotion must agree. No behavior change (downstream kwargs already defaulted False). |
+
+## Round 3.6 — codex P2 on head edbc3ff
+
+| Row | Priority | Raw comment IDs | Terminal disposition | Validation and result |
+|---:|---|---|---|---|
+| R36-1 | P2 | 3676960744 | Fixed now | `SummaryDAG._search_like` no longer truncates after the first unordered batch when `source` is unset: it scans the bounded candidate set (`candidate_cap`) before applying `limit`. Regression test `test_search_summary_like_scans_past_first_batch_for_best_match` (20 decoys + target at row 21, limit=1). Disclosure: this also corrects the same first-batch truncation on the pre-existing flag-off LIKE fallback — a strict recall improvement bounded by `candidate_cap`; the pinned flag-off regression corpus is byte-identical (same SHA-256 `d9cf3621…e3219`). |
