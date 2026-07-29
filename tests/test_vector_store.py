@@ -5,6 +5,7 @@ import math
 import sqlite3
 import struct
 import threading
+import time
 from array import array
 
 import pytest
@@ -845,6 +846,86 @@ def test_live_knn_residency_builds_once_and_ranks_every_query_above_crossover(
         dag.close()
 
 
+def test_resident_hit_is_sql_free_and_constant_time_above_crossover(
+    tmp_path, monkeypatch, empty_resident_registry
+):
+    numpy = pytest.importorskip("numpy")
+    db_path = tmp_path / "resident-hit-cost.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=1),
+        bounded_scan_rows=500,
+    )
+    try:
+        _seed_scan_corpus(
+            dag,
+            store,
+            vector_store_module._FAST_SCAN_STREAMING_MIN_ROWS,
+            gold_vector=[1.0, 0.0, 0.0],
+            filler_vector=[0.0, 1.0, 0.0],
+        )
+        profile = store._current_profile()
+        assert profile is not None
+        identity = str(profile["identity_hash"])
+        kwargs = {
+            "data_version": int(profile["data_version"]),
+            "chunk": False,
+            "deadline": None,
+        }
+        built = store._resident_int8_matrix(
+            numpy, identity, 3, "float32", **kwargs
+        )
+        assert built is not None
+
+        statements: list[str] = []
+        store.connection.set_trace_callback(statements.append)
+        try:
+            hit = store._resident_int8_matrix(
+                numpy, identity, 3, "float32", **kwargs
+            )
+        finally:
+            store.connection.set_trace_callback(None)
+        assert hit is built
+        assert statements == []
+
+        service_statements: list[str] = []
+        store.connection.set_trace_callback(service_statements.append)
+        try:
+            service_hit = store.knn(
+                [1.0, 0.0, 0.0],
+                k=1,
+                model="scan",
+                full_scan=True,
+            )
+        finally:
+            store.connection.set_trace_callback(None)
+        assert service_hit.coverage == "full"
+        assert not [
+            statement
+            for statement in service_statements
+            if "count(" in statement.lower()
+            or "from lcm_embedding_vectors" in statement.lower()
+            or "from lcm_embedding_meta" in statement.lower()
+        ]
+
+        hit_ms: list[float] = []
+        for _ in range(9):
+            started = time.perf_counter()
+            service_hit = store.knn(
+                [1.0, 0.0, 0.0],
+                k=1,
+                model="scan",
+                full_scan=True,
+            )
+            assert service_hit.coverage == "full"
+            hit_ms.append((time.perf_counter() - started) * 1000)
+        assert sorted(hit_ms)[len(hit_ms) // 2] < 25.0
+    finally:
+        store.close()
+        dag.close()
+
+
 def test_resident_summary_filters_suppressed_rows_before_and_after_warmup(
     tmp_path, monkeypatch, empty_resident_registry
 ):
@@ -886,11 +967,14 @@ def test_resident_summary_filters_suppressed_rows_before_and_after_warmup(
         assert str(first) not in {row[0] for row in cold}
         assert len(cold) == 2
 
+        identity = store.capture_identity("scan").identity_hash
+        before_version = store._data_version(identity)
         store.connection.execute(
             "UPDATE summary_nodes SET suppressed_at = 'after' "
             "WHERE node_id = ?",
             (second,),
         )
+        assert store._data_version(identity) == before_version + 1
         warm = store.knn(
             [1.0, 0.0, 0.0], k=3, model="scan", full_scan=True
         )
@@ -900,6 +984,24 @@ def test_resident_summary_filters_suppressed_rows_before_and_after_warmup(
     finally:
         store.close()
         dag.close()
+
+
+def test_profile_swap_bumps_task_versions(tmp_path):
+    store = VectorStore(tmp_path / "profile-swap.db")
+    try:
+        first = store.register_profile("shared", "provider-a", 3)
+        assert store._data_version(first) == 0
+
+        second = store.register_profile("shared", "provider-b", 3)
+        assert store._data_version(first) == 1
+        assert store._data_version(second) == 1
+
+        reactivated = store.register_profile("shared", "provider-a", 3)
+        assert reactivated == first
+        assert store._data_version(first) == 2
+        assert store._data_version(second) == 2
+    finally:
+        store.close()
 
 
 def test_resident_count_growth_falls_back_without_matrix_overrun(

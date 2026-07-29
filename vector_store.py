@@ -777,6 +777,19 @@ class VectorStore:
 
         identity = canonical.identity_hash
         with self._write_transaction():
+            active = self._conn.execute(
+                """
+                SELECT identity_hash
+                FROM lcm_embedding_profile
+                WHERE active = 1 AND archived_at IS NULL AND task = ?
+                ORDER BY registered_at DESC, identity_hash DESC
+                LIMIT 1
+                """,
+                (canonical.task,),
+            ).fetchone()
+            profile_swapped = (
+                active is not None and str(active["identity_hash"]) != identity
+            )
             existing = self._profile_by_identity(identity)
             if existing is None:
                 self._conn.execute(
@@ -822,6 +835,12 @@ class VectorStore:
                 "WHERE identity_hash != ? AND task = ?",
                 (identity, canonical.task),
             )
+            if profile_swapped:
+                self._conn.execute(
+                    "UPDATE lcm_embedding_profile "
+                    "SET data_version = data_version + 1 WHERE task = ?",
+                    (canonical.task,),
+                )
         return identity
 
     def record_embedding(
@@ -1498,6 +1517,7 @@ class VectorStore:
         dim: int,
         dtype: str,
         *,
+        data_version: int,
         chunk: bool,
         deadline: float | None,
     ) -> tuple[list[int], list[str], list[str], Any, Any] | None:
@@ -1512,20 +1532,14 @@ class VectorStore:
             return None
         if _prescreen_deadline_expired(deadline, 0):
             raise _PrescreenDeadlineExpired()
-        data_version = self._data_version(identity_hash)
+        data_version = int(data_version)
         key = (bool(chunk), str(identity_hash), data_version)
         registry_key = self._resident_registry_key(identity_hash, data_version)
-        count = self._live_vector_count(identity_hash, chunk=chunk)
         with _RESIDENT_MATRIX_REGISTRY_LOCK:
             self._purge_stale_resident_versions_locked(registry_key)
             cached = _RESIDENT_MATRIX_REGISTRY.get(registry_key)
             if cached is not None:
-                if len(cached[1]) != count:
-                    # Suppression and source-message deletion can change live
-                    # membership without touching the embedding profile version.
-                    _drop_resident_registry_entry_locked(registry_key)
-                    cached = None
-                elif self._enforce_resident_budget_locked(
+                if self._enforce_resident_budget_locked(
                     registry_key, protected_key=registry_key
                 ):
                     _RESIDENT_MATRIX_REGISTRY.move_to_end(registry_key)
@@ -1551,17 +1565,21 @@ class VectorStore:
 
         with build_lock:
             # Another caller may have completed the same cold build while this
-            # caller waited. Recheck before allocating a second corpus matrix.
-            count = self._live_vector_count(identity_hash, chunk=chunk)
+            # caller waited. The shared key already includes data_version, so a
+            # hit needs no profile/cardinality SQL.
             with _RESIDENT_MATRIX_REGISTRY_LOCK:
                 self._purge_stale_resident_versions_locked(registry_key)
                 cached = _RESIDENT_MATRIX_REGISTRY.get(registry_key)
-                if cached is not None and len(cached[1]) == count:
+                if cached is not None:
                     _RESIDENT_MATRIX_REGISTRY.move_to_end(registry_key)
                     self._resident_matrix_cache[key] = cached
                     self._resident_ineligible_cache.discard(key)
                     return cached
 
+            # Admission sizing and the row-2/row-3 correctness checks belong to
+            # cold construction. Every live-membership mutation advances the
+            # profile data_version, so no corpus recount is needed on a hit.
+            count = self._live_vector_count(identity_hash, chunk=chunk)
             required_bytes = count * (dim + 4)
             if (
                 count == 0
@@ -2908,6 +2926,7 @@ class VectorStore:
                     identity,
                     dim,
                     dtype,
+                    data_version=int(profile["data_version"]),
                     chunk=False,
                     deadline=deadline,
                 )
@@ -3659,6 +3678,7 @@ class VectorStore:
                     identity,
                     dim,
                     dtype,
+                    data_version=int(profile["data_version"]),
                     chunk=True,
                     deadline=deadline,
                 )

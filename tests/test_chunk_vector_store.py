@@ -153,8 +153,11 @@ class TestArchiveOnPurge:
     def test_archive_drops_from_knn(self, store):
         _write(store, "10:0", 10, 0, [1.0, 0.0, 0.0, 0.0])
         _write(store, "11:0", 11, 0, [0.0, 1.0, 0.0, 0.0])
+        identity = str(store._current_chunk_profile()["identity_hash"])
+        before_version = store._data_version(identity)
         archived = store.archive_chunks_for_messages([10])
         assert archived == 1
+        assert store._data_version(identity) > before_version
         result = store.knn_chunks([1.0, 0.0, 0.0, 0.0], k=5, model=MODEL, provider=PROVIDER)
         assert {row[0] for row in result} == {"11:0"}
 
@@ -603,7 +606,62 @@ def test_warm_chunk_residency_drops_orphans_when_message_is_deleted(
         )
         assert {row[0] for row in cold} == {"0:0", "1:0"}
 
+        identity = str(store._current_chunk_profile()["identity_hash"])
+        before_version = store._data_version(identity)
         store.connection.execute("DELETE FROM messages WHERE store_id = 0")
+        assert store._data_version(identity) == before_version + 1
+        warm = store.knn_chunks(
+            [1.0, 0.0, 0.0, 0.0],
+            k=2,
+            model=MODEL,
+            provider=PROVIDER,
+            full_scan=True,
+        )
+        assert warm.coverage == "full"
+        assert [row[0] for row in warm] == ["1:0"]
+    finally:
+        store.close()
+
+
+def test_warm_chunk_residency_invalidates_when_vector_is_deleted(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
+    db_path = tmp_path / "chunk-resident-delete.db"
+    _seed_messages(
+        db_path,
+        [
+            (0, "s", "history", "user", "m", 0.0),
+            (1, "s", "history", "user", "m", 1.0),
+        ],
+    )
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=1),
+        bounded_scan_rows=1,
+    )
+    store.register_profile(MODEL, PROVIDER, DIM, task="chunk")
+    try:
+        _write(store, "0:0", 0, 0, [1.0, 0.0, 0.0, 0.0])
+        _write(store, "1:0", 1, 0, [0.0, 1.0, 0.0, 0.0])
+        cold = store.knn_chunks(
+            [1.0, 0.0, 0.0, 0.0],
+            k=2,
+            model=MODEL,
+            provider=PROVIDER,
+            full_scan=True,
+        )
+        assert {row[0] for row in cold} == {"0:0", "1:0"}
+
+        identity = str(store._current_chunk_profile()["identity_hash"])
+        before_version = store._data_version(identity)
+        store.connection.execute(
+            "DELETE FROM lcm_chunk_vectors "
+            "WHERE chunk_id = '0:0' AND identity_hash = ?",
+            (identity,),
+        )
+        assert store._data_version(identity) == before_version + 1
+
         warm = store.knn_chunks(
             [1.0, 0.0, 0.0, 0.0],
             k=2,
