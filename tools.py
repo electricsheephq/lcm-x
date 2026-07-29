@@ -4154,13 +4154,18 @@ def _lcm_recall_exact_ref(hit: dict[str, Any], hydrated: dict[str, Any] | None) 
 
 def _lcm_recall_session_expand_v1_date(
     engine: "LCMEngine", row: dict[str, Any]
-) -> str:
+) -> str | None:
     """Resolve a source-backed date without consulting a model."""
     session_id = str(row.get("session_id") or "")
     session_dates = getattr(engine, "_session_occurrence_dates", {}) or {}
     session_date = session_dates.get(session_id)
     if session_date:
         return str(session_date)
+    # Benchmark rows are stamped when the bridge ingests them; that wall-clock
+    # value is not the source session's date. If the harness did not provide a
+    # sidecar date, preserve the unknown instead of fabricating one.
+    if str(row.get("source") or "") == "benchmark":
+        return None
     raw_timestamp = row.get("observed_at")
     if raw_timestamp is None:
         raw_timestamp = row.get("timestamp")
@@ -4169,7 +4174,7 @@ def _lcm_recall_session_expand_v1_date(
     except (TypeError, ValueError, OverflowError):
         timestamp = 0
     if timestamp <= 0:
-        return ""
+        return None
     return (
         datetime.fromtimestamp(timestamp, tz=timezone.utc)
         .isoformat()
@@ -4177,110 +4182,107 @@ def _lcm_recall_session_expand_v1_date(
     )
 
 
-def _lcm_recall_session_expand_v1_exact_hit(
+def _lcm_recall_session_expand_v1_candidate(
     engine: "LCMEngine",
-    hit: dict[str, Any],
     row: dict[str, Any],
-    *,
-    query: str,
 ) -> dict[str, Any] | None:
-    """Normalize one ranked item onto the evidence-card offset path."""
-    full_content = str(row.get("content") or "")
-    if not full_content:
-        return None
+    """Shape one whole-message candidate for reference-strict admission.
 
-    original_kind = hit.get("kind")
-    content = str(hit.get("content") or "")
-    if original_kind == "summary":
-        # Summary refs cannot satisfy the Stage-2 store_id offset invariant.
-        # Keep their rank/session slot but deliver their first authoritative
-        # source message instead.
-        content = ""
-    if content:
-        offset = min(
-            max(0, int(hit.get("content_offset") or 0)),
-            len(full_content),
-        )
-        if full_content[offset:offset + len(content)] != content:
-            unique_offset = full_content.find(content)
-            if unique_offset >= 0 and full_content.find(
-                content, unique_offset + 1
-            ) < 0:
-                offset = unique_offset
-            else:
-                content = ""
-    if not content:
-        span = hit.get("chunk_span") or {}
-        try:
-            offset = int(span["char_start"])
-        except (KeyError, TypeError, ValueError):
-            offset = _content_offset_for_query_match(full_content, query)
-        offset = min(max(0, offset), len(full_content))
-        char_cap = (
-            _LCM_RECALL_ANSWER_READY_CONTENT_CHARS
-            if "content" in hit
-            else _LCM_RECALL_SNIPPET_CHARS
-        )
-        content = full_content[offset:offset + char_cap]
+    ``snippet`` deliberately carries the WHOLE candidate until the strict
+    selector has verified it at offset zero. The published copy truncates the
+    preview only after that proof succeeds; ``content`` and its exact span stay
+    whole.
+    """
+    content = str(row.get("content") or "")
     if not content:
         return None
-
     store_id = int(row["store_id"])
     returned_chars = len(content)
-    exact_ref = f"lcm:{store_id}:{offset}-{offset + returned_chars}"
-    normalized = dict(hit)
-    if original_kind == "summary":
-        normalized["summary_node_id"] = hit.get("node_id")
-        normalized["kind"] = "message_excerpt"
-        normalized.pop("node_id", None)
-    normalized.update(
-        {
-            "session_id": row.get("session_id"),
-            "date": _lcm_recall_session_expand_v1_date(engine, row),
-            "store_id": store_id,
-            "role": row.get("role"),
-            "source": row.get("source") or "",
-            "content": content,
-            "snippet": content[:_LCM_RECALL_SNIPPET_CHARS],
-            "content_source": "message",
-            "content_chars": len(full_content),
-            "content_offset": offset,
-            "content_returned_chars": returned_chars,
-            "content_truncated": returned_chars < len(full_content),
-            "exact_ref": exact_ref,
-            "expand_hint": (
-                f"lcm_expand(store_id={store_id}, content_offset={offset})"
-            ),
-        }
-    )
-    return normalized
+    return {
+        "kind": "message_excerpt",
+        "session_id": row.get("session_id"),
+        "date": _lcm_recall_session_expand_v1_date(engine, row),
+        "timestamp": row.get("timestamp") or 0,
+        "snippet": content,
+        "score": 0.0,
+        "expand_hint": f"lcm_expand(store_id={store_id}, content_offset=0)",
+        "from_current_session": False,
+        "arms": ["session_expand_v1"],
+        "store_id": store_id,
+        "role": row.get("role"),
+        "source": row.get("source") or "",
+        "content": content,
+        "content_source": "message",
+        "content_chars": returned_chars,
+        "content_offset": 0,
+        "content_returned_chars": returned_chars,
+        "content_truncated": False,
+        "exact_ref": f"lcm:{store_id}:0-{returned_chars}",
+        "chunk_span": {
+            "chunk_index": 0,
+            "char_start": 0,
+            "char_end": returned_chars,
+        },
+        "session_expanded": True,
+    }
+
+
+def _lcm_recall_session_expand_v1_is_containment_duplicate(
+    store_id: int,
+    content: str,
+    delivered_text_by_store: dict[int, list[str]],
+) -> bool:
+    """True when this row would repeat an already-delivered span of itself."""
+    for delivered in delivered_text_by_store.get(store_id, []):
+        if delivered and (delivered in content or content in delivered):
+            return True
+    return False
 
 
 def _lcm_recall_session_expand_v1(
     engine: "LCMEngine",
     ranked_hits: list[dict[str, Any]],
     *,
-    query: str,
     per_session_token_budget: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Append whole-message windows from the top three ranked hit sessions.
+    """Append citable, contiguous windows without rewriting ranked evidence.
 
-    Ranking is already complete when this runs. Ranked hits stay first and in
-    the same order; session-window hits are appended in top-session order and
-    chronological order. The budget counts only additional whole messages.
+    Ranking and reference-strict selection are complete when this runs. The
+    ranked prefix is copied byte-for-byte; only additional whole-message hits
+    may be appended. Each session grows from its highest-ranked resolvable
+    anchor through adjacent rows only. A row that does not fit closes that side
+    of the window instead of letting the selector hop over it.
+
+    Appended candidates then pass through ``_LcmRecallStrictSelector`` with
+    hydration disabled, forcing the exact bytes to verify at offset zero against
+    a fresh store read. This is the #174 citable-delivery backstop, not a parallel
+    lookalike check.
     """
     from .tokens import count_tokens
 
-    store_ids = [
+    ranked_store_ids = [
         int(hit["store_id"])
         for hit in ranked_hits
         if hit.get("store_id") is not None
     ]
-    stored_by_id = engine._store.get_batch(store_ids)
-    normalized_hits: list[dict[str, Any]] = []
-    delivered_exact: set[tuple[int, str]] = set()
-    dropped_unresolvable = 0
-    dropped_duplicate = 0
+    stored_by_id = engine._store.get_batch(ranked_store_ids)
+    delivered_text_by_store: dict[int, list[str]] = {}
+    for hit in ranked_hits:
+        raw_store_id = hit.get("store_id")
+        if raw_store_id is None:
+            continue
+        delivered = hit.get("content")
+        if delivered is None:
+            delivered = hit.get("snippet")
+        delivered = str(delivered or "")
+        if delivered:
+            delivered_text_by_store.setdefault(int(raw_store_id), []).append(
+                delivered
+            )
+
+    top_sessions: list[str] = []
+    anchors_by_session: dict[str, list[int]] = {}
+    current_by_session: dict[str, bool] = {}
     for hit in ranked_hits:
         raw_store_id = hit.get("store_id")
         row = (
@@ -4288,30 +4290,15 @@ def _lcm_recall_session_expand_v1(
             if raw_store_id is not None
             else None
         )
-        if row is None:
-            dropped_unresolvable += 1
-            continue
-        normalized = _lcm_recall_session_expand_v1_exact_hit(
-            engine, hit, row, query=query
+        session_id = str(
+            hit.get("session_id") or (row or {}).get("session_id") or ""
         )
-        if normalized is None:
-            dropped_unresolvable += 1
-            continue
-        exact_key = (int(normalized["store_id"]), str(normalized["content"]))
-        if exact_key in delivered_exact:
-            dropped_duplicate += 1
-            continue
-        delivered_exact.add(exact_key)
-        normalized_hits.append(normalized)
-
-    top_sessions: list[str] = []
-    anchors_by_session: dict[str, list[int]] = {}
-    current_by_session: dict[str, bool] = {}
-    for hit in normalized_hits:
-        session_id = str(hit.get("session_id") or "")
         if not session_id:
             continue
-        anchors_by_session.setdefault(session_id, []).append(int(hit["store_id"]))
+        if row is not None:
+            anchors_by_session.setdefault(session_id, []).append(
+                int(row["store_id"])
+            )
         current_by_session.setdefault(
             session_id, bool(hit.get("from_current_session"))
         )
@@ -4322,8 +4309,9 @@ def _lcm_recall_session_expand_v1(
             top_sessions.append(session_id)
 
     token_budget = max(0, int(per_session_token_budget))
-    additional_hits: list[dict[str, Any]] = []
-    session_metrics: list[dict[str, Any]] = []
+    candidate_records: list[dict[str, Any]] = []
+    session_state: dict[str, dict[str, Any]] = {}
+    containment_dropped = 0
     for session_id in top_sessions:
         session_count = engine._store.get_session_count(session_id)
         rows = engine._store.get_session_messages(
@@ -4338,106 +4326,227 @@ def _lcm_recall_session_expand_v1(
             if store_id in index_by_store_id
         ]
         if not anchor_indices:
-            session_metrics.append(
-                {
-                    "session_id": session_id,
-                    "token_budget": token_budget,
-                    "tokens_used": 0,
-                    "expanded_hit_count": 0,
-                    "reason": "no_resolvable_anchor",
-                }
-            )
-            continue
-
-        candidate_indices = sorted(
-            range(len(rows)),
-            key=lambda index: (
-                min(abs(index - anchor) for anchor in anchor_indices),
-                index,
-            ),
-        )
-        chosen_rows: list[tuple[dict[str, Any], int]] = []
-        tokens_used = 0
-        budget_skipped = 0
-        for index in candidate_indices:
-            row = rows[index]
-            content = str(row.get("content") or "")
-            if not content:
-                continue
-            exact_key = (int(row["store_id"]), content)
-            if exact_key in delivered_exact:
-                continue
-            content_tokens = count_tokens(content)
-            if content_tokens > token_budget - tokens_used:
-                budget_skipped += 1
-                continue
-            delivered_exact.add(exact_key)
-            chosen_rows.append((row, content_tokens))
-            tokens_used += content_tokens
-
-        for row, _content_tokens in sorted(
-            chosen_rows, key=lambda item: int(item[0]["store_id"])
-        ):
-            content = str(row.get("content") or "")
-            store_id = int(row["store_id"])
-            returned_chars = len(content)
-            additional_hits.append(
-                {
-                    "kind": "message_excerpt",
-                    "session_id": row.get("session_id"),
-                    "date": _lcm_recall_session_expand_v1_date(engine, row),
-                    "timestamp": row.get("timestamp") or 0,
-                    "snippet": content[:_LCM_RECALL_SNIPPET_CHARS],
-                    "score": 0.0,
-                    "expand_hint": (
-                        f"lcm_expand(store_id={store_id}, content_offset=0)"
-                    ),
-                    "from_current_session": current_by_session.get(
-                        session_id, False
-                    ),
-                    "arms": ["session_expand_v1"],
-                    "store_id": store_id,
-                    "role": row.get("role"),
-                    "source": row.get("source") or "",
-                    "content": content,
-                    "content_source": "message",
-                    "content_chars": returned_chars,
-                    "content_offset": 0,
-                    "content_returned_chars": returned_chars,
-                    "content_truncated": False,
-                    "exact_ref": f"lcm:{store_id}:0-{returned_chars}",
-                    "chunk_span": {
-                        "chunk_index": 0,
-                        "char_start": 0,
-                        "char_end": returned_chars,
-                    },
-                    "session_expanded": True,
-                }
-            )
-        session_metrics.append(
-            {
+            session_state[session_id] = {
                 "session_id": session_id,
                 "token_budget": token_budget,
-                "tokens_used": tokens_used,
-                "expanded_hit_count": len(chosen_rows),
-                "budget_skipped_count": budget_skipped,
-                "anchor_store_ids": anchors_by_session.get(session_id, []),
+                "primary_anchor_store_id": None,
+                "primary_anchor_index": None,
+                "baseline_indices": set(),
+                "budget_skipped_count": 0,
+                "containment_duplicate_dropped_count": 0,
+                "reason": "no_resolvable_anchor",
             }
+            continue
+
+        primary_anchor = anchor_indices[0]
+        baseline_indices = set(anchor_indices)
+        remaining_tokens = token_budget
+        budget_skipped = 0
+        containment_for_session = 0
+        side_next = {"left": primary_anchor - 1, "right": primary_anchor + 1}
+        side_open = {"left": True, "right": True}
+        while side_open["left"] or side_open["right"]:
+            made_progress = False
+            for side, step in (("left", -1), ("right", 1)):
+                if not side_open[side]:
+                    continue
+                index = side_next[side]
+                if index < 0 or index >= len(rows):
+                    side_open[side] = False
+                    continue
+                row = rows[index]
+                content = str(row.get("content") or "")
+                if not content:
+                    side_open[side] = False
+                    continue
+                store_id = int(row["store_id"])
+                if _lcm_recall_session_expand_v1_is_containment_duplicate(
+                    store_id, content, delivered_text_by_store
+                ):
+                    containment_dropped += 1
+                    containment_for_session += 1
+                    side_next[side] += step
+                    made_progress = True
+                    continue
+                content_tokens = count_tokens(content)
+                if content_tokens > remaining_tokens:
+                    budget_skipped += 1
+                    side_open[side] = False
+                    continue
+                candidate = _lcm_recall_session_expand_v1_candidate(engine, row)
+                if candidate is None:
+                    side_open[side] = False
+                    continue
+                candidate["from_current_session"] = current_by_session.get(
+                    session_id, False
+                )
+                candidate_records.append(
+                    {
+                        "session_id": session_id,
+                        "index": index,
+                        "tokens": content_tokens,
+                        "entry": {
+                            "hit": candidate,
+                            "ranks": {},
+                            "_final_score": 0.0,
+                        },
+                    }
+                )
+                remaining_tokens -= content_tokens
+                side_next[side] += step
+                made_progress = True
+            if not made_progress:
+                break
+
+        session_state[session_id] = {
+            "session_id": session_id,
+            "token_budget": token_budget,
+            "primary_anchor_store_id": int(rows[primary_anchor]["store_id"]),
+            "primary_anchor_index": primary_anchor,
+            "baseline_indices": baseline_indices,
+            "budget_skipped_count": budget_skipped,
+            "containment_duplicate_dropped_count": containment_for_session,
+            "anchor_store_ids": anchors_by_session.get(session_id, []),
+        }
+
+    candidate_entries = [record["entry"] for record in candidate_records]
+    strict_selector = _LcmRecallStrictSelector(
+        candidate_entries,
+        engine=engine,
+        # The Stage-2 per-session token budget already bounds this appended tier.
+        # The ranked tier's density rule ran before expansion and is unchanged.
+        per_session_limit=max(1, len(candidate_entries)),
+        # Zero forces verification of the candidate's own whole-message bytes;
+        # it cannot be admitted merely because a row with that id exists.
+        expanded_limit=0,
+    )
+    strict_entries = strict_selector.take(len(candidate_entries))
+    strict_entry_ids = {id(entry) for entry in strict_entries}
+
+    kept_entry_ids: set[int] = set()
+    contiguity_dropped = 0
+    for session_id, state in session_state.items():
+        anchor = state["primary_anchor_index"]
+        if anchor is None:
+            continue
+        accepted_indices = {
+            record["index"]
+            for record in candidate_records
+            if record["session_id"] == session_id
+            and id(record["entry"]) in strict_entry_ids
+        }
+        baseline_indices = state["baseline_indices"]
+        for step in (-1, 1):
+            index = anchor + step
+            while 0 <= index < engine._store.get_session_count(session_id):
+                if index in baseline_indices:
+                    index += step
+                    continue
+                if index not in accepted_indices:
+                    break
+                for record in candidate_records:
+                    if (
+                        record["session_id"] == session_id
+                        and record["index"] == index
+                    ):
+                        kept_entry_ids.add(id(record["entry"]))
+                        break
+                index += step
+        dropped_here = len(accepted_indices) - sum(
+            1
+            for record in candidate_records
+            if record["session_id"] == session_id
+            and id(record["entry"]) in kept_entry_ids
         )
+        contiguity_dropped += max(0, dropped_here)
+
+    additional_hits: list[dict[str, Any]] = []
+    delivered_tokens_by_session: dict[str, int] = {}
+    delivered_count_by_session: dict[str, int] = {}
+    for entry in strict_entries:
+        if id(entry) not in kept_entry_ids:
+            strict_selector.release(entry)
+
+    session_order = {
+        session_id: index for index, session_id in enumerate(top_sessions)
+    }
+    kept_records = sorted(
+        (
+            record
+            for record in candidate_records
+            if id(record["entry"]) in strict_entry_ids
+            and id(record["entry"]) in kept_entry_ids
+        ),
+        key=lambda record: (
+            session_order[record["session_id"]],
+            record["index"],
+        ),
+    )
+    for record in kept_records:
+        entry = record["entry"]
+        hit = entry["hit"]
+        expected_span = (0, len(str(hit.get("content") or "")))
+        if entry.get("_strict_span") != expected_span:
+            strict_selector.release(entry)
+            continue
+        strict_selector.deliver(entry)
+        item = dict(hit)
+        item["snippet"] = str(item["content"])[:_LCM_RECALL_SNIPPET_CHARS]
+        additional_hits.append(item)
+        session_id = record["session_id"]
+        delivered_tokens_by_session[session_id] = (
+            delivered_tokens_by_session.get(session_id, 0) + record["tokens"]
+        )
+        delivered_count_by_session[session_id] = (
+            delivered_count_by_session.get(session_id, 0) + 1
+        )
+
+    session_metrics: list[dict[str, Any]] = []
+    for session_id in top_sessions:
+        state = session_state[session_id]
+        metrics_item = {
+            key: value
+            for key, value in state.items()
+            if key != "baseline_indices"
+        }
+        metrics_item["tokens_used"] = delivered_tokens_by_session.get(
+            session_id, 0
+        )
+        metrics_item["additional_hit_count"] = delivered_count_by_session.get(
+            session_id, 0
+        )
+        session_metrics.append(metrics_item)
 
     metrics = {
         "enabled": True,
         "policy_version": "session_expand_v1",
         "top_session_limit": _LCM_RECALL_SESSION_EXPAND_V1_TOP_SESSIONS,
         "per_session_token_budget": token_budget,
-        "expanded_session_count": len(top_sessions),
+        "selected_session_count": len(top_sessions),
+        "expanded_session_count": sum(
+            bool(delivered_count_by_session.get(session_id))
+            for session_id in top_sessions
+        ),
+        "candidate_additional_hit_count": len(candidate_entries),
         "additional_hit_count": len(additional_hits),
-        "dropped_unresolvable_ranked_hit_count": dropped_unresolvable,
-        "dropped_duplicate_ranked_hit_count": dropped_duplicate,
-        "dedup_policy": "store_id plus byte-identical content",
+        "strict_uncitable_dropped_count": strict_selector.unreferenced_dropped,
+        "contiguity_dropped_after_strict_count": contiguity_dropped,
+        "dropped_containment_duplicate_hit_count": containment_dropped,
+        "dedup_policy": (
+            "per-store byte containment: drop when the ranked excerpt is inside "
+            "the whole message or the whole message is inside the ranked text"
+        ),
+        "window_policy": (
+            "single highest-ranked resolvable anchor per session; grow left and "
+            "right through adjacent rows only; a non-fitting row closes that side"
+        ),
+        "citable_delivery_policy": (
+            "every appended whole message passes the #174 reference-strict "
+            "selector against a fresh row read before delivery"
+        ),
         "sessions": session_metrics,
     }
-    return normalized_hits + additional_hits, metrics
+    return list(ranked_hits) + additional_hits, metrics
 
 
 def _lcm_recall_bounded_reason(
@@ -5389,7 +5498,6 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         hits_out, session_expand_metrics = _lcm_recall_session_expand_v1(
             engine,
             hits_out,
-            query=query,
             per_session_token_budget=max(
                 0,
                 int(
@@ -5494,6 +5602,11 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         response["provenance"]["answer_ready"] = expansion
         if session_expand_metrics is not None:
             expansion["session_expand_v1"] = session_expand_metrics
+            expansion["expanded_hit_count_semantics"] = (
+                "all delivered answer_ready hits carrying hydrated content; "
+                "treatment-only additions are counted separately under "
+                "session_expand_v1.additional_hit_count"
+            )
         if delta_requested:
             novel_refs = [hit["exact_ref"] for hit in hits_out if hit.get("exact_ref")]
             response["delta"] = {

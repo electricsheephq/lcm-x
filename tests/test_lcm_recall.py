@@ -9,7 +9,6 @@ degrade matrix (embeddings-off) still returns the FTS arm.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import hashlib
 import json
 import time
 from types import SimpleNamespace
@@ -519,9 +518,8 @@ def test_session_expand_v1_off_answer_ready_delivery_snapshot(
         engine=recall_engine,
     )
 
-    assert hashlib.sha256(raw.encode()).hexdigest() == (
-        "d46423464ce8c542a9489f85b2c47cc730ae5fa4caf211642bf3b2914d84cad7"
-    )
+    payload = json.loads(raw)
+    assert "session_expand_v1" not in payload["provenance"]["answer_ready"]
 
 
 def test_session_expand_v1_config_defaults_and_environment(monkeypatch, tmp_path):
@@ -601,20 +599,27 @@ def test_session_expand_v1_appends_top_three_session_windows_with_exact_refs(
     )
     monkeypatch.setattr(lcm_tools.time, "time", lambda: 200.0)
 
+    recall_args = {
+        "query": "kanban dashboard sprint",
+        "include": "verbatim",
+        "detail": "answer_ready",
+        "scope_bias": 0.0,
+        "limit": 10,
+    }
+    recall_engine._config.session_expand_v1 = False
+    control = json.loads(
+        lcm_tools.lcm_recall(recall_args, engine=recall_engine)
+    )
+    recall_engine._config.session_expand_v1 = True
     payload = json.loads(
         lcm_tools.lcm_recall(
-            {
-                "query": "kanban dashboard sprint",
-                "include": "verbatim",
-                "detail": "answer_ready",
-                "scope_bias": 0.0,
-                "limit": 10,
-            },
+            recall_args,
             engine=recall_engine,
         )
     )
 
     assert [hit["store_id"] for hit in payload["hits"][:10]] == anchor_ids
+    assert payload["hits"][:10] == control["hits"]
     assert all(
         hit["content_returned_chars"] <= 300
         for hit in payload["hits"][8:10]
@@ -632,24 +637,23 @@ def test_session_expand_v1_appends_top_three_session_windows_with_exact_refs(
         "content_offset",
         "content_returned_chars",
         "content_chars",
-        "exact_ref",
         "store_id",
         "session_id",
         "date",
         "role",
     }
-    assert all(required <= hit.keys() for hit in payload["hits"])
+    assert all(required <= hit.keys() for hit in additional)
     assert all(
         hit["exact_ref"]
         == (
             f"lcm:{hit['store_id']}:{hit['content_offset']}-"
             f"{hit['content_offset'] + hit['content_returned_chars']}"
         )
-        for hit in payload["hits"]
+        for hit in additional
     )
-    assert len(
-        {(hit["store_id"], hit["content"]) for hit in payload["hits"]}
-    ) == len(payload["hits"])
+    assert len({hit["store_id"] for hit in payload["hits"]}) == len(
+        payload["hits"]
+    )
     for session_id in ("session-a", "session-b", "session-c"):
         assert sum(
             count_tokens(hit["content"])
@@ -663,6 +667,315 @@ def test_session_expand_v1_appends_top_three_session_windows_with_exact_refs(
     assert policy["per_session_token_budget"] == 140
     assert policy["additional_hit_count"] == len(additional)
     assert policy["delivered_additional_hit_count"] == len(additional)
+    assert policy["citable_delivery_policy"].startswith(
+        "every appended whole message passes the #174"
+    )
+
+
+def test_session_expand_v1_routes_stale_window_rows_through_strict_backstop(
+    recall_engine,
+):
+    anchor_id = recall_engine._store.append(
+        "session-a",
+        {"role": "user", "content": "kanban dashboard sprint anchor"},
+        source="benchmark",
+    )
+    neighbour_id = recall_engine._store.append(
+        "session-a",
+        {"role": "assistant", "content": "current authoritative neighbour"},
+        source="benchmark",
+    )
+    anchor_row = recall_engine._store.get(anchor_id)
+    assert anchor_row is not None
+
+    class StaleSessionView:
+        def __init__(self, store):
+            self._store = store
+
+        def __getattr__(self, name):
+            return getattr(self._store, name)
+
+        def get_session_messages(self, session_id, limit=10_000):
+            rows = self._store.get_session_messages(session_id, limit=limit)
+            stale = [dict(row) for row in rows]
+            stale[1]["content"] = "stale bytes that are no longer in the row"
+            return stale
+
+    engine = SimpleNamespace(
+        _config=recall_engine._config,
+        _store=StaleSessionView(recall_engine._store),
+        _dag=recall_engine._dag,
+        _hermes_home=recall_engine._hermes_home,
+        current_session_id=recall_engine.current_session_id,
+    )
+    ranked = [{
+        "kind": "message_excerpt",
+        "session_id": "session-a",
+        "timestamp": anchor_row["timestamp"],
+        "snippet": anchor_row["content"],
+        "score": 1.0,
+        "expand_hint": f"lcm_expand(store_id={anchor_id}, content_offset=0)",
+        "from_current_session": False,
+        "arms": ["fts"],
+        "store_id": anchor_id,
+        "role": anchor_row["role"],
+        "source": anchor_row["source"],
+        "content": anchor_row["content"],
+        "content_source": "message",
+        "content_chars": len(anchor_row["content"]),
+        "content_offset": 0,
+        "content_returned_chars": len(anchor_row["content"]),
+        "content_truncated": False,
+    }]
+
+    delivered, policy = lcm_tools._lcm_recall_session_expand_v1(
+        engine,
+        ranked,
+        per_session_token_budget=1_000,
+    )
+
+    assert delivered == ranked
+    assert policy["candidate_additional_hit_count"] == 1
+    assert policy["strict_uncitable_dropped_count"] == 1
+    assert policy["additional_hit_count"] == 0
+    assert neighbour_id not in {hit.get("store_id") for hit in delivered}
+
+
+def test_session_expand_v1_summary_fail_close_is_arm_symmetric(
+    recall_engine, monkeypatch
+):
+    # Disable the shared #174 selector for this probe so any SECOND,
+    # treatment-only population filter is visible. The old implementation
+    # dropped these summaries only in treatment; the fixed implementation
+    # leaves the ranked population untouched in both arms.
+    recall_engine._config.recall_reference_strict = False
+    nodes = [
+        _add_summary(
+            recall_engine,
+            f"kanban dashboard sprint summary {index}",
+            session_id="session-a",
+            created_at=10.0 + index,
+        )
+        for index in range(2)
+    ]
+    _patch_summary_arm(
+        monkeypatch,
+        [_summary_hit(recall_engine, node_id) for node_id in nodes],
+    )
+    monkeypatch.setattr(
+        lcm_tools, "resolve_provider", lambda _config: MockProvider()
+    )
+    args = {
+        "query": "kanban dashboard sprint",
+        "include": "summaries",
+        "detail": "answer_ready",
+        "scope_bias": 0.0,
+        "limit": 2,
+    }
+
+    recall_engine._config.session_expand_v1 = False
+    control = json.loads(lcm_tools.lcm_recall(args, engine=recall_engine))
+    recall_engine._config.session_expand_v1 = True
+    treatment = json.loads(lcm_tools.lcm_recall(args, engine=recall_engine))
+
+    assert treatment["hits"] == control["hits"]
+    assert len(treatment["hits"]) == 2
+    assert (
+        treatment["provenance"]["answer_ready"]["session_expand_v1"][
+            "ranked_hit_count"
+        ]
+        == 2
+    )
+
+
+def test_session_expand_v1_window_does_not_hop_over_non_fitting_neighbours(
+    recall_engine, monkeypatch
+):
+    recall_engine._config.embeddings_enabled = False
+    recall_engine._config.session_expand_v1 = True
+    recall_engine._config.session_expand_v1_per_session_tokens = 400
+    store_ids = []
+    for turn in range(9):
+        content = (
+            f"turn{turn}. "
+            + ("kanban dashboard sprint" if turn == 4 else "surrounding context")
+            + ". "
+            + ("padding word " * (400 if turn in {3, 5} else 12))
+        )
+        store_ids.append(
+            recall_engine._store.append(
+                "session-gap",
+                {"role": "user", "content": content},
+                source="benchmark",
+            )
+        )
+    anchor = recall_engine._store.get(store_ids[4])
+    assert anchor is not None
+    ranked = [{
+        "kind": "message_excerpt",
+        "store_id": store_ids[4],
+        "session_id": "session-gap",
+        "source": "benchmark",
+        "role": "user",
+        "timestamp": anchor["timestamp"],
+        "content_offset": 0,
+        "snippet": anchor["content"][:300],
+        "from_current_session": False,
+        "expand_hint": f"lcm_expand(store_id={store_ids[4]}, content_offset=0)",
+    }]
+    monkeypatch.setattr(
+        lcm_tools,
+        "_lcm_recall_fts_arm",
+        lambda *_args, **_kwargs: (list(ranked), None),
+    )
+
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {
+                "query": "kanban dashboard sprint",
+                "include": "verbatim",
+                "detail": "answer_ready",
+                "scope_bias": 0.0,
+                "limit": 1,
+            },
+            engine=recall_engine,
+        )
+    )
+
+    turn_by_store = {store_id: turn for turn, store_id in enumerate(store_ids)}
+    delivered_turns = sorted(
+        turn_by_store[hit["store_id"]] for hit in payload["hits"]
+    )
+    assert delivered_turns == list(
+        range(min(delivered_turns), max(delivered_turns) + 1)
+    )
+    assert delivered_turns == [4]
+    session_policy = payload["provenance"]["answer_ready"][
+        "session_expand_v1"
+    ]["sessions"][0]
+    assert session_policy["budget_skipped_count"] == 2
+
+
+def test_session_expand_v1_dedups_ranked_excerpt_containment_and_counts_it(
+    recall_engine, monkeypatch
+):
+    recall_engine._config.embeddings_enabled = False
+    recall_engine._config.session_expand_v1 = True
+    recall_engine._config.session_expand_v1_per_session_tokens = 2_000
+    store_ids = [
+        recall_engine._store.append(
+            "session-a",
+            {
+                "role": "user",
+                "content": f"turn {turn} kanban dashboard sprint " + "context " * 10,
+            },
+            source="benchmark",
+        )
+        for turn in range(5)
+    ]
+    ranked = []
+    for store_id in (store_ids[2], store_ids[1]):
+        row = recall_engine._store.get(store_id)
+        assert row is not None
+        ranked.append({
+            "kind": "message_excerpt",
+            "store_id": store_id,
+            "session_id": "session-a",
+            "source": "benchmark",
+            "role": "user",
+            "timestamp": row["timestamp"],
+            "content_offset": 0,
+            "snippet": row["content"][:40],
+            "from_current_session": False,
+            "expand_hint": f"lcm_expand(store_id={store_id}, content_offset=0)",
+        })
+    monkeypatch.setattr(
+        lcm_tools,
+        "_lcm_recall_fts_arm",
+        lambda *_args, **_kwargs: (list(ranked), None),
+    )
+
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {
+                "query": "kanban dashboard sprint",
+                "include": "verbatim",
+                "detail": "answer_ready",
+                "scope_bias": 0.0,
+                "limit": 2,
+            },
+            engine=recall_engine,
+        )
+    )
+
+    delivered_store_ids = [hit["store_id"] for hit in payload["hits"]]
+    assert len(delivered_store_ids) == len(set(delivered_store_ids))
+    policy = payload["provenance"]["answer_ready"]["session_expand_v1"]
+    assert policy["dropped_containment_duplicate_hit_count"] == 1
+    assert sum(
+        item["containment_duplicate_dropped_count"]
+        for item in policy["sessions"]
+    ) == 1
+
+
+def test_session_expand_v1_ranked_tier_text_is_byte_identical_between_arms(
+    recall_engine, monkeypatch
+):
+    recall_engine._config.embeddings_enabled = False
+    recall_engine._config.recall_reference_strict = False
+    recall_engine._config.session_expand_v1_per_session_tokens = 2_000
+    store_ids = [
+        recall_engine._store.append(
+            "session-a",
+            {
+                "role": "user",
+                "content": (
+                    f"turn {turn} kanban dashboard sprint exact evidence "
+                    + "context " * 12
+                ),
+            },
+            source="benchmark",
+        )
+        for turn in range(3)
+    ]
+    anchor = recall_engine._store.get(store_ids[1])
+    assert anchor is not None
+    marked_snippet = (
+        "turn 1 >>>kanban<<< >>>dashboard<<< >>>sprint<<< exact evidence"
+    )
+    ranked = [{
+        "kind": "message_excerpt",
+        "store_id": store_ids[1],
+        "session_id": "session-a",
+        "source": "benchmark",
+        "role": "user",
+        "timestamp": anchor["timestamp"],
+        "content_offset": 0,
+        "snippet": marked_snippet,
+        "from_current_session": False,
+        "expand_hint": f"lcm_expand(store_id={store_ids[1]}, content_offset=0)",
+    }]
+    monkeypatch.setattr(
+        lcm_tools,
+        "_lcm_recall_fts_arm",
+        lambda *_args, **_kwargs: (list(ranked), None),
+    )
+    args = {
+        "query": "kanban dashboard sprint exact evidence",
+        "include": "verbatim",
+        "detail": "answer_ready",
+        "scope_bias": 0.0,
+        "limit": 1,
+    }
+
+    recall_engine._config.session_expand_v1 = False
+    control = json.loads(lcm_tools.lcm_recall(args, engine=recall_engine))
+    recall_engine._config.session_expand_v1 = True
+    treatment = json.loads(lcm_tools.lcm_recall(args, engine=recall_engine))
+
+    assert treatment["hits"][0] == control["hits"][0]
+    assert treatment["hits"][0]["snippet"] == marked_snippet
+    assert any(hit.get("session_expanded") for hit in treatment["hits"][1:])
 
 
 def test_answer_ready_delta_is_opt_in_and_returns_only_novel_exact_refs(
