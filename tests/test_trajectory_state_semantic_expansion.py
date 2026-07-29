@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 import sqlite3
 import struct
+import threading
 
 import pytest
 
@@ -112,6 +113,32 @@ class RequestBudgetProvider(StateVectorProvider):
         if tokens > self.token_limit:
             raise ValueError("request exceeded provider token limit")
         return super().embed_documents(texts)
+
+
+class CoordinatedStateVectorProvider(StateVectorProvider):
+    def __init__(
+        self,
+        *,
+        model_id: str,
+        document_vector: list[float],
+        started: threading.Event | None = None,
+        release: threading.Event | None = None,
+    ) -> None:
+        super().__init__()
+        self.model_id = model_id
+        self.document_vector = document_vector
+        self.started = started
+        self.release = release
+
+    def embed_documents(self, texts):
+        self.document_calls += 1
+        if self.started is not None:
+            self.started.set()
+        if self.release is not None and not self.release.wait(timeout=5):
+            raise RuntimeError("timed out waiting to release embedding request")
+        self.last_usage_tokens = sum(max(1, len(str(t)) // 4) for t in texts)
+        self.usage_tokens_total += self.last_usage_tokens
+        return [list(self.document_vector) for _text in texts]
 
 
 def _identity() -> CorpusIdentity:
@@ -606,6 +633,87 @@ def test_legacy_state_embeddings_migrate_idempotently_without_ranking_drift(
     assert _ranking_bytes(store) == rankings_before
 
 
+def test_legacy_state_embedding_migration_blocks_same_connection_reader(
+    tmp_path,
+):
+    store = _build_invisible_semantic_store(tmp_path)
+    prior = store.active_state_semantic_profile()
+    assert prior is not None
+    prior_digest = str(prior["profile_digest"])
+    prior_dim = int(prior["dim"])
+    expected_state_ids = [
+        row[0] for row in _profile_embedding_rows(store, prior_digest)
+    ]
+    _downgrade_state_embeddings_to_legacy_primary_key(store)
+    store._state_semantic_cache = None
+
+    table_dropped = threading.Event()
+    release_migration = threading.Event()
+    reader_started = threading.Event()
+    reader_finished = threading.Event()
+    reader_results = []
+    reader_errors = []
+    migration_errors = []
+
+    class PauseAfterLegacyDrop:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def execute(self, statement, parameters=()):
+            cursor = self.connection.execute(statement, parameters)
+            normalized = " ".join(statement.upper().split())
+            if normalized == "DROP TABLE LCM_TRAJECTORY_STATE_EMBEDDINGS":
+                table_dropped.set()
+                if not release_migration.wait(timeout=5):
+                    raise RuntimeError("timed out waiting to resume migration")
+            return cursor
+
+    store._conn = PauseAfterLegacyDrop(store._conn)
+
+    def read_matrix():
+        reader_started.set()
+        try:
+            reader_results.append(
+                store._load_state_semantic_matrix(prior_digest, prior_dim)
+            )
+        except Exception as exc:
+            reader_errors.append(exc)
+        finally:
+            reader_finished.set()
+
+    def migrate():
+        try:
+            store._ensure_state_semantic_schema()
+        except Exception as exc:
+            migration_errors.append(exc)
+
+    migration_thread = threading.Thread(target=migrate)
+    migration_thread.start()
+    assert table_dropped.wait(timeout=2)
+    reader_thread = threading.Thread(target=read_matrix)
+    reader_thread.start()
+    assert reader_started.wait(timeout=2)
+    completed_while_table_missing = reader_finished.wait(timeout=0.5)
+    release_migration.set()
+    try:
+        migration_thread.join(timeout=2)
+        reader_thread.join(timeout=2)
+    finally:
+        release_migration.set()
+
+    assert not migration_thread.is_alive()
+    reader_thread.join(timeout=2)
+    assert not reader_thread.is_alive()
+    assert migration_errors == []
+    assert not completed_while_table_missing
+    assert reader_errors == []
+    assert len(reader_results) == 1
+    assert reader_results[0][0] == expected_state_ids
+
+
 def test_legacy_state_embedding_migration_adopts_sole_inactive_digest(tmp_path):
     store = _build_invisible_semantic_store(tmp_path)
     prior = store.active_state_semantic_profile()
@@ -968,6 +1076,73 @@ def test_forced_distinct_profile_rebuild_replaces_staged_rows_and_cuts_over(
     assert len(cutover_updates) == 1
     assert _profile_embedding_rows(store, prior_digest) == prior_rows
     assert len(_profile_embedding_rows(store, distinct_digest)) == 3
+
+
+def test_slow_overlapping_builder_cannot_rewrite_profile_after_cutover(
+    tmp_path,
+):
+    asset_root = tmp_path / "assets"
+    asset_root.mkdir()
+    initial = StateVectorProvider()
+    store = TrajectoryStore(
+        tmp_path / "lcm.db", _identity(), asset_root=asset_root,
+        embedding_provider=initial,
+    )
+    store.insert(_source(
+        asset_root,
+        trajectory_id="answerpath",
+        ordinal=0,
+        goal="Update the account settings",
+        texts=(
+            "widget configuration export panel form",
+            "alpha-answer success banner",
+            "logout footer copyright notice",
+        ),
+    ))
+    store.finalize(["answerpath"])
+    store.build_state_semantic_index(initial)
+
+    slow_started = threading.Event()
+    release_slow = threading.Event()
+    slow = CoordinatedStateVectorProvider(
+        model_id="fake-state-overlap",
+        document_vector=[0.0, 1.0, 0.0],
+        started=slow_started,
+        release=release_slow,
+    )
+    fast = CoordinatedStateVectorProvider(
+        model_id=slow.model_id,
+        document_vector=[1.0, 0.0, 0.0],
+    )
+    slow_errors = []
+
+    def run_slow_builder():
+        try:
+            store.build_state_semantic_index(slow)
+        except Exception as exc:
+            slow_errors.append(exc)
+
+    slow_thread = threading.Thread(target=run_slow_builder)
+    slow_thread.start()
+    assert slow_started.wait(timeout=2)
+
+    completed = store.build_state_semantic_index(fast)
+    serving_rows = _profile_embedding_rows(
+        store, completed["profile_digest"]
+    )
+    release_slow.set()
+    slow_thread.join(timeout=5)
+
+    assert not slow_thread.is_alive()
+    assert len(slow_errors) == 1
+    assert isinstance(slow_errors[0], TrajectoryStoreError)
+    assert "became active during backfill" in str(slow_errors[0])
+    active = store.active_state_semantic_profile()
+    assert active is not None
+    assert str(active["profile_digest"]) == completed["profile_digest"]
+    assert _profile_embedding_rows(
+        store, completed["profile_digest"]
+    ) == serving_rows
 
 
 def test_dimension_probe_is_bounded_by_document_token_budget(tmp_path):

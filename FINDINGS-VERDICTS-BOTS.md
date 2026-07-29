@@ -125,3 +125,31 @@ therefore uses the focused file plus `tests/test_trajectory_store*.py`.
 Proof boundary: Round 2 proves the four binding fixes in the local working tree
 and the named focused fallback checks. It does not prove a pushed head, remote
 CI, merge readiness, merge, release, deployment, or runtime adoption.
+
+## Round 3
+
+Reviewed head: `367e9b4`
+
+| Raw comment ID | Terminal disposition | Fix | Reproducible validation evidence |
+| --- | --- | --- | --- |
+| `3676895819` | Verified; fixed in the local working tree. | `_load_state_semantic_matrix()` now holds the store lock across its freshness and row reads, so a same-connection reader waits for the legacy table replacement transaction instead of observing the table between `DROP` and rename. The regression pauses migration immediately after the legacy table is dropped and requires the reader to return the expected serving state IDs only after migration resumes. | `python3 -m pytest tests/test_trajectory_state_semantic_expansion.py -q` |
+| `3676895821` | Verified; fixed in the local working tree. | Each embedding persistence transaction now rechecks that its target profile is inactive before upserting. The overlapping-builder regression holds a slow builder after embedding, lets a fast builder activate the shared target, then requires the slow builder to abort without changing any serving row. | `python3 -m pytest tests/test_trajectory_state_semantic_expansion.py -q` |
+
+Round 3 validation:
+
+```bash
+python3 -m pytest tests/test_trajectory_state_semantic_expansion.py -q
+# 33 passed
+python3 -m pytest tests/test_trajectory_store*.py -q
+# 15 passed
+ruff check trajectory_store.py tests/test_trajectory_state_semantic_expansion.py
+# All checks passed!
+git diff --check
+# no output
+```
+
+Proof boundary: Round 3 proves the two reported concurrency defects are fixed
+in the local working tree, the Round 2 pre-probe refusal and single-statement
+cutover tests remain green, and the named focused fallback checks pass. It does
+not prove a pushed head, remote CI, merge readiness, merge, release, deployment,
+or runtime adoption.

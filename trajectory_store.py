@@ -1955,6 +1955,19 @@ class TrajectoryStore:
             with self._lock:
                 self._conn.execute("BEGIN IMMEDIATE")
                 try:
+                    target = self._conn.execute(
+                        """
+                        SELECT active
+                        FROM lcm_trajectory_state_embedding_profiles
+                        WHERE profile_digest = ?
+                        """,
+                        (profile_digest,),
+                    ).fetchone()
+                    if target is not None and int(target["active"]) == 1:
+                        raise TrajectoryStoreError(
+                            "state semantic profile became active during backfill; "
+                            "refusing to rewrite serving vectors"
+                        )
                     self._conn.executemany(
                         """
                         INSERT INTO lcm_trajectory_state_embeddings(
@@ -2276,30 +2289,31 @@ class TrajectoryStore:
         tuples for a pure-Python fallback -- the state vectors were normalized at
         backfill, so a query-vector dot product is cosine similarity either way.
         """
-        freshness_row = self._conn.execute(
-            """
-            SELECT COUNT(*), COALESCE(MAX(embedded_at), 0.0)
-            FROM lcm_trajectory_state_embeddings
-            WHERE profile_digest = ?
-            """,
-            (profile_digest,),
-        ).fetchone()
-        freshness = (int(freshness_row[0]), float(freshness_row[1]))
-        cache = self._state_semantic_cache
-        if (
-            cache is not None
-            and cache[0] == profile_digest
-            and cache[1] == freshness
-        ):
-            return cache[2], cache[3]
-        rows = self._conn.execute(
-            """
-            SELECT state_id, vector FROM lcm_trajectory_state_embeddings
-            WHERE profile_digest = ?
-            ORDER BY state_id
-            """,
-            (profile_digest,),
-        ).fetchall()
+        with self._lock:
+            freshness_row = self._conn.execute(
+                """
+                SELECT COUNT(*), COALESCE(MAX(embedded_at), 0.0)
+                FROM lcm_trajectory_state_embeddings
+                WHERE profile_digest = ?
+                """,
+                (profile_digest,),
+            ).fetchone()
+            freshness = (int(freshness_row[0]), float(freshness_row[1]))
+            cache = self._state_semantic_cache
+            if (
+                cache is not None
+                and cache[0] == profile_digest
+                and cache[1] == freshness
+            ):
+                return cache[2], cache[3]
+            rows = self._conn.execute(
+                """
+                SELECT state_id, vector FROM lcm_trajectory_state_embeddings
+                WHERE profile_digest = ?
+                ORDER BY state_id
+                """,
+                (profile_digest,),
+            ).fetchall()
         state_ids = [int(row["state_id"]) for row in rows]
         try:
             import numpy as _np
