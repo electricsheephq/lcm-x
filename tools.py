@@ -78,7 +78,11 @@ from .retrieval_core import (
     run_knn,
 )
 from .rollup_store import RollupStore
-from .search_query import AGE_DECAY_RATE, normalize_search_sort
+from .search_query import (
+    AGE_DECAY_RATE,
+    normalize_search_sort,
+    resolve_prose_sort,
+)
 from .session_patterns import build_session_match_keys, compile_session_pattern
 from .sqlite_util import _sqlite_savepoint
 from .store import build_message_fts_spec
@@ -2366,7 +2370,15 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     requested_limit = parsed_limit
     limit_cap = int(kwargs.get("_limit_cap", _LCM_GREP_HARD_LIMIT_CAP))
     limit = min(requested_limit, limit_cap)
-    sort = normalize_search_sort(args.get("sort"))
+    fts_prose_mode = bool(engine._config.fts_prose_mode)
+    requested_sort = args.get("sort")
+    # allow_operators is pinned False here to mirror the downstream store/dag
+    # searches (their kwargs omit it); the two promotion sites must agree.
+    sort = normalize_search_sort(
+        resolve_prose_sort(
+            requested_sort, fts_prose_mode, query, allow_operators=False
+        )
+    )
     source_limit = max(limit * 4, limit, 20)
 
     content_scope = str(args.get("content_scope") or "history").strip().lower()
@@ -2474,16 +2486,21 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
 
     if content_scope in {"history", "both"}:
         try:
+            message_search_kwargs = {
+                "session_id": search_session_id,
+                "limit": source_limit,
+                "sort": sort,
+                "source": source,
+                "conversation_id": conversation_id,
+                "role": role,
+                "time_from": time_from,
+                "time_to": time_to,
+            }
+            if fts_prose_mode:
+                message_search_kwargs["fts_prose_mode"] = True
             msg_hits = engine._store.search(
                 query,
-                session_id=search_session_id,
-                limit=source_limit,
-                sort=sort,
-                source=source,
-                conversation_id=conversation_id,
-                role=role,
-                time_from=time_from,
-                time_to=time_to,
+                **message_search_kwargs,
             )
             for hit in msg_hits:
                 results.append(
@@ -2503,12 +2520,17 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     # sessions via lcm_expand(store_id=...).
     if content_scope in {"history", "both"} and session_scope == "current" and not raw_message_filter_active:
         try:
+            node_search_kwargs = {
+                "session_id": search_session_id,
+                "limit": source_limit,
+                "sort": sort,
+                "source": source,
+            }
+            if fts_prose_mode:
+                node_search_kwargs["fts_prose_mode"] = True
             node_hits = engine._dag.search(
                 query,
-                session_id=search_session_id,
-                limit=source_limit,
-                sort=sort,
-                source=source,
+                **node_search_kwargs,
             )
             for node in node_hits:
                 results.append(_shape_summary_hit(node))
@@ -5535,8 +5557,15 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             if node is not None:
                 nodes.append(node)
     elif query:
-        nodes = engine._dag.search(query, session_id=engine.current_session_id, limit=max_results)
-        raw_results = engine._store.search(query, session_id=engine.current_session_id, limit=max_results)
+        fts_prose_mode = bool(engine._config.fts_prose_mode)
+        search_kwargs = {
+            "session_id": engine.current_session_id,
+            "limit": max_results,
+        }
+        if fts_prose_mode:
+            search_kwargs["fts_prose_mode"] = True
+        nodes = engine._dag.search(query, **search_kwargs)
+        raw_results = engine._store.search(query, **search_kwargs)
     else:
         return json.dumps({"error": "Provide either query or node_ids"})
 

@@ -32,6 +32,7 @@ from .db_bootstrap import (
 _DELETE_SESSION_SCOPE_TABLE = "temp_lcm_delete_session_scope"
 _DELETE_SESSION_SCOPE_INSERT_CHUNK = 512
 from .search_query import (
+    build_fts5_match_query,
     AGE_DECAY_RATE,
     compute_search_candidate_cap,
     compute_directness_rank_bonus_upper_bound,
@@ -42,12 +43,14 @@ from .search_query import (
     count_term_matches,
     escape_like,
     extract_quoted_phrases,
+    extract_prose_search_terms,
     extract_search_terms,
     normalize_search_sort,
     requires_like_fallback,
-    sanitize_fts5_query,
+    resolve_prose_sort,
     sanitize_like_query,
     should_apply_directness_rank_adjustment,
+    should_use_fts_prose_mode,
 )
 from .store import _normalize_source_value, _UNKNOWN_SOURCE, _legacy_blank_source_clause
 
@@ -551,7 +554,8 @@ class SummaryDAG:
 
     def search(self, query: str, session_id: str | None = None,
                limit: int = 20, sort: str | None = None,
-               source: str | None = None) -> List[SummaryNode]:
+               source: str | None = None,
+               fts_prose_mode: bool = False) -> List[SummaryNode]:
         """FTS5 search across summary nodes.
 
         Retrieval contract:
@@ -562,15 +566,32 @@ class SummaryDAG:
           session-level source presence
         - mixed-source nodes may match more than one ``source`` filter
         """
-        safe_query = sanitize_fts5_query(query)
+        safe_query = build_fts5_match_query(query, prose_mode=fts_prose_mode)
+        sort = resolve_prose_sort(sort, fts_prose_mode, query)
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
         # LIKE is the fallback for text sanitization LOSES (CJK/emoji) and for a
         # query with no term left after it. A raw natural-language question is
         # NOT one of those: it sanitizes to a term form the index answers, so it
         # stays on the FTS path (F31 §3).
-        if requires_like_fallback(query, safe_query):
-            return self._search_like(query, session_id=session_id, limit=limit, sort=sort, source=source)
+        if requires_like_fallback(
+            query,
+            safe_query,
+            # Symbol preservation is gated on the PROSE CLASSIFICATION, not the
+            # flag alone: a compact classifier-negative query must keep its
+            # flag-off route and conjunctive semantics.
+            preserve_unicode_symbols=(
+                fts_prose_mode and should_use_fts_prose_mode(query)
+            ),
+        ):
+            return self._search_like(
+                query,
+                session_id=session_id,
+                limit=limit,
+                sort=sort,
+                source=source,
+                prose_mode=fts_prose_mode,
+            )
 
         order_by = _build_search_order_by(sort, "COALESCE(n.latest_at, n.created_at)")
         fetch_limit = compute_search_fetch_limit(limit, terms, phrases)
@@ -603,7 +624,14 @@ class SummaryDAG:
                 scanned_rows += len(rows)
             except sqlite3.Error as exc:
                 logger.warning("FTS node search failed, falling back to LIKE: %s", exc)
-                return self._search_like(query, session_id=session_id, limit=limit, sort=sort, source=source)
+                return self._search_like(
+                    query,
+                    session_id=session_id,
+                    limit=limit,
+                    sort=sort,
+                    source=source,
+                    prose_mode=fts_prose_mode,
+                )
 
             raw_nodes = [self._row_to_node(r) for r in rows]
             for node in raw_nodes:
@@ -642,11 +670,20 @@ class SummaryDAG:
 
     def _search_like(self, query: str, session_id: str | None = None,
                      limit: int = 20, sort: str | None = None,
-                     source: str | None = None) -> List[SummaryNode]:
+                     source: str | None = None,
+                     prose_mode: bool = False) -> List[SummaryNode]:
         # LIKE keeps every character the index cannot spell (emoji, punctuation)
         # because substring matching is the only way to find those rows.
         safe_query = sanitize_like_query(query)
-        terms = extract_search_terms(safe_query)
+        # Classification always keys off the canonical FTS-sanitized view
+        # (should_use_fts_prose_mode sanitizes internally); extraction stays on
+        # the LIKE-sanitized form so unindexable characters remain searchable.
+        prose_branch = prose_mode and should_use_fts_prose_mode(query)
+        terms = (
+            extract_prose_search_terms(query, safe_query)
+            if prose_branch
+            else extract_search_terms(safe_query)
+        )
         phrases = extract_quoted_phrases(safe_query)
         if not terms:
             return []
@@ -664,7 +701,9 @@ class SummaryDAG:
         where.append("(" + " OR ".join(like_clauses) + ")")
         fetch_limit = compute_like_fallback_fetch_limit(limit, terms, phrases)
         base_args = list(args)
-        collapse_risky_repeats = contains_risky_fts_ascii(query)
+        collapse_term_repeats = (
+            prose_branch or contains_risky_fts_ascii(query)
+        )
         candidate_cap = compute_search_candidate_cap(limit)
         offset = 0
         scanned_rows = 0
@@ -675,6 +714,7 @@ class SummaryDAG:
                 rows = self._conn.execute(
                     f"""SELECT * FROM summary_nodes
                         WHERE {' AND '.join(where)}
+                        ORDER BY rowid
                         LIMIT ? OFFSET ?""",
                     [*base_args, fetch_limit, offset],
                 ).fetchall()
@@ -684,7 +724,7 @@ class SummaryDAG:
                 if source and not self._node_matches_source(node.node_id, source, cache=source_match_cache):
                     continue
                 score = sum(
-                    min(count_term_matches(node.summary, term), 1) if collapse_risky_repeats else count_term_matches(node.summary, term)
+                    min(count_term_matches(node.summary, term), 1) if collapse_term_repeats else count_term_matches(node.summary, term)
                     for term in terms
                 )
                 if score <= 0:
@@ -694,7 +734,10 @@ class SummaryDAG:
                 nodes.append(node)
 
             nodes.sort(key=lambda node: _fallback_result_sort_key(node, sort))
-            if not source or len(rows) < fetch_limit or scanned_rows >= candidate_cap:
+            # Truncating after the FIRST batch
+            # can drop the best match at row fetch_limit+1. Always scan the
+            # bounded candidate set (candidate_cap) before applying `limit`.
+            if len(rows) < fetch_limit or scanned_rows >= candidate_cap:
                 return nodes[:limit]
 
             offset += len(rows)

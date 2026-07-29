@@ -354,6 +354,39 @@ def test_embeddings_off_degrades_to_fts_arm(recall_engine, monkeypatch):
     assert all(h["kind"] == "message_excerpt" for h in payload["hits"])
 
 
+def test_fts_prose_mode_restores_zero_llm_recall_and_ranking(recall_engine):
+    """Flag-on prose recovers the relevant FTS row without a provider or LLM."""
+    recall_engine._config.embeddings_enabled = False
+    target = recall_engine._store.append(
+        "session-a",
+        {"role": "user", "content": "the dog vet appointment is Friday"},
+    )
+    recall_engine._store.append(
+        "session-b",
+        {"role": "user", "content": "dog grooming supplies are in the hall"},
+    )
+    recall_engine._store.append(
+        CURRENT,
+        {"role": "user", "content": "the project appointment calendar changed"},
+    )
+    args = {
+        "query": "What did I say about my dog's vet appointment?",
+        "include": "verbatim",
+        "limit": 3,
+        "scope_bias": 0.0,
+    }
+
+    flag_off = json.loads(lcm_tools.lcm_recall(args, engine=recall_engine))
+    assert flag_off["hits"] == []
+
+    recall_engine._config.fts_prose_mode = True
+    flag_on = json.loads(lcm_tools.lcm_recall(args, engine=recall_engine))
+
+    assert flag_on["hits"]
+    assert flag_on["hits"][0]["store_id"] == target
+    assert flag_on["provenance"]["arms_run"] == ["fts"]
+
+
 def test_summaries_include_degrades_to_fts_when_embeddings_off(recall_engine, monkeypatch):
     """F4-degrade-to-fts: include='summaries' with embeddings disabled must still
     run the FTS arm (its only vector arm is dead) rather than returning nothing."""

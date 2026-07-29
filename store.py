@@ -30,6 +30,7 @@ from .db_bootstrap import (
 from .config import LCMConfig
 from .ingest_protection import protect_message_for_ingest, protect_messages_for_ingest
 from .search_query import (
+    build_fts5_match_query,
     build_snippet,
     compute_search_candidate_cap,
     compute_directness_rank_bonus_upper_bound,
@@ -40,13 +41,15 @@ from .search_query import (
     count_term_matches,
     escape_like,
     extract_quoted_phrases,
+    extract_prose_search_terms,
     extract_search_terms,
     normalize_search_sort,
     requires_like_fallback,
-    sanitize_fts5_query,
+    resolve_prose_sort,
     sanitize_like_query,
     AGE_DECAY_RATE,
     should_apply_directness_rank_adjustment,
+    should_use_fts_prose_mode,
 )
 from .message_content import normalize_content_value as _normalize_content_value
 from .tokens import count_message_tokens
@@ -1100,7 +1103,8 @@ class MessageStore:
                role: str | None = None,
                time_from: float | None = None,
                time_to: float | None = None,
-               allow_operators: bool = False) -> List[Dict[str, Any]]:
+               allow_operators: bool = False,
+               fts_prose_mode: bool = False) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
         Retrieval contract:
@@ -1113,15 +1117,38 @@ class MessageStore:
         - ``conversation_id`` limits rows to one gateway conversation/session key
         - ``allow_operators`` marks a query the CALLER composed as FTS5 syntax,
           keeping its bare AND/OR/NOT/NEAR. Never set it for user or agent text
+        - ``fts_prose_mode`` enables bounded disjunctive routing for raw prose;
+          default-off preserves the historical conjunctive query byte-for-byte
         """
-        safe_query = sanitize_fts5_query(query, allow_operators=allow_operators)
+        safe_query = build_fts5_match_query(
+            query,
+            allow_operators=allow_operators,
+            prose_mode=fts_prose_mode,
+        )
+        sort = resolve_prose_sort(
+            sort,
+            fts_prose_mode,
+            query,
+            allow_operators=allow_operators,
+        )
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
         # LIKE is the fallback for text sanitization LOSES (CJK/emoji) and for a
         # query with no term left after it. A raw natural-language question is
         # NOT one of those: it sanitizes to a term form the index answers, so it
         # stays on the FTS path (F31 §3).
-        if requires_like_fallback(query, safe_query):
+        if requires_like_fallback(
+            query,
+            safe_query,
+            # Symbol preservation is gated on the PROSE CLASSIFICATION, not the
+            # flag alone: a compact classifier-negative query must keep its
+            # flag-off route and conjunctive semantics.
+            preserve_unicode_symbols=(
+                fts_prose_mode
+                and not allow_operators
+                and should_use_fts_prose_mode(query)
+            ),
+        ):
             return self._search_like(
                 query,
                 session_id=session_id,
@@ -1132,6 +1159,7 @@ class MessageStore:
                 role=role,
                 time_from=time_from,
                 time_to=time_to,
+                prose_mode=fts_prose_mode and not allow_operators,
             )
 
         order_by = _build_search_order_by(
@@ -1196,6 +1224,7 @@ class MessageStore:
                     role=role,
                     time_from=time_from,
                     time_to=time_to,
+                    prose_mode=fts_prose_mode and not allow_operators,
                 )
 
             raw_primary_values: list[float] = []
@@ -1236,11 +1265,20 @@ class MessageStore:
                      conversation_id: str | None = None,
                      role: str | None = None,
                      time_from: float | None = None,
-                     time_to: float | None = None) -> List[Dict[str, Any]]:
+                     time_to: float | None = None,
+                     prose_mode: bool = False) -> List[Dict[str, Any]]:
         # LIKE keeps every character the index cannot spell (emoji, punctuation)
         # because substring matching is the only way to find those rows.
         safe_query = sanitize_like_query(query)
-        terms = extract_search_terms(safe_query)
+        # Classification always keys off the canonical FTS-sanitized view
+        # (should_use_fts_prose_mode sanitizes internally); extraction stays on
+        # the LIKE-sanitized form so unindexable characters remain searchable.
+        prose_branch = prose_mode and should_use_fts_prose_mode(query)
+        terms = (
+            extract_prose_search_terms(query, safe_query)
+            if prose_branch
+            else extract_search_terms(safe_query)
+        )
         phrases = extract_quoted_phrases(safe_query)
         if not terms:
             return []
@@ -1277,7 +1315,9 @@ class MessageStore:
         base_args = list(args)
         normalized_sort = normalize_search_sort(sort)
         results: List[Dict[str, Any]] = []
-        collapse_risky_repeats = contains_risky_fts_ascii(query)
+        collapse_term_repeats = (
+            prose_branch or contains_risky_fts_ascii(query)
+        )
         order_by = ""
         order_args: list[Any] = []
         role_bias = "CASE role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 WHEN 'tool' THEN 2 ELSE 1 END"
@@ -1292,7 +1332,7 @@ class MessageStore:
         if normalized_sort == "recency":
             score_exprs: list[str] = []
             for term in terms:
-                if collapse_risky_repeats:
+                if collapse_term_repeats:
                     score_exprs.append("CASE WHEN content LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END")
                     order_args.append(f"%{escape_like(term)}%")
                 else:
@@ -1354,7 +1394,7 @@ class MessageStore:
                 result = self._row_to_dict(row)
                 content = result.get("content") or ""
                 score = sum(
-                    min(count_term_matches(content, term), 1) if collapse_risky_repeats else count_term_matches(content, term)
+                    min(count_term_matches(content, term), 1) if collapse_term_repeats else count_term_matches(content, term)
                     for term in terms
                 )
                 if score <= 0:
@@ -1421,7 +1461,7 @@ class MessageStore:
             score_exprs: list[str] = []
             order_args = []
             for term in terms:
-                if collapse_risky_repeats:
+                if collapse_term_repeats:
                     score_exprs.append("CASE WHEN content LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END")
                     order_args.append(f"%{escape_like(term)}%")
                 else:
