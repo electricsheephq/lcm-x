@@ -77,10 +77,51 @@ was performed.
 - Ruff on both changed source files: passed.
 - `git diff --check`: passed.
 
-Evidence directory:
-`/Volumes/LEXAR/Codex/session-notes/2026-07-29/hermes-r3-1/artifacts/lane182bots-logs/`
+Reproduce the checked-in validation evidence with:
+
+```bash
+python3 -m pytest tests/test_trajectory_state_semantic_expansion.py -q
+python3 -m pytest tests/test_trajectory_store*.py -q
+ruff check trajectory_store.py tests/test_trajectory_state_semantic_expansion.py
+git diff --check
+```
+
+Raw command logs are retained off-repo by the operator.
 
 Proof boundary: this proves the local working-tree fixes and exact baseline
 parity in the named CI-replica environment. It does not prove a pushed head,
 current-head remote CI, merge readiness, merge, release, deployment, or runtime
 adoption.
+
+## Round 2
+
+Reviewed head: `5a9259b5f53f04bd91b747c8be9bf420aec30b7c`
+
+| Raw comment ID | Terminal disposition | Fix | Reproducible validation evidence |
+| --- | --- | --- | --- |
+| `3674826213` | Verified; fixed in the local working tree. | The `resume=False` same-profile guard derives the requested digest from the active state profile's dimension under `BEGIN IMMEDIATE`, before any provider probe. The refusal test makes query probing fail if reached and asserts zero query calls. | `python3 -m pytest tests/test_trajectory_state_semantic_expansion.py -q` |
+| `3674826226` | Verified; fixed in the local working tree. | Cutover now flips predecessor and target flags with one ordered upsert statement: the predecessor is cleared before the target is activated, preserving the one-active unique index. The distinct-profile test traces the cutover and requires exactly one active-flag mutation statement. | `python3 -m pytest tests/test_trajectory_state_semantic_expansion.py -q` |
+| `3674838648` | Verified; fixed in the local working tree. | Added the positive distinct-profile `resume=False` test. It observes the prior staged row set deleted before fresh persistence, the new profile active, and the predecessor inactive with its rows unchanged. | `python3 -m pytest tests/test_trajectory_state_semantic_expansion.py -q` |
+| `3674880065` | Verified; fixed in the local working tree. | Removed the machine-local evidence path, published the exact regeneration commands, and recorded that raw logs remain off-repo. | `rg -n '/Vo[l]umes' FINDINGS-VERDICTS-BOTS.md` |
+
+Round 2 validation:
+
+```bash
+python3 -m pytest tests/test_trajectory_state_semantic_expansion.py -q
+# 31 passed
+python3 -m pytest tests/test_trajectory_store*.py -q
+# 15 passed
+ruff check trajectory_store.py tests/test_trajectory_state_semantic_expansion.py
+# All checks passed
+git diff --check
+# no output
+```
+
+The local full-suite CI-replica command could not reach test execution because
+the checkout does not contain CI's generated `agent.context_engine` stub; it
+stopped during collection with 22 import errors. The acceptance fallback above
+therefore uses the focused file plus `tests/test_trajectory_store*.py`.
+
+Proof boundary: Round 2 proves the four binding fixes in the local working tree
+and the named focused fallback checks. It does not prove a pushed head, remote
+CI, merge readiness, merge, release, deployment, or runtime adoption.

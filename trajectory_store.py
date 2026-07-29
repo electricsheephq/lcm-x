@@ -1803,6 +1803,36 @@ class TrajectoryStore:
         ).fetchall()
         total_states = len(all_states)
 
+        if not resume:
+            # Reject an in-place rebuild before a provider probe can incur cost
+            # or turn a deterministic local refusal into a provider failure.
+            # The serving profile's dimension is enough to derive the requested
+            # identity without trusting a source-level semantic profile.
+            with self._lock:
+                self._conn.execute("BEGIN IMMEDIATE")
+                try:
+                    serving_profile = self.active_state_semantic_profile()
+                    if serving_profile is not None:
+                        requested_digest = self._state_semantic_profile_digest(
+                            provider_name,
+                            model_name,
+                            int(serving_profile["dim"]),
+                            source_manifest_digest,
+                        )
+                        if (
+                            str(serving_profile["profile_digest"])
+                            == requested_digest
+                        ):
+                            raise TrajectoryStoreError(
+                                "cannot rebuild the active state semantic profile "
+                                "in place; use a distinct profile identity so the "
+                                "serving vectors remain intact"
+                            )
+                    self._conn.commit()
+                except Exception:
+                    self._conn.rollback()
+                    raise
+
         if dim is None:
             if not all_states:
                 raise ValueError("trajectory corpus has no states to index")
@@ -2036,13 +2066,25 @@ class TrajectoryStore:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 self._conn.execute(
-                    "UPDATE lcm_trajectory_state_embedding_profiles "
-                    "SET active = 0 WHERE active = 1"
-                )
-                self._conn.execute(
-                    "UPDATE lcm_trajectory_state_embedding_profiles "
-                    "SET active = 1 WHERE profile_digest = ?",
-                    (profile_digest,),
+                    """
+                    INSERT INTO lcm_trajectory_state_embedding_profiles(
+                        profile_digest, provider, model_name, dim,
+                        document_version, source_manifest_digest,
+                        state_count, active, created_at
+                    )
+                    SELECT
+                        profile_digest, provider, model_name, dim,
+                        document_version, source_manifest_digest,
+                        state_count,
+                        CASE WHEN profile_digest = ? THEN 1 ELSE 0 END,
+                        created_at
+                    FROM lcm_trajectory_state_embedding_profiles
+                    WHERE active = 1 OR profile_digest = ?
+                    ORDER BY CASE WHEN profile_digest = ? THEN 1 ELSE 0 END
+                    ON CONFLICT(profile_digest) DO UPDATE SET
+                        active = excluded.active
+                    """,
+                    (profile_digest, profile_digest, profile_digest),
                 )
                 self._conn.commit()
             except Exception:
