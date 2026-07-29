@@ -15,6 +15,7 @@ states) with a chunked path for over-cap documents.
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 import sqlite3
 import struct
@@ -27,6 +28,7 @@ from hermes_lcm.trajectory_store import (
     TrajectorySource,
     TrajectoryState,
     TrajectoryStore,
+    TrajectoryStoreError,
 )
 
 
@@ -173,6 +175,88 @@ def _admitted(store) -> list[dict[str, int]]:
     telemetry = store.last_query_telemetry()
     expansion = telemetry.get("state_semantic_expansion")
     return list(expansion["admitted"]) if expansion else []
+
+
+def _ranking_bytes(store) -> bytes:
+    hits = store.query(_QUERY, image_limit=0, state_semantic_quota=8)
+    return json.dumps(
+        [hit.to_dict() for hit in hits],
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+
+def _profile_embedding_rows(store, profile_digest: str) -> list[tuple]:
+    return [
+        (
+            int(row["state_id"]),
+            str(row["document_sha256"]),
+            bytes(row["vector"]),
+            float(row["embedded_at"]),
+        )
+        for row in store._conn.execute(
+            """
+            SELECT state_id, document_sha256, vector, embedded_at
+            FROM lcm_trajectory_state_embeddings
+            WHERE profile_digest = ?
+            ORDER BY state_id
+            """,
+            (profile_digest,),
+        ).fetchall()
+    ]
+
+
+def _downgrade_state_embeddings_to_legacy_primary_key(store) -> None:
+    """Recreate the pre-#179 table shape without changing stored rows."""
+    store._conn.execute("BEGIN IMMEDIATE")
+    try:
+        store._conn.execute(
+            "DROP INDEX lcm_trajectory_state_embeddings_profile"
+        )
+        store._conn.execute(
+            """
+            ALTER TABLE lcm_trajectory_state_embeddings
+            RENAME TO lcm_trajectory_state_embeddings_profile_scoped
+            """
+        )
+        store._conn.execute(
+            """
+            CREATE TABLE lcm_trajectory_state_embeddings (
+                state_id INTEGER PRIMARY KEY
+                    REFERENCES lcm_trajectory_states(state_id) ON DELETE CASCADE,
+                profile_digest TEXT NOT NULL
+                    REFERENCES lcm_trajectory_state_embedding_profiles(
+                        profile_digest
+                    )
+                    ON DELETE CASCADE,
+                document_sha256 TEXT NOT NULL,
+                vector BLOB NOT NULL,
+                embedded_at REAL NOT NULL
+            )
+            """
+        )
+        store._conn.execute(
+            """
+            INSERT INTO lcm_trajectory_state_embeddings(
+                state_id, profile_digest, document_sha256, vector, embedded_at
+            )
+            SELECT state_id, profile_digest, document_sha256, vector, embedded_at
+            FROM lcm_trajectory_state_embeddings_profile_scoped
+            """
+        )
+        store._conn.execute(
+            "DROP TABLE lcm_trajectory_state_embeddings_profile_scoped"
+        )
+        store._conn.execute(
+            """
+            CREATE INDEX lcm_trajectory_state_embeddings_profile
+            ON lcm_trajectory_state_embeddings(profile_digest, state_id)
+            """
+        )
+        store._conn.commit()
+    except Exception:
+        store._conn.rollback()
+        raise
 
 
 def _build_invisible_semantic_store(tmp_path: Path, *, provider=None):
@@ -485,15 +569,118 @@ def test_backfill_is_idempotent_and_resumable(tmp_path):
     assert provider.document_calls == 0
 
 
-def test_interrupted_profile_rebuild_leaves_no_active_profile_until_cutover(
+def test_legacy_state_embeddings_migrate_idempotently_without_ranking_drift(
     tmp_path,
 ):
-    # The vector upsert conflicts on state_id alone, so a staged rebuild
-    # overwrites the previous profile's vectors as it goes. The previous
-    # profile therefore CANNOT keep serving during a rebuild (it would serve
-    # a mixed index) — staging deactivates it up front, and readers degrade
-    # to lexical until the atomic cutover at completion. Profile-scoped
-    # embeddings are the tracked prerequisite for rebuild availability.
+    store = _build_invisible_semantic_store(tmp_path)
+    prior = store.active_state_semantic_profile()
+    assert prior is not None
+    prior_digest = str(prior["profile_digest"])
+    _downgrade_state_embeddings_to_legacy_primary_key(store)
+    rows_before = _profile_embedding_rows(store, prior_digest)
+    rankings_before = _ranking_bytes(store)
+    legacy_primary_key = tuple(
+        str(row[1])
+        for row in store._conn.execute(
+            "PRAGMA table_info(lcm_trajectory_state_embeddings)"
+        ).fetchall()
+        if int(row[5]) > 0
+    )
+    assert legacy_primary_key == ("state_id",)
+
+    store._ensure_state_semantic_schema()
+    store._ensure_state_semantic_schema()
+
+    migrated_primary_key = tuple(
+        str(row[1])
+        for row in sorted(
+            store._conn.execute(
+                "PRAGMA table_info(lcm_trajectory_state_embeddings)"
+            ).fetchall(),
+            key=lambda row: int(row[5]),
+        )
+        if int(row[5]) > 0
+    )
+    assert migrated_primary_key == ("profile_digest", "state_id")
+    assert _profile_embedding_rows(store, prior_digest) == rows_before
+    assert _ranking_bytes(store) == rankings_before
+
+
+def test_legacy_state_embedding_migration_adopts_sole_inactive_digest(tmp_path):
+    store = _build_invisible_semantic_store(tmp_path)
+    prior = store.active_state_semantic_profile()
+    assert prior is not None
+    prior_digest = str(prior["profile_digest"])
+    _downgrade_state_embeddings_to_legacy_primary_key(store)
+    rows_before = _profile_embedding_rows(store, prior_digest)
+    store._conn.execute(
+        "UPDATE lcm_trajectory_state_embedding_profiles SET active = 0"
+    )
+    store._conn.commit()
+
+    store._ensure_state_semantic_schema()
+    store._ensure_state_semantic_schema()
+
+    assert store.active_state_semantic_profile() is None
+    assert _profile_embedding_rows(store, prior_digest) == rows_before
+
+
+def test_legacy_state_embedding_migration_refuses_ambiguous_inactive_rows(
+    tmp_path,
+):
+    store = _build_invisible_semantic_store(tmp_path)
+    prior = store.active_state_semantic_profile()
+    assert prior is not None
+    _downgrade_state_embeddings_to_legacy_primary_key(store)
+    alternate_digest = "alternate-profile"
+    store._conn.execute(
+        """
+        INSERT INTO lcm_trajectory_state_embedding_profiles(
+            profile_digest, provider, model_name, dim, document_version,
+            source_manifest_digest, state_count, active, created_at
+        )
+        SELECT ?, provider, ?, dim, document_version, source_manifest_digest,
+               state_count, 0, created_at
+        FROM lcm_trajectory_state_embedding_profiles
+        WHERE profile_digest = ?
+        """,
+        (alternate_digest, "alternate-model", prior["profile_digest"]),
+    )
+    store._conn.execute(
+        "UPDATE lcm_trajectory_state_embedding_profiles SET active = 0"
+    )
+    store._conn.execute(
+        """
+        UPDATE lcm_trajectory_state_embeddings
+        SET profile_digest = ?
+        WHERE state_id = (
+            SELECT MAX(state_id) FROM lcm_trajectory_state_embeddings
+        )
+        """,
+        (alternate_digest,),
+    )
+    store._conn.commit()
+
+    with pytest.raises(
+        TrajectoryStoreError,
+        match="multiple profile digests and no active profile",
+    ):
+        store._ensure_state_semantic_schema()
+
+    primary_key = tuple(
+        str(row[1])
+        for row in store._conn.execute(
+            "PRAGMA table_info(lcm_trajectory_state_embeddings)"
+        ).fetchall()
+        if int(row[5]) > 0
+    )
+    assert primary_key == ("state_id",)
+
+
+@pytest.mark.parametrize("fail_after", [0, 1, 2])
+def test_interrupted_profile_rebuild_keeps_prior_profile_serving_until_cutover(
+    tmp_path, fail_after,
+):
     asset_root = tmp_path / "assets"
     asset_root.mkdir()
     initial = StateVectorProvider()
@@ -516,20 +703,25 @@ def test_interrupted_profile_rebuild_leaves_no_active_profile_until_cutover(
     store.build_state_semantic_index(initial)
     prior = store.active_state_semantic_profile()
     assert prior is not None
+    prior_digest = str(prior["profile_digest"])
+    prior_rows = _profile_embedding_rows(store, prior_digest)
+    prior_rankings = _ranking_bytes(store)
 
     interrupted = InterruptingStateVectorProvider(
-        model_id="fake-state-v2", fail_after=1
+        model_id="fake-state-v2", fail_after=fail_after
     )
     with pytest.raises(RuntimeError, match="interrupted backfill"):
         store.build_state_semantic_index(
             interrupted, batch_max_items=1, batch_token_budget=100_000
         )
 
-    assert store.active_state_semantic_profile() is None
+    serving = store.active_state_semantic_profile()
+    assert serving is not None
+    assert str(serving["profile_digest"]) == prior_digest
     assert store._conn.execute(
         "SELECT COUNT(*) FROM lcm_trajectory_state_embedding_profiles "
         "WHERE active = 1"
-    ).fetchone()[0] == 0
+    ).fetchone()[0] == 1
     staged = store._conn.execute(
         """
         SELECT profile_digest, active
@@ -539,21 +731,23 @@ def test_interrupted_profile_rebuild_leaves_no_active_profile_until_cutover(
         ("fake-state-v2",),
     ).fetchone()
     assert staged is not None and int(staged["active"]) == 0
-    assert staged["profile_digest"] != prior["profile_digest"]
+    assert staged["profile_digest"] != prior_digest
     staged_count = store._conn.execute(
         "SELECT COUNT(*) FROM lcm_trajectory_state_embeddings "
         "WHERE profile_digest = ?",
         (staged["profile_digest"],),
     ).fetchone()[0]
-    assert staged_count == 1
+    assert staged_count == fail_after
+    assert _profile_embedding_rows(store, prior_digest) == prior_rows
+    assert _ranking_bytes(store) == prior_rankings
 
     interrupted.fail_after = None
     resumed = store.build_state_semantic_index(
         interrupted, batch_max_items=1, batch_token_budget=100_000
     )
     active = store.active_state_semantic_profile()
-    assert resumed["already_embedded"] == 1
-    assert resumed["states_embedded"] == 2
+    assert resumed["already_embedded"] == fail_after
+    assert resumed["states_embedded"] == 3 - fail_after
     assert active is not None
     assert active["model_name"] == "fake-state-v2"
     assert active["profile_digest"] == staged["profile_digest"]
@@ -561,9 +755,10 @@ def test_interrupted_profile_rebuild_leaves_no_active_profile_until_cutover(
         "SELECT COUNT(*) FROM lcm_trajectory_state_embedding_profiles "
         "WHERE active = 1"
     ).fetchone()[0] == 1
+    assert _profile_embedding_rows(store, prior_digest) == prior_rows
 
 
-def test_forced_same_profile_rebuild_discards_prior_rows(tmp_path):
+def test_forced_same_profile_rebuild_refuses_to_mutate_serving_rows(tmp_path):
     asset_root = tmp_path / "assets"
     asset_root.mkdir()
     initial = StateVectorProvider()
@@ -584,11 +779,16 @@ def test_forced_same_profile_rebuild_discards_prior_rows(tmp_path):
     ))
     store.finalize(["answerpath"])
     completed = store.build_state_semantic_index(initial)
+    prior_rows = _profile_embedding_rows(store, completed["profile_digest"])
+    prior_rankings = _ranking_bytes(store)
 
     interrupted = InterruptingStateVectorProvider(
         model_id=initial.model_id, fail_after=1
     )
-    with pytest.raises(RuntimeError, match="interrupted backfill"):
+    with pytest.raises(
+        TrajectoryStoreError,
+        match="cannot rebuild the active state semantic profile in place",
+    ):
         store.build_state_semantic_index(
             interrupted,
             resume=False,
@@ -596,18 +796,9 @@ def test_forced_same_profile_rebuild_discards_prior_rows(tmp_path):
             batch_token_budget=100_000,
         )
 
-    assert store._conn.execute(
-        "SELECT COUNT(*) FROM lcm_trajectory_state_embeddings "
-        "WHERE profile_digest = ?",
-        (completed["profile_digest"],),
-    ).fetchone()[0] == 1
-
-    interrupted.fail_after = None
-    resumed = store.build_state_semantic_index(
-        interrupted, batch_max_items=1, batch_token_budget=100_000
-    )
-    assert resumed["already_embedded"] == 1
-    assert resumed["states_embedded"] == 2
+    assert interrupted.document_calls == 0
+    assert _profile_embedding_rows(store, completed["profile_digest"]) == prior_rows
+    assert _ranking_bytes(store) == prior_rankings
 
 
 def test_dimension_probe_is_bounded_by_document_token_budget(tmp_path):
