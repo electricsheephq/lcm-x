@@ -153,3 +153,10 @@ in the local working tree, the Round 2 pre-probe refusal and single-statement
 cutover tests remain green, and the named focused fallback checks pass. It does
 not prove a pushed head, remote CI, merge readiness, merge, release, deployment,
 or runtime adoption.
+
+## Round 4 — two codex P2 on head 9750790
+
+| Row | Priority | Raw comment IDs | Terminal disposition | Validation and result |
+|---:|---|---|---|---|
+| R4-1 | P2 | 3677048438 | Fixed now | The pre-probe guard prefers the caller's resolved `dim` and infers from the serving profile only when the requested dimension is unknown — a distinct-dimension rebuild for the same provider/model is no longer falsely refused. Focused suite green. |
+| R4-2 | P2 | 3677048435 | Declined in-PR; filed as a fork issue | Full-backfill leasing hardens against two same-declared-identity providers returning DIFFERENT vectors — a provider-contract violation — on a default-off path. The round-3 recheck already prevents post-cutover rewrites (the serving-data hazard). Leasing is real hardening but out of proportion for this train; tracked as its own issue. |

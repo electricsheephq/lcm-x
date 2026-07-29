@@ -1806,8 +1806,9 @@ class TrajectoryStore:
         if not resume:
             # Reject an in-place rebuild before a provider probe can incur cost
             # or turn a deterministic local refusal into a provider failure.
-            # The serving profile's dimension is enough to derive the requested
-            # identity without trusting a source-level semantic profile.
+            # Prefer the caller's resolved dimension; only infer from the
+            # serving profile when the requested dimension is genuinely
+            # unknown, so a distinct-dimension rebuild is not falsely refused.
             with self._lock:
                 self._conn.execute("BEGIN IMMEDIATE")
                 try:
@@ -1816,7 +1817,8 @@ class TrajectoryStore:
                         requested_digest = self._state_semantic_profile_digest(
                             provider_name,
                             model_name,
-                            int(serving_profile["dim"]),
+                            int(dim) if dim is not None
+                            else int(serving_profile["dim"]),
                             source_manifest_digest,
                         )
                         if (
