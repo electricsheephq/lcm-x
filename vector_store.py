@@ -107,40 +107,50 @@ _FAST_SCAN_STREAMING_MIN_ROWS = 2_500
 _SOURCE_LINEAGE_WORK_LIMIT = 4096
 
 # Full-corpus resident matrices outlive the per-query VectorStore instances that
-# use them. The key is (resolved db_path, data_version, identity_hash, budget_mb).
-# Each configured budget value owns an independent LRU partition; mixed-budget
-# stores therefore never evict one another using whichever ceiling queried last.
+# use them. The key is (resolved db_path, filesystem device, filesystem inode,
+# data_version, identity_hash, budget_mb). The filesystem incarnation prevents a
+# database replaced at the same path from inheriting the old file's resident
+# rows. Each configured budget value owns an independent LRU partition;
+# mixed-budget stores therefore never evict one another using whichever ceiling
+# queried last.
 _RESIDENT_MATRIX_REGISTRY_LOCK = threading.RLock()
-_RESIDENT_MATRIX_REGISTRY: "OrderedDict[tuple[str, int, str, int], tuple[list[int], list[str], list[str], Any, Any]]" = OrderedDict()
+_RESIDENT_MATRIX_REGISTRY: "OrderedDict[tuple[str, int, int, int, str, int], tuple[list[int], list[str], list[str], Any, Any]]" = OrderedDict()
 _RESIDENT_MATRIX_INSTANCES: "weakref.WeakSet[VectorStore]" = weakref.WeakSet()
-_RESIDENT_MATRIX_BUILD_LOCKS: "dict[tuple[str, int, str, int], threading.Lock]" = {}
+_RESIDENT_MATRIX_BUILD_LOCKS: "weakref.WeakValueDictionary[tuple[str, int, int, int, str, int], threading.Lock]" = weakref.WeakValueDictionary()
 
 
 def _drop_resident_registry_entry_locked(
-    key: tuple[str, int, str, int],
+    key: tuple[str, int, int, int, str, int],
 ) -> tuple[list[int], list[str], list[str], Any, Any] | None:
     """Drop one pooled entry and every instance-local reference to it."""
     entry = _RESIDENT_MATRIX_REGISTRY.pop(key, None)
     for store in list(_RESIDENT_MATRIX_INSTANCES):
         if (
             getattr(store, "_resident_registry_db_path", None) != key[0]
-            or getattr(store, "knn_resident_max_mb", None) != key[3]
+            or getattr(store, "_resident_registry_incarnation", None) != key[1:3]
+            or getattr(store, "knn_resident_max_mb", None) != key[5]
         ):
             continue
         local_cache = getattr(store, "_resident_matrix_cache", {})
         for local_key in list(local_cache):
-            if local_key[1:] == (key[2], key[1]):
+            if local_key[1:] == (key[4], key[3]):
                 local_cache.pop(local_key, None)
     return entry
 
 
-def _drop_resident_registry_db_locked(db_path: str) -> None:
+def _drop_resident_registry_db_locked(
+    db_path: str, incarnation: tuple[int, int]
+) -> None:
     """Invalidate pooled residency and local references for one database."""
     for key in list(_RESIDENT_MATRIX_REGISTRY):
-        if key[0] == db_path:
+        if key[0] == db_path and key[1:3] == incarnation:
             _drop_resident_registry_entry_locked(key)
     for store in list(_RESIDENT_MATRIX_INSTANCES):
-        if getattr(store, "_resident_registry_db_path", None) == db_path:
+        if (
+            getattr(store, "_resident_registry_db_path", None) == db_path
+            and getattr(store, "_resident_registry_incarnation", None)
+            == incarnation
+        ):
             store._resident_matrix_cache.clear()
             store._resident_ineligible_cache.clear()
 
@@ -435,6 +445,14 @@ class VectorStore:
         self._resident_ineligible_cache: set[tuple[bool, str, int]] = set()
         self._chunk_schema_ready = False
         self._init_db()
+        if self._resident_registry_is_memory:
+            self._resident_registry_incarnation = (0, 0)
+        else:
+            db_stat = self.db_path.stat()
+            self._resident_registry_incarnation = (
+                int(db_stat.st_dev),
+                int(db_stat.st_ino),
+            )
         with _RESIDENT_MATRIX_REGISTRY_LOCK:
             _RESIDENT_MATRIX_INSTANCES.add(self)
 
@@ -542,7 +560,8 @@ class VectorStore:
                     # the next eligible full scan reloads the complete matrix.
                     with _RESIDENT_MATRIX_REGISTRY_LOCK:
                         _drop_resident_registry_db_locked(
-                            self._resident_registry_db_path
+                            self._resident_registry_db_path,
+                            self._resident_registry_incarnation,
                         )
         except sqlite3.Error as exc:
             if _is_sqlite_locked_error(exc):
@@ -1439,24 +1458,25 @@ class VectorStore:
 
     @staticmethod
     def _purge_stale_resident_versions_locked(
-        registry_key: tuple[str, int, str, int],
+        registry_key: tuple[str, int, int, int, str, int],
     ) -> None:
         """Drop old profile versions in this database/budget namespace."""
         for stale_key in list(_RESIDENT_MATRIX_REGISTRY):
             if (
                 stale_key[0] == registry_key[0]
-                and stale_key[2] == registry_key[2]
-                and stale_key[3] == registry_key[3]
-                and stale_key[1] != registry_key[1]
+                and stale_key[1:3] == registry_key[1:3]
+                and stale_key[4] == registry_key[4]
+                and stale_key[5] == registry_key[5]
+                and stale_key[3] != registry_key[3]
             ):
                 _drop_resident_registry_entry_locked(stale_key)
 
     def _enforce_resident_budget_locked(
         self,
-        registry_key: tuple[str, int, str, int],
+        registry_key: tuple[str, int, int, int, str, int],
         *,
         incoming_bytes: int = 0,
-        protected_key: tuple[str, int, str, int] | None = None,
+        protected_key: tuple[str, int, int, int, str, int] | None = None,
     ) -> bool:
         """Evict LRU entries only within the caller's budget namespace.
 
@@ -1464,9 +1484,9 @@ class VectorStore:
         different ceilings are independent partitions rather than enforcing
         whichever ceiling happened to query last.
         """
-        budget_mb = registry_key[3]
+        budget_mb = registry_key[5]
         matching_keys = [
-            key for key in _RESIDENT_MATRIX_REGISTRY if key[3] == budget_mb
+            key for key in _RESIDENT_MATRIX_REGISTRY if key[5] == budget_mb
         ]
         used = sum(
             self._resident_entry_bytes(_RESIDENT_MATRIX_REGISTRY[key])
@@ -1477,7 +1497,7 @@ class VectorStore:
                 (
                     key
                     for key in _RESIDENT_MATRIX_REGISTRY
-                    if key[3] == budget_mb and key != protected_key
+                    if key[5] == budget_mb and key != protected_key
                 ),
                 None,
             )
@@ -1501,10 +1521,11 @@ class VectorStore:
 
     def _resident_registry_key(
         self, identity_hash: str, data_version: int
-    ) -> tuple[str, int, str, int]:
+    ) -> tuple[str, int, int, int, str, int]:
         """Derive the one pooled key used for resident lookup and build."""
         return (
             self._resident_registry_db_path,
+            *self._resident_registry_incarnation,
             int(data_version),
             str(identity_hash),
             self.knn_resident_max_mb,
@@ -1522,6 +1543,11 @@ class VectorStore:
         deadline: float | None,
     ) -> tuple[list[int], list[str], list[str], Any, Any] | None:
         """Return a budgeted, live-row-filtered int8-scored corpus matrix.
+
+        D-ARCH-5 deliberately keeps the 128 MiB default enabled for eligible
+        float32 corpora: F44 measured net-zero recall change at 185k vectors,
+        every result discloses ``scoring='int8_quantized'``, and operators can
+        disable residency with ``LCM_KNN_RESIDENT_MAX_MB=0``.
 
         Cold builds are serialized per pooled key. The count is an admission
         estimate only: the loader guards growth and rechecks live membership
@@ -3923,10 +3949,15 @@ class VectorStore:
         with _RESIDENT_MATRIX_REGISTRY_LOCK:
             if getattr(self, "_resident_registry_is_memory", False):
                 _drop_resident_registry_db_locked(
-                    self._resident_registry_db_path
+                    self._resident_registry_db_path,
+                    self._resident_registry_incarnation,
                 )
                 for build_key in list(_RESIDENT_MATRIX_BUILD_LOCKS):
-                    if build_key[0] == self._resident_registry_db_path:
+                    if (
+                        build_key[0] == self._resident_registry_db_path
+                        and build_key[1:3]
+                        == self._resident_registry_incarnation
+                    ):
                         _RESIDENT_MATRIX_BUILD_LOCKS.pop(build_key, None)
             self._resident_matrix_cache.clear()
             self._resident_ineligible_cache.clear()

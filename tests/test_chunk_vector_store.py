@@ -623,6 +623,59 @@ def test_warm_chunk_residency_drops_orphans_when_message_is_deleted(
         store.close()
 
 
+def test_message_delete_bumps_only_chunk_profiles_for_affected_store_id(tmp_path):
+    db_path = tmp_path / "chunk-delete-scope.db"
+    _seed_messages(
+        db_path,
+        [
+            (0, "s", "history", "user", "m", 0.0),
+            (1, "s", "history", "user", "m", 1.0),
+            (2, "s", "history", "user", "m", 2.0),
+        ],
+    )
+    store = VectorStore(db_path)
+    first_identity = EmbeddingIdentity.canonical(
+        "provider-a", MODEL, "", DIM, "float32", "little", "chunk"
+    )
+    second_identity = EmbeddingIdentity.canonical(
+        "provider-b", MODEL, "", DIM, "float32", "little", "chunk"
+    )
+    try:
+        store.register_profile(MODEL, "provider-a", DIM, task="chunk")
+        _write(
+            store,
+            "0:0",
+            0,
+            0,
+            [1.0, 0.0, 0.0, 0.0],
+            identity=first_identity,
+        )
+        store.register_profile(MODEL, "provider-b", DIM, task="chunk")
+        _write(
+            store,
+            "1:0",
+            1,
+            0,
+            [0.0, 1.0, 0.0, 0.0],
+            identity=second_identity,
+        )
+
+        before_first = store._data_version(first_identity.identity_hash)
+        before_second = store._data_version(second_identity.identity_hash)
+        store.connection.execute("DELETE FROM messages WHERE store_id = 2")
+        assert store._data_version(first_identity.identity_hash) == before_first
+        assert store._data_version(second_identity.identity_hash) == before_second
+
+        store.connection.execute("DELETE FROM messages WHERE store_id = 0")
+        assert (
+            store._data_version(first_identity.identity_hash)
+            == before_first + 1
+        )
+        assert store._data_version(second_identity.identity_hash) == before_second
+    finally:
+        store.close()
+
+
 def test_warm_chunk_residency_invalidates_when_vector_is_deleted(
     tmp_path, monkeypatch
 ):

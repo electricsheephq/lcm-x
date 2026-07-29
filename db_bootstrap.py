@@ -1262,17 +1262,36 @@ def ensure_resident_invalidation_triggers(conn: sqlite3.Connection) -> None:
     }
     if "lcm_embedding_profile" not in tables:
         return
-    if "messages" in tables:
-        conn.execute(
-            """
-            CREATE TRIGGER IF NOT EXISTS lcm_resident_message_delete
+    # SQLite has no statement-level triggers, so bulk purges necessarily pay
+    # one trigger invocation per deleted row. This is an accepted control-plane
+    # mutation cost (deletes are rare relative to recall reads). The message
+    # predicate below confines chunk invalidation to profiles whose live corpus
+    # changed.
+    if "messages" in tables and "lcm_chunk_meta" in tables:
+        message_delete_sql = """
+            CREATE TRIGGER lcm_resident_message_delete
             AFTER DELETE ON messages BEGIN
                 UPDATE lcm_embedding_profile
                 SET data_version = data_version + 1
-                WHERE task = 'chunk';
+                WHERE task = 'chunk'
+                  AND identity_hash IN (
+                      SELECT identity_hash
+                      FROM lcm_chunk_meta
+                      WHERE store_id = old.store_id AND archived = 0
+                  );
             END
-            """
-        )
+        """
+        existing = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'trigger' AND name = 'lcm_resident_message_delete'"
+        ).fetchone()
+        if existing is not None and re.sub(
+            r"\s+", "", str(existing[0]).lower()
+        ).rstrip(";") != re.sub(r"\s+", "", message_delete_sql.lower()).rstrip(";"):
+            conn.execute("DROP TRIGGER lcm_resident_message_delete")
+            existing = None
+        if existing is None:
+            conn.execute(message_delete_sql)
     if "summary_nodes" in tables:
         conn.execute(
             """

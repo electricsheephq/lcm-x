@@ -270,6 +270,15 @@ outside the LCM database.
 | `lcm_inspect` | Read-only operator inventory for current-session lineage, frontier/fresh-tail metadata, externalized refs/readability, compaction skip/no-op reasons, and matched ignore/stateless patterns. Returns metadata only; use retrieval tools for content. |
 | `lcm_doctor` | Run database, FTS, lifecycle, config, and context-pressure diagnostics. |
 
+### KNN residency and scoring
+
+Eligible full-corpus KNN scans use a default 128 MiB resident-matrix budget.
+For float32 corpora this may use disclosed int8-quantized scoring; the F44 gate
+measured net-zero recall change at 185k vectors. Each response reports
+`scoring="int8_quantized"` or `scoring="float32_exact"` so callers can observe
+the selected arithmetic. Set `LCM_KNN_RESIDENT_MAX_MB=0` to disable residency
+and retain the exact streaming path.
+
 ## Recall skill and policy
 
 Hermes-LCM ships `skills/hermes-lcm/SKILL.md` plus progressive-disclosure

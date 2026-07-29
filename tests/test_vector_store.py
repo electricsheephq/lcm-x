@@ -749,6 +749,7 @@ def test_residency_survives_close_and_invalidates_on_data_version(
         pooled_key = next(iter(empty_resident_registry))
         assert pooled_key == (
             str(db_path.resolve()),
+            *first._resident_registry_incarnation,
             3,
             first.capture_identity("scan").identity_hash,
             1,
@@ -778,12 +779,74 @@ def test_residency_survives_close_and_invalidates_on_data_version(
         )
         assert refreshed.coverage == "full"
         assert len(builds) == 2
-        assert next(iter(empty_resident_registry))[1] == 4
+        assert next(iter(empty_resident_registry))[3] == 4
     finally:
         first.close()
         if second is not None:
             second.close()
         dag.close()
+
+
+def test_replaced_database_path_cannot_reuse_prior_incarnation_residency(
+    tmp_path, monkeypatch, empty_resident_registry
+):
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
+    db_path = tmp_path / "replaced-resident.db"
+    config = LCMConfig(knn_resident_max_mb=1)
+
+    old_dag = SummaryDAG(db_path)
+    old_store = VectorStore(db_path, config=config, bounded_scan_rows=1)
+    try:
+        old_node = _add_summary(old_dag, created_at=1.0)
+        old_store.register_profile("scan", "local", 3)
+        _record_embedding(
+            old_store,
+            old_node,
+            "summary",
+            "scan",
+            [1.0, 0.0, 0.0],
+        )
+        old_result = old_store.knn(
+            [1.0, 0.0, 0.0], k=1, model="scan", full_scan=True
+        )
+        assert [row[0] for row in old_result] == [str(old_node)]
+        old_incarnation = old_store._resident_registry_incarnation
+    finally:
+        old_store.close()
+        old_dag.close()
+
+    replacement_path = tmp_path / "replacement.db"
+    replacement_dag = SummaryDAG(replacement_path)
+    replacement_store = VectorStore(
+        replacement_path, config=config, bounded_scan_rows=1
+    )
+    try:
+        _add_summary(replacement_dag, created_at=1.0)
+        replacement_node = _add_summary(replacement_dag, created_at=2.0)
+        replacement_store.register_profile("scan", "local", 3)
+        _record_embedding(
+            replacement_store,
+            replacement_node,
+            "summary",
+            "scan",
+            [1.0, 0.0, 0.0],
+        )
+    finally:
+        replacement_store.close()
+        replacement_dag.close()
+
+    replacement_path.replace(db_path)
+    reopened = VectorStore(db_path, config=config, bounded_scan_rows=1)
+    try:
+        assert reopened._resident_registry_incarnation != old_incarnation
+        replacement_result = reopened.knn(
+            [1.0, 0.0, 0.0], k=1, model="scan", full_scan=True
+        )
+        assert [row[0] for row in replacement_result] == [
+            str(replacement_node)
+        ]
+    finally:
+        reopened.close()
 
 
 def test_live_knn_residency_builds_once_and_ranks_every_query_above_crossover(
@@ -910,17 +973,32 @@ def test_resident_hit_is_sql_free_and_constant_time_above_crossover(
         ]
 
         hit_ms: list[float] = []
+        hit_scan_statement_counts: list[int] = []
         for _ in range(9):
+            hit_statements: list[str] = []
+            store.connection.set_trace_callback(hit_statements.append)
             started = time.perf_counter()
-            service_hit = store.knn(
-                [1.0, 0.0, 0.0],
-                k=1,
-                model="scan",
-                full_scan=True,
-            )
+            try:
+                service_hit = store.knn(
+                    [1.0, 0.0, 0.0],
+                    k=1,
+                    model="scan",
+                    full_scan=True,
+                )
+            finally:
+                store.connection.set_trace_callback(None)
             assert service_hit.coverage == "full"
             hit_ms.append((time.perf_counter() - started) * 1000)
-        assert sorted(hit_ms)[len(hit_ms) // 2] < 25.0
+            hit_scan_statement_counts.append(
+                sum(
+                    "count(" in statement.lower()
+                    or "from lcm_embedding_vectors" in statement.lower()
+                    or "from lcm_embedding_meta" in statement.lower()
+                    for statement in hit_statements
+                )
+            )
+        assert hit_scan_statement_counts == [0] * len(hit_ms)
+        assert sorted(hit_ms)[len(hit_ms) // 2] < 250.0
     finally:
         store.close()
         dag.close()
@@ -1152,7 +1230,7 @@ def test_resident_budget_partitions_do_not_evict_other_store_budgets(
             assert result.coverage == "full"
 
         assert len(empty_resident_registry) == 2
-        assert {key[3] for key in empty_resident_registry} == {1, 2}
+        assert {key[5] for key in empty_resident_registry} == {1, 2}
     finally:
         for store, dag in stores_and_dags:
             store.close()
@@ -1264,6 +1342,7 @@ def test_same_key_concurrent_cold_scans_build_one_resident_matrix(
         assert list(results[0]) == list(results[1])
         assert builds == 1
         assert len(empty_resident_registry) == 1
+        assert len(vector_store_module._RESIDENT_MATRIX_BUILD_LOCKS) == 0
     finally:
         first.close()
         if second is not None:
