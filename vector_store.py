@@ -1239,31 +1239,6 @@ class VectorStore:
         with self._temp_id_table(normalized) as table:
             yield table
 
-    @contextmanager
-    def _temp_ordered_id_table(self, ids: Sequence[str]) -> Iterator[str]:
-        """Stage candidate ids with their caller-defined recency ordinal."""
-        table = f"_lcm_ordered_id_scratch_{uuid.uuid4().hex}"
-        self._conn.execute(
-            f"CREATE TEMP TABLE {table}("
-            "id TEXT PRIMARY KEY, candidate_ordinal INTEGER NOT NULL)"
-        )
-        try:
-            for offset in range(0, len(ids), _ID_INSERT_CHUNK):
-                rows = [
-                    (str(value), offset + index)
-                    for index, value in enumerate(
-                        ids[offset:offset + _ID_INSERT_CHUNK]
-                    )
-                ]
-                self._conn.executemany(
-                    f"INSERT OR IGNORE INTO {table}(id, candidate_ordinal) "
-                    "VALUES(?, ?)",
-                    rows,
-                )
-            yield table
-        finally:
-            self._conn.execute(f"DROP TABLE IF EXISTS {table}")
-
     def purge_embeddings_for_nodes(self, node_ids: Sequence[int | str]) -> int:
         unique_ids = list(dict.fromkeys(str(node_id) for node_id in node_ids))
         if not unique_ids:
@@ -1505,6 +1480,17 @@ class VectorStore:
             }
             self._resident_ineligible_cache.add(key)
 
+    def _resident_registry_key(
+        self, identity_hash: str, data_version: int
+    ) -> tuple[str, int, str, int]:
+        """Derive the one pooled key used for resident lookup and build."""
+        return (
+            self._resident_registry_db_path,
+            int(data_version),
+            str(identity_hash),
+            self.knn_resident_max_mb,
+        )
+
     def _resident_int8_matrix(
         self,
         numpy: Any,
@@ -1528,12 +1514,7 @@ class VectorStore:
             raise _PrescreenDeadlineExpired()
         data_version = self._data_version(identity_hash)
         key = (bool(chunk), str(identity_hash), data_version)
-        registry_key = (
-            self._resident_registry_db_path,
-            data_version,
-            str(identity_hash),
-            self.knn_resident_max_mb,
-        )
+        registry_key = self._resident_registry_key(identity_hash, data_version)
         count = self._live_vector_count(identity_hash, chunk=chunk)
         with _RESIDENT_MATRIX_REGISTRY_LOCK:
             self._purge_stale_resident_versions_locked(registry_key)
@@ -1556,11 +1537,13 @@ class VectorStore:
                     return cached
                 else:
                     _drop_resident_registry_entry_locked(registry_key)
-            if deadline is not None:
-                # Do not spend an operation deadline constructing a cold
-                # accelerator: no row is scored until the whole matrix exists,
-                # so progress would be zero. Exact streaming below remains
-                # interruptible and reports rows that were actually scored.
+            if (
+                deadline is not None
+                and dtype == _INT8_DTYPE
+                and self._binary_fully_synced(identity_hash, chunk=chunk)
+            ):
+                # Preserve the deadline-aware two-stage int8 path, whose
+                # completed-batch accounting is finer than a cold resident build.
                 return None
             build_lock = _RESIDENT_MATRIX_BUILD_LOCKS.setdefault(
                 registry_key, threading.Lock()
@@ -1868,18 +1851,17 @@ class VectorStore:
         chunk: bool,
         candidate_ids: Sequence[str] | None = None,
     ) -> sqlite3.Cursor:
-        """Stream a full live corpus in stable vector-row order.
-
-        Candidate-restricted scans use ``_vector_rows_stream`` so their
-        caller-defined recency order is retained without a host-parameter-sized
-        ``IN`` clause. ``candidate_ids`` remains accepted for compatibility with
-        test instrumentation but membership is applied by that wrapper.
-        """
-        del candidate_ids
+        """Stream live vectors, newest-first when candidates were enumerated."""
+        candidate_order = candidate_ids is not None
         args: list[object] = [str(identity_hash)]
         if chunk:
+            order_by = (
+                "msg.timestamp DESC, v.chunk_id DESC"
+                if candidate_order
+                else "v.rowid"
+            )
             return self._conn.execute(
-                """
+                f"""
                 SELECT v.rowid AS vector_rowid, v.chunk_id AS vector_id,
                        'chunk' AS vector_kind, v.vec AS vector_blob
                 FROM lcm_chunk_vectors v
@@ -1889,14 +1871,25 @@ class VectorStore:
                 JOIN messages msg
                   ON msg.store_id = m.store_id
                 WHERE v.identity_hash = ? AND m.archived = 0
-                ORDER BY v.rowid
+                ORDER BY {order_by}
                 """,
                 args,
             )
+        summary_columns = self._table_columns("summary_nodes")
         suppressed_clause = (
             " AND sn.suppressed_at IS NULL"
-            if "suppressed_at" in self._table_columns("summary_nodes")
+            if "suppressed_at" in summary_columns
             else ""
+        )
+        recency_expr = (
+            "COALESCE(sn.latest_at, sn.created_at)"
+            if "latest_at" in summary_columns
+            else "sn.created_at"
+        )
+        order_by = (
+            f"{recency_expr} DESC, sn.node_id DESC"
+            if candidate_order
+            else "v.rowid"
         )
         return self._conn.execute(
             f"""
@@ -1909,54 +1902,9 @@ class VectorStore:
             JOIN summary_nodes sn
               ON sn.node_id = CAST(m.embedded_id AS INTEGER)
             WHERE v.identity_hash = ? AND m.archived = 0{suppressed_clause}
-            ORDER BY v.rowid
+            ORDER BY {order_by}
             """,
             args,
-        )
-
-    def _ordered_vector_rows_cursor(
-        self, identity_hash: str, *, chunk: bool, candidate_table: str
-    ) -> sqlite3.Cursor:
-        """Stream selected live rows in the candidates' newest-first order."""
-        if chunk:
-            return self._conn.execute(
-                f"""
-                SELECT v.rowid AS vector_rowid, v.chunk_id AS vector_id,
-                       'chunk' AS vector_kind, v.vec AS vector_blob
-                FROM {candidate_table} t
-                JOIN lcm_chunk_vectors v
-                  ON v.chunk_id = t.id AND v.identity_hash = ?
-                JOIN lcm_chunk_meta m
-                  ON m.chunk_id = v.chunk_id
-                 AND m.identity_hash = v.identity_hash
-                JOIN messages msg
-                  ON msg.store_id = m.store_id
-                WHERE m.archived = 0
-                ORDER BY t.candidate_ordinal
-                """,
-                (str(identity_hash),),
-            )
-        suppressed_clause = (
-            " AND sn.suppressed_at IS NULL"
-            if "suppressed_at" in self._table_columns("summary_nodes")
-            else ""
-        )
-        return self._conn.execute(
-            f"""
-            SELECT v.rowid AS vector_rowid, v.embedded_id AS vector_id,
-                   m.embedded_kind AS vector_kind, v.vec AS vector_blob
-            FROM {candidate_table} t
-            JOIN lcm_embedding_vectors v
-              ON v.embedded_id = t.id AND v.identity_hash = ?
-            JOIN lcm_embedding_meta m
-              ON m.embedded_id = v.embedded_id
-             AND m.identity_hash = v.identity_hash
-            JOIN summary_nodes sn
-              ON sn.node_id = CAST(m.embedded_id AS INTEGER)
-            WHERE m.archived = 0{suppressed_clause}
-            ORDER BY t.candidate_ordinal
-            """,
-            (str(identity_hash),),
         )
 
     @contextmanager
@@ -1967,21 +1915,15 @@ class VectorStore:
         chunk: bool,
         candidate_ids: Sequence[str] | None,
     ) -> Iterator[sqlite3.Cursor]:
-        if candidate_ids is None:
-            cursor = self._vector_rows_cursor(identity_hash, chunk=chunk)
-            try:
-                yield cursor
-            finally:
-                cursor.close()
-            return
-        with self._temp_ordered_id_table(candidate_ids) as table:
-            cursor = self._ordered_vector_rows_cursor(
-                identity_hash, chunk=chunk, candidate_table=table
-            )
-            try:
-                yield cursor
-            finally:
-                cursor.close()
+        cursor = self._vector_rows_cursor(
+            identity_hash,
+            chunk=chunk,
+            candidate_ids=candidate_ids,
+        )
+        try:
+            yield cursor
+        finally:
+            cursor.close()
 
     @staticmethod
     def _vectorized_batch(

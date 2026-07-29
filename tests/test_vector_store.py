@@ -785,6 +785,66 @@ def test_residency_survives_close_and_invalidates_on_data_version(
         dag.close()
 
 
+def test_live_knn_residency_builds_once_and_ranks_every_query_above_crossover(
+    tmp_path, monkeypatch, empty_resident_registry
+):
+    db_path = tmp_path / "live-resident-crossover.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=1),
+        bounded_scan_rows=500,
+    )
+    build_count = 0
+    resident_ranked_count = 0
+    original_cursor = VectorStore._vector_rows_cursor
+    original_rank = VectorStore._rank_resident_int8
+
+    def counted_cursor(store, identity_hash, *, chunk, candidate_ids=None):
+        nonlocal build_count
+        if candidate_ids is None:
+            build_count += 1
+        return original_cursor(
+            store,
+            identity_hash,
+            chunk=chunk,
+            candidate_ids=candidate_ids,
+        )
+
+    def counted_rank(store, *args, **kwargs):
+        nonlocal resident_ranked_count
+        resident_ranked_count += 1
+        return original_rank(store, *args, **kwargs)
+
+    monkeypatch.setattr(VectorStore, "_vector_rows_cursor", counted_cursor)
+    monkeypatch.setattr(VectorStore, "_rank_resident_int8", counted_rank)
+    try:
+        _seed_scan_corpus(
+            dag,
+            store,
+            vector_store_module._FAST_SCAN_STREAMING_MIN_ROWS,
+            gold_vector=[1.0, 0.0, 0.0],
+            filler_vector=[0.0, 1.0, 0.0],
+        )
+        query_count = 3
+        for _ in range(query_count):
+            result = store.knn(
+                [1.0, 0.0, 0.0],
+                k=1,
+                model="scan",
+                full_scan=True,
+                deadline=vector_store_module._monotonic() + 60.0,
+            )
+            assert result.coverage == "full"
+            assert result.scoring == "int8_quantized"
+
+        assert resident_ranked_count == query_count
+        assert build_count == 1
+    finally:
+        store.close()
+        dag.close()
+
+
 def test_resident_summary_filters_suppressed_rows_before_and_after_warmup(
     tmp_path, monkeypatch, empty_resident_registry
 ):
@@ -1229,18 +1289,24 @@ def test_streaming_truncation_keeps_recency_order_below_host_limit(
         monkeypatch.setattr(
             VectorStore, "_vectorized_batch", staticmethod(timed_load)
         )
-        result = store.knn(
-            [0.0, 1.0, 0.0],
-            k=1,
-            model="scan",
-            full_scan=True,
-            scan_budget_s=0.5,
-        )
+        statements: list[str] = []
+        store.connection.set_trace_callback(statements.append)
+        try:
+            result = store.knn(
+                [0.0, 1.0, 0.0],
+                k=1,
+                model="scan",
+                full_scan=True,
+                scan_budget_s=0.5,
+            )
+        finally:
+            store.connection.set_trace_callback(None)
 
         assert result.coverage == "bounded"
         assert result.scanned == 2
         assert result[0][0] == expected_newest
         assert str(gold) not in {row[0] for row in result}
+        assert not any("_lcm_ordered_id_scratch" in sql for sql in statements)
     finally:
         store.close()
         dag.close()
