@@ -1989,6 +1989,32 @@ class TestMessageStore:
             is False
         )
 
+    def test_search_prose_disjunction_drops_contraction_fragments(self):
+        """Round-4 finding: "didn't" must not leak `didn OR t` into the
+        disjunction — fragments are never subject terms."""
+        terms = extract_prose_search_terms("What didn't we deploy?")
+        assert terms == ["deploy"]
+
+    def test_search_prose_all_framing_query_falls_back_to_conjunctive(self):
+        """Round-4 finding: when nothing but framing survives, the MATCH
+        query must fall back to the sanitized conjunctive form, not a lone
+        framing token disjunction."""
+        match = build_fts5_match_query(
+            "Can you tell me about that?", prose_mode=True
+        )
+        assert " OR " not in match
+        assert match  # non-empty sanitized fallback
+
+    def test_search_prose_term_cap_preserves_unicode_symbol_signal(self):
+        """Round-4 finding: the routing-signal symbol must survive the
+        term cap on the LIKE route."""
+        keywords = " ".join(f"keyword{i}" for i in range(12))
+        terms = extract_prose_search_terms(
+            f"What did I say about {keywords} ©?",
+            sanitize_like_query(f"What did I say about {keywords} ©?"),
+        )
+        assert any("©" in term for term in terms)
+
     def test_search_prose_mode_preserves_stoplisted_subject_signal(self, store):
         target = store.append(
             "sess1",
@@ -2050,7 +2076,19 @@ class TestMessageStore:
         )
 
         assert len(terms) <= search_query_module._PROSE_TERM_LIMIT
-        assert len(like_terms) <= search_query_module._PROSE_TERM_LIMIT
+        # Round-4 amendment: the cap bounds ORDINARY terms; an unindexable
+        # symbol is the LIKE route's routing signal and rides on top.
+        ordinary_like_terms = [
+            term
+            for term in like_terms
+            if not search_query_module.contains_unindexed_unicode_symbol(term)
+        ]
+        assert len(ordinary_like_terms) <= search_query_module._PROSE_TERM_LIMIT
+        assert all(
+            search_query_module.contains_unindexed_unicode_symbol(term)
+            for term in like_terms
+            if term not in ordinary_like_terms
+        )
 
     def test_search_keeps_hyphenated_compound_on_the_fts_path(self, store):
         """Review finding 1: a compound token sanitizes to ordinary terms, so it

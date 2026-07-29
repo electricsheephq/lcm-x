@@ -43,6 +43,27 @@ _PROSE_LEAD_WORDS = frozenset({
     "can", "could", "did", "do", "does", "find", "how", "please", "recall",
     "remember", "tell", "what", "when", "where", "which", "who", "why", "would",
 })
+# Tokenizer debris from possessives and contractions ("dog's" -> [dog, s],
+# "didn't" -> [didn, t]). None of these is ever a subject term, and none may
+# inflate classification counts. The n't stems are the closed set of tokens
+# that are not standalone English words.
+_PROSE_FRAGMENTS = frozenset({
+    "s", "t", "d", "m", "ll", "ve", "re",
+    "didn", "doesn", "isn", "wasn", "aren", "weren", "hasn", "haven", "hadn",
+    "wouldn", "couldn", "shouldn", "needn", "mustn", "mightn", "shan", "oughtn",
+})
+# Stopwords that can never be the SUBJECT of a memory search (pronouns,
+# articles, prepositions, verbs of asking). The subject-fallback may return a
+# stopword like ``will`` (a noun in possessive-heavy queries) but never one of
+# these — a lone framing token as the sole disjunction term broadens recall to
+# any row containing a common word.
+_PROSE_NEVER_SUBJECT = frozenset({
+    "a", "an", "and", "about", "are", "as", "at", "be", "been", "but",
+    "by", "for", "from", "had", "has", "have", "i", "in", "is", "it", "me",
+    "my", "near", "not", "of", "on", "or", "our", "say", "said", "that",
+    "the", "their", "them", "there", "these", "they", "this", "those", "to",
+    "us", "was", "we", "were", "with", "you", "your",
+})
 # Characters that are special in FTS5 QUERY SYNTAX (as opposed to characters
 # FTS5 simply cannot spell in a bareword). Only these have to go on the LIKE
 # path, which has no query grammar of its own.
@@ -154,12 +175,12 @@ def should_use_fts_prose_mode(
     # Classification retains ordinary lowercase conjunctions. The scoring
     # extractor intentionally drops boolean-looking tokens, which previously
     # hid "and"/"or" from the prose stopword threshold.
-    # Apostrophe tokenization yields a bare ``s`` for possessives. It remains a
-    # stopword during extraction, but is not a word for classification counts.
+    # Possessive/contraction debris ("s", "didn", "t") is not a word for
+    # classification counts.
     terms = [
         term
         for term in _WORD_RE.findall(safe)
-        if term.casefold() != "s"
+        if term.casefold() not in _PROSE_FRAGMENTS
     ]
     if len(terms) < 2:
         return False
@@ -187,24 +208,39 @@ def _extract_bounded_prose_terms(sanitized: str) -> List[str]:
     seen: set[str] = set()
     for term in candidates:
         folded = term.casefold()
-        if folded in _PROSE_STOPWORDS or folded in seen:
+        if (
+            folded in _PROSE_STOPWORDS
+            or folded in _PROSE_FRAGMENTS
+            or folded in seen
+        ):
             continue
         seen.add(folded)
-        prose_terms.append(term)
-        if len(prose_terms) >= _PROSE_TERM_LIMIT:
-            return prose_terms
+        if len(prose_terms) < _PROSE_TERM_LIMIT:
+            prose_terms.append(term)
+        elif contains_unindexed_unicode_symbol(term):
+            # An unindexable symbol is the ROUTING SIGNAL that sent this
+            # query to LIKE; it must survive the cap or the route cannot
+            # match its own reason for existing.
+            prose_terms.append(term)
 
     if prose_terms:
         return prose_terms
 
     # A broad stoplist can also contain the grammatical subject (for example,
-    # ``will``). Prefer the last non-lead token instead of restoring the full
-    # conversational frame and its implicit-AND semantics.
+    # ``will``). Prefer the last token that could plausibly BE a subject —
+    # never a lead word, tokenizer fragment, or pure framing word. If nothing
+    # but framing survives, return no terms: build_fts5_match_query then falls
+    # back to the sanitized conjunctive form instead of broadening recall on a
+    # lone framing token.
     for term in reversed(candidates):
         folded = term.casefold()
-        if folded not in _PROSE_LEAD_WORDS and folded != "s":
+        if (
+            folded not in _PROSE_LEAD_WORDS
+            and folded not in _PROSE_FRAGMENTS
+            and folded not in _PROSE_NEVER_SUBJECT
+        ):
             return [term]
-    return candidates[-1:]
+    return []
 
 
 def extract_prose_search_terms(query: str, sanitized: str | None = None) -> List[str]:

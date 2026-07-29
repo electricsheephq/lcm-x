@@ -194,3 +194,16 @@ flag-off probe byte-identical (2,104 bytes, SHA-256 `d9cf3621ed51669eeaff13642b8
 | Row | Priority | Raw comment IDs | Terminal disposition | Validation and result |
 |---:|---|---|---|---|
 | R36-1 | P2 | 3676960744 | Fixed now | `SummaryDAG._search_like` no longer truncates after the first unordered batch when `source` is unset: it scans the bounded candidate set (`candidate_cap`) before applying `limit`. Regression test `test_search_summary_like_scans_past_first_batch_for_best_match` (20 decoys + target at row 21, limit=1). Disclosure: this also corrects the same first-batch truncation on the pre-existing flag-off LIKE fallback — a strict recall improvement bounded by `candidate_cap`; the pinned flag-off regression corpus is byte-identical (same SHA-256 `d9cf3621…e3219`). |
+
+## Round 4 — five findings on head 00b5afd
+
+| Row | Priority | Raw comment IDs | Terminal disposition | Validation and result |
+|---:|---|---|---|---|
+| R4-1 | P2 | 3677032230 | Fixed now | The term cap bounds ORDINARY terms; an unindexable Unicode symbol (the LIKE route's routing signal) now survives the cap. The round-2 cap test is amended to state this contract; new test `test_search_prose_term_cap_preserves_unicode_symbol_signal`. |
+| R4-2 | P2 | 3677032233 | Fixed now | New `_PROSE_FRAGMENTS` set (possessive/contraction debris incl. the closed n't-stem set) filtered from disjunctions AND excluded from classification counts. `What didn't we deploy?` extracts `[deploy]`; test added. |
+| R4-3 | P2 | 3677042003 | Refuted in part; disclosure stands | The claimed polarity is inverted: removing `not source` changed the source-UNSET branch (previously truncated at the first batch — the defect); the source-SET branch always paged and is unchanged. The valid kernel — the pinned corpus does not exercise deep paging — was already stated in R36-1: the sha is a no-regression check on the pinned corpus, not a proof of no-change on the fixed branch; the behavior delta was disclosed as a strict, cap-bounded recall improvement. |
+| R4-4 | P3 | 3677042008 | Refuted | The expand path passes `sort=None`, and the store/dag backends' internal `resolve_prose_sort` promotes exactly this case — the "direct caller" scenario those blocks exist for (as the round-3 sort-helper disposition documented). Both entry points therefore rank identically; no divergence exists. |
+| R4-5 | P3 | 3677042011 | Fixed now | The subject-fallback may return a subject-capable stopword (``will``) but never a pure framing token: new `_PROSE_NEVER_SUBJECT` set; when nothing but framing survives, extraction returns no terms and `build_fts5_match_query` falls back to the sanitized conjunctive form. Test `test_search_prose_all_framing_query_falls_back_to_conjunctive`. |
+
+Round-4 validation: focused 93 passed + recall 90 passed; flag-off probe byte-identical
+(2,104 bytes, SHA-256 `d9cf3621…e3219`).
