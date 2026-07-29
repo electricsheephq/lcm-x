@@ -1,162 +1,38 @@
-# PR #182 bot-finding verdicts
+# PR #184 bot findings — validation and verdicts
 
-Reviewed PR: `100yenadmin/hermes-lcm#182`
+Scope: the 34 raw bot comments in `pr184_comments.json`, deduplicated into the
+20 semantic rows required by `SPEC-BOTS.md`. Every raw comment ID is mapped
+below. The nine High rows are 1–9.
 
-Reviewed head: `95d20d0384db203a3a673b6890bce6939b4f829c`
-
-Base: `cb92bf40c1d4c862cb56090792113b69d88660d4`
-
-Mode: validate-then-fix, address existing feedback only. The fail-closed
-migration posture is binding. No commit, push, PR reply, or thread resolution
-was performed.
-
-## 1. Mixed legacy digests with an active profile
-
-- Source: CodeRabbit discussion `3673283174`
-- Reported priority: Major / digest summary High
-- Verdict: verified; fixed in the local working tree.
-- Validation: a legacy table with active profile `A` and stored digests
-  `{A, B}` migrated without raising and rewrote every row to `A`.
-  `validate-before-fix.xml` records the failing regression.
-- Fix: migration now adopts the active digest only when every stored legacy
-  digest matches it. Any foreign digest fails closed before table replacement.
-- Proof: `test_legacy_state_embedding_migration_refuses_mixed_active_rows`
-  passes and verifies the legacy primary-key table remains intact after the
-  rejected migration.
-
-## 2. Ambiguous migration recovery text
-
-- Source: Codex discussion `3673282194`
-- Reported priority: P2 / digest summary Medium
-- Verdict: verified; fixed in the local working tree.
-- Validation: schema migration blocks `build_state_semantic_index()` before a
-  rebuild can start, while the old error said only to rebuild.
-  `validate-before-fix.xml` records the message mismatch.
-- Fix: the fail-closed error now documents the recovery explicitly: discard
-  the ambiguous legacy state embeddings and run a fresh backfill.
-- Proof:
-  `test_legacy_state_embedding_migration_refuses_ambiguous_inactive_rows`
-  requires the fresh-backfill recovery text and verifies rollback preserves the
-  legacy primary-key table.
-
-## 3. Rebuild-guard TOCTOU
-
-- Source: CodeRabbit discussion `3673283186`
-- Reported priority: Minor / digest summary Medium
-- Verdict: verified; fixed in the local working tree.
-- Validation: the guard probe observed `Connection.in_transaction == False`
-  on the reviewed head. `validate-before-fix.xml` records the failure.
-- Fix: the active-profile read and same-profile rebuild guard now run under
-  `self._lock`, after `BEGIN IMMEDIATE`. A rejection follows the existing
-  exception path and rolls back the transaction.
-- Proof:
-  `test_forced_same_profile_rebuild_refuses_to_mutate_serving_rows` observes
-  the guard inside the transaction, confirms the transaction is closed after
-  rejection, and confirms serving rows and rankings remain unchanged.
-
-## 4. Test helper staging-table name reuse
-
-- Source: CodeRabbit discussion `3673283168`
-- Reported priority: Trivial / digest summary Low
-- Verdict: verified; fixed in the local working tree.
-- Validation: `_downgrade_state_embeddings_to_legacy_primary_key` used the
-  production migration table name
-  `lcm_trajectory_state_embeddings_profile_scoped`.
-- Fix: the test helper now uses
-  `lcm_trajectory_state_embeddings_legacy_stage` for rename, copy, and drop.
-- Proof: the complete state-semantic migration test file passes.
-
-## Validation
-
-- Failing-first evidence: `validate-before-fix.xml` — 3 expected failures.
-- Bot regression subset: `focused-bot-regressions.xml` — 3 passed.
-- Migration regressions: `migration-regressions.xml` — 30 passed.
-- Full CI replica: `full-suite.xml` — 2711 passed, 35 failed, 1 skipped,
-  12 xfailed. The 35 failure names exactly match the prior lane baseline:
-  zero new and zero missing.
-- Ruff on both changed source files: passed.
-- `git diff --check`: passed.
-
-Reproduce the checked-in validation evidence with:
-
-```bash
-python3 -m pytest tests/test_trajectory_state_semantic_expansion.py -q
-python3 -m pytest tests/test_trajectory_store*.py -q
-ruff check trajectory_store.py tests/test_trajectory_state_semantic_expansion.py
-git diff --check
-```
-
-Raw command logs are retained off-repo by the operator.
-
-Proof boundary: this proves the local working-tree fixes and exact baseline
-parity in the named CI-replica environment. It does not prove a pushed head,
-current-head remote CI, merge readiness, merge, release, deployment, or runtime
-adoption.
-
-## Round 2
-
-Reviewed head: `5a9259b5f53f04bd91b747c8be9bf420aec30b7c`
-
-| Raw comment ID | Terminal disposition | Fix | Reproducible validation evidence |
-| --- | --- | --- | --- |
-| `3674826213` | Verified; fixed in the local working tree. | The `resume=False` same-profile guard derives the requested digest from the active state profile's dimension under `BEGIN IMMEDIATE`, before any provider probe. The refusal test makes query probing fail if reached and asserts zero query calls. | `python3 -m pytest tests/test_trajectory_state_semantic_expansion.py -q` |
-| `3674826226` | Verified; fixed in the local working tree. | Cutover now flips predecessor and target flags with one ordered upsert statement: the predecessor is cleared before the target is activated, preserving the one-active unique index. The distinct-profile test traces the cutover and requires exactly one active-flag mutation statement. | `python3 -m pytest tests/test_trajectory_state_semantic_expansion.py -q` |
-| `3674838648` | Verified; fixed in the local working tree. | Added the positive distinct-profile `resume=False` test. It observes the prior staged row set deleted before fresh persistence, the new profile active, and the predecessor inactive with its rows unchanged. | `python3 -m pytest tests/test_trajectory_state_semantic_expansion.py -q` |
-| `3674880065` | Verified; fixed in the local working tree. | Removed the machine-local evidence path, published the exact regeneration commands, and recorded that raw logs remain off-repo. | `rg -n '/Vo[l]umes' FINDINGS-VERDICTS-BOTS.md` |
-
-Round 2 validation:
-
-```bash
-python3 -m pytest tests/test_trajectory_state_semantic_expansion.py -q
-# 31 passed
-python3 -m pytest tests/test_trajectory_store*.py -q
-# 15 passed
-ruff check trajectory_store.py tests/test_trajectory_state_semantic_expansion.py
-# All checks passed
-git diff --check
-# no output
-```
-
-The local full-suite CI-replica command could not reach test execution because
-the checkout does not contain CI's generated `agent.context_engine` stub; it
-stopped during collection with 22 import errors. The acceptance fallback above
-therefore uses the focused file plus `tests/test_trajectory_store*.py`.
-
-Proof boundary: Round 2 proves the four binding fixes in the local working tree
-and the named focused fallback checks. It does not prove a pushed head, remote
-CI, merge readiness, merge, release, deployment, or runtime adoption.
-
-## Round 3
-
-Reviewed head: `367e9b4`
-
-| Raw comment ID | Terminal disposition | Fix | Reproducible validation evidence |
-| --- | --- | --- | --- |
-| `3676895819` | Verified; fixed in the local working tree. | `_load_state_semantic_matrix()` now holds the store lock across its freshness and row reads, so a same-connection reader waits for the legacy table replacement transaction instead of observing the table between `DROP` and rename. The regression pauses migration immediately after the legacy table is dropped and requires the reader to return the expected serving state IDs only after migration resumes. | `python3 -m pytest tests/test_trajectory_state_semantic_expansion.py -q` |
-| `3676895821` | Verified; fixed in the local working tree. | Each embedding persistence transaction now rechecks that its target profile is inactive before upserting. The overlapping-builder regression holds a slow builder after embedding, lets a fast builder activate the shared target, then requires the slow builder to abort without changing any serving row. | `python3 -m pytest tests/test_trajectory_state_semantic_expansion.py -q` |
-
-Round 3 validation:
-
-```bash
-python3 -m pytest tests/test_trajectory_state_semantic_expansion.py -q
-# 33 passed
-python3 -m pytest tests/test_trajectory_store*.py -q
-# 15 passed
-ruff check trajectory_store.py tests/test_trajectory_state_semantic_expansion.py
-# All checks passed!
-git diff --check
-# no output
-```
-
-Proof boundary: Round 3 proves the two reported concurrency defects are fixed
-in the local working tree, the Round 2 pre-probe refusal and single-statement
-cutover tests remain green, and the named focused fallback checks pass. It does
-not prove a pushed head, remote CI, merge readiness, merge, release, deployment,
-or runtime adoption.
-
-## Round 4 — two codex P2 on head 9750790
+Binding contract: `coverage` continues to describe candidate reach. A resident
+scan that scores every candidate therefore remains `coverage="full"`.
+`KNNResult.scoring` is additive: resident/quantized scoring reports
+`int8_quantized`; exact float32 scoring reports `float32_exact`.
 
 | Row | Priority | Raw comment IDs | Terminal disposition | Validation and result |
 |---:|---|---|---|---|
-| R4-1 | P2 | 3677048438 | Fixed now | The pre-probe guard prefers the caller's resolved `dim` and infers from the serving profile only when the requested dimension is unknown — a distinct-dimension rebuild for the same provider/model is no longer falsely refused. Focused suite green. |
-| R4-2 | P2 | 3677048435 | Declined in-PR; filed as a fork issue | Full-backfill leasing hardens against two same-declared-identity providers returning DIFFERENT vectors — a provider-contract violation — on a default-off path. The round-3 recheck already prevents post-cutover rewrites (the serving-data hazard). Leasing is real hardening but out of proportion for this train; tracked as its own issue. |
+| 1 | High | 3673526888 | Fixed now | Reproduced that resident summary loads bypassed suppression. Resident count/load queries now join `summary_nodes` and exclude `suppressed_at IS NOT NULL` when that column exists; a warm-cache suppression regression test passes. |
+| 2 | High | 3673526894 | Fixed now | Reproduced the preallocated count/load overrun seam. Resident construction now rejects `end > count`, falls back to exact scoring, and rechecks profile version plus live count before publishing. |
+| 3 | High | 3673526904 | Fixed now | Reproduced orphan chunk reach after deleting its message. Resident count/load queries now join `messages`; warm resident entries are invalidated when live cardinality changes. |
+| 4 | High | 3674122396, 3674137273 | Fixed now | Applied the binding coverage/scoring decision to `KNNResult`, summary KNN, chunk KNN, docstrings, tests, and benchmark output. No coverage value was added or changed for resident reach. |
+| 5 | High | 3674426257, 3674426269, 3674426671, 3674426674 | Fixed now | Validated budget aliasing and cross-budget eviction. Registry keys include database path, data version, identity, and budget; stale purge/LRU enforcement is confined to the matching budget partition and cannot evict the protected warm key. |
+| 6 | High | 3674137283, 3674465153 | Fixed now | Validated that array bytes alone undercount resident memory and concurrent cold callers duplicate work. Entry sizing now includes Python list/item metadata, and a per-registry-key build lock with post-wait recheck produces one cold build. |
+| 7 | High | 3674426659, 3674465147 | Fixed now | Reproduced the shared `:memory:` registry namespace. Every in-memory store now receives a UUID-backed private namespace and drops its entries/build locks on close. |
+| 8 | High | 3673536547, 3673536580, 3674465157 | Fixed now | Reproduced loss of candidate recency order during streamed loads. An ordered temporary candidate table carries `candidate_ordinal`, and vector rows are emitted in that order; truncated scans now retain newest-first semantics. |
+| 9 | High | 3673536556, 3674465164 | Fixed now | Reproduced the host-parameter failure with SQLite's variable limit lowered to 8. Candidate IDs are inserted into the temporary table with bounded `executemany`; no corpus-sized `IN (...)` clause remains. |
+| 10 | Non-High | 3673526909, 3674426278 | Fixed now | Cold resident construction no longer reports loaded-but-unscored rows on a deadline; it falls back to exact deadline-aware scoring. Warm resident ranking reports completed batch boundaries. Existing int8 deadline and pooled float32 cache behaviors both pass. |
+| 11 | Non-High | 3673536562 | Already fixed at starting HEAD | Validated that data-version changes purge stale resident entries before lookup/publication. No additional change was required. |
+| 12 | Non-High | 3673536506, 3673536587 | Fixed now | Removed the inert resident-budget config from the test that overrides bytes directly. The duplicate-block refactor comment was already addressed and did not reproduce a supported-path failure, so no further refactor was added. |
+| 13 | Non-High | 3673505461 | Fixed now | Added legacy int8 decode parity proof: resident and retained exact arithmetic return identical IDs and scores within `1e-7`. |
+| 14 | Non-High | 3673505456 | Fixed now | Benchmark seeding now writes `archived=0` explicitly and output distinguishes first-query, page-cache-hot timing. The script was run successfully against both float32 and int8 profiles. |
+| 15 | Non-High | 3674122408, 3674426264 | Fixed now | Restored gold-vector exclusion assertions for max-row, time-budget, and absolute-deadline truncation tests. |
+| 16 | Non-High | 3673526897, 3674161057 | Fixed now | Benchmark setup removes the database plus WAL/SHM before seeding, making the same work directory rerunnable; two consecutive smoke runs completed. |
+| 17 | Non-High | 3673536473 | Fixed now | Renamed the benchmark's misleading `cold_ms` metric to `first_query_ms` and documents that filesystem page cache may already be warm. |
+| 18 | Non-High | 3673536476 | Fixed now | Benchmark CLI rejects `warm_runs < 1`; first and warm calls must report full reach, the requested result count, and matching top-k IDs. |
+| 19 | Non-High | 3673536512 | Fixed now | Added exact top-result assertions to the resident summary test and exact/resident identity and score parity checks for int8. |
+| 20 | Non-High | 3673536501, 3674161048 | Fixed now | Benchmark metadata now records git SHA, Python/NumPy versions, warm runs, batch/scan settings, resident use, and scoring; crossover sizes include 2,499 and 2,500 rows. |
+
+Parity result: 20/20 semantic rows and 34/34 raw comment IDs have a terminal
+disposition. Focused contract tests pass. The CI-replica suite, with one
+unrelated concurrency test run separately, has zero new or missing failure
+names relative to the recorded 35-failure baseline.
