@@ -13,6 +13,7 @@ import logging
 import math
 import sqlite3
 import struct
+import sys
 import threading
 import time
 import uuid
@@ -99,10 +100,6 @@ _SCAN_ALL_ROWS = -1
 # (observed failure at ~33k ids). Candidate id resolution loads ids into a temp
 # table in bounded chunks and JOINs instead, so it scales past that limit.
 _ID_INSERT_CHUNK = 500
-# Direct streaming loads can bind a bounded candidate set without a temp table.
-# Keep this comfortably below the ~33k host-parameter failure observed in the
-# existing store; larger/full-corpus scans use one unfiltered identity cursor.
-_STREAM_ID_FILTER_MAX = 10_000
 # Full scans below this measured crossover retain the pre-R1 temp-table loader.
 # The R1 streaming cursor wins above the crossover while avoiding the small-store
 # setup regression found by F39. See the R2-prime benchmark manifest.
@@ -110,11 +107,13 @@ _FAST_SCAN_STREAMING_MIN_ROWS = 2_500
 _SOURCE_LINEAGE_WORK_LIMIT = 4096
 
 # Full-corpus resident matrices outlive the per-query VectorStore instances that
-# use them. The key is (resolved db_path, data_version, identity_hash, budget_mb);
-# the registry itself is one process-wide LRU governed by the active budget.
+# use them. The key is (resolved db_path, data_version, identity_hash, budget_mb).
+# Each configured budget value owns an independent LRU partition; mixed-budget
+# stores therefore never evict one another using whichever ceiling queried last.
 _RESIDENT_MATRIX_REGISTRY_LOCK = threading.RLock()
 _RESIDENT_MATRIX_REGISTRY: "OrderedDict[tuple[str, int, str, int], tuple[list[int], list[str], list[str], Any, Any]]" = OrderedDict()
 _RESIDENT_MATRIX_INSTANCES: "weakref.WeakSet[VectorStore]" = weakref.WeakSet()
+_RESIDENT_MATRIX_BUILD_LOCKS: "dict[tuple[str, int, str, int], threading.Lock]" = {}
 
 
 def _drop_resident_registry_entry_locked(
@@ -293,19 +292,27 @@ def _pack_sign_bits(normalized: Sequence[float]) -> bytes:
 
 
 class KNNResult(list[tuple[str, float, str]]):
-    """Ranked KNN rows with result-level vector coverage metadata."""
+    """Ranked KNN rows with reach and score-representation metadata.
+
+    ``coverage`` describes candidate reach, not numerical precision: ``full``
+    means every requested candidate was scored. ``scoring`` separately
+    discloses whether scores came from exact float32 vectors or int8-quantized
+    vectors (including float32 corpora quantized for resident scoring).
+    """
 
     def __init__(
         self,
         rows: Sequence[tuple[str, float, str]] = (),
         *,
         coverage: str,
+        scoring: str | None = None,
         reason: str | None = None,
         scanned: int | None = None,
         total: int | None = None,
     ) -> None:
         super().__init__(rows)
         self.coverage = coverage
+        self.scoring = scoring
         self.reason = reason
         # Bounded-coverage provenance: how many of the corpus's live vectors were
         # actually scored (``scanned``) out of the total live for the identity
@@ -357,9 +364,18 @@ class VectorStore:
         config: LCMConfig | None = None,
         bounded_scan_rows: int | None = None,
     ) -> None:
+        raw_db_path = str(db_path)
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._resident_registry_db_path = str(self.db_path.resolve())
+        self._resident_registry_is_memory = raw_db_path == ":memory:"
+        if self._resident_registry_is_memory:
+            # Each ``:memory:`` connection owns an independent database. A
+            # resolved pseudo-path would pool unrelated corpora, and an object
+            # id can be reused after close while pooled entries intentionally
+            # survive, so use a durable per-connection namespace token.
+            self._resident_registry_db_path = f":memory:#{uuid.uuid4().hex}"
+        else:
+            self._resident_registry_db_path = str(self.db_path.resolve())
         resolved_config = config or LCMConfig.from_env()
         self.bounded_scan_rows = (
             resolved_config.embedding_bounded_scan_rows
@@ -1223,6 +1239,31 @@ class VectorStore:
         with self._temp_id_table(normalized) as table:
             yield table
 
+    @contextmanager
+    def _temp_ordered_id_table(self, ids: Sequence[str]) -> Iterator[str]:
+        """Stage candidate ids with their caller-defined recency ordinal."""
+        table = f"_lcm_ordered_id_scratch_{uuid.uuid4().hex}"
+        self._conn.execute(
+            f"CREATE TEMP TABLE {table}("
+            "id TEXT PRIMARY KEY, candidate_ordinal INTEGER NOT NULL)"
+        )
+        try:
+            for offset in range(0, len(ids), _ID_INSERT_CHUNK):
+                rows = [
+                    (str(value), offset + index)
+                    for index, value in enumerate(
+                        ids[offset:offset + _ID_INSERT_CHUNK]
+                    )
+                ]
+                self._conn.executemany(
+                    f"INSERT OR IGNORE INTO {table}(id, candidate_ordinal) "
+                    "VALUES(?, ?)",
+                    rows,
+                )
+            yield table
+        finally:
+            self._conn.execute(f"DROP TABLE IF EXISTS {table}")
+
     def purge_embeddings_for_nodes(self, node_ids: Sequence[int | str]) -> int:
         unique_ids = list(dict.fromkeys(str(node_id) for node_id in node_ids))
         if not unique_ids:
@@ -1365,19 +1406,28 @@ class VectorStore:
                 JOIN lcm_chunk_meta m
                   ON m.chunk_id = v.chunk_id
                  AND m.identity_hash = v.identity_hash
+                JOIN messages msg
+                  ON msg.store_id = m.store_id
                 WHERE v.identity_hash = ? AND m.archived = 0
                 """,
                 (str(identity_hash),),
             ).fetchone()
         else:
+            suppressed_clause = (
+                " AND sn.suppressed_at IS NULL"
+                if "suppressed_at" in self._table_columns("summary_nodes")
+                else ""
+            )
             row = self._conn.execute(
-                """
+                f"""
                 SELECT COUNT(*)
                 FROM lcm_embedding_vectors v
                 JOIN lcm_embedding_meta m
                   ON m.embedded_id = v.embedded_id
                  AND m.identity_hash = v.identity_hash
-                WHERE v.identity_hash = ? AND m.archived = 0
+                JOIN summary_nodes sn
+                  ON sn.node_id = CAST(m.embedded_id AS INTEGER)
+                WHERE v.identity_hash = ? AND m.archived = 0{suppressed_clause}
                 """,
                 (str(identity_hash),),
             ).fetchone()
@@ -1385,7 +1435,64 @@ class VectorStore:
 
     @staticmethod
     def _resident_entry_bytes(entry: tuple[Any, ...]) -> int:
-        return int(entry[3].nbytes) + int(entry[4].nbytes)
+        rowids, ids, kinds, matrix, scales = entry
+        metadata_bytes = sum(
+            sys.getsizeof(values)
+            + sum(sys.getsizeof(value) for value in values)
+            for values in (rowids, ids, kinds)
+        )
+        return int(matrix.nbytes) + int(scales.nbytes) + metadata_bytes
+
+    @staticmethod
+    def _purge_stale_resident_versions_locked(
+        registry_key: tuple[str, int, str, int],
+    ) -> None:
+        """Drop old profile versions in this database/budget namespace."""
+        for stale_key in list(_RESIDENT_MATRIX_REGISTRY):
+            if (
+                stale_key[0] == registry_key[0]
+                and stale_key[2] == registry_key[2]
+                and stale_key[3] == registry_key[3]
+                and stale_key[1] != registry_key[1]
+            ):
+                _drop_resident_registry_entry_locked(stale_key)
+
+    def _enforce_resident_budget_locked(
+        self,
+        registry_key: tuple[str, int, str, int],
+        *,
+        incoming_bytes: int = 0,
+        protected_key: tuple[str, int, str, int] | None = None,
+    ) -> bool:
+        """Evict LRU entries only within the caller's budget namespace.
+
+        The budget value is part of the pooled key, so stores configured with
+        different ceilings are independent partitions rather than enforcing
+        whichever ceiling happened to query last.
+        """
+        budget_mb = registry_key[3]
+        matching_keys = [
+            key for key in _RESIDENT_MATRIX_REGISTRY if key[3] == budget_mb
+        ]
+        used = sum(
+            self._resident_entry_bytes(_RESIDENT_MATRIX_REGISTRY[key])
+            for key in matching_keys
+        )
+        while used + incoming_bytes > self.knn_resident_max_bytes:
+            oldest_key = next(
+                (
+                    key
+                    for key in _RESIDENT_MATRIX_REGISTRY
+                    if key[3] == budget_mb and key != protected_key
+                ),
+                None,
+            )
+            if oldest_key is None:
+                return False
+            evicted = _drop_resident_registry_entry_locked(oldest_key)
+            if evicted is not None:
+                used -= self._resident_entry_bytes(evicted)
+        return True
 
     def _mark_resident_ineligible(
         self, key: tuple[bool, str, int]
@@ -1408,7 +1515,13 @@ class VectorStore:
         chunk: bool,
         deadline: float | None,
     ) -> tuple[list[int], list[str], list[str], Any, Any] | None:
-        """Return a budgeted, data-version-keyed int8-scored corpus matrix."""
+        """Return a budgeted, live-row-filtered int8-scored corpus matrix.
+
+        Cold builds are serialized per pooled key. The count is an admission
+        estimate only: the loader guards growth and rechecks live membership
+        before publication, so a concurrent commit cannot overrun a preallocated
+        matrix or publish a stale snapshot.
+        """
         if self.knn_resident_max_bytes <= 0:
             return None
         if _prescreen_deadline_expired(deadline, 0):
@@ -1421,142 +1534,142 @@ class VectorStore:
             str(identity_hash),
             self.knn_resident_max_mb,
         )
+        count = self._live_vector_count(identity_hash, chunk=chunk)
         with _RESIDENT_MATRIX_REGISTRY_LOCK:
-            for stale_key in list(_RESIDENT_MATRIX_REGISTRY):
-                if (
-                    stale_key[0] == registry_key[0]
-                    and stale_key[2] == registry_key[2]
-                    and stale_key[1] != registry_key[1]
-                ):
-                    _drop_resident_registry_entry_locked(stale_key)
+            self._purge_stale_resident_versions_locked(registry_key)
             cached = _RESIDENT_MATRIX_REGISTRY.get(registry_key)
             if cached is not None:
-                _RESIDENT_MATRIX_REGISTRY.move_to_end(registry_key)
-                used = sum(
-                    self._resident_entry_bytes(value)
-                    for value in _RESIDENT_MATRIX_REGISTRY.values()
-                )
-                while (
-                    _RESIDENT_MATRIX_REGISTRY
-                    and used > self.knn_resident_max_bytes
+                if len(cached[1]) != count:
+                    # Suppression and source-message deletion can change live
+                    # membership without touching the embedding profile version.
+                    _drop_resident_registry_entry_locked(registry_key)
+                    cached = None
+                elif self._enforce_resident_budget_locked(
+                    registry_key, protected_key=registry_key
                 ):
-                    oldest_key = next(iter(_RESIDENT_MATRIX_REGISTRY))
-                    evicted = _drop_resident_registry_entry_locked(oldest_key)
-                    if evicted is not None:
-                        used -= self._resident_entry_bytes(evicted)
-                cached = _RESIDENT_MATRIX_REGISTRY.get(registry_key)
-                if cached is not None:
+                    _RESIDENT_MATRIX_REGISTRY.move_to_end(registry_key)
                     self._resident_matrix_cache[key] = cached
                     self._resident_matrix_cache.move_to_end(key)
                     if _prescreen_deadline_expired(deadline, len(cached[1])):
-                        raise _PrescreenDeadlineExpired(len(cached[1]))
+                        # The matrix is loaded but ranking has not scored a row.
+                        raise _PrescreenDeadlineExpired()
                     return cached
-            if key in self._resident_ineligible_cache:
+                else:
+                    _drop_resident_registry_entry_locked(registry_key)
+            if deadline is not None:
+                # Do not spend an operation deadline constructing a cold
+                # accelerator: no row is scored until the whole matrix exists,
+                # so progress would be zero. Exact streaming below remains
+                # interruptible and reports rows that were actually scored.
+                return None
+            build_lock = _RESIDENT_MATRIX_BUILD_LOCKS.setdefault(
+                registry_key, threading.Lock()
+            )
+
+        with build_lock:
+            # Another caller may have completed the same cold build while this
+            # caller waited. Recheck before allocating a second corpus matrix.
+            count = self._live_vector_count(identity_hash, chunk=chunk)
+            with _RESIDENT_MATRIX_REGISTRY_LOCK:
+                self._purge_stale_resident_versions_locked(registry_key)
+                cached = _RESIDENT_MATRIX_REGISTRY.get(registry_key)
+                if cached is not None and len(cached[1]) == count:
+                    _RESIDENT_MATRIX_REGISTRY.move_to_end(registry_key)
+                    self._resident_matrix_cache[key] = cached
+                    self._resident_ineligible_cache.discard(key)
+                    return cached
+
+            required_bytes = count * (dim + 4)
+            if (
+                count == 0
+                or (
+                    dtype != _INT8_DTYPE
+                    and count < _FAST_SCAN_STREAMING_MIN_ROWS
+                )
+                or required_bytes > self.knn_resident_max_bytes
+            ):
+                self._mark_resident_ineligible(key)
+                return None
+            # A float32 identity with a complete sign-bit corpus explicitly
+            # selects the existing two-stage approximate-reach path.
+            if dtype != _INT8_DTYPE and self._binary_fully_synced(
+                identity_hash, chunk=chunk
+            ):
+                self._mark_resident_ineligible(key)
                 return None
 
-        count = self._live_vector_count(identity_hash, chunk=chunk)
-        required_bytes = count * (dim + 4)
-        if (
-            count == 0
-            or (
-                dtype != _INT8_DTYPE
-                and count < _FAST_SCAN_STREAMING_MIN_ROWS
-            )
-            or required_bytes > self.knn_resident_max_bytes
-        ):
-            self._mark_resident_ineligible(key)
-            return None
-        # A float32 identity with a complete sign-bit corpus explicitly selects
-        # the existing two-stage approximate path and its full_approx contract.
-        # R2-prime targets ordinary float32 profiles (the F39 stores had zero
-        # binary rows); int8 profiles continue to prefer exact residency.
-        if dtype != _INT8_DTYPE and self._binary_fully_synced(
-            identity_hash, chunk=chunk
-        ):
-            self._mark_resident_ineligible(key)
-            return None
-
-        matrix = numpy.empty((count, dim), dtype=numpy.int8)
-        scales = numpy.empty(count, dtype=numpy.float32)
-        rowids: list[int] = []
-        ids: list[str] = []
-        kinds: list[str] = []
-        loaded = 0
-        for (
-            batch_rowids,
-            batch_ids,
-            batch_kinds,
-            batch_matrix,
-            batch_scales,
-        ) in self._iter_vectorized_batches(
-            numpy,
-            identity_hash,
-            dim,
-            None,
-            dtype,
-            chunk=chunk,
-            batch_rows=max(1, self.bounded_scan_rows),
-            deadline=deadline,
-        ):
-            if batch_scales is None:
-                batch_matrix, batch_scales = self._quantize_float_matrix(
-                    numpy, batch_matrix
-                )
-            end = loaded + len(batch_ids)
-            matrix[loaded:end] = batch_matrix
-            scales[loaded:end] = batch_scales
-            rowids.extend(batch_rowids)
-            ids.extend(batch_ids)
-            kinds.extend(batch_kinds)
-            loaded = end
-            if _prescreen_deadline_expired(deadline, loaded):
-                raise _PrescreenDeadlineExpired(loaded)
-        if loaded != count:
-            # A missing/malformed live row cannot back a truthful full resident
-            # result. Fall through to R1, which reports the incomplete score as
-            # bounded instead of caching or overstating this partial matrix.
-            return None
-        entry = (rowids, ids, kinds, matrix, scales)
-
-        # A cross-process writer can commit while the cursor is loading. Never
-        # publish that stale snapshot under the old key; exact R1 will read the
-        # new version on this call, and the next call may establish residency.
-        if self._data_version(identity_hash) != data_version:
-            return None
-        entry_bytes = self._resident_entry_bytes(entry)
-        if entry_bytes > self.knn_resident_max_bytes:
-            return None
-        with _RESIDENT_MATRIX_REGISTRY_LOCK:
-            for stale_key in list(_RESIDENT_MATRIX_REGISTRY):
-                if (
-                    stale_key[0] == registry_key[0]
-                    and stale_key[2] == registry_key[2]
-                    and stale_key[1] != registry_key[1]
-                ):
-                    _drop_resident_registry_entry_locked(stale_key)
-            cached = _RESIDENT_MATRIX_REGISTRY.get(registry_key)
-            if cached is not None:
-                _RESIDENT_MATRIX_REGISTRY.move_to_end(registry_key)
-                self._resident_matrix_cache[key] = cached
-                self._resident_ineligible_cache.discard(key)
-                return cached
-            used = sum(
-                self._resident_entry_bytes(value)
-                for value in _RESIDENT_MATRIX_REGISTRY.values()
-            )
-            while (
-                _RESIDENT_MATRIX_REGISTRY
-                and used + entry_bytes > self.knn_resident_max_bytes
+            matrix = numpy.empty((count, dim), dtype=numpy.int8)
+            scales = numpy.empty(count, dtype=numpy.float32)
+            rowids: list[int] = []
+            ids: list[str] = []
+            kinds: list[str] = []
+            loaded = 0
+            for (
+                batch_rowids,
+                batch_ids,
+                batch_kinds,
+                batch_matrix,
+                batch_scales,
+            ) in self._iter_vectorized_batches(
+                numpy,
+                identity_hash,
+                dim,
+                None,
+                dtype,
+                chunk=chunk,
+                batch_rows=max(1, self.bounded_scan_rows),
+                deadline=deadline,
             ):
-                oldest_key = next(iter(_RESIDENT_MATRIX_REGISTRY))
-                evicted = _drop_resident_registry_entry_locked(oldest_key)
-                if evicted is None:
-                    continue
-                used -= self._resident_entry_bytes(evicted)
-            self._resident_ineligible_cache.discard(key)
-            _RESIDENT_MATRIX_REGISTRY[registry_key] = entry
-            self._resident_matrix_cache[key] = entry
-        return entry
+                if batch_scales is None:
+                    batch_matrix, batch_scales = self._quantize_float_matrix(
+                        numpy, batch_matrix
+                    )
+                end = loaded + len(batch_ids)
+                if end > count:
+                    # The count and cursor can observe adjacent snapshots. Abort
+                    # safely and let exact R1 read current state.
+                    return None
+                matrix[loaded:end] = batch_matrix
+                scales[loaded:end] = batch_scales
+                rowids.extend(batch_rowids)
+                ids.extend(batch_ids)
+                kinds.extend(batch_kinds)
+                loaded = end
+                if _prescreen_deadline_expired(deadline, loaded):
+                    # Loading is not scoring; KNNResult.scanned must remain zero.
+                    raise _PrescreenDeadlineExpired()
+            if loaded != count:
+                return None
+            entry = (rowids, ids, kinds, matrix, scales)
+
+            # Profile writes, suppression, and message deletion can all change
+            # the live snapshot. Never publish a matrix built across that change.
+            if (
+                self._data_version(identity_hash) != data_version
+                or self._live_vector_count(identity_hash, chunk=chunk) != count
+            ):
+                return None
+            entry_bytes = self._resident_entry_bytes(entry)
+            if entry_bytes > self.knn_resident_max_bytes:
+                self._mark_resident_ineligible(key)
+                return None
+            with _RESIDENT_MATRIX_REGISTRY_LOCK:
+                self._purge_stale_resident_versions_locked(registry_key)
+                cached = _RESIDENT_MATRIX_REGISTRY.get(registry_key)
+                if cached is not None:
+                    _RESIDENT_MATRIX_REGISTRY.move_to_end(registry_key)
+                    self._resident_matrix_cache[key] = cached
+                    self._resident_ineligible_cache.discard(key)
+                    return cached
+                if not self._enforce_resident_budget_locked(
+                    registry_key, incoming_bytes=entry_bytes
+                ):
+                    self._mark_resident_ineligible(key)
+                    return None
+                self._resident_ineligible_cache.discard(key)
+                _RESIDENT_MATRIX_REGISTRY[registry_key] = entry
+                self._resident_matrix_cache[key] = entry
+            return entry
 
     def _rank_resident_int8(
         self,
@@ -1567,7 +1680,7 @@ class VectorStore:
         *,
         deadline: float | None,
     ) -> list[tuple[str, float, str]]:
-        """Score every resident row exactly, with deadline checks per batch."""
+        """Score every resident row with disclosed int8-quantized arithmetic."""
         rowids, ids, kinds, matrix, scales = resident
         best: list[tuple[int, str, float, str]] = []
         batch_rows = max(1, self.bounded_scan_rows)
@@ -1755,43 +1868,36 @@ class VectorStore:
         chunk: bool,
         candidate_ids: Sequence[str] | None = None,
     ) -> sqlite3.Cursor:
-        """Stream every live vector row for one corpus/identity.
+        """Stream a full live corpus in stable vector-row order.
 
-        Candidate membership is applied by the caller while consuming this
-        cursor. This deliberately avoids the old temp-table INSERT/JOIN cycle;
-        a full scan now opens one cursor, even when scoring in many RAM-bounded
-        batches.
+        Candidate-restricted scans use ``_vector_rows_stream`` so their
+        caller-defined recency order is retained without a host-parameter-sized
+        ``IN`` clause. ``candidate_ids`` remains accepted for compatibility with
+        test instrumentation but membership is applied by that wrapper.
         """
-        filtered_ids = (
-            [str(value) for value in candidate_ids]
-            if candidate_ids is not None
-            and len(candidate_ids) <= _STREAM_ID_FILTER_MAX
-            else []
-        )
-        id_clause = ""
+        del candidate_ids
         args: list[object] = [str(identity_hash)]
-        if filtered_ids:
-            column = "v.chunk_id" if chunk else "v.embedded_id"
-            id_clause = (
-                f" AND {column} IN ("
-                + ",".join("?" for _ in filtered_ids)
-                + ")"
-            )
-            args.extend(filtered_ids)
         if chunk:
             return self._conn.execute(
-                f"""
+                """
                 SELECT v.rowid AS vector_rowid, v.chunk_id AS vector_id,
                        'chunk' AS vector_kind, v.vec AS vector_blob
                 FROM lcm_chunk_vectors v
                 JOIN lcm_chunk_meta m
                  ON m.chunk_id = v.chunk_id
                  AND m.identity_hash = v.identity_hash
-                WHERE v.identity_hash = ? AND m.archived = 0{id_clause}
+                JOIN messages msg
+                  ON msg.store_id = m.store_id
+                WHERE v.identity_hash = ? AND m.archived = 0
                 ORDER BY v.rowid
                 """,
                 args,
             )
+        suppressed_clause = (
+            " AND sn.suppressed_at IS NULL"
+            if "suppressed_at" in self._table_columns("summary_nodes")
+            else ""
+        )
         return self._conn.execute(
             f"""
             SELECT v.rowid AS vector_rowid, v.embedded_id AS vector_id,
@@ -1800,11 +1906,82 @@ class VectorStore:
             JOIN lcm_embedding_meta m
               ON m.embedded_id = v.embedded_id
              AND m.identity_hash = v.identity_hash
-            WHERE v.identity_hash = ? AND m.archived = 0{id_clause}
+            JOIN summary_nodes sn
+              ON sn.node_id = CAST(m.embedded_id AS INTEGER)
+            WHERE v.identity_hash = ? AND m.archived = 0{suppressed_clause}
             ORDER BY v.rowid
             """,
             args,
         )
+
+    def _ordered_vector_rows_cursor(
+        self, identity_hash: str, *, chunk: bool, candidate_table: str
+    ) -> sqlite3.Cursor:
+        """Stream selected live rows in the candidates' newest-first order."""
+        if chunk:
+            return self._conn.execute(
+                f"""
+                SELECT v.rowid AS vector_rowid, v.chunk_id AS vector_id,
+                       'chunk' AS vector_kind, v.vec AS vector_blob
+                FROM {candidate_table} t
+                JOIN lcm_chunk_vectors v
+                  ON v.chunk_id = t.id AND v.identity_hash = ?
+                JOIN lcm_chunk_meta m
+                  ON m.chunk_id = v.chunk_id
+                 AND m.identity_hash = v.identity_hash
+                JOIN messages msg
+                  ON msg.store_id = m.store_id
+                WHERE m.archived = 0
+                ORDER BY t.candidate_ordinal
+                """,
+                (str(identity_hash),),
+            )
+        suppressed_clause = (
+            " AND sn.suppressed_at IS NULL"
+            if "suppressed_at" in self._table_columns("summary_nodes")
+            else ""
+        )
+        return self._conn.execute(
+            f"""
+            SELECT v.rowid AS vector_rowid, v.embedded_id AS vector_id,
+                   m.embedded_kind AS vector_kind, v.vec AS vector_blob
+            FROM {candidate_table} t
+            JOIN lcm_embedding_vectors v
+              ON v.embedded_id = t.id AND v.identity_hash = ?
+            JOIN lcm_embedding_meta m
+              ON m.embedded_id = v.embedded_id
+             AND m.identity_hash = v.identity_hash
+            JOIN summary_nodes sn
+              ON sn.node_id = CAST(m.embedded_id AS INTEGER)
+            WHERE m.archived = 0{suppressed_clause}
+            ORDER BY t.candidate_ordinal
+            """,
+            (str(identity_hash),),
+        )
+
+    @contextmanager
+    def _vector_rows_stream(
+        self,
+        identity_hash: str,
+        *,
+        chunk: bool,
+        candidate_ids: Sequence[str] | None,
+    ) -> Iterator[sqlite3.Cursor]:
+        if candidate_ids is None:
+            cursor = self._vector_rows_cursor(identity_hash, chunk=chunk)
+            try:
+                yield cursor
+            finally:
+                cursor.close()
+            return
+        with self._temp_ordered_id_table(candidate_ids) as table:
+            cursor = self._ordered_vector_rows_cursor(
+                identity_hash, chunk=chunk, candidate_table=table
+            )
+            try:
+                yield cursor
+            finally:
+                cursor.close()
 
     @staticmethod
     def _vectorized_batch(
@@ -1853,35 +2030,35 @@ class VectorStore:
         expected_bytes = dim + 4 if dtype == _INT8_DTYPE else dim * 4
         pending: list[tuple[int, str, str, bytes]] = []
         completed = 0
-        cursor = self._vector_rows_cursor(
+        with self._vector_rows_stream(
             identity_hash, chunk=chunk, candidate_ids=candidate_ids
-        )
-        for row in cursor:
-            if _prescreen_deadline_expired(deadline, completed):
-                raise _PrescreenDeadlineExpired(completed)
-            vector_id = str(row["vector_id"])
-            if wanted is not None and vector_id not in wanted:
-                continue
-            try:
-                blob = bytes(row["vector_blob"])
-            except (TypeError, ValueError):
-                continue
-            if len(blob) != expected_bytes:
-                continue
-            pending.append(
-                (
-                    int(row["vector_rowid"]),
-                    vector_id,
-                    str(row["vector_kind"]),
-                    blob,
+        ) as cursor:
+            for row in cursor:
+                if _prescreen_deadline_expired(deadline, completed):
+                    raise _PrescreenDeadlineExpired(completed)
+                vector_id = str(row["vector_id"])
+                if wanted is not None and vector_id not in wanted:
+                    continue
+                try:
+                    blob = bytes(row["vector_blob"])
+                except (TypeError, ValueError):
+                    continue
+                if len(blob) != expected_bytes:
+                    continue
+                pending.append(
+                    (
+                        int(row["vector_rowid"]),
+                        vector_id,
+                        str(row["vector_kind"]),
+                        blob,
+                    )
                 )
-            )
-            if len(pending) >= max(1, int(batch_rows)):
+                if len(pending) >= max(1, int(batch_rows)):
+                    yield self._vectorized_batch(numpy, pending, dim, dtype)
+                    completed += len(pending)
+                    pending = []
+            if pending:
                 yield self._vectorized_batch(numpy, pending, dim, dtype)
-                completed += len(pending)
-                pending = []
-        if pending:
-            yield self._vectorized_batch(numpy, pending, dim, dtype)
 
     def _load_vector_matrix(
         self,
@@ -1924,7 +2101,7 @@ class VectorStore:
         *,
         chunk: bool,
     ) -> tuple[list[int], list[str], list[str], list[list[float]]]:
-        """Dependency-free fallback over the same no-temp-table cursor."""
+        """Dependency-free fallback over the same ordered live-row stream."""
         wanted = {str(value) for value in candidate_ids}
         rowids: list[int] = []
         ids: list[str] = []
@@ -1932,24 +2109,25 @@ class VectorStore:
         vectors: list[list[float]] = []
         if not wanted:
             return rowids, ids, kinds, vectors
-        for row in self._vector_rows_cursor(
+        with self._vector_rows_stream(
             identity_hash, chunk=chunk, candidate_ids=candidate_ids
-        ):
-            vector_id = str(row["vector_id"])
-            if vector_id not in wanted:
-                continue
-            try:
-                vector = self._decode_stored_vec(
-                    bytes(row["vector_blob"]), dim, dtype
-                )
-            except (TypeError, ValueError):
-                continue
-            if vector is None:
-                continue
-            rowids.append(int(row["vector_rowid"]))
-            ids.append(vector_id)
-            kinds.append(str(row["vector_kind"]))
-            vectors.append(list(vector))
+        ) as cursor:
+            for row in cursor:
+                vector_id = str(row["vector_id"])
+                if vector_id not in wanted:
+                    continue
+                try:
+                    vector = self._decode_stored_vec(
+                        bytes(row["vector_blob"]), dim, dtype
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if vector is None:
+                    continue
+                rowids.append(int(row["vector_rowid"]))
+                ids.append(vector_id)
+                kinds.append(str(row["vector_kind"]))
+                vectors.append(list(vector))
         return rowids, ids, kinds, vectors
 
     def _load_vectors_for_ids(
@@ -2185,6 +2363,7 @@ class VectorStore:
         scanned = 0
         stopped_early = False
         started = _monotonic()
+        batches = None
         try:
             batches = self._iter_vectorized_batches(
                 numpy,
@@ -2223,6 +2402,9 @@ class VectorStore:
         except _PrescreenDeadlineExpired as exc:
             scanned = max(scanned, exc.scanned)
             stopped_early = scanned < len(candidate_ids)
+        finally:
+            if batches is not None:
+                batches.close()
         if scanned < len(candidate_ids):
             stopped_early = True
         best.sort(key=self._rank_key)
@@ -2726,6 +2908,13 @@ class VectorStore:
         scan_budget_s: float = 0.0,
         deadline: float | None = None,
     ) -> KNNResult:
+        """Summary KNN with independent reach and scoring disclosure.
+
+        ``coverage`` reports how much of the requested candidate set was
+        reached. ``scoring`` is ``float32_exact`` on exact float paths and
+        ``int8_quantized`` whenever int8 values are scored, including resident
+        quantize-on-load scans whose reach remains ``coverage="full"``.
+        """
         operation_started = _monotonic()
         k = int(k)
         if k <= 0:
@@ -2752,6 +2941,9 @@ class VectorStore:
         identity = str(profile["identity_hash"])
         dim = int(profile["dim"])
         dtype = str(profile["dtype"])
+        exact_scoring = (
+            "int8_quantized" if dtype == _INT8_DTYPE else "float32_exact"
+        )
         query = self._normalized(query_vec, expected_dim=dim)
         try:
             numpy = _load_numpy()
@@ -2785,10 +2977,15 @@ class VectorStore:
                         k,
                         deadline=deadline,
                     )
-                    return KNNResult(candidates, coverage="full")
+                    return KNNResult(
+                        candidates,
+                        coverage="full",
+                        scoring="int8_quantized",
+                    )
             except _PrescreenDeadlineExpired as exc:
                 return KNNResult(
                     coverage="bounded",
+                    scoring="int8_quantized",
                     scanned=exc.scanned,
                     total=self._count_embedded_vectors(identity, chunk=False),
                 )
@@ -2828,11 +3025,12 @@ class VectorStore:
             except _PrescreenDeadlineExpired as exc:
                 return KNNResult(
                     coverage="bounded",
+                    scoring=exact_scoring,
                     scanned=exc.scanned,
                     total=self._count_embedded_vectors(identity, chunk=False),
                 )
             if binary_matrix.shape[0] == 0:
-                return KNNResult(coverage="none")
+                return KNNResult(coverage="none", scoring=exact_scoring)
             try:
                 candidates = self._two_stage_rank(
                     numpy,
@@ -2849,13 +3047,18 @@ class VectorStore:
             except _PrescreenDeadlineExpired as exc:
                 return KNNResult(
                     coverage="bounded",
+                    scoring=exact_scoring,
                     scanned=exc.scanned,
                     total=len(binary_ids),
                 )
             # coverage='full_approx' (FIX 2): the whole corpus is REACHED, but
             # stage-1 Hamming keeps only M=mult*k survivors, so top-k is an
             # approximate (recall@M) result, not exact like the exact-scan 'full'.
-            return KNNResult(candidates, coverage="full_approx")
+            return KNNResult(
+                candidates,
+                coverage="full_approx",
+                scoring=exact_scoring,
+            )
 
         probe_limit, scan_limit = self._scan_limits(
             full_scan=full_scan, scan_max_rows=scan_max_rows
@@ -2884,15 +3087,20 @@ class VectorStore:
                 scan_deadline,
             )
         except _UnverifiableProvenance:
-            return KNNResult(coverage="none", reason="unverifiable_provenance")
+            return KNNResult(
+                coverage="none",
+                scoring=exact_scoring,
+                reason="unverifiable_provenance",
+            )
         except _PrescreenDeadlineExpired as exc:
             return KNNResult(
                 coverage="bounded",
+                scoring=exact_scoring,
                 scanned=exc.scanned,
                 total=self._count_embedded_vectors(identity, chunk=False),
             )
         if not probed_ids:
-            return KNNResult(coverage="none")
+            return KNNResult(coverage="none", scoring=exact_scoring)
         scan_ids = probed_ids if scan_limit is None else probed_ids[:scan_limit]
         candidate_coverage = (
             "bounded"
@@ -2904,7 +3112,12 @@ class VectorStore:
         if numpy is not None:
             query_array = numpy.asarray(query, dtype=numpy.float32)
 
-            if self._use_streaming_scan(
+            # Deadline-aware int8 decoding must preserve its per-batch scored-row
+            # accounting. Small float32 scans keep the retained single-batch LRU
+            # path so pooled recall calls still warm and reuse their matrix.
+            if (
+                deadline is not None and dtype == _INT8_DTYPE
+            ) or self._use_streaming_scan(
                 len(scan_ids), max(1, self.bounded_scan_rows)
             ):
                 candidates, scanned_rows, stopped_early = (
@@ -2928,7 +3141,11 @@ class VectorStore:
                     scanned = scanned_rows
                     total = self._count_embedded_vectors(identity, chunk=False)
                 return KNNResult(
-                    candidates, coverage=coverage, scanned=scanned, total=total
+                    candidates,
+                    coverage=coverage,
+                    scoring=exact_scoring,
+                    scanned=scanned,
+                    total=total,
                 )
 
             def score_batch(
@@ -2976,7 +3193,13 @@ class VectorStore:
         if coverage == "bounded":
             scanned = scanned_rows
             total = self._count_embedded_vectors(identity, chunk=False)
-        return KNNResult(candidates, coverage=coverage, scanned=scanned, total=total)
+        return KNNResult(
+            candidates,
+            coverage=coverage,
+            scoring=exact_scoring,
+            scanned=scanned,
+            total=total,
+        )
 
     def _scan_limits(
         self, *, full_scan: bool, scan_max_rows: int
@@ -3436,13 +3659,15 @@ class VectorStore:
         scan_budget_s: float = 0.0,
         deadline: float | None = None,
     ) -> KNNResult:
-        """Chunk KNN with the summary coverage contract.
+        """Chunk KNN with the summary reach/scoring contract.
 
         Coverage is full|bounded|none exactly as for summaries: ``none`` when
         the corpus/identity is unbackfilled or a requested filter is
         unverifiable (missing message column), ``bounded`` when the scan was
         cut short by a hard cap, latency budget, or operation deadline, and
         ``full`` when the requested candidate set was scanned completely.
+        Scoring is disclosed separately as ``float32_exact`` or
+        ``int8_quantized``.
         """
         operation_started = _monotonic()
         k = int(k)
@@ -3467,6 +3692,9 @@ class VectorStore:
         identity = str(profile["identity_hash"])
         dim = int(profile["dim"])
         dtype = str(profile["dtype"])
+        exact_scoring = (
+            "int8_quantized" if dtype == _INT8_DTYPE else "float32_exact"
+        )
         query = self._normalized(query_vec, expected_dim=dim)
         try:
             numpy = _load_numpy()
@@ -3500,10 +3728,15 @@ class VectorStore:
                         k,
                         deadline=deadline,
                     )
-                    return KNNResult(candidates, coverage="full")
+                    return KNNResult(
+                        candidates,
+                        coverage="full",
+                        scoring="int8_quantized",
+                    )
             except _PrescreenDeadlineExpired as exc:
                 return KNNResult(
                     coverage="bounded",
+                    scoring="int8_quantized",
                     scanned=exc.scanned,
                     total=self._count_embedded_vectors(identity, chunk=True),
                 )
@@ -3546,11 +3779,12 @@ class VectorStore:
             except _PrescreenDeadlineExpired as exc:
                 return KNNResult(
                     coverage="bounded",
+                    scoring=exact_scoring,
                     scanned=exc.scanned,
                     total=self._count_embedded_vectors(identity, chunk=True),
                 )
             if binary_matrix.shape[0] == 0:
-                return KNNResult(coverage="none")
+                return KNNResult(coverage="none", scoring=exact_scoring)
             try:
                 candidates = self._two_stage_rank(
                     numpy,
@@ -3567,12 +3801,17 @@ class VectorStore:
             except _PrescreenDeadlineExpired as exc:
                 return KNNResult(
                     coverage="bounded",
+                    scoring=exact_scoring,
                     scanned=exc.scanned,
                     total=len(binary_ids),
                 )
             # coverage='full_approx' (FIX 2): whole corpus reached, but stage-1
             # keeps only M=mult*k survivors -> approximate top-k, not exact.
-            return KNNResult(candidates, coverage="full_approx")
+            return KNNResult(
+                candidates,
+                coverage="full_approx",
+                scoring=exact_scoring,
+            )
 
         probe_limit, scan_limit = self._scan_limits(
             full_scan=full_scan, scan_max_rows=scan_max_rows
@@ -3600,11 +3839,12 @@ class VectorStore:
         except _PrescreenDeadlineExpired as exc:
             return KNNResult(
                 coverage="bounded",
+                scoring=exact_scoring,
                 scanned=exc.scanned,
                 total=self._count_embedded_vectors(identity, chunk=True),
             )
         if not probed_ids:
-            return KNNResult(coverage="none")
+            return KNNResult(coverage="none", scoring=exact_scoring)
         scan_ids = probed_ids if scan_limit is None else probed_ids[:scan_limit]
         candidate_coverage = (
             "bounded"
@@ -3615,7 +3855,11 @@ class VectorStore:
         if numpy is not None:
             query_array = numpy.asarray(query, dtype=numpy.float32)
 
-            if self._use_streaming_scan(
+            # Match the summary arm: int8 deadlines use the scored-row-aware
+            # streaming decoder; small float32 calls retain their pooled LRU.
+            if (
+                deadline is not None and dtype == _INT8_DTYPE
+            ) or self._use_streaming_scan(
                 len(scan_ids), max(1, self.bounded_scan_rows)
             ):
                 candidates, scanned_rows, stopped_early = (
@@ -3639,7 +3883,11 @@ class VectorStore:
                     scanned = scanned_rows
                     total = self._count_embedded_vectors(identity, chunk=True)
                 return KNNResult(
-                    candidates, coverage=coverage, scanned=scanned, total=total
+                    candidates,
+                    coverage=coverage,
+                    scoring=exact_scoring,
+                    scanned=scanned,
+                    total=total,
                 )
 
             def score_batch(
@@ -3674,7 +3922,13 @@ class VectorStore:
         if coverage == "bounded":
             scanned = scanned_rows
             total = self._count_embedded_vectors(identity, chunk=True)
-        return KNNResult(candidates, coverage=coverage, scanned=scanned, total=total)
+        return KNNResult(
+            candidates,
+            coverage=coverage,
+            scoring=exact_scoring,
+            scanned=scanned,
+            total=total,
+        )
 
     def _current_chunk_profile(self) -> sqlite3.Row | None:
         """The active profile registered under task='chunk' (most recent)."""
@@ -3705,6 +3959,13 @@ class VectorStore:
             self._binary_matrix_cache.clear()
             self._chunk_binary_matrix_cache.clear()
         with _RESIDENT_MATRIX_REGISTRY_LOCK:
+            if getattr(self, "_resident_registry_is_memory", False):
+                _drop_resident_registry_db_locked(
+                    self._resident_registry_db_path
+                )
+                for build_key in list(_RESIDENT_MATRIX_BUILD_LOCKS):
+                    if build_key[0] == self._resident_registry_db_path:
+                        _RESIDENT_MATRIX_BUILD_LOCKS.pop(build_key, None)
             self._resident_matrix_cache.clear()
             self._resident_ineligible_cache.clear()
             _RESIDENT_MATRIX_INSTANCES.discard(self)

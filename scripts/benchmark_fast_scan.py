@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
-"""Time cold/warm #171 KNN and compare pre-R1 vs streaming scan paths."""
+"""Time first-query/warm #171 KNN and compare simple vs streaming paths.
+
+The first query builds process-local residency but runs against page-cache-hot
+data seeded by this process; it is not an I/O-cold measurement.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
+import platform
 import sqlite3
 import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -22,7 +28,16 @@ from benchmarking.replay import _ensure_hermes_lcm_package
 
 
 SIZES = (10_000, 50_000, 185_000)
-CROSSOVER_SIZES = (500, 1_000, 2_000, 5_000, 10_000, 20_000)
+CROSSOVER_SIZES = (
+    500,
+    1_000,
+    2_000,
+    2_499,
+    2_500,
+    5_000,
+    10_000,
+    20_000,
+)
 MODEL = "fast-scan-synthetic"
 PROVIDER = "bench"
 DIM = 384
@@ -35,6 +50,8 @@ def _seed(
     *,
     dtype: str,
 ) -> None:
+    for suffix in ("", "-wal", "-shm"):
+        db_path.with_name(f"{db_path.name}{suffix}").unlink(missing_ok=True)
     _ensure_hermes_lcm_package()
     from hermes_lcm.vector_store import VectorStore
 
@@ -110,8 +127,8 @@ def _seed(
                     """
                     INSERT INTO lcm_chunk_meta(
                         chunk_id, identity_hash, store_id, chunk_index,
-                        char_start, char_end, token_estimate, embedded_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        char_start, char_end, token_estimate, embedded_at, archived
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
                     """,
                     meta_rows,
                 )
@@ -137,6 +154,8 @@ def _time_one(
     batch_rows: int,
     path: str,
 ) -> dict[str, object]:
+    if warm_runs < 1:
+        raise ValueError("warm_runs must be >= 1")
     _ensure_hermes_lcm_package()
     import hermes_lcm.vector_store as vector_store_module
     from hermes_lcm.config import LCMConfig
@@ -165,7 +184,14 @@ def _time_one(
             provider=PROVIDER,
             full_scan=True,
         )
-        cold_ms = (time.perf_counter() - started) * 1_000.0
+        first_query_ms = (time.perf_counter() - started) * 1_000.0
+        if cold.coverage != "full":
+            raise RuntimeError(f"first-query coverage mismatch: {cold.coverage}")
+        expected_k = min(50, count)
+        if len(cold) != expected_k:
+            raise RuntimeError(
+                f"first-query result count mismatch: {len(cold)} != {expected_k}"
+            )
         warm_ms = []
         for _ in range(warm_runs):
             started = time.perf_counter()
@@ -177,20 +203,33 @@ def _time_one(
                 full_scan=True,
             )
             warm_ms.append((time.perf_counter() - started) * 1_000.0)
-        if cold.coverage != "full" or warm.coverage != "full":
-            raise RuntimeError(
-                f"coverage mismatch: cold={cold.coverage}, warm={warm.coverage}"
-            )
+        if warm.coverage != "full":
+            raise RuntimeError(f"warm coverage mismatch: {warm.coverage}")
+        if [row[0] for row in cold] != [row[0] for row in warm]:
+            raise RuntimeError("first-query and warm top-k ids differ")
+        git_sha = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
         return {
             "n": count,
             "dim": DIM,
             "path": path,
             "batch_rows": batch_rows,
+            "embedding_bounded_scan_rows": batch_rows,
             "resident_max_mb": resident_max_mb,
-            "cold_ms": round(cold_ms, 3),
+            "resident_used": bool(store._resident_matrix_cache),
+            "first_query_ms": round(first_query_ms, 3),
             "warm_ms": [round(value, 3) for value in warm_ms],
             "warm_p50_ms": round(float(np.median(warm_ms)), 3),
             "coverage": warm.coverage,
+            "scoring": warm.scoring,
+            "git_sha": git_sha,
+            "python_version": platform.python_version(),
+            "numpy_version": np.__version__,
+            "warm_runs": warm_runs,
             "_ranked": list(warm),
         }
     finally:
@@ -212,6 +251,8 @@ def main() -> int:
     invalid = [size for size in sizes if size <= 0]
     if invalid:
         parser.error(f"--sizes must be positive: {invalid}")
+    if args.warm_runs < 1:
+        parser.error("--warm-runs must be >= 1")
 
     def run(root: Path) -> None:
         for count in sizes:
@@ -231,7 +272,7 @@ def main() -> int:
                     resident_max_mb=(
                         0 if args.compare_loaders else max(0, args.resident_max_mb)
                     ),
-                    warm_runs=max(1, args.warm_runs),
+                    warm_runs=args.warm_runs,
                     batch_rows=max(1, args.batch_rows),
                     path=path,
                 )

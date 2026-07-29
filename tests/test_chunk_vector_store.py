@@ -348,6 +348,8 @@ def test_float32_residency_overlaps_exact_top_k_with_quantized_scores(
         exact_ids = {row[0] for row in exact}
         resident_ids = {row[0] for row in resident}
         assert exact.coverage == resident.coverage == "full"
+        assert exact.scoring == "float32_exact"
+        assert resident.scoring == "int8_quantized"
         assert len(exact_ids & resident_ids) / k >= 0.9
         exact_scores = dict((row[0], row[1]) for row in exact)
         assert any(
@@ -506,7 +508,40 @@ def test_int8_residency_reuses_matrix_and_write_forces_full_reload(
         )
 
         assert cold.coverage == warm.coverage == "full"
+        assert cold.scoring == warm.scoring == "int8_quantized"
         assert list(cold) == list(warm)
+        rows = store.connection.execute(
+            """
+            SELECT v.rowid, v.chunk_id, v.vec
+            FROM lcm_chunk_vectors v
+            JOIN lcm_chunk_meta m
+              ON m.chunk_id = v.chunk_id
+             AND m.identity_hash = v.identity_hash
+            JOIN messages msg ON msg.store_id = m.store_id
+            WHERE v.identity_hash = ? AND m.archived = 0
+            """,
+            (identity.identity_hash,),
+        ).fetchall()
+        query = [1.0, 0.0, 0.0, 0.0]
+        decoded = [
+            vector_store_module._decode_int8_vector(bytes(row["vec"]), DIM)
+            for row in rows
+        ]
+        legacy_scores = [
+            sum(value * query_value for value, query_value in zip(vector, query))
+            for vector in decoded
+        ]
+        expected = store._ranked(
+            [int(row["rowid"]) for row in rows],
+            [str(row["chunk_id"]) for row in rows],
+            ["chunk"] * len(rows),
+            legacy_scores,
+            2,
+        )
+        assert [row[0] for row in cold] == [row[0] for row in expected]
+        assert [row[1] for row in cold] == pytest.approx(
+            [row[1] for row in expected], abs=1e-7
+        )
         assert calls == [True]
         assert len(store._resident_matrix_cache) == 1
 
@@ -538,6 +573,50 @@ def test_int8_residency_reuses_matrix_and_write_forces_full_reload(
         store.close()
 
 
+def test_warm_chunk_residency_drops_orphans_when_message_is_deleted(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
+    db_path = tmp_path / "chunk-resident-orphan.db"
+    _seed_messages(
+        db_path,
+        [
+            (0, "s", "history", "user", "m", 0.0),
+            (1, "s", "history", "user", "m", 1.0),
+        ],
+    )
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=1),
+        bounded_scan_rows=1,
+    )
+    store.register_profile(MODEL, PROVIDER, DIM, task="chunk")
+    try:
+        _write(store, "0:0", 0, 0, [1.0, 0.0, 0.0, 0.0])
+        _write(store, "1:0", 1, 0, [0.0, 1.0, 0.0, 0.0])
+        cold = store.knn_chunks(
+            [1.0, 0.0, 0.0, 0.0],
+            k=2,
+            model=MODEL,
+            provider=PROVIDER,
+            full_scan=True,
+        )
+        assert {row[0] for row in cold} == {"0:0", "1:0"}
+
+        store.connection.execute("DELETE FROM messages WHERE store_id = 0")
+        warm = store.knn_chunks(
+            [1.0, 0.0, 0.0, 0.0],
+            k=2,
+            model=MODEL,
+            provider=PROVIDER,
+            full_scan=True,
+        )
+        assert warm.coverage == "full"
+        assert [row[0] for row in warm] == ["1:0"]
+    finally:
+        store.close()
+
+
 def test_int8_over_resident_budget_falls_back_to_exact_r1(
     tmp_path, monkeypatch
 ):
@@ -552,7 +631,6 @@ def test_int8_over_resident_budget_falls_back_to_exact_r1(
     )
     store = VectorStore(
         db_path,
-        config=LCMConfig(knn_resident_max_mb=1),
         bounded_scan_rows=1,
     )
     identity = EmbeddingIdentity.canonical(

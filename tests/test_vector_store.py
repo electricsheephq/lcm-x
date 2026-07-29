@@ -674,6 +674,8 @@ def test_summary_int8_full_scan_uses_exact_residency(tmp_path, monkeypatch):
                 vec,
                 identity=identity,
             )
+            if index == 0:
+                expected_top = node_id
 
         result = store.knn(
             [1.0, 0.0, 0.0],
@@ -684,7 +686,9 @@ def test_summary_int8_full_scan_uses_exact_residency(tmp_path, monkeypatch):
         )
 
         assert result.coverage == "full"
+        assert result.scoring == "int8_quantized"
         assert len(result) == 3
+        assert result[0][0] == str(expected_top)
         assert len(store._resident_matrix_cache) == 1
         assert next(iter(store._resident_matrix_cache))[0] is False
     finally:
@@ -697,11 +701,13 @@ def empty_resident_registry():
     registry = vector_store_module._RESIDENT_MATRIX_REGISTRY
     with vector_store_module._RESIDENT_MATRIX_REGISTRY_LOCK:
         registry.clear()
+        vector_store_module._RESIDENT_MATRIX_BUILD_LOCKS.clear()
     try:
         yield registry
     finally:
         with vector_store_module._RESIDENT_MATRIX_REGISTRY_LOCK:
             registry.clear()
+            vector_store_module._RESIDENT_MATRIX_BUILD_LOCKS.clear()
 
 
 def test_residency_survives_close_and_invalidates_on_data_version(
@@ -779,6 +785,113 @@ def test_residency_survives_close_and_invalidates_on_data_version(
         dag.close()
 
 
+def test_resident_summary_filters_suppressed_rows_before_and_after_warmup(
+    tmp_path, monkeypatch, empty_resident_registry
+):
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
+    db_path = tmp_path / "resident-suppressed.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=1),
+        bounded_scan_rows=1,
+    )
+    try:
+        store.connection.execute(
+            "ALTER TABLE summary_nodes ADD COLUMN suppressed_at TEXT"
+        )
+        first = _add_summary(dag, created_at=1.0)
+        second = _add_summary(dag, created_at=2.0)
+        third = _add_summary(dag, created_at=3.0)
+        store.register_profile("scan", "local", 3)
+        _record_embedding(
+            store, first, "summary", "scan", [1.0, 0.0, 0.0]
+        )
+        _record_embedding(
+            store, second, "summary", "scan", [0.8, 0.2, 0.0]
+        )
+        _record_embedding(
+            store, third, "summary", "scan", [0.0, 1.0, 0.0]
+        )
+        store.connection.execute(
+            "UPDATE summary_nodes SET suppressed_at = 'before' "
+            "WHERE node_id = ?",
+            (first,),
+        )
+
+        cold = store.knn(
+            [1.0, 0.0, 0.0], k=3, model="scan", full_scan=True
+        )
+        assert cold.coverage == "full"
+        assert str(first) not in {row[0] for row in cold}
+        assert len(cold) == 2
+
+        store.connection.execute(
+            "UPDATE summary_nodes SET suppressed_at = 'after' "
+            "WHERE node_id = ?",
+            (second,),
+        )
+        warm = store.knn(
+            [1.0, 0.0, 0.0], k=3, model="scan", full_scan=True
+        )
+        assert warm.coverage == "full"
+        assert [row[0] for row in warm] == [str(third)]
+        assert len(next(iter(empty_resident_registry.values()))[1]) == 1
+    finally:
+        store.close()
+        dag.close()
+
+
+def test_resident_count_growth_falls_back_without_matrix_overrun(
+    tmp_path, monkeypatch, empty_resident_registry
+):
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
+    db_path = tmp_path / "resident-count-race.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=1),
+        bounded_scan_rows=1,
+    )
+    try:
+        _seed_scan_corpus(
+            dag,
+            store,
+            3,
+            gold_vector=[1.0, 0.0, 0.0],
+            filler_vector=[0.0, 1.0, 0.0],
+        )
+        actual_count = VectorStore._live_vector_count
+
+        def stale_count(self, identity_hash, *, chunk):
+            return actual_count(self, identity_hash, chunk=chunk) - 1
+
+        monkeypatch.setattr(VectorStore, "_live_vector_count", stale_count)
+        result = store.knn(
+            [1.0, 0.0, 0.0], k=3, model="scan", full_scan=True
+        )
+
+        assert result.coverage == "full"
+        assert result.scoring == "float32_exact"
+        assert len(result) == 3
+        assert empty_resident_registry == {}
+    finally:
+        store.close()
+        dag.close()
+
+
+def test_in_memory_resident_registry_namespaces_are_unique():
+    first = VectorStore(":memory:")
+    second = VectorStore(":memory:")
+    try:
+        assert first._resident_registry_db_path != second._resident_registry_db_path
+        assert first._resident_registry_db_path.startswith(":memory:#")
+        assert second._resident_registry_db_path.startswith(":memory:#")
+    finally:
+        first.close()
+        second.close()
+
+
 def test_resident_registry_evicts_lru_across_databases(
     tmp_path, monkeypatch, empty_resident_registry
 ):
@@ -813,7 +926,7 @@ def test_resident_registry_evicts_lru_across_databases(
                 gold_vector=[1.0, 0.0, 0.0],
                 filler_vector=[0.0, 1.0, 0.0],
             )
-            store.knn_resident_max_bytes = 20
+            store.knn_resident_max_bytes = 800
             stores_and_dags.append((store, dag))
 
         first, _ = stores_and_dags[0]
@@ -843,6 +956,159 @@ def test_resident_registry_evicts_lru_across_databases(
             dag.close()
 
 
+def test_resident_budget_partitions_do_not_evict_other_store_budgets(
+    tmp_path, monkeypatch, empty_resident_registry
+):
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
+    stores_and_dags = []
+    try:
+        for name, budget_mb in (("small", 1), ("large", 2)):
+            db_path = tmp_path / f"{name}.db"
+            dag = SummaryDAG(db_path)
+            store = VectorStore(
+                db_path,
+                config=LCMConfig(knn_resident_max_mb=budget_mb),
+                bounded_scan_rows=1,
+            )
+            _seed_scan_corpus(
+                dag,
+                store,
+                2,
+                gold_vector=[1.0, 0.0, 0.0],
+                filler_vector=[0.0, 1.0, 0.0],
+            )
+            store.knn_resident_max_bytes = 800
+            stores_and_dags.append((store, dag))
+
+        for store, _ in stores_and_dags:
+            result = store.knn(
+                [1.0, 0.0, 0.0],
+                k=1,
+                model="scan",
+                full_scan=True,
+            )
+            assert result.coverage == "full"
+
+        assert len(empty_resident_registry) == 2
+        assert {key[3] for key in empty_resident_registry} == {1, 2}
+    finally:
+        for store, dag in stores_and_dags:
+            store.close()
+            dag.close()
+
+
+def test_resident_budget_counts_metadata_not_only_numpy_arrays(
+    tmp_path, monkeypatch, empty_resident_registry
+):
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
+    db_path = tmp_path / "resident-metadata-budget.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=1),
+        bounded_scan_rows=1,
+    )
+    try:
+        _seed_scan_corpus(
+            dag,
+            store,
+            2,
+            gold_vector=[1.0, 0.0, 0.0],
+            filler_vector=[0.0, 1.0, 0.0],
+        )
+        store.knn_resident_max_bytes = 20
+        result = store.knn(
+            [1.0, 0.0, 0.0], k=2, model="scan", full_scan=True
+        )
+
+        assert result.coverage == "full"
+        assert result.scoring == "float32_exact"
+        assert empty_resident_registry == {}
+    finally:
+        store.close()
+        dag.close()
+
+
+def test_same_key_concurrent_cold_scans_build_one_resident_matrix(
+    tmp_path, monkeypatch, empty_resident_registry
+):
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
+    db_path = tmp_path / "resident-concurrent.db"
+    dag = SummaryDAG(db_path)
+    first = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=1),
+        bounded_scan_rows=1,
+    )
+    second = None
+    builds = 0
+    builds_lock = threading.Lock()
+    original = VectorStore._vector_rows_cursor
+
+    def counted(store, identity_hash, *, chunk, candidate_ids=None):
+        nonlocal builds
+        with builds_lock:
+            builds += 1
+        return original(
+            store,
+            identity_hash,
+            chunk=chunk,
+            candidate_ids=candidate_ids,
+        )
+
+    monkeypatch.setattr(VectorStore, "_vector_rows_cursor", counted)
+    try:
+        _seed_scan_corpus(
+            dag,
+            first,
+            3,
+            gold_vector=[1.0, 0.0, 0.0],
+            filler_vector=[0.0, 1.0, 0.0],
+        )
+        second = VectorStore(
+            db_path,
+            config=LCMConfig(knn_resident_max_mb=1),
+            bounded_scan_rows=1,
+        )
+        barrier = threading.Barrier(2)
+        results = []
+        errors = []
+
+        def recall(store):
+            try:
+                barrier.wait()
+                results.append(
+                    store.knn(
+                        [1.0, 0.0, 0.0],
+                        k=2,
+                        model="scan",
+                        full_scan=True,
+                    )
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=recall, args=(first,)),
+            threading.Thread(target=recall, args=(second,)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert errors == []
+        assert len(results) == 2
+        assert list(results[0]) == list(results[1])
+        assert builds == 1
+        assert len(empty_resident_registry) == 1
+    finally:
+        first.close()
+        if second is not None:
+            second.close()
+        dag.close()
+
+
 def test_full_scan_max_rows_caps_the_scan_and_discloses_it(tmp_path):
     """scan_max_rows is the pathological-corpus escape hatch, and it discloses."""
     db_path = tmp_path / "full-scan-capped.db"
@@ -853,7 +1119,7 @@ def test_full_scan_max_rows_caps_the_scan_and_discloses_it(tmp_path):
         bounded_scan_rows=2,
     )
     try:
-        _seed_scan_corpus(
+        gold = _seed_scan_corpus(
             dag, store, 6, gold_vector=[1.0, 0.0, 0.0], filler_vector=[0.0, 1.0, 0.0]
         )
 
@@ -864,7 +1130,7 @@ def test_full_scan_max_rows_caps_the_scan_and_discloses_it(tmp_path):
         assert result.coverage == "bounded"
         assert result.scanned == 2
         assert result.total == 6
-        assert len(result) == 1
+        assert str(gold) not in {row[0] for row in result}
     finally:
         store.close()
         dag.close()
@@ -882,7 +1148,7 @@ def test_full_scan_budget_stops_early_and_reports_bounded(tmp_path, monkeypatch)
         bounded_scan_rows=2,
     )
     try:
-        _seed_scan_corpus(
+        gold = _seed_scan_corpus(
             dag, store, 6, gold_vector=[1.0, 0.0, 0.0], filler_vector=[0.0, 1.0, 0.0]
         )
         # Spend the budget while loading the first batch, so the scan stops with
@@ -914,7 +1180,67 @@ def test_full_scan_budget_stops_early_and_reports_bounded(tmp_path, monkeypatch)
         assert result.coverage == "bounded"
         assert result.scanned == 2
         assert result.total == 6
-        assert len(result) == 1
+        assert str(gold) not in {row[0] for row in result}
+    finally:
+        store.close()
+        dag.close()
+
+
+def test_streaming_truncation_keeps_recency_order_below_host_limit(
+    tmp_path, monkeypatch
+):
+    if not hasattr(sqlite3.Connection, "setlimit"):
+        pytest.skip("sqlite runtime does not expose setlimit")
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
+    db_path = tmp_path / "streaming-recency-host-limit.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=0),
+        bounded_scan_rows=2,
+    )
+    try:
+        gold = _seed_scan_corpus(
+            dag,
+            store,
+            12,
+            gold_vector=[1.0, 0.0, 0.0],
+            filler_vector=[0.0, 1.0, 0.0],
+        )
+        identity = store.capture_identity("scan").identity_hash
+        expected_newest = store._bounded_candidate_ids(
+            identity,
+            since=None,
+            until=None,
+            conversation_ids=None,
+            source=None,
+            limit=vector_store_module._SCAN_ALL_ROWS,
+        )[0]
+        store.connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 8)
+        now = [0.0]
+        original_load = VectorStore._vectorized_batch
+
+        def timed_load(np, rows, dim, dtype):
+            loaded = original_load(np, rows, dim, dtype)
+            now[0] = 1.0
+            return loaded
+
+        monkeypatch.setattr(vector_store_module, "_monotonic", lambda: now[0])
+        monkeypatch.setattr(
+            VectorStore, "_vectorized_batch", staticmethod(timed_load)
+        )
+        result = store.knn(
+            [0.0, 1.0, 0.0],
+            k=1,
+            model="scan",
+            full_scan=True,
+            scan_budget_s=0.5,
+        )
+
+        assert result.coverage == "bounded"
+        assert result.scanned == 2
+        assert result[0][0] == expected_newest
+        assert str(gold) not in {row[0] for row in result}
     finally:
         store.close()
         dag.close()
@@ -973,7 +1299,7 @@ def test_full_scan_absolute_deadline_stops_between_batches(tmp_path, monkeypatch
         bounded_scan_rows=2,
     )
     try:
-        _seed_scan_corpus(
+        gold = _seed_scan_corpus(
             dag, store, 6, gold_vector=[1.0, 0.0, 0.0], filler_vector=[0.0, 1.0, 0.0]
         )
         with monkeypatch.context() as clock_patch:
@@ -1003,7 +1329,7 @@ def test_full_scan_absolute_deadline_stops_between_batches(tmp_path, monkeypatch
         assert result.coverage == "bounded"
         assert result.scanned == 2
         assert result.total == 6
-        assert len(result) == 1
+        assert str(gold) not in {row[0] for row in result}
     finally:
         store.close()
         dag.close()
