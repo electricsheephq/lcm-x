@@ -592,6 +592,7 @@ class TrajectoryStore:
         self._lock = threading.RLock()
         self._conn = self._open_connection()
         try:
+            self._validate_existing_schema_version()
             self._init_schema()
             self._bind_identity()
         except Exception:
@@ -624,6 +625,22 @@ class TrajectoryStore:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _validate_existing_schema_version(self) -> None:
+        exists = self._conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'lcm_trajectory_corpora'"
+        ).fetchone()
+        if exists is None:
+            return
+        row = self._conn.execute(
+            "SELECT schema_version FROM lcm_trajectory_corpora "
+            "WHERE singleton = 1"
+        ).fetchone()
+        if row is not None and int(row["schema_version"]) != TRAJECTORY_SCHEMA_VERSION:
+            raise CorpusIdentityError(
+                "trajectory database corpus identity does not match requested identity"
+            )
 
     def _init_schema(self) -> None:
         required = {
@@ -3745,15 +3762,15 @@ class TrajectoryStore:
             int(row["state_id"]): candidate_score[int(row["state_id"])]
             for row in selected
         }
+        selected_per_trajectory: dict[str, int] = {}
+        for row in selected:
+            trajectory_id = str(row["trajectory_id"])
+            selected_per_trajectory[trajectory_id] = (
+                selected_per_trajectory.get(trajectory_id, 0) + 1
+            )
 
         if include_adjacent and selected and len(selected) < limit:
             nucleus_rows = list(selected)
-            selected_per_trajectory: dict[str, int] = {}
-            for row in selected:
-                trajectory_id = str(row["trajectory_id"])
-                selected_per_trajectory[trajectory_id] = (
-                    selected_per_trajectory.get(trajectory_id, 0) + 1
-                )
             adjacent_by_nucleus: list[list[sqlite3.Row]] = []
             for nucleus in nucleus_rows:
                 adjacent_rows = self._conn.execute(
@@ -3802,6 +3819,30 @@ class TrajectoryStore:
                         break
                 if not made_progress:
                     break
+
+        # The adjacency reserve is a priority carve-out, not a quota. Return
+        # any unused slots to the ranked pool in its existing order.
+        if include_adjacent and len(selected) < limit:
+            for row in rows:
+                if len(selected) >= limit:
+                    break
+                state_id = int(row["state_id"])
+                if state_id in selected_ids:
+                    continue
+                trajectory_id = str(row["trajectory_id"])
+                if (
+                    diversity_cap > 0
+                    and selected_per_trajectory.get(trajectory_id, 0)
+                    >= diversity_cap
+                ):
+                    continue
+                selected.append(row)
+                selected_ids.add(state_id)
+                selected_per_trajectory[trajectory_id] = (
+                    selected_per_trajectory.get(trajectory_id, 0) + 1
+                )
+                match_kind_by_id[state_id] = candidate_kind.get(state_id, "fts")
+                score_by_id[state_id] = candidate_score[state_id]
 
         adaptive_active = (
             adaptive_excerpt

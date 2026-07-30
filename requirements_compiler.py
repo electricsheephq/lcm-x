@@ -7,7 +7,7 @@ or non-improving work returns an unchanged-baseline decision.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 import hashlib
 import json
@@ -947,16 +947,27 @@ def _candidate_event_day(candidate: Mapping[str, Any]) -> tuple[date | None, str
 def _available_as_of(candidate: Mapping[str, Any], contract: AnswerContract) -> bool:
     if not contract.question_as_of:
         return True
+    boundary = question_date_as_of_epoch(contract.question_as_of)
+    if boundary is None:
+        return False
+    event_day, _ = _candidate_event_day(candidate)
+    if event_day is not None and event_day > date.fromisoformat(contract.question_as_of):
+        return False
     if (
         contract.temporal_window is None
         and contract.operation
         not in {"latest", "previous", "date_filter", "date_interval", "order"}
     ):
         return True
-    boundary = question_date_as_of_epoch(contract.question_as_of)
-    if boundary is None:
-        return False
-    if candidate.get("session_date_source") == "benchmark_session_date":
+    observed = candidate.get("observed_at")
+    if observed is not None:
+        try:
+            available = float(observed)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not math.isfinite(available):
+            return False
+    elif candidate.get("session_date_source") == "benchmark_session_date":
         raw = str(candidate.get("session_date") or "")
         try:
             available = datetime.combine(
@@ -965,16 +976,7 @@ def _available_as_of(candidate: Mapping[str, Any], contract: AnswerContract) -> 
         except ValueError:
             return False
     else:
-        observed = candidate.get("observed_at")
-        try:
-            available = float(observed)
-        except (TypeError, ValueError, OverflowError):
-            return False
-        if not math.isfinite(available):
-            return False
-    event_day, _ = _candidate_event_day(candidate)
-    if event_day is not None and event_day > date.fromisoformat(contract.question_as_of):
-        return False
+        return True
     return available <= boundary
 
 
@@ -1643,7 +1645,11 @@ def _material_clauses(content: str, unit: str | None) -> list[tuple[int, int, st
     return clauses
 
 
-def _finite_event_key(quote: str, unit: str | None) -> str | None:
+def _finite_event_key(
+    quote: str,
+    unit: str | None,
+    resolved_date: str | None = None,
+) -> str | None:
     if not unit:
         return None
     blocked = {
@@ -1666,11 +1672,23 @@ def _finite_event_key(quote: str, unit: str | None) -> str | None:
         if name not in blocked
     ]
     if names:
-        return " ".join([unit.replace("_", " "), *dict.fromkeys(names)])[:300]
-    explicit = _DATE_TEXT_RE.search(quote)
-    if explicit:
-        return f"{unit.replace('_', ' ')} {explicit.group(0).casefold()}"[:300]
-    return None
+        base = " ".join([unit.replace("_", " "), *dict.fromkeys(names)])
+    else:
+        explicit = _DATE_TEXT_RE.search(quote)
+        if explicit is None:
+            return None
+        base = f"{unit.replace('_', ' ')} {explicit.group(0).casefold()}"
+    def bounded_key(value: str, limit: int) -> str:
+        if len(value) <= limit:
+            return value
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+        marker = f" #{digest}"
+        return f"{value[:limit - len(marker)]}{marker}"
+
+    if resolved_date:
+        suffix = f" @ {resolved_date}"
+        return f"{bounded_key(base, 300 - len(suffix))}{suffix}"
+    return bounded_key(base, 300)
 
 
 def _source_event_clause(quote: str, *, role: Any, unit: str | None) -> bool:
@@ -1680,9 +1698,39 @@ def _source_event_clause(quote: str, *, role: Any, unit: str | None) -> bool:
     if quote.rstrip().endswith("?"):
         return False
     normalized = " ".join(quote.casefold().split())
-    if re.search(r"\b(?:might|may|plan(?:ning)? to|want to|hope to|would|could|should|never|not)\b", normalized):
+    if re.search(
+        r"\b(?:might|may|plan(?:ning)? to|want to|hope to|would|could|should)\b",
+        normalized,
+    ):
         return False
     forms = "|".join(re.escape(form) for form in _unit_forms(unit))
+    actions = (
+        r"attend(?:ed)?|visit(?:ed)?|go(?:ne)? to|went to|take|took|taken|"
+        r"view(?:ed)?|add(?:ed)?|buy|bought|return(?:ed)? from|"
+        r"participat(?:e|ed) in|complet(?:e|ed)|join(?:ed)?|"
+        r"travel(?:led|ed)? to"
+    )
+    contraction = r"(?:didn|don|doesn|haven|hasn)(?:['’]|\s+)t"
+    if re.search(
+        rf"\b(?:i|we)\s+(?:(?:did|do|does|have|has)\s+not|"
+        rf"{contraction}|never)\s+(?:{actions})\b",
+        normalized,
+    ):
+        return False
+    if re.search(
+        rf"\b(?:i|we)\s+(?:{actions})\s+(?:no|zero)\s+(?:{forms})\b|"
+        rf"\b(?:i|we)\s+(?:{actions})\s+none\s+of\s+"
+        rf"(?:(?:my|our|the)\s+)?(?:{forms})\b|"
+        rf"\b(?:i|we)\s+(?:went|returned|travelled|traveled)\s+without\s+"
+        rf"(?:(?:a|an|any|the)\s+)?(?:{forms})\b|"
+        rf"\b(?:i|we)\s+(?:went|returned|travelled|traveled)\s+without\s+"
+        rf"(?:attending|visiting|going to|taking|viewing|adding|"
+        rf"buying|returning from|participating in|completing|joining|"
+        rf"travelling to|traveling to)\s+(?:(?:a|an|any|the)\s+)?"
+        rf"(?:{forms})\b",
+        normalized,
+    ):
+        return False
     return bool(
         re.search(
             r"\b(?:i|we)\s+(?:attended|visited|went to|took|viewed|added|bought|"
@@ -1719,6 +1767,8 @@ def _finite_enumeration(
         "distinct_keys": 0,
         "time_bases": [],
         "adapter_time_used": False,
+        "every_counted_event_trusted": False,
+        "every_counted_event_dated": False,
     }
     if certificate["truncated"]:
         return None, [], certificate, "finite_scan_truncated"
@@ -1746,31 +1796,39 @@ def _finite_enumeration(
             if hydrated is None:
                 certificate["ungrounded_key_clauses"] += 1
                 continue
-            event_day, basis = _candidate_event_day(hydrated)
-            if event_day is None:
-                certificate["unknown_time_clauses"] += 1
-                continue
             if not _available_as_of(hydrated, contract):
                 certificate["unavailable_as_of_clauses"] += 1
                 continue
-            time_bases.add(basis)
-            if not (
-                contract.temporal_window.start
-                <= event_day
-                < contract.temporal_window.end
-            ):
-                continue
-            key = _finite_event_key(clause, contract.requested_unit)
-            if key is None:
+            event_day, basis = _candidate_event_day(hydrated)
+            if event_day is None:
+                certificate["unknown_time_clauses"] += 1
+                resolved_date = None
+            else:
+                time_bases.add(basis)
+                if not (
+                    contract.temporal_window.start
+                    <= event_day
+                    < contract.temporal_window.end
+                ):
+                    continue
+                resolved_date = event_day.isoformat()
+            grounding_key = _finite_event_key(clause, contract.requested_unit)
+            dedupe_key = _finite_event_key(
+                clause,
+                contract.requested_unit,
+                resolved_date,
+            )
+            if grounding_key is None or dedupe_key is None:
                 certificate["ungrounded_key_clauses"] += 1
                 continue
             candidates.append(
                 {
                     **hydrated,
-                    "key": key,
+                    "key": grounding_key,
+                    "dedupe_key": dedupe_key,
                     "unit": contract.requested_unit,
                     "value": None,
-                    "date": event_day.isoformat(),
+                    "date": resolved_date,
                     "time_basis": basis,
                 }
             )
@@ -1779,18 +1837,19 @@ def _finite_enumeration(
     certificate["adapter_time_used"] = "adapter_session_date" in time_bases
     if certificate["material_clauses"] == 0:
         return None, [], certificate, "finite_no_material_events"
-    if certificate["unknown_time_clauses"]:
-        return None, [], certificate, "finite_unknown_time_population"
-    if certificate["unavailable_as_of_clauses"]:
-        return None, [], certificate, "finite_source_availability_unknown"
     if certificate["ungrounded_key_clauses"]:
         return None, [], certificate, "finite_event_keys_unproven"
 
+    # Engine finite-scan certification uses dedupe_key uniqueness; caller-evidence
+    # certification uses exact_ref uniqueness. These are intentionally different surfaces.
     by_key: dict[str, dict[str, Any]] = {}
     for candidate in candidates:
-        by_key.setdefault(str(candidate["key"]), candidate)
+        by_key.setdefault(str(candidate["dedupe_key"]), candidate)
     operands = list(by_key.values())
     certificate["distinct_keys"] = len(operands)
+    certificate["every_counted_event_dated"] = all(
+        bool(item.get("date")) for item in operands
+    )
     if not operands:
         return None, [], certificate, "finite_no_events_in_window"
     raw_operands = [
@@ -1810,9 +1869,17 @@ def _finite_enumeration(
         messages=engine._store,
         assertions=getattr(engine, "_assertions", None),
         as_of=question_date_as_of_epoch(contract.question_as_of),
+        engine=engine,
     )
     if grounding.status != "grounded":
         return None, operands, certificate, f"finite_grounding_failed:{grounding.reason}"
+    certificate["every_counted_event_trusted"] = (
+        grounding.temporal_certified is not False
+    )
+    computed_operands = tuple(
+        replace(grounded, key=str(candidate["dedupe_key"]))
+        for grounded, candidate in zip(grounding.operands, operands, strict=True)
+    )
     plan = EvidencePlan(
         operation="count_distinct",
         minimum_operands=len(operands),
@@ -1820,11 +1887,19 @@ def _finite_enumeration(
         exact_operands=len(operands),
         requires_complete_evidence=True,
     )
-    computed = execute_plan(plan, grounding.operands)
+    computed = execute_plan(plan, computed_operands)
     if computed.status != "computed" or computed.trace is None:
         return None, operands, certificate, f"finite_computation_failed:{computed.reason}"
     certificate["certificate_sha256"] = _digest(certificate)
-    return computed.trace.as_dict(), operands, certificate, "finite_coverage_product_verified"
+    reason = (
+        "finite_coverage_product_verified"
+        if (
+            certificate["every_counted_event_dated"]
+            and certificate["every_counted_event_trusted"]
+        )
+        else "finite_count_uncertified_undated_events"
+    )
+    return computed.trace.as_dict(), operands, certificate, reason
 
 
 def _render_fact(candidate: Mapping[str, Any], contract: AnswerContract) -> str:
@@ -1850,18 +1925,34 @@ def _render_fact(candidate: Mapping[str, Any], contract: AnswerContract) -> str:
     )
 
 
-def _render_computation(computation: Mapping[str, Any]) -> str:
+def _render_computation(
+    computation: Mapping[str, Any], *, uncertified: bool = False
+) -> str:
     refs = [str(item) for item in computation.get("citations") or []]
-    return "\n".join(
+    lines = [
+        f'<lcm-answer-brief version="{REQUIREMENTS_COMPILER_VERSION}">',
+        "Product-validated canonical computation:",
+        f"- result: {computation.get('result')}",
+        f"- exact operands: {', '.join(refs)}",
+    ]
+    if uncertified:
+        lines.append(
+            "- certification: UNCERTIFIED because at least one counted event has "
+            "no trusted occurrence date; this count is not certified as exhaustive "
+            "for the requested time window."
+        )
+    lines.extend(
         [
-            f'<lcm-answer-brief version="{REQUIREMENTS_COMPILER_VERSION}">',
-            "Product-validated canonical computation:",
-            f"- result: {computation.get('result')}",
-            f"- exact operands: {', '.join(refs)}",
-            "Use the canonical result unchanged; do not add or alter operands.",
+            (
+                "Use the canonical result unchanged; preserve the UNCERTIFIED "
+                "disclosure and do not add or alter operands."
+                if uncertified
+                else "Use the canonical result unchanged; do not add or alter operands."
+            ),
             "</lcm-answer-brief>",
         ]
     )
+    return "\n".join(lines)
 
 
 def _deliver(
@@ -2149,7 +2240,11 @@ def compile_preanswer_evidence(
         if coverage_certificate is not None:
             result["coverage_certificate"] = coverage_certificate
         if computation is not None:
-            result["finite_coverage"] = True
+            result["finite_coverage"] = bool(
+                coverage_certificate
+                and coverage_certificate.get("every_counted_event_dated")
+                and coverage_certificate.get("every_counted_event_trusted")
+            )
 
     result["metrics"].update(
         {
@@ -2179,7 +2274,13 @@ def compile_preanswer_evidence(
             result,
             state="computation_sufficient",
             reason_code=reason,
-            context=_render_computation(computation),
+            context=_render_computation(
+                computation,
+                uncertified=(
+                    coverage_certificate is not None
+                    and not result["finite_coverage"]
+                ),
+            ),
             evidence=selected_items,
             novel_refs=novel_selected,
             computation=computation,

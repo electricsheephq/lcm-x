@@ -16,10 +16,12 @@ from types import SimpleNamespace
 import pytest
 
 import hermes_lcm.tools as lcm_tools
+from hermes_lcm.assertion_store import AssertionStore
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, SummaryNode
 from hermes_lcm.store import MessageStore
 from hermes_lcm.tokens import count_tokens
+from hermes_lcm.tools import lcm_compute
 from hermes_lcm.vector_store import EmbeddingIdentity, VectorStore
 
 CURRENT = "session-cur"
@@ -1416,6 +1418,79 @@ def test_occurrence_time_is_opt_in_and_uses_source_session_date(
     assert occurrence["event_date"] == "2023-03-15"
     assert occurrence["event_time_source"] == "relative_to_session"
     assert occurrence["observed_at"] != occurrence["event_at"]
+
+
+def test_recalled_occurrence_round_trips_as_unchanged_compute_operand(
+    recall_engine, monkeypatch
+):
+    content = "I finished the kanban dashboard sprint 5 days ago."
+    recall_engine._store.append(
+        "session-a",
+        {"role": "user", "content": content},
+    )
+    recall_engine._session_occurrence_dates = {"session-a": "2023-03-20"}
+    payload = _recall(
+        recall_engine,
+        monkeypatch,
+        include="verbatim",
+        detail="answer_ready",
+        limit=1,
+        seen_refs=[],
+        include_occurrence_time=True,
+    )
+    hit = payload["hits"][0]
+    occurrence = hit["occurrence_time"]
+    occurrence_before_compute = json.loads(json.dumps(occurrence))
+    assert set(occurrence) == {
+        "observed_at",
+        "stored_at",
+        "event_at",
+        "event_date",
+        "event_time_source",
+        "session_date",
+        "precision",
+        "policy_version",
+        "support",
+    }
+    assert hit["temporal_trust"] == {
+        "status": "engine_sidecar",
+        "certified": True,
+        "notes": [],
+    }
+
+    assertions = AssertionStore(recall_engine._store.db_path)
+    try:
+        computed = json.loads(lcm_compute(
+            {
+                "question": "How long ago did I finish the kanban dashboard sprint?",
+                "question_date": "2023-03-20",
+                "operands": [
+                    {
+                        "store_id": hit["store_id"],
+                        "span_start": hit["content_offset"],
+                        "span_end": (
+                            hit["content_offset"]
+                            + hit["content_returned_chars"]
+                        ),
+                        "quote": hit["content"],
+                        "date": occurrence["event_date"],
+                        "occurrence_time": occurrence,
+                    }
+                ],
+            },
+            engine=SimpleNamespace(
+                _store=recall_engine._store,
+                _assertions=assertions,
+                _session_occurrence_dates=recall_engine._session_occurrence_dates,
+            ),
+        ))
+    finally:
+        assertions.close()
+
+    assert computed["status"] == "computed"
+    assert computed["trace"]["result_value"] == 5
+    assert computed["temporal_trust"] == hit["temporal_trust"]
+    assert occurrence == occurrence_before_compute
 
 
 def test_occurrence_time_uses_host_observation_without_benchmark_sidecar(

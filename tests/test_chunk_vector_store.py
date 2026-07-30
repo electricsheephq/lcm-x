@@ -728,6 +728,80 @@ def test_warm_chunk_residency_invalidates_when_vector_is_deleted(
         store.close()
 
 
+def test_chunk_deadline_on_final_batch_reports_total_without_count(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
+    db_path = tmp_path / "chunk-final-batch-deadline.db"
+    _seed_messages(
+        db_path,
+        [
+            (index, "s", "history", "user", "m", float(index))
+            for index in range(4)
+        ],
+    )
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=0),
+        bounded_scan_rows=2,
+    )
+    store.register_profile(MODEL, PROVIDER, DIM, task="chunk")
+    try:
+        for index in range(4):
+            _write(
+                store,
+                f"{index}:0",
+                index,
+                0,
+                [1.0, float(index), 0.0, 0.0],
+            )
+        now = [0.0]
+        loads = 0
+        original_load = VectorStore._vectorized_batch
+
+        def timed_load(np, rows, dim, dtype):
+            nonlocal loads
+            loaded = original_load(np, rows, dim, dtype)
+            loads += 1
+            if loads == 2:
+                now[0] = 2.0
+            return loaded
+
+        def count_should_not_run(*args, **kwargs):
+            raise AssertionError(
+                "completed final-batch chunk scan must not run COUNT(*)"
+            )
+
+        monkeypatch.setattr(vector_store_module, "_monotonic", lambda: now[0])
+        monkeypatch.setattr(
+            VectorStore,
+            "_vectorized_batch",
+            staticmethod(timed_load),
+        )
+        monkeypatch.setattr(
+            store,
+            "_count_embedded_vectors",
+            count_should_not_run,
+        )
+
+        result = store.knn_chunks(
+            [1.0, 0.0, 0.0, 0.0],
+            k=1,
+            model=MODEL,
+            provider=PROVIDER,
+            full_scan=True,
+            scan_budget_s=0.0,
+            deadline=1.0,
+        )
+
+        assert loads == 2
+        assert result.coverage == "full"
+        assert result.scanned == 4
+        assert result.total == 4
+    finally:
+        store.close()
+
+
 def test_int8_over_resident_budget_falls_back_to_exact_r1(
     tmp_path, monkeypatch
 ):

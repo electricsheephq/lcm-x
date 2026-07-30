@@ -697,6 +697,52 @@ def test_summary_int8_full_scan_uses_exact_residency(tmp_path, monkeypatch):
         dag.close()
 
 
+def test_resident_deadline_does_not_start_a_count_query(tmp_path, monkeypatch):
+    db_path = tmp_path / "resident-deadline.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=1),
+        bounded_scan_rows=1,
+    )
+    try:
+        _seed_scan_corpus(
+            dag,
+            store,
+            3,
+            gold_vector=[1.0, 0.0, 0.0],
+            filler_vector=[0.0, 1.0, 0.0],
+        )
+
+        def expire(*args, **kwargs):
+            raise vector_store_module._PrescreenDeadlineExpired(1)
+
+        def count_after_deadline(*args, **kwargs):
+            raise AssertionError("deadline expiry must not start COUNT(*)")
+
+        monkeypatch.setattr(
+            store, "_resident_int8_matrix", lambda *args, **kwargs: object()
+        )
+        monkeypatch.setattr(store, "_rank_resident_int8", expire)
+        monkeypatch.setattr(
+            store, "_count_embedded_vectors", count_after_deadline
+        )
+        result = store.knn(
+            [1.0, 0.0, 0.0],
+            k=1,
+            model="scan",
+            full_scan=True,
+            deadline=vector_store_module._monotonic() + 60.0,
+        )
+
+        assert result.coverage == "bounded"
+        assert result.scanned == 1
+        assert result.total is None
+    finally:
+        store.close()
+        dag.close()
+
+
 @pytest.fixture
 def empty_resident_registry():
     registry = vector_store_module._RESIDENT_MATRIX_REGISTRY
@@ -1398,6 +1444,13 @@ def test_full_scan_budget_stops_early_and_reports_bounded(tmp_path, monkeypatch)
         with monkeypatch.context() as clock_patch:
             now = [0.0]
             original_load = VectorStore._vectorized_batch
+            count_calls = 0
+            original_count = store._count_embedded_vectors
+
+            def counted_total(*args, **kwargs):
+                nonlocal count_calls
+                count_calls += 1
+                return original_count(*args, **kwargs)
 
             def timed_load(np, rows, dim, dtype):
                 loaded = original_load(np, rows, dim, dtype)
@@ -1410,6 +1463,9 @@ def test_full_scan_budget_stops_early_and_reports_bounded(tmp_path, monkeypatch)
             clock_patch.setattr(
                 VectorStore, "_vectorized_batch", staticmethod(timed_load)
             )
+            clock_patch.setattr(
+                store, "_count_embedded_vectors", counted_total
+            )
             result = store.knn(
                 [1.0, 0.0, 0.0],
                 k=1,
@@ -1421,7 +1477,139 @@ def test_full_scan_budget_stops_early_and_reports_bounded(tmp_path, monkeypatch)
         assert result.coverage == "bounded"
         assert result.scanned == 2
         assert result.total == 6
+        assert count_calls == 1
         assert str(gold) not in {row[0] for row in result}
+    finally:
+        store.close()
+        dag.close()
+
+
+def test_full_scan_deadline_on_final_batch_reports_complete_total(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "full-scan-final-batch-deadline.db"
+    monkeypatch.setattr(vector_store_module, "_FAST_SCAN_STREAMING_MIN_ROWS", 0)
+    dag = SummaryDAG(db_path)
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=0),
+        bounded_scan_rows=2,
+    )
+    try:
+        _seed_scan_corpus(
+            dag,
+            store,
+            4,
+            gold_vector=[1.0, 0.0, 0.0],
+            filler_vector=[0.0, 1.0, 0.0],
+        )
+        now = [0.0]
+        loads = 0
+        original_load = VectorStore._vectorized_batch
+
+        def timed_load(np, rows, dim, dtype):
+            nonlocal loads
+            loaded = original_load(np, rows, dim, dtype)
+            loads += 1
+            if loads == 2:
+                now[0] = 2.0
+            return loaded
+
+        monkeypatch.setattr(vector_store_module, "_monotonic", lambda: now[0])
+        monkeypatch.setattr(
+            VectorStore, "_vectorized_batch", staticmethod(timed_load)
+        )
+
+        def count_should_not_run(*args, **kwargs):
+            raise AssertionError(
+                "completed final-batch scan must not run COUNT(*)"
+            )
+
+        monkeypatch.setattr(
+            store,
+            "_count_embedded_vectors",
+            count_should_not_run,
+        )
+
+        result = store.knn(
+            [1.0, 0.0, 0.0],
+            k=1,
+            model="scan",
+            full_scan=True,
+            scan_budget_s=0.0,
+            deadline=1.0,
+        )
+
+        assert loads == 2
+        assert result.coverage == "full"
+        assert result.scanned == 4
+        assert result.total == 4
+    finally:
+        store.close()
+        dag.close()
+
+
+def test_full_scan_deadline_on_final_batch_without_numpy_reports_complete_total(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "full-scan-final-batch-deadline-nonumpy.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(knn_resident_max_mb=0),
+        bounded_scan_rows=2,
+    )
+    try:
+        _seed_scan_corpus(
+            dag,
+            store,
+            4,
+            gold_vector=[1.0, 0.0, 0.0],
+            filler_vector=[0.0, 1.0, 0.0],
+        )
+        now = [0.0]
+        loads = 0
+        original_load = store._load_vectors_for_ids
+
+        def unavailable():
+            raise ImportError("numpy not installed")
+
+        def timed_load(*args, **kwargs):
+            nonlocal loads
+            loaded = original_load(*args, **kwargs)
+            loads += 1
+            if loads == 2:
+                now[0] = 2.0
+            return loaded
+
+        monkeypatch.setattr(vector_store_module, "_load_numpy", unavailable)
+        monkeypatch.setattr(vector_store_module, "_monotonic", lambda: now[0])
+        monkeypatch.setattr(store, "_load_vectors_for_ids", timed_load)
+
+        def count_should_not_run(*args, **kwargs):
+            raise AssertionError(
+                "completed final-batch scan must not run COUNT(*)"
+            )
+
+        monkeypatch.setattr(
+            store,
+            "_count_embedded_vectors",
+            count_should_not_run,
+        )
+
+        result = store.knn(
+            [1.0, 0.0, 0.0],
+            k=1,
+            model="scan",
+            full_scan=True,
+            scan_budget_s=0.0,
+            deadline=1.0,
+        )
+
+        assert loads == 2
+        assert result.coverage == "full"
+        assert result.scanned == 4
+        assert result.total == 4
     finally:
         store.close()
         dag.close()
@@ -1528,6 +1716,7 @@ def test_full_scan_budget_includes_candidate_enumeration(tmp_path, monkeypatch):
 
         assert result.coverage == "bounded"
         assert result.scanned == 0
+        assert result.total == 6
         assert result == []
     finally:
         store.close()
@@ -1553,6 +1742,9 @@ def test_full_scan_absolute_deadline_stops_between_batches(tmp_path, monkeypatch
             now = [0.0]
             original_load = VectorStore._vectorized_batch
 
+            def count_after_deadline(*args, **kwargs):
+                raise AssertionError("deadline expiry must not start COUNT(*)")
+
             def timed_load(np, rows, dim, dtype):
                 loaded = original_load(np, rows, dim, dtype)
                 now[0] = 2.0
@@ -1563,6 +1755,9 @@ def test_full_scan_absolute_deadline_stops_between_batches(tmp_path, monkeypatch
             )
             clock_patch.setattr(
                 VectorStore, "_vectorized_batch", staticmethod(timed_load)
+            )
+            clock_patch.setattr(
+                store, "_count_embedded_vectors", count_after_deadline
             )
             result = store.knn(
                 [1.0, 0.0, 0.0],
@@ -1575,7 +1770,7 @@ def test_full_scan_absolute_deadline_stops_between_batches(tmp_path, monkeypatch
 
         assert result.coverage == "bounded"
         assert result.scanned == 2
-        assert result.total == 6
+        assert result.total is None
         assert str(gold) not in {row[0] for row in result}
     finally:
         store.close()

@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 import calendar
 import math
 import re
-from typing import Any, Literal, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 from .assertion_state import query_assertion_state
 from .assertion_store import AssertionStore
@@ -35,6 +35,9 @@ _MAX_OPERANDS = 50
 _MAX_QUESTION_CHARS = 4_000
 _MAX_QUOTE_CHARS = 24_000
 _MAX_LABEL_CHARS = 300
+_MAX_CALLER_SESSION_DATE_NOTE_CHARS = 64
+_MAX_TEMPORAL_TRUST_NOTES = 8
+_MAX_TEMPORAL_TRUST_NOTE_CHARS = 512
 _NUMBER_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
 _COMPUTATION_TRIGGER_RE = re.compile(
     r"\b(how many|how much|count|total|sum|difference|more than|less than|ago|"
@@ -82,11 +85,129 @@ _MONTHS.update({
 })
 
 
-def resolve_occurrence_time(text: Any, *, observed_at: Any, session_date: Any = None):
+def resolve_occurrence_time_with_trust(
+    text: Any,
+    *,
+    observed_at: Any,
+    session_date: Any = None,
+    engine: Any = None,
+    session_id: Any = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Lazy import keeps plugin bootstrap order independent of this optional parser."""
     from .occurrence_time import resolve_occurrence_time as _resolve
 
-    return _resolve(text, observed_at=observed_at, session_date=session_date)
+    caller_session_date = str(session_date or "").strip() or None
+    sidecar_dates = getattr(engine, "_session_occurrence_dates", {}) or {}
+    session_key = str(session_id or "")
+    sidecar_session_date = (
+        str(sidecar_dates.get(session_key) or "").strip() or None
+        if isinstance(sidecar_dates, Mapping) and session_key
+        else None
+    )
+    overridden = bool(
+        sidecar_session_date
+        and caller_session_date
+        and caller_session_date != sidecar_session_date
+    )
+    caller_session_date_note = caller_session_date
+    if (
+        caller_session_date_note
+        and len(caller_session_date_note) > _MAX_CALLER_SESSION_DATE_NOTE_CHARS
+    ):
+        caller_session_date_note = (
+            caller_session_date_note[:_MAX_CALLER_SESSION_DATE_NOTE_CHARS - 3]
+            + "..."
+        )
+    anchor = sidecar_session_date or caller_session_date
+    result = _resolve(text, observed_at=observed_at, session_date=anchor)
+    source = str(result.get("event_time_source") or "unknown")
+    reason = str(result.get("reason") or "")
+    trust: dict[str, Any] = {
+        "anchor_trust": "not_applicable",
+        "temporal_certified": None,
+        "session_date_overridden": False,
+    }
+    if source == "explicit":
+        # An explicit date is self-anchoring. Sidecar availability or validity
+        # cannot change its certification.
+        trust["temporal_certified"] = True
+    elif source == "relative_to_session" and sidecar_session_date:
+        trust["anchor_trust"] = "engine_sidecar"
+        trust["temporal_certified"] = True
+        trust["session_date_overridden"] = overridden
+        if overridden:
+            trust["trust_note"] = (
+                f"caller session_date {caller_session_date_note} overridden by "
+                f"engine sidecar {sidecar_session_date}"
+            )
+    elif (
+        source == "relative_to_session"
+        or reason == "relative_expression_without_session_date"
+    ):
+        trust["anchor_trust"] = "low_trust"
+        trust["temporal_certified"] = False
+        if sidecar_session_date:
+            trust["trust_note"] = (
+                f"engine occurrence-date sidecar invalid for session "
+                f"{session_key or '<unknown>'}; temporal result is low-trust"
+            )
+        else:
+            trust["trust_note"] = (
+                f"engine occurrence-date sidecar absent for session "
+                f"{session_key or '<unknown>'}; temporal result is low-trust"
+            )
+    return result, trust
+
+
+def temporal_trust_wire(
+    status: Any,
+    certified: Any,
+    notes: Sequence[Any] = (),
+) -> dict[str, Any]:
+    """Return the one bounded temporal-trust shape used on public tool wires."""
+    normalized_status = str(status or "not_applicable")
+    if normalized_status not in {
+        "not_applicable",
+        "engine_sidecar",
+        "low_trust",
+    }:
+        normalized_status = "low_trust"
+    normalized_certified = certified if isinstance(certified, bool) else None
+    normalized_notes: list[str] = []
+    for value in notes:
+        note = str(value or "").strip()[:_MAX_TEMPORAL_TRUST_NOTE_CHARS]
+        if note and note not in normalized_notes:
+            normalized_notes.append(note)
+        if len(normalized_notes) >= _MAX_TEMPORAL_TRUST_NOTES:
+            break
+    return {
+        "status": normalized_status,
+        "certified": normalized_certified,
+        "notes": normalized_notes,
+    }
+
+
+def resolve_occurrence_time(
+    text: Any,
+    *,
+    observed_at: Any,
+    session_date: Any = None,
+    engine: Any = None,
+    session_id: Any = None,
+) -> dict[str, Any]:
+    """Return only the operand-shaped occurrence object.
+
+    Trust metadata is deliberately kept out of this object so an answer-ready
+    recall hit can pass it to ``lcm_compute`` without changing wire shape.
+    """
+    occurrence, _trust = resolve_occurrence_time_with_trust(
+        text,
+        observed_at=observed_at,
+        session_date=session_date,
+        engine=engine,
+        session_id=session_id,
+    )
+    return occurrence
 
 
 @dataclass(frozen=True)
@@ -111,7 +232,7 @@ class EvidencePlan:
     exact_operands: int | None = None
     temporal_window: TemporalWindow | None = None
     question_anchor: date | None = None
-    interval_unit: Literal["day", "week", "month"] = "day"
+    interval_unit: Literal["auto", "day", "week", "month", "year"] = "day"
     difference_direction: Literal[
         "absolute", "first_minus_second", "second_minus_first"
     ] | None = None
@@ -167,6 +288,11 @@ class GroundedEvidence:
     unresolved_conflict: bool | None
     group_active_assertion_ids: tuple[str, ...]
     group_state_truncated: bool
+    temporal_trust: Literal[
+        "not_applicable", "engine_sidecar", "low_trust"
+    ] = "not_applicable"
+    temporal_certified: bool | None = None
+    temporal_notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -174,6 +300,11 @@ class GroundingDecision:
     status: Literal["grounded", "fallback"]
     operands: tuple[GroundedEvidence, ...] = ()
     reason: str = ""
+    temporal_trust: Literal[
+        "not_applicable", "engine_sidecar", "low_trust"
+    ] = "not_applicable"
+    temporal_certified: bool | None = None
+    notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -374,8 +505,24 @@ def compile_evidence_plan(question: str, question_date: Any = None) -> PlanDecis
     ] | None = None
     order: Literal["ascending", "descending"] | None = None
     requires_complete = False
-    interval_unit: Literal["day", "week", "month"] = "day"
-    if re.search(
+    interval_unit: Literal["auto", "day", "week", "month", "year"] = "day"
+    if re.search(r"\bhow long ago\b", normalized):
+        if question_anchor is None:
+            return PlanDecision(
+                "fallback",
+                reason="question needs a valid question date for deterministic temporal planning",
+            )
+        requested_interval_unit = re.search(
+            r"\bin\s+(?:calendar\s+)?(days?|weeks?|months?|years?)\b",
+            normalized,
+        )
+        interval_unit = (
+            requested_interval_unit.group(1).rstrip("s")
+            if requested_interval_unit
+            else "auto"
+        )  # type: ignore[assignment]
+        operation, exact, minimum = "date_interval", 1, 1
+    elif re.search(
         r"\b(how long|time between|interval between|how many\s+(?:calendar\s+)?days?\s+between|since when)\b",
         normalized,
     ):
@@ -627,6 +774,7 @@ def _ground_one(
     messages: MessageStore,
     assertions: AssertionStore | None,
     as_of: float | None,
+    engine: Any = None,
 ) -> tuple[GroundedEvidence | None, str | None]:
     if not isinstance(raw, dict):
         return None, "each operand must be an object"
@@ -749,11 +897,17 @@ def _ground_one(
     evidence_day = assertion_day
 
     occurrence_day = None
+    resolved_occurrence: Mapping[str, Any] | None = None
+    temporal_trust: Literal[
+        "not_applicable", "engine_sidecar", "low_trust"
+    ] = "not_applicable"
+    temporal_certified: bool | None = None
+    temporal_notes: tuple[str, ...] = ()
     raw_occurrence = raw.get("occurrence_time")
     if raw_occurrence is not None:
         if not isinstance(raw_occurrence, dict):
             return None, "occurrence_time must be an object"
-        resolved = resolve_occurrence_time(
+        resolved, resolved_trust = resolve_occurrence_time_with_trust(
             quote,
             observed_at=(
                 stored.get("observed_at")
@@ -761,12 +915,25 @@ def _ground_one(
                 else stored.get("timestamp")
             ),
             session_date=raw_occurrence.get("session_date"),
+            engine=engine,
+            session_id=stored.get("session_id"),
         )
+        resolved_occurrence = resolved
+        temporal_trust = str(  # type: ignore[assignment]
+            resolved_trust["anchor_trust"]
+        )
+        temporal_certified = resolved_trust["temporal_certified"]
+        note = str(resolved_trust.get("trust_note") or "").strip()
+        temporal_notes = (note,) if note else ()
         supplied_source = str(raw_occurrence.get("event_time_source") or "")
         if supplied_source != resolved["event_time_source"]:
             return None, "occurrence_time source is not supported by the exact quote"
         supplied_date = str(raw_occurrence.get("event_date") or "").strip()
-        if supplied_date and supplied_date != str(resolved.get("event_date") or ""):
+        if (
+            supplied_date
+            and supplied_date != str(resolved.get("event_date") or "")
+            and not resolved_trust.get("session_date_overridden")
+        ):
             return None, "occurrence_time date is not supported by the exact quote"
         occurrence_day = _parse_day(str(resolved.get("event_date") or ""))
         evidence_day = occurrence_day or evidence_day
@@ -776,11 +943,18 @@ def _ground_one(
         claimed_day = _parse_day(raw_date)
         if claimed_day is None:
             return None, f"date {raw_date!r} is invalid or timezone-ambiguous"
-        if claimed_day not in {assertion_day, occurrence_day} and not _quote_supports_day(
-            quote, claimed_day, raw_date
-        ):
+        claimed_supported = (
+            claimed_day in {assertion_day, occurrence_day}
+            or _quote_supports_day(quote, claimed_day, raw_date)
+        )
+        occurrence_overridden = bool(
+            resolved_occurrence
+            and resolved_trust.get("session_date_overridden")
+        )
+        if not claimed_supported and not occurrence_overridden:
             return None, f"date {raw_date!r} is not supported by metadata or exact quote"
-        evidence_day = claimed_day
+        if not occurrence_overridden:
+            evidence_day = claimed_day
 
     if as_of is not None:
         source_observation_grounded = False
@@ -800,8 +974,10 @@ def _ground_one(
             if not math.isfinite(stored_observed_at) or stored_observed_at > as_of:
                 return None, "source was observed after the question-date boundary"
             source_observation_grounded = True
-        elif raw_occurrence is not None and raw_occurrence.get("session_date"):
-            source_observed_day = _parse_day(str(raw_occurrence.get("session_date")))
+        elif resolved_occurrence is not None and resolved_occurrence.get("session_date"):
+            source_observed_day = _parse_day(
+                str(resolved_occurrence.get("session_date"))
+            )
             if source_observed_day is None:
                 return None, "occurrence_time session_date is invalid"
             source_observed_epoch = datetime.combine(
@@ -849,6 +1025,9 @@ def _ground_one(
         unresolved_conflict=conflict,
         group_active_assertion_ids=group_active_ids,
         group_state_truncated=group_truncated,
+        temporal_trust=temporal_trust,
+        temporal_certified=temporal_certified,
+        temporal_notes=temporal_notes,
     ), None
 
 
@@ -858,6 +1037,7 @@ def ground_evidence(
     messages: MessageStore,
     assertions: AssertionStore | None,
     as_of: float | None = None,
+    engine: Any = None,
 ) -> GroundingDecision:
     if not isinstance(raw_operands, list):
         return GroundingDecision("fallback", reason="operands must be an array")
@@ -872,11 +1052,44 @@ def ground_evidence(
             messages=messages,
             assertions=assertions,
             as_of=as_of,
+            engine=engine,
         )
         if error:
             return GroundingDecision("fallback", reason=f"operands[{index}]: {error}")
         grounded.append(operand)  # type: ignore[arg-type]
-    return GroundingDecision("grounded", operands=tuple(grounded))
+    temporal = [
+        operand
+        for operand in grounded
+        if operand.temporal_certified is not None
+    ]
+    notes = tuple(dict.fromkeys(
+        note
+        for operand in temporal
+        for note in operand.temporal_notes
+    ))
+    if any(operand.temporal_certified is False for operand in temporal):
+        trust = "low_trust"
+        certified = False
+    elif temporal:
+        trust = (
+            "engine_sidecar"
+            if any(
+                operand.temporal_trust == "engine_sidecar"
+                for operand in temporal
+            )
+            else "not_applicable"
+        )
+        certified = True
+    else:
+        trust = "not_applicable"
+        certified = None
+    return GroundingDecision(
+        "grounded",
+        operands=tuple(grounded),
+        temporal_trust=trust,
+        temporal_certified=certified,
+        notes=notes,
+    )
 
 
 def _format_number(value: float) -> str:
@@ -1142,28 +1355,64 @@ def execute_plan(
                 f"Absolute interval from {selected[0].evidence_date.isoformat()} "
                 f"to {selected[1].evidence_date.isoformat()} is {days} days"  # type: ignore[union-attr]
             )
-        if plan.interval_unit == "week":
-            result_value = days // 7
-        elif plan.interval_unit == "month":
+        interval_unit = plan.interval_unit
+        complete_months = complete_years = 0
+        if interval_unit in {"auto", "month", "year"}:
             if len(selected) == 1:
-                first_day, second_day = selected[0].evidence_date, plan.question_anchor
+                first_day, second_day = (
+                    selected[0].evidence_date,
+                    plan.question_anchor,
+                )
             else:
-                first_day, second_day = selected[0].evidence_date, selected[1].evidence_date
-            assert first_day is not None and second_day is not None
+                first_day, second_day = (
+                    selected[0].evidence_date,
+                    selected[1].evidence_date,
+                )
+            if first_day is None or second_day is None:
+                return ComputationDecision(
+                    "fallback",
+                    reason="calendar date_interval requires two grounded dates",
+                )
             earlier, later = sorted((first_day, second_day))
-            result_value = (later.year - earlier.year) * 12 + later.month - earlier.month
+            complete_months = (
+                (later.year - earlier.year) * 12 + later.month - earlier.month
+            )
             if later.day < earlier.day:
-                result_value -= 1
+                complete_months -= 1
+            complete_years = later.year - earlier.year
+            anniversary_day = min(
+                earlier.day,
+                calendar.monthrange(later.year, earlier.month)[1],
+            )
+            if (later.month, later.day) < (earlier.month, anniversary_day):
+                complete_years -= 1
+
+        if interval_unit == "auto":
+            if complete_years > 0:
+                interval_unit = "year"
+            elif complete_months > 0:
+                interval_unit = "month"
+            elif days >= 7:
+                interval_unit = "week"
+            else:
+                interval_unit = "day"
+
+        if interval_unit == "week":
+            result_value = days // 7
+        elif interval_unit == "month":
+            result_value = complete_months
+        elif interval_unit == "year":
+            result_value = complete_years
         else:
             result_value = days
-        result = _format_quantity(float(result_value), plan.interval_unit)
+        result = _format_quantity(float(result_value), interval_unit)
         return _trace(
             plan,
             selected,
             result=result,
             result_value=result_value,
-            unit=plan.interval_unit,
-            steps=[interval_step, f"Reported interval in {plan.interval_unit}s"],
+            unit=interval_unit,
+            steps=[interval_step, f"Reported interval in {interval_unit}s"],
         )
 
     if plan.operation == "date_filter":

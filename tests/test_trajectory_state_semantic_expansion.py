@@ -460,9 +460,9 @@ def test_pool_incumbents_are_not_readmitted(tmp_path):
 
 # --- anti-filler / additive-only controls -----------------------------------
 
-def test_delivery_unchanged_when_ranked_pool_fills_nucleus(tmp_path):
-    """Additive-only proof on a full pool: the semantic state may enter the POOL
-    but must not displace any delivered nucleus/backfill incumbent."""
+def test_delivery_backfills_when_ranked_pool_fills_nucleus(tmp_path):
+    """D-ARCH-2 proof on a full pool: an unused adjacency reserve is backfilled
+    from the expanded ranked pool without disturbing incumbent rank order."""
     asset_root = tmp_path / "assets"
     asset_root.mkdir()
     provider = StateVectorProvider()
@@ -497,12 +497,23 @@ def test_delivery_unchanged_when_ranked_pool_fills_nucleus(tmp_path):
     store.finalize(order)
     store.build_state_semantic_index(provider)
 
-    baseline = [h.exact_ref for h in store.query(_QUERY, image_limit=0)]
-    expanded = [
-        h.exact_ref
-        for h in store.query(_QUERY, image_limit=0, state_semantic_quota=16)
+    baseline = [h.exact_ref for h in store.query(_QUERY, limit=16, image_limit=0)]
+    expanded_hits = store.query(
+        _QUERY, limit=16, image_limit=0, state_semantic_quota=16
+    )
+    expanded = [h.exact_ref for h in expanded_hits]
+    # D-ARCH-2 fully utilizes the available ranked pool: all incumbents retain
+    # their order and the newly admitted semantic state fills the unused slot.
+    assert expanded[:-1] == baseline
+    assert [
+        (hit.trajectory_id, hit.state_index)
+        for hit in expanded_hits
+    ] == [
+        *((f"lexical-{index:02d}", 0) for index in range(12)),
+        ("target", 0),
+        ("target", 1),
     ]
-    assert expanded == baseline
+    assert len(expanded) == 14
     admitted = _admitted(store)
     assert admitted, "the pool itself must still gain a semantic entry"
     invisible = _state_id(store, "target", 1)

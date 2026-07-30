@@ -445,6 +445,29 @@ def test_closed_and_open_vacation_counts_preserve_finite_coverage_boundary(tmp_p
     assert open_world["computation"] is None
 
 
+def test_duplicate_grounded_ref_cannot_certify_finite_coverage(tmp_path):
+    engine = _engine(tmp_path)
+    bali = _append(engine, "I took a vacation to Bali this year.")
+    duplicate_claims = [
+        _claim("events", bali, "bali-1", entity="Bali", distinct_key="vacation bali"),
+        _claim("events", bali, "bali-2", entity="Bali", distinct_key="vacation bali"),
+    ]
+    try:
+        result = _compile(
+            engine,
+            "How many of the two vacations did I take this year?",
+            refs=[bali],
+            selector=_selector(*duplicate_claims, operation="count_distinct"),
+            question_date="2026-12-31",
+        )
+    finally:
+        engine._store.close()
+
+    assert result["finite_coverage"] is False
+    assert result["state"] == "partial"
+    assert result["computation"] is None
+
+
 @pytest.mark.parametrize(
     ("question", "operation", "expected"),
     [

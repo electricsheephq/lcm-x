@@ -202,6 +202,13 @@ def test_deadline_bounds_a_synced_binary_summary_prescreen(tmp_path, monkeypatch
         "_prescreen_deadline_expired",
         _expire_after_first_prescreen_batch,
     )
+    monkeypatch.setattr(
+        store,
+        "_count_embedded_vectors",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("deadline expiry must not start COUNT(*)")
+        ),
+    )
     expired = store.knn(
         [1.0, 0.0, 0.0],
         k=1,

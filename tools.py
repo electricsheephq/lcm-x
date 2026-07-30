@@ -52,9 +52,10 @@ from .reasoning import (
     execute_plan,
     ground_evidence,
     question_date_as_of_epoch,
+    temporal_trust_wire,
     validate_selector_alignment,
     verify_final_answer,
-    resolve_occurrence_time,
+    resolve_occurrence_time_with_trust,
 )
 from .presets import preset_status_payload
 from .rollup_periods import (
@@ -696,6 +697,7 @@ def lcm_compute(args: Dict[str, Any], **kwargs) -> str:
             messages=engine._store,
             assertions=getattr(engine, "_assertions", None),
             as_of=as_of,
+            engine=engine,
         )
     except (TypeError, ValueError, sqlite3.Error) as exc:
         grounding = None
@@ -747,6 +749,9 @@ def lcm_compute(args: Dict[str, Any], **kwargs) -> str:
                 )
             },
         })
+    # Tri-state contract: None means temporal certification is not applicable,
+    # False means temporal evidence is uncertified, and True means certified.
+    # Preserve those values through JSON as null/false/true; never bool-coerce.
     stages["selector"] = _compute_stage(
         "host_tool_arguments",
         selector_started,
@@ -755,6 +760,7 @@ def lcm_compute(args: Dict[str, Any], **kwargs) -> str:
         status="validated",
         evidence_complete=bool(args.get("evidence_complete") is True),
         operand_count=len(grounding.operands),
+        temporal_certified=grounding.temporal_certified,
     )
 
     executor_started = time.perf_counter()
@@ -832,6 +838,11 @@ def lcm_compute(args: Dict[str, Any], **kwargs) -> str:
         "trace": trace.as_dict(),
         "answer": answer,
         "candidate_verification": verification_payload,
+        "temporal_trust": temporal_trust_wire(
+            grounding.temporal_trust,
+            grounding.temporal_certified,
+            grounding.notes,
+        ),
         "provenance": {
             "runtime_inputs": ["question", "question_date", "exact_retrieved_evidence"],
             "stages": stages,
@@ -5544,13 +5555,21 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         ).date().isoformat()
                     except (TypeError, ValueError, OverflowError, OSError):
                         session_date = None
-                occurrence = resolve_occurrence_time(
+                occurrence, resolved_trust = resolve_occurrence_time_with_trust(
                     (hydrated or {}).get("content") or hit.get("snippet") or "",
                     observed_at=source_observed_at or 0,
                     session_date=session_date,
+                    engine=engine,
+                    session_id=hit.get("session_id"),
                 )
                 occurrence["stored_at"] = source_row.get("ingested_at") or source_row.get("timestamp")
                 item["occurrence_time"] = occurrence
+                trust_note = str(resolved_trust.get("trust_note") or "").strip()
+                item["temporal_trust"] = temporal_trust_wire(
+                    resolved_trust.get("anchor_trust"),
+                    resolved_trust.get("temporal_certified"),
+                    (trust_note,) if trust_note else (),
+                )
                 item["observation_time"] = {
                     "observed_at": occurrence.get("observed_at") or None,
                     "ingested_at": source_row.get("ingested_at") or source_row.get("timestamp"),
