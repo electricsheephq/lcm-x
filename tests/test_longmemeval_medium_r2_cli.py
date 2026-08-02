@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -74,6 +75,9 @@ def test_run_converts_lazy_prepared_iterator_errors_to_system_exit(tmp_path, mon
         def validate_question_ids(self, *, limit=None):
             return None
 
+        def selected_question_ids(self, *, limit=None):
+            return ()
+
         def iter_questions(self, *, limit=None):
             def _lazy():
                 raise error
@@ -143,3 +147,36 @@ def test_run_preflights_prepared_qids_before_scoring(tmp_path, monkeypatch):
     with pytest.raises(SystemExit, match="ended early"):
         cli._cmd_run(args)
     assert scoring_started is False
+
+
+def test_direct_dataset_digest_change_fails_closed_on_resume(tmp_path):
+    cli = _load_cli()
+    dataset = tmp_path / lme.DATASET_COORDS["s"]["file"]
+    row = {
+        "question_id": "q0",
+        "question_type": "single-session-user",
+        "question": "what is the code?",
+        "answer": "ALPHA",
+        "question_date": "2023-01-01",
+        "haystack_session_ids": ["s0"],
+        "haystack_dates": ["2023-01-01"],
+        "haystack_sessions": [[{"role": "user", "content": "the code is ALPHA"}]],
+        "answer_session_ids": ["s0"],
+    }
+    dataset.write_text(json.dumps([row]) + "\n", encoding="utf-8")
+    output = tmp_path / "output"
+    base_args = [
+        "run",
+        "--dataset",
+        str(dataset),
+        "--output",
+        str(output),
+        "--allow-external-output",
+    ]
+    assert cli.main(base_args) == 0
+
+    row["haystack_sessions"][0][0]["content"] = "the code is BETA"
+    dataset.write_text(json.dumps([row]) + "\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match=r"configuration mismatch.*source_sha256"):
+        cli.main([*base_args, "--resume"])

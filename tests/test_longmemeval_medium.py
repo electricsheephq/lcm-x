@@ -318,6 +318,12 @@ def test_cli_requires_exactly_one_run_source_and_exposes_prepare():
     )
     assert prepared.command == "prepare"
     assert prepared.dataset_label == "m"
+    resumed = cli._parse_args(
+        [
+            "run", "--dataset", "longmemeval_s", "--output", "out", "--resume",
+        ]
+    )
+    assert resumed.resume is True
     with pytest.raises(SystemExit):
         cli._parse_args(["run", "--output", "out"])
     with pytest.raises(SystemExit):
