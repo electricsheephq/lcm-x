@@ -15,8 +15,9 @@ import shutil
 import sqlite3
 import threading
 import time
+import uuid
 from contextlib import contextmanager
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,28 @@ REQUIRED_CORE_TABLES = (
     "messages_fts",
     "nodes_fts",
 )
+
+DATABASE_UUID_METADATA_KEY = "database_uuid"
+DATABASE_UUID_MIGRATION = "database_uuid_v1"
+RETRIEVAL_REFERENCES_MIGRATION = "retrieval_references_v1"
+RETRIEVAL_REFERENCES_TABLE = "retrieval_references_v1"
+RETRIEVAL_REFERENCE_KINDS = (
+    "message",
+    "summary_node",
+    "externalized_payload",
+    "source_cursor",
+    "content_cursor",
+    "session_cursor",
+)
+RETRIEVAL_REFERENCE_CONSISTENCIES = ("live", "high_watermark", "snapshot")
+
+
+class DatabaseIdentityError(RuntimeError):
+    """Raised when a migrated database no longer has a valid authority UUID."""
+
+
+class RetrievalReferenceSchemaError(RuntimeError):
+    """Raised when the named V1 registry exists with an incompatible shape."""
 
 
 class ExternalContentFtsSpec:
@@ -416,6 +439,7 @@ def classify_version_mismatch(conn: sqlite3.Connection) -> str:
     # The feature table's *internal* shape is intentionally NOT checked here — an
     # early-variant feature table is still an interim stamp, repaired on apply.
     allowed = set(_V5_CORE_TABLE_COLUMNS) | set(_V5_CORE_PRESENCE_ONLY)
+    allowed.add(RETRIEVAL_REFERENCES_TABLE)
     for fts in _V5_CORE_PRESENCE_ONLY:
         allowed.update(get_fts_shadow_table_names(fts))
     for table in tables:
@@ -424,6 +448,29 @@ def classify_version_mismatch(conn: sqlite3.Connection) -> str:
         if any(table.startswith(prefix) for prefix in _KNOWN_FEATURE_TABLE_PREFIXES):
             continue
         return VERSION_MISMATCH_GENUINELY_NEWER
+
+    identity_marked = _migration_marker_exists(conn, DATABASE_UUID_MIGRATION)
+    database_uuid_value = _read_database_uuid_value(conn)
+    if identity_marked != (database_uuid_value is not None):
+        return VERSION_MISMATCH_GENUINELY_NEWER
+    if identity_marked and not _is_canonical_uuid4(database_uuid_value):
+        return VERSION_MISMATCH_GENUINELY_NEWER
+
+    registry_present = RETRIEVAL_REFERENCES_TABLE in tables
+    registry_marked = _migration_marker_exists(
+        conn, RETRIEVAL_REFERENCES_MIGRATION
+    )
+    if registry_present != registry_marked:
+        # Table names and exact shapes are not provenance. A V1 registry is known
+        # to this build only when its named completion marker is present too.
+        return VERSION_MISMATCH_GENUINELY_NEWER
+    if registry_present:
+        if verify_retrieval_references_schema(conn):
+            return VERSION_MISMATCH_GENUINELY_NEWER
+        try:
+            get_database_uuid(conn)
+        except DatabaseIdentityError:
+            return VERSION_MISMATCH_GENUINELY_NEWER
 
     # A present feature-family table that carries an EXTRA column this build does
     # not recognise is a newer-build signature, not an early interim variant —
@@ -564,6 +611,367 @@ def ensure_migration_state_table(conn: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def _is_canonical_uuid4(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = uuid.UUID(value)
+    except (AttributeError, ValueError, TypeError):
+        return False
+    return parsed.version == 4 and str(parsed) == value
+
+
+def _migration_marker_exists(conn: sqlite3.Connection, step_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM lcm_migration_state WHERE step_name = ?",
+        (step_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _read_database_uuid_value(conn: sqlite3.Connection) -> object | None:
+    row = conn.execute(
+        "SELECT value FROM metadata WHERE key = ?",
+        (DATABASE_UUID_METADATA_KEY,),
+    ).fetchone()
+    return None if row is None else row[0]
+
+
+@contextmanager
+def _named_migration_ownership(conn: sqlite3.Connection, name: str):
+    """Serialize a named migration while preserving caller transaction ownership."""
+    savepoint = quote_sql_identifier(name)
+    owns_transaction = not conn.in_transaction
+    if owns_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    else:
+        conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        yield
+    except BaseException:
+        if owns_transaction:
+            conn.rollback()
+        else:
+            try:
+                conn.execute(f"ROLLBACK TO {savepoint}")
+            finally:
+                conn.execute(f"RELEASE {savepoint}")
+        raise
+    else:
+        if owns_transaction:
+            conn.commit()
+        else:
+            conn.execute(f"RELEASE {savepoint}")
+
+
+def _ensure_database_uuid_migration(conn: sqlite3.Connection) -> str:
+    marker_exists = _migration_marker_exists(conn, DATABASE_UUID_MIGRATION)
+    value = _read_database_uuid_value(conn)
+    if value is None:
+        registry_marker_exists = _migration_marker_exists(
+            conn, RETRIEVAL_REFERENCES_MIGRATION
+        )
+        registry_table_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (RETRIEVAL_REFERENCES_TABLE,),
+        ).fetchone() is not None
+        if marker_exists or registry_marker_exists or registry_table_exists:
+            raise DatabaseIdentityError(
+                "LCM retrieval-reference state exists without its database_uuid "
+                "authority identity; refusing to generate a replacement identity"
+            )
+        value = str(uuid.uuid4())
+        conn.execute(
+            """
+            INSERT INTO metadata(key, value) VALUES(?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (DATABASE_UUID_METADATA_KEY, value),
+        )
+    elif not _is_canonical_uuid4(value):
+        raise DatabaseIdentityError(
+            "LCM database_uuid is missing or corrupt; refusing to regenerate authority identity"
+        )
+    mark_migration_step_complete(conn, DATABASE_UUID_MIGRATION)
+    return str(value)
+
+
+def _ensure_retrieval_references_table(conn: sqlite3.Connection) -> None:
+    kinds = ", ".join(repr(kind) for kind in RETRIEVAL_REFERENCE_KINDS)
+    consistencies = ", ".join(repr(value) for value in RETRIEVAL_REFERENCE_CONSISTENCIES)
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {RETRIEVAL_REFERENCES_TABLE} (
+            token_digest TEXT NOT NULL PRIMARY KEY
+                CHECK(length(token_digest) = 64
+                      AND token_digest NOT GLOB '*[^0-9a-f]*'),
+            kind TEXT NOT NULL CHECK(kind IN ({kinds})),
+            target_json TEXT NOT NULL,
+            scope_json TEXT NOT NULL,
+            revision_json TEXT NOT NULL,
+            consistency TEXT NOT NULL CHECK(consistency IN ({consistencies})),
+            issued_at REAL NOT NULL,
+            expires_at REAL,
+            revoked_at REAL
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE INDEX IF NOT EXISTS idx_{RETRIEVAL_REFERENCES_TABLE}_kind_state
+            ON {RETRIEVAL_REFERENCES_TABLE}(kind, revoked_at, expires_at)
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE INDEX IF NOT EXISTS idx_{RETRIEVAL_REFERENCES_TABLE}_scope
+            ON {RETRIEVAL_REFERENCES_TABLE}(kind, scope_json)
+        """
+    )
+
+
+def verify_retrieval_references_schema(conn: sqlite3.Connection) -> list[str]:
+    """Return structural defects in the V1 registry, without mutating it."""
+    table = RETRIEVAL_REFERENCES_TABLE
+    table_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    if table_row is None:
+        return [f"missing table:{table}"]
+
+    expected = {
+        "token_digest": ("TEXT", 1, 1),
+        "kind": ("TEXT", 1, 0),
+        "target_json": ("TEXT", 1, 0),
+        "scope_json": ("TEXT", 1, 0),
+        "revision_json": ("TEXT", 1, 0),
+        "consistency": ("TEXT", 1, 0),
+        "issued_at": ("REAL", 1, 0),
+        "expires_at": ("REAL", 0, 0),
+        "revoked_at": ("REAL", 0, 0),
+    }
+    actual = {
+        str(row[1]): (str(row[2]).upper(), int(row[3] or 0), int(row[5] or 0))
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    errors: list[str] = []
+    if actual != expected:
+        errors.append(f"malformed table:{table}")
+
+    normalized_sql = re.sub(r"\s+", "", str(table_row[0] or "").lower())
+    if "check(kindin('message','summary_node','externalized_payload','source_cursor','content_cursor','session_cursor'))" not in normalized_sql:
+        errors.append(f"missing kind check:{table}")
+    if "check(consistencyin('live','high_watermark','snapshot'))" not in normalized_sql:
+        errors.append(f"missing consistency check:{table}")
+    if "length(token_digest)=64" not in normalized_sql:
+        errors.append(f"missing digest check:{table}")
+    if "token_digestnotglob'*[^0-9a-f]*'" not in normalized_sql:
+        errors.append(f"missing digest character check:{table}")
+
+    expected_indexes = {
+        f"idx_{table}_kind_state": ("kind", "revoked_at", "expires_at"),
+        f"idx_{table}_scope": ("kind", "scope_json"),
+    }
+    for index_name, columns in expected_indexes.items():
+        row = conn.execute(
+            "SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=?",
+            (index_name,),
+        ).fetchone()
+        actual_columns = [
+            str(item[2])
+            for item in conn.execute(f"PRAGMA index_info({index_name})").fetchall()
+        ] if row is not None else []
+        if (
+            row is None
+            or str(row[0]) != table
+            or actual_columns != list(columns)
+        ):
+            errors.append(f"malformed index:{index_name}")
+    return sorted(set(errors))
+
+
+def _completed_retrieval_reference_migrations(
+    conn: sqlite3.Connection,
+) -> str | None:
+    """Validate known V1 provenance or identify a completely fresh boundary."""
+    identity_complete = _migration_marker_exists(conn, DATABASE_UUID_MIGRATION)
+    registry_complete = _migration_marker_exists(
+        conn, RETRIEVAL_REFERENCES_MIGRATION
+    )
+    database_uuid_value = _read_database_uuid_value(conn)
+    registry_table_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (RETRIEVAL_REFERENCES_TABLE,),
+    ).fetchone() is not None
+
+    if not identity_complete:
+        if (
+            database_uuid_value is not None
+            or registry_complete
+            or registry_table_exists
+        ):
+            raise DatabaseIdentityError(
+                "unmarked retrieval-reference authority state cannot be adopted"
+            )
+        return None
+
+    database_uuid = get_database_uuid(conn)
+    if not registry_complete:
+        if registry_table_exists:
+            raise RetrievalReferenceSchemaError(
+                "unmarked retrieval_references_v1 table cannot be adopted"
+            )
+        return None
+
+    errors = verify_retrieval_references_schema(conn)
+    if errors:
+        raise RetrievalReferenceSchemaError(
+            "completed retrieval_references_v1 migration is damaged: "
+            + "; ".join(errors)
+        )
+    return database_uuid
+
+
+def ensure_retrieval_reference_migrations(conn: sqlite3.Connection) -> str:
+    """Install and validate the V1 authority identity and reference registry.
+
+    The two named migrations share one ownership transaction. A failed schema
+    check or UUID write rolls back both, and the numeric core schema remains v5.
+    """
+    # Direct callers receive the same pre-DDL newer-schema refusal as the main
+    # migration ladder; named helpers must not bypass that authority boundary.
+    refuse_schema_version_too_new(conn)
+    prerequisite_tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?, ?)",
+            ("metadata", "lcm_migration_state"),
+        ).fetchall()
+    }
+    if prerequisite_tables == {"metadata", "lcm_migration_state"}:
+        complete = _completed_retrieval_reference_migrations(conn)
+        if complete is not None:
+            return complete
+
+    ensure_metadata_table(conn)
+    ensure_migration_state_table(conn)
+
+    complete = _completed_retrieval_reference_migrations(conn)
+    if complete is not None:
+        return complete
+
+    with _named_migration_ownership(conn, "lcm_retrieval_references_v1"):
+        # Another constructor may have completed the named migration while this
+        # connection waited for ownership. Accept that winner without replaying
+        # DDL or rewriting identity metadata.
+        complete = _completed_retrieval_reference_migrations(conn)
+        if complete is not None:
+            return complete
+
+        database_uuid = _ensure_database_uuid_migration(conn)
+        _ensure_retrieval_references_table(conn)
+        errors = verify_retrieval_references_schema(conn)
+        if errors:
+            raise RetrievalReferenceSchemaError(
+                "retrieval_references_v1 schema validation failed: " + "; ".join(errors)
+            )
+        mark_migration_step_complete(conn, RETRIEVAL_REFERENCES_MIGRATION)
+    return database_uuid
+
+
+def get_retrieval_reference_authority(conn: sqlite3.Connection) -> str:
+    """Read and validate the complete V1 authority without installing it."""
+    required_tables = {
+        "metadata",
+        "lcm_migration_state",
+        RETRIEVAL_REFERENCES_TABLE,
+    }
+    present_tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?, ?, ?)",
+            tuple(sorted(required_tables)),
+        ).fetchall()
+    }
+    if present_tables != required_tables:
+        raise DatabaseIdentityError(
+            "retrieval-reference authority migrations have not completed"
+        )
+    complete = _completed_retrieval_reference_migrations(conn)
+    if complete is None:
+        raise DatabaseIdentityError(
+            "retrieval-reference authority migrations have not completed"
+        )
+    return complete
+
+
+def get_database_uuid(conn: sqlite3.Connection) -> str:
+    """Return the migrated logical authority UUID, failing closed if damaged."""
+    if not _migration_marker_exists(conn, DATABASE_UUID_MIGRATION):
+        raise DatabaseIdentityError("LCM database_uuid migration has not completed")
+    value = _read_database_uuid_value(conn)
+    if not _is_canonical_uuid4(value):
+        raise DatabaseIdentityError(
+            "migrated LCM database is missing or has a corrupt database_uuid"
+        )
+    return str(value)
+
+
+def rotate_database_uuid(
+    conn: sqlite3.Connection,
+    *,
+    authorization_context: object = None,
+    authorize_rotation: Callable[[object], bool] | None = None,
+    revoked_at: float | None = None,
+) -> str:
+    """Rotate authority identity and revoke copied V1 references atomically."""
+    try:
+        rotation_allowed = bool(
+            authorization_context is not None
+            and authorize_rotation is not None
+            and authorize_rotation(authorization_context)
+        )
+    except Exception:
+        rotation_allowed = False
+    if not rotation_allowed:
+        raise PermissionError("explicit clone rotation is not authorized")
+    timestamp = time.time() if revoked_at is None else float(revoked_at)
+    if not math.isfinite(timestamp):
+        raise ValueError("revoked_at must be finite")
+    new_uuid = str(uuid.uuid4())
+    with _named_migration_ownership(conn, "lcm_clone_rotation_v1"):
+        current = get_retrieval_reference_authority(conn)
+        cursor = conn.execute(
+            """
+            UPDATE metadata SET value = ?
+            WHERE key = ? AND value = ?
+            """,
+            (new_uuid, DATABASE_UUID_METADATA_KEY, current),
+        )
+        if cursor.rowcount != 1:
+            raise DatabaseIdentityError(
+                "database_uuid authority changed during explicit clone rotation"
+            )
+        conn.execute(
+            f"UPDATE {RETRIEVAL_REFERENCES_TABLE} SET revoked_at=? WHERE revoked_at IS NULL",
+            (timestamp,),
+        )
+    return new_uuid
+
+
+def rotate_database_identity(
+    conn: sqlite3.Connection,
+    **kwargs: object,
+) -> str:
+    """Compatibility name for the explicit clone authority rotation primitive."""
+    return rotate_database_uuid(conn, **kwargs)
+
+
+def ensure_database_identity(conn: sqlite3.Connection) -> str:
+    """Return the authority UUID after the named V1 migrations have been validated."""
+    return ensure_retrieval_reference_migrations(conn)
 
 
 def ensure_lifecycle_state_table(conn: sqlite3.Connection) -> None:
@@ -2494,11 +2902,8 @@ def ensure_external_content_fts(
 def run_versioned_migrations(conn: sqlite3.Connection) -> None:
     refuse_schema_version_too_new(conn)
 
-    ensure_metadata_table(conn)
-    ensure_migration_state_table(conn)
-
-    refuse_schema_version_too_new(conn)
-    current_version = get_schema_version(conn)
+    ensure_retrieval_reference_migrations(conn)
+    current_version = read_existing_schema_version(conn)
     if current_version < 2:
         mark_migration_step_complete(conn, "v2_external_content_fts_triggers")
         current_version = 2
@@ -2529,4 +2934,5 @@ def run_versioned_migrations(conn: sqlite3.Connection) -> None:
     # feature materialized lazily by VectorStore (recorded via the named
     # ``embeddings_v1`` marker), so a disabled install stays at v5 with no
     # embedding tables and the numeric counter is free for the temporal train.
-    set_schema_version(conn, current_version)
+    if read_existing_schema_version(conn) != current_version:
+        set_schema_version(conn, current_version)
