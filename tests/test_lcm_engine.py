@@ -12112,17 +12112,33 @@ class TestPostCompactionIngestion:
             fresh.shutdown()
 
     def test_late_off_current_session_end_does_not_write_bound_session_proof(self, tmp_path):
-        """Codex MEDIUM: a late ordinary on_session_end for a superseded
-        session A, delivered after session B is bound, must not write
-        session-end replay proof under B's namespace."""
+        """A late ordinary A-end after B binds keeps A rows and proof out of B."""
         database_path = str(tmp_path / "late-off-current.db")
         engine = LCMEngine(config=LCMConfig(database_path=database_path))
+        snapshot = self._summary_only_snapshot()
+        b_marker = {"role": "user", "content": "B-owned history must remain isolated"}
         try:
             engine.on_session_start("late-session-A", context_length=200000)
             engine.on_session_start("late-session-B", context_length=200000)
+            engine._ingest_messages([dict(b_marker)])
             assert engine._session_id == "late-session-B"
-            engine.on_session_end("late-session-A", self._summary_only_snapshot())
+            assert engine._store.get_session_count("late-session-A") == 0
+            assert engine._store.get_session_count("late-session-B") == 1
+
+            engine.on_session_end(
+                "late-session-A",
+                [dict(message) for message in snapshot],
+            )
+
             assert engine._load_session_end_replay_snapshot_digests() == []
+            assert engine._store.get_session_count("late-session-A") == len(snapshot)
+            assert engine._store.get_session_count("late-session-B") == 1
+            a_rows = engine._store.get_session_messages("late-session-A")
+            b_rows = engine._store.get_session_messages("late-session-B")
+            assert [row.get("content") for row in a_rows] == [
+                message.get("content") for message in snapshot
+            ]
+            assert [row.get("content") for row in b_rows] == [b_marker["content"]]
         finally:
             engine.shutdown()
 
