@@ -577,6 +577,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         self._lcm_normal_message_prefix_fingerprints: dict[tuple[str, str], list[str]] = {}
         self._lcm_current_start_allows_bypass_lineage = False
         self._auxiliary_session_lock = threading.RLock()
+        # Keep public lifecycle rebinding and session-end replay reconciliation
+        # on one stable engine binding. This is deliberately distinct from the
+        # auxiliary-session bookkeeping lock above.
+        self._session_lifecycle_lock = threading.RLock()
         self._host_fallback_compressor: Any = None
         self._host_fallback_session_id = ""
         self._host_fallback_import_warning_logged = False
@@ -2407,6 +2411,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         self._log_session_filter_diagnostics()
 
     def on_session_start(self, session_id: str, **kwargs) -> None:
+        """Bind a host session without racing an in-flight session end."""
+        with self._session_lifecycle_lock:
+            self._on_session_start_locked(session_id, **kwargs)
+
+    def _on_session_start_locked(self, session_id: str, **kwargs) -> None:
         if "hermes_home" in kwargs:
             self._rebind_storage_for_home(str(kwargs.get("hermes_home") or ""))
 
@@ -3022,6 +3031,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         )
 
     def on_session_end(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
+        """Finalize one stable session binding before another may rebind it."""
+        with self._session_lifecycle_lock:
+            self._on_session_end_locked(session_id, messages)
+
+    def _on_session_end_locked(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
         ended_generation = self._in_process_auxiliary_caller_generation(session_id)
         active_auxiliary_end = session_id in self._active_auxiliary_session_ids()
         if (
