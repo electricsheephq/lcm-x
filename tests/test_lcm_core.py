@@ -590,6 +590,33 @@ class TestProviderPrefixedAuxiliaryCalls:
             disabled.record_call(now=0)
         assert disabled.allows(now=0) is True
 
+    def test_spend_guard_reservation_is_atomic_across_threads(self):
+        from hermes_lcm.escalation import SummarySpendGuard
+
+        guard = SummarySpendGuard(
+            max_calls=3,
+            window_seconds=100,
+            backoff_seconds=50,
+        )
+        barrier = threading.Barrier(12)
+        reservations: list[bool] = []
+        result_lock = threading.Lock()
+
+        def reserve():
+            barrier.wait()
+            accepted = guard.try_record_call(now=1000.0)
+            with result_lock:
+                reservations.append(accepted)
+
+        threads = [threading.Thread(target=reserve) for _ in range(12)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+
+        assert all(not thread.is_alive() for thread in threads)
+        assert sum(reservations) == 3
+
     def test_summarize_falls_to_l3_when_spend_guard_backs_off(self, monkeypatch):
         from hermes_lcm import escalation
         from hermes_lcm.escalation import SummarySpendGuard

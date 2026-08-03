@@ -86,13 +86,13 @@ Expected signals:
 
 - plugin list includes `hermes-lcm`
 - selected context engine is `lcm`
-- tool list includes `lcm_grep`, `lcm_load_session`, `lcm_describe`, `lcm_expand`, `lcm_expand_query`, `lcm_status`, `lcm_inspect`, and `lcm_doctor`
+- tool list includes `lcm_grep`, `lcm_recall`, `lcm_recent`, `lcm_load_session`, `lcm_describe`, `lcm_expand`, `lcm_expand_query`, `lcm_status`, `lcm_inspect`, and `lcm_doctor`
 
 Typical output:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm v0.19.0 (8 tools)
+  ✓ hermes-lcm v0.20.0 (10 tools)
 
 Provider Plugins:
   Context Engine: lcm
@@ -120,7 +120,7 @@ LCM tools are still available through the context-engine schema/dispatch path
 registration (Path A) on those hosts because Path A would shadow Path B and lose
 current-turn ingest.
 
-Healthy signals are the same as above: selected context engine `lcm`, the eight
+Healthy signals are the same as above: selected context engine `lcm`, the ten
 `lcm_*` tools in the live tool list, and `lcm_status` / `lcm_inspect` / `lcm_doctor` responding
 after one normal message initializes the session.
 

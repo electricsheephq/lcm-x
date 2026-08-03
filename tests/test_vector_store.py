@@ -624,6 +624,7 @@ def test_large_id_metadata_resolve_scales_past_variable_limit(stores):
     now = 1.0
     vec = array("f", store._normalized([1.0, 0.0], expected_dim=2)).tobytes()
     identity = store._current_profile()["identity_hash"]
+    conn.execute("BEGIN")
     for node_id in range(1, 40_001):
         conn.execute(
             "INSERT INTO summary_nodes(node_id, session_id, depth, summary, "

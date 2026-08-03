@@ -4,6 +4,14 @@ This repo also publishes GitHub Releases. This file is the repo-root release sur
 
 ## Unreleased
 
+## v0.20.0 - 2026-07-23
+
+Release focus: Lossless-Claw parity plus the merged cross-session recall and temporal retrieval stack.
+
+- Completed the five selected Lossless-Claw parity behaviors: recoverable active-replay stubs for large externalized tool results; token-bounded fresh tails that preserve the newest message and complete tool-call/result groups; dry-run-first historical tool-output backfill with guarded rollback; bounded active-session externalized-payload search with strict ownership and recoverability checks; and bounded atomic threshold full sweeps with one final active-context publication. (#380, #381, #382, #413)
+- Shipped the merged #413 recall and temporal surface: `lcm_recall`, `lcm_recent`, and `lcm_load_session`; semantic and hybrid retrieval over summaries and message chunks; temporal rollups with bounded fallback; optional proactive recall; and the corresponding benchmark and reproduction documentation.
+- Release boundary: stock installs keep large-output externalization, active-replay stubbing, embeddings, temporal rollups, proactive recall, and threshold full sweeps disabled by default. Payload search requires explicit `content_scope`; historical backfill remains an operator-invoked, dry-run-first command. Committed benchmark results are directional evidence under their documented model and harness, not a universal provider-parity claim. This release does not include the later work tracked in #423, #434, or #436.
+
 ## v0.19.0 - 2026-07-07
 
 Release focus: data-safety hardening, operator diagnostics, import tooling, benchmarking, and the WS5 engine decomposition.

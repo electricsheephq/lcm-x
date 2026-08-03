@@ -189,15 +189,15 @@ Expected signals:
 
 - plugin list includes `hermes-lcm`
 - selected context engine is `lcm`
-- tool list includes `lcm_grep`, `lcm_load_session`, `lcm_describe`,
-  `lcm_expand`, `lcm_expand_query`, `lcm_status`, `lcm_inspect`, and
-  `lcm_doctor`
+- tool list includes `lcm_grep`, `lcm_recall`, `lcm_recent`,
+  `lcm_load_session`, `lcm_describe`, `lcm_expand`, `lcm_expand_query`,
+  `lcm_status`, `lcm_inspect`, and `lcm_doctor`
 
 Typical output:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm v0.19.0 (8 tools)
+  ✓ hermes-lcm v0.20.0 (10 tools)
 
 Provider Plugins:
   Context Engine: lcm
@@ -210,7 +210,7 @@ best-effort git identity:
 
 If startup logs say LCM tools are available through `context-engine schemas` or
 mention the `Path B fallback`, that is expected on older Hermes hosts such as
-Hermes Agent v0.16. The seven `lcm_*` tools remain available through the
+Hermes Agent v0.16. The ten `lcm_*` tools remain available through the
 context-engine path; standalone plugin-registry registration is not required
 there.
 

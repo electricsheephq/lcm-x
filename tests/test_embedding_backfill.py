@@ -1026,12 +1026,16 @@ def test_inflight_maintenance_processes_only_one_bounded_chunk(tmp_path):
         conn = store.connection
         command_mod._ensure_inflight_table(conn)
         identity = "identity"
+        # VectorStore connections use autocommit, so batch this large fixture
+        # explicitly instead of forcing one durable transaction per row.
+        conn.execute("BEGIN")
         conn.executemany(
             "INSERT INTO lcm_embedding_backfill_inflight("
             "embedded_id, identity_hash, lease_id, generation, claimed_at, "
             "state, updated_at) VALUES (?, ?, 'stale', 1, 1, 'claimed', 1)",
             ((str(index), identity) for index in range(250_001)),
         )
+        conn.commit()
         lease = command_mod._acquire_embedding_backfill_lease(
             conn, ttl_s=600.0, heartbeat_s=60.0
         )
