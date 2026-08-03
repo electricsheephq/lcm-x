@@ -360,6 +360,212 @@ def test_session_reset_clears_sustained_evidence_and_bound(tmp_path, monkeypatch
         engine.shutdown()
 
 
+# ── Strict-consecutive streak semantics ──────────────────────────────────────
+
+
+def test_intervening_eligible_invocation_resets_blocked_streak(tmp_path, monkeypatch):
+    # blocked -> eligible -> blocked with min_observations=2: the eligible
+    # turn proves the session is not tail-deadlocked, so the two blocked
+    # turns are separated events, not sustained pressure. Pre-fix the second
+    # blocked turn engaged the yield.
+    engine = _make_engine(
+        tmp_path,
+        monkeypatch,
+        fresh_tail_count=128,
+        fresh_tail_pressure_yield_min_observations=2,
+    )
+    try:
+        messages = [_fat_user(i) for i in range(40)]
+        assert count_messages_tokens(messages) > engine.threshold_tokens
+
+        assert engine.should_compress_preflight(list(messages)) is False
+        assert engine._pressure_yield_blocked_streak == 1
+
+        # Shrinking the count tail exposes plenty of raw backlog: an ordinary
+        # eligible preflight, no yield involved.
+        engine._config.fresh_tail_count = 4
+        assert engine.should_compress_preflight(list(messages)) is True
+        assert engine._pressure_yield_blocked_streak == 0
+        engine._config.fresh_tail_count = 128
+
+        # Observation 1/2 again: the classic noop must hold.
+        assert engine.should_compress_preflight(list(messages)) is False
+        assert engine._pressure_yield_blocked_streak == 1
+        assert engine._pressure_yield_tail_token_limit == 0
+    finally:
+        engine.shutdown()
+
+
+def test_non_tail_blockage_resets_blocked_streak(tmp_path, monkeypatch):
+    # An invocation blocked by something other than fresh-tail eligibility
+    # (here: the compression boundary cooldown) is not evidence of the tail
+    # deadlock and must reset the streak.
+    engine = _make_engine(
+        tmp_path,
+        monkeypatch,
+        fresh_tail_count=128,
+        fresh_tail_pressure_yield_min_observations=2,
+    )
+    try:
+        messages = [_fat_user(i) for i in range(40)]
+
+        assert engine.should_compress_preflight(list(messages)) is False
+        assert engine._pressure_yield_blocked_streak == 1
+
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                engine, "_compression_boundary_cooldown_active", lambda: True
+            )
+            assert engine.should_compress_preflight(list(messages)) is False
+        assert engine._pressure_yield_blocked_streak == 0
+
+        assert engine.should_compress_preflight(list(messages)) is False
+        assert engine._pressure_yield_blocked_streak == 1
+        assert engine._pressure_yield_tail_token_limit == 0
+    finally:
+        engine.shutdown()
+
+
+def test_sanitation_only_progress_resets_blocked_streak(tmp_path, monkeypatch):
+    # A compress pass that ends "sanitized" (context cleanup, no leaf node)
+    # is real progress: stale blocked evidence must not survive it.
+    engine = _make_engine(
+        tmp_path,
+        monkeypatch,
+        fresh_tail_count=128,
+        fresh_tail_pressure_yield_min_observations=5,
+    )
+    try:
+        messages = [_fat_user(i) for i in range(40)]
+        observed = count_messages_tokens(messages)
+
+        assert engine.should_compress_preflight(list(messages)) is False
+        assert engine.should_compress_preflight(list(messages)) is False
+        assert engine._pressure_yield_blocked_streak == 2
+
+        real_sanitize = engine._sanitize_active_context_messages
+
+        def _cleaning_sanitize(msgs, **kwargs):
+            return real_sanitize(msgs, **kwargs) + [
+                {"role": "user", "content": "sanitation marker"}
+            ]
+
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                engine, "_sanitize_active_context_messages", _cleaning_sanitize
+            )
+            engine.compress(list(messages), current_tokens=observed)
+
+        assert engine._last_compression_status == "sanitized"
+        assert engine._pressure_yield_blocked_streak == 0
+    finally:
+        engine.shutdown()
+
+
+def test_forced_overflow_preflight_resets_blocked_streak(tmp_path, monkeypatch):
+    # Forced overflow recovery is a context-reducing path in its own right:
+    # a preflight that advertises it is not tail-blocked, so the streak
+    # restarts.
+    engine = _make_engine(
+        tmp_path,
+        monkeypatch,
+        fresh_tail_count=128,
+        fresh_tail_pressure_yield_min_observations=2,
+    )
+    try:
+        messages = [_fat_user(i) for i in range(40)]
+
+        assert engine.should_compress_preflight(list(messages)) is False
+        assert engine._pressure_yield_blocked_streak == 1
+
+        # An assembly cap far below the observed tokens makes this turn a
+        # forced-overflow recovery request, which preflight advertises before
+        # it ever consults fresh-tail eligibility.
+        saved_cap = engine._config.max_assembly_tokens
+        engine._config.max_assembly_tokens = 1_000
+        assert engine.should_compress_preflight(list(messages)) is True
+        engine._config.max_assembly_tokens = saved_cap
+        assert engine._pressure_yield_blocked_streak == 0
+
+        assert engine.should_compress_preflight(list(messages)) is False
+        assert engine._pressure_yield_blocked_streak == 1
+        assert engine._pressure_yield_tail_token_limit == 0
+    finally:
+        engine.shutdown()
+
+
+def test_exception_neither_extends_nor_resets_blocked_streak(tmp_path, monkeypatch):
+    # A summarizer failure mid-invocation is not an observation in either
+    # direction: the accumulated evidence stays exactly as it was.
+    engine = _make_engine(
+        tmp_path,
+        monkeypatch,
+        fresh_tail_count=128,
+        fresh_tail_pressure_yield_min_observations=3,
+    )
+
+    def _raising_summarizer(chunk, focus_topic=None, **_kwargs):
+        raise RuntimeError("summarizer down")
+
+    try:
+        messages = [_fat_user(i) for i in range(40)]
+        observed = count_messages_tokens(messages)
+
+        assert engine.should_compress_preflight(list(messages)) is False
+        assert engine.should_compress_preflight(list(messages)) is False
+        assert engine._pressure_yield_blocked_streak == 2
+
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                engine, "_summarize_leaf_chunk_with_rescue", _raising_summarizer
+            )
+            with pytest.raises(RuntimeError):
+                engine.compress(list(messages), current_tokens=observed)
+
+        # The failed compress counted its own blocked observation before the
+        # yield engaged and the summarizer died; the exception exit must not
+        # wipe that evidence (the deadlock is still there).
+        assert engine._pressure_yield_blocked_streak == 3
+        assert engine._pressure_yield_tail_token_limit == 0
+    finally:
+        engine.shutdown()
+
+
+# ── Reset authority across nested scopes ─────────────────────────────────────
+
+
+def test_session_reset_inside_nested_invocation_stays_authoritative(
+    tmp_path, monkeypatch
+):
+    # A reset that runs inside a nested invocation scope must win over the
+    # scope-exit restore: pre-fix, leaving the inner scope restored the
+    # outer invocation's pre-reset bound (1234 -> reset to 0 -> exit
+    # restores 1234).
+    engine = _make_engine(
+        tmp_path,
+        monkeypatch,
+        fresh_tail_count=128,
+        fresh_tail_pressure_yield_min_observations=3,
+    )
+    try:
+        messages = [_fat_user(i) for i in range(40)]
+        assert engine.should_compress_preflight(list(messages)) is False
+        assert engine.should_compress_preflight(list(messages)) is False
+        assert engine._pressure_yield_blocked_streak == 2
+
+        with engine._fresh_tail_pressure_yield_invocation():
+            engine._pressure_yield_tail_token_limit = 1234
+            with engine._fresh_tail_pressure_yield_invocation():
+                engine._reset_session_scoped_runtime_state()
+                assert engine._pressure_yield_tail_token_limit == 0
+            assert engine._pressure_yield_tail_token_limit == 0
+        assert engine._pressure_yield_tail_token_limit == 0
+        assert engine._pressure_yield_blocked_streak == 0
+        assert engine._pressure_yield_scope_depth == 0
+    finally:
+        engine.shutdown()
+
+
 # ── Preflight/compress agreement ─────────────────────────────────────────────
 
 

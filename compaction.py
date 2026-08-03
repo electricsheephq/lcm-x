@@ -75,6 +75,9 @@ class CompactionMixin:
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         if self._bypasses_lcm_context_management():
+            # Bypassed traffic observes nothing about the pressured session's
+            # tail: it must neither extend nor reset the blocked streak.
+            self._pressure_yield_invocation_verdict = "neutral"
             self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
             rough = count_messages_tokens(messages)
             if self._compression_boundary_cooldown_active():
@@ -452,6 +455,9 @@ class CompactionMixin:
 
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         if self._bypasses_lcm_context_management():
+            # Bypassed traffic observes nothing about the pressured session's
+            # tail: it must neither extend nor reset the blocked streak.
+            self._pressure_yield_invocation_verdict = "neutral"
             bypass_current_tokens = current_tokens
             if bypass_current_tokens is None or bypass_current_tokens <= 0:
                 auxiliary_session_id = self._thread_context_session_id()
@@ -510,6 +516,7 @@ class CompactionMixin:
             self._ingest_cursor = len(sanitized_messages)
             self._last_compression_status = "sanitized"
             self._last_compression_noop_reason = ""
+            self._note_fresh_tail_pressure_relieved()
             self._write_generated_ignored_placeholder_hash_counts(
                 self._generated_placeholder_digest_budget_for_active_replay(
                     sanitized_messages
@@ -992,6 +999,7 @@ class CompactionMixin:
                 self._ingest_cursor = len(sanitized_messages)
                 self._last_compression_status = "sanitized"
                 self._last_compression_noop_reason = ""
+                self._note_fresh_tail_pressure_relieved()
             else:
                 if dropped_replayed_scaffold_messages:
                     # The active context changed even though no new leaf node was
