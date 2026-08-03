@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import re
@@ -1676,6 +1677,425 @@ def _context_content_token_count(blocks: list[dict[str, Any]]) -> int:
         elif block.get("type") in {"child_nodes", "descendant_child_nodes"}:
             total += sum(count_tokens(str(child.get("summary") or "")) for child in block.get("children", []))
     return total
+
+
+_EXPAND_QUERY_EVIDENCE_QUOTE_MAX_CHARS = 500
+_EXPAND_QUERY_EVIDENCE_MAX_ITEMS = 24
+_EXPAND_QUERY_EVIDENCE_MAX_SERIALIZED_CHARS = 10_000
+_EXPAND_QUERY_EVIDENCE_METADATA_MAX_CHARS = 256
+_EXPAND_QUERY_EVIDENCE_SOURCE_PATH_MAX_HOPS = 8
+_EXPAND_QUERY_EVIDENCE_SOURCE_PATH_MAX_PATHS = 8
+
+
+def _expand_query_evidence_serialized_chars(evidence: dict[str, Any]) -> int:
+    """Measure the exact JSON representation used by the tool response."""
+
+    return len(json.dumps(evidence))
+
+
+def _bounded_evidence_text(value: Any) -> tuple[str, dict[str, Any] | None]:
+    """Bound metadata while retaining explicit length and digest disclosure."""
+
+    text = str(value or "")
+    if len(text) <= _EXPAND_QUERY_EVIDENCE_METADATA_MAX_CHARS:
+        return text, None
+    return text[:_EXPAND_QUERY_EVIDENCE_METADATA_MAX_CHARS], {
+        "original_chars": len(text),
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
+
+
+def _normalized_evidence_source_path(
+    value: Any,
+    *,
+    source_path_depth: Any = None,
+    source_path_truncated: Any = None,
+) -> dict[str, Any] | None:
+    if not isinstance(value, (list, tuple)):
+        return None
+    result: list[dict[str, int]] = []
+    for part in value[-_EXPAND_QUERY_EVIDENCE_SOURCE_PATH_MAX_HOPS:]:
+        if not isinstance(part, dict):
+            continue
+        node_id = part.get("node_id")
+        source_index = part.get("source_index")
+        if isinstance(node_id, int) and isinstance(source_index, int):
+            result.append({"node_id": node_id, "source_index": source_index})
+    if not result:
+        return None
+    depth = (
+        source_path_depth
+        if isinstance(source_path_depth, int) and source_path_depth >= len(result)
+        else len(result)
+    )
+    return {
+        "path": result,
+        "depth": depth,
+        "truncated": bool(source_path_truncated or depth > len(result)),
+    }
+
+
+def _build_expand_query_evidence(
+    context_blocks: list[dict[str, Any]],
+    *,
+    session_id: str,
+    context_truncated: bool,
+    synthesis_status: str,
+) -> dict[str, Any]:
+    """Return bounded, tool-extracted provenance for expansion synthesis context.
+
+    The bundle identifies excerpts that were actually sent to the auxiliary
+    model. It deliberately does not claim that the resulting answer is
+    semantically entailed by those excerpts.
+    """
+
+    synthesis_status = (
+        synthesis_status
+        if synthesis_status in {"completed", "failed", "not_run"}
+        else "unknown"
+    )
+    candidates: list[dict[str, Any]] = []
+    seen_items: dict[str, dict[str, Any]] = {}
+
+    def put_bounded_text(item: dict[str, Any], field: str, value: Any) -> bool:
+        bounded, truncation = _bounded_evidence_text(value)
+        item[field] = bounded
+        if truncation is not None:
+            item.setdefault("metadata_truncation", {})[field] = truncation
+            return True
+        return False
+
+    def add_candidate(
+        identity: str,
+        item: dict[str, Any],
+        *,
+        source_path: Any = None,
+        source_path_depth: Any = None,
+        source_path_truncated: Any = None,
+    ) -> None:
+        path = _normalized_evidence_source_path(
+            source_path,
+            source_path_depth=source_path_depth,
+            source_path_truncated=source_path_truncated,
+        )
+        existing = seen_items.get(identity)
+        if existing is not None:
+            existing["context_occurrence_count"] += 1
+            source_paths = existing.setdefault("source_paths", [])
+            if path and path not in source_paths:
+                if len(source_paths) < _EXPAND_QUERY_EVIDENCE_SOURCE_PATH_MAX_PATHS:
+                    source_paths.append(path)
+                else:
+                    existing["source_paths_truncated"] = True
+            return
+        put_bounded_text(item, "evidence_id", identity)
+        item["context_occurrence_count"] = 1
+        if path:
+            item["source_paths"] = [path]
+        seen_items[identity] = item
+        candidates.append(item)
+
+    def quote_payload(content: Any) -> dict[str, Any]:
+        quote = str(content or "")
+        return {
+            "quote": quote[:_EXPAND_QUERY_EVIDENCE_QUOTE_MAX_CHARS],
+            "quote_chars_before_provenance_cap": len(quote),
+            "quote_truncated_by_provenance_cap": len(quote)
+            > _EXPAND_QUERY_EVIDENCE_QUOTE_MAX_CHARS,
+        }
+
+    for block_index, block in enumerate(context_blocks):
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+
+        if block_type == "summary":
+            node_id = block.get("node_id")
+            identity = (
+                f"node:{node_id}"
+                if isinstance(node_id, int)
+                else f"context:{block_index}:summary"
+            )
+            item: dict[str, Any] = {
+                "source_type": "summary",
+                "node_id": node_id if isinstance(node_id, int) else None,
+                "locator_present": isinstance(node_id, int),
+                "locator_replay_status": "unverified" if isinstance(node_id, int) else "not_available",
+                **quote_payload(block.get("summary")),
+            }
+            put_bounded_text(item, "session_id", block.get("session_id") or session_id)
+            if isinstance(node_id, int):
+                item["expand_args"] = {"node_id": node_id}
+            add_candidate(
+                identity,
+                item,
+                source_path=block.get("source_path"),
+                source_path_depth=block.get("source_path_depth"),
+                source_path_truncated=block.get("source_path_truncated"),
+            )
+
+        if block_type in {"child_nodes", "descendant_child_nodes"}:
+            for child_index, child in enumerate(block.get("children", []) or []):
+                if not isinstance(child, dict):
+                    continue
+                node_id = child.get("node_id")
+                identity = (
+                    f"node:{node_id}"
+                    if isinstance(node_id, int)
+                    else f"context:{block_index}:child:{child_index}"
+                )
+                item = {
+                    "source_type": "summary",
+                    "node_id": node_id if isinstance(node_id, int) else None,
+                    "parent_node_id": (
+                        block.get("node_id")
+                        if isinstance(block.get("node_id"), int)
+                        else None
+                    ),
+                    "source_index": (
+                        child.get("source_index")
+                        if isinstance(child.get("source_index"), int)
+                        else None
+                    ),
+                    "locator_present": isinstance(node_id, int),
+                    "locator_replay_status": "unverified" if isinstance(node_id, int) else "not_available",
+                    **quote_payload(child.get("summary")),
+                }
+                put_bounded_text(
+                    item,
+                    "session_id",
+                    child.get("session_id") or block.get("session_id") or session_id,
+                )
+                if isinstance(node_id, int):
+                    item["expand_args"] = {"node_id": node_id}
+                add_candidate(
+                    identity,
+                    item,
+                    source_path=block.get("source_path"),
+                    source_path_depth=block.get("source_path_depth"),
+                    source_path_truncated=block.get("source_path_truncated"),
+                )
+
+        if block_type not in {"messages", "child_messages", "raw_messages"}:
+            continue
+        for message_index, message in enumerate(block.get("messages", []) or []):
+            if not isinstance(message, dict):
+                continue
+            store_id = message.get("store_id")
+            content_offset = message.get("content_offset")
+            if not isinstance(content_offset, int) or content_offset < 0:
+                content_offset = 0
+            content_source = str(message.get("content_source") or "message")
+            externalized = message.get("externalized") or {}
+            externalized_ref = externalized.get("ref") if isinstance(externalized, dict) else None
+            if content_source == "externalized_payload" and externalized_ref:
+                identity = f"externalized:{externalized_ref}:{content_offset}"
+                source_type = "externalized_payload"
+            elif isinstance(store_id, int):
+                identity = f"store:{store_id}:{content_offset}:{content_source}"
+                source_type = "raw_message"
+            else:
+                identity = f"context:{block_index}:message:{message_index}"
+                source_type = "raw_message"
+
+            item = {
+                "source_type": source_type,
+                "store_id": store_id if isinstance(store_id, int) else None,
+                "node_id": (
+                    block.get("node_id")
+                    if isinstance(block.get("node_id"), int)
+                    else None
+                ),
+                "parent_node_id": (
+                    block.get("parent_node_id")
+                    if isinstance(block.get("parent_node_id"), int)
+                    else None
+                ),
+                "source_index": (
+                    message.get("source_index")
+                    if isinstance(message.get("source_index"), int)
+                    else None
+                ),
+                "content_offset": content_offset,
+                **quote_payload(message.get("content")),
+            }
+            put_bounded_text(item, "session_id", message.get("session_id") or "")
+            put_bounded_text(item, "source", message.get("source") or "")
+            put_bounded_text(item, "role", message.get("role"))
+            put_bounded_text(item, "content_source", content_source)
+            ref_truncated = put_bounded_text(item, "externalized_ref", externalized_ref)
+            if content_source == "externalized_payload":
+                if externalized_ref and not ref_truncated:
+                    item["expand_args"] = {
+                        "externalized_ref": str(externalized_ref),
+                        "content_offset": content_offset,
+                    }
+            elif isinstance(store_id, int):
+                item["expand_args"] = {"store_id": store_id, "content_offset": content_offset}
+            item["locator_present"] = "expand_args" in item
+            item["locator_replay_status"] = (
+                "unverified" if item["locator_present"] else "not_available"
+            )
+            add_candidate(
+                identity,
+                item,
+                source_path=block.get("source_path"),
+                source_path_depth=block.get("source_path_depth"),
+                source_path_truncated=block.get("source_path_truncated"),
+            )
+
+            # Externalized/hydrated context blocks can contain both the text
+            # exposed as ``content`` and the durable transcript representation
+            # exposed as ``transcript_content``. Both fields are serialized into
+            # the auxiliary model prompt, so traceability cannot be called
+            # complete unless both are represented when they differ.
+            transcript_content = message.get("transcript_content")
+            if transcript_content is not None and str(transcript_content) != str(
+                message.get("content") or ""
+            ):
+                transcript_identity = (
+                    f"store:{store_id}:0:transcript_content"
+                    if isinstance(store_id, int)
+                    else f"context:{block_index}:message:{message_index}:transcript_content"
+                )
+                transcript_item = {
+                    "source_type": "raw_message",
+                    "store_id": store_id if isinstance(store_id, int) else None,
+                    "node_id": (
+                        block.get("node_id")
+                        if isinstance(block.get("node_id"), int)
+                        else None
+                    ),
+                    "parent_node_id": (
+                        block.get("parent_node_id")
+                        if isinstance(block.get("parent_node_id"), int)
+                        else None
+                    ),
+                    "source_index": (
+                        message.get("source_index")
+                        if isinstance(message.get("source_index"), int)
+                        else None
+                    ),
+                    "content_offset": 0,
+                    "locator_present": isinstance(store_id, int),
+                    "locator_replay_status": "unverified" if isinstance(store_id, int) else "not_available",
+                    **quote_payload(transcript_content),
+                }
+                put_bounded_text(transcript_item, "session_id", message.get("session_id") or "")
+                put_bounded_text(transcript_item, "source", message.get("source") or "")
+                put_bounded_text(transcript_item, "role", message.get("role"))
+                put_bounded_text(transcript_item, "content_source", "transcript_content")
+                if isinstance(store_id, int):
+                    transcript_item["expand_args"] = {
+                        "store_id": store_id,
+                        "content_offset": 0,
+                    }
+                add_candidate(
+                    transcript_identity,
+                    transcript_item,
+                    source_path=block.get("source_path"),
+                    source_path_depth=block.get("source_path_depth"),
+                    source_path_truncated=block.get("source_path_truncated"),
+                )
+
+    items = candidates[:_EXPAND_QUERY_EVIDENCE_MAX_ITEMS]
+    bounded_scope_session, scope_truncation = _bounded_evidence_text(session_id)
+    retrieval_scope: dict[str, Any] = {
+        "kind": "current_session",
+        "session_ids": [bounded_scope_session],
+    }
+    if scope_truncation is not None:
+        retrieval_scope["metadata_truncation"] = {"session_ids[0]": scope_truncation}
+    evidence = {
+        "retrieval_scope": retrieval_scope,
+        "identifiers_are_authority": False,
+        "locator_replay_safety": "not_guaranteed",
+        "synthesis_status": synthesis_status,
+        "semantic_entailment": "not_verified" if synthesis_status == "completed" else "not_applicable",
+        "quote_origin": "tool_extracted_from_synthesis_context",
+        "context_truncated": bool(context_truncated),
+        "context_unique_item_count": len(candidates),
+        "context_occurrence_count": sum(
+            int(item.get("context_occurrence_count") or 1) for item in candidates
+        ),
+        "serialized_char_limit": _EXPAND_QUERY_EVIDENCE_MAX_SERIALIZED_CHARS,
+        "serialization": {
+            "scope": "evidence_provenance_only",
+            "json_ensure_ascii": True,
+        },
+        "quote_max_chars": _EXPAND_QUERY_EVIDENCE_QUOTE_MAX_CHARS,
+        "items": items,
+    }
+
+    def refresh_bounds() -> None:
+        items_truncated = len(items) < len(candidates)
+        located_items = sum(1 for item in items if item.get("locator_present"))
+        if not candidates:
+            locator_coverage = "none"
+        elif items_truncated or located_items < len(candidates):
+            locator_coverage = "partial"
+        else:
+            locator_coverage = "complete"
+        evidence["locator_coverage"] = locator_coverage
+        evidence["items_truncated"] = items_truncated
+        evidence["quotes_truncated_by_provenance_cap"] = sum(
+            1 for item in items if item.get("quote_truncated_by_provenance_cap")
+        )
+        evidence["metadata_truncated"] = bool(
+            retrieval_scope.get("metadata_truncation")
+            or any(item.get("metadata_truncation") for item in items)
+        )
+
+    refresh_bounds()
+    while (
+        items
+        and _expand_query_evidence_serialized_chars(evidence)
+        > _EXPAND_QUERY_EVIDENCE_MAX_SERIALIZED_CHARS
+    ):
+        items.pop()
+        refresh_bounds()
+    if (
+        _expand_query_evidence_serialized_chars(evidence)
+        > _EXPAND_QUERY_EVIDENCE_MAX_SERIALIZED_CHARS
+    ):
+        # Bounded metadata makes this unreachable under normal inputs. Keep a
+        # compact fail-safe so even a pathological fixed envelope cannot violate
+        # the public nested-object contract.
+        evidence = {
+            "retrieval_scope": {
+                "kind": "current_session",
+                "session_ids": [],
+                "session_id_sha256": hashlib.sha256(
+                    str(session_id or "").encode("utf-8")
+                ).hexdigest(),
+                "session_id_omitted_due_to_size": True,
+            },
+            "identifiers_are_authority": False,
+            "locator_replay_safety": "not_guaranteed",
+            "synthesis_status": synthesis_status,
+            "semantic_entailment": (
+                "not_verified" if synthesis_status == "completed" else "not_applicable"
+            ),
+            "quote_origin": "tool_extracted_from_synthesis_context",
+            "context_truncated": bool(context_truncated),
+            "context_unique_item_count": len(candidates),
+            "context_occurrence_count": sum(
+                int(item.get("context_occurrence_count") or 1) for item in candidates
+            ),
+            "serialized_char_limit": _EXPAND_QUERY_EVIDENCE_MAX_SERIALIZED_CHARS,
+            "serialization": {
+                "scope": "evidence_provenance_only",
+                "json_ensure_ascii": True,
+            },
+            "quote_max_chars": _EXPAND_QUERY_EVIDENCE_QUOTE_MAX_CHARS,
+            "locator_coverage": "none" if not candidates else "partial",
+            "items_truncated": bool(candidates),
+            "quotes_truncated_by_provenance_cap": 0,
+            "metadata_truncated": True,
+            "fixed_envelope_compacted": True,
+            "items": [],
+        }
+    return evidence
 
 
 def _synthesize_expansion_answer(
@@ -5561,6 +5981,12 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
                 "node_ids": [],
                 "matches": [],
                 "raw_matches": [],
+                "evidence_provenance": _build_expand_query_evidence(
+                    [],
+                    session_id=engine.current_session_id,
+                    context_truncated=False,
+                    synthesis_status="not_run",
+                ),
             }
         )
 
@@ -5715,6 +6141,12 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             "node_ids": node_ids,
             "matches": matches,
             "raw_matches": raw_matches,
+            "evidence_provenance": _build_expand_query_evidence(
+                context_blocks,
+                session_id=engine.current_session_id,
+                context_truncated=context_truncated,
+                synthesis_status="failed",
+            ),
         }
         if include_timeout:
             payload["timeout_seconds"] = timeout
@@ -5755,6 +6187,12 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             "node_ids": node_ids,
             "matches": matches,
             "raw_matches": raw_matches,
+            "evidence_provenance": _build_expand_query_evidence(
+                context_blocks,
+                session_id=engine.current_session_id,
+                context_truncated=context_truncated,
+                synthesis_status="completed",
+            ),
         }
     )
 

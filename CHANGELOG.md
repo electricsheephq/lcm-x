@@ -23,6 +23,8 @@ This repo also publishes GitHub Releases. This file is the repo-root release sur
   stamp downgrades, deadline-interruptible summary lineage expansion, delta refs rebuilt after response-cap
   eviction, spend-ledger completeness on chunked backfills, and the benchmark evidence trail (`bench/`, F20–F37).
 
+- Added nested-default-JSON-bounded, tool-extracted `lcm_expand_query` evidence provenance so successful and degraded answers retain synthesis-context identities, occurrences, paths, and excerpts while explicitly distinguishing locator coverage from unverified replay, semantic entailment, and caller authorization.
+
 ## v0.20.0 - 2026-07-23
 
 Release focus: Lossless-Claw parity plus the merged cross-session recall and temporal retrieval stack.
