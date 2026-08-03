@@ -89,6 +89,35 @@ def test_expand_query_returns_tool_extracted_evidence_without_claiming_entailmen
     assert expanded["content"].startswith(message_item["quote"])
 
 
+def test_expand_query_session_snapshot_survives_rebind_during_synthesis(engine, monkeypatch):
+    _, node_id = _add_message_summary(engine)
+
+    def synthesize(**kwargs):
+        engine._session_id = "rebound-session"
+        return "snapshot answer"
+
+    monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", synthesize)
+
+    result = json.loads(
+        engine.handle_tool_call(
+            "lcm_expand_query",
+            {
+                "prompt": "When is rollout?",
+                "node_ids": [node_id],
+                "context_max_tokens": 1000,
+            },
+        )
+    )
+
+    evidence = result["evidence_provenance"]
+    assert engine.current_session_id == "rebound-session"
+    assert evidence["retrieval_scope"] == {
+        "kind": "current_session",
+        "session_ids": ["test-session"],
+    }
+    assert all(item["session_id"] == "test-session" for item in evidence["items"])
+
+
 def test_expand_query_preserves_evidence_when_synthesis_fails(engine, monkeypatch):
     store_id, node_id = _add_message_summary(engine)
 
@@ -235,9 +264,42 @@ def test_expand_query_provenance_covers_recursive_descendants(engine, monkeypatc
 
     items = result["evidence_provenance"]["items"]
     assert any(item.get("node_id") == parent_id for item in items)
-    assert any(item.get("node_id") == middle_id for item in items)
-    assert any(item.get("node_id") == leaf_id for item in items)
-    assert any(item.get("store_id") == store_id and item["quote"] == "recursive leaf evidence" for item in items)
+    middle_item = next(item for item in items if item.get("node_id") == middle_id)
+    leaf_item = next(
+        item
+        for item in items
+        if item.get("node_id") == leaf_id and item["source_type"] == "summary"
+    )
+    message_item = next(item for item in items if item.get("store_id") == store_id)
+    assert message_item["quote"] == "recursive leaf evidence"
+    assert middle_item["source_paths"] == [
+        {
+            "path": [{"node_id": parent_id, "source_index": 0}],
+            "depth": 1,
+            "truncated": False,
+        }
+    ]
+    assert leaf_item["source_paths"] == [
+        {
+            "path": [
+                {"node_id": parent_id, "source_index": 0},
+                {"node_id": middle_id, "source_index": 0},
+            ],
+            "depth": 2,
+            "truncated": False,
+        }
+    ]
+    assert message_item["source_paths"] == [
+        {
+            "path": [
+                {"node_id": parent_id, "source_index": 0},
+                {"node_id": middle_id, "source_index": 0},
+                {"node_id": leaf_id, "source_index": 0},
+            ],
+            "depth": 3,
+            "truncated": False,
+        }
+    ]
 
 
 def test_expand_query_raw_window_provenance_expands_from_exact_offset(engine, monkeypatch):
@@ -490,20 +552,29 @@ def test_expand_query_dedupe_preserves_production_paths_and_occurrences():
     ]
     blocks = [
         {
-            "type": "descendant_child_nodes",
-            "source_path": [
-                {"node_id": 1, "source_index": 0},
-                {"node_id": 99, "source_index": 1},
+            "type": "child_nodes",
+            "node_id": 1,
+            "children": [
+                {
+                    "node_id": 99,
+                    "source_index": 0,
+                    "summary": "shared descendant",
+                }
             ],
-            "source_path_depth": 2,
-            "children": [{"node_id": 99, "summary": "shared descendant"}],
         },
         {
             "type": "descendant_child_nodes",
+            "node_id": 20,
             "source_path": truncated_path,
             "source_path_depth": 10,
             "source_path_truncated": True,
-            "children": [{"node_id": 99, "summary": "shared descendant"}],
+            "children": [
+                {
+                    "node_id": 99,
+                    "source_index": 3,
+                    "summary": "shared descendant",
+                }
+            ],
         },
     ]
 
@@ -520,16 +591,54 @@ def test_expand_query_dedupe_preserves_production_paths_and_occurrences():
     assert item["context_occurrence_count"] == 2
     assert item["source_paths"] == [
         {
-            "path": [
-                {"node_id": 1, "source_index": 0},
-                {"node_id": 99, "source_index": 1},
-            ],
-            "depth": 2,
+            "path": [{"node_id": 1, "source_index": 0}],
+            "depth": 1,
             "truncated": False,
         },
         {
-            "path": truncated_path,
-            "depth": 10,
+            "path": [
+                *truncated_path[1:],
+                {"node_id": 20, "source_index": 3},
+            ],
+            "depth": 11,
             "truncated": True,
         },
     ]
+
+
+def test_expand_query_child_message_paths_include_final_dag_edge():
+    evidence = lcm_tools._build_expand_query_evidence(
+        [
+            {
+                "type": "child_messages",
+                "node_id": 7,
+                "source_path": [{"node_id": 1, "source_index": 0}],
+                "source_path_depth": 1,
+                "messages": [
+                    {
+                        "store_id": 42,
+                        "source_index": 2,
+                        "session_id": "test-session",
+                        "content": "hydrated child evidence",
+                        "transcript_content": "stored child transcript",
+                    }
+                ],
+            }
+        ],
+        session_id="test-session",
+        context_truncated=False,
+        synthesis_status="completed",
+    )
+
+    assert evidence["context_unique_item_count"] == 2
+    for item in evidence["items"]:
+        assert item["source_paths"] == [
+            {
+                "path": [
+                    {"node_id": 1, "source_index": 0},
+                    {"node_id": 7, "source_index": 2},
+                ],
+                "depth": 2,
+                "truncated": False,
+            }
+        ]

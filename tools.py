@@ -140,9 +140,15 @@ def _require_engine(kwargs: Dict[str, Any]) -> "LCMEngine | None":
     return engine if engine is not None else None
 
 
-def _get_session_node(engine: "LCMEngine", node_id: int):
+def _get_session_node(
+    engine: "LCMEngine",
+    node_id: int,
+    *,
+    session_id: str | None = None,
+):
+    session_id = engine.current_session_id if session_id is None else session_id
     node = engine._dag.get_node(node_id)
-    if node is None or node.session_id != engine.current_session_id:
+    if node is None or node.session_id != session_id:
         return None
     return node
 
@@ -1188,9 +1194,11 @@ def _expand_message_sources(
     source_limit: int | None = None,
     content_offset: int = 0,
     hydrate_externalized_content: bool = False,
+    session_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     from .tokens import count_tokens
 
+    session_id = engine.current_session_id if session_id is None else session_id
     total_sources = len(node.source_ids)
     source_offset = min(max(0, source_offset), total_sources)
     remaining_source_count = max(0, total_sources - source_offset)
@@ -1233,7 +1241,7 @@ def _expand_message_sources(
             ref_payload = _get_externalized_payload(
                 engine,
                 ref,
-                allowed_session_ids={engine.current_session_id, stored.get("session_id", "")},
+                allowed_session_ids={session_id, stored.get("session_id", "")},
             )
             if ref_payload is not None and ref_payload.get("kind") != "ingest_payload":
                 externalized = ref_payload
@@ -1250,7 +1258,7 @@ def _expand_message_sources(
             "source_index": source_index,
             "session_id": stored.get("session_id", ""),
             "source": stored.get("source") or "",
-            "from_current_session": stored.get("session_id", "") == engine.current_session_id,
+            "from_current_session": stored.get("session_id", "") == session_id,
             "role": stored["role"],
             "content": sliced["content"],
             "content_chars": sliced["content_chars"],
@@ -1331,9 +1339,11 @@ def _expand_child_nodes(
     *,
     source_offset: int = 0,
     source_limit: int | None = None,
+    session_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     from .tokens import count_tokens
 
+    session_id = engine.current_session_id if session_id is None else session_id
     total_sources = len(node.source_ids)
     source_offset = min(max(0, source_offset), total_sources)
     remaining_source_count = max(0, total_sources - source_offset)
@@ -1345,7 +1355,7 @@ def _expand_child_nodes(
     children: list[tuple[int, Any]] = []
     for relative_index, child_id in enumerate(selected_source_ids):
         child = engine._dag.get_node(child_id)
-        if child is None or child.session_id != engine.current_session_id:
+        if child is None or child.session_id != session_id:
             continue
         children.append((source_offset + relative_index, child))
 
@@ -1417,6 +1427,7 @@ def _collect_descendant_evidence_blocks(
     visited_node_ids: set[int] | None = None,
     source_path: list[dict[str, int]] | None = None,
     remaining_node_visits: list[int] | None = None,
+    session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     if max_tokens <= 0 or node.source_type != "nodes":
         return []
@@ -1430,6 +1441,7 @@ def _collect_descendant_evidence_blocks(
         # walk an unbounded number of nodes while normal deep summaries still
         # reach their leaf evidence.
         remaining_node_visits = [max(64, int(max_tokens) * 4)]
+    session_id = engine.current_session_id if session_id is None else session_id
     if remaining_node_visits[0] <= 0:
         return []
 
@@ -1448,7 +1460,7 @@ def _collect_descendant_evidence_blocks(
         stack.append((current, current_path, current_visited, source_index + 1))
         child_id = current.source_ids[source_index]
         child = engine._dag.get_node(child_id)
-        if child is None or child.session_id != engine.current_session_id:
+        if child is None or child.session_id != session_id:
             continue
         child_node_id = int(child.node_id)
         if child_node_id in current_visited:
@@ -1463,6 +1475,7 @@ def _collect_descendant_evidence_blocks(
                 child,
                 max_tokens=remaining_tokens,
                 hydrate_externalized_content=hydrate_externalized_content,
+                session_id=session_id,
             )
             if messages or pagination.get("has_more"):
                 block = {
@@ -1480,7 +1493,12 @@ def _collect_descendant_evidence_blocks(
             continue
 
         if child.source_type == "nodes":
-            children, pagination = _expand_child_nodes(engine, child, max_tokens=remaining_tokens)
+            children, pagination = _expand_child_nodes(
+                engine,
+                child,
+                max_tokens=remaining_tokens,
+                session_id=session_id,
+            )
             if children or pagination.get("has_more"):
                 block = {
                     "type": "descendant_child_nodes",
@@ -1505,9 +1523,11 @@ def _collect_context_blocks_for_node(
     max_tokens: int,
     *,
     hydrate_externalized_content: bool = False,
+    session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     from .tokens import count_tokens
 
+    session_id = engine.current_session_id if session_id is None else session_id
     summary, summary_truncated = _truncate_text_to_token_budget(node.summary, max_tokens)
     blocks: list[dict[str, Any]] = [
         {
@@ -1528,6 +1548,7 @@ def _collect_context_blocks_for_node(
             node,
             max_tokens=remaining_tokens,
             hydrate_externalized_content=hydrate_externalized_content,
+            session_id=session_id,
         )
         if messages or pagination.get("has_more"):
             block = {
@@ -1538,7 +1559,12 @@ def _collect_context_blocks_for_node(
             }
             blocks.append(block)
     elif node.source_type == "nodes":
-        children, pagination = _expand_child_nodes(engine, node, max_tokens=remaining_tokens)
+        children, pagination = _expand_child_nodes(
+            engine,
+            node,
+            max_tokens=remaining_tokens,
+            session_id=session_id,
+        )
         if children or pagination.get("has_more"):
             blocks.append(
                 {
@@ -1557,6 +1583,7 @@ def _collect_context_blocks_for_node(
                     node,
                     max_tokens=descendant_tokens,
                     hydrate_externalized_content=hydrate_externalized_content,
+                    session_id=session_id,
                 )
             )
 
@@ -1735,6 +1762,24 @@ def _normalized_evidence_source_path(
     }
 
 
+def _evidence_source_path_with_final_edge(
+    block: dict[str, Any],
+    source_index: Any,
+) -> tuple[Any, Any, Any]:
+    """Return a block path extended through its selected child/message edge."""
+
+    source_path = block.get("source_path")
+    path = list(source_path) if isinstance(source_path, (list, tuple)) else []
+    depth = block.get("source_path_depth")
+    if not isinstance(depth, int) or depth < len(path):
+        depth = len(path)
+    node_id = block.get("node_id")
+    if isinstance(node_id, int) and isinstance(source_index, int):
+        path.append({"node_id": node_id, "source_index": source_index})
+        depth += 1
+    return path, depth, block.get("source_path_truncated")
+
+
 def _build_expand_query_evidence(
     context_blocks: list[dict[str, Any]],
     *,
@@ -1868,12 +1913,18 @@ def _build_expand_query_evidence(
                 )
                 if isinstance(node_id, int):
                     item["expand_args"] = {"node_id": node_id}
+                source_path, source_path_depth, source_path_truncated = (
+                    _evidence_source_path_with_final_edge(
+                        block,
+                        child.get("source_index"),
+                    )
+                )
                 add_candidate(
                     identity,
                     item,
-                    source_path=block.get("source_path"),
-                    source_path_depth=block.get("source_path_depth"),
-                    source_path_truncated=block.get("source_path_truncated"),
+                    source_path=source_path,
+                    source_path_depth=source_path_depth,
+                    source_path_truncated=source_path_truncated,
                 )
 
         if block_type not in {"messages", "child_messages", "raw_messages"}:
@@ -1936,12 +1987,22 @@ def _build_expand_query_evidence(
             item["locator_replay_status"] = (
                 "unverified" if item["locator_present"] else "not_available"
             )
+            source_path = block.get("source_path")
+            source_path_depth = block.get("source_path_depth")
+            source_path_truncated = block.get("source_path_truncated")
+            if block_type in {"messages", "child_messages"}:
+                source_path, source_path_depth, source_path_truncated = (
+                    _evidence_source_path_with_final_edge(
+                        block,
+                        message.get("source_index"),
+                    )
+                )
             add_candidate(
                 identity,
                 item,
-                source_path=block.get("source_path"),
-                source_path_depth=block.get("source_path_depth"),
-                source_path_truncated=block.get("source_path_truncated"),
+                source_path=source_path,
+                source_path_depth=source_path_depth,
+                source_path_truncated=source_path_truncated,
             )
 
             # Externalized/hydrated context blocks can contain both the text
@@ -1993,9 +2054,9 @@ def _build_expand_query_evidence(
                 add_candidate(
                     transcript_identity,
                     transcript_item,
-                    source_path=block.get("source_path"),
-                    source_path_depth=block.get("source_path_depth"),
-                    source_path_truncated=block.get("source_path_truncated"),
+                    source_path=source_path,
+                    source_path_depth=source_path_depth,
+                    source_path_truncated=source_path_truncated,
                 )
 
     items = candidates[:_EXPAND_QUERY_EVIDENCE_MAX_ITEMS]
@@ -5925,6 +5986,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
     engine = _require_engine(kwargs)
     if engine is None:
         return json.dumps({"error": "LCM engine not initialized"})
+    session_id = engine.current_session_id
 
     prompt = str(args.get("prompt") or "").strip()
     if not prompt:
@@ -5963,12 +6025,12 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
                 parsed_node_id = int(node_id)
             except (TypeError, ValueError):
                 return json.dumps({"error": "node_ids must contain only integers"})
-            node = _get_session_node(engine, parsed_node_id)
+            node = _get_session_node(engine, parsed_node_id, session_id=session_id)
             if node is not None:
                 nodes.append(node)
     elif query:
-        nodes = engine._dag.search(query, session_id=engine.current_session_id, limit=max_results)
-        raw_results = engine._store.search(query, session_id=engine.current_session_id, limit=max_results)
+        nodes = engine._dag.search(query, session_id=session_id, limit=max_results)
+        raw_results = engine._store.search(query, session_id=session_id, limit=max_results)
     else:
         return json.dumps({"error": "Provide either query or node_ids"})
 
@@ -5983,7 +6045,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
                 "raw_matches": [],
                 "evidence_provenance": _build_expand_query_evidence(
                     [],
-                    session_id=engine.current_session_id,
+                    session_id=session_id,
                     context_truncated=False,
                     synthesis_status="not_run",
                 ),
@@ -5999,6 +6061,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             node,
             max_tokens=remaining_context_tokens,
             hydrate_externalized_content=True,
+            session_id=session_id,
         )
         context_blocks.extend(node_blocks)
         context_budget_used += _context_content_token_count(node_blocks)
@@ -6143,7 +6206,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             "raw_matches": raw_matches,
             "evidence_provenance": _build_expand_query_evidence(
                 context_blocks,
-                session_id=engine.current_session_id,
+                session_id=session_id,
                 context_truncated=context_truncated,
                 synthesis_status="failed",
             ),
@@ -6189,7 +6252,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             "raw_matches": raw_matches,
             "evidence_provenance": _build_expand_query_evidence(
                 context_blocks,
-                session_id=engine.current_session_id,
+                session_id=session_id,
                 context_truncated=context_truncated,
                 synthesis_status="completed",
             ),
