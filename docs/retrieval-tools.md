@@ -348,6 +348,30 @@ The script is intentionally conservative:
 
 This is a local archive migration path. It does not make LCM a general memory provider, and it does not change the current-session retrieval contract for agent tools.
 
+## Message retrieval-reference V1 adapter
+
+The narrow `hermes_lcm.message_references` adapter binds one existing
+`messages.store_id` to a V1 opaque `kind="message"` envelope. It accepts a
+caller-supplied canonical scope and computes a SHA-256 semantic revision over
+normalized session/source/conversation/role/content/tool metadata and the
+finite timestamp. `pinned` and `token_estimate` are operational metadata and do
+not affect the revision.
+
+Use `issue_message_reference(...)` with the trusted host
+`authorization_context`, mandatory `authorize_target` callback, and
+`authorize_issue` callback. Target preauthorization runs before any transaction
+or `messages` lookup, so denied existing and missing IDs are indistinguishable;
+foundation issue authorization then validates the loaded target/revision before
+registry insertion. Use `resolve_message_reference(...)` with both foundation
+authorization callbacks. Resolution authorizes the opaque envelope and stored
+scope before selecting the message row, and verifies the current semantic
+revision in one stable read snapshot. Issuance uses one `BEGIN IMMEDIATE`
+transaction when the caller has no active transaction; caller-owned transactions
+remain rollbackable. The adapter returns only the foundation's closed V1 error
+codes and does not add public tool emission, pagination, session cursors,
+summary-node/sidecar references, principal/tenant policy, signing, or schema
+changes.
+
 ## Related references
 
 - [Embeddings setup — free and local options](./embeddings-setup.md) — provider configuration for the `semantic` / `hybrid` modes
