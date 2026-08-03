@@ -12356,6 +12356,117 @@ class TestPostCompactionIngestion:
         finally:
             engine.shutdown()
 
+    def test_current_session_end_holds_binding_through_replay_proof_reconciliation(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A session rebind cannot redirect an authorized end callback.
+
+        Pause A after its session-end proof authorization but before ingest
+        reconciliation, then attempt to bind B.  B's proof matches the shared
+        compacted prefix, so an unlocked implementation would use B's proof to
+        skip that prefix and append A's tail under B.
+        """
+        database_path = str(tmp_path / "session-end-binding-lock.db")
+        engine = LCMEngine(config=LCMConfig(database_path=database_path))
+        underlying_lifecycle_lock = engine._session_lifecycle_lock
+        snapshot = self._summary_only_snapshot()
+        a_tail = {"role": "user", "content": "A-only tail must not land under B"}
+        paused_before_reconcile = threading.Event()
+        allow_a_end_to_continue = threading.Event()
+        b_rebind_attempted = threading.Event()
+        b_blocked_on_lifecycle_lock = threading.Event()
+        b_rebind_finished = threading.Event()
+        errors = []
+        end_thread = None
+        rebind_thread = None
+
+        try:
+            engine.on_session_start("session-B", context_length=200000)
+            engine.on_session_end("session-B", [dict(message) for message in snapshot])
+            b_proofs_before = engine._load_session_end_replay_snapshot_digests()
+            assert b_proofs_before
+
+            engine.on_session_start("session-A", context_length=200000)
+
+            class ObservedLifecycleLock:
+                """Expose deterministic proof that B reached the held lock."""
+
+                def __enter__(self):
+                    if threading.current_thread().name == "lcm-test-rebind-B":
+                        acquired = underlying_lifecycle_lock.acquire(blocking=False)
+                        if not acquired:
+                            b_blocked_on_lifecycle_lock.set()
+                            underlying_lifecycle_lock.acquire()
+                    else:
+                        underlying_lifecycle_lock.acquire()
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    underlying_lifecycle_lock.release()
+                    return False
+
+            engine._session_lifecycle_lock = ObservedLifecycleLock()
+            original_ingest = engine._ingest_messages
+
+            def pause_a_before_reconcile(messages, *, allow_session_end_replay_proof=False):
+                if allow_session_end_replay_proof:
+                    paused_before_reconcile.set()
+                    assert allow_a_end_to_continue.wait(timeout=5)
+                return original_ingest(
+                    messages,
+                    allow_session_end_replay_proof=allow_session_end_replay_proof,
+                )
+
+            monkeypatch.setattr(engine, "_ingest_messages", pause_a_before_reconcile)
+
+            def end_a():
+                try:
+                    engine.on_session_end("session-A", [*snapshot, dict(a_tail)])
+                except Exception as exc:  # pragma: no cover - assertion helper
+                    errors.append(exc)
+
+            def rebind_b():
+                try:
+                    b_rebind_attempted.set()
+                    engine.on_session_start("session-B", context_length=200000)
+                    b_rebind_finished.set()
+                except Exception as exc:  # pragma: no cover - assertion helper
+                    errors.append(exc)
+
+            end_thread = threading.Thread(target=end_a, name="lcm-test-end-A")
+            end_thread.start()
+            assert paused_before_reconcile.wait(timeout=5)
+
+            rebind_thread = threading.Thread(target=rebind_b, name="lcm-test-rebind-B")
+            rebind_thread.start()
+            assert b_rebind_attempted.wait(timeout=5)
+            assert b_blocked_on_lifecycle_lock.wait(timeout=5)
+            assert not b_rebind_finished.is_set()
+
+            allow_a_end_to_continue.set()
+            end_thread.join(timeout=5)
+            rebind_thread.join(timeout=5)
+            assert not end_thread.is_alive()
+            assert not rebind_thread.is_alive()
+            assert errors == []
+
+            assert engine._session_id == "session-B"
+            assert engine._store.get_session_count("session-A") == len(snapshot) + 1
+            assert engine._store.get_session_count("session-B") == len(snapshot)
+            b_rows = engine._store.get_session_messages("session-B")
+            assert all(row.get("content") != a_tail["content"] for row in b_rows)
+            assert engine._load_session_end_replay_snapshot_digests() == b_proofs_before
+        finally:
+            allow_a_end_to_continue.set()
+            if end_thread is not None:
+                end_thread.join(timeout=5)
+            if rebind_thread is not None:
+                rebind_thread.join(timeout=5)
+            engine._session_lifecycle_lock = underlying_lifecycle_lock
+            engine.shutdown()
+
     def test_plain_history_session_end_records_no_compacted_snapshot_metadata(self, tmp_path):
         """on_session_end for an ordinary history without a generated summary
         scaffold must record neither engine-assembled nor session-end
