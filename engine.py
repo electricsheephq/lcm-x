@@ -3256,6 +3256,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             and (
                 self._has_lcm_bypass_lineage_session(session_id)
                 or off_current_auxiliary_reused_normal
+                or bool(self._lcm_session_last_normal_conversation_id.get(session_id))
             )
         )
         off_current_normal_conversation_id = (
