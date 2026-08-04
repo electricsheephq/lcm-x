@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from types import MappingProxyType
 from pathlib import Path
 
 from access_context import (
@@ -140,49 +141,73 @@ def test_public_denial_projection_is_total_and_content_free() -> None:
         public = project_public(internal)
         assert public.denial_reason is PUBLIC_DENIAL_PROJECTION[reason]
         assert "query_text" not in internal.detail
-        assert "query_text" not in public.detail
+        assert dict(public.detail) == {}
 
 
-def test_public_detail_shape_cannot_re_identify_the_blurred_reason() -> None:
-    """Blurring ``denial_reason`` is undone if ``detail`` varies by reason.
-
-    Several internal reasons collapse to TARGET_NOT_FOUND_OR_FORBIDDEN, so a
-    detail key present for only one of them would re-identify it. The public
-    key set must therefore be identical for every reason.
-    """
-
-    # Detail rich enough that a verbatim pass-through would differ per reason.
-    discriminating = {
+# Detail that VARIES per reason, mirroring what validate() really produces:
+# SCOPE_FORBIDDEN carries context_id + policy_revision, while
+# TARGET_NOT_FOUND_OR_FORBIDDEN carries nothing at all. A test that passes the
+# same detail to every reason cannot see a value-level leak, because it
+# manufactures the uniformity it is meant to be checking.
+_REALISTIC_DENIAL_DETAIL: dict[DenialReason, dict[str, object]] = {
+    DenialReason.CONTEXT_MISSING: {},
+    DenialReason.CONTEXT_INVALID: {"context_id": "ctx-invalid"},
+    DenialReason.CONTEXT_UNSUPPORTED_VERSION: {"context_id": "ctx-version"},
+    DenialReason.CONTEXT_EXPIRED: {"context_id": "ctx-expired", "lease_id": "lease-1"},
+    DenialReason.CONTEXT_REVOKED: {"context_id": "ctx-revoked", "revocation_epoch": 9},
+    DenialReason.SCOPE_FORBIDDEN: {"context_id": "ctx-123", "policy_revision": 11},
+    DenialReason.SCOPE_MISMATCH: {"context_id": "ctx-456", "policy_revision": 12},
+    DenialReason.OWNERSHIP_CHANGED: {
+        "context_id": "ctx-789",
         "ownership_generation": 3,
         "expected_ownership_generation": 4,
-        "lease_generation": 7,
-        "expected_lease_generation": 8,
-        "policy_revision": 11,
-        "membership_revision": 12,
-        "revocation_epoch": 13,
-        "target_id": "target-a",
-    }
+    },
+    DenialReason.LEASE_STALE: {"lease_id": "lease-2", "lease_generation": 7},
+    DenialReason.TARGET_NOT_FOUND_OR_FORBIDDEN: {},
+}
 
-    shapes = set()
-    for reason in DenialReason:
-        public = project_public(
-            Decision.deny(reason, context_id="ctx", request_id="req", **discriminating)
-        )
-        shapes.add(frozenset(public.detail))
-        for leaked in discriminating:
-            assert leaked not in public.detail, (reason, leaked)
 
-    assert len(shapes) == 1, f"public detail shape varies by reason: {shapes}"
+def test_public_projection_cannot_re_identify_the_blurred_reason() -> None:
+    """Blurring ``denial_reason`` is undone by anything that co-varies with it.
 
-    # Every reason that blurs to the same public bucket must be fully
-    # indistinguishable in the public projection, not merely similar.
-    blurred = [
-        project_public(Decision.deny(reason, context_id="ctx", request_id="req", **discriminating))
+    Detail co-varies two ways: which keys are present, and which values are.
+    The second is the subtle one -- an echoed ``context_id`` that is a real ID
+    for SCOPE_FORBIDDEN and ``None`` for TARGET_NOT_FOUND_OR_FORBIDDEN
+    separates two members of the same public bucket just as effectively as a
+    missing key would.
+    """
+
+    assert set(_REALISTIC_DENIAL_DETAIL) == set(DenialReason), "cover every reason"
+
+    for reason, detail in _REALISTIC_DENIAL_DETAIL.items():
+        public = project_public(Decision.deny(reason, **detail))
+        # Exact, not "no discriminating key": an empty projection is the only
+        # shape that needs no argument about which keys are safe to echo.
+        assert dict(public.detail) == {}, (reason, dict(public.detail))
+
+    # Freeze the bucket membership. A reason added to this bucket later must
+    # be considered here rather than silently inheriting the guarantee.
+    bucket = [
+        reason
         for reason, public_reason in PUBLIC_DENIAL_PROJECTION.items()
         if public_reason is DenialReason.TARGET_NOT_FOUND_OR_FORBIDDEN
     ]
-    assert len(blurred) >= 4
-    assert len(set(blurred)) == 1, "denials sharing a public bucket are distinguishable"
+    assert set(bucket) == {
+        DenialReason.SCOPE_FORBIDDEN,
+        DenialReason.SCOPE_MISMATCH,
+        DenialReason.OWNERSHIP_CHANGED,
+        DenialReason.LEASE_STALE,
+        DenialReason.TARGET_NOT_FOUND_OR_FORBIDDEN,
+    }
+
+    # Every member must be LITERALLY EQUAL once projected -- indistinguishable
+    # by value, repr, equality or hash, not merely similar in shape.
+    projected = {
+        project_public(Decision.deny(reason, **_REALISTIC_DENIAL_DETAIL[reason]))
+        for reason in bucket
+    }
+    assert len(projected) == 1, f"same-bucket denials are distinguishable: {projected}"
+    assert len({hash(p) for p in projected}) == 1
 
 
 def test_decisions_are_hashable_despite_mappingproxy_detail() -> None:
@@ -192,6 +217,45 @@ def test_decisions_are_hashable_despite_mappingproxy_detail() -> None:
     assert len({internal, Decision.deny(DenialReason.LEASE_STALE, context_id="ctx")}) == 1
     assert len({project_public(internal), project_public(internal)}) == 1
     assert len({Decision.allow(), Decision.allow()}) == 1
+
+
+def test_hashing_is_total_and_equality_safe_for_hostile_detail() -> None:
+    """``isinstance`` admits subclasses, so detail values must be coerced.
+
+    A subclass can set ``__hash__ = None`` or redefine it, which would make an
+    otherwise-ordinary Decision unhashable or make two equal Decisions hash
+    differently. Values are normalized to exact primitives to prevent both.
+    """
+
+    class Unhashable(int):
+        __hash__ = None  # type: ignore[assignment]
+
+    class Rehashed(int):
+        def __hash__(self) -> int:  # pragma: no cover - value is what matters
+            return 999999
+
+    # Would raise TypeError without normalization.
+    hash(Decision.allow(policy_revision=Unhashable(5)))
+    hash(project_public(Decision.deny(DenialReason.LEASE_STALE, policy_revision=Unhashable(5))))
+
+    equal_pair = (
+        Decision.deny(DenialReason.LEASE_STALE, policy_revision=Rehashed(5)),
+        Decision.deny(DenialReason.LEASE_STALE, policy_revision=5),
+    )
+    assert equal_pair[0] == equal_pair[1]
+    assert hash(equal_pair[0]) == hash(equal_pair[1]), "equal objects must hash equally"
+
+    # PublicDecision is exported, so a caller can build one directly with a
+    # mutable dict; its hash must not change out from under a set or dict.
+    source = {"context_id": "x"}
+    public = PublicDecision(False, DenialReason.CONTEXT_MISSING, source)
+    before = hash(public)
+    source["context_id"] = "mutated"
+    assert hash(public) == before
+    assert isinstance(public.detail, MappingProxyType)
+
+    # Mixed key types must not make sorting raise inside __hash__.
+    hash(PublicDecision(False, DenialReason.CONTEXT_MISSING, {1: "a", "context_id": "b"}))
 
 
 def test_two_principal_replay_vectors_fail_closed() -> None:
@@ -290,12 +354,19 @@ class RecordingCarrier:
         return self.context
 
 
-def test_protocol_order_authorize_precedes_every_disclosure_primitive() -> None:
+def test_consumer_protocol_freezes_473_steps_2_through_6() -> None:
     context = _context(Path("tests/fixtures/access_context_v1/positive/human.json"))
     consumer = RecordingConsumer()
     carrier = RecordingCarrier(context)
     assert isinstance(carrier, HostContextCarrier)
     assert isinstance(consumer, LcmAuthorizationConsumer)
+    # Step 1 of #473 is "validate current host context". It is validate(), a
+    # module function rather than a consumer method, so it is a PRECONDITION
+    # here rather than a recorded call -- its own ordering is covered by
+    # test_validation_order_is_explicit_and_stable. Steps 2-6 are what the
+    # consumer protocol owns, and are what this test freezes.
+    assert validate(context, now=NOW).allowed
+
     context = carrier.get_access_context()
     scope = {"collection": "collection-main"}
     decision = consumer.authorize_operation(context, "read", scope)

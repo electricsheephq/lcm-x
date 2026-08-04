@@ -46,28 +46,28 @@ _CONTENT_FREE_DETAIL_KEYS = frozenset(
 )
 
 
-# The only keys a denied caller may see. Both are values the caller itself
-# supplied, so echoing them teaches it nothing it did not already know.
-_PUBLIC_DETAIL_KEYS: tuple[str, ...] = ("context_id", "request_id")
+def _exact_primitive(value: Any) -> Any:
+    """Coerce to an exact primitive so hashing is total and stable.
 
-
-def _public_detail(detail: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Project detail to a FIXED key set, identical for every denial reason.
-
-    The shape must not vary: several internal reasons blur to one public
-    reason, so a key that appeared only for, say, ``LEASE_STALE`` would
-    re-identify it and undo ``PUBLIC_DENIAL_PROJECTION``. Keys are always
-    present, carrying ``None`` when absent internally.
+    ``isinstance`` admits subclasses, and a subclass may set ``__hash__ =
+    None`` or redefine it, which would make an otherwise-equal Decision
+    unhashable or hash differently.
     """
 
-    return MappingProxyType({key: detail.get(key) for key in _PUBLIC_DETAIL_KEYS})
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, int):
+        return int(value)
+    return str(value)
 
 
 def _safe_detail(detail: Mapping[str, Any] | None) -> Mapping[str, Any]:
     if not detail:
         return MappingProxyType({})
     clean = {
-        str(key): value
+        str(key): _exact_primitive(value)
         for key, value in detail.items()
         if str(key) in _CONTENT_FREE_DETAIL_KEYS and isinstance(value, (str, int, bool, type(None)))
     }
@@ -142,11 +142,20 @@ class Decision:
 
 @dataclass(frozen=True)
 class PublicDecision:
-    """Public projection that does not reveal target existence."""
+    """Public projection that does not reveal target existence.
+
+    ``detail`` is empty for every projected denial: see ``project_public``.
+    The field is kept so the two decision types stay shape-compatible.
+    """
 
     allowed: bool
     denial_reason: DenialReason | None = None
     detail: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+
+    def __post_init__(self) -> None:
+        # Sanitize on this type too. Without it a caller-built PublicDecision
+        # can hold a mutable dict, so its hash would change after construction.
+        object.__setattr__(self, "detail", _safe_detail(self.detail))
 
     def __hash__(self) -> int:
         # See Decision.__hash__ — same mappingproxy caveat.
@@ -158,16 +167,21 @@ class PublicDecision:
 
 
 def project_public(decision: Decision) -> PublicDecision:
-    """Apply the complete, explicit public denial projection table."""
+    """Apply the complete, explicit public denial projection table.
+
+    A denial's ``detail`` is dropped entirely rather than filtered. Blurring
+    the reason is undone by anything that co-varies with it, and detail varies
+    two ways: which keys are present, and -- less obviously -- which values
+    are. ``SCOPE_FORBIDDEN`` carries a real ``context_id`` while
+    ``TARGET_NOT_FOUND_OR_FORBIDDEN`` carries none, so echoing even a fixed
+    key set re-identifies the bucket member through ``None`` versus a value.
+    Emitting nothing is the only version of this that needs no proof.
+    """
 
     if decision.allowed:
         return PublicDecision(True)
     assert decision.denial_reason is not None
-    return PublicDecision(
-        False,
-        PUBLIC_DENIAL_PROJECTION[decision.denial_reason],
-        _public_detail(decision.detail),
-    )
+    return PublicDecision(False, PUBLIC_DENIAL_PROJECTION[decision.denial_reason])
 
 
 # Explicit names for callers that want to distinguish the two projections;
