@@ -17,7 +17,7 @@ from access_context import (
     resolve_mode,
     validate,
 )
-from access_context.denials import PUBLIC_DENIAL_PROJECTION, project_public
+from access_context.denials import PUBLIC_DENIAL_PROJECTION, PublicDecision, project_public
 from access_context.fixtures import fixture_paths, load_context, load_fixture
 from access_context.protocols import HostContextCarrier, LcmAuthorizationConsumer
 
@@ -140,6 +140,58 @@ def test_public_denial_projection_is_total_and_content_free() -> None:
         public = project_public(internal)
         assert public.denial_reason is PUBLIC_DENIAL_PROJECTION[reason]
         assert "query_text" not in internal.detail
+        assert "query_text" not in public.detail
+
+
+def test_public_detail_shape_cannot_re_identify_the_blurred_reason() -> None:
+    """Blurring ``denial_reason`` is undone if ``detail`` varies by reason.
+
+    Several internal reasons collapse to TARGET_NOT_FOUND_OR_FORBIDDEN, so a
+    detail key present for only one of them would re-identify it. The public
+    key set must therefore be identical for every reason.
+    """
+
+    # Detail rich enough that a verbatim pass-through would differ per reason.
+    discriminating = {
+        "ownership_generation": 3,
+        "expected_ownership_generation": 4,
+        "lease_generation": 7,
+        "expected_lease_generation": 8,
+        "policy_revision": 11,
+        "membership_revision": 12,
+        "revocation_epoch": 13,
+        "target_id": "target-a",
+    }
+
+    shapes = set()
+    for reason in DenialReason:
+        public = project_public(
+            Decision.deny(reason, context_id="ctx", request_id="req", **discriminating)
+        )
+        shapes.add(frozenset(public.detail))
+        for leaked in discriminating:
+            assert leaked not in public.detail, (reason, leaked)
+
+    assert len(shapes) == 1, f"public detail shape varies by reason: {shapes}"
+
+    # Every reason that blurs to the same public bucket must be fully
+    # indistinguishable in the public projection, not merely similar.
+    blurred = [
+        project_public(Decision.deny(reason, context_id="ctx", request_id="req", **discriminating))
+        for reason, public_reason in PUBLIC_DENIAL_PROJECTION.items()
+        if public_reason is DenialReason.TARGET_NOT_FOUND_OR_FORBIDDEN
+    ]
+    assert len(blurred) >= 4
+    assert len(set(blurred)) == 1, "denials sharing a public bucket are distinguishable"
+
+
+def test_decisions_are_hashable_despite_mappingproxy_detail() -> None:
+    # frozen=True advertises hashability, but detail is a mappingproxy; without
+    # an explicit __hash__ a consumer deduping decisions crashes at runtime.
+    internal = Decision.deny(DenialReason.LEASE_STALE, context_id="ctx")
+    assert len({internal, Decision.deny(DenialReason.LEASE_STALE, context_id="ctx")}) == 1
+    assert len({project_public(internal), project_public(internal)}) == 1
+    assert len({Decision.allow(), Decision.allow()}) == 1
 
 
 def test_two_principal_replay_vectors_fail_closed() -> None:
@@ -194,9 +246,20 @@ class RecordingConsumer:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def authorize(self, context, operation, target_scope):
-        self.calls.append("authorize")
+    def authorize_operation(self, context, operation, expected_scope):
+        self.calls.append("authorize_operation")
         return Decision.allow()
+
+    def resolve_authorized_targets(self, context, operation, requested_narrowing):
+        self.calls.append("resolve_authorized_targets")
+        return [1]
+
+    def authorize_stored_scope(self, context, operation, stored_scope):
+        self.calls.append("authorize_stored_scope")
+        return Decision.allow()
+
+    def audit_decision(self, context, operation, internal_reason, public_result: PublicDecision):
+        self.calls.append("audit_decision")
 
     def select_collection(self, target_scope):
         self.calls.append("select_collection")
@@ -233,17 +296,53 @@ def test_protocol_order_authorize_precedes_every_disclosure_primitive() -> None:
     carrier = RecordingCarrier(context)
     assert isinstance(carrier, HostContextCarrier)
     assert isinstance(consumer, LcmAuthorizationConsumer)
-    consumer.authorize(carrier.get_access_context(), "read", {"collection": "collection-main"})
-    consumer.select_collection({})
-    consumer.count_candidates([1])
-    consumer.rank_candidates([1])
-    consumer.hydrate_targets([1])
-    consumer.issue_handle(1)
+    context = carrier.get_access_context()
+    scope = {"collection": "collection-main"}
+    decision = consumer.authorize_operation(context, "read", scope)
+    authorized_targets = consumer.resolve_authorized_targets(context, "read", scope)
+    consumer.select_collection(scope)
+    consumer.authorize_stored_scope(context, "read", scope)
+    consumer.count_candidates(authorized_targets)
+    consumer.rank_candidates(authorized_targets)
+    consumer.hydrate_targets(authorized_targets)
+    consumer.issue_handle(authorized_targets[0])
+    consumer.audit_decision(context, "read", None, decision.public())
+
+    # Frozen verbatim from #473: 1 validate context, 2 authorize operation and
+    # expected scope, 3 resolve only authorized targets, 4 inspect stored scope
+    # before content/revision disclosure, 5 query/rank/hydrate within authorized
+    # targets, 6 audit. Step 1 is the carrier read above.
     assert consumer.calls == [
-        "authorize",
+        "authorize_operation",
+        "resolve_authorized_targets",
+        "select_collection",
+        "authorize_stored_scope",
+        "count_candidates",
+        "rank_candidates",
+        "hydrate_targets",
+        "issue_handle",
+        "audit_decision",
+    ]
+
+    def before(earlier: str, later: str) -> bool:
+        return consumer.calls.index(earlier) < consumer.calls.index(later)
+
+    disclosure_primitives = (
         "select_collection",
         "count_candidates",
         "rank_candidates",
         "hydrate_targets",
         "issue_handle",
-    ]
+    )
+    # Nothing is disclosed before the operation is authorized.
+    assert all(before("authorize_operation", name) for name in disclosure_primitives)
+    # A collection is never opened before the authorized target set is resolved,
+    # and ranking/limits never run over unresolved candidates.
+    assert all(before("resolve_authorized_targets", name) for name in disclosure_primitives)
+    # Stored scope is re-authorized before any existence, count or content signal.
+    assert all(
+        before("authorize_stored_scope", name)
+        for name in ("count_candidates", "rank_candidates", "hydrate_targets", "issue_handle")
+    )
+    # The audit is the final step and never gates disclosure.
+    assert all(before(name, "audit_decision") for name in disclosure_primitives)

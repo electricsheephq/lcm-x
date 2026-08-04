@@ -10,7 +10,7 @@ from .model import AccessContextV1
 
 
 FIXTURE_ROOT_NAME = "access_context_v1"
-FIXTURE_KINDS = frozenset({"positive", "negative", "delegation", "revocation"})
+FIXTURE_KINDS = frozenset({"positive", "negative", "delegation", "revocation", "derivation"})
 
 
 class FixtureCorpusNotFound(FileNotFoundError):

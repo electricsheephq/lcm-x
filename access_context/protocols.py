@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 
-from .denials import Decision
+from .denials import Decision, DenialReason, PublicDecision
 from .model import AccessContextV1
 
 TargetScope = Mapping[str, Any]
@@ -22,13 +22,42 @@ class HostContextCarrier(Protocol):
 class LcmAuthorizationConsumer(Protocol):
     """Consumer seam that must authorize before any disclosure primitive."""
 
-    def authorize(
+    def authorize_operation(
         self,
         context: AccessContextV1 | None,
         operation: str,
-        target_scope: TargetScope,
+        expected_scope: TargetScope,
     ) -> Decision:
         """Authorize an operation before selecting or disclosing targets."""
+
+    def resolve_authorized_targets(
+        self,
+        context: AccessContextV1 | None,
+        operation: str,
+        requested_narrowing: TargetScope,
+    ) -> Sequence[Any]:
+        """Resolve targets only within the already-authorized narrowing."""
+
+    def authorize_stored_scope(
+        self,
+        context: AccessContextV1 | None,
+        operation: str,
+        stored_scope: TargetScope,
+    ) -> Decision:
+        """Re-authorize scope persisted with a stored target or handle."""
+
+    def audit_decision(
+        self,
+        context: AccessContextV1 | None,
+        operation: str,
+        internal_reason: DenialReason | None,
+        public_result: PublicDecision,
+    ) -> None:
+        """Record the exact internal reason alongside its public projection.
+
+        ``internal_reason`` is ``None`` for an allow; the seam audits allow and
+        deny alike, so the reason is only present on the deny path.
+        """
 
     def select_collection(self, target_scope: TargetScope) -> Any:
         """Select a backing collection only after authorization."""

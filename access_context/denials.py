@@ -46,6 +46,23 @@ _CONTENT_FREE_DETAIL_KEYS = frozenset(
 )
 
 
+# The only keys a denied caller may see. Both are values the caller itself
+# supplied, so echoing them teaches it nothing it did not already know.
+_PUBLIC_DETAIL_KEYS: tuple[str, ...] = ("context_id", "request_id")
+
+
+def _public_detail(detail: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Project detail to a FIXED key set, identical for every denial reason.
+
+    The shape must not vary: several internal reasons blur to one public
+    reason, so a key that appeared only for, say, ``LEASE_STALE`` would
+    re-identify it and undo ``PUBLIC_DENIAL_PROJECTION``. Keys are always
+    present, carrying ``None`` when absent internally.
+    """
+
+    return MappingProxyType({key: detail.get(key) for key in _PUBLIC_DETAIL_KEYS})
+
+
 def _safe_detail(detail: Mapping[str, Any] | None) -> Mapping[str, Any]:
     if not detail:
         return MappingProxyType({})
@@ -102,6 +119,13 @@ class Decision:
     def deny(cls, reason: DenialReason, **detail: Any) -> "Decision":
         return cls(False, DenialReason(reason), detail)
 
+    def __hash__(self) -> int:
+        # ``detail`` is a mappingproxy, which is unhashable, so the generated
+        # __hash__ raises despite frozen=True advertising the opposite. Values
+        # are constrained to str/int/bool/None by _safe_detail, so the sorted
+        # item tuple is hashable.
+        return hash((self.allowed, self.denial_reason, tuple(sorted(self.detail.items()))))
+
     @property
     def reason(self) -> DenialReason | None:
         """Short alias used by consumers that call the field ``reason``."""
@@ -124,6 +148,10 @@ class PublicDecision:
     denial_reason: DenialReason | None = None
     detail: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 
+    def __hash__(self) -> int:
+        # See Decision.__hash__ — same mappingproxy caveat.
+        return hash((self.allowed, self.denial_reason, tuple(sorted(self.detail.items()))))
+
     @property
     def reason(self) -> DenialReason | None:
         return self.denial_reason
@@ -138,7 +166,7 @@ def project_public(decision: Decision) -> PublicDecision:
     return PublicDecision(
         False,
         PUBLIC_DENIAL_PROJECTION[decision.denial_reason],
-        decision.detail,
+        _public_detail(decision.detail),
     )
 
 
