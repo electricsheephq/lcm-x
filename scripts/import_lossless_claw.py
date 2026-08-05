@@ -46,7 +46,7 @@ policy_access_context = _access_policy.policy_access_context
 
 from hermes_lcm.config import LCMConfig  # noqa: E402
 from hermes_lcm.dag import build_nodes_fts_spec  # noqa: E402
-from hermes_lcm.db_bootstrap import ensure_external_content_fts  # noqa: E402
+from hermes_lcm.db_bootstrap import add_column_if_missing, ensure_external_content_fts  # noqa: E402
 from hermes_lcm.ingest_protection import protect_message_for_ingest  # noqa: E402
 from hermes_lcm.message_content import normalize_content_value  # noqa: E402
 from hermes_lcm.store import MessageStore, _normalize_source_value  # noqa: E402
@@ -739,6 +739,18 @@ def _ensure_summary_nodes_schema(conn: sqlite3.Connection) -> None:
         """
     )
     columns = _table_columns(conn, "summary_nodes")
+    if "scope" in columns and "access_scope" not in columns:
+        conn.execute(
+            "ALTER TABLE summary_nodes RENAME COLUMN scope TO access_scope"
+        )
+        columns.remove("scope")
+        columns.add("access_scope")
+    add_column_if_missing(
+        conn,
+        columns,
+        "access_scope",
+        "ALTER TABLE summary_nodes ADD COLUMN access_scope TEXT",
+    )
     if "earliest_at" not in columns:
         conn.execute("ALTER TABLE summary_nodes ADD COLUMN earliest_at REAL")
     if "latest_at" not in columns:
@@ -834,8 +846,9 @@ def _insert_summary_node(
     cur = conn.execute(
         """INSERT INTO summary_nodes
            (session_id, depth, summary, token_count, source_token_count,
-            source_ids, source_type, created_at, earliest_at, latest_at, expand_hint)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            source_ids, source_type, created_at, earliest_at, latest_at,
+            expand_hint, access_scope)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             candidate.target_session_id,
             depth,
@@ -848,6 +861,7 @@ def _insert_summary_node(
             candidate.earliest_at,
             candidate.latest_at,
             candidate.expand_hint,
+            None,
         ),
     )
     node_id = int(cur.lastrowid)
@@ -1052,8 +1066,8 @@ def _insert_import_candidate(
     cur = conn.execute(
         """INSERT INTO messages
            (session_id, source, role, content, tool_call_id, tool_calls,
-            tool_name, timestamp, token_estimate, pinned)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+            tool_name, timestamp, token_estimate, pinned, access_scope)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
         (
             candidate.target_session_id,
             _normalize_source_value(candidate.source),
@@ -1064,6 +1078,7 @@ def _insert_import_candidate(
             protected_msg.get("tool_name"),
             candidate.timestamp,
             count_message_tokens(protected_msg),
+            None,
         ),
     )
     store_id = int(cur.lastrowid)

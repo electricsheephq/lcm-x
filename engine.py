@@ -145,6 +145,11 @@ from .sqlite_util import (
     _temporary_sqlite_busy_timeout,
 )
 from .store import MessageStore
+from .scope_storage import (
+    mark_teams_enabled,
+    setup_teams_scope,
+    teams_enabled as storage_teams_enabled,
+)
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 from . import tools as lcm_tools
 
@@ -739,8 +744,12 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 db_path,
                 ingest_protection_config=self._config,
                 hermes_home=hermes_home,
+                access_scope_provider=self._access_scope_for_storage_session,
             )
-            self._dag = SummaryDAG(db_path)
+            self._dag = SummaryDAG(
+                db_path,
+                access_scope_provider=self._access_scope_for_storage_session,
+            )
             if self._config.temporal_rollups_enabled:
                 # Install the transaction-coupled summary mutation triggers before
                 # this engine can publish or delete a DAG node.
@@ -776,6 +785,67 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         except Exception:
             self._close_storage()
             raise
+
+    def _access_scope_for_storage_session(self, session_id: str) -> str | None:
+        """Return the Teams owner scope for a writer's session, if enabled."""
+
+        if not storage_teams_enabled(self):
+            return None
+        resolver = getattr(self, "resolve_lcm_session_owner", None)
+        if callable(resolver):
+            resolved = resolver(session_id)
+            if resolved:
+                return str(resolved)
+        context = policy_access_context(self)
+        if context is not None and context.session_id == session_id:
+            resolved = str(
+                context.session_owner_principal_id
+                or context.principal_id
+                or ""
+            )
+            if resolved:
+                return resolved
+        raise ValueError(f"Teams scope owner is unresolved for session_id={session_id}")
+
+    def _preteams_owner_for_session(self, session_id: str) -> str:
+        """Resolve the ratified legacy owner attribution for setup/backfill."""
+
+        resolver = getattr(self, "resolve_lcm_session_owner", None)
+        if callable(resolver):
+            resolved = resolver(session_id)
+            if resolved:
+                return str(resolved)
+        context = policy_access_context(self)
+        if context is not None and context.session_id == session_id:
+            resolved = context.session_owner_principal_id or context.principal_id
+            if resolved:
+                return str(resolved)
+        raise ValueError(f"pre-Teams owner is unresolved for session_id={session_id}")
+
+    def enable_teams(
+        self,
+        owner_for_session: Callable[[str], str | None] | None = None,
+        *,
+        batch_size: int = 256,
+    ) -> dict[str, object]:
+        """Set up Teams scope storage and stamp all historical LCM rows.
+
+        This is intentionally explicit: ordinary schema startup never calls
+        the backfill, so a store that never enables Teams remains unstamped.
+        The flag is published only after the setup transaction has completed.
+        """
+
+        result = setup_teams_scope(
+            self._store.connection,
+            owner_for_session or self._preteams_owner_for_session,
+            batch_size=batch_size,
+        )
+        mark_teams_enabled(self)
+        return result
+
+    # Host adapters may use either verb; both routes share the same idempotent
+    # setup/backfill implementation and do not alter the default-off path.
+    setup_teams = enable_teams
 
     def _close_storage(self) -> None:
         """Best-effort close of currently bound SQLite helpers."""

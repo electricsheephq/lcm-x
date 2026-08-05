@@ -35,6 +35,7 @@ from .db_bootstrap import (
     inspect_lcm_schema_health,
     load_integrity_failed,
 )
+from .scope_storage import teams_enabled as storage_teams_enabled, verify_scope_storage
 from .extraction import sanitize_pre_compaction_content
 from .ingest_protection import (
     externalized_payload_stats,
@@ -6564,6 +6565,31 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     except Exception as e:
         checks.append({
             "check": "database_integrity",
+            "status": "fail",
+            "detail": str(e),
+        })
+
+    # Per-item scope staging is intentionally Teams-aware: legacy NULLs are
+    # expected while Teams is off, but an enabled store must have checked every
+    # observed row and every source-level writer.
+    try:
+        scope_storage = verify_scope_storage(
+            engine._store.connection,
+            teams_enabled=storage_teams_enabled(engine),
+        )
+        scope_status = str(scope_storage.get("status"))
+        checks.append({
+            "check": "scope_storage",
+            "status": (
+                "fail" if scope_status == "fail"
+                else "warn" if scope_status == "nothing-to-verify"
+                else "pass"
+            ),
+            "detail": scope_storage,
+        })
+    except Exception as e:
+        checks.append({
+            "check": "scope_storage",
             "status": "fail",
             "detail": str(e),
         })

@@ -272,7 +272,13 @@ _V5_CORE_TABLE_COLUMNS: dict[str, frozenset[str]] = {
 # have them until MessageStore opens it. Their presence is recognised, but an
 # unrelated extra core column still fails closed as a genuinely newer shape.
 _V5_CORE_OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
-    "messages": frozenset({"ingested_at", "observed_at", "observed_at_source"}),
+    "messages": frozenset({
+        "ingested_at", "observed_at", "observed_at_source", "access_scope",
+        # Accepted so the corrective startup migration can rename the first
+        # staging build's access column in place.
+        "scope",
+    }),
+    "summary_nodes": frozenset({"access_scope", "scope"}),
 }
 
 # Core FTS5 virtual tables: presence is enough — their column layout is owned by
@@ -713,6 +719,7 @@ def ensure_temporal_rollup_tables(conn: sqlite3.Connection) -> None:
             period_kind TEXT NOT NULL CHECK (period_kind IN ('day', 'week', 'month')),
             period_start TEXT NOT NULL,
             scope TEXT NOT NULL,
+            access_scope TEXT,
             summary TEXT,
             token_count INTEGER,
             status TEXT NOT NULL DEFAULT 'building'
@@ -742,6 +749,7 @@ def ensure_temporal_rollup_tables(conn: sqlite3.Connection) -> None:
             event_id INTEGER PRIMARY KEY AUTOINCREMENT,
             node_id INTEGER,
             scope TEXT NOT NULL,
+            access_scope TEXT,
             covered_start REAL NOT NULL,
             covered_end REAL NOT NULL,
             next_day TEXT,
@@ -780,6 +788,10 @@ def ensure_temporal_rollup_tables(conn: sqlite3.Connection) -> None:
         conn, rollup_columns, "failed_at",
         "ALTER TABLE lcm_rollups ADD COLUMN failed_at TEXT",
     )
+    add_column_if_missing(
+        conn, rollup_columns, "access_scope",
+        "ALTER TABLE lcm_rollups ADD COLUMN access_scope TEXT",
+    )
     for column, ddl in (
         ("summary", "ALTER TABLE lcm_rollups ADD COLUMN summary TEXT"),
         ("token_count", "ALTER TABLE lcm_rollups ADD COLUMN token_count INTEGER"),
@@ -800,6 +812,12 @@ def ensure_temporal_rollup_tables(conn: sqlite3.Connection) -> None:
         invalidation_columns,
         "next_day",
         "ALTER TABLE lcm_rollup_invalidations ADD COLUMN next_day TEXT",
+    )
+    add_column_if_missing(
+        conn,
+        invalidation_columns,
+        "access_scope",
+        "ALTER TABLE lcm_rollup_invalidations ADD COLUMN access_scope TEXT",
     )
     conn.execute(
         """
@@ -898,12 +916,26 @@ def ensure_temporal_rollup_tables(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS lcm_rollup_state (
             period_kind TEXT NOT NULL,
             scope TEXT NOT NULL DEFAULT '',
+            access_scope TEXT,
             last_build_cursor TEXT,
             last_built_at TEXT,
             PRIMARY KEY(period_kind, scope)
         )
         """
     )
+    state_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(lcm_rollup_state)").fetchall()
+    }
+    add_column_if_missing(
+        conn,
+        state_columns,
+        "access_scope",
+        "ALTER TABLE lcm_rollup_state ADD COLUMN access_scope TEXT",
+    )
+    from .scope_storage import ensure_scope_columns
+
+    ensure_scope_columns(conn)
     ensure_temporal_rollup_invalidation_triggers(conn)
 
 
@@ -918,9 +950,9 @@ def ensure_temporal_rollup_invalidation_triggers(conn: sqlite3.Connection) -> No
             CREATE TRIGGER lcm_rollup_node_insert
             AFTER INSERT ON summary_nodes BEGIN
                 INSERT INTO lcm_rollup_invalidations(
-                    node_id, scope, covered_start, covered_end, operation
+                    node_id, scope, access_scope, covered_start, covered_end, operation
                 ) VALUES(
-                    new.node_id, new.session_id,
+                    new.node_id, new.session_id, new.access_scope,
                     MIN(COALESCE(new.earliest_at, new.created_at),
                         COALESCE(new.latest_at, new.created_at)),
                     MAX(COALESCE(new.earliest_at, new.created_at),
@@ -932,9 +964,9 @@ def ensure_temporal_rollup_invalidation_triggers(conn: sqlite3.Connection) -> No
             CREATE TRIGGER lcm_rollup_node_delete
             BEFORE DELETE ON summary_nodes BEGIN
                 INSERT INTO lcm_rollup_invalidations(
-                    node_id, scope, covered_start, covered_end, operation
+                    node_id, scope, access_scope, covered_start, covered_end, operation
                 ) VALUES(
-                    old.node_id, old.session_id,
+                    old.node_id, old.session_id, old.access_scope,
                     MIN(COALESCE(old.earliest_at, old.created_at),
                         COALESCE(old.latest_at, old.created_at)),
                     MAX(COALESCE(old.earliest_at, old.created_at),
@@ -946,20 +978,20 @@ def ensure_temporal_rollup_invalidation_triggers(conn: sqlite3.Connection) -> No
             CREATE TRIGGER lcm_rollup_node_update
             AFTER UPDATE OF session_id, depth, summary, token_count,
                             source_token_count, source_ids, source_type, created_at,
-                            earliest_at, latest_at, expand_hint ON summary_nodes BEGIN
+                            earliest_at, latest_at, expand_hint, access_scope ON summary_nodes BEGIN
                 INSERT INTO lcm_rollup_invalidations(
-                    node_id, scope, covered_start, covered_end, operation
+                    node_id, scope, access_scope, covered_start, covered_end, operation
                 ) VALUES(
-                    old.node_id, old.session_id,
+                    old.node_id, old.session_id, old.access_scope,
                     MIN(COALESCE(old.earliest_at, old.created_at),
                         COALESCE(old.latest_at, old.created_at)),
                     MAX(COALESCE(old.earliest_at, old.created_at),
                         COALESCE(old.latest_at, old.created_at)), 'update'
                 );
                 INSERT INTO lcm_rollup_invalidations(
-                    node_id, scope, covered_start, covered_end, operation
+                    node_id, scope, access_scope, covered_start, covered_end, operation
                 ) VALUES(
-                    new.node_id, new.session_id,
+                    new.node_id, new.session_id, new.access_scope,
                     MIN(COALESCE(new.earliest_at, new.created_at),
                         COALESCE(new.latest_at, new.created_at)),
                     MAX(COALESCE(new.earliest_at, new.created_at),
@@ -1037,6 +1069,7 @@ def verify_temporal_rollup_schema(conn: sqlite3.Connection) -> list[str]:
             "period_kind": ("TEXT", 1, None, 0),
             "period_start": ("TEXT", 1, None, 0),
             "scope": ("TEXT", 1, None, 0),
+            "access_scope": ("TEXT", 0, None, 0),
             "summary": ("TEXT", 0, None, 0),
             "token_count": ("INTEGER", 0, None, 0),
             "status": ("TEXT", 1, "'building'", 0),
@@ -1055,6 +1088,7 @@ def verify_temporal_rollup_schema(conn: sqlite3.Connection) -> list[str]:
         "lcm_rollup_state": {
             "period_kind": ("TEXT", 1, None, 1),
             "scope": ("TEXT", 1, "''", 2),
+            "access_scope": ("TEXT", 0, None, 0),
             "last_build_cursor": ("TEXT", 0, None, 0),
             "last_built_at": ("TEXT", 0, None, 0),
         },
@@ -1062,6 +1096,7 @@ def verify_temporal_rollup_schema(conn: sqlite3.Connection) -> list[str]:
             "event_id": ("INTEGER", 0, None, 1),
             "node_id": ("INTEGER", 0, None, 0),
             "scope": ("TEXT", 1, None, 0),
+            "access_scope": ("TEXT", 0, None, 0),
             "covered_start": ("REAL", 1, None, 0),
             "covered_end": ("REAL", 1, None, 0),
             "next_day": ("TEXT", 0, None, 0),
@@ -1246,10 +1281,11 @@ def verify_temporal_rollup_schema(conn: sqlite3.Connection) -> list[str]:
                     node_id INTEGER, session_id TEXT, depth INTEGER, summary TEXT,
                     token_count INTEGER, source_token_count INTEGER,
                     source_ids TEXT, source_type TEXT, created_at REAL,
-                    earliest_at REAL, latest_at REAL, expand_hint TEXT
+                    earliest_at REAL, latest_at REAL, expand_hint TEXT,
+                    access_scope TEXT
                 );
                 CREATE TABLE lcm_rollup_invalidations(
-                    node_id INTEGER, scope TEXT, covered_start REAL,
+                    node_id INTEGER, scope TEXT, access_scope TEXT, covered_start REAL,
                     covered_end REAL, operation TEXT
                 );
                 """
@@ -1339,6 +1375,9 @@ def ensure_embedding_tables(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    from .scope_storage import ensure_scope_columns
+
+    ensure_scope_columns(conn)
 
 
 # The tables and indexes ``ensure_embedding_tables`` is responsible for. Used to
@@ -1383,16 +1422,19 @@ _EMBEDDING_TABLE_SHAPES: dict[
         ("embedded_at", "TEXT", 0, 0, None),
         ("source_token_count", "INTEGER", 0, 0, None),
         ("archived", "INTEGER", 0, 0, "0"),
+        ("access_scope", "TEXT", 0, 0, None),
     ),
     "lcm_embedding_vectors": (
         ("embedded_id", "TEXT", 0, 1, None),
         ("identity_hash", "TEXT", 0, 2, None),
         ("vec", "BLOB", 1, 0, None),
+        ("access_scope", "TEXT", 0, 0, None),
     ),
     "lcm_embedding_binary": (
         ("embedded_id", "TEXT", 0, 1, None),
         ("identity_hash", "TEXT", 0, 2, None),
         ("bits", "BLOB", 1, 0, None),
+        ("access_scope", "TEXT", 0, 0, None),
     ),
 }
 
@@ -1592,6 +1634,9 @@ def ensure_chunk_tables(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    from .scope_storage import ensure_scope_columns
+
+    ensure_scope_columns(conn)
 
 
 # The tables and indexes ``ensure_chunk_tables`` owns. Verified on chunk-corpus
@@ -1623,16 +1668,19 @@ _CHUNK_TABLE_SHAPES: dict[
         ("token_estimate", "INTEGER", 0, 0, None),
         ("embedded_at", "TEXT", 0, 0, None),
         ("archived", "INTEGER", 0, 0, "0"),
+        ("access_scope", "TEXT", 0, 0, None),
     ),
     "lcm_chunk_vectors": (
         ("chunk_id", "TEXT", 0, 1, None),
         ("identity_hash", "TEXT", 0, 2, None),
         ("vec", "BLOB", 1, 0, None),
+        ("access_scope", "TEXT", 0, 0, None),
     ),
     "lcm_chunk_binary": (
         ("chunk_id", "TEXT", 0, 1, None),
         ("identity_hash", "TEXT", 0, 2, None),
         ("bits", "BLOB", 1, 0, None),
+        ("access_scope", "TEXT", 0, 0, None),
     ),
 }
 
@@ -3014,4 +3062,7 @@ def run_versioned_migrations(conn: sqlite3.Connection) -> None:
     # feature materialized lazily by VectorStore (recorded via the named
     # ``embeddings_v1`` marker), so a disabled install stays at v5 with no
     # embedding tables and the numeric counter is free for the temporal train.
+    from .scope_storage import ensure_scope_columns
+
+    ensure_scope_columns(conn)
     set_schema_version(conn, current_version)

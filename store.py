@@ -261,11 +261,22 @@ def build_message_fts_spec() -> ExternalContentFtsSpec:
 class MessageStore:
     """SQLite-backed immutable message store."""
 
-    def __init__(self, db_path: str | Path, *, ingest_protection_config=None, hermes_home: str = ""):
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        ingest_protection_config=None,
+        hermes_home: str = "",
+        access_scope_provider: Callable[[str], str | None] | None = None,
+    ):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ingest_protection_config = ingest_protection_config or LCMConfig(database_path=str(self.db_path))
         self._hermes_home = hermes_home or str(self.db_path.parent)
+        # The provider is intentionally optional.  With Teams disabled it
+        # returns None and the nullable column preserves the legacy write
+        # semantics byte-for-byte at the product boundary.
+        self._access_scope_provider = access_scope_provider
         self._conn: Optional[sqlite3.Connection] = None
         # ``self._conn`` is shared across threads (the connection is opened with
         # ``check_same_thread=False``). SQLite's own C-level mutex serializes
@@ -306,7 +317,8 @@ class MessageStore:
                 pinned INTEGER DEFAULT 0,
                 ingested_at REAL,
                 observed_at REAL,
-                observed_at_source TEXT
+                observed_at_source TEXT,
+                access_scope TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_msg_session
                 ON messages(session_id, store_id);
@@ -318,11 +330,14 @@ class MessageStore:
                 value TEXT
             );
         """)
+        run_versioned_migrations(self._conn)
+        # Finish additive columns before constructing the external-content FTS
+        # table.  This avoids a one-time FTS schema-cache race on old stores
+        # whose messages table is altered during startup.
         ensure_external_content_fts(
             self._conn,
             build_message_fts_spec(),
         )
-        run_versioned_migrations(self._conn)
         self._ensure_source_column()
         self._ensure_conversation_id_column()
         self._ensure_time_contract_columns()
@@ -386,9 +401,18 @@ class MessageStore:
 
     # -- Write operations ---------------------------------------------------
 
+    def _access_scope_for_session(
+        self, session_id: str, explicit: str | None
+    ) -> str | None:
+        if explicit is not None:
+            return explicit
+        if self._access_scope_provider is None:
+            return None
+        return self._access_scope_provider(session_id)
+
     def append(self, session_id: str, msg: Dict[str, Any],
                token_estimate: int = 0, source: str = "",
-               conversation_id: str = "") -> int:
+               conversation_id: str = "", access_scope: str | None = None) -> int:
         """Persist a message and return its store_id."""
         msg = protect_message_for_ingest(
             msg,
@@ -400,14 +424,15 @@ class MessageStore:
         tc_json = json.dumps(tool_calls) if tool_calls else None
         observed_at = _normalize_observed_at(msg.get("timestamp"))
         ingested_at = time.time()
+        resolved_access_scope = self._access_scope_for_session(session_id, access_scope)
 
         with self._write_lock:
             cur = self._conn.execute(
                 """INSERT INTO messages
                    (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
                     tool_name, timestamp, token_estimate, pinned, ingested_at,
-                    observed_at, observed_at_source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    observed_at, observed_at_source, access_scope)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     _normalize_source_value(source),
@@ -423,6 +448,7 @@ class MessageStore:
                     ingested_at,
                     observed_at,
                     "host_message_timestamp" if observed_at is not None else None,
+                    resolved_access_scope,
                 ),
             )
             self._conn.commit()
@@ -432,7 +458,7 @@ class MessageStore:
                      messages: List[Dict[str, Any]],
                      token_estimates: List[int] | None = None,
                      source: str = "",
-                     conversation_id: str = "") -> List[int]:
+                     conversation_id: str = "", access_scope: str | None = None) -> List[int]:
         """Persist multiple messages in one transaction. Returns store_ids."""
         protected_messages = protect_messages_for_ingest(
             messages,
@@ -446,13 +472,15 @@ class MessageStore:
             token_estimates,
             source=source,
             conversation_id=conversation_id,
+            access_scope=access_scope,
         )
 
     def _append_protected_batch(self, session_id: str,
                                 messages: List[Dict[str, Any]],
                                 token_estimates: List[int] | None = None,
                                 source: str = "",
-                                conversation_id: str = "") -> List[int]:
+                                conversation_id: str = "",
+                                access_scope: str | None = None) -> List[int]:
         """Persist messages that already passed ingest protection.
 
         This is an internal fast path for callers that need the protected form
@@ -464,6 +492,7 @@ class MessageStore:
             token_estimates = [0] * len(messages)
 
         ids = []
+        resolved_access_scope = self._access_scope_for_session(session_id, access_scope)
         with self._write_lock, self._conn:
             for msg, est in zip(messages, token_estimates):
                 tc = msg.get("tool_calls")
@@ -474,8 +503,8 @@ class MessageStore:
                     """INSERT INTO messages
                        (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
                         tool_name, timestamp, token_estimate, pinned, ingested_at,
-                        observed_at, observed_at_source)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        observed_at, observed_at_source, access_scope)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         _normalize_source_value(source),
@@ -491,6 +520,7 @@ class MessageStore:
                         ts,
                         observed_at,
                         "host_message_timestamp" if observed_at is not None else None,
+                        resolved_access_scope,
                     ),
                 )
                 ids.append(cur.lastrowid)

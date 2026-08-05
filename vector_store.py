@@ -1047,7 +1047,7 @@ class VectorStore:
         summary = (
             self._conn.execute(
                 """
-                SELECT source_token_count
+                SELECT source_token_count, access_scope
                 FROM summary_nodes
                 WHERE node_id = ?
                 """,
@@ -1058,6 +1058,7 @@ class VectorStore:
         )
         if summary is None:
             raise ValueError(f"summary node does not exist: {embedded_id}")
+        access_scope = summary["access_scope"]
         embedded_at = self._now()
         self._conn.execute(
             "DELETE FROM lcm_embedding_vectors "
@@ -1075,22 +1076,22 @@ class VectorStore:
             (embedded_id, identity_hash),
         )
         self._conn.execute(
-            "INSERT INTO lcm_embedding_vectors(embedded_id, identity_hash, vec) "
-            "VALUES(?, ?, ?)",
-            (embedded_id, identity_hash, packed),
+            "INSERT INTO lcm_embedding_vectors(embedded_id, identity_hash, vec, access_scope) "
+            "VALUES(?, ?, ?, ?)",
+            (embedded_id, identity_hash, packed, access_scope),
         )
         if sign_bits is not None:
             self._conn.execute(
-                "INSERT INTO lcm_embedding_binary(embedded_id, identity_hash, bits) "
-                "VALUES(?, ?, ?)",
-                (embedded_id, identity_hash, sign_bits),
+                "INSERT INTO lcm_embedding_binary(embedded_id, identity_hash, bits, access_scope) "
+                "VALUES(?, ?, ?, ?)",
+                (embedded_id, identity_hash, sign_bits, access_scope),
             )
         self._conn.execute(
             """
             INSERT INTO lcm_embedding_meta(
                 embedded_id, embedded_kind, identity_hash, embedded_at,
-                source_token_count, archived
-            ) VALUES(?, ?, ?, ?, ?, 0)
+                source_token_count, archived, access_scope
+            ) VALUES(?, ?, ?, ?, ?, 0, ?)
             """,
             (
                 embedded_id,
@@ -1098,6 +1099,7 @@ class VectorStore:
                 identity_hash,
                 embedded_at,
                 int(summary["source_token_count"] or 0),
+                access_scope,
             ),
         )
         self._bump_data_version(identity_hash)
@@ -2380,6 +2382,11 @@ class VectorStore:
         identity_hash = identity.identity_hash
         normalized, packed, sign_bits = self._encode_stored_vector(vec, profile)
         embedded_at = self._now()
+        source_message = self._conn.execute(
+            "SELECT access_scope FROM messages WHERE store_id = ?",
+            (int(store_id),),
+        ).fetchone()
+        access_scope = source_message[0] if source_message is not None else None
         self._conn.execute(
             "DELETE FROM lcm_chunk_vectors WHERE chunk_id = ? AND identity_hash = ?",
             (chunk_id, identity_hash),
@@ -2393,21 +2400,21 @@ class VectorStore:
             (chunk_id, identity_hash),
         )
         self._conn.execute(
-            "INSERT INTO lcm_chunk_vectors(chunk_id, identity_hash, vec) VALUES(?, ?, ?)",
-            (chunk_id, identity_hash, packed),
+            "INSERT INTO lcm_chunk_vectors(chunk_id, identity_hash, vec, access_scope) VALUES(?, ?, ?, ?)",
+            (chunk_id, identity_hash, packed, access_scope),
         )
         if sign_bits is not None:
             self._conn.execute(
-                "INSERT INTO lcm_chunk_binary(chunk_id, identity_hash, bits) "
-                "VALUES(?, ?, ?)",
-                (chunk_id, identity_hash, sign_bits),
+                "INSERT INTO lcm_chunk_binary(chunk_id, identity_hash, bits, access_scope) "
+                "VALUES(?, ?, ?, ?)",
+                (chunk_id, identity_hash, sign_bits, access_scope),
             )
         self._conn.execute(
             """
             INSERT INTO lcm_chunk_meta(
                 chunk_id, identity_hash, store_id, chunk_index, char_start,
-                char_end, token_estimate, embedded_at, archived
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 0)
+                char_end, token_estimate, embedded_at, archived, access_scope
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
             """,
             (
                 chunk_id,
@@ -2418,6 +2425,7 @@ class VectorStore:
                 int(char_end),
                 int(token_estimate),
                 embedded_at,
+                access_scope,
             ),
         )
         self._bump_data_version(identity_hash)

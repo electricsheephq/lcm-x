@@ -32,6 +32,7 @@ from .db_bootstrap import (
     remediate_interim_schema_stamp,
     repair_external_content_fts,
 )
+from .scope_storage import teams_enabled as storage_teams_enabled, verify_scope_storage
 from .diagnostics import (
     _has_lifecycle_fragmentation,
     _state_db_path_for_engine,
@@ -1295,6 +1296,26 @@ def _doctor_text(engine) -> str:
     if schema_missing_tables or schema_health.get("error"):
         issues.append("schema_core_tables")
 
+    try:
+        scope_storage = verify_scope_storage(
+            store_conn,
+            teams_enabled=storage_teams_enabled(engine),
+        )
+    except Exception as exc:  # pragma: no cover - defensive doctor boundary
+        scope_storage = {
+            "status": "fail",
+            "message": str(exc),
+            "tables": {},
+            "writer_guard": {"status": "fail", "discovered": 0, "violations": []},
+            "observed_rows": 0,
+        }
+    if scope_storage.get("status") == "fail":
+        issues.append("scope_storage")
+    elif scope_storage.get("status") == "nothing-to-verify":
+        recommended_actions.append(
+            "enable Teams before relying on per-item scope verification"
+        )
+
     def _safe_count(conn, query: str, issue_key: str) -> int | str:
         try:
             return int(conn.execute(query).fetchone()[0])
@@ -1471,6 +1492,28 @@ def _doctor_text(engine) -> str:
     else:
         observations.append("schema_core_tables: ok")
 
+    observations.append(
+        "scope_storage: "
+        f"status={scope_storage.get('status')} "
+        f"observed_rows={scope_storage.get('observed_rows', 0)}"
+    )
+    for table, counts in (scope_storage.get("tables") or {}).items():
+        observations.append(
+            f"scope_counts:{table} stamped={counts.get('stamped', 0)} "
+            f"unstamped={counts.get('unstamped', 0)}"
+        )
+    writer_guard = scope_storage.get("writer_guard") or {}
+    observations.append(
+        "scope_writer_guard: "
+        f"status={writer_guard.get('status')} "
+        f"discovered={writer_guard.get('discovered', 0)}"
+    )
+    if writer_guard.get("violations"):
+        observations.append(
+            "scope_writer_guard_violations: "
+            + ", ".join(str(item) for item in writer_guard["violations"])
+        )
+
     if debt_rows:
         first = debt_rows[0]
         observations.append(
@@ -1627,6 +1670,8 @@ def _doctor_text(engine) -> str:
         triage_checks.append({"check": "database_integrity", "status": "fail", "detail": integrity})
     if schema_health.get("error") or schema_missing_tables:
         triage_checks.append({"check": "schema_core_tables", "status": "fail", "detail": schema_health})
+    if scope_storage.get("status") == "fail":
+        triage_checks.append({"check": "scope_storage", "status": "fail", "detail": scope_storage})
     if store_fts != "ok":
         triage_checks.append({
             "check": "messages_fts_integrity",

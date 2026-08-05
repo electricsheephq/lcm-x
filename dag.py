@@ -154,6 +154,7 @@ class SummaryNode:
     expand_hint: str = ""  # "Expand for details about: ..."
     search_rank: float | None = None
     search_directness: float = 0.0
+    access_scope: str | None = None
 
 
 class SummaryDAG:
@@ -161,10 +162,16 @@ class SummaryDAG:
 
     DELETE_SESSION_SCOPE_TABLE = _DELETE_SESSION_SCOPE_TABLE
 
-    def __init__(self, db_path: str | Path):
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        access_scope_provider: Callable[[str], str | None] | None = None,
+    ):
         self.db_path = Path(db_path)
         self._conn: Optional[sqlite3.Connection] = None
         self._db_lock = threading.RLock()
+        self._access_scope_provider = access_scope_provider
         self._init_db()
 
     @property
@@ -196,7 +203,8 @@ class SummaryDAG:
                 created_at REAL NOT NULL,
                 earliest_at REAL,
                 latest_at REAL,
-                expand_hint TEXT DEFAULT ''
+                expand_hint TEXT DEFAULT '',
+                access_scope TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_nodes_session_depth
                 ON summary_nodes(session_id, depth, created_at);
@@ -210,11 +218,14 @@ class SummaryDAG:
                 value TEXT
             );
         """)
+        run_versioned_migrations(self._conn)
+        # Add the nullable column before constructing the external-content FTS
+        # table, so a fresh or upgraded store never leaves a stale FTS schema
+        # cache while scope storage is materialized.
         ensure_external_content_fts(
             self._conn,
             build_nodes_fts_spec(),
         )
-        run_versioned_migrations(self._conn)
         self._ensure_source_window_columns()
         self._conn.commit()
 
@@ -244,14 +255,27 @@ class SummaryDAG:
 
     # -- Write --------------------------------------------------------------
 
+    def _access_scope_for_session(
+        self, session_id: str, explicit: str | None
+    ) -> str | None:
+        if explicit is not None:
+            return explicit
+        if self._access_scope_provider is None:
+            return None
+        return self._access_scope_provider(session_id)
+
     def add_node(self, node: SummaryNode) -> int:
         """Insert a summary node and return its node_id."""
         with self._db_lock:
+            resolved_access_scope = self._access_scope_for_session(
+                node.session_id, node.access_scope
+            )
             cur = self._conn.execute(
                 """INSERT INTO summary_nodes
                    (session_id, depth, summary, token_count, source_token_count,
-                    source_ids, source_type, created_at, earliest_at, latest_at, expand_hint)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    source_ids, source_type, created_at, earliest_at, latest_at,
+                    expand_hint, access_scope)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     node.session_id,
                     node.depth,
@@ -264,6 +288,7 @@ class SummaryDAG:
                     node.earliest_at,
                     node.latest_at,
                     node.expand_hint,
+                    resolved_access_scope,
                 ),
             )
             self._conn.commit()
@@ -871,7 +896,11 @@ class SummaryDAG:
             earliest_at=row[9],
             latest_at=row[10],
             expand_hint=row[11] or "",
-            search_rank=row[12] if len(row) > 12 else None,
+            # ``access_scope`` is the additive thirteenth table column.  Search
+            # statements append ``rank`` after ``n.*``; keep that rank index
+            # correct for both pre-scope and current row shapes.
+            search_rank=row[13] if len(row) > 13 else None,
+            access_scope=row[12] if len(row) > 12 else None,
         )
 
     def close(self) -> None:
