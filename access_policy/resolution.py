@@ -12,6 +12,39 @@ from .fail_closed import FailClosedPolicy
 from .trusted_owner import TrustedOwnerPolicy
 
 
+# The ONE place each binding is named. Hooks must not guess at attribute names:
+# a cascade of getattr fallbacks silently yields a permissive policy when an
+# attribute is renamed, which is the "unscoped fallback" #473 forbids and is
+# invisible to tests because nothing fails.
+TEAMS_ENABLED_ATTR = "lcm_teams_enabled"
+ACCESS_CONTEXT_ACCESSOR = "get_lcm_access_context"
+
+
+def policy_access_context(engine: object) -> AccessContextV1 | None:
+    """Read the engine's carrier context through the same documented seam."""
+
+    accessor = getattr(engine, ACCESS_CONTEXT_ACCESSOR, None)
+    return accessor() if callable(accessor) else None
+
+
+def policy_for_engine(engine: object) -> "TrustedOwnerPolicy | FailClosedPolicy":
+    """Resolve the policy for an engine through one documented seam.
+
+    Every hook site calls this rather than reading the engine itself, so there
+    is a single place to change when the host wiring lands, and F5 can assert
+    that no hook resolves a policy any other way.
+
+    Note the asymmetry that makes this safe: an engine with no Teams wiring at
+    all reports ``teams_enabled=False`` and gets the permissive policy, which
+    is correct default-off. But an engine that HAS Teams enabled and is missing
+    its context accessor yields ``resolve_policy(None, True)`` -> FAIL_CLOSED.
+    Enabled-but-unwired fails closed; it does not fall back to permissive.
+    """
+
+    teams_enabled = bool(getattr(engine, TEAMS_ENABLED_ATTR, False))
+    return resolve_policy(policy_access_context(engine), teams_enabled)
+
+
 def resolve_policy(
     carrier_context: AccessContextV1 | None,
     teams_enabled: bool,

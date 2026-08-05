@@ -2,12 +2,14 @@
 
 from .errors import AuthorizationRequiredError
 from .fail_closed import FailClosedPolicy
-from .resolution import resolve_policy
+from .resolution import policy_access_context, policy_for_engine, resolve_policy
 from .trusted_owner import TrustedOwnerPolicy
 
 __all__ = [
     "AuthorizationRequiredError",
     "FailClosedPolicy",
+    "policy_access_context",
+    "policy_for_engine",
     "TrustedOwnerPolicy",
     "resolve_policy",
 ]

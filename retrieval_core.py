@@ -17,6 +17,7 @@ lexical to that module.
 from __future__ import annotations
 
 import copy
+import importlib
 import sqlite3
 import threading
 import time
@@ -24,6 +25,12 @@ from collections import OrderedDict
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Dict, TYPE_CHECKING
+
+_access_policy = importlib.import_module("access_policy")
+AuthorizationRequiredError = _access_policy.AuthorizationRequiredError
+resolve_policy = _access_policy.resolve_policy
+policy_for_engine = _access_policy.policy_for_engine
+policy_access_context = _access_policy.policy_access_context
 
 if TYPE_CHECKING:
     from .engine import LCMEngine
@@ -247,6 +254,29 @@ def run_knn(
     corpus (the lcm_recall contract), optionally capped by ``scan_max_rows`` /
     ``scan_budget_s`` — both 0 (no early stop) by default.
     """
+    # One documented seam (access_policy.policy_for_engine) rather than reading
+    # the engine here: guessing attribute names silently yields a permissive
+    # policy when one is renamed, which is exactly the unscoped fallback #473
+    # forbids -- and nothing would fail to tell us.
+    policy = policy_for_engine(engine)
+    access_context = policy_access_context(engine)
+    expected_scope = {
+        "conversation_ids": conversation_ids,
+        "source": source,
+    }
+    decision = policy.authorize_operation(access_context, "read", expected_scope)
+    policy.audit_decision(
+        access_context, "read", decision.denial_reason, decision.public()
+    )
+    if not decision.allowed:
+        raise AuthorizationRequiredError(
+            "authorize_operation", decision.denial_reason
+        )
+    authorized_scope = policy.resolve_authorized_targets(
+        access_context, "read", expected_scope
+    )
+    conversation_ids = authorized_scope.get("conversation_ids", conversation_ids)
+    source = authorized_scope.get("source", source)
     if time.monotonic() >= deadline:
         raise TimeoutError("semantic vector search deadline exhausted")
     return _run_pooled_knn(
@@ -337,6 +367,12 @@ def hydrate_chunk_hits(
     ``store_id`` so RRF fuses it against an FTS raw hit for the same message.
     """
     conn: sqlite3.Connection | None = None
+    # One documented seam (access_policy.policy_for_engine) rather than reading
+    # the engine here: guessing attribute names silently yields a permissive
+    # policy when one is renamed, which is exactly the unscoped fallback #473
+    # forbids -- and nothing would fail to tell us.
+    policy = policy_for_engine(engine)
+    access_context = policy_access_context(engine)
 
     def require_remaining(stage: str) -> float:
         remaining = deadline - time.monotonic()
@@ -378,6 +414,19 @@ def hydrate_chunk_hits(
                 break
         if not ordered_ids:
             return []
+        for chunk_id in ordered_ids:
+            decision = policy.authorize_stored_scope(
+                access_context,
+                "read",
+                {"target_id": chunk_id, "kind": "chunk"},
+            )
+            policy.audit_decision(
+                access_context, "read", decision.denial_reason, decision.public()
+            )
+            if not decision.allowed:
+                raise AuthorizationRequiredError(
+                    "authorize_stored_scope", decision.denial_reason
+                )
         rows_by_id: dict[str, sqlite3.Row] = {}
         # Chunk in bounded batches so the IN(...) placeholder list stays well
         # under SQLite's variable limit even for a large knn_limit.
@@ -438,6 +487,12 @@ def hydrate_semantic_nodes(
 ) -> list[tuple[Any, float]]:
     """Hydrate ranked vector hits into summary nodes on a read-only connection."""
     conn: sqlite3.Connection | None = None
+    # One documented seam (access_policy.policy_for_engine) rather than reading
+    # the engine here: guessing attribute names silently yields a permissive
+    # policy when one is renamed, which is exactly the unscoped fallback #473
+    # forbids -- and nothing would fail to tell us.
+    policy = policy_for_engine(engine)
+    access_context = policy_access_context(engine)
 
     def require_remaining(stage: str) -> float:
         remaining = deadline - time.monotonic()
@@ -482,6 +537,18 @@ def hydrate_semantic_nodes(
             except (TypeError, ValueError):
                 continue
             require_remaining("node lookup")
+            decision = policy.authorize_stored_scope(
+                access_context,
+                "read",
+                {"target_id": str(embedded_id), "kind": "summary"},
+            )
+            policy.audit_decision(
+                access_context, "read", decision.denial_reason, decision.public()
+            )
+            if not decision.allowed:
+                raise AuthorizationRequiredError(
+                    "authorize_stored_scope", decision.denial_reason
+                )
             node = read_dag.get_node(node_id)
             require_remaining("node lookup")
             if node is not None:
