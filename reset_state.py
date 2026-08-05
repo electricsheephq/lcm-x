@@ -7,7 +7,6 @@ reset or rolled over. State stays on the engine (accessed via ``self``);
 mixing this in leaves every call site and ``self._*`` reference unchanged.
 """
 
-import importlib
 
 from . import access_policy as _access_policy
 AuthorizationRequiredError = _access_policy.AuthorizationRequiredError

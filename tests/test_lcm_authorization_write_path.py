@@ -3,12 +3,11 @@ from __future__ import annotations
 import ast
 import base64
 import importlib
-import sqlite3
 from pathlib import Path
 
 import pytest
 
-from hermes_lcm.access_context import AccessContextV1, Decision, DenialReason
+from hermes_lcm.access_context import AccessContextV1, Decision
 from hermes_lcm.access_context.fixtures import load_fixture
 from hermes_lcm import command as command_module
 from hermes_lcm import compaction as compaction_module

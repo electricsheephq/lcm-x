@@ -17,7 +17,6 @@ lexical to that module.
 from __future__ import annotations
 
 import copy
-import importlib
 import sqlite3
 import threading
 import time

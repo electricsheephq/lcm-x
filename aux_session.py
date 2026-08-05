@@ -15,7 +15,6 @@ mixes this in, so no call site and no test changes.
 from __future__ import annotations
 
 import inspect
-import importlib
 import logging
 import sqlite3
 import threading

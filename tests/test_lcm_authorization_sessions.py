@@ -11,7 +11,6 @@ from hermes_lcm.access_context import Decision
 from hermes_lcm import engine as engine_module
 from hermes_lcm import engine_registry
 from hermes_lcm import maintenance as maintenance_module
-from hermes_lcm import reset_state as reset_state_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 
