@@ -1663,6 +1663,47 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
     def _schedule_rollup_maintenance(self, scope: str) -> None:
         """Enqueue one best-effort rollup pass using private SQLite helpers."""
         try:
+            # The scheduler owns one long-lived process-wide worker. Resolve
+            # and authorize on this caller thread, then carry the immutable
+            # decision into the job; a worker-thread lookup would have no
+            # caller ContextVar and could inherit another principal's state.
+            policy = policy_for_engine(self)
+            access_context = policy_access_context(self)
+            expected_scope = {
+                "kind": "rollup",
+                "partition_key": scope,
+                "source_scope": access_context,
+                "derived_scope": access_context,
+            }
+            decision = policy.authorize_operation(
+                access_context, "write", expected_scope
+            )
+            policy.audit_decision(
+                access_context, "write", decision.denial_reason, decision.public()
+            )
+            if not decision.allowed:
+                raise AuthorizationRequiredError(
+                    "authorize_operation", decision.denial_reason
+                )
+            authorized_scope = policy.resolve_authorized_targets(
+                access_context, "write", expected_scope
+            )
+            if isinstance(authorized_scope, dict):
+                source_scope = authorized_scope.get("source_scope", access_context)
+                derived_scope = authorized_scope.get("derived_scope", access_context)
+                if (
+                    isinstance(source_scope, AccessContextV1)
+                    and isinstance(derived_scope, AccessContextV1)
+                    and not is_subset_of(derived_scope, source_scope)
+                ):
+                    mismatch = Decision.deny(DenialReason.SCOPE_MISMATCH)
+                    policy.audit_decision(
+                        access_context, "write", mismatch.denial_reason, mismatch.public()
+                    )
+                    raise AuthorizationRequiredError(
+                        "authorize_operation", mismatch.denial_reason
+                    )
+            captured_decision = decision
             raw_database_path = str(self._dag.db_path)
             if raw_database_path == ":memory:":
                 logger.warning(
@@ -1677,48 +1718,12 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             spend_guard = self._summary_spend_guard
 
             def maintain() -> None:
-                # RollupStore/build_day are standalone helpers. Resolve the
-                # policy once at the engine-side worker boundary, before the
-                # private DAG/store construction can perform any write.
-                policy = policy_for_engine(self)
-                access_context = policy_access_context(self)
-                expected_scope = {
-                    "kind": "rollup",
-                    "partition_key": scope,
-                    "source_scope": access_context,
-                    "derived_scope": access_context,
-                }
-                decision = policy.authorize_operation(
-                    access_context, "write", expected_scope
-                )
-                policy.audit_decision(
-                    access_context, "write", decision.denial_reason, decision.public()
-                )
-                if not decision.allowed:
+                # The decision was captured before enqueue on the caller's
+                # thread. Never resolve policy on this shared worker.
+                if not captured_decision.allowed:
                     raise AuthorizationRequiredError(
-                        "authorize_operation", decision.denial_reason
+                        "authorize_operation", captured_decision.denial_reason
                     )
-                authorized_scope = policy.resolve_authorized_targets(
-                    access_context, "write", expected_scope
-                )
-                if isinstance(authorized_scope, dict):
-                    source_scope = authorized_scope.get("source_scope", access_context)
-                    derived_scope = authorized_scope.get("derived_scope", access_context)
-                    if (
-                        isinstance(source_scope, AccessContextV1)
-                        and isinstance(derived_scope, AccessContextV1)
-                        and not is_subset_of(derived_scope, source_scope)
-                    ):
-                        mismatch = Decision.deny(DenialReason.SCOPE_MISMATCH)
-                        policy.audit_decision(
-                            access_context,
-                            "write",
-                            mismatch.denial_reason,
-                            mismatch.public(),
-                        )
-                        raise AuthorizationRequiredError(
-                            "authorize_operation", mismatch.denial_reason
-                        )
                 private_dag = SummaryDAG(database_path)
                 try:
                     run_rollup_maintenance(
@@ -2539,6 +2544,22 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         self._log_session_filter_diagnostics()
 
     def on_session_start(self, session_id: str, **kwargs) -> None:
+        # Authorize before ``hermes_home`` can rebind the engine's storage.
+        policy = policy_for_engine(self)
+        access_context = policy_access_context(self)
+        expected_scope = {
+            "kind": "session_start",
+            "session_id": session_id,
+            "conversation_id": kwargs.get("conversation_id"),
+        }
+        decision = policy.authorize_operation(access_context, "write", expected_scope)
+        policy.audit_decision(
+            access_context, "write", decision.denial_reason, decision.public()
+        )
+        if not decision.allowed:
+            raise AuthorizationRequiredError(
+                "authorize_operation", decision.denial_reason
+            )
         if "hermes_home" in kwargs:
             self._rebind_storage_for_home(str(kwargs.get("hermes_home") or ""))
 
@@ -3172,6 +3193,23 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         )
 
     def on_session_end(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
+        # Gate the callback before inspecting messages or mutating auxiliary
+        # and lifecycle state.
+        policy = policy_for_engine(self)
+        access_context = policy_access_context(self)
+        expected_scope = {
+            "kind": "session_end",
+            "session_id": session_id,
+            "conversation_id": self._conversation_id,
+        }
+        decision = policy.authorize_operation(access_context, "write", expected_scope)
+        policy.audit_decision(
+            access_context, "write", decision.denial_reason, decision.public()
+        )
+        if not decision.allowed:
+            raise AuthorizationRequiredError(
+                "authorize_operation", decision.denial_reason
+            )
         ended_generation = self._in_process_auxiliary_caller_generation(session_id)
         active_auxiliary_end = session_id in self._active_auxiliary_session_ids()
         if (
@@ -3501,6 +3539,21 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             raise
 
     def on_session_reset(self) -> None:
+        policy = policy_for_engine(self)
+        access_context = policy_access_context(self)
+        expected_scope = {
+            "kind": "session_reset",
+            "session_id": self._session_id,
+            "conversation_id": self._conversation_id,
+        }
+        decision = policy.authorize_operation(access_context, "write", expected_scope)
+        policy.audit_decision(
+            access_context, "write", decision.denial_reason, decision.public()
+        )
+        if not decision.allowed:
+            raise AuthorizationRequiredError(
+                "authorize_operation", decision.denial_reason
+            )
         if self._host_fallback_compressor is not None:
             compressor = self._host_fallback_compressor
             on_session_reset = getattr(compressor, "on_session_reset", None)
@@ -3720,6 +3773,24 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         ]
 
     def handle_tool_call(self, name: str, args: Dict[str, Any], **kwargs) -> str:
+        # This callback is a bypass around individual tool handlers. Authorize
+        # before current-turn ingest or dispatch can disclose or mutate state.
+        policy = policy_for_engine(self)
+        access_context = policy_access_context(self)
+        expected_scope = {
+            "kind": "tool_call",
+            "tool_name": name,
+            "session_id": self._session_id,
+            "conversation_id": self._conversation_id,
+        }
+        decision = policy.authorize_operation(access_context, "read", expected_scope)
+        policy.audit_decision(
+            access_context, "read", decision.denial_reason, decision.public()
+        )
+        if not decision.allowed:
+            raise AuthorizationRequiredError(
+                "authorize_operation", decision.denial_reason
+            )
         # Ingest live messages if passed (enables current-turn search)
         messages = kwargs.get("messages")
 

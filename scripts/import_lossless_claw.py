@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import sqlite3
 import sys
@@ -26,6 +27,8 @@ PACKAGE_NAME = "hermes_lcm"
 
 def _ensure_local_package_importable() -> None:
     """Make local plugin modules importable when this file is run directly."""
+    if str(PLUGIN_DIR) not in sys.path:
+        sys.path.insert(0, str(PLUGIN_DIR))
     if PACKAGE_NAME in sys.modules:
         return
     pkg = types.ModuleType(PACKAGE_NAME)
@@ -35,6 +38,11 @@ def _ensure_local_package_importable() -> None:
 
 
 _ensure_local_package_importable()
+
+_access_policy = importlib.import_module("access_policy")
+AuthorizationRequiredError = _access_policy.AuthorizationRequiredError
+policy_for_engine = _access_policy.policy_for_engine
+policy_access_context = _access_policy.policy_access_context
 
 from hermes_lcm.config import LCMConfig  # noqa: E402
 from hermes_lcm.dag import build_nodes_fts_spec  # noqa: E402
@@ -1251,9 +1259,24 @@ def import_lossless_claw(
     session_identity: str = "session_id",
     include_summaries: bool = False,
     apply: bool = False,
+    engine: object | None = None,
 ) -> ImportResult:
     source_path = Path(source_db)
     target_path = Path(target_db)
+    policy = policy_for_engine(engine)
+    access_context = policy_access_context(engine)
+    expected_scope = {
+        "kind": "lossless_claw_import",
+        "source_db": str(source_path),
+        "target_db": str(target_path),
+        "apply": bool(apply),
+    }
+    decision = policy.authorize_operation(access_context, "write", expected_scope)
+    policy.audit_decision(
+        access_context, "write", decision.denial_reason, decision.public()
+    )
+    if not decision.allowed:
+        raise AuthorizationRequiredError("authorize_operation", decision.denial_reason)
     resolved_import_id = import_id or _default_import_id(source_path)
     if session_identity not in VALID_SESSION_IDENTITIES:
         raise ValueError(
@@ -3156,9 +3179,24 @@ def import_jsonl_sessions(
     agent: str = "unknown",
     import_id: str | None = None,
     apply: bool = False,
+    engine: object | None = None,
 ) -> ImportResult:
     source_files = [Path(path) for path in files]
     target_path = Path(target_db)
+    policy = policy_for_engine(engine)
+    access_context = policy_access_context(engine)
+    expected_scope = {
+        "kind": "jsonl_import",
+        "source_files": tuple(str(path) for path in source_files),
+        "target_db": str(target_path),
+        "apply": bool(apply),
+    }
+    decision = policy.authorize_operation(access_context, "write", expected_scope)
+    policy.audit_decision(
+        access_context, "write", decision.denial_reason, decision.public()
+    )
+    if not decision.allowed:
+        raise AuthorizationRequiredError("authorize_operation", decision.denial_reason)
     resolved_import_id = import_id or _default_jsonl_import_id(source_files)
     existing_tool_call_ids = _existing_tool_call_ids_by_source_session(
         target_path,

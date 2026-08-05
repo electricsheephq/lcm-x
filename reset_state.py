@@ -7,6 +7,13 @@ reset or rolled over. State stays on the engine (accessed via ``self``);
 mixing this in leaves every call site and ``self._*`` reference unchanged.
 """
 
+import importlib
+
+_access_policy = importlib.import_module("access_policy")
+AuthorizationRequiredError = _access_policy.AuthorizationRequiredError
+policy_for_engine = _access_policy.policy_for_engine
+policy_access_context = _access_policy.policy_access_context
+
 
 class ResetStateMixin:
     def _reset_session_counters(self) -> None:
@@ -46,6 +53,21 @@ class ResetStateMixin:
         Proven carry-over paths must restore/advance state from the verified
         source lifecycle after rebinding.
         """
+        policy = policy_for_engine(self)
+        access_context = policy_access_context(self)
+        expected_scope = {
+            "kind": "reset_state",
+            "session_id": getattr(self, "_session_id", ""),
+            "conversation_id": getattr(self, "_conversation_id", ""),
+        }
+        decision = policy.authorize_operation(access_context, "write", expected_scope)
+        policy.audit_decision(
+            access_context, "write", decision.denial_reason, decision.public()
+        )
+        if not decision.allowed:
+            raise AuthorizationRequiredError(
+                "authorize_operation", decision.denial_reason
+            )
         self._reset_session_counters()
         self._reset_compaction_progress()
         self._generated_ignored_active_replay_placeholder_hashes = set()

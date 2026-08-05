@@ -7,12 +7,17 @@ Based on the LCM paper by Ehrlich & Blackman (Voltropy PBC, Feb 2026).
 """
 
 import json
+import importlib
 import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+_access_policy = importlib.import_module("access_policy")
+policy_for_engine = _access_policy.policy_for_engine
+policy_access_context = _access_policy.policy_access_context
 
 
 def get_recall_policy() -> str:
@@ -86,6 +91,28 @@ def _ensure_engine_bound_to_session(
             platform=platform,
             conversation_id=conversation_id or None,
         )
+
+
+def _authorize_active_engine_resolution(
+    caller_engine: object,
+    *,
+    session_id: str,
+    conversation_id: str,
+    operation: str,
+) -> bool:
+    """Authorize a resolved session/lane before using its runtime clone."""
+    policy = policy_for_engine(caller_engine)
+    access_context = policy_access_context(caller_engine)
+    expected_scope = {
+        "kind": "active_engine_resolution",
+        "session_id": session_id,
+        "conversation_id": conversation_id,
+    }
+    decision = policy.authorize_operation(access_context, operation, expected_scope)
+    policy.audit_decision(
+        access_context, operation, decision.denial_reason, decision.public()
+    )
+    return bool(decision.allowed)
 
 
 def _hook_question_date(payload: dict) -> object:
@@ -404,6 +431,18 @@ def register(ctx):
                     or payload.get("gateway_session_key")
                     or ""
                 )
+                caller_engine = (
+                    payload.get("context_compressor")
+                    or payload.get("context_engine")
+                    or engine
+                )
+                if not _authorize_active_engine_resolution(
+                    caller_engine,
+                    session_id=session_id,
+                    conversation_id=conversation_id,
+                    operation="read",
+                ):
+                    return None
                 active_engine = resolve_active_lcm_engine(
                     session_id=session_id,
                     conversation_id=conversation_id,
@@ -524,6 +563,15 @@ def register(ctx):
                 or ""
             )
             platform = str(kwargs.get("platform") or "")
+
+            caller_engine = active_engine or kwargs.get("context_engine") or engine
+            if not _authorize_active_engine_resolution(
+                caller_engine,
+                session_id=session_id,
+                conversation_id=conversation_id,
+                operation="write",
+            ):
+                return
 
             if active_engine is None:
                 active_engine = resolve_active_lcm_engine(
