@@ -7721,6 +7721,63 @@ class TestLCMEngineSharedStorage:
             for engine in (*clones, prototype):
                 engine.shutdown()
 
+    def test_shared_lifecycle_reads_wait_for_path_lock(self, tmp_path):
+        prototype = self._engine(tmp_path)
+        clone = prototype.clone_for_agent()
+        started = threading.Event()
+        finished = threading.Event()
+        failures = []
+
+        def read_state():
+            try:
+                started.set()
+                clone._lifecycle.row_count()
+                clone._lifecycle.get_by_conversation("missing")
+                clone._lifecycle.get_by_session("missing")
+                clone._lifecycle.get_fragmentation_stats()
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                finished.set()
+
+        try:
+            with prototype._storage._operation_lock:
+                thread = threading.Thread(target=read_state)
+                thread.start()
+                assert started.wait(timeout=1)
+                assert not finished.wait(timeout=0.05)
+            thread.join(timeout=2)
+            assert finished.is_set()
+            assert failures == []
+        finally:
+            prototype.shutdown()
+            clone.shutdown()
+
+    def test_dag_delete_callback_runs_outside_path_lock(self, tmp_path):
+        prototype = self._engine(tmp_path)
+        prototype._dag.add_node(SummaryNode(session_id="delete", summary="node"))
+        callback_lock_state = []
+
+        def on_deleted_batch(_node_ids):
+            acquired = []
+
+            def acquire_lock():
+                with prototype._storage._operation_lock:
+                    acquired.append(True)
+
+            thread = threading.Thread(target=acquire_lock)
+            thread.start()
+            thread.join(timeout=1)
+            callback_lock_state.append(bool(acquired))
+
+        try:
+            assert prototype._dag.delete_session_nodes(
+                "delete", on_deleted_batch=on_deleted_batch
+            ) == 1
+            assert callback_lock_state == [True]
+        finally:
+            prototype.shutdown()
+
     def test_concurrent_shutdown_releases_one_lease(self, tmp_path):
         prototype = self._engine(tmp_path)
         clone = prototype.clone_for_agent()

@@ -1272,3 +1272,28 @@ class QueryViewStore:
             self.close()
         except Exception:
             pass
+
+
+def _synchronized(method):
+    """Serialize operations that share one SQLite connection across clones."""
+    def locked(self, *args, **kwargs):
+        with self._write_lock:
+            return method(self, *args, **kwargs)
+
+    return locked
+
+
+for _method_name in (
+    "corpus_snapshot",
+    "snapshot_dependency",
+    "claim_build",
+    "publish_ready",
+    "mark_failed",
+    "reclaim_expired_builds",
+    "delta_events",
+    "lookup",
+    "expire_views",
+    "purge_expired",
+    "prune_corpus_events",
+):
+    setattr(QueryViewStore, _method_name, _synchronized(getattr(QueryViewStore, _method_name)))

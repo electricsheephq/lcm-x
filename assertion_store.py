@@ -1102,3 +1102,22 @@ class AssertionStore:
             except Exception:
                 self._conn.execute("ROLLBACK")
                 raise
+
+
+def _synchronized(method):
+    """Serialize operations that share one SQLite connection across clones."""
+    def locked(self, *args, **kwargs):
+        with self._write_lock:
+            return method(self, *args, **kwargs)
+
+    return locked
+
+
+for _method_name in (
+    "snapshot_source",
+    "has_current_receipt",
+    "plan_rebuild",
+    "query_assertions",
+    "query_relations",
+):
+    setattr(AssertionStore, _method_name, _synchronized(getattr(AssertionStore, _method_name)))

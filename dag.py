@@ -901,8 +901,6 @@ def _synchronized(method):
 
 
 for _method_name in (
-    "delete_below_depth",
-    "delete_session_nodes",
     "reassign_session_nodes",
     "get_node",
     "get_session_nodes",

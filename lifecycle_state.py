@@ -106,6 +106,7 @@ class LifecycleStateStore:
         """
         return getattr(self, "_conn", None)
 
+    @_synchronized
     def row_count(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) AS count FROM lcm_lifecycle_state").fetchone()
         return int(row["count"] if row else 0)
@@ -130,6 +131,7 @@ class LifecycleStateStore:
             updated_at=float(row["updated_at"] or 0.0),
         )
 
+    @_synchronized
     def get_by_conversation(self, conversation_id: str | None) -> LifecycleState | None:
         if not conversation_id:
             return None
@@ -139,6 +141,7 @@ class LifecycleStateStore:
         ).fetchone()
         return self._row_to_state(row)
 
+    @_synchronized
     def get_by_session(self, session_id: str | None) -> LifecycleState | None:
         if not session_id:
             return None
@@ -371,6 +374,7 @@ class LifecycleStateStore:
         assert updated is not None
         return updated
 
+    @_synchronized
     def get_fragmentation_stats(self, state_db_path: str | Path | None = None) -> dict[str, Any]:
         """Return read-only lifecycle/session fragmentation diagnostics.
 
