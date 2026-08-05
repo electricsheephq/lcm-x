@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from access_context.denials import DenialReason
-from access_context.model import AccessContextV1
-from access_context.validation import ResolutionMode, resolve_mode, validate
+from ..access_context.denials import DenialReason
+from ..access_context.model import AccessContextV1
+from ..access_context.validation import ResolutionMode, resolve_mode, validate
 
 from .fail_closed import FailClosedPolicy
 from .trusted_owner import TrustedOwnerPolicy

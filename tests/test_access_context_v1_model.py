@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from access_context import (
+from hermes_lcm.access_context import (
     ACCESS_CONTEXT_CONTRACT_REVISION,
     AccessContextV1,
     ActorType,
@@ -13,7 +13,7 @@ from access_context import (
     is_subset_of,
     validate,
 )
-from access_context.fixtures import load_context
+from hermes_lcm.access_context.fixtures import load_context
 
 NOW = datetime(2026, 1, 2, tzinfo=timezone.utc)
 

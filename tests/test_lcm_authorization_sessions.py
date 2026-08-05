@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from access_context import Decision
+from hermes_lcm.access_context import Decision
 from hermes_lcm import engine as engine_module
 from hermes_lcm import engine_registry
 from hermes_lcm import maintenance as maintenance_module
@@ -15,7 +15,7 @@ from hermes_lcm import reset_state as reset_state_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 
-_access_policy = importlib.import_module("access_policy")
+_access_policy = importlib.import_module("hermes_lcm.access_policy")
 AuthorizationRequiredError = _access_policy.AuthorizationRequiredError
 FailClosedPolicy = _access_policy.FailClosedPolicy
 TrustedOwnerPolicy = _access_policy.TrustedOwnerPolicy
@@ -178,8 +178,12 @@ def test_resolve_active_engine_denies_wrong_principal_before_consumption(
     with engine_registry._ACTIVE_ENGINE_REGISTRY_LOCK:
         engine_registry._ACTIVE_ENGINES_BY_SESSION_ID.clear()
         engine_registry._ACTIVE_ENGINES_BY_SESSION_ID["session-b"] = wrong_engine
-    monkeypatch.setattr(plugin, "policy_for_engine", lambda _engine: FailClosedPolicy())
-    monkeypatch.setattr(plugin, "policy_access_context", lambda _engine: None)
+    # __init__ resolves the policy helpers lazily via _policy_api(), so patch
+    # that seam rather than module-level names that no longer exist.
+    monkeypatch.setattr(
+        plugin, "_policy_api",
+        lambda: ((lambda _engine: FailClosedPolicy()), (lambda _engine: None)),
+    )
     try:
         authorized = plugin._authorize_active_engine_resolution(
             object(),

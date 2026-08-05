@@ -16,8 +16,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from access_context import AccessContextV1, Decision, DenialReason
-from access_context.denials import PublicDecision
+from hermes_lcm.access_context import AccessContextV1, Decision, DenialReason
+from hermes_lcm.access_context.denials import PublicDecision
 from hermes_lcm import engine as engine_module
 from hermes_lcm import maintenance as maintenance_module
 from hermes_lcm import retrieval_core

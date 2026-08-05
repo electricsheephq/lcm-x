@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from pathlib import Path
 
-from access_context import (
+from hermes_lcm.access_context import (
     AccessContextV1,
     Decision,
     DenialReason,
@@ -18,9 +18,9 @@ from access_context import (
     resolve_mode,
     validate,
 )
-from access_context.denials import PUBLIC_DENIAL_PROJECTION, PublicDecision, project_public
-from access_context.fixtures import fixture_paths, load_context, load_fixture
-from access_context.protocols import HostContextCarrier, LcmAuthorizationConsumer
+from hermes_lcm.access_context.denials import PUBLIC_DENIAL_PROJECTION, PublicDecision, project_public
+from hermes_lcm.access_context.fixtures import fixture_paths, load_context, load_fixture
+from hermes_lcm.access_context.protocols import HostContextCarrier, LcmAuthorizationConsumer
 
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)

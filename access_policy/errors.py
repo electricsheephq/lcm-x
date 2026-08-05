@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from access_context.denials import DenialReason
+from ..access_context.denials import DenialReason
 
 
 class AuthorizationRequiredError(RuntimeError):

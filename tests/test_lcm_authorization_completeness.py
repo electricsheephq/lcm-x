@@ -147,32 +147,59 @@ def test_hook_sites_resolve_only_through_access_policy_seam() -> None:
     for module, module_calls in calls_by_module.items():
         path = REPO_ROOT / module
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=module)
-        access_policy_imports = [
+        # The seam must be imported RELATIVELY, as every other local module is.
+        # An absolute import (importlib.import_module("access_policy") or a bare
+        # `from access_policy import ...`) loads a SECOND copy of the package when
+        # the plugin is loaded as `hermes_lcm`, so a caller's
+        # `except AuthorizationRequiredError` would not catch what the engine
+        # raises -- and it breaks package import entirely when the plugin
+        # directory is not on sys.path. Proven on a real production store.
+        relative_imports = [
             node
             for node in ast.walk(tree)
-            if isinstance(node, ast.Assign)
-            and any(isinstance(target, ast.Name) and target.id == "_access_policy" for target in node.targets)
-            and isinstance(node.value, ast.Call)
-            and isinstance(node.value.func, ast.Attribute)
-            and isinstance(node.value.func.value, ast.Name)
-            and node.value.func.value.id == "importlib"
-            and node.value.func.attr == "import_module"
-            and len(node.value.args) == 1
-            and isinstance(node.value.args[0], ast.Constant)
-            and node.value.args[0].value == "access_policy"
-        ]
-        assert access_policy_imports, f"{module} does not import access_policy for its seam"
-        seam_bindings = [
+            if isinstance(node, ast.ImportFrom)
+            and node.level >= 1
+            and (
+                (node.module or "").endswith("access_policy")
+                or any(a.name == "access_policy" for a in node.names)
+            )
+        ] + [
+            # A standalone script cannot use a relative import, so the
+            # package-qualified name is the correct equivalent for it.
             node
             for node in ast.walk(tree)
-            if isinstance(node, ast.Assign)
-            and any(isinstance(target, ast.Name) and target.id == "policy_for_engine" for target in node.targets)
-            and isinstance(node.value, ast.Attribute)
-            and node.value.attr == "policy_for_engine"
-            and isinstance(node.value.value, ast.Name)
-            and node.value.value.id == "_access_policy"
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "import_module"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and str(node.args[0].value) == "hermes_lcm.access_policy"
         ]
-        assert seam_bindings, f"{module} does not bind policy_for_engine from access_policy"
+        assert relative_imports, (
+            f"{module} must import access_policy relatively (found none); "
+            "an absolute import creates a duplicate package under hermes_lcm"
+        )
+        absolute_imports = [
+            node
+            for node in ast.walk(tree)
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.level == 0
+                and (node.module or "").startswith("access_policy")
+            )
+            or (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "import_module"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and str(node.args[0].value).startswith("access_policy")
+            )
+        ]
+        assert not absolute_imports, (
+            f"{module} imports access_policy ABSOLUTELY; this duplicates the "
+            "package under hermes_lcm and breaks strict package import"
+        )
 
         for call in module_calls:
             assert isinstance(call.node.func, ast.Name)

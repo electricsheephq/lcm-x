@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from access_context import AccessContextV1, Decision, DenialReason, LcmAuthorizationConsumer
-from access_context.denials import PublicDecision
-from access_context.fixtures import load_context
-from access_policy import (
+from hermes_lcm.access_context import AccessContextV1, Decision, DenialReason, LcmAuthorizationConsumer
+from hermes_lcm.access_context.denials import PublicDecision
+from hermes_lcm.access_context.fixtures import load_context
+from hermes_lcm.access_policy import (
     AuthorizationRequiredError,
     FailClosedPolicy,
     TrustedOwnerPolicy,
@@ -89,30 +89,20 @@ def test_invalid_teams_context_resolves_fail_closed_without_ambient_fallback() -
     assert policy.authorize_operation(context, "read", {}).denial_reason is DenialReason.CONTEXT_INVALID
 
 
-def test_access_policy_imports_are_inert_outside_package_and_its_test() -> None:
-    package_root = REPO_ROOT / "access_policy"
-    own_test = Path(__file__).resolve()
-    offenders: list[str] = []
-
-    for path in REPO_ROOT.rglob("*.py"):
-        resolved = path.resolve()
-        if package_root in resolved.parents or resolved == own_test:
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            imported = None
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name == "access_policy" or alias.name.startswith("access_policy."):
-                        imported = alias.name
-            elif isinstance(node, ast.ImportFrom):
-                module = node.module or ""
-                if module == "access_policy" or module.startswith("access_policy."):
-                    imported = module
-            if imported is not None:
-                offenders.append(f"{path}:{imported}")
-
-    assert offenders == []
+# REMOVED: test_access_policy_imports_are_inert_outside_package_and_its_test.
+#
+# Written in F1 when access_policy was genuinely inert. F2-F6 then wired it into
+# engine/retrieval/compaction/command by design, so its premise is void.
+#
+# Worth recording WHY it did not fail when that happened: it scanned for `import`
+# and `from ... import` AST nodes, while the hook modules were pulling the package
+# in via importlib.import_module("access_policy") -- a Call node. The assertion was
+# therefore vacuous from F2 onward, passing not because nothing imported the
+# package but because it could not see the imports that existed.
+#
+# The invariant that actually matters now lives in
+# tests/test_lcm_authorization_completeness.py: every hook module must import the
+# seam RELATIVELY, and absolute imports are rejected.
 
 
 DISCLOSURE_PRIMITIVES = (

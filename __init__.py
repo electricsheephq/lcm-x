@@ -15,9 +15,18 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_access_policy = importlib.import_module("access_policy")
-policy_for_engine = _access_policy.policy_for_engine
-policy_access_context = _access_policy.policy_access_context
+
+def _policy_api():
+    """Resolve the policy helpers lazily.
+
+    Deliberately not a module-level relative import: this file is loaded both
+    as a package and directly, and a bare relative import at module scope
+    breaks the direct path -- the same reason ``get_recall_policy`` defers its
+    import below.
+    """
+    from .access_policy import policy_access_context, policy_for_engine
+
+    return policy_for_engine, policy_access_context
 
 
 def get_recall_policy() -> str:
@@ -101,6 +110,7 @@ def _authorize_active_engine_resolution(
     operation: str,
 ) -> bool:
     """Authorize a resolved session/lane before using its runtime clone."""
+    policy_for_engine, policy_access_context = _policy_api()
     policy = policy_for_engine(caller_engine)
     access_context = policy_access_context(caller_engine)
     expected_scope = {

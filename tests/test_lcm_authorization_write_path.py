@@ -8,15 +8,15 @@ from pathlib import Path
 
 import pytest
 
-from access_context import AccessContextV1, Decision, DenialReason
-from access_context.fixtures import load_fixture
+from hermes_lcm.access_context import AccessContextV1, Decision, DenialReason
+from hermes_lcm.access_context.fixtures import load_fixture
 from hermes_lcm import command as command_module
 from hermes_lcm import compaction as compaction_module
 from hermes_lcm import engine as engine_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 
-_access_policy = importlib.import_module("access_policy")
+_access_policy = importlib.import_module("hermes_lcm.access_policy")
 AuthorizationRequiredError = _access_policy.AuthorizationRequiredError
 FailClosedPolicy = _access_policy.FailClosedPolicy
 

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from access_context.fixtures import FIXTURE_KINDS, fixture_paths, load_fixture
+from hermes_lcm.access_context.fixtures import FIXTURE_KINDS, fixture_paths, load_fixture
 
 def test_fixture_corpus_is_non_empty_in_every_kind() -> None:
     minimums = {"positive": 5, "negative": 16, "delegation": 10, "revocation": 4, "derivation": 8}

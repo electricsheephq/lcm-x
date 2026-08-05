@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from access_context.denials import Decision, DenialReason, PublicDecision
-from access_context.model import AccessContextV1
-from access_context.protocols import TargetScope
+from ..access_context.denials import Decision, DenialReason, PublicDecision
+from ..access_context.model import AccessContextV1
+from ..access_context.protocols import TargetScope
 
 from .errors import AuthorizationRequiredError
 

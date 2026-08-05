@@ -25,7 +25,7 @@ from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
-_access_policy = importlib.import_module("access_policy")
+from . import access_policy as _access_policy
 AuthorizationRequiredError = _access_policy.AuthorizationRequiredError
 policy_for_engine = _access_policy.policy_for_engine
 policy_access_context = _access_policy.policy_access_context

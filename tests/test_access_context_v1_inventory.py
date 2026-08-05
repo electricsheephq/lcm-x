@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from access_context.inventory import (
+from hermes_lcm.access_context.inventory import (
     AUTHORITY_REQUIREMENTS,
     CATEGORIES,
     DISCLOSURES,

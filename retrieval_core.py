@@ -26,7 +26,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Dict, TYPE_CHECKING
 
-_access_policy = importlib.import_module("access_policy")
+from . import access_policy as _access_policy
 AuthorizationRequiredError = _access_policy.AuthorizationRequiredError
 resolve_policy = _access_policy.resolve_policy
 policy_for_engine = _access_policy.policy_for_engine

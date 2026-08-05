@@ -39,7 +39,7 @@ def _ensure_local_package_importable() -> None:
 
 _ensure_local_package_importable()
 
-_access_policy = importlib.import_module("access_policy")
+_access_policy = importlib.import_module("hermes_lcm.access_policy")
 AuthorizationRequiredError = _access_policy.AuthorizationRequiredError
 policy_for_engine = _access_policy.policy_for_engine
 policy_access_context = _access_policy.policy_access_context

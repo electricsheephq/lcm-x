@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from access_context import Decision, DenialReason
-_access_policy = importlib.import_module("access_policy")
+from hermes_lcm.access_context import Decision, DenialReason
+_access_policy = importlib.import_module("hermes_lcm.access_policy")
 AuthorizationRequiredError = _access_policy.AuthorizationRequiredError
 FailClosedPolicy = _access_policy.FailClosedPolicy
 TrustedOwnerPolicy = _access_policy.TrustedOwnerPolicy
