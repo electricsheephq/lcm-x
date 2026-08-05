@@ -7,6 +7,7 @@ with a DAG-based summarization system that preserves every message.
 import asyncio
 import copy
 import hashlib
+import importlib
 import json
 import logging
 import os
@@ -19,6 +20,13 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from agent.context_engine import ContextEngine
+
+from access_context import AccessContextV1, Decision, DenialReason, is_subset_of
+
+_access_policy = importlib.import_module("access_policy")
+AuthorizationRequiredError = _access_policy.AuthorizationRequiredError
+policy_for_engine = _access_policy.policy_for_engine
+policy_access_context = _access_policy.policy_access_context
 
 from .codex_routing import (
     _codex_oauth_context_cap,
@@ -1669,6 +1677,48 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             spend_guard = self._summary_spend_guard
 
             def maintain() -> None:
+                # RollupStore/build_day are standalone helpers. Resolve the
+                # policy once at the engine-side worker boundary, before the
+                # private DAG/store construction can perform any write.
+                policy = policy_for_engine(self)
+                access_context = policy_access_context(self)
+                expected_scope = {
+                    "kind": "rollup",
+                    "partition_key": scope,
+                    "source_scope": access_context,
+                    "derived_scope": access_context,
+                }
+                decision = policy.authorize_operation(
+                    access_context, "write", expected_scope
+                )
+                policy.audit_decision(
+                    access_context, "write", decision.denial_reason, decision.public()
+                )
+                if not decision.allowed:
+                    raise AuthorizationRequiredError(
+                        "authorize_operation", decision.denial_reason
+                    )
+                authorized_scope = policy.resolve_authorized_targets(
+                    access_context, "write", expected_scope
+                )
+                if isinstance(authorized_scope, dict):
+                    source_scope = authorized_scope.get("source_scope", access_context)
+                    derived_scope = authorized_scope.get("derived_scope", access_context)
+                    if (
+                        isinstance(source_scope, AccessContextV1)
+                        and isinstance(derived_scope, AccessContextV1)
+                        and not is_subset_of(derived_scope, source_scope)
+                    ):
+                        mismatch = Decision.deny(DenialReason.SCOPE_MISMATCH)
+                        policy.audit_decision(
+                            access_context,
+                            "write",
+                            mismatch.denial_reason,
+                            mismatch.public(),
+                        )
+                        raise AuthorizationRequiredError(
+                            "authorize_operation", mismatch.denial_reason
+                        )
                 private_dag = SummaryDAG(database_path)
                 try:
                     run_rollup_maintenance(
@@ -3089,6 +3139,24 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             kept.append(msg)
         if not kept:
             return []
+        # MessageStore has no carrier; authorize at this engine-side caller
+        # before ingest protection can externalize a sidecar or the batch can
+        # reach the durable store.
+        policy = policy_for_engine(self)
+        access_context = policy_access_context(self)
+        expected_scope = {
+            "kind": "message_store",
+            "session_id": session_id,
+            "conversation_id": conversation_id,
+        }
+        decision = policy.authorize_operation(access_context, "write", expected_scope)
+        policy.audit_decision(
+            access_context, "write", decision.denial_reason, decision.public()
+        )
+        if not decision.allowed:
+            raise AuthorizationRequiredError(
+                "authorize_operation", decision.denial_reason
+            )
         protected_messages = protect_messages_for_ingest(
             kept,
             session_id=session_id,
@@ -4404,6 +4472,24 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             externalize_messages[idx] = not ignored_original_messages[idx]
         for idx in range(0, scan_start):
             prefer_existing_externalized[idx] = not ignored_original_messages[idx]
+        # MessageStore and externalize_ingest_payload have no carrier. Resolve
+        # once at this engine-side boundary before quarantine/protection can
+        # create a sidecar or before the protected batch is persisted.
+        policy = policy_for_engine(self)
+        access_context = policy_access_context(self)
+        expected_scope = {
+            "kind": "message_store",
+            "session_id": self._session_id,
+            "conversation_id": self._conversation_id,
+        }
+        decision = policy.authorize_operation(access_context, "write", expected_scope)
+        policy.audit_decision(
+            access_context, "write", decision.denial_reason, decision.public()
+        )
+        if not decision.allowed:
+            raise AuthorizationRequiredError(
+                "authorize_operation", decision.denial_reason
+            )
         replay_messages = quarantine_suspicious_assistant_messages(
             messages,
             session_id=self._session_id,

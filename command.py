@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
 import dataclasses
+import importlib
 import json
 import math
 import os
@@ -15,6 +16,13 @@ import sqlite3
 import time
 from typing import Any
 import uuid
+
+from access_context import AccessContextV1, Decision, DenialReason, is_subset_of
+
+_access_policy = importlib.import_module("access_policy")
+AuthorizationRequiredError = _access_policy.AuthorizationRequiredError
+policy_for_engine = _access_policy.policy_for_engine
+policy_access_context = _access_policy.policy_access_context
 
 from .db_bootstrap import (
     check_external_content_fts_integrity,
@@ -2412,6 +2420,46 @@ def _rollups_rebuild_text(tokens: list[str], engine) -> str:
             return _help_text("`/lcm rollups rebuild` date must be a valid YYYY-MM-DD UTC date.")
     else:
         target_date = datetime.now(timezone.utc).date()
+
+    # RollupStore/build_day have no carrier. Authorize at this engine-side
+    # caller before acquiring the operator lease or opening the write store.
+    # The access scope is the context returned by policy_access_context; the
+    # later ``scope`` value is only the rollup/DAG partition key.
+    policy = policy_for_engine(engine)
+    access_context = policy_access_context(engine)
+    expected_scope = {
+        "kind": "rollup",
+        "period_kind": kind,
+        "period_date": target_date.isoformat(),
+        "source_scope": access_context,
+        "derived_scope": access_context,
+    }
+    decision = policy.authorize_operation(access_context, "write", expected_scope)
+    policy.audit_decision(
+        access_context, "write", decision.denial_reason, decision.public()
+    )
+    if not decision.allowed:
+        raise AuthorizationRequiredError(
+            "authorize_operation", decision.denial_reason
+        )
+    authorized_scope = policy.resolve_authorized_targets(
+        access_context, "write", expected_scope
+    )
+    if isinstance(authorized_scope, dict):
+        source_scope = authorized_scope.get("source_scope", access_context)
+        derived_scope = authorized_scope.get("derived_scope", access_context)
+        if (
+            isinstance(source_scope, AccessContextV1)
+            and isinstance(derived_scope, AccessContextV1)
+            and not is_subset_of(derived_scope, source_scope)
+        ):
+            mismatch = Decision.deny(DenialReason.SCOPE_MISMATCH)
+            policy.audit_decision(
+                access_context, "write", mismatch.denial_reason, mismatch.public()
+            )
+            raise AuthorizationRequiredError(
+                "authorize_operation", mismatch.denial_reason
+            )
 
     scope = engine.current_session_id
     targets = _rollup_period_targets(kind, target_date)
