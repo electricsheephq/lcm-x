@@ -42,7 +42,7 @@ _TODO_ANNOTATION_V2 = (
 )
 
 
-def _make_engine(tmp_path: Path, *, session_id: str = "reconcile-todo") -> LCMEngine:
+def _make_engine(tmp_path: Path, *, session_id: str = "reconcile-todo"):
     # engine.py imports agent.context_engine at module level; provide a
     # stub here (not at module level, so collection order of other test
     # files is unaffected), then clear any partial import left by conftest.

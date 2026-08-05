@@ -22,7 +22,7 @@ from types import ModuleType
 from hermes_lcm.config import LCMConfig
 
 
-def _make_engine(tmp_path: Path, *, session_id: str = "model-switch") -> LCMEngine:
+def _make_engine(tmp_path: Path, *, session_id: str = "model-switch"):
     # engine.py imports agent.context_engine at module level; provide a
     # stub here (not at module level, so collection order of other test
     # files is unaffected), then clear any partial import left by conftest.
