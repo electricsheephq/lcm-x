@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hermes_lcm.engine import LCM_TOOL_TARGET_BINDINGS
+from hermes_lcm.scope_storage import enumerate_scope_writers
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -75,6 +76,16 @@ def _source_files() -> tuple[Path, ...]:
             for path in REPO_ROOT.rglob("*.py")
             if not any(part.startswith(".venv") or part in excluded for part in path.parts)
         )
+    )
+
+
+def test_scope_bearing_writers_populate_access_scope() -> None:
+    writers = enumerate_scope_writers(REPO_ROOT)
+    violations = [
+        writer.name for writer in writers if not writer.populates_access_scope
+    ]
+    assert not violations, (
+        "scope-bearing writers missing access_scope: " + ", ".join(violations)
     )
 
 

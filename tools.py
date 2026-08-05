@@ -6571,7 +6571,8 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
 
     # Per-item scope staging is intentionally Teams-aware: legacy NULLs are
     # expected while Teams is off, but an enabled store must have checked every
-    # observed row and every source-level writer.
+    # observed row. Static writer coverage belongs to the test suite because
+    # it describes the source tree, not this database.
     try:
         scope_storage = verify_scope_storage(
             engine._store.connection,

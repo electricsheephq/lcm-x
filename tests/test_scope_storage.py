@@ -138,9 +138,6 @@ def bad_writer(conn):
     assert len(writers) == 1
     assert not writers[0].populates_scope
     assert "bad_writer" in writers[0].name
-    result = verify_scope_storage(sqlite3.connect(":memory:"), source_root=tmp_path)
-    assert result["status"] == "fail"
-    assert "bad_writer" in result["message"]
 
 
 def test_rollup_partition_scope_does_not_mask_unstamped_access_scope(tmp_path):

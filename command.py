@@ -1306,7 +1306,6 @@ def _doctor_text(engine) -> str:
             "status": "fail",
             "message": str(exc),
             "tables": {},
-            "writer_guard": {"status": "fail", "discovered": 0, "violations": []},
             "observed_rows": 0,
         }
     if scope_storage.get("status") == "fail":
@@ -1502,18 +1501,6 @@ def _doctor_text(engine) -> str:
             f"scope_counts:{table} stamped={counts.get('stamped', 0)} "
             f"unstamped={counts.get('unstamped', 0)}"
         )
-    writer_guard = scope_storage.get("writer_guard") or {}
-    observations.append(
-        "scope_writer_guard: "
-        f"status={writer_guard.get('status')} "
-        f"discovered={writer_guard.get('discovered', 0)}"
-    )
-    if writer_guard.get("violations"):
-        observations.append(
-            "scope_writer_guard_violations: "
-            + ", ".join(str(item) for item in writer_guard["violations"])
-        )
-
     if debt_rows:
         first = debt_rows[0]
         observations.append(

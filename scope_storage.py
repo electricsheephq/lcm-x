@@ -14,7 +14,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
-from .db_bootstrap import add_column_if_missing
+from .db_bootstrap import (
+    SCOPE_MIGRATION_STEP,
+    add_column_if_missing,
+    mark_migration_step_complete,
+)
 
 ACCESS_SCOPE_COLUMN = "access_scope"
 # Kept as a compatibility alias for callers of the first staging build.  All
@@ -110,14 +114,72 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")')}
 
 
-def ensure_scope_columns(conn: sqlite3.Connection) -> dict[str, list[str]]:
+def _tables_missing_scope_column(
+    conn: sqlite3.Connection,
+    tables: Iterable[str],
+) -> list[str]:
+    names = tuple(dict.fromkeys(str(table) for table in tables))
+    if not names:
+        return []
+    placeholders = ", ".join("?" for _ in names)
+    rows = conn.execute(
+        f"""
+        SELECT table_schema.name
+        FROM sqlite_master AS table_schema
+        WHERE table_schema.type = 'table'
+          AND table_schema.name IN ({placeholders})
+          AND NOT EXISTS (
+              SELECT 1
+              FROM pragma_table_info(table_schema.name) AS column_info
+              WHERE column_info.name = ?
+          )
+        """,
+        (*names, ACCESS_SCOPE_COLUMN),
+    ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
+def ensure_scope_columns(
+    conn: sqlite3.Connection,
+    *,
+    tables: Iterable[str] | None = None,
+) -> dict[str, list[str]]:
     """Add nullable ``access_scope`` to every materialized item table.
 
     The migration intentionally does not create optional feature tables.  A
     disabled store therefore keeps exactly the same table set; a later lazy
     feature initializer calls this function again after creating its tables.
     ``add_column_if_missing`` is the repository's race-tolerant ALTER idiom.
+    The core pass is recorded as ``scope_v1`` after successful materialization;
+    ``tables`` is reserved for targeted repairs of a table created after that
+    marker (for example, a legacy chunk source table).
     """
+
+    materialized_tables = _ACCESS_SCOPE_TABLES if tables is None else tuple(tables)
+    try:
+        marker = conn.execute(
+            "SELECT 1 FROM lcm_migration_state WHERE step_name = ? LIMIT 1",
+            (SCOPE_MIGRATION_STEP,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        marker = None
+    if marker is not None and tables is None:
+        # The marker is written only below, after every materialized table has
+        # been checked/altered successfully. A marker-absent older database is
+        # therefore still fully verified rather than assumed to be current.
+        return {"added": [], "existing": [], "absent": []}
+
+    if tables is None:
+        # Current table definitions already declare the nullable column. One
+        # correlated pragma query confirms that all materialized tables have it;
+        # only an older/partial shape pays the detailed ALTER/rename sweep.
+        try:
+            missing_tables = _tables_missing_scope_column(conn, materialized_tables)
+        except sqlite3.Error:
+            missing_tables = list(materialized_tables)
+        if not missing_tables:
+            mark_migration_step_complete(conn, SCOPE_MIGRATION_STEP)
+            return {"added": [], "existing": [], "absent": []}
 
     added: list[str] = []
     existing: list[str] = []
@@ -125,7 +187,7 @@ def ensure_scope_columns(conn: sqlite3.Connection) -> dict[str, list[str]]:
     rollup_tables = {
         "lcm_rollups", "lcm_rollup_invalidations", "lcm_rollup_state"
     }
-    for table in _ACCESS_SCOPE_TABLES:
+    for table in materialized_tables:
         if not _table_exists(conn, table):
             absent.append(table)
             continue
@@ -150,6 +212,8 @@ def ensure_scope_columns(conn: sqlite3.Connection) -> dict[str, list[str]]:
             f'ALTER TABLE "{table}" ADD COLUMN {ACCESS_SCOPE_COLUMN} TEXT',
         )
         added.append(table)
+    if tables is None:
+        mark_migration_step_complete(conn, SCOPE_MIGRATION_STEP)
     return {"added": added, "existing": existing, "absent": absent}
 
 
@@ -439,7 +503,6 @@ def enumerate_scope_writers(source_root: str | Path | None = None) -> list[Scope
 def verify_scope_storage(
     conn: sqlite3.Connection | None,
     *,
-    source_root: str | Path | None = None,
     teams_enabled: bool = True,
 ) -> dict[str, object]:
     """Doctor-style storage verification with a non-vacuity sentinel."""
@@ -452,7 +515,6 @@ def verify_scope_storage(
             "status": "fail",
             "message": "scope storage connection is not initialized",
             "tables": tables,
-            "writer_guard": {"status": "fail", "writers": [], "violations": []},
             "observed_rows": 0,
         }
 
@@ -492,18 +554,6 @@ def verify_scope_storage(
             "total": total,
         }
 
-    writers = enumerate_scope_writers(source_root)
-    violations = [
-        writer.name for writer in writers if not writer.populates_access_scope
-    ]
-    writer_guard = {
-        "status": "fail" if violations else "pass",
-        "writers": [writer.name for writer in writers],
-        "violations": violations,
-        "discovered": len(writers),
-    }
-    if violations:
-        errors.append("writer guard: " + ", ".join(violations))
     unstamped_total = sum(int(item.get("unstamped", 0)) for item in tables.values())
     if teams_enabled and unstamped_total:
         errors.append(f"{unstamped_total} unstamped access-scope row(s)")
@@ -524,7 +574,6 @@ def verify_scope_storage(
         "status": status,
         "message": message,
         "tables": tables,
-        "writer_guard": writer_guard,
         "observed_rows": observed_rows,
         "unstamped_rows": unstamped_total,
     }

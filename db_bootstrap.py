@@ -38,6 +38,7 @@ class SchemaVersionTooNewError(RuntimeError):
 # embedding tables, fully openable by a base build, and leaves the numeric
 # counter free for the temporal train so neither collides on a v6.
 SCHEMA_VERSION = 5
+SCOPE_MIGRATION_STEP = "scope_v1"
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 _MIN_DISK_SPACE_BYTES = 50 * 1024 * 1024
 REQUIRED_CORE_TABLES = (
@@ -1353,6 +1354,7 @@ def ensure_embedding_tables(conn: sqlite3.Connection) -> None:
             embedded_at TEXT,
             source_token_count INTEGER,
             archived INTEGER DEFAULT 0,
+            access_scope TEXT,
             PRIMARY KEY(embedded_id, embedded_kind, identity_hash)
         );
 
@@ -1364,6 +1366,7 @@ def ensure_embedding_tables(conn: sqlite3.Connection) -> None:
             embedded_id TEXT,
             identity_hash TEXT,
             vec BLOB NOT NULL,
+            access_scope TEXT,
             PRIMARY KEY(embedded_id, identity_hash)
         );
 
@@ -1371,6 +1374,7 @@ def ensure_embedding_tables(conn: sqlite3.Connection) -> None:
             embedded_id TEXT,
             identity_hash TEXT,
             bits BLOB NOT NULL,
+            access_scope TEXT,
             PRIMARY KEY(embedded_id, identity_hash)
         );
         """
@@ -1609,6 +1613,7 @@ def ensure_chunk_tables(conn: sqlite3.Connection) -> None:
             token_estimate INTEGER,
             embedded_at TEXT,
             archived INTEGER DEFAULT 0,
+            access_scope TEXT,
             PRIMARY KEY(chunk_id, identity_hash)
         );
 
@@ -1623,6 +1628,7 @@ def ensure_chunk_tables(conn: sqlite3.Connection) -> None:
             chunk_id TEXT,
             identity_hash TEXT,
             vec BLOB NOT NULL,
+            access_scope TEXT,
             PRIMARY KEY(chunk_id, identity_hash)
         );
 
@@ -1630,13 +1636,17 @@ def ensure_chunk_tables(conn: sqlite3.Connection) -> None:
             chunk_id TEXT,
             identity_hash TEXT,
             bits BLOB NOT NULL,
+            access_scope TEXT,
             PRIMARY KEY(chunk_id, identity_hash)
         );
         """
     )
     from .scope_storage import ensure_scope_columns
 
-    ensure_scope_columns(conn)
+    # Chunk writes also read the source message's scope. A legacy/in-memory
+    # caller can create ``messages`` after the core marker, so repair that one
+    # source column with a targeted probe rather than reopening the full sweep.
+    ensure_scope_columns(conn, tables=("messages",))
 
 
 # The tables and indexes ``ensure_chunk_tables`` owns. Verified on chunk-corpus
@@ -3062,7 +3072,16 @@ def run_versioned_migrations(conn: sqlite3.Connection) -> None:
     # feature materialized lazily by VectorStore (recorded via the named
     # ``embeddings_v1`` marker), so a disabled install stays at v5 with no
     # embedding tables and the numeric counter is free for the temporal train.
+    # Scope columns are additive core materialization, but use the same named
+    # marker idiom so the eleven-table PRAGMA sweep is paid only once per DB.
     from .scope_storage import ensure_scope_columns
 
+    # ``ensure_scope_columns`` owns the read-before-sweep and stamps the marker
+    # only after materialization succeeds (including marker-absent older DBs).
     ensure_scope_columns(conn)
     set_schema_version(conn, current_version)
+    # Downstream startup checks may open a second connection (for example the
+    # background FTS integrity scan). Publish the named migration marker and
+    # schema version before those checks so they cannot wait on this connection's
+    # still-open migration transaction.
+    conn.commit()
