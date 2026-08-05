@@ -14,6 +14,7 @@ import re
 import sqlite3
 import threading
 import time
+import weakref
 from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional
@@ -739,16 +740,24 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         self._query_views = None
         self._adaptive_retrieval = None
         self._assertion_extractor = None
+        engine_ref = weakref.ref(self)
+
+        def access_scope_provider(session_id: str) -> str | None:
+            engine = engine_ref()
+            if engine is None:
+                return None
+            return engine._access_scope_for_storage_session(session_id)
+
         try:
             self._store = MessageStore(
                 db_path,
                 ingest_protection_config=self._config,
                 hermes_home=hermes_home,
-                access_scope_provider=self._access_scope_for_storage_session,
+                access_scope_provider=access_scope_provider,
             )
             self._dag = SummaryDAG(
                 db_path,
-                access_scope_provider=self._access_scope_for_storage_session,
+                access_scope_provider=access_scope_provider,
             )
             if self._config.temporal_rollups_enabled:
                 # Install the transaction-coupled summary mutation triggers before
