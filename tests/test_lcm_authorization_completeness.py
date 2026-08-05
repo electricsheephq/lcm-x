@@ -5,6 +5,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from hermes_lcm.engine import LCM_TOOL_TARGET_BINDINGS
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INVENTORY_PATH = REPO_ROOT / "access_context" / "inventory.json"
@@ -218,3 +220,41 @@ def test_tool_authority_paths_are_discovered_from_source() -> None:
         f"source-only={sorted(source_tools - inventory_tools)}, "
         f"inventory-only={sorted(inventory_tools - source_tools)}"
     )
+
+
+def test_tool_target_bindings_cover_source_and_inventory_both_directions() -> None:
+    tree = ast.parse((REPO_ROOT / "tools.py").read_text(encoding="utf-8"), filename="tools.py")
+    source_tools = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("lcm_")
+    }
+    mapping_tools = set(LCM_TOOL_TARGET_BINDINGS)
+    assert mapping_tools == source_tools, (
+        "target binding map differs from source lcm_* handlers: "
+        f"source-only={sorted(source_tools - mapping_tools)}, "
+        f"mapping-only={sorted(mapping_tools - source_tools)}"
+    )
+
+    inventory_entries = {
+        str(entry["entry_point"]): entry
+        for entry in _inventory_payload()
+        if entry.get("module") == "tools.py" and str(entry.get("entry_point", "")).startswith("lcm_")
+    }
+    assert set(inventory_entries) == mapping_tools
+    for tool_name in sorted(source_tools):
+        entry = inventory_entries[tool_name]
+        binding = entry.get("target_binding")
+        assert isinstance(binding, dict), f"{tool_name} must declare target_binding"
+        expected = LCM_TOOL_TARGET_BINDINGS[tool_name]
+        expected_args = list(expected.get("args", ()))
+        assert binding.get("args") == expected_args, f"{tool_name} target args drifted"
+        target_free = bool(expected.get("target_free", False))
+        assert bool(binding.get("target_free", False)) is target_free
+        if target_free:
+            reason = binding.get("reason")
+            assert isinstance(reason, str) and reason.strip(), (
+                f"{tool_name} target_free entries require a non-empty reason"
+            )
+        else:
+            assert not binding.get("reason"), f"{tool_name} target-bound entries cannot carry a target-free reason"

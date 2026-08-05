@@ -17,7 +17,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from agent.context_engine import ContextEngine
 
@@ -366,6 +366,51 @@ _AUTO_FOCUS_MAX_CHARS = 700
 
 _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across context compression]"
 _LCM_MESSAGE_PREFIX_FINGERPRINT_LIMIT = 8
+
+# The tool boundary must authorize the object named by the caller, not just the
+# engine's currently bound session.  Keep this table explicit: each entry is
+# derived from the corresponding handler body in ``tools.py``.  ``target_free``
+# is deliberately explicit for handlers whose data is restricted to the
+# caller-bound scope (or whose nested target calls re-enter this boundary).
+LCM_TOOL_TARGET_BINDINGS: Dict[str, Dict[str, Any]] = {
+    "lcm_query_state": {"args": ("subject_key", "scope_key")},
+    "lcm_compute": {"args": ("operands",)},
+    "lcm_evidence_pack": {"args": ("baseline_refs",)},
+    "lcm_compile_evidence": {"args": ("baseline_refs", "proposal")},
+    "lcm_retrieve": {"args": ("identity", "tool_args", "selected_refs", "computation")},
+    "lcm_recent": {
+        "args": (),
+        "target_free": True,
+        "reason": "The handler reads only the active conversation; period and limit are not targets.",
+    },
+    "lcm_load_session": {"args": ("session_id",)},
+    "lcm_grep": {
+        "args": ("session_scope", "session_id", "source", "conversation_id", "externalized_refs"),
+    },
+    "lcm_recall": {
+        "args": (),
+        "target_free": True,
+        "reason": "The handler has no caller-supplied target; its retrieval arms re-authorize corpus targets.",
+    },
+    "lcm_describe": {"args": ("node_id", "externalized_ref")},
+    "lcm_expand": {"args": ("node_id", "externalized_ref", "store_id")},
+    "lcm_expand_query": {"args": ("node_ids",)},
+    "lcm_status": {
+        "args": (),
+        "target_free": True,
+        "reason": "The handler reports the engine's current session and accepts no target argument.",
+    },
+    "lcm_inspect": {
+        "args": (),
+        "target_free": True,
+        "reason": "The handler inspects the engine's current session and accepts only a limit.",
+    },
+    "lcm_doctor": {
+        "args": (),
+        "target_free": True,
+        "reason": "The handler diagnoses the engine's current session and accepts no target argument.",
+    },
+}
 
 
 class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessionMixin, PlaceholderLedgerMixin, BypassMixin, ContextEngine):
@@ -3777,12 +3822,26 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         # before current-turn ingest or dispatch can disclose or mutate state.
         policy = policy_for_engine(self)
         access_context = policy_access_context(self)
+        binding = LCM_TOOL_TARGET_BINDINGS.get(name)
+        target_args = tuple(binding.get("args", ())) if binding else ()
+        target_scope = {
+            key: args[key]
+            for key in target_args
+            if isinstance(args, Mapping) and key in args
+        }
+        if binding and binding.get("target_free"):
+            target_scope = {
+                "session_id": self._session_id,
+                "conversation_id": self._conversation_id,
+            }
         expected_scope = {
             "kind": "tool_call",
             "tool_name": name,
-            "session_id": self._session_id,
-            "conversation_id": self._conversation_id,
+            "caller_session_id": self._session_id,
+            "caller_conversation_id": self._conversation_id,
+            "target_scope": target_scope,
         }
+        expected_scope.update(target_scope)
         decision = policy.authorize_operation(access_context, "read", expected_scope)
         policy.audit_decision(
             access_context, "read", decision.denial_reason, decision.public()
@@ -3791,6 +3850,20 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             raise AuthorizationRequiredError(
                 "authorize_operation", decision.denial_reason
             )
+        authorized_scope = policy.resolve_authorized_targets(
+            access_context, "read", expected_scope
+        )
+        # A policy may narrow a target before dispatch.  Apply the resolved
+        # values to the handler arguments so the body cannot continue with the
+        # caller's original, wider target.  The inert default policy returns
+        # the requested mapping unchanged.
+        handler_args = dict(args) if isinstance(args, Mapping) else args
+        if isinstance(authorized_scope, Mapping):
+            resolved_target_scope = authorized_scope.get("target_scope", authorized_scope)
+            if isinstance(resolved_target_scope, Mapping):
+                for key in target_args:
+                    if key in resolved_target_scope:
+                        handler_args[key] = resolved_target_scope[key]
         # Ingest live messages if passed (enables current-turn search)
         messages = kwargs.get("messages")
 
@@ -3826,7 +3899,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         }
         handler = handlers.get(name)
         if handler:
-            return handler(args, engine=self)
+            return handler(handler_args, engine=self)
         return json.dumps({"error": f"Unknown LCM tool: {name}"})
 
     def _database_path_source(self) -> str:
