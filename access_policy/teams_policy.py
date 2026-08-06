@@ -13,7 +13,6 @@ alone, which is enough to find out which probes still leak.
 
 from __future__ import annotations
 
-import time
 from typing import Any, Callable, Sequence
 
 from ..access_context.denials import Decision, DenialReason, PublicDecision
