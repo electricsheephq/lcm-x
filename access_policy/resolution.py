@@ -10,6 +10,7 @@ from ..access_context.model import AccessContextV1
 from ..access_context.validation import ResolutionMode, resolve_mode, validate
 
 from .fail_closed import FailClosedPolicy
+from .teams_policy import TeamsPolicy
 from .trusted_owner import TrustedOwnerPolicy
 
 
@@ -143,6 +144,6 @@ def resolve_policy(
         current_revocation_epoch=getattr(current_revisions, "revocation_epoch", None),
     )
     if validation.allowed:
-        return TrustedOwnerPolicy(teams_enabled=True)
+        return TeamsPolicy(carrier_context)
     assert validation.denial_reason is not None
     return FailClosedPolicy(validation.denial_reason)

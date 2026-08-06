@@ -1,9 +1,12 @@
 """Two-principal composition smoke for the Teams authorization seam.
 
-This deliberately runs against the built seam.  The composition test uses
-the policy resolved by the engine; the separate seam regression uses one
-minimal target-aware policy only because the real Teams policy is still the
-permissive #483 placeholder.
+This deliberately runs against the built seam, using the policy the engine
+actually resolves -- which is now TeamsPolicy, not the #483 placeholder. The
+isolation test is no longer xfail.
+
+Read the two together or neither means anything: the isolation body proves B
+cannot reach A, and the positive control inside it proves A still can. A policy
+that denied everything would pass the first and fail the second.
 """
 
 from __future__ import annotations
@@ -430,9 +433,13 @@ def _run_positive_control(
     if not recent or SECRET not in json.dumps(recent):
         failures.append("rollup receive: A rollup/summary unavailable")
 
-    backup = check("maintenance backup", lambda: maintenance_module.backup_database(engine))
-    if not backup or not backup.get("ok"):
-        failures.append("maintenance backup: A backup failed")
+    # maintenance backup is deliberately NOT here. It copies the whole store --
+    # every principal's memory into one file -- so under Teams it is an
+    # administrative capability, not something principal A inherits by being
+    # the one who asked. Asserting A can back up encoded pre-Teams semantics.
+    # It is now pinned by test_store_wide_backup_is_admin_only_under_teams,
+    # which checks BOTH principals are refused and that Teams-off is unaffected
+    # -- a stronger claim than this leg made.
 
     check("maintenance reset", engine.on_session_reset)
     return failures
@@ -611,10 +618,6 @@ def _b_leaks(
     return leaks
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="valid Teams contexts resolve the permissive placeholder until #483",
-)
 def test_two_principal_isolation_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Teams-on composition must isolate B while preserving A's full path."""
     db_path = tmp_path / "teams-on.db"
@@ -689,3 +692,48 @@ def test_default_off_single_principal_reaches_everything(
         assert not failures, "DEFAULT-OFF POSITIVE CONTROL FAILED: " + "; ".join(failures)
     finally:
         engine.shutdown()
+
+
+def test_store_wide_backup_is_admin_only_under_teams(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A whole-store backup is not any principal's to take.
+
+    It copies every principal's memory into one file, so under Teams it is an
+    administrative capability -- #497 gives the connector the `backup.*` family
+    and authenticates it separately. The positive control used to assert
+    principal A could do it, which encoded pre-Teams semantics: A was not
+    "the owner", A was merely the one who asked.
+
+    Asserting BOTH principals are refused is a stronger claim than the leg it
+    replaces, which only checked that B was not. And the Teams-off leg is what
+    keeps it honest -- without it this would pass just as well if backup were
+    broken outright rather than scoped.
+    """
+    db_path = tmp_path / "backup-admin.db"
+    context_a = _context(
+        principal_id="A", profile_id="profile-a", session_id=SESSION_A, collection=COLLECTION_A
+    )
+    context_b = _context(
+        principal_id="B", profile_id="profile-b", session_id=SESSION_B, collection=COLLECTION_B
+    )
+    engine_a = _engine(db_path, context_a, teams_enabled=True)
+    engine_b = _engine(db_path, context_b, teams_enabled=True)
+    try:
+        for name, engine in (("A", engine_a), ("B", engine_b)):
+            with pytest.raises(Exception) as excinfo:
+                maintenance_module.backup_database(engine)
+            assert "authorize" in str(excinfo.value), (
+                f"principal {name} was refused, but not by the authorization seam"
+            )
+    finally:
+        engine_b.shutdown()
+        engine_a.shutdown()
+
+    # Teams OFF: unchanged. Backup is restricted BY Teams, not broken by it.
+    off_path = tmp_path / "backup-teams-off.db"
+    engine_off = _engine(off_path, context_a, teams_enabled=False)
+    try:
+        assert maintenance_module.backup_database(engine_off).get("ok")
+    finally:
+        engine_off.shutdown()

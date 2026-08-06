@@ -148,6 +148,7 @@ from .sqlite_util import (
 )
 from .store import MessageStore
 from .scope_storage import (
+    ACCESS_SCOPE_COLUMN,
     mark_teams_enabled,
     persist_teams_enabled,
     preflight_teams_scope,
@@ -4027,6 +4028,42 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             LCM_DOCTOR,
         ]
 
+    _TARGET_OWNER_LOOKUPS = (
+        ("store_id", "messages", "store_id"),
+        ("node_id", "summary_nodes", "node_id"),
+    )
+
+    def _stored_access_scopes_for_targets(
+        self, target_scope: Mapping[str, Any]
+    ) -> tuple[str, ...]:
+        """Return the distinct owner stamps of the rows a call names.
+
+        Empty when Teams is off, when nothing addressable was named, or when a
+        target does not resolve -- an absent row is not an ownership claim, and
+        reporting one would turn a miss into a denial that leaks existence.
+        """
+
+        if not storage_teams_enabled(self):
+            return ()
+        connection = getattr(self._store, "connection", None)
+        if connection is None:
+            return ()
+        owners: set[str] = set()
+        for key, table, column in self._TARGET_OWNER_LOOKUPS:
+            raw = target_scope.get(key)
+            if raw is None or isinstance(raw, (dict, list, tuple, set)):
+                continue
+            try:
+                row = connection.execute(
+                    f'SELECT {ACCESS_SCOPE_COLUMN} FROM "{table}" WHERE {column} = ?',
+                    (raw,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                continue
+            if row is not None and row[0] is not None:
+                owners.add(str(row[0]))
+        return tuple(sorted(owners))
+
     def handle_tool_call(self, name: str, args: Dict[str, Any], **kwargs) -> str:
         # This callback is a bypass around individual tool handlers. Authorize
         # before current-turn ingest or dispatch can disclose or mutate state.
@@ -4052,6 +4089,15 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             "target_scope": target_scope,
         }
         expected_scope.update(target_scope)
+        # Raw identifiers -- store_id, node_id -- name a row without saying who
+        # owns it, so a policy asked to authorize them has nothing to decide
+        # against and must either guess or let them through. Resolving the
+        # stored owner HERE keeps the policy pure (no database handle, still
+        # unit-testable) and puts the answer in the scope the policy already
+        # receives. Reads only; the row itself is not disclosed.
+        owners = self._stored_access_scopes_for_targets(target_scope)
+        if owners:
+            expected_scope["target_access_scopes"] = owners
         operation = LCM_TOOL_AUTHORITY_OPERATIONS.get(name, "read")
         expected_scope["required_scope"] = operation
         decision = policy.authorize_operation(access_context, operation, expected_scope)

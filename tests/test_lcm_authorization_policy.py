@@ -11,6 +11,7 @@ from hermes_lcm.access_context.fixtures import load_context
 from hermes_lcm.access_policy import (
     AuthorizationRequiredError,
     FailClosedPolicy,
+    TeamsPolicy,
     TrustedOwnerPolicy,
     resolve_policy,
 )
@@ -46,9 +47,15 @@ def test_resolution_carrier_present_teams_off_stays_trusted_owner() -> None:
     assert isinstance(resolve_policy(context, False), TrustedOwnerPolicy)
 
 
-def test_resolution_carrier_present_teams_on_validates_to_trusted_owner() -> None:
+def test_resolution_carrier_present_teams_on_resolves_the_enforcing_policy() -> None:
+    """Renamed: this used to assert the permissive placeholder.
+
+    A valid Teams context resolving to TrustedOwnerPolicy WAS the #483 gap --
+    the test named the placeholder as though it were the contract. It now
+    resolves TeamsPolicy, which scopes to the acting principal.
+    """
     context = _context("tests/fixtures/access_context_v1/positive/human.json")
-    assert isinstance(resolve_policy(context, True, NOW), TrustedOwnerPolicy)
+    assert isinstance(resolve_policy(context, True, NOW), TeamsPolicy)
 
 
 def test_resolution_malformed_carrier_fails_closed_without_attribute_error() -> None:

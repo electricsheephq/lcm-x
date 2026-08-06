@@ -19,6 +19,7 @@ from hermes_lcm.access_context import DenialReason
 from hermes_lcm.access_context.model import AccessContextV1
 from hermes_lcm.access_policy import (
     FailClosedPolicy,
+    TeamsPolicy,
     TrustedOwnerPolicy,
     policy_for_engine,
     resolve_policy,
@@ -105,7 +106,7 @@ def test_a_current_revision_is_permitted() -> None:
         NOW,
         current_revisions=catalog.CatalogRevisions(revocation_epoch=3),
     )
-    assert isinstance(policy, TrustedOwnerPolicy)
+    assert isinstance(policy, TeamsPolicy)
 
 
 def test_without_revisions_the_same_stale_context_passes() -> None:
@@ -117,7 +118,7 @@ def test_without_revisions_the_same_stale_context_passes() -> None:
         stale, True, NOW, current_revisions=catalog.CatalogRevisions(revocation_epoch=3)
     )
 
-    assert isinstance(unwired, TrustedOwnerPolicy)  # what production used to do
+    assert isinstance(unwired, TeamsPolicy)  # permitted, because nothing said otherwise
     assert isinstance(wired, FailClosedPolicy)
 
 
@@ -127,7 +128,7 @@ def test_bumping_the_epoch_invalidates_an_already_issued_context(
     """The operation an operator actually performs to revoke someone."""
     catalog.ensure_teams_catalog(store)
     issued = _context()
-    assert isinstance(policy_for_engine(_Engine(store, issued)), TrustedOwnerPolicy)
+    assert isinstance(policy_for_engine(_Engine(store, issued)), TeamsPolicy)
 
     catalog.bump_revision(store, "tenant-1", "revocation_epoch")
 
@@ -144,7 +145,7 @@ def test_a_context_minted_after_the_bump_is_accepted(
 
     policy = policy_for_engine(_Engine(store, _context(revocation_epoch=1)))
 
-    assert isinstance(policy, TrustedOwnerPolicy)
+    assert isinstance(policy, TeamsPolicy)
 
 
 def test_teams_on_without_a_catalog_fails_closed(store: sqlite3.Connection) -> None:
@@ -193,4 +194,4 @@ def test_a_context_carrier_with_no_store_is_not_treated_as_an_inconsistent_store
         lcm_teams_enabled=True, get_lcm_access_context=lambda: _context()
     )
 
-    assert isinstance(policy_for_engine(carrier), TrustedOwnerPolicy)
+    assert isinstance(policy_for_engine(carrier), TeamsPolicy)
