@@ -42,26 +42,67 @@ def policy_for_engine(engine: object) -> "TrustedOwnerPolicy | FailClosedPolicy"
     """
 
     teams_enabled = bool(getattr(engine, TEAMS_ENABLED_ATTR, False))
-    return resolve_policy(policy_access_context(engine), teams_enabled)
+    context = policy_access_context(engine)
+    if not teams_enabled or not isinstance(context, AccessContextV1):
+        return resolve_policy(context, teams_enabled)
+
+    revisions = _catalog_revisions(engine, context)
+    if revisions is None:
+        # Teams is on with a valid context, but the catalog that owns the
+        # revisions is missing or unreadable. Falling through with "no
+        # revisions" would resolve permissive on a store that cannot say
+        # whether this context has been revoked -- the exact silent-permissive
+        # shape this seam exists to prevent.
+        return FailClosedPolicy(DenialReason.CONTEXT_INVALID)
+    return resolve_policy(context, teams_enabled, current_revisions=revisions)
+
+
+def _catalog_revisions(engine: object, context: AccessContextV1):
+    """Read the tenant's CURRENT revisions, or None if they cannot be read.
+
+    Deliberately not defaulted to zero on failure: zero is a real revision
+    value, and a context minted at zero would then validate against a store
+    whose catalog could not be consulted.
+    """
+
+    from ..teams.catalog import read_revisions, teams_catalog_exists
+
+    store = getattr(engine, "_store", None)
+    connection = getattr(store, "connection", None)
+    if connection is None:
+        return None
+    try:
+        if not teams_catalog_exists(connection):
+            return None
+        return read_revisions(connection, context.tenant_id)
+    except Exception:
+        return None
 
 
 def resolve_policy(
     carrier_context: AccessContextV1 | None,
     teams_enabled: bool,
     now: datetime | None = None,
+    current_revisions: object | None = None,
 ) -> TrustedOwnerPolicy | FailClosedPolicy:
     """Resolve the policy from the explicit Teams flag and carrier context.
 
     Teams-off is deliberately resolved before context validation: carrying a
     context does not enable Teams, and the default path remains trusted-owner.
 
-    ⚠ A VALID Teams context currently resolves to ``TrustedOwnerPolicy``, which
-    permits everything. That is a placeholder, not enforcement. This slice adds
-    the neutral seam only; the policy that actually scopes a principal --
-    membership, roles, catalogs -- is the Teams adapter in #483. Until that
-    lands, enabling Teams changes which policy object is constructed and
-    nothing about what is permitted. Do not read a valid context reaching this
-    branch as "Teams is enforced".
+    ``current_revisions`` carries the catalog's policy/membership/revocation
+    counters. Passing them is what makes the NOT_REVOKED stage live: without
+    them every comparison in that stage is against ``None`` and short-circuits,
+    so a revoked context validated exactly like a current one.
+
+    ⚠ Still NOT enforced by this function, and worth naming rather than
+    leaving to be discovered: OWNERSHIP_CURRENT's generation check and
+    LEASE_CURRENT both remain inert, because the catalog does not yet track
+    ownership generations or leases. SCOPE_PERMITTED and TARGET_RESOLUTION are
+    per-OPERATION rather than per-context and belong in the policy's
+    authorize_operation, not here. A valid context reaching the allowed branch
+    below still resolves to ``TrustedOwnerPolicy``; revocation is now real, the
+    rest of enforcement is not.
     """
 
     mode = resolve_mode(carrier_context, teams_enabled)
@@ -76,6 +117,11 @@ def resolve_policy(
     validation = validate(
         carrier_context,
         now=now if now is not None else datetime.now(timezone.utc),
+        current_policy_revision=getattr(current_revisions, "policy_revision", None),
+        current_membership_revision=getattr(
+            current_revisions, "membership_revision", None
+        ),
+        current_revocation_epoch=getattr(current_revisions, "revocation_epoch", None),
     )
     if validation.allowed:
         return TrustedOwnerPolicy(teams_enabled=True)
