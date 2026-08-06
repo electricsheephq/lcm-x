@@ -3166,10 +3166,15 @@ def _lcm_grep_semantic(
     knn_limit = candidate_limit if candidate_limit is not None else limit
 
     requested_session_scope = str(args.get("session_scope", "current")).lower()
-    # The OWNER predicate a Teams policy narrows with. Absent (default-off and
-    # every non-Teams caller) it stays None and the query is byte-identical to
-    # what it was before.
-    requested_access_scope = args.get("access_scope")
+    # NOTE: this arm deliberately does NOT read an `access_scope` ARGUMENT.
+    # The owner predicate is resolved from the POLICY inside `run_knn`
+    # (retrieval_core.py: `access_scope = authorized_scope.get("access_scope")`),
+    # which is authoritative and cannot be steered by model-authored tool
+    # arguments. An earlier version assigned `requested_access_scope` here and
+    # never used it, which reads like missing enforcement -- hence this note:
+    # the scoping is real, it just does not come from `args` on this path.
+    # The `degraded()` fallback forwards `dict(args)` to the FTS arm, which
+    # takes its predicate from args in the ordinary way.
     raw_session_id_arg = args.get("session_id")
     explicit_session_id = (
         str(raw_session_id_arg).strip() if raw_session_id_arg is not None else ""

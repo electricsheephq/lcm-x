@@ -3860,6 +3860,15 @@ class VectorStore:
         # and disclose it.
         if (
             numpy is not None
+            # An owner-scoped query takes the exact path, exactly as the summary
+            # arm above already required. The binary prescreen mirrors the WHOLE
+            # corpus and cannot express a per-row filter, so running it here
+            # prescreened across every principal before any scoping applied.
+            # This guard was present on the summary twin and absent here, so a
+            # scoped CHUNK query silently ranked against other principals'
+            # vectors -- `knn_chunks` accepts `access_scope` and this path
+            # ignored it.
+            and access_scope is None
             and not (full_scan and dtype == _INT8_DTYPE)
             and not self._scan_bounds_requested(scan_max_rows, scan_budget_s)
             and self._binary_fully_synced(identity, chunk=True)

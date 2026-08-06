@@ -639,9 +639,29 @@ class TrajectoryStore:
                 "WHERE singleton = 1"
             ).fetchone()
         except sqlite3.OperationalError:
-            # A pre-``schema_version`` corpora table predates the version
-            # column entirely; treat it as unversioned rather than failing the
-            # open, which is what the table-absent branch above already does.
+            # Two very different tables reach this branch, and only one of them
+            # should be tolerated:
+            #
+            #   LEGACY   -- a corpora table written before the ``schema_version``
+            #               column existed. It still carries the core identity
+            #               columns, and failing the open on it would brick a
+            #               store that is merely old. Treat it as unversioned,
+            #               the same way the table-absent branch above does.
+            #   MALFORMED -- a table that is missing the core columns as well.
+            #               Nothing can be recovered from it, and swallowing the
+            #               error here lets the open continue until some later
+            #               INSERT fails on an arbitrary column, reporting the
+            #               wrong cause and doing so AFTER FTS repair has run.
+            #
+            # Distinguish them by a column the legacy table certainly has.
+            columns = {
+                str(row[1])
+                for row in self._conn.execute(
+                    "PRAGMA table_info(lcm_trajectory_corpora)"
+                )
+            }
+            if "identity_digest" not in columns:
+                raise
             return
 
         if row is not None and int(row["schema_version"]) != TRAJECTORY_SCHEMA_VERSION:
