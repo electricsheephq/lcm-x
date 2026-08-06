@@ -170,22 +170,31 @@ def _authorize_supplied_baseline_refs(active_engine, refs) -> tuple:
     policy_for_engine, policy_access_context = _policy_api()
     policy = policy_for_engine(active_engine)
     access_context = policy_access_context(active_engine)
-    authorized: list[str] = []
+    authorized: list = []
     for ref in refs:
-        match = _EXACT_REF_RE.fullmatch(str(ref))
+        # Callers pass either a bare "lcm:<store_id>:<start>-<end>" string or a
+        # mapping carrying it under "exact_ref" alongside its quote.
+        exact_ref = ref.get("exact_ref") if isinstance(ref, dict) else ref
+        match = _EXACT_REF_RE.fullmatch(str(exact_ref or ""))
         if match is None:
+            # Not an exact store span, so not a disclosure this gate governs.
+            # Passed through untouched: dropping it would silently change the
+            # payload for callers whose refs were never store references.
+            authorized.append(ref)
             continue
         expected_scope = {
             "kind": "preanswer_baseline_ref",
             "store_id": int(match.group("store_id")),
-            "exact_ref": str(ref),
+            "exact_ref": str(exact_ref),
         }
         decision = policy.authorize_operation(access_context, "read", expected_scope)
         policy.audit_decision(
             access_context, "read", decision.denial_reason, decision.public()
         )
         if decision.allowed:
-            authorized.append(str(ref))
+            # The ORIGINAL item, not the extracted ref -- downstream consumers
+            # read the quote alongside it.
+            authorized.append(ref)
     return tuple(authorized)
 
 

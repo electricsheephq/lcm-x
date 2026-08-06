@@ -159,6 +159,51 @@ def test_recall_arm_never_keeps_the_hardcoded_all_session_corpus(
     assert captured.get("session_scope") != "all"
 
 
+class _DenyStoreReads:
+    def authorize_operation(self, _context, _operation, expected_scope) -> Decision:
+        if expected_scope.get("kind") == "preanswer_baseline_ref":
+            return Decision.deny(DenialReason.SCOPE_FORBIDDEN)
+        return Decision.allow()
+
+    def audit_decision(self, *_args, **_kwargs) -> None:
+        return None
+
+
+def _baseline_refs(monkeypatch: pytest.MonkeyPatch, policy, refs):
+    import hermes_lcm as plugin
+
+    monkeypatch.setattr(plugin, "_policy_api", lambda: (lambda _e: policy, lambda _e: None))
+    return plugin._authorize_supplied_baseline_refs(object(), refs)
+
+
+def test_supplied_baseline_refs_are_authorized_in_both_shapes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Callers pass bare strings OR mappings carrying exact_ref plus a quote."""
+    mapping_ref = {"exact_ref": "lcm:12:0-4", "quote": "text"}
+    string_ref = "lcm:99:0-4"
+
+    allowed = _baseline_refs(monkeypatch, _NarrowingPolicy({}), [mapping_ref, string_ref])
+    # The ORIGINAL items survive -- downstream reads the quote alongside the ref.
+    assert list(allowed) == [mapping_ref, string_ref]
+
+    denied = _baseline_refs(monkeypatch, _DenyStoreReads(), [mapping_ref, string_ref])
+    assert denied == ()
+
+
+def test_supplied_refs_that_are_not_store_spans_pass_through_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only exact store spans are a disclosure this gate governs.
+
+    Dropping everything else silently emptied the payload for callers whose
+    refs were never store references, which changed unrelated downstream
+    branching rather than closing a hole.
+    """
+    opaque = [{"quote": "no exact_ref here"}, "not-a-reference"]
+    assert list(_baseline_refs(monkeypatch, _DenyStoreReads(), opaque)) == opaque
+
+
 def test_compression_rollover_presents_the_source_session_to_the_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
