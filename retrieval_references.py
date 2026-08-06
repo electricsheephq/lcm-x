@@ -22,6 +22,7 @@ from typing import Callable, Mapping
 
 from .db_bootstrap import (
     DATABASE_UUID_MIGRATION,
+    DATABASE_UUID_METADATA_KEY,
     RETRIEVAL_REFERENCE_CONSISTENCIES,
     RETRIEVAL_REFERENCE_KINDS,
     RETRIEVAL_REFERENCES_TABLE,
@@ -683,11 +684,15 @@ def resolve_reference(
     try:
         binding = conn.execute(
             f"""
-            SELECT target_json, revision_json
-            FROM {RETRIEVAL_REFERENCES_TABLE}
-            WHERE token_digest = ?
+            SELECT registry.target_json, registry.revision_json
+            FROM {RETRIEVAL_REFERENCES_TABLE} AS registry
+            JOIN metadata AS authority
+              ON authority.key = ? AND authority.value = ?
+            WHERE registry.token_digest = ?
+              AND registry.revoked_at IS NULL
+              AND (registry.expires_at IS NULL OR registry.expires_at > ?)
             """,
-            (digest,),
+            (DATABASE_UUID_METADATA_KEY, parsed.database_uuid, digest, current),
         ).fetchone()
         if binding is None:
             return _failure(

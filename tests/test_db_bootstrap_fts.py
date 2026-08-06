@@ -503,6 +503,34 @@ def test_explicit_repair_clears_stuck_integrity_failed_flag(tmp_path, monkeypatc
     conn.close()
 
 
+def test_explicit_repair_rebuilds_same_count_corruption_with_missing_triggers(tmp_path):
+    """Explicit repair must fix index drift even while recreating triggers."""
+    from hermes_lcm.store import build_message_fts_spec
+
+    conn = _make_conn(tmp_path)
+    spec = build_message_fts_spec()
+    ensure_external_content_fts(conn, spec)
+
+    for trigger_sql in spec.trigger_sqls:
+        trigger_name = db_bootstrap._extract_trigger_name(trigger_sql)
+        assert trigger_name is not None
+        conn.execute(f"DROP TRIGGER {db_bootstrap.quote_sql_identifier(trigger_name)}")
+    conn.execute(
+        "UPDATE messages SET content = 'completely different searchable text' WHERE store_id = 1"
+    )
+    assert db_bootstrap._fts_needs_rebuild_structural(conn, spec) is False
+    assert db_bootstrap._fts_missing_triggers(conn, spec) is True
+    assert db_bootstrap.check_external_content_fts_integrity(conn, spec)["status"] == "fail"
+
+    repaired = db_bootstrap.repair_external_content_fts(conn, spec)
+
+    assert repaired["rebuilt"] is True
+    assert repaired["triggers_recreated"] is True
+    assert db_bootstrap._fts_missing_triggers(conn, spec) is False
+    assert db_bootstrap.check_external_content_fts_integrity(conn, spec)["status"] == "pass"
+    conn.close()
+
+
 def test_repair_without_rebuild_still_clears_integrity_failed_flag(tmp_path, monkeypatch):
     """Even a no-op repair (nothing to rebuild) clears a stale corruption flag."""
     monkeypatch.setenv(INTERVAL_ENV, "24")

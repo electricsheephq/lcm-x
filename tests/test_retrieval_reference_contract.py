@@ -686,6 +686,51 @@ def test_expiry_and_revocation_have_stable_errors(tmp_path):
         conn.close()
 
 
+def test_resolution_rechecks_lifecycle_after_mid_resolve_revocation(tmp_path):
+    path = tmp_path / "mid-resolve-revocation.db"
+    conn = _open(path)
+    revoker = sqlite3.connect(path)
+    envelope = _issue(conn)
+    revocation = []
+    statements = []
+    conn.set_trace_callback(statements.append)
+
+    def revoke_during_scope(context, parsed, scope):
+        assert any(
+            "SCOPE_JSON" in statement.upper() and "SELECT" in statement.upper()
+            for statement in statements
+        )
+        assert not any("TARGET_JSON" in statement.upper() for statement in statements)
+        result = revoke_reference(
+            revoker,
+            envelope,
+            authorization_context={"trusted": True},
+            authorize=_allow,
+            authorize_scope=_allow_scope,
+            revoked_at=120.0,
+        )
+        revocation.append(result.ok)
+        return True
+
+    try:
+        result = resolve_reference(
+            conn,
+            envelope,
+            authorization_context={"trusted": True},
+            authorize=_allow,
+            authorize_scope=revoke_during_scope,
+            now=100.0,
+        )
+        assert revocation == [True]
+        assert any("TARGET_JSON" in statement.upper() for statement in statements)
+        assert result.ok is False
+        assert result.error_code == ReferenceErrorCode.REFERENCE_NOT_FOUND.value
+        assert result.record is None
+    finally:
+        revoker.close()
+        conn.close()
+
+
 @pytest.mark.parametrize(
     ("column", "value"),
     [

@@ -2804,10 +2804,11 @@ def repair_external_content_fts(
     degraded = False
     structural_repair_needed = external_content_fts_needs_repair(conn, spec)
     deep_repair_needed = False
-    if not structural_repair_needed:
+    if not structural_repair_needed or not throttle:
         # Preserve the cheap startup path and its background integrity-scan
-        # behavior. Only a caller that observed repair-worthy state enters the
-        # write-ownership boundary below.
+        # behavior. Explicit repair remains unthrottled even when a structural
+        # trigger repair is also needed, so same-row-count index drift is not
+        # hidden behind the trigger-only path.
         deep_repair_needed = _fts_needs_rebuild(conn, spec, now=now, throttle=throttle)
         if not deep_repair_needed:
             # A trigger can disappear after the initial complete-state check.
@@ -2830,7 +2831,7 @@ def repair_external_content_fts(
         owner_rebuild_needed = (
             _fts_needs_rebuild_structural(conn, spec) if winner_state_needs_repair else False
         )
-        if not owner_rebuild_needed and not structural_repair_needed and deep_repair_needed:
+        if not owner_rebuild_needed and deep_repair_needed:
             # Explicit repair (and synchronous startup when background scans are
             # disabled) must revalidate same-row-count token drift while owning
             # the write boundary. A repaired winner is accepted without a second
