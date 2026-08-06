@@ -371,9 +371,21 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("database_path", "LCM_DATABASE_PATH", str),
     _EnvFieldSpec("embeddings_enabled", "LCM_EMBEDDINGS_ENABLED", bool),
     _EnvFieldSpec("rerank_enabled", "LCM_RERANK_ENABLED", bool),
+    _EnvFieldSpec("session_expand_v1", "LCM_SESSION_EXPAND_V1", bool),
+    _EnvFieldSpec(
+        "session_expand_v1_per_session_tokens",
+        "LCM_SESSION_EXPAND_V1_PER_SESSION_TOKENS",
+        int,
+    ),
+    _EnvFieldSpec(
+        "session_expand_v1_response_char_cap",
+        "LCM_SESSION_EXPAND_V1_RESPONSE_CHAR_CAP",
+        int,
+    ),
     _EnvFieldSpec("recall_scan_rows", "LCM_RECALL_SCAN_ROWS", int),
     _EnvFieldSpec("recall_scan_max_rows", "LCM_RECALL_SCAN_MAX_ROWS", int),
     _EnvFieldSpec("recall_scan_budget_s", "LCM_RECALL_SCAN_BUDGET_S", float),
+    _EnvFieldSpec("fts_prose_mode", "LCM_FTS_PROSE_MODE", bool),
     _EnvFieldSpec("recall_reference_strict", "LCM_RECALL_REFERENCE_STRICT", bool),
     _EnvFieldSpec("proactive_recall_enabled", "LCM_PROACTIVE_RECALL_ENABLED", bool),
     _EnvFieldSpec("proactive_recall_min_score", "LCM_PROACTIVE_RECALL_MIN_SCORE", float),
@@ -388,6 +400,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("embedding_store_dim", "LCM_EMBEDDING_STORE_DIM", int),
     _EnvFieldSpec("embedding_binary_prescreen", "LCM_EMBEDDING_BINARY_PRESCREEN", bool),
     _EnvFieldSpec("knn_prescreen_multiplier", "LCM_KNN_PRESCREEN_MULTIPLIER", int),
+    _EnvFieldSpec("knn_resident_max_mb", "LCM_KNN_RESIDENT_MAX_MB", int),
     _EnvFieldSpec("embedding_provider", "LCM_EMBEDDING_PROVIDER", str),
     _EnvFieldSpec("embedding_model", "LCM_EMBEDDING_MODEL", str),
     _EnvFieldSpec("embedding_content_policy", "LCM_EMBED_CONTENT_POLICY", str),
@@ -609,6 +622,19 @@ class LCMConfig:
     # fused candidates). Default-off: recall ships value on RRF order alone, and
     # rerank is one extra billable API call the operator opts into.
     rerank_enabled: bool = False
+    # Stage-2 session expansion treatment. Default-off preserves the historical
+    # lcm_recall delivery byte-for-byte. When enabled, answer-ready delivery
+    # appends whole-message windows from the top three ranked hit sessions after
+    # ranking has completed; it never changes candidate scoring or ordering.
+    session_expand_v1: bool = False
+    # Content-token budget for ADDITIONAL whole-message hits from each expanded
+    # session. Three sessions x 3,500 tokens targets the pre-declared ~10-13k
+    # treatment context from the Stage-2 cost curve.
+    session_expand_v1_per_session_tokens: int = 3_500
+    # Operator ceiling for the expanded response. Runtime also applies an
+    # absolute 512k maximum so a mistyped value cannot create an unbounded tool
+    # result.
+    session_expand_v1_response_char_cap: int = 512_000
     embedding_bounded_scan_rows: int = 2_000
     # Vector storage dtype for NEWLY-registered embedding profiles: float32
     # (default; a stock install keeps summary vectors byte-identical) or int8
@@ -633,6 +659,10 @@ class LCMConfig:
     # rescore) KNN: M = knn_prescreen_multiplier x k survivors are rescored.
     # Larger widens the approximate prescreen toward exact recall at more cost.
     knn_prescreen_multiplier: int = 4
+    # Maximum RAM used by persistent int8 KNN matrices. A full-corpus int8
+    # matrix is retained across calls when it fits; 0 disables residency and
+    # over-budget corpora use the exact streaming scan.
+    knn_resident_max_mb: int = 128
     # lcm_recall candidate-scan BATCH SIZE. lcm_recall promises "all
     # conversations, all time", so it must NOT inherit the small
     # recency-truncating grep bound above (that structurally hides the oldest
@@ -653,6 +683,9 @@ class LCMConfig:
     # batches and degrades to coverage='bounded' rather than silently paying an
     # unbounded cost. This is the ONLY thing that truncates a default scan.
     recall_scan_budget_s: float = 0.0
+    # Opt raw natural-language questions into a bounded disjunctive FTS5 form.
+    # Default-off preserves the existing implicit-AND query bytes and ranking.
+    fts_prose_mode: bool = False
     # Per-arm RRF fusion weights for lcm_recall's 3-arm hybrid (fts/summary/chunk).
     # Down-weighting the weak FTS arm keeps naive equal-weight fusion from dragging
     # fused recall below its best (vector) arm — measured −21 R@5 on LongMemEval.

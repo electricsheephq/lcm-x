@@ -1314,6 +1314,114 @@ def verify_temporal_rollup_schema(conn: sqlite3.Connection) -> list[str]:
             if actual != expected:
                 missing.append(f"trigger-shape:{name}")
     return missing
+
+
+def ensure_resident_invalidation_triggers(conn: sqlite3.Connection) -> None:
+    """Bump resident-cache versions when live corpus membership changes.
+
+    The embedding tables are opt-in, while ``messages`` and ``summary_nodes``
+    may be created before or after them. Install only the triggers whose source
+    tables currently exist; every VectorStore schema ensure reruns this helper,
+    so normal database initialization order is idempotent.
+    """
+    tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    if "lcm_embedding_profile" not in tables:
+        return
+    # SQLite has no statement-level triggers, so bulk purges necessarily pay
+    # one trigger invocation per deleted row. This is an accepted control-plane
+    # mutation cost (deletes are rare relative to recall reads). The message
+    # predicate below confines chunk invalidation to profiles whose live corpus
+    # changed.
+    if "messages" in tables and "lcm_chunk_meta" in tables:
+        message_delete_sql = """
+            CREATE TRIGGER lcm_resident_message_delete
+            AFTER DELETE ON messages BEGIN
+                UPDATE lcm_embedding_profile
+                SET data_version = data_version + 1
+                WHERE task = 'chunk'
+                  AND identity_hash IN (
+                      SELECT identity_hash
+                      FROM lcm_chunk_meta
+                      WHERE store_id = old.store_id AND archived = 0
+                  );
+            END
+        """
+        existing = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'trigger' AND name = 'lcm_resident_message_delete'"
+        ).fetchone()
+        if existing is not None and re.sub(
+            r"\s+", "", str(existing[0]).lower()
+        ).rstrip(";") != re.sub(r"\s+", "", message_delete_sql.lower()).rstrip(";"):
+            conn.execute("DROP TRIGGER lcm_resident_message_delete")
+            existing = None
+        if existing is None:
+            conn.execute(message_delete_sql)
+    if "summary_nodes" in tables:
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS lcm_resident_summary_delete
+            AFTER DELETE ON summary_nodes BEGIN
+                UPDATE lcm_embedding_profile
+                SET data_version = data_version + 1
+                WHERE task = 'summary';
+            END
+            """
+        )
+        # SQLite intentionally permits an UPDATE OF trigger to name a column
+        # that is added later. Install this unconditionally so databases that
+        # gain the optional suppression column after VectorStore construction
+        # still invalidate resident summary matrices.
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS lcm_resident_summary_suppress
+            AFTER UPDATE OF suppressed_at ON summary_nodes
+            WHEN old.suppressed_at IS NOT new.suppressed_at
+            BEGIN
+                UPDATE lcm_embedding_profile
+                SET data_version = data_version + 1
+                WHERE task = 'summary';
+            END
+            """
+        )
+    if "lcm_chunk_meta" in tables:
+        conn.executescript(
+            """
+            CREATE TRIGGER IF NOT EXISTS lcm_resident_chunk_archive
+            AFTER UPDATE OF archived ON lcm_chunk_meta
+            WHEN old.archived IS NOT new.archived
+            BEGIN
+                UPDATE lcm_embedding_profile
+                SET data_version = data_version + 1
+                WHERE identity_hash = new.identity_hash;
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS lcm_resident_chunk_meta_delete
+            AFTER DELETE ON lcm_chunk_meta BEGIN
+                UPDATE lcm_embedding_profile
+                SET data_version = data_version + 1
+                WHERE identity_hash = old.identity_hash;
+            END;
+            """
+        )
+    if "lcm_chunk_vectors" in tables:
+        conn.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS lcm_resident_chunk_vector_delete
+            AFTER DELETE ON lcm_chunk_vectors BEGIN
+                UPDATE lcm_embedding_profile
+                SET data_version = data_version + 1
+                WHERE identity_hash = old.identity_hash;
+            END
+            """
+        )
+
+
 def ensure_embedding_tables(conn: sqlite3.Connection) -> None:
     """Create the opt-in embedding tables idempotently.
 
@@ -1386,6 +1494,7 @@ def ensure_embedding_tables(conn: sqlite3.Connection) -> None:
     from .scope_storage import ensure_scope_columns
 
     ensure_scope_columns(conn)
+    ensure_resident_invalidation_triggers(conn)
 
 
 # The tables and indexes ``ensure_embedding_tables`` is responsible for. Used to
@@ -1651,6 +1760,7 @@ def ensure_chunk_tables(conn: sqlite3.Connection) -> None:
     # caller can create ``messages`` after the core marker, so repair that one
     # source column with a targeted probe rather than reopening the full sweep.
     ensure_scope_columns(conn, tables=("messages",))
+    ensure_resident_invalidation_triggers(conn)
 
 
 # The tables and indexes ``ensure_chunk_tables`` owns. Verified on chunk-corpus

@@ -16,11 +16,6 @@
       "reason": "Connection-local TEMP staging table for bounded rollup source ids."
     },
     {
-      "table": "lcm_assertion_relations",
-      "class": "principal_data",
-      "reason": "Derived assertion relationships preserve principal-scoped memory claims."
-    },
-    {
       "table": "lcm_assertion_message_delete",
       "class": "infra",
       "reason": "Schema trigger that invalidates assertion provenance after message deletion."
@@ -36,9 +31,19 @@
       "reason": "Schema trigger enforcing assertion-relation scope invariants."
     },
     {
+      "table": "lcm_assertion_relations",
+      "class": "principal_data",
+      "reason": "Derived assertion relationships preserve principal-scoped memory claims."
+    },
+    {
       "table": "lcm_assertion_row_insert_guard",
       "class": "infra",
       "reason": "Schema trigger enforcing assertion-row scope invariants."
+    },
+    {
+      "table": "lcm_assertion_source_delete",
+      "class": "infra",
+      "reason": "Schema trigger that removes orphaned assertion rows and relations."
     },
     {
       "table": "lcm_assertion_source_insert_guard",
@@ -49,11 +54,6 @@
       "table": "lcm_assertion_sources",
       "class": "principal_data",
       "reason": "Assertion provenance points to principal-scoped source messages."
-    },
-    {
-      "table": "lcm_assertion_source_delete",
-      "class": "infra",
-      "reason": "Schema trigger that removes orphaned assertion rows and relations."
     },
     {
       "table": "lcm_assertions",
@@ -196,6 +196,36 @@
       "reason": "Connection-local TEMP staging table for bounded recent-node traversal."
     },
     {
+      "table": "lcm_resident_chunk_archive",
+      "class": "infra",
+      "reason": "Schema trigger that invalidates the resident chunk matrix on archive."
+    },
+    {
+      "table": "lcm_resident_chunk_meta_delete",
+      "class": "infra",
+      "reason": "Schema trigger that invalidates the resident chunk matrix after chunk-meta deletion."
+    },
+    {
+      "table": "lcm_resident_chunk_vector_delete",
+      "class": "infra",
+      "reason": "Schema trigger that invalidates the resident chunk matrix after chunk-vector deletion."
+    },
+    {
+      "table": "lcm_resident_message_delete",
+      "class": "infra",
+      "reason": "Schema trigger that invalidates the resident int8 matrix after message deletion."
+    },
+    {
+      "table": "lcm_resident_summary_delete",
+      "class": "infra",
+      "reason": "Schema trigger that invalidates the resident int8 matrix after summary deletion."
+    },
+    {
+      "table": "lcm_resident_summary_suppress",
+      "class": "infra",
+      "reason": "Schema trigger that invalidates the resident int8 matrix when a summary is suppressed."
+    },
+    {
       "table": "lcm_rollup_invalidations",
       "class": "principal_data",
       "reason": "Invalidation rows identify principal-scoped summary changes."
@@ -266,21 +296,6 @@
       "reason": "Canonical raw principal-scoped conversation messages."
     },
     {
-      "table": "msg_fts_delete",
-      "class": "infra",
-      "reason": "Schema trigger that maintains the principal-scoped messages FTS table."
-    },
-    {
-      "table": "msg_fts_insert",
-      "class": "infra",
-      "reason": "Schema trigger that maintains the principal-scoped messages FTS table."
-    },
-    {
-      "table": "msg_fts_update",
-      "class": "infra",
-      "reason": "Schema trigger that maintains the principal-scoped messages FTS table."
-    },
-    {
       "table": "messages_fts",
       "class": "principal_data",
       "reason": "FTS materialization derived from principal-scoped messages."
@@ -311,19 +326,24 @@
       "reason": "Schema, migration, feature, and maintenance control metadata."
     },
     {
+      "table": "msg_fts_delete",
+      "class": "infra",
+      "reason": "Schema trigger that maintains the principal-scoped messages FTS table."
+    },
+    {
+      "table": "msg_fts_insert",
+      "class": "infra",
+      "reason": "Schema trigger that maintains the principal-scoped messages FTS table."
+    },
+    {
+      "table": "msg_fts_update",
+      "class": "infra",
+      "reason": "Schema trigger that maintains the principal-scoped messages FTS table."
+    },
+    {
       "table": "nodes_fts",
       "class": "principal_data",
       "reason": "FTS materialization derived from principal-scoped summary nodes."
-    },
-    {
-      "table": "nodes_fts_delete",
-      "class": "infra",
-      "reason": "Schema trigger that maintains the principal-scoped summary-node FTS table."
-    },
-    {
-      "table": "nodes_fts_insert",
-      "class": "infra",
-      "reason": "Schema trigger that maintains the principal-scoped summary-node FTS table."
     },
     {
       "table": "nodes_fts_config",
@@ -336,6 +356,11 @@
       "reason": "FTS shadow data derived from principal-scoped summary nodes."
     },
     {
+      "table": "nodes_fts_delete",
+      "class": "infra",
+      "reason": "Schema trigger that maintains the principal-scoped summary-node FTS table."
+    },
+    {
       "table": "nodes_fts_docsize",
       "class": "principal_data",
       "reason": "FTS shadow document state derived from principal-scoped summary nodes."
@@ -344,6 +369,11 @@
       "table": "nodes_fts_idx",
       "class": "principal_data",
       "reason": "FTS shadow index derived from principal-scoped summary nodes."
+    },
+    {
+      "table": "nodes_fts_insert",
+      "class": "infra",
+      "reason": "Schema trigger that maintains the principal-scoped summary-node FTS table."
     },
     {
       "table": "summary_nodes",

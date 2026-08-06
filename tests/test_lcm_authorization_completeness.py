@@ -317,7 +317,12 @@ def _inventory_payload() -> list[dict[str, object]]:
 
 
 def _source_files() -> tuple[Path, ...]:
-    excluded = {"tests", "bench", "benchmarks", "__pycache__"}
+    # "benchmarking" joins the list its two siblings were already on: it is a
+    # separate evaluation harness with its OWN sqlite databases (an embedding
+    # cache keyed by content hash), not the LCM store, and no principal can
+    # reach it. The -ing spelling was simply missed when the others were added,
+    # which stayed invisible until an upstream merge put a mutating file there.
+    excluded = {"tests", "bench", "benchmarks", "benchmarking", "__pycache__"}
     return tuple(
         sorted(
             path

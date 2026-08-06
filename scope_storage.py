@@ -762,9 +762,17 @@ class _WriterVisitor(ast.NodeVisitor):
 
 
 def _source_files(source_root: Path) -> Iterable[Path]:
-    excluded = {"tests", "bench", "benchmarks", "__pycache__"}
+    # "benchmarking" joins its two siblings; the -ing spelling was missed when
+    # they were added. Benchmark harnesses are excluded because they build their
+    # OWN throwaway databases -- scripts/benchmark_fast_scan.py literally
+    # `CREATE TABLE messages` with a hand-rolled six-column schema that has no
+    # access_scope column to populate, in a tempfile. Scanning them reports a
+    # scope-bearing writer that can never touch a customer store.
+    excluded = {"tests", "bench", "benchmarks", "benchmarking", "__pycache__"}
     for path in sorted(source_root.rglob("*.py")):
         if any(part.startswith(".venv") or part in excluded for part in path.parts):
+            continue
+        if path.name.startswith("benchmark_"):
             continue
         yield path
 
