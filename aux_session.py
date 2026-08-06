@@ -334,7 +334,12 @@ class AuxiliarySessionMixin:
         expected_scope = {
             "kind": "auxiliary_session_handoff",
             "session_id": new_session_id,
-            "old_session_id": old_session_id,
+            # The session being RETIRED is presented under `source_session_id`,
+            # which is the key the policy reads for "the other session in a
+            # rollover". It was `old_session_id`, a name nothing consults, so
+            # only the incoming session was ever owner-checked and a handoff
+            # could name someone else's session as the one it retires.
+            "source_session_id": old_session_id,
         }
         expected_scope["required_scope"] = "owner_only"
         decision = policy.authorize_operation(access_context, "owner_only", expected_scope)

@@ -2487,7 +2487,22 @@ def _rollups_rebuild_text(tokens: list[str], engine) -> str:
         "kind": "rollup",
         "period_kind": kind,
         "period_date": target_date.isoformat(),
+        # The SAME partition under two names, deliberately, because two
+        # different consumers read two different keys:
+        #
+        #   partition_scope -- the NARROWING contract. The caller re-reads it
+        #                      from the resolver's result below and rejects a
+        #                      mismatch, so it must keep this name.
+        #   partition_key   -- what TeamsPolicy actually decides on. Only
+        #                      `partition_scope` was passed before, and the
+        #                      policy reads neither that nor anything else here,
+        #                      so the gate ran, audited, and permitted every
+        #                      principal regardless of whose partition was
+        #                      named. Same defect as #218: a gate asking a
+        #                      question the policy has no rule for is answered
+        #                      "yes".
         "partition_scope": scope,
+        "partition_key": scope,
         "source_scope": access_context,
         "derived_scope": access_context,
     }

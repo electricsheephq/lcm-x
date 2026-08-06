@@ -106,3 +106,73 @@ def test_no_gate_site_asks_for_an_authority_the_policy_ignores() -> None:
         f"gate sites request authorities TeamsPolicy does not act on: {sorted(unhandled)}. "
         "Add handling to authorize_operation, or the gate is inert."
     )
+
+
+def test_no_gate_site_names_a_decision_key_the_policy_ignores() -> None:
+    """The generalization of #218, and the check that would have caught four of them.
+
+    `authorize_operation` reads exactly six keys and falls through to allow() for
+    everything else. So a gate that names a key with a typo, a synonym, or a
+    concept the policy was never taught still RUNS, still AUDITS, and still
+    PERMITS everyone -- and reads as correct at the call site. Three shipped that
+    way: `required_scope` (#218), `partition_scope` where the policy reads
+    `partition_key`, and `old_session_id` where it reads `source_session_id`.
+
+    Every key is therefore either DECIDING (the policy acts on it) or
+    INFORMATIONAL (carried for the audit record and knowingly not decided). A new
+    key in neither set fails here rather than silently widening authority.
+    """
+    import ast
+    import pathlib
+
+    deciding = {
+        "kind",
+        "required_scope",
+        "session_id",
+        "source_session_id",
+        "partition_key",
+        "target_access_scopes",
+    }
+    # Carried for humans and the audit trail; naming one of these decides nothing
+    # and is not meant to. Each stays listed so that adding a key is deliberate.
+    informational = {
+        "command", "entry_point", "operation", "tool_name", "arm", "corpus",
+        "period_kind", "period_date", "status", "message", "tables",
+        "observed_rows", "apply", "target_db", "source_db", "source_files",
+        "conversation_id", "conversation_ids", "caller_session_id",
+        "caller_conversation_id", "session_scope", "source", "target_scope",
+        "source_scope", "derived_scope", "store_id", "exact_ref",
+        # A NARROWING key, not a decision key: the rollup caller re-reads it
+        # from the resolver's result and rejects a mismatch. The same partition
+        # is ALSO passed as `partition_key`, which is what the policy decides
+        # on -- one value, two consumers, two names.
+        "partition_scope",
+    }
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    found: set[str] = set()
+    for path in root.rglob("*.py"):
+        if any(part in {"tests", ".venv", "__pycache__"} for part in path.parts):
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Dict):
+                continue
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            if not any("scope" in name for name in names):
+                continue
+            for key in node.value.keys:
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    found.add(key.value)
+
+    unclassified = found - deciding - informational
+    assert not unclassified, (
+        f"gate sites name scope keys that are neither decided nor declared "
+        f"informational: {sorted(unclassified)}. TeamsPolicy falls through to "
+        f"allow() for any key it does not read, so an unclassified key is an "
+        f"inert gate. Decide it in authorize_operation, or list it as "
+        f"informational."
+    )
