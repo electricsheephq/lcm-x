@@ -1168,3 +1168,28 @@ def test_named_migration_failure_rolls_back_identity_and_new_registry(tmp_path, 
     finally:
         monkeypatch.setattr(db_bootstrap, "verify_retrieval_references_schema", original_verify)
         conn.close()
+
+
+def test_registry_index_recreated_as_unique_is_rejected(tmp_path):
+    """Name, table and columns do not pin an index's semantics.
+
+    A unique idx_..._scope keeps all three and would verify as healthy, while
+    rejecting the second reference issued for a scope -- a correctness change
+    this verification exists to catch.
+    """
+    path = tmp_path / "index-uniqueness.db"
+    conn = _open(path)
+    ensure_retrieval_reference_migrations(conn)
+    assert db_bootstrap.verify_retrieval_references_schema(conn) == []
+
+    table = db_bootstrap.RETRIEVAL_REFERENCES_TABLE
+    index_name = f"idx_{table}_scope"
+    conn.execute(f"DROP INDEX {index_name}")
+    conn.execute(f"CREATE UNIQUE INDEX {index_name} ON {table}(kind, scope_json)")
+    conn.commit()
+    try:
+        assert db_bootstrap.verify_retrieval_references_schema(conn) == [
+            f"malformed index:{index_name}"
+        ]
+    finally:
+        conn.close()

@@ -791,6 +791,16 @@ def verify_retrieval_references_schema(conn: sqlite3.Connection) -> list[str]:
         f"idx_{table}_kind_state": ("kind", "revoked_at", "expires_at"),
         f"idx_{table}_scope": ("kind", "scope_json"),
     }
+    # Name, table and columns do not pin an index's SEMANTICS. An index
+    # recreated as UNIQUE -- or as a partial index -- keeps all three and would
+    # verify as healthy while behaving differently: a unique idx_..._scope
+    # rejects the second reference issued for a scope, which is exactly the
+    # class of corruption this function exists to catch. PRAGMA index_list
+    # carries both flags.
+    index_flags = {
+        str(item[1]): (int(item[2] or 0), int(item[4] or 0))
+        for item in conn.execute(f"PRAGMA index_list({table})").fetchall()
+    }
     for index_name, columns in expected_indexes.items():
         row = conn.execute(
             "SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=?",
@@ -800,10 +810,13 @@ def verify_retrieval_references_schema(conn: sqlite3.Connection) -> list[str]:
             str(item[2])
             for item in conn.execute(f"PRAGMA index_info({index_name})").fetchall()
         ] if row is not None else []
+        is_unique, is_partial = index_flags.get(index_name, (0, 0))
         if (
             row is None
             or str(row[0]) != table
             or actual_columns != list(columns)
+            or is_unique
+            or is_partial
         ):
             errors.append(f"malformed index:{index_name}")
     return sorted(set(errors))
