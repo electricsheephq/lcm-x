@@ -7838,6 +7838,76 @@ class TestLCMEngineSharedStorage:
             prototype.shutdown()
         assert storage._closed is True
 
+    @staticmethod
+    def _open_fd_count() -> int:
+        import os
+
+        for fd_dir in ("/proc/self/fd", "/dev/fd"):
+            if os.path.isdir(fd_dir):
+                return len(os.listdir(fd_dir))
+        pytest.skip("no file-descriptor listing available on this platform")
+
+    def test_clone_churn_does_not_leak_fds(self, tmp_path):
+        # Warm up once so lazy imports/caches do not skew the baseline.
+        warmup = self._engine(tmp_path)
+        warmup.shutdown()
+
+        baseline = self._open_fd_count()
+        prototype = self._engine(tmp_path)
+        clones = []
+        try:
+            with_prototype = self._open_fd_count()
+
+            # Churn: repeatedly create and shut down clones.
+            for _ in range(10):
+                churn_clone = prototype.clone_for_agent()
+                churn_clone.shutdown()
+
+            # Hold live clones concurrently.
+            clones = [prototype.clone_for_agent() for _ in range(10)]
+            after_clones = self._open_fd_count()
+
+            # Clones share the prototype's storage bundle: zero new fds.
+            assert after_clones == with_prototype
+        finally:
+            for clone in clones:
+                clone.shutdown()
+            prototype.shutdown()
+
+        # Every descriptor opened by the engine family is returned.
+        assert self._open_fd_count() == baseline
+
+    def test_concurrent_clone_churn_is_thread_safe(self, tmp_path):
+        prototype = self._engine(tmp_path)
+        storage = prototype._storage
+        thread_count = 10
+        barrier = threading.Barrier(thread_count)
+        failures = []
+
+        def worker():
+            try:
+                barrier.wait()
+                for _ in range(10):
+                    clone = prototype.clone_for_agent()
+                    clone.shutdown()
+            except BaseException as exc:
+                failures.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(thread_count)]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            assert failures == []
+            # The prototype's lease survived the churn and storage still works.
+            assert storage._owners == 1
+            prototype._store.append("churn", {"role": "user", "content": "still open"})
+        finally:
+            prototype.shutdown()
+        assert storage._closed is True
+
 
 def test_like_fallback_relevance_prefers_multi_term_score_over_single_exact(tmp_path):
     import hermes_lcm.store as store_module

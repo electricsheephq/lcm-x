@@ -426,6 +426,8 @@ class _SharedStorage:
             raise
 
     def acquire(self) -> "_SharedStorage":
+        # Increment the owner count. A closed or closing bundle must never be
+        # re-acquired: its SQLite helpers are (or are about to be) closed.
         with self._lock:
             if self._closed or self._closing:
                 raise RuntimeError("cannot acquire closed LCM storage")
@@ -433,13 +435,14 @@ class _SharedStorage:
         return self
 
     def release(self) -> None:
+        # Decrement the owner count; only the last release triggers teardown.
         with self._lock:
             if self._owners <= 0:
                 return
             self._owners -= 1
             if self._owners:
-                return
-            self._closing = True
+                return  # Other engines still share this bundle; keep it open.
+            self._closing = True  # Last owner: block new acquires, then close.
 
         failures: list[BaseException] = []
         try:
