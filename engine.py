@@ -150,6 +150,7 @@ from .store import MessageStore
 from .scope_storage import (
     mark_teams_enabled,
     persist_teams_enabled,
+    preflight_teams_scope,
     resolve_startup_teams_state,
     setup_teams_scope,
     teams_enabled as storage_teams_enabled,
@@ -892,6 +893,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         owner_for_session: Callable[[str], str | None] | None = None,
         *,
         batch_size: int = 256,
+        overrides: Mapping[str, str] | None = None,
+        fallback_owner: str | None = None,
     ) -> dict[str, object]:
         """Set up Teams scope storage and stamp all historical LCM rows.
 
@@ -904,13 +907,43 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             self._store.connection,
             owner_for_session or self._preteams_owner_for_session,
             batch_size=batch_size,
+            overrides=overrides,
+            fallback_owner=fallback_owner,
         )
+        if not result.get("complete", True):
+            # Some tables failed. Recording "enabled" here would put an
+            # enforcing policy over a partly-stamped store; leaving the marker
+            # unset leaves it stamped-without-marker, which fails closed until
+            # the operator supplies the missing owners and re-runs. The backfill
+            # is idempotent, so re-running resumes rather than redoing.
+            return result
         # Durable BEFORE in-process, so a crash between the two lands on
         # "enabled" rather than on stamps with no recorded decision.
         persist_teams_enabled(self._store.connection, True)
         mark_teams_enabled(self)
         self._teams_state_reason = "enabled"
         return result
+
+    def preflight_teams(
+        self,
+        owner_for_session: Callable[[str], str | None] | None = None,
+        *,
+        overrides: Mapping[str, str] | None = None,
+        fallback_owner: str | None = None,
+    ) -> dict[str, object]:
+        """Report every owner an enable would need, without writing anything.
+
+        Run this before :meth:`enable_teams` on any store that matters. It
+        answers the one question that can strand an enable half-done -- which
+        sessions cannot be attributed -- while the store is still untouched.
+        """
+
+        return preflight_teams_scope(
+            self._store.connection,
+            owner_for_session or self._preteams_owner_for_session,
+            overrides=overrides,
+            fallback_owner=fallback_owner,
+        )
 
     def disable_teams(self) -> dict[str, object]:
         """Record that Teams is off, without unstamping anything.

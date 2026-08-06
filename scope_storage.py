@@ -12,7 +12,7 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Mapping
 
 from .db_bootstrap import (
     SCOPE_MIGRATION_STEP,
@@ -316,6 +316,123 @@ def _resolve_scope(resolver: ScopeResolver, session_id: object) -> str:
     return str(value)
 
 
+def compose_scope_resolver(
+    owner_for_session: ScopeResolver,
+    *,
+    overrides: Mapping[str, str] | None = None,
+    fallback_owner: str | None = None,
+) -> ScopeResolver:
+    """Wrap the host resolver with operator-supplied answers.
+
+    The host resolver raises for any session it cannot attribute, and there was
+    no way to answer for it: a single unattributable session was enough to make
+    an enable impossible. The override map answers named sessions, the fallback
+    answers the rest, and both are operator input rather than a guess made here.
+    """
+
+    named = {
+        str(key): str(value)
+        for key, value in (overrides or {}).items()
+        if str(value).strip()
+    }
+    default = str(fallback_owner).strip() if fallback_owner else ""
+
+    def resolve(session_id: str) -> str | None:
+        if session_id in named:
+            return named[session_id]
+        resolved = owner_for_session(session_id)
+        if resolved is not None and str(resolved).strip():
+            return resolved
+        return default or None
+
+    return resolve
+
+
+def preflight_teams_scope(
+    conn: sqlite3.Connection,
+    owner_for_session: ScopeResolver,
+    *,
+    overrides: Mapping[str, str] | None = None,
+    fallback_owner: str | None = None,
+) -> dict[str, object]:
+    """Resolve every owner an enable would need, WITHOUT writing anything.
+
+    Enable stamps in committed batches, so discovering an unattributable
+    session halfway through leaves the store partly stamped -- the exact state
+    Phase 1 has to fail closed on. This answers the question first: run it, read
+    ``unresolvable``, supply an override map or a fallback owner for whatever it
+    names, and only then enable.
+
+    Writes nothing and creates nothing -- not the access_scope columns, not the
+    metadata table. A preflight that mutates the store it is inspecting is not a
+    preflight.
+    """
+
+    resolver = compose_scope_resolver(
+        owner_for_session, overrides=overrides, fallback_owner=fallback_owner
+    )
+    tables: dict[str, dict[str, object]] = {}
+    unresolvable: set[str] = set()
+    blank_key_tables: list[str] = []
+
+    keyed = [(table, "session_id") for table in _SESSION_SCOPE_TABLES]
+    keyed += [
+        (table, "scope")
+        for table in ("lcm_rollups", "lcm_rollup_invalidations", "lcm_rollup_state")
+    ]
+
+    for table, key_column in keyed:
+        if not _table_exists(conn, table):
+            continue
+        columns = _table_columns(conn, table)
+        if key_column not in columns:
+            continue
+        # An un-migrated store has no access_scope column at all, and every row
+        # then needs attribution -- not zero rows.
+        predicate = (
+            f"WHERE {ACCESS_SCOPE_COLUMN} IS NULL"
+            if ACCESS_SCOPE_COLUMN in columns
+            else ""
+        )
+        keys = [
+            row[0]
+            for row in conn.execute(
+                f'SELECT DISTINCT "{key_column}" FROM "{table}" {predicate}'
+            ).fetchall()
+        ]
+        blank = [key for key in keys if not str(key or "").strip()]
+        if blank:
+            blank_key_tables.append(table)
+        table_unresolvable = sorted(
+            {
+                str(key)
+                for key in keys
+                if str(key or "").strip()
+                and not str(resolver(str(key)) or "").strip()
+            }
+        )
+        unresolvable.update(table_unresolvable)
+        tables[table] = {
+            "distinct_keys": len([k for k in keys if str(k or "").strip()]),
+            "unresolvable": table_unresolvable,
+            "blank_keys": len(blank),
+        }
+
+    ready = not unresolvable and not blank_key_tables
+    return {
+        "ready": ready,
+        "unresolvable": sorted(unresolvable),
+        "blank_key_tables": sorted(blank_key_tables),
+        "tables": tables,
+        "message": (
+            "every owner resolves; enable can proceed"
+            if ready
+            else "supply an override map or fallback owner for the names above "
+            "before enabling"
+        ),
+    }
+
+
 def _backfill_session_table(
     conn: sqlite3.Connection,
     table: str,
@@ -405,6 +522,8 @@ def backfill_scopes(
     owner_for_session: ScopeResolver | None = None,
     *,
     batch_size: int = 256,
+    overrides: Mapping[str, str] | None = None,
+    fallback_owner: str | None = None,
 ) -> dict[str, object]:
     """Stamp all pre-existing rows, leaving already-stamped rows untouched.
 
@@ -421,61 +540,104 @@ def backfill_scopes(
         raise ValueError(
             "owner_for_session is required to attribute pre-Teams rows to their owner"
         )
-    resolver = owner_for_session
+    resolver = compose_scope_resolver(
+        owner_for_session, overrides=overrides, fallback_owner=fallback_owner
+    )
     updated: dict[str, int] = {}
+    failures: dict[str, str] = {}
+    attempted: list[str] = []
+
+    def _isolated(table: str, work: Callable[[], int]) -> None:
+        """Run one table's backfill so its failure cannot silence the rest.
+
+        The loop had no exception handling, so the first unattributable session
+        aborted the whole run and every LATER table was never started -- not
+        merely truncated. The operator saw one error and had no way to tell
+        which tables had been attempted. This also matches the ratified
+        converge rule: one failure must not abort the others.
+        """
+
+        attempted.append(table)
+        try:
+            updated[table] = work()
+        except Exception as exc:  # noqa: BLE001 - recorded, then reported
+            failures[table] = f"{type(exc).__name__}: {exc}"
+
     for table in _SESSION_SCOPE_TABLES:
         if _table_exists(conn, table):
-            updated[table] = _backfill_session_table(conn, table, resolver, batch_size)
+            _isolated(
+                table,
+                lambda t=table: _backfill_session_table(conn, t, resolver, batch_size),
+            )
 
     # Chunk metadata points at a raw message; vectors/binary point at metadata.
     if _table_exists(conn, "lcm_chunk_meta") and _table_exists(conn, "messages"):
-        updated["lcm_chunk_meta"] = _backfill_joined_table(
-            conn,
-            table="lcm_chunk_meta",
-            source_table="messages",
-            join_sql="source.store_id = target.store_id",
-            batch_size=batch_size,
+        _isolated(
+            "lcm_chunk_meta",
+            lambda: _backfill_joined_table(
+                conn,
+                table="lcm_chunk_meta",
+                source_table="messages",
+                join_sql="source.store_id = target.store_id",
+                batch_size=batch_size,
+            ),
         )
     for table in ("lcm_chunk_vectors", "lcm_chunk_binary"):
         if _table_exists(conn, table) and _table_exists(conn, "lcm_chunk_meta"):
-            updated[table] = _backfill_joined_table(
-                conn,
-                table=table,
-                source_table="lcm_chunk_meta",
-                join_sql="source.chunk_id = target.chunk_id AND source.identity_hash = target.identity_hash",
-                batch_size=batch_size,
+            _isolated(
+                table,
+                lambda t=table: _backfill_joined_table(
+                    conn,
+                    table=t,
+                    source_table="lcm_chunk_meta",
+                    join_sql="source.chunk_id = target.chunk_id AND source.identity_hash = target.identity_hash",
+                    batch_size=batch_size,
+                ),
             )
 
     # Rollups retain their session partition key in ``scope``.  Their access
     # scope is attributed from that key only during the explicit Teams setup.
     for table in ("lcm_rollups", "lcm_rollup_invalidations", "lcm_rollup_state"):
         if _table_exists(conn, table):
-            updated[table] = _backfill_rollup_table(
-                conn, table, owner_for_session, batch_size
+            _isolated(
+                table,
+                lambda t=table: _backfill_rollup_table(conn, t, resolver, batch_size),
             )
 
     # Summary embedding metadata points at a summary node; vector/binary rows
     # point at that metadata.  ``embedded_id`` is the persisted node id.
     if _table_exists(conn, "lcm_embedding_meta") and _table_exists(conn, "summary_nodes"):
-        updated["lcm_embedding_meta"] = _backfill_joined_table(
-            conn,
-            table="lcm_embedding_meta",
-            source_table="summary_nodes",
-            join_sql="source.node_id = CAST(target.embedded_id AS INTEGER)",
-            batch_size=batch_size,
+        _isolated(
+            "lcm_embedding_meta",
+            lambda: _backfill_joined_table(
+                conn,
+                table="lcm_embedding_meta",
+                source_table="summary_nodes",
+                join_sql="source.node_id = CAST(target.embedded_id AS INTEGER)",
+                batch_size=batch_size,
+            ),
         )
     for table in ("lcm_embedding_vectors", "lcm_embedding_binary"):
         if _table_exists(conn, table) and _table_exists(conn, "lcm_embedding_meta"):
-            updated[table] = _backfill_joined_table(
-                conn,
-                table=table,
-                source_table="lcm_embedding_meta",
-                join_sql="source.embedded_id = target.embedded_id AND source.identity_hash = target.identity_hash",
-                batch_size=batch_size,
+            _isolated(
+                table,
+                lambda t=table: _backfill_joined_table(
+                    conn,
+                    table=t,
+                    source_table="lcm_embedding_meta",
+                    join_sql="source.embedded_id = target.embedded_id AND source.identity_hash = target.identity_hash",
+                    batch_size=batch_size,
+                ),
             )
 
     conn.commit()
-    return {"updated": updated, "total_updated": sum(updated.values())}
+    return {
+        "updated": updated,
+        "total_updated": sum(updated.values()),
+        "attempted": attempted,
+        "failures": failures,
+        "complete": not failures,
+    }
 
 
 def setup_teams_scope(
@@ -483,11 +645,19 @@ def setup_teams_scope(
     owner_for_session: ScopeResolver | None = None,
     *,
     batch_size: int = 256,
+    overrides: Mapping[str, str] | None = None,
+    fallback_owner: str | None = None,
 ) -> dict[str, object]:
     """Run the additive schema stage and Teams-only historical backfill."""
 
     columns = ensure_scope_columns(conn)
-    result = backfill_scopes(conn, owner_for_session, batch_size=batch_size)
+    result = backfill_scopes(
+        conn,
+        owner_for_session,
+        batch_size=batch_size,
+        overrides=overrides,
+        fallback_owner=fallback_owner,
+    )
     result["columns"] = columns
     return result
 
