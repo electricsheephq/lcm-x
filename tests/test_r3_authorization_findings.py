@@ -170,10 +170,14 @@ class _DenyStoreReads:
 
 
 def _baseline_refs(monkeypatch: pytest.MonkeyPatch, policy, refs):
-    import hermes_lcm as plugin
+    # The gate lives in preanswer_evidence, not in __init__.py: tests/conftest.py
+    # registers the package WITHOUT executing __init__.py, so anything defined
+    # at that level is unreachable from a test.
+    from hermes_lcm import preanswer_evidence
 
-    monkeypatch.setattr(plugin, "_policy_api", lambda: (lambda _e: policy, lambda _e: None))
-    return plugin._authorize_supplied_baseline_refs(object(), refs)
+    monkeypatch.setattr(preanswer_evidence, "policy_for_engine", lambda _e: policy)
+    monkeypatch.setattr(preanswer_evidence, "policy_access_context", lambda _e: None)
+    return preanswer_evidence.authorize_supplied_baseline_refs(object(), refs)
 
 
 def test_supplied_baseline_refs_are_authorized_in_both_shapes(
