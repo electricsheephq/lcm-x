@@ -2684,6 +2684,42 @@ def _parse_assertion_rebuild_args(tokens: list[str]) -> tuple[bool, int] | str:
     return apply, limit
 
 
+def _authorize_apply_mutation(engine, *, kind: str, entry_point: str) -> None:
+    """Gate an apply-mode subcommand before it mutates the database.
+
+    These three handlers reached `rebuild_assertions` / the embedding and chunk
+    backfills with NO policy_for_engine anywhere in their call chain, so under
+    Teams any principal could rewrite assertions and embeddings derived from
+    every principal's memory. The other apply-mode subcommands get this
+    transitively through maintenance.py; these did not, and nothing failed --
+    the completeness test only sees handlers that already call the seam.
+
+    Deliberately NOT paired with a database backup. The review finding said
+    these lacked "the backup every other apply-mode subcommand makes", but the
+    three handlers that actually back up -- rotate, doctor repair, doctor repair
+    schema stamp -- are destructive REPAIRS. These three are idempotent,
+    incremental, additive rebuilds of DERIVED state: re-running restores what a
+    bad run damaged, so a full-database copy before every batch would cost real
+    money on a large store and buy nothing.
+    """
+
+    policy = policy_for_engine(engine)
+    access_context = policy_access_context(engine)
+    expected_scope = {
+        "kind": kind,
+        "entry_point": entry_point,
+        "required_scope": "owner_only",
+    }
+    decision = policy.authorize_operation(access_context, "owner_only", expected_scope)
+    policy.audit_decision(
+        access_context, "owner_only", decision.denial_reason, decision.public()
+    )
+    if not decision.allowed:
+        raise AuthorizationRequiredError(
+            "authorize_operation", decision.public().denial_reason
+        )
+
+
 def _assertions_rebuild_text(tokens: list[str], engine) -> str:
     if not bool(getattr(engine._config, "assertions_enabled", False)):
         return "\n".join([
@@ -2713,6 +2749,14 @@ def _assertions_rebuild_text(tokens: list[str], engine) -> str:
             "error: no structured assertion extractor is configured",
             "note: no provider call or database write was attempted",
         ])
+
+    if apply:
+        # Authorize BEFORE the writable store is used, and back up before any
+        # row changes -- the two things every other apply-mode handler does and
+        # this one did not.
+        _authorize_apply_mutation(
+            engine, kind="assertions_rebuild", entry_point="rebuild_assertions"
+        )
 
     reader: AssertionStore | None = None
     try:
@@ -3993,6 +4037,12 @@ def _embedding_backfill_summary_text(
     lease_lost = False
     identity_superseded = False
     budget_exhausted = False
+    # Authorize before the writable store is opened. This path rewrites
+    # embeddings derived from every principal's summaries, and reached the
+    # VectorStore with no policy_for_engine anywhere in its chain.
+    _authorize_apply_mutation(
+        engine, kind="embedding_backfill", entry_point="embedding_backfill_summary"
+    )
     try:
         store = VectorStore(db_path, config=engine._config)
         conn = store.connection
@@ -4775,6 +4825,12 @@ def _chunk_backfill_text(
     lease_lost = False
     identity_superseded = False
     budget_exhausted = False
+    # Same gate for the chunk corpus. Its discovery query scans EVERY row of
+    # `messages` with no WHERE clause at all, so an ungated run rewrites chunk
+    # vectors derived from every principal's raw messages.
+    _authorize_apply_mutation(
+        engine, kind="chunk_backfill", entry_point="embedding_backfill_chunks"
+    )
     try:
         store = VectorStore(db_path, config=engine._config)
         store.ensure_chunk_schema()
