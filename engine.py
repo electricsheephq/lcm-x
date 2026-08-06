@@ -4124,6 +4124,23 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                         handler_args[key] = resolved_target_scope[key]
                     else:
                         handler_args.pop(key, None)
+            # The owner predicate is propagated OUTSIDE the target_args loop,
+            # because it is an authorization OUTPUT rather than a caller-supplied
+            # target: it appears in no tool's binding, so the loop above cannot
+            # carry it and the handler never saw it. That is exactly how
+            # `lcm_grep session_scope=all` kept returning every principal's rows
+            # -- the policy narrowed correctly and nothing downstream was told.
+            #
+            # Taken from the top-level resolved mapping, not from target_scope,
+            # and a caller-supplied value is never trusted: it is overwritten
+            # when the policy resolved one, and stripped when it did not.
+            resolved_owner = None
+            if isinstance(authorized_scope, Mapping):
+                resolved_owner = authorized_scope.get("access_scope")
+            if resolved_owner:
+                handler_args["access_scope"] = resolved_owner
+            elif isinstance(handler_args, dict):
+                handler_args.pop("access_scope", None)
         # Ingest live messages if passed (enables current-turn search)
         messages = kwargs.get("messages")
 

@@ -1167,6 +1167,12 @@ class MessageStore:
                 role=role,
                 time_from=time_from,
                 time_to=time_to,
+                # The owner predicate must survive THIS fallback too. It is
+                # taken for CJK and emoji queries, so omitting it here meant a
+                # non-ASCII search silently escaped scoping while the identical
+                # ASCII search was scoped -- a leak that depends on the alphabet
+                # the query is written in.
+                access_scope=access_scope,
             )
 
         order_by = _build_search_order_by(

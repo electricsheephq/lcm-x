@@ -24,7 +24,16 @@ from ..access_context.protocols import TargetScope
 # A backup copies every principal's memory into one file, so it is an
 # administrative capability the connector holds, not something a principal
 # inherits by being the only one logged in.
-_STORE_WIDE_KINDS = frozenset({"backup"})
+#
+# The three apply-mode rebuilds belong here for the same reason, and leaving
+# them out made their gate INERT: their scope carries no session, partition or
+# target key, so the owner-of-target loop below had nothing to compare and
+# every principal fell through to allow(). The gate existed, ran, and permitted
+# everyone -- and its test used a denying STUB, so it proved the gate propagates
+# a denial rather than that this policy produces one.
+_STORE_WIDE_KINDS = frozenset(
+    {"backup", "assertions_rebuild", "embedding_backfill", "chunk_backfill"}
+)
 
 
 def principal_of(context: AccessContextV1 | None) -> str:
