@@ -433,6 +433,20 @@ def lcm_query_state(args: Dict[str, Any], **kwargs) -> str:
     requested_limit = parsed_limit
     limit = min(requested_limit, _LCM_QUERY_STATE_LIMIT_CAP)
 
+    # The owner predicate comes from the POLICY, never from `args` -- this tool
+    # addresses assertions by `subject_key`, which names no row, so the
+    # tool-boundary gate has nothing to attach an owner to and allows. Without
+    # this, the query returned assertions extracted from EVERY principal's
+    # messages, each carrying the source quote verbatim plus the foreign
+    # session_id and store_id.
+    _state_policy = policy_for_engine(engine)
+    _state_scope = _state_policy.resolve_authorized_targets(
+        policy_access_context(engine), "read", {}
+    )
+    _state_access_scope = (
+        _state_scope.get("access_scope") if isinstance(_state_scope, Mapping) else None
+    )
+
     try:
         result = query_assertion_state(
             store,
@@ -442,6 +456,7 @@ def lcm_query_state(args: Dict[str, Any], **kwargs) -> str:
             scope_key=scope_key,
             speaker_role=speaker_role,
             as_of=as_of,
+            access_scope=_state_access_scope,
             limit=limit,
         )
     except (TypeError, ValueError, sqlite3.Error) as exc:
