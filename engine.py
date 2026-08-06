@@ -4033,6 +4033,49 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         ("node_id", "summary_nodes", "node_id"),
     )
 
+    # Targets naming rows by EXACT REFERENCE (``lcm:<store_id>:<start>-<end>``)
+    # rather than by bare id, in either scalar or list form.
+    #
+    # The scalar loop below matches `WHERE store_id = ?` against the raw value,
+    # so a reference STRING could never match a row, and it skips list values
+    # outright -- so none of these attached a `target_access_scopes`, leaving
+    # TeamsPolicy with nothing to decide on and the gate unconditionally
+    # allowing. The identical store_id passed as a scalar int (lcm_expand)
+    # resolved and denied, which is what makes this a target-SHAPE gap rather
+    # than a policy gap.
+    #
+    # All four were found at once by the structural test in
+    # tests/test_teams_target_shapes.py; fixing only the reported one
+    # (baseline_refs) would have left three siblings open.
+    _TARGET_REF_LOOKUPS = (
+        ("baseline_refs", "messages", "store_id"),       # evidence_pack, compile_evidence
+        ("externalized_refs", "messages", "store_id"),   # lcm_grep
+        ("externalized_ref", "messages", "store_id"),    # lcm_describe, lcm_expand (scalar)
+        ("selected_refs", "messages", "store_id"),       # lcm_retrieve
+    )
+
+    # Targets naming rows by a LIST of bare ids.
+    _TARGET_ID_LIST_LOOKUPS = (
+        ("node_ids", "summary_nodes", "node_id"),        # lcm_expand_query
+    )
+
+    @staticmethod
+    def _store_id_from_exact_ref(value: Any) -> int | None:
+        """The store_id inside an ``lcm:<store_id>:<start>-<end>`` reference.
+
+        Callers pass either the bare string or a mapping carrying it under
+        ``exact_ref``; both shapes reach the authorization boundary. The regex
+        is imported from its canonical home rather than restated, so the two
+        cannot drift into disagreeing about what a reference looks like.
+        """
+
+        from .preanswer_evidence import _EXACT_REF_RE
+
+        if isinstance(value, Mapping):
+            value = value.get("exact_ref")
+        match = _EXACT_REF_RE.match(str(value or "").strip())
+        return int(match.group("store_id")) if match else None
+
     def _stored_access_scopes_for_targets(
         self, target_scope: Mapping[str, Any]
     ) -> tuple[str, ...]:
@@ -4062,6 +4105,45 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 continue
             if row is not None and row[0] is not None:
                 owners.add(str(row[0]))
+
+        # Reference and list targets, resolved element by element. An
+        # unparseable or unresolved element is skipped for the same reason a
+        # missing scalar row is: an absent row is not an ownership claim, and
+        # reporting one would turn a miss into a denial that leaks existence.
+        def _resolve(table: str, column: str, value: Any) -> None:
+            try:
+                row = connection.execute(
+                    f'SELECT {ACCESS_SCOPE_COLUMN} FROM "{table}" WHERE {column} = ?',
+                    (value,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return
+            if row is not None and row[0] is not None:
+                owners.add(str(row[0]))
+
+        def _elements(raw: Any) -> tuple[Any, ...]:
+            """Scalar and list targets differ only in shape, never in authority."""
+            if raw is None:
+                return ()
+            if isinstance(raw, (list, tuple, set)):
+                return tuple(raw)
+            return (raw,)
+
+        for key, table, column in self._TARGET_REF_LOOKUPS:
+            for element in _elements(target_scope.get(key)):
+                store_id = self._store_id_from_exact_ref(element)
+                if store_id is not None:
+                    _resolve(table, column, store_id)
+
+        for key, table, column in self._TARGET_ID_LIST_LOOKUPS:
+            for element in _elements(target_scope.get(key)):
+                if isinstance(element, (dict, list, tuple, set)):
+                    continue
+                try:
+                    _resolve(table, column, int(element))
+                except (TypeError, ValueError):
+                    continue
+
         return tuple(sorted(owners))
 
     def handle_tool_call(self, name: str, args: Dict[str, Any], **kwargs) -> str:
