@@ -34,8 +34,11 @@ class FailClosedPolicy:
         context: AccessContextV1 | None,
         operation: str,
         requested_narrowing: TargetScope,
-    ) -> Sequence[Any]:
-        return ()
+    ) -> TargetScope:
+        # An empty SCOPE, not an empty sequence: callers read this with .get,
+        # and the protocol declares a mapping. Both are falsy, so the practical
+        # behaviour is unchanged -- this keeps the type honest.
+        return {}
 
     def authorize_stored_scope(
         self,

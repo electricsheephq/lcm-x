@@ -79,7 +79,9 @@ def test_fail_closed_denies_every_protocol_operation_with_typed_reason() -> None
         assert isinstance(decision, Decision)
         assert decision.allowed is False
         assert decision.denial_reason is DenialReason.CONTEXT_MISSING
-    assert targets == ()
+    # An empty scope MAPPING -- resolve_authorized_targets is declared to
+    # return a TargetScope, because every production caller reads it with .get.
+    assert targets == {}
 
     public = denied[0].public()
     assert isinstance(public, PublicDecision)

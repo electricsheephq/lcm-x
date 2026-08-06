@@ -4241,9 +4241,23 @@ def _lcm_recall_fts_arm(
         "limit": candidate_limit,
     }
     if isinstance(authorized_scope, Mapping):
+        # The resolved mapping is authoritative for the target dimension: a key
+        # the policy OMITS is a target it did not authorize, so the permissive
+        # default is REMOVED rather than left standing. Keeping the hard-coded
+        # session_scope="all" meant a policy narrowing the corpus to a single
+        # session -- or authorizing nothing at all -- still searched every
+        # session. Dropping the key degrades to this tool's own "current"
+        # default, which is the narrowest scope it offers.
         for key in ("session_scope", "session_id", "source", "conversation_id"):
             if key in authorized_scope:
                 fts_args[key] = authorized_scope[key]
+            else:
+                fts_args.pop(key, None)
+        # A resolved session_id with no scope is incoherent for this tool
+        # ("session_id is only valid with session_scope=session"), so name the
+        # scope the policy's own narrowing implies instead of erroring out.
+        if "session_id" in fts_args and "session_scope" not in authorized_scope:
+            fts_args["session_scope"] = "session"
     payload = _lcm_grep_full_text_with_deadline(
         fts_args,
         engine=engine,

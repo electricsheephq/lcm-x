@@ -112,7 +112,11 @@ def validate(
     """
 
     now = _utc(now)
-    revoked_ids = frozenset(revoked_context_ids or ())
+    # Normalised through the same string-or-iterable helper as required_scope.
+    # A bare "ctx-human" satisfies the declared Iterable[str], and frozenset()
+    # would shred it into single characters -- so the revoked context would
+    # match nothing and be ALLOWED. The failure is silent and inverts the stage.
+    revoked_ids = _scope_values(revoked_context_ids)
     required = _scope_values(required_scope)
 
     for stage in VALIDATION_ORDER:
@@ -137,7 +141,13 @@ def validate(
                 )
         elif stage is ValidationStage.NOT_EXPIRED:
             assert context is not None
-            if now >= context.expires_at:
+            # Both ends of the validity window. A future-dated envelope is as
+            # unusable as a lapsed one -- issued_at bounds delegation lifetime,
+            # so accepting now < issued_at would honour authority that has not
+            # begun. CONTEXT_EXPIRED covers both ends rather than adding a
+            # reason: the taxonomy is frozen by #482, and the public projection
+            # deliberately does not distinguish before-window from after-window.
+            if now >= context.expires_at or now < context.issued_at:
                 return Decision.deny(
                     DenialReason.CONTEXT_EXPIRED,
                     context_id=context.context_id,

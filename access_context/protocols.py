@@ -35,8 +35,16 @@ class LcmAuthorizationConsumer(Protocol):
         context: AccessContextV1 | None,
         operation: str,
         requested_narrowing: TargetScope,
-    ) -> Sequence[Any]:
-        """Resolve targets only within the already-authorized narrowing."""
+    ) -> TargetScope:
+        """Resolve targets only within the already-authorized narrowing.
+
+        Declared as a scope MAPPING, not a sequence. Every production caller
+        reads the result with ``.get`` -- ``retrieval_core.run_knn`` does it
+        immediately -- so a policy that honoured a ``Sequence[Any]`` annotation
+        by returning a list would crash every retrieval it allowed. The
+        annotation is the contract a Teams adapter is written against, so it
+        has to describe the shape callers actually consume.
+        """
 
     def authorize_stored_scope(
         self,

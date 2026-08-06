@@ -708,8 +708,18 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             _access_policy.TEAMS_ENABLED_ATTR,
             _access_policy.ACCESS_CONTEXT_ACCESSOR,
         ):
-            if hasattr(self, wiring_name):
-                setattr(clone, wiring_name, getattr(self, wiring_name))
+            # Only per-INSTANCE wiring is copied, and a callable bound to the
+            # prototype is rebound to the clone. A class-defined accessor is
+            # already inherited and rebinds through the descriptor protocol;
+            # copying getattr(self, name) would hand every clone a method bound
+            # to the PROTOTYPE, so each agent clone would read the prototype's
+            # context and authorize as the wrong principal.
+            if wiring_name not in vars(self):
+                continue
+            wiring_value = vars(self)[wiring_name]
+            if getattr(wiring_value, "__self__", None) is self:
+                wiring_value = wiring_value.__func__.__get__(clone, type(clone))
+            setattr(clone, wiring_name, wiring_value)
         if self._context_length_source:
             clone._set_context_length(
                 self.raw_context_length,
@@ -2693,11 +2703,24 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         # Authorize before ``hermes_home`` can rebind the engine's storage.
         policy = policy_for_engine(self)
         access_context = policy_access_context(self)
+        boundary_reason = str(kwargs.get("boundary_reason") or "")
+        old_session_id = str(kwargs.get("old_session_id") or "")
         expected_scope = {
             "kind": "session_start",
             "session_id": session_id,
             "conversation_id": kwargs.get("conversation_id"),
         }
+        # A compression rollover READS the source session's lifecycle and DAG
+        # and can reassign its summary nodes into the destination. The source
+        # is caller-supplied and may name another principal's durable session,
+        # so it has to be presented to the policy BEFORE any rollover lookup --
+        # authorizing only the destination asked about the wrong session.
+        if (
+            boundary_reason == "compression"
+            and old_session_id
+            and old_session_id != session_id
+        ):
+            expected_scope["source_session_id"] = old_session_id
         decision = policy.authorize_operation(access_context, "write", expected_scope)
         policy.audit_decision(
             access_context, "write", decision.denial_reason, decision.public()
@@ -2709,8 +2732,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         if "hermes_home" in kwargs:
             self._rebind_storage_for_home(str(kwargs.get("hermes_home") or ""))
 
-        boundary_reason = str(kwargs.get("boundary_reason") or "")
-        old_session_id = str(kwargs.get("old_session_id") or "")
+        # boundary_reason / old_session_id are read above, before authorization.
         previous_session_id = self._session_id
         self._lcm_current_start_allows_bypass_lineage = False
         requested_platform = str(kwargs.get("platform") or self._session_platform or "")

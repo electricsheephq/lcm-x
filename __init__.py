@@ -152,11 +152,48 @@ def _hook_question_date(payload: dict) -> object:
     return None
 
 
+def _authorize_supplied_baseline_refs(active_engine, refs) -> tuple:
+    """Authorize caller-supplied exact refs before any content is read.
+
+    The generated path goes through ``handle_tool_call("lcm_recall", ...)``,
+    which is gated. Caller-supplied refs skipped that entirely: each one names
+    a store_id whose exact span is read straight out of the store and injected
+    into the model context, so a ref to another principal's known store_id was
+    disclosed verbatim without the policy ever seeing it. Unauthorized refs are
+    dropped rather than raising, so a partly-authorized payload still answers
+    from the part the caller may see.
+    """
+    # Deferred for the same reason as _policy_api: this module loads both as a
+    # package and directly, so relative imports cannot sit at module scope.
+    from .preanswer_evidence import _EXACT_REF_RE
+
+    policy_for_engine, policy_access_context = _policy_api()
+    policy = policy_for_engine(active_engine)
+    access_context = policy_access_context(active_engine)
+    authorized: list[str] = []
+    for ref in refs:
+        match = _EXACT_REF_RE.fullmatch(str(ref))
+        if match is None:
+            continue
+        expected_scope = {
+            "kind": "preanswer_baseline_ref",
+            "store_id": int(match.group("store_id")),
+            "exact_ref": str(ref),
+        }
+        decision = policy.authorize_operation(access_context, "read", expected_scope)
+        policy.audit_decision(
+            access_context, "read", decision.denial_reason, decision.public()
+        )
+        if decision.allowed:
+            authorized.append(str(ref))
+    return tuple(authorized)
+
+
 def _answer_ready_baseline(active_engine, question: str, payload: dict):
     """Return caller-supplied exact refs or create one bounded product baseline."""
     baseline_refs = payload.get("baseline_refs")
     if isinstance(baseline_refs, (list, tuple)):
-        return tuple(baseline_refs)
+        return _authorize_supplied_baseline_refs(active_engine, baseline_refs)
     raw = active_engine.handle_tool_call(
         "lcm_recall",
         {

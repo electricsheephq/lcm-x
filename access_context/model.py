@@ -252,10 +252,34 @@ class AccessContextV1:
         ):
             raise ScopeMismatchError("default collection would fall outside the child allowlist")
 
-        child_narrowing = set(self.narrowing)
+        # Narrowing REPLACES a dimension; it does not union with it. Seeding the
+        # child with every parent token and adding the child's on top keeps the
+        # superseded ones: narrowing operation:{read,write} down to read left
+        # operation:write in place, so the "read-only" child's
+        # operation_allowlist still passed a write check. Each dimension the
+        # caller actually narrows is cleared first -- whether it was named
+        # through the typed argument or as an explicit token.
+        narrowed_dimensions = {
+            token.partition(":")[0]
+            for token in requested_narrowing
+            if token.partition(":")[2]
+        }
+        if requested_operations is not None:
+            narrowed_dimensions.add("operation")
+        if requested_collections is not None:
+            narrowed_dimensions.add("collection")
+        if audience is not None:
+            narrowed_dimensions.add("audience")
+
+        child_narrowing = {
+            token
+            for token in self.narrowing
+            if token.partition(":")[0] not in narrowed_dimensions
+        }
         if requested_operations is not None:
             child_narrowing.update(f"operation:{item}" for item in child_grants)
-        child_narrowing.update(f"collection:{item}" for item in child_collections)
+        if requested_collections is not None:
+            child_narrowing.update(f"collection:{item}" for item in child_collections)
         if audience is not None:
             child_narrowing.update(f"audience:{item}" for item in child_audience)
         for token in requested_narrowing:
