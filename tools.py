@@ -11,7 +11,12 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, TYPE_CHECKING
+from typing import Any, Dict, Mapping, TYPE_CHECKING
+
+from . import access_policy as _access_policy
+AuthorizationRequiredError = _access_policy.AuthorizationRequiredError
+policy_for_engine = _access_policy.policy_for_engine
+policy_access_context = _access_policy.policy_access_context
 
 from .externalize import (
     _inspect_top_level_json_string_fields_before_content as _externalized_top_level_fields_before_content,
@@ -4205,13 +4210,42 @@ def _lcm_recall_fts_arm(
     engine: "LCMEngine", query: str, *, candidate_limit: int, deadline: float
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """FTS arm: raw messages across ALL sessions (no conversation filter)."""
+    policy = policy_for_engine(engine)
+    access_context = policy_access_context(engine)
+    expected_scope = {
+        "kind": "recall_corpus",
+        "tool_name": "lcm_recall",
+        "arm": "fts",
+        "session_scope": "all",
+        "session_id": None,
+        "conversation_ids": None,
+        "source": None,
+    }
+    decision = policy.authorize_operation(access_context, "read", expected_scope)
+    policy.audit_decision(
+        access_context, "read", decision.denial_reason, decision.public()
+    )
+    if not decision.allowed:
+        raise AuthorizationRequiredError(
+            "authorize_operation", decision.denial_reason
+        )
+    authorized_scope = policy.resolve_authorized_targets(
+        access_context, "read", expected_scope
+    )
+    if isinstance(authorized_scope, Mapping):
+        authorized_scope = authorized_scope.get("target_scope", authorized_scope)
+    fts_args = {
+        "query": query,
+        "mode": "recall",
+        "session_scope": "all",
+        "limit": candidate_limit,
+    }
+    if isinstance(authorized_scope, Mapping):
+        for key in ("session_scope", "session_id", "source", "conversation_id"):
+            if key in authorized_scope:
+                fts_args[key] = authorized_scope[key]
     payload = _lcm_grep_full_text_with_deadline(
-        {
-            "query": query,
-            "mode": "recall",
-            "session_scope": "all",
-            "limit": candidate_limit,
-        },
+        fts_args,
         engine=engine,
         deadline=deadline,
         limit_cap=_LCM_GREP_HYBRID_CANDIDATE_CAP,

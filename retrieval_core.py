@@ -325,6 +325,26 @@ def run_chunk_knn(
     ``knn_chunks`` instead of ``knn``. Returns the store's coverage contract
     (full|bounded|none) so the caller degrades identically to the summary arm.
     """
+    policy = policy_for_engine(engine)
+    access_context = policy_access_context(engine)
+    expected_scope = {
+        "conversation_ids": conversation_ids,
+        "source": source,
+        "corpus": "chunks",
+    }
+    decision = policy.authorize_operation(access_context, "read", expected_scope)
+    policy.audit_decision(
+        access_context, "read", decision.denial_reason, decision.public()
+    )
+    if not decision.allowed:
+        raise AuthorizationRequiredError(
+            "authorize_operation", decision.denial_reason
+        )
+    authorized_scope = policy.resolve_authorized_targets(
+        access_context, "read", expected_scope
+    )
+    conversation_ids = authorized_scope.get("conversation_ids", conversation_ids)
+    source = authorized_scope.get("source", source)
     if time.monotonic() >= deadline:
         raise TimeoutError("chunk vector search deadline exhausted")
     return _run_pooled_knn(

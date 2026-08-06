@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from hermes_lcm.access_policy import AuthorizationRequiredError
 from hermes_lcm.dag import SummaryDAG
 from hermes_lcm.store import MessageStore
 
@@ -341,6 +342,29 @@ def test_dry_run_does_not_create_target_db(tmp_path: Path):
     assert result.skipped_existing == 0
     assert result.backup_path is None
     assert not target_db.exists()
+
+
+def test_apply_scoped_target_requires_a_carrier(tmp_path: Path):
+    importer = load_importer_module()
+    source_db = tmp_path / "lossless.db"
+    target_db = tmp_path / "teams-target.db"
+    create_lossless_source(source_db)
+    target_store = MessageStore(target_db)
+    target_store.append(
+        "existing-session",
+        {"role": "user", "content": "scoped target"},
+        token_estimate=2,
+        access_scope="principal-owner",
+    )
+    target_store.close()
+
+    with pytest.raises(AuthorizationRequiredError, match="context_missing"):
+        importer.import_lossless_claw(
+            source_db=source_db,
+            target_db=target_db,
+            import_id="scoped-target",
+            apply=True,
+        )
 
 
 def test_dry_run_handles_uri_reserved_source_db_path(tmp_path: Path):

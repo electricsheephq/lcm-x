@@ -49,9 +49,10 @@ def backup_database(engine) -> dict[str, Any]:
     policy = policy_for_engine(engine)
     access_context = policy_access_context(engine)
     expected_scope = {"kind": "backup", "operation": "backup_database"}
-    decision = policy.authorize_operation(access_context, "write", expected_scope)
+    expected_scope["required_scope"] = "owner_only"
+    decision = policy.authorize_operation(access_context, "owner_only", expected_scope)
     policy.audit_decision(
-        access_context, "write", decision.denial_reason, decision.public()
+        access_context, "owner_only", decision.denial_reason, decision.public()
     )
     if not decision.allowed:
         raise AuthorizationRequiredError("authorize_operation", decision.denial_reason)
@@ -104,9 +105,10 @@ def rotate_backup_database(engine) -> dict[str, Any]:
     policy = policy_for_engine(engine)
     access_context = policy_access_context(engine)
     expected_scope = {"kind": "backup", "operation": "rotate_backup_database"}
-    decision = policy.authorize_operation(access_context, "write", expected_scope)
+    expected_scope["required_scope"] = "owner_only"
+    decision = policy.authorize_operation(access_context, "owner_only", expected_scope)
     policy.audit_decision(
-        access_context, "write", decision.denial_reason, decision.public()
+        access_context, "owner_only", decision.denial_reason, decision.public()
     )
     if not decision.allowed:
         raise AuthorizationRequiredError("authorize_operation", decision.denial_reason)

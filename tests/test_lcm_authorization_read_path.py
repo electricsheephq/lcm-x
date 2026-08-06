@@ -16,6 +16,7 @@ FailClosedPolicy = _access_policy.FailClosedPolicy
 TrustedOwnerPolicy = _access_policy.TrustedOwnerPolicy
 policy_for_engine = _access_policy.policy_for_engine
 import hermes_lcm.retrieval_core as retrieval_core
+import hermes_lcm.tools as lcm_tools
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -376,6 +377,36 @@ def test_enabled_but_unwired_engine_fails_closed_on_every_arm(tmp_path: Path) ->
             ranked_rows=[(7, 1.0, "summary")],
             knn_limit=1,
             deadline=_deadline(),
+        )
+
+
+def test_recall_fts_and_chunk_arms_authorize_before_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _engine(tmp_path)
+    policy = FailClosedPolicy()
+    monkeypatch.setattr(lcm_tools, "policy_for_engine", lambda _engine: policy)
+    monkeypatch.setattr(lcm_tools, "policy_access_context", lambda _engine: None)
+    with pytest.raises(AuthorizationRequiredError, match="authorize_operation"):
+        lcm_tools._lcm_recall_fts_arm(
+            engine, "secret", candidate_limit=2, deadline=_deadline()
+        )
+
+    monkeypatch.setattr(retrieval_core, "policy_for_engine", lambda _engine: policy)
+    monkeypatch.setattr(retrieval_core, "policy_access_context", lambda _engine: None)
+    provider = SimpleNamespace(model_id="model", provider_id="provider")
+    with pytest.raises(AuthorizationRequiredError, match="authorize_operation"):
+        retrieval_core.run_chunk_knn(
+            engine,
+            query_vector=[1.0],
+            provider=provider,
+            knn_limit=2,
+            deadline=_deadline(),
+            since=None,
+            until=None,
+            conversation_ids=None,
+            source=None,
+            vector_store_cls=object,
         )
 
 

@@ -44,11 +44,13 @@ AuthorizationRequiredError = _access_policy.AuthorizationRequiredError
 policy_for_engine = _access_policy.policy_for_engine
 policy_access_context = _access_policy.policy_access_context
 
+from hermes_lcm.access_context import Decision, DenialReason  # noqa: E402
 from hermes_lcm.config import LCMConfig  # noqa: E402
 from hermes_lcm.dag import build_nodes_fts_spec  # noqa: E402
 from hermes_lcm.db_bootstrap import add_column_if_missing, ensure_external_content_fts  # noqa: E402
 from hermes_lcm.ingest_protection import protect_message_for_ingest  # noqa: E402
 from hermes_lcm.message_content import normalize_content_value  # noqa: E402
+from hermes_lcm.scope_storage import SCOPE_BEARING_TABLES  # noqa: E402
 from hermes_lcm.store import MessageStore, _normalize_source_value  # noqa: E402
 from hermes_lcm.tokens import count_message_tokens  # noqa: E402
 
@@ -175,6 +177,62 @@ class ImportResult:
 
 def _readonly_sqlite_uri(db_path: Path) -> str:
     return db_path.resolve().as_uri() + "?mode=ro"
+
+
+def _target_has_stamped_scope(target_path: Path) -> bool:
+    """Detect a Teams-scoped target before an uncarried apply can write it."""
+    if not target_path.is_file():
+        return False
+    try:
+        conn = sqlite3.connect(_readonly_sqlite_uri(target_path), uri=True)
+    except sqlite3.Error:
+        return True
+    try:
+        for table in SCOPE_BEARING_TABLES:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                (table,),
+            ).fetchone()
+            if exists is None:
+                continue
+            columns = {
+                str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")')
+            }
+            if "access_scope" not in columns:
+                continue
+            if conn.execute(
+                f'SELECT 1 FROM "{table}" WHERE access_scope IS NOT NULL LIMIT 1'
+            ).fetchone():
+                return True
+        return False
+    except sqlite3.Error:
+        return True
+    finally:
+        conn.close()
+
+
+def _authorize_import(
+    policy: Any,
+    access_context: Any,
+    expected_scope: dict[str, Any],
+    *,
+    target_path: Path,
+    apply: bool,
+) -> None:
+    operation = "owner_only"
+    expected_scope["required_scope"] = operation
+    decision = policy.authorize_operation(access_context, operation, expected_scope)
+    policy.audit_decision(
+        access_context, operation, decision.denial_reason, decision.public()
+    )
+    if not decision.allowed:
+        raise AuthorizationRequiredError("authorize_operation", decision.denial_reason)
+    if apply and _target_has_stamped_scope(target_path) and access_context is None:
+        missing = Decision.deny(DenialReason.CONTEXT_MISSING)
+        policy.audit_decision(
+            access_context, operation, missing.denial_reason, missing.public()
+        )
+        raise AuthorizationRequiredError("authorize_operation", missing.denial_reason)
 
 
 def _connect_readonly(db_path: Path) -> sqlite3.Connection:
@@ -1286,12 +1344,13 @@ def import_lossless_claw(
         "target_db": str(target_path),
         "apply": bool(apply),
     }
-    decision = policy.authorize_operation(access_context, "write", expected_scope)
-    policy.audit_decision(
-        access_context, "write", decision.denial_reason, decision.public()
+    _authorize_import(
+        policy,
+        access_context,
+        expected_scope,
+        target_path=target_path,
+        apply=apply,
     )
-    if not decision.allowed:
-        raise AuthorizationRequiredError("authorize_operation", decision.denial_reason)
     resolved_import_id = import_id or _default_import_id(source_path)
     if session_identity not in VALID_SESSION_IDENTITIES:
         raise ValueError(
@@ -3206,12 +3265,13 @@ def import_jsonl_sessions(
         "target_db": str(target_path),
         "apply": bool(apply),
     }
-    decision = policy.authorize_operation(access_context, "write", expected_scope)
-    policy.audit_decision(
-        access_context, "write", decision.denial_reason, decision.public()
+    _authorize_import(
+        policy,
+        access_context,
+        expected_scope,
+        target_path=target_path,
+        apply=apply,
     )
-    if not decision.allowed:
-        raise AuthorizationRequiredError("authorize_operation", decision.denial_reason)
     resolved_import_id = import_id or _default_jsonl_import_id(source_files)
     existing_tool_call_ids = _existing_tool_call_ids_by_source_session(
         target_path,

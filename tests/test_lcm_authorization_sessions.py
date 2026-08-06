@@ -60,6 +60,69 @@ def test_default_off_callback_and_maintenance_passthrough(tmp_path: Path) -> Non
         engine.shutdown()
 
 
+def test_tool_dispatch_uses_inventory_authority_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _engine(tmp_path)
+    policy = _RecordingPolicy("authority")
+    monkeypatch.setattr(engine_module, "policy_for_engine", lambda _engine: policy)
+    monkeypatch.setattr(engine_module, "policy_access_context", lambda _engine: None)
+    monkeypatch.setattr(engine_module.lcm_tools, "lcm_compute", lambda *_args, **_kwargs: "compute")
+    monkeypatch.setattr(
+        engine_module.lcm_tools,
+        "lcm_compile_evidence",
+        lambda *_args, **_kwargs: "compile",
+    )
+    try:
+        assert engine.handle_tool_call("lcm_compute", {"operands": []}) == "compute"
+        assert engine.handle_tool_call("lcm_compile_evidence", {}) == "compile"
+        assert [operation for operation, _scope in policy.calls] == ["write", "write"]
+        assert all(scope["required_scope"] == "write" for _operation, scope in policy.calls)
+    finally:
+        engine.shutdown()
+
+
+def test_clone_for_agent_preserves_teams_wiring(
+    tmp_path: Path,
+) -> None:
+    prototype = _engine(tmp_path)
+    prototype.lcm_teams_enabled = True
+    prototype.get_lcm_access_context = lambda: None
+    clone = None
+    try:
+        clone = prototype.clone_for_agent()
+        assert clone.lcm_teams_enabled is True
+        assert callable(clone.get_lcm_access_context)
+        assert isinstance(engine_module.policy_for_engine(clone), FailClosedPolicy)
+    finally:
+        prototype.shutdown()
+        if clone is not None:
+            clone.shutdown()
+
+
+def test_backup_maintenance_requires_owner_only_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _engine(tmp_path)
+
+    class OwnerOnlyPolicy(_RecordingPolicy):
+        def authorize_operation(self, context, operation, expected_scope):
+            self.calls.append((operation, dict(expected_scope)))
+            if operation != "owner_only" or expected_scope.get("required_scope") != "owner_only":
+                return Decision.deny("scope_forbidden")
+            return Decision.allow()
+
+    policy = OwnerOnlyPolicy("owner")
+    monkeypatch.setattr(maintenance_module, "policy_for_engine", lambda _engine: policy)
+    monkeypatch.setattr(maintenance_module, "policy_access_context", lambda _engine: None)
+    try:
+        assert maintenance_module.backup_database(engine)["ok"] is True
+        assert maintenance_module.rotate_backup_database(engine)["ok"] is True
+        assert [operation for operation, _scope in policy.calls] == ["owner_only", "owner_only"]
+    finally:
+        engine.shutdown()
+
+
 def test_fail_closed_callbacks_refuse_before_rebind_ingest_or_reset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

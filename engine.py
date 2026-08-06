@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 from agent.context_engine import ContextEngine
 
 from .access_context import AccessContextV1, Decision, DenialReason, is_subset_of
+from .access_context.inventory import load_inventory
 
 from . import access_policy as _access_policy
 AuthorizationRequiredError = _access_policy.AuthorizationRequiredError
@@ -417,6 +418,19 @@ LCM_TOOL_TARGET_BINDINGS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+_AUTHORITY_OPERATION_BY_REQUIREMENT = {
+    "read_scoped": "read",
+    "write_scoped": "write",
+    "owner_only": "owner_only",
+    "admin_only": "admin",
+    "none_required": "none",
+}
+LCM_TOOL_AUTHORITY_OPERATIONS = {
+    entry.entry_point: _AUTHORITY_OPERATION_BY_REQUIREMENT[entry.authority_requirement]
+    for entry in load_inventory()
+    if entry.module == "tools.py" and entry.entry_point.startswith("lcm_")
+}
+
 
 class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessionMixin, PlaceholderLedgerMixin, BypassMixin, ContextEngine):
     """Lossless Context Management engine.
@@ -690,6 +704,12 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         clone.api_key = self.api_key
         clone.provider = self.provider
         clone.api_mode = self.api_mode
+        for wiring_name in (
+            _access_policy.TEAMS_ENABLED_ATTR,
+            _access_policy.ACCESS_CONTEXT_ACCESSOR,
+        ):
+            if hasattr(self, wiring_name):
+                setattr(clone, wiring_name, getattr(self, wiring_name))
         if self._context_length_source:
             clone._set_context_length(
                 self.raw_context_length,
@@ -3920,16 +3940,18 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             "target_scope": target_scope,
         }
         expected_scope.update(target_scope)
-        decision = policy.authorize_operation(access_context, "read", expected_scope)
+        operation = LCM_TOOL_AUTHORITY_OPERATIONS.get(name, "read")
+        expected_scope["required_scope"] = operation
+        decision = policy.authorize_operation(access_context, operation, expected_scope)
         policy.audit_decision(
-            access_context, "read", decision.denial_reason, decision.public()
+            access_context, operation, decision.denial_reason, decision.public()
         )
         if not decision.allowed:
             raise AuthorizationRequiredError(
                 "authorize_operation", decision.denial_reason
             )
         authorized_scope = policy.resolve_authorized_targets(
-            access_context, "read", expected_scope
+            access_context, operation, expected_scope
         )
         # A policy may narrow a target before dispatch.  Apply the resolved
         # values to the handler arguments so the body cannot continue with the
