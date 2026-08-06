@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from enum import Enum
 
@@ -57,7 +58,34 @@ def policy_for_engine(engine: object) -> "TrustedOwnerPolicy | FailClosedPolicy"
         # either: zero is a real revision value, so a context minted at zero
         # would validate against a catalog nobody could read.
         return FailClosedPolicy(DenialReason.CONTEXT_INVALID)
-    return resolve_policy(context, teams_enabled, current_revisions=revisions)
+    return resolve_policy(
+        context,
+        teams_enabled,
+        current_revisions=revisions,
+        audit_sink=_audit_sink_for_engine(engine),
+    )
+
+
+def _audit_sink_for_engine(engine: object):
+    """Bind an audit writer to this engine's store, or None.
+
+    A CALLABLE rather than the connection itself: the policy stays free of a
+    database handle, which is what keeps it unit-testable with a recording fake
+    and consistent with how raw-identifier ownership is resolved (in the
+    engine, before the policy is asked).
+    """
+
+    from ..teams.catalog import record_audit_event
+
+    store = getattr(engine, "_store", None)
+    connection = getattr(store, "connection", None)
+    if connection is None:
+        return None
+
+    def sink(**fields: object) -> None:
+        record_audit_event(connection, occurred_at=time.time(), **fields)
+
+    return sink
 
 
 class _CatalogLookup(Enum):
@@ -104,6 +132,7 @@ def resolve_policy(
     teams_enabled: bool,
     now: datetime | None = None,
     current_revisions: object | None = None,
+    audit_sink: object | None = None,
 ) -> TrustedOwnerPolicy | FailClosedPolicy:
     """Resolve the policy from the explicit Teams flag and carrier context.
 
@@ -115,14 +144,15 @@ def resolve_policy(
     them every comparison in that stage is against ``None`` and short-circuits,
     so a revoked context validated exactly like a current one.
 
-    ⚠ Still NOT enforced by this function, and worth naming rather than
-    leaving to be discovered: OWNERSHIP_CURRENT's generation check and
-    LEASE_CURRENT both remain inert, because the catalog does not yet track
-    ownership generations or leases. SCOPE_PERMITTED and TARGET_RESOLUTION are
-    per-OPERATION rather than per-context and belong in the policy's
-    authorize_operation, not here. A valid context reaching the allowed branch
-    below still resolves to ``TrustedOwnerPolicy``; revocation is now real, the
-    rest of enforcement is not.
+    A valid context now resolves to :class:`TeamsPolicy`, which scopes to the
+    acting principal. The permissive placeholder is gone.
+
+    ⚠ Still inert HERE, and worth naming rather than leaving to be discovered:
+    OWNERSHIP_CURRENT's generation check and LEASE_CURRENT, because the catalog
+    does not yet track ownership generations or leases. SCOPE_PERMITTED and
+    TARGET_RESOLUTION are per-OPERATION rather than per-context, so they belong
+    in the policy's authorize_operation -- which is where TeamsPolicy now makes
+    them, via the owner-of-target and store-wide rules.
     """
 
     mode = resolve_mode(carrier_context, teams_enabled)
@@ -144,6 +174,6 @@ def resolve_policy(
         current_revocation_epoch=getattr(current_revisions, "revocation_epoch", None),
     )
     if validation.allowed:
-        return TeamsPolicy(carrier_context)
+        return TeamsPolicy(carrier_context, audit_sink=audit_sink)
     assert validation.denial_reason is not None
     return FailClosedPolicy(validation.denial_reason)

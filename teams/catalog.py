@@ -167,6 +167,84 @@ def read_revisions(conn: sqlite3.Connection, tenant_id: str) -> CatalogRevisions
     )
 
 
+def record_audit_event(
+    conn: sqlite3.Connection,
+    *,
+    occurred_at: float,
+    tenant_id: str,
+    principal_id: str,
+    operation: str,
+    allowed: bool,
+    denial_reason: str | None = None,
+    detail: str | None = None,
+) -> None:
+    """Append one authorization outcome to the audit trail.
+
+    The denial reason stored here is the PUBLIC projection, never the internal
+    one. #497 exposes an ``audit.*`` family, so these rows can leave the store
+    and reach a tenant admin; an internal reason distinguishes "forbidden" from
+    "does not exist", which is exactly the distinction the public projection
+    exists to collapse. An operator debugging a denial has the operation, the
+    principal and the timestamp, which is enough to correlate.
+
+    Best-effort by construction: auditing must never be the reason an
+    authorized operation fails. A store whose audit table is missing or locked
+    still serves its principals.
+    """
+
+    try:
+        conn.execute(
+            "INSERT INTO lcm_teams_audit("
+            "occurred_at, tenant_id, principal_id, operation, allowed, "
+            "denial_reason, detail) VALUES(?, ?, ?, ?, ?, ?, ?)",
+            (
+                float(occurred_at),
+                str(tenant_id or ""),
+                str(principal_id or ""),
+                str(operation or ""),
+                1 if allowed else 0,
+                str(denial_reason) if denial_reason is not None else None,
+                str(detail) if detail is not None else None,
+            ),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        return
+
+
+def read_audit_events(
+    conn: sqlite3.Connection, *, tenant_id: str | None = None, limit: int = 100
+) -> list[dict[str, object]]:
+    """Read the audit trail, newest first."""
+
+    if tenant_id is None:
+        rows = conn.execute(
+            "SELECT occurred_at, tenant_id, principal_id, operation, allowed, "
+            "denial_reason, detail FROM lcm_teams_audit "
+            "ORDER BY event_id DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT occurred_at, tenant_id, principal_id, operation, allowed, "
+            "denial_reason, detail FROM lcm_teams_audit WHERE tenant_id = ? "
+            "ORDER BY event_id DESC LIMIT ?",
+            (str(tenant_id), int(limit)),
+        ).fetchall()
+    return [
+        {
+            "occurred_at": row[0],
+            "tenant_id": row[1],
+            "principal_id": row[2],
+            "operation": row[3],
+            "allowed": bool(row[4]),
+            "denial_reason": row[5],
+            "detail": row[6],
+        }
+        for row in rows
+    ]
+
+
 def set_revisions(
     conn: sqlite3.Connection, tenant_id: str, revisions: CatalogRevisions
 ) -> None:

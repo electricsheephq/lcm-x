@@ -13,7 +13,8 @@ alone, which is enough to find out which probes still leak.
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+import time
+from typing import Any, Callable, Sequence
 
 from ..access_context.denials import Decision, DenialReason, PublicDecision
 from ..access_context.model import AccessContextV1
@@ -42,8 +43,13 @@ def principal_of(context: AccessContextV1 | None) -> str:
 class TeamsPolicy:
     """Scope every operation to the acting principal."""
 
-    def __init__(self, context: AccessContextV1 | None) -> None:
+    def __init__(
+        self,
+        context: AccessContextV1 | None,
+        audit_sink: "Callable[..., None] | None" = None,
+    ) -> None:
         self._context = context
+        self._audit_sink = audit_sink
         self.teams_enabled = True
 
     # -- authorization ----------------------------------------------------
@@ -145,7 +151,33 @@ class TeamsPolicy:
         internal_reason: DenialReason | None,
         public_result: PublicDecision,
     ) -> None:
-        # Phase 3d writes these to lcm_teams_audit.
+        """Record what was decided, without recording why in internal terms.
+
+        Volume is deliberately bounded. Every denial is recorded, but only
+        NON-READ allows are: `audit_decision` has 39 call sites and reads
+        dominate them, so a row per authorization would put an INSERT in the
+        hot path of every retrieval. This branch already cost this branch a
+        48s->174s regression once, from far less.
+
+        The reason written out is ``public_result``'s, never
+        ``internal_reason`` -- see record_audit_event for why that matters when
+        an audit export leaves the store.
+        """
+
+        if self._audit_sink is None:
+            return None
+        allowed = bool(getattr(public_result, "allowed", False))
+        if allowed and str(operation) == "read":
+            return None
+        effective = context if context is not None else self._context
+        reason = getattr(public_result, "denial_reason", None)
+        self._audit_sink(
+            tenant_id=str(getattr(effective, "tenant_id", "") or ""),
+            principal_id=principal_of(effective),
+            operation=str(operation),
+            allowed=allowed,
+            denial_reason=getattr(reason, "value", None) if reason else None,
+        )
         return None
 
     # -- disclosure primitives (no production call sites; protocol only) ---
