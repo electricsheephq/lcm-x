@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import MappingProxyType
 from pathlib import Path
@@ -52,6 +53,13 @@ def test_positive_contexts_validate() -> None:
     for path in paths:
         context = _context(path)
         assert validate(context, required_scope="read", now=NOW).allowed, path
+
+
+def test_validation_uses_effective_operation_allowlist() -> None:
+    context = _context(Path("tests/fixtures/access_context_v1/positive/human.json"))
+    narrowed = replace(context, narrowing=frozenset({"operation:read"}))
+    decision = validate(narrowed, required_scope="write", now=NOW)
+    assert decision.denial_reason is DenialReason.SCOPE_FORBIDDEN
 
 
 def _expected_decision(path: Path):
@@ -350,7 +358,7 @@ class RecordingCarrier:
     def __init__(self, context):
         self.context = context
 
-    def get_access_context(self):
+    def get_lcm_access_context(self):
         return self.context
 
 
@@ -367,7 +375,7 @@ def test_consumer_protocol_freezes_473_steps_2_through_6() -> None:
     # consumer protocol owns, and are what this test freezes.
     assert validate(context, now=NOW).allowed
 
-    context = carrier.get_access_context()
+    context = carrier.get_lcm_access_context()
     scope = {"collection": "collection-main"}
     decision = consumer.authorize_operation(context, "read", scope)
     authorized_targets = consumer.resolve_authorized_targets(context, "read", scope)

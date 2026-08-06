@@ -12,6 +12,12 @@ from ..access_context.protocols import TargetScope
 class TrustedOwnerPolicy:
     """Preserve the existing trusted-owner behavior for the default path."""
 
+    def __init__(self, *, teams_enabled: bool = False) -> None:
+        # This is routing metadata, not an authorization decision.  Hooks use
+        # the policy seam to distinguish default-off compatibility from the
+        # Teams-enabled placeholder policy without reading host wiring directly.
+        self.teams_enabled = bool(teams_enabled)
+
     def authorize_operation(
         self,
         context: AccessContextV1 | None,

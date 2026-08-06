@@ -43,6 +43,7 @@ def _deadline() -> float:
 class _RecordingPolicy:
     def __init__(self, events: list[str]) -> None:
         self.events = events
+        self.stored_scopes: list[dict[str, object]] = []
 
     def authorize_operation(self, context, operation, expected_scope):
         self.events.append("authorize_operation")
@@ -54,6 +55,7 @@ class _RecordingPolicy:
 
     def authorize_stored_scope(self, context, operation, stored_scope):
         self.events.append("authorize_stored_scope")
+        self.stored_scopes.append(dict(stored_scope))
         return Decision.allow()
 
     def audit_decision(self, context, operation, internal_reason, public_result):
@@ -275,10 +277,18 @@ def test_stored_scope_authorization_precedes_hydration_disclosure(
         "content": "hello world",
     }
 
+    class ScopeRow(dict):
+        def __getitem__(self, key):
+            if key == "content":
+                chunk_events.append("content_read")
+            return super().__getitem__(key)
+
     class ChunkConnection:
         row_factory = None
 
         def execute(self, sql, *_args, **_kwargs):
+            if "access_scope" in sql:
+                return [ScopeRow({**chunk_row, "access_scope": "principal-a"})]
             if "SELECT" in sql:
                 chunk_events.append("content_read")
                 return [chunk_row]
@@ -299,6 +309,7 @@ def test_stored_scope_authorization_precedes_hydration_disclosure(
         snippet_chars=40,
     )
     assert chunk_hits[0][0]["snippet"] == "hello"
+    assert chunk_policy.stored_scopes[0]["access_scope"] == "principal-a"
     assert chunk_events.index("authorize_stored_scope") < chunk_events.index("content_read")
 
     semantic_events: list[str] = []
@@ -317,6 +328,8 @@ def test_stored_scope_authorization_precedes_hydration_disclosure(
         row_factory = None
 
         def execute(self, *_args, **_kwargs):
+            if _args and "access_scope" in _args[0]:
+                return [{"node_id": 7, "access_scope": "principal-a"}]
             return []
 
         def set_progress_handler(self, *_args, **_kwargs):
@@ -333,6 +346,7 @@ def test_stored_scope_authorization_precedes_hydration_disclosure(
         deadline=_deadline(),
     )
     assert semantic_hits[0][0].node_id == 7
+    assert semantic_policy.stored_scopes[0]["access_scope"] == "principal-a"
     assert semantic_events.index("authorize_stored_scope") < semantic_events.index("content_read")
 
 

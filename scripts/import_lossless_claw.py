@@ -44,7 +44,7 @@ AuthorizationRequiredError = _access_policy.AuthorizationRequiredError
 policy_for_engine = _access_policy.policy_for_engine
 policy_access_context = _access_policy.policy_access_context
 
-from hermes_lcm.access_context import Decision, DenialReason  # noqa: E402
+from hermes_lcm.access_context import AccessContextV1, Decision, DenialReason  # noqa: E402
 from hermes_lcm.config import LCMConfig  # noqa: E402
 from hermes_lcm.dag import build_nodes_fts_spec  # noqa: E402
 from hermes_lcm.db_bootstrap import add_column_if_missing, ensure_external_content_fts  # noqa: E402
@@ -218,6 +218,7 @@ def _authorize_import(
     *,
     target_path: Path,
     apply: bool,
+    teams_enabled: bool,
 ) -> None:
     operation = "owner_only"
     expected_scope["required_scope"] = operation
@@ -233,6 +234,21 @@ def _authorize_import(
             access_context, operation, missing.denial_reason, missing.public()
         )
         raise AuthorizationRequiredError("authorize_operation", missing.denial_reason)
+    if apply and teams_enabled and _access_scope_from_context(access_context) is None:
+        invalid = Decision.deny(DenialReason.CONTEXT_INVALID)
+        policy.audit_decision(
+            access_context, operation, invalid.denial_reason, invalid.public()
+        )
+        raise AuthorizationRequiredError("authorize_operation", invalid.denial_reason)
+
+
+def _access_scope_from_context(context: Any) -> str | None:
+    """Return the storage owner scope carried by an authorized host context."""
+
+    if not isinstance(context, AccessContextV1):
+        return None
+    value = context.session_owner_principal_id or context.principal_id
+    return str(value).strip() or None
 
 
 def _connect_readonly(db_path: Path) -> sqlite3.Connection:
@@ -892,6 +908,7 @@ def _insert_summary_node(
     candidate: SummaryCandidate,
     source_ids: list[int],
     source_type: str,
+    access_scope: str | None,
 ) -> int:
     source_token_count = (
         candidate.descendant_token_count
@@ -919,7 +936,7 @@ def _insert_summary_node(
             candidate.earliest_at,
             candidate.latest_at,
             candidate.expand_hint,
-            None,
+            access_scope,
         ),
     )
     node_id = int(cur.lastrowid)
@@ -959,6 +976,7 @@ def _process_summary_candidates(
     imported_messages: dict[int, int],
     imported_summaries: dict[str, int],
     dry_run: bool,
+    access_scope: str | None = None,
 ) -> SummaryImportStats:
     stats = SummaryImportStats(scanned=len(candidates))
     summary_to_node = dict(imported_summaries)
@@ -979,6 +997,7 @@ def _process_summary_candidates(
             candidate=candidate,
             source_ids=source_ids,
             source_type=source_type,
+            access_scope=access_scope,
         )
         summary_to_node[candidate.source_summary_id] = node_id
         stats.imported += 1
@@ -1113,6 +1132,7 @@ def _insert_import_candidate(
     candidate: ImportCandidate,
     protection_config: LCMConfig,
     target_path: Path,
+    access_scope: str | None,
 ) -> int:
     protected_msg = protect_message_for_ingest(
         _candidate_message(candidate),
@@ -1136,7 +1156,7 @@ def _insert_import_candidate(
             protected_msg.get("tool_name"),
             candidate.timestamp,
             count_message_tokens(protected_msg),
-            None,
+            access_scope,
         ),
     )
     store_id = int(cur.lastrowid)
@@ -1170,6 +1190,7 @@ def _process_import_candidates(
     apply: bool,
     summary_candidates: list[SummaryCandidate] | None = None,
     include_summaries: bool = False,
+    access_scope: str | None = None,
     invalid_rows: int = 0,
     warnings: list[str] | None = None,
 ) -> ImportResult:
@@ -1198,6 +1219,7 @@ def _process_import_candidates(
                 imported_messages=imported_message_map,
                 imported_summaries=_target_imported_summary_map(target_path, import_id),
                 dry_run=True,
+                access_scope=access_scope,
             )
         return ImportResult(
             source_db=source_label,
@@ -1230,6 +1252,7 @@ def _process_import_candidates(
             imported_messages=_target_imported_message_map(target_path, import_id),
             imported_summaries=_target_imported_summary_map(target_path, import_id),
             dry_run=True,
+            access_scope=access_scope,
         )
         summary_writes_planned = preflight_summary_stats.would_import > 0
 
@@ -1281,6 +1304,7 @@ def _process_import_candidates(
                 candidate=candidate,
                 protection_config=protection_config,
                 target_path=target_path,
+                access_scope=access_scope,
             )
             imported_message_map[candidate.source_message_id] = store_id
             imported += 1
@@ -1292,6 +1316,7 @@ def _process_import_candidates(
                 imported_messages=imported_message_map,
                 imported_summaries=_imported_summary_map_from_conn(conn, import_id),
                 dry_run=False,
+                access_scope=access_scope,
             )
         conn.commit()
     except Exception:
@@ -1338,6 +1363,8 @@ def import_lossless_claw(
     target_path = Path(target_db)
     policy = policy_for_engine(engine)
     access_context = policy_access_context(engine)
+    teams_enabled = bool(getattr(policy, "teams_enabled", False))
+    access_scope = _access_scope_from_context(access_context) if teams_enabled else None
     expected_scope = {
         "kind": "lossless_claw_import",
         "source_db": str(source_path),
@@ -1350,6 +1377,7 @@ def import_lossless_claw(
         expected_scope,
         target_path=target_path,
         apply=apply,
+        teams_enabled=teams_enabled,
     )
     resolved_import_id = import_id or _default_import_id(source_path)
     if session_identity not in VALID_SESSION_IDENTITIES:
@@ -1387,6 +1415,7 @@ def import_lossless_claw(
         apply=apply,
         summary_candidates=summary_candidates,
         include_summaries=include_summaries,
+        access_scope=access_scope,
     )
 
 
@@ -3259,6 +3288,8 @@ def import_jsonl_sessions(
     target_path = Path(target_db)
     policy = policy_for_engine(engine)
     access_context = policy_access_context(engine)
+    teams_enabled = bool(getattr(policy, "teams_enabled", False))
+    access_scope = _access_scope_from_context(access_context) if teams_enabled else None
     expected_scope = {
         "kind": "jsonl_import",
         "source_files": tuple(str(path) for path in source_files),
@@ -3271,6 +3302,7 @@ def import_jsonl_sessions(
         expected_scope,
         target_path=target_path,
         apply=apply,
+        teams_enabled=teams_enabled,
     )
     resolved_import_id = import_id or _default_jsonl_import_id(source_files)
     existing_tool_call_ids = _existing_tool_call_ids_by_source_session(
@@ -3306,6 +3338,7 @@ def import_jsonl_sessions(
         skipped_empty=skipped_empty,
         conversations=conversations,
         apply=apply,
+        access_scope=access_scope,
         invalid_rows=invalid_rows,
         warnings=warnings,
     )

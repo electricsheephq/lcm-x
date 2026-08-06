@@ -51,6 +51,12 @@ def test_resolution_carrier_present_teams_on_validates_to_trusted_owner() -> Non
     assert isinstance(resolve_policy(context, True, NOW), TrustedOwnerPolicy)
 
 
+def test_resolution_malformed_carrier_fails_closed_without_attribute_error() -> None:
+    policy = resolve_policy({"context_id": "decoded-but-not-a-context"}, True, NOW)
+    assert isinstance(policy, FailClosedPolicy)
+    assert policy.denial_reason is DenialReason.CONTEXT_INVALID
+
+
 def test_trusted_owner_returns_requested_narrowing_unchanged() -> None:
     narrowing = {"collections": ("collection-a",), "limit": 3}
     result = TrustedOwnerPolicy().resolve_authorized_targets(None, "read", narrowing)

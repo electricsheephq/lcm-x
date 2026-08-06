@@ -3964,6 +3964,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 for key in target_args:
                     if key in resolved_target_scope:
                         handler_args[key] = resolved_target_scope[key]
+                    else:
+                        handler_args.pop(key, None)
         # Ingest live messages if passed (enables current-turn search)
         messages = kwargs.get("messages")
 

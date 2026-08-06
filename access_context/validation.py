@@ -226,7 +226,7 @@ def validate(
                         context_id=context.context_id,
                         policy_revision=context.policy_revision,
                     )
-            if not required <= context.grants:
+            if not required <= context.operation_allowlist:
                 return Decision.deny(
                     DenialReason.SCOPE_FORBIDDEN,
                     context_id=context.context_id,

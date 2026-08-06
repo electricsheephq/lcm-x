@@ -170,6 +170,64 @@ def test_non_widening_rollup_scope_refuses_fixture_widening(tmp_path: Path, monk
         engine.shutdown()
 
 
+def test_rollup_rebuild_rejects_partition_narrowing_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _engine(tmp_path, rollups=True)
+
+    class WrongPartitionPolicy:
+        def authorize_operation(self, context, operation, expected_scope):
+            assert expected_scope["partition_scope"] == "session-a"
+            return Decision.allow()
+
+        def resolve_authorized_targets(self, context, operation, requested_narrowing):
+            return {**requested_narrowing, "partition_scope": "other-session"}
+
+        def audit_decision(self, *args):
+            pass
+
+    monkeypatch.setattr(command_module, "policy_for_engine", lambda _engine: WrongPartitionPolicy())
+    monkeypatch.setattr(command_module, "policy_access_context", lambda _engine: None)
+    try:
+        with pytest.raises(AuthorizationRequiredError, match="scope_mismatch"):
+            command_module._rollups_rebuild_text(["day", "2026-01-01"], engine)
+        assert engine._store._conn.execute("SELECT COUNT(*) FROM lcm_rollups").fetchone()[0] == 0
+    finally:
+        engine.shutdown()
+
+
+def test_tool_narrowing_removes_omitted_target_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _engine(tmp_path)
+    policy = type(
+        "NarrowingPolicy",
+        (),
+        {
+            "authorize_operation": lambda self, context, operation, expected_scope: Decision.allow(),
+            "resolve_authorized_targets": lambda self, context, operation, expected_scope: {
+                "target_scope": {"session_id": "narrowed-session"}
+            },
+            "audit_decision": lambda self, *args: None,
+        },
+    )()
+    monkeypatch.setattr(engine_module, "policy_for_engine", lambda _engine: policy)
+    monkeypatch.setattr(engine_module, "policy_access_context", lambda _engine: None)
+    monkeypatch.setattr(
+        engine_module.lcm_tools,
+        "lcm_grep",
+        lambda args, engine: args,
+    )
+    try:
+        args = engine.handle_tool_call(
+            "lcm_grep",
+            {"query": "needle", "session_scope": "all", "session_id": "wide"},
+        )
+        assert args == {"query": "needle", "session_id": "narrowed-session"}
+    finally:
+        engine.shutdown()
+
+
 def test_write_arms_resolve_only_through_documented_policy_seam() -> None:
     root = Path(__file__).resolve().parents[1]
     for name in ("engine.py", "compaction.py", "command.py"):

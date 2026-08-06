@@ -186,12 +186,13 @@ class AccessContextV1:
         if grants is not None and operations is not None and _freeze_strings(grants) != _freeze_strings(operations):
             raise ScopeMismatchError("grants and operations disagree")
         requested_operations = grants if grants is not None else operations
+        parent_operations = self.operation_allowlist
         if requested_operations is None:
             child_grants = self.grants
         else:
             child_grants = _freeze_strings(requested_operations)
-            if not child_grants <= self.grants:
-                raise ScopeMismatchError("operations would widen grants")
+            if not child_grants <= parent_operations:
+                raise ScopeMismatchError("operations would widen the parent allowlist")
 
         requested_collections = collections if collections is not None else collection_allowlist
         parent_collections = self.collection_allowlist
@@ -225,13 +226,31 @@ class AccessContextV1:
             if requested is not None and requested != current:
                 raise ScopeMismatchError(f"{name} would change current state")
 
+        requested_narrowing = _freeze_strings(narrowing)
+        requested_collection_tokens = frozenset(
+            token.partition(":")[2]
+            for token in requested_narrowing
+            if token.startswith("collection:") and token.partition(":")[2]
+        )
         child_collection = self.default_write_collection_id
         if default_write_collection_id is not None:
             if parent_collections and default_write_collection_id not in parent_collections:
                 raise ScopeMismatchError("default collection would widen the parent allowlist")
-            if not parent_collections and default_write_collection_id != child_collection:
+            if (
+                not parent_collections
+                and requested_collections is None
+                and default_write_collection_id != child_collection
+            ):
                 raise ScopeMismatchError("default collection would change the parent binding")
+            effective_collections = child_collections or requested_collection_tokens
+            if effective_collections and default_write_collection_id not in effective_collections:
+                raise ScopeMismatchError("default collection would fall outside the child allowlist")
             child_collection = default_write_collection_id
+        elif (
+            (child_collections or requested_collection_tokens)
+            and child_collection not in (child_collections or requested_collection_tokens)
+        ):
+            raise ScopeMismatchError("default collection would fall outside the child allowlist")
 
         child_narrowing = set(self.narrowing)
         if requested_operations is not None:
@@ -239,13 +258,16 @@ class AccessContextV1:
         child_narrowing.update(f"collection:{item}" for item in child_collections)
         if audience is not None:
             child_narrowing.update(f"audience:{item}" for item in child_audience)
-        requested_narrowing = _freeze_strings(narrowing)
         for token in requested_narrowing:
             prefix, _, value = token.partition(":")
-            if prefix == "operation" and value not in child_grants:
-                raise ScopeMismatchError("narrowing names an operation outside grants")
-            if prefix == "collection" and parent_collections and value not in parent_collections:
-                raise ScopeMismatchError("narrowing names a collection outside the parent allowlist")
+            if prefix == "operation" and value not in (
+                child_grants if requested_operations is not None else parent_operations
+            ):
+                raise ScopeMismatchError("narrowing names an operation outside the child allowlist")
+            if prefix == "collection" and (
+                requested_collections is not None or parent_collections
+            ) and value not in child_collections:
+                raise ScopeMismatchError("narrowing names a collection outside the child allowlist")
             if prefix == "audience" and self.audience and value not in child_audience:
                 raise ScopeMismatchError("narrowing names an audience outside the child audience")
         child_narrowing.update(requested_narrowing)
@@ -333,6 +355,8 @@ def is_subset_of(child: AccessContextV1, parent: AccessContextV1) -> bool:
             return False
     if not child.grants <= parent.grants:
         return False
+    if not child.operation_allowlist <= parent.operation_allowlist:
+        return False
     if not _same_or_unrestricted(child.audience, parent.audience):
         return False
     if child.expires_at > parent.expires_at or child.issued_at < parent.issued_at:
@@ -340,7 +364,7 @@ def is_subset_of(child: AccessContextV1, parent: AccessContextV1) -> bool:
     if not parent.delegation_chain == child.delegation_chain[: len(parent.delegation_chain)]:
         return False
     if child.context_id != parent.context_id:
-        if parent.context_id not in child.delegation_chain or child.delegated_by != parent.context_id:
+        if parent.context_id not in child.delegation_chain:
             return False
     if not parent.narrowing <= child.narrowing:
         return False
@@ -348,7 +372,9 @@ def is_subset_of(child: AccessContextV1, parent: AccessContextV1) -> bool:
     child_collections = child.collection_allowlist
     if parent_collections and not child_collections <= parent_collections:
         return False
+    if child_collections and child.default_write_collection_id not in child_collections:
+        return False
     if child.default_write_collection_id != parent.default_write_collection_id:
-        if not parent_collections or child.default_write_collection_id not in parent_collections:
+        if not child_collections or child.default_write_collection_id not in child_collections:
             return False
     return True

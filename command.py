@@ -2452,6 +2452,8 @@ def _rollups_rebuild_text(tokens: list[str], engine) -> str:
     else:
         target_date = datetime.now(timezone.utc).date()
 
+    scope = engine.current_session_id
+
     # RollupStore/build_day have no carrier. Authorize at this engine-side
     # caller before acquiring the operator lease or opening the write store.
     # The access scope is the context returned by policy_access_context; the
@@ -2462,6 +2464,7 @@ def _rollups_rebuild_text(tokens: list[str], engine) -> str:
         "kind": "rollup",
         "period_kind": kind,
         "period_date": target_date.isoformat(),
+        "partition_scope": scope,
         "source_scope": access_context,
         "derived_scope": access_context,
     }
@@ -2477,6 +2480,15 @@ def _rollups_rebuild_text(tokens: list[str], engine) -> str:
         access_context, "write", expected_scope
     )
     if isinstance(authorized_scope, dict):
+        resolved_partition = authorized_scope.get("partition_scope", scope)
+        if str(resolved_partition) != str(scope):
+            mismatch = Decision.deny(DenialReason.SCOPE_MISMATCH)
+            policy.audit_decision(
+                access_context, "write", mismatch.denial_reason, mismatch.public()
+            )
+            raise AuthorizationRequiredError(
+                "authorize_operation", mismatch.denial_reason
+            )
         source_scope = authorized_scope.get("source_scope", access_context)
         derived_scope = authorized_scope.get("derived_scope", access_context)
         if (
@@ -2492,7 +2504,6 @@ def _rollups_rebuild_text(tokens: list[str], engine) -> str:
                 "authorize_operation", mismatch.denial_reason
             )
 
-    scope = engine.current_session_id
     targets = _rollup_period_targets(kind, target_date)
     limit = max(0, int(engine._config.rollup_builds_per_pass))
     lease_key = engine.try_acquire_rollup_operator_lease(scope)
@@ -2520,7 +2531,13 @@ def _rollups_rebuild_text(tokens: list[str], engine) -> str:
             [
                 (period_kind, period_start.isoformat(), scope)
                 for period_kind, period_start in targets
-            ]
+            ],
+            authorized_access_scope=(
+                str(access_context.session_owner_principal_id or access_context.principal_id)
+                if bool(getattr(policy, "teams_enabled", False))
+                and isinstance(access_context, AccessContextV1)
+                else None
+            ),
         )
 
         builders = {

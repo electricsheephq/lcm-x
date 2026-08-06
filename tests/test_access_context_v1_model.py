@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timezone
 
 import pytest
@@ -99,6 +99,57 @@ def test_narrow_returns_new_context_and_rejects_every_widening_boundary() -> Non
     for attempt in attempts:
         with pytest.raises(ScopeMismatchError):
             parent.narrow(**attempt)
+
+
+def test_narrowing_uses_effective_operation_and_collection_bounds() -> None:
+    parent = _human().narrow(operations=["read"])
+    assert parent.operation_allowlist == frozenset({"read"})
+    with pytest.raises(ScopeMismatchError):
+        parent.narrow(operations=["write"])
+    with pytest.raises(ScopeMismatchError):
+        parent.narrow(narrowing=["operation:write"])
+    effective_parent = replace(_human(), narrowing=frozenset({"operation:read"}))
+    with pytest.raises(ScopeMismatchError):
+        effective_parent.narrow(operations=["write"])
+
+    with pytest.raises(ScopeMismatchError):
+        _human().narrow(collections=["collection-child"])
+    child = _human().narrow(
+        collections=["collection-child"],
+        default_write_collection_id="collection-child",
+    )
+    assert child.default_write_collection_id == "collection-child"
+    with pytest.raises(ScopeMismatchError):
+        _human().narrow(
+            collections=["collection-main"],
+            narrowing=["collection:collection-other"],
+        )
+
+
+def test_subset_uses_effective_operations_and_transitive_delegation() -> None:
+    root = _human()
+    one = root.narrow(operations=["read"])
+    one = replace(
+        one,
+        context_id="ctx-one",
+        delegation_chain=(root.context_id,),
+        delegated_by=root.context_id,
+    )
+    two = one.narrow(operations=["read"])
+    two = replace(
+        two,
+        context_id="ctx-two",
+        delegation_chain=(root.context_id, one.context_id),
+        delegated_by=one.context_id,
+    )
+    assert is_subset_of(two, root)
+
+    widened = replace(
+        two,
+        context_id="ctx-widened",
+        narrowing=two.narrowing | {"operation:write"},
+    )
+    assert not is_subset_of(widened, one)
 
 
 def test_from_payload_normalizes_json_collections_and_timestamps() -> None:

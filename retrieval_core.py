@@ -433,11 +433,61 @@ def hydrate_chunk_hits(
                 break
         if not ordered_ids:
             return []
+        rows_by_id: dict[str, sqlite3.Row] = {}
+        batch_size = 500
+        for start in range(0, len(ordered_ids), batch_size):
+            require_remaining("chunk lookup")
+            batch = ordered_ids[start:start + batch_size]
+            placeholders = ",".join("?" for _ in batch)
+            try:
+                for row in conn.execute(
+                    f"""
+                    SELECT cm.chunk_id, cm.store_id, cm.chunk_index, cm.char_start,
+                           cm.char_end, m.session_id, m.source, m.role, m.timestamp,
+                           m.content, m.access_scope
+                    FROM lcm_chunk_meta cm
+                    JOIN messages m ON m.store_id = cm.store_id
+                    WHERE cm.chunk_id IN ({placeholders}) AND cm.archived = 0
+                    """,
+                    batch,
+                ):
+                    rows_by_id.setdefault(str(row["chunk_id"]), row)
+            except sqlite3.OperationalError:
+                # Older/default-off databases may not yet carry the additive
+                # scope column; the policy still receives an explicit NULL.
+                if not list(
+                    conn.execute(
+                        "SELECT 1 FROM sqlite_master "
+                        "WHERE type IN ('table', 'view') AND name='lcm_chunk_meta'"
+                    )
+                ):
+                    continue
+                for row in conn.execute(
+                    f"""
+                    SELECT cm.chunk_id, cm.store_id, cm.chunk_index, cm.char_start,
+                           cm.char_end, m.session_id, m.source, m.role, m.timestamp,
+                           m.content
+                    FROM lcm_chunk_meta cm
+                    JOIN messages m ON m.store_id = cm.store_id
+                    WHERE cm.chunk_id IN ({placeholders}) AND cm.archived = 0
+                    """,
+                    batch,
+                ):
+                    rows_by_id.setdefault(str(row["chunk_id"]), row)
         for chunk_id in ordered_ids:
+            row = rows_by_id.get(chunk_id)
+            try:
+                stored_scope = row["access_scope"] if row is not None else None
+            except (IndexError, KeyError):
+                stored_scope = None
             decision = policy.authorize_stored_scope(
                 access_context,
                 "read",
-                {"target_id": chunk_id, "kind": "chunk"},
+                {
+                    "target_id": chunk_id,
+                    "kind": "chunk",
+                    "access_scope": stored_scope,
+                },
             )
             policy.audit_decision(
                 access_context, "read", decision.denial_reason, decision.public()
@@ -446,26 +496,6 @@ def hydrate_chunk_hits(
                 raise AuthorizationRequiredError(
                     "authorize_stored_scope", decision.denial_reason
                 )
-        rows_by_id: dict[str, sqlite3.Row] = {}
-        # Chunk in bounded batches so the IN(...) placeholder list stays well
-        # under SQLite's variable limit even for a large knn_limit.
-        batch_size = 500
-        for start in range(0, len(ordered_ids), batch_size):
-            require_remaining("chunk lookup")
-            batch = ordered_ids[start:start + batch_size]
-            placeholders = ",".join("?" for _ in batch)
-            for row in conn.execute(
-                f"""
-                SELECT cm.chunk_id, cm.store_id, cm.chunk_index, cm.char_start,
-                       cm.char_end, m.session_id, m.source, m.role, m.timestamp,
-                       m.content
-                FROM lcm_chunk_meta cm
-                JOIN messages m ON m.store_id = cm.store_id
-                WHERE cm.chunk_id IN ({placeholders}) AND cm.archived = 0
-                """,
-                batch,
-            ):
-                rows_by_id.setdefault(str(row["chunk_id"]), row)
         hydrated: list[tuple[dict[str, Any], float]] = []
         for cid in ordered_ids:  # preserve KNN rank order
             row = rows_by_id.get(cid)
@@ -546,6 +576,35 @@ def hydrate_semantic_nodes(
         read_dag._conn = conn
         read_dag._db_lock = threading.RLock()
         require_remaining("DAG setup")
+        summary_ids: list[int] = []
+        for embedded_id, _score, kind in ranked_rows:
+            if kind != "summary":
+                continue
+            try:
+                summary_ids.append(int(embedded_id))
+            except (TypeError, ValueError):
+                continue
+            if len(summary_ids) >= knn_limit:
+                break
+        scopes_by_id: dict[int, object] = {}
+        batch_size = 500
+        for start in range(0, len(summary_ids), batch_size):
+            require_remaining("summary scope lookup")
+            batch = summary_ids[start:start + batch_size]
+            placeholders = ",".join("?" for _ in batch)
+            try:
+                for row in conn.execute(
+                    f"SELECT node_id, access_scope FROM summary_nodes "
+                    f"WHERE node_id IN ({placeholders})",
+                    batch,
+                ):
+                    try:
+                        stored_scope = row["access_scope"]
+                    except (IndexError, KeyError):
+                        stored_scope = None
+                    scopes_by_id[int(row["node_id"])] = stored_scope
+            except sqlite3.OperationalError:
+                pass
         hydrated: list[tuple[Any, float]] = []
         for embedded_id, score, kind in ranked_rows:
             require_remaining("node lookup")
@@ -559,7 +618,11 @@ def hydrate_semantic_nodes(
             decision = policy.authorize_stored_scope(
                 access_context,
                 "read",
-                {"target_id": str(embedded_id), "kind": "summary"},
+                {
+                    "target_id": str(embedded_id),
+                    "kind": "summary",
+                    "access_scope": scopes_by_id.get(node_id),
+                },
             )
             policy.audit_decision(
                 access_context, "read", decision.denial_reason, decision.public()

@@ -66,16 +66,18 @@ def resolve_policy(
 
     mode = resolve_mode(carrier_context, teams_enabled)
     if mode is ResolutionMode.STANDARD_UNMANAGED:
-        return TrustedOwnerPolicy()
+        return TrustedOwnerPolicy(teams_enabled=False)
     if mode is ResolutionMode.FAIL_CLOSED:
         return FailClosedPolicy(DenialReason.CONTEXT_MISSING)
 
     assert mode is ResolutionMode.ENFORCING
+    if not isinstance(carrier_context, AccessContextV1):
+        return FailClosedPolicy(DenialReason.CONTEXT_INVALID)
     validation = validate(
         carrier_context,
         now=now if now is not None else datetime.now(timezone.utc),
     )
     if validation.allowed:
-        return TrustedOwnerPolicy()
+        return TrustedOwnerPolicy(teams_enabled=True)
     assert validation.denial_reason is not None
     return FailClosedPolicy(validation.denial_reason)

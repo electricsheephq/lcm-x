@@ -14,7 +14,7 @@ TargetScope = Mapping[str, Any]
 class HostContextCarrier(Protocol):
     """Host-side producer; ``None`` means this operation has no Teams context."""
 
-    def get_access_context(self) -> AccessContextV1 | None:
+    def get_lcm_access_context(self) -> AccessContextV1 | None:
         """Return the authenticated context for the current operation."""
 
 

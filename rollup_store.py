@@ -546,7 +546,10 @@ class RollupStore:
         return expanded
 
     def upsert_stale_many(
-        self, targets: Sequence[tuple[str, str, str]]
+        self,
+        targets: Sequence[tuple[str, str, str]],
+        *,
+        authorized_access_scope: str | None = None,
     ) -> int:
         """Durably seed several ``stale`` rows in ONE transaction (all-or-nothing).
 
@@ -563,10 +566,16 @@ class RollupStore:
         rows = self._expand_stale_targets(targets)
         if not rows:
             return 0
+        if authorized_access_scope is not None and not str(authorized_access_scope).strip():
+            raise ValueError("authorized_access_scope must be non-empty when provided")
         affected = 0
         with self._write_transaction():
             for period_kind, period_start, scope in rows:
-                access_scope = self._access_scope_for_partition(scope)
+                access_scope = (
+                    str(authorized_access_scope)
+                    if authorized_access_scope is not None
+                    else self._access_scope_for_partition(scope)
+                )
                 cur = self._conn.execute(
                     """
                     INSERT INTO lcm_rollups(
