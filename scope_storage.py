@@ -92,9 +92,19 @@ TEAMS_ENABLED_METADATA_KEY = "teams_enabled_v1"
 
 
 def read_persisted_teams_enabled(conn: sqlite3.Connection) -> bool | None:
-    """Return the recorded decision, or None when none was ever recorded."""
+    """Return the recorded decision, or None when none was ever recorded.
 
-    ensure_metadata_table(conn)
+    Deliberately does NOT create the metadata table. This runs on the doctor
+    path and on every storage bind, and a verification that mutates schema is
+    not a verification -- it would materialise `metadata` on a header-only
+    database and report a shape it had just produced itself.
+    """
+
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'"
+    ).fetchone()
+    if exists is None:
+        return None
     row = conn.execute(
         "SELECT value FROM metadata WHERE key = ?", (TEAMS_ENABLED_METADATA_KEY,)
     ).fetchone()

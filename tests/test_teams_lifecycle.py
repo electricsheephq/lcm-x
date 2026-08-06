@@ -202,3 +202,26 @@ def test_doctor_passes_a_deliberately_disabled_store_and_says_stamps_are_kept(
     assert result["status"] == "not-enabled"
     assert _doctor_status(result) == "pass"
     assert "retained" in str(result["message"])
+
+
+def test_reading_the_decision_never_creates_schema(tmp_path) -> None:
+    """The read path runs on the doctor and on every bind.
+
+    An earlier version called ensure_metadata_table here, so simply asking
+    whether Teams was enabled materialised `metadata` on a header-only
+    database -- a verification reporting a shape it had just created itself.
+    """
+    conn = sqlite3.connect(tmp_path / "header-only.db")
+    try:
+        assert read_persisted_teams_enabled(conn) is None
+        assert resolve_startup_teams_state(conn) == (False, "never-enabled")
+
+        tables = [
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        ]
+        assert tables == []
+    finally:
+        conn.close()
