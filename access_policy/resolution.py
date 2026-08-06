@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from datetime import datetime, timezone
 from enum import Enum
@@ -63,7 +64,41 @@ def policy_for_engine(engine: object) -> "TrustedOwnerPolicy | FailClosedPolicy"
         teams_enabled,
         current_revisions=revisions,
         audit_sink=_audit_sink_for_engine(engine),
+        session_owner=_session_owner_for_engine(engine),
     )
+
+
+def _session_owner_for_engine(engine: object):
+    """Bind a target-session owner resolver to this engine's store, or None.
+
+    Answers "who owns this session" from the stamps already on disk, which is
+    authoritative: the same value the write path assigns. A session with no
+    stamped rows resolves to None and is treated as unclaimed by the policy.
+
+    A callable rather than a connection, for the same reason as the audit sink:
+    the policy keeps no database handle and stays testable with a plain dict.
+    """
+
+    store = getattr(engine, "_store", None)
+    connection = getattr(store, "connection", None)
+    if connection is None:
+        return None
+
+    def resolve(session_id: str) -> str | None:
+        for table in ("messages", "summary_nodes"):
+            try:
+                row = connection.execute(
+                    f'SELECT access_scope FROM "{table}" '
+                    "WHERE session_id = ? AND access_scope IS NOT NULL LIMIT 1",
+                    (session_id,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                continue
+            if row is not None and row[0] is not None:
+                return str(row[0])
+        return None
+
+    return resolve
 
 
 def _audit_sink_for_engine(engine: object):
@@ -133,6 +168,7 @@ def resolve_policy(
     now: datetime | None = None,
     current_revisions: object | None = None,
     audit_sink: object | None = None,
+    session_owner: object | None = None,
 ) -> TrustedOwnerPolicy | FailClosedPolicy:
     """Resolve the policy from the explicit Teams flag and carrier context.
 
@@ -174,6 +210,8 @@ def resolve_policy(
         current_revocation_epoch=getattr(current_revisions, "revocation_epoch", None),
     )
     if validation.allowed:
-        return TeamsPolicy(carrier_context, audit_sink=audit_sink)
+        return TeamsPolicy(
+            carrier_context, audit_sink=audit_sink, session_owner=session_owner
+        )
     assert validation.denial_reason is not None
     return FailClosedPolicy(validation.denial_reason)

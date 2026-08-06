@@ -46,10 +46,28 @@ class TeamsPolicy:
         self,
         context: AccessContextV1 | None,
         audit_sink: "Callable[..., None] | None" = None,
+        session_owner: "Callable[[str], str | None] | None" = None,
     ) -> None:
         self._context = context
         self._audit_sink = audit_sink
+        self._session_owner = session_owner
         self.teams_enabled = True
+
+    def _target_owner(self, session_id: str) -> str | None:
+        """Who owns a target session, or None when nothing claims it.
+
+        Resolved through a seam-bound callable rather than a database handle,
+        the same way the audit sink is bound -- the policy stays pure and
+        testable with a plain dict.
+        """
+
+        if self._session_owner is None:
+            return None
+        try:
+            owner = self._session_owner(session_id)
+        except Exception:  # noqa: BLE001 - an unreadable owner is not a claim
+            return None
+        return str(owner) if owner else None
 
     # -- authorization ----------------------------------------------------
 
@@ -79,17 +97,32 @@ class TeamsPolicy:
         if str(expected_scope.get("kind") or "") in _STORE_WIDE_KINDS:
             return Decision.deny(DenialReason.SCOPE_FORBIDDEN)
 
-        # Owner OF THE TARGET. A session belonging to someone else is refused
-        # before any row is read. The key differs by path: most carry
-        # `session_id`, compression rollover carries `source_session_id`, and
-        # rollup scheduling carries the session as `partition_key`.
+        # Owner OF THE TARGET -- an OWNER comparison, not a session-id one.
+        #
+        # The first version of this compared the target session id against the
+        # context's, which denied a principal its own auxiliary session:
+        # on_session_end passes the TARGET session (engine.py:3450-3460), and an
+        # auxiliary session id is deliberately not the bound one. Right intent,
+        # wrong rule.
+        #
+        # An UNRESOLVED target is allowed on purpose. A session nothing has
+        # claimed yet cannot belong to another principal, and denying would
+        # break creating any new session under Teams. It is safe because the
+        # write is stamped with the WRITER's scope on the way in, so an unknown
+        # session becomes the writer's rather than a way into someone else's.
+        #
+        # The key differs by path: most carry `session_id`, compression rollover
+        # carries `source_session_id`, and rollup scheduling carries the session
+        # as `partition_key`.
         for key in ("session_id", "source_session_id", "partition_key"):
             target = expected_scope.get(key)
-            if (
-                target
-                and effective is not None
-                and str(target) != str(effective.session_id)
-            ):
+            if not target or effective is None:
+                continue
+            target = str(target)
+            if target == str(effective.session_id):
+                continue
+            owner = self._target_owner(target)
+            if owner is not None and owner != principal:
                 return Decision.deny(DenialReason.SCOPE_FORBIDDEN)
 
         # Raw identifiers (store_id, node_id) name a row without saying who owns
