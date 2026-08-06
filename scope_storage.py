@@ -68,6 +68,24 @@ _OPTIONAL_SCOPE_TABLES = {
 }
 
 ScopeResolver = Callable[[str], str | None]
+
+
+class ScopeBackfillIncompleteError(RuntimeError):
+    """At least one table could not be fully stamped.
+
+    Raised only AFTER every table has been attempted, so the report names what
+    succeeded as well as what failed. Isolation is about not cancelling the
+    remaining tables; it is not about letting a caller proceed as though the
+    enable had worked.
+    """
+
+    def __init__(self, report: dict[str, object]) -> None:
+        self.report = report
+        failures = report.get("failures") or {}
+        super().__init__(
+            "scope backfill incomplete for "
+            + ", ".join(f"{table} ({error})" for table, error in failures.items())
+        )
 _TEAMS_ENABLED_ATTRIBUTE = "lcm_" + "teams_enabled"
 
 
@@ -631,13 +649,21 @@ def backfill_scopes(
             )
 
     conn.commit()
-    return {
+    report = {
         "updated": updated,
         "total_updated": sum(updated.values()),
         "attempted": attempted,
         "failures": failures,
         "complete": not failures,
     }
+    if failures:
+        # Every table was attempted first, so the report is complete -- but the
+        # run still fails loudly. A caller that ignored a returned
+        # complete=False would proceed as though the enable had worked, and the
+        # whole point of isolating the tables was to make the failure MORE
+        # legible, not optional.
+        raise ScopeBackfillIncompleteError(report)
+    return report
 
 
 def setup_teams_scope(

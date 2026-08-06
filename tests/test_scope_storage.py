@@ -4,6 +4,7 @@ import sqlite3
 
 from hermes_lcm.dag import SummaryDAG, SummaryNode
 from hermes_lcm.scope_storage import (
+    ScopeBackfillIncompleteError,
     backfill_scopes,
     enumerate_scope_writers,
     setup_teams_scope,
@@ -80,10 +81,16 @@ def test_backfill_resumes_after_a_committed_batch(tmp_path):
                 raise RuntimeError("simulated setup interruption")
             return f"owner:{session_id}"
 
+        # The run still fails loudly, but only AFTER every table has been
+        # attempted, so the report names what succeeded as well as what did
+        # not. Isolation stops one table cancelling the tables after it; it
+        # does not let a caller proceed as though the enable had worked.
         try:
             backfill_scopes(store.connection, interrupted_owner, batch_size=1)
-        except RuntimeError as exc:
-            assert str(exc) == "simulated setup interruption"
+        except ScopeBackfillIncompleteError as exc:
+            assert "simulated setup interruption" in exc.report["failures"]["messages"]
+            assert "summary_nodes" in exc.report["attempted"]
+            assert exc.report["complete"] is False
         else:
             raise AssertionError("the interruption must stop the first run")
         assert store.connection.execute(

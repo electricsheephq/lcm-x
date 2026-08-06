@@ -15,6 +15,7 @@ import pytest
 
 from hermes_lcm.scope_storage import (
     ACCESS_SCOPE_COLUMN,
+    ScopeBackfillIncompleteError,
     backfill_scopes,
     compose_scope_resolver,
     preflight_teams_scope,
@@ -162,12 +163,14 @@ def test_one_table_failing_does_not_cancel_the_tables_after_it(
     store.execute("INSERT INTO summary_nodes(session_id) VALUES('known-a')")
     store.commit()
 
-    result = backfill_scopes(store, _resolver)
+    with pytest.raises(ScopeBackfillIncompleteError) as excinfo:
+        backfill_scopes(store, _resolver)
 
-    assert "messages" in result["failures"]
-    assert "summary_nodes" in result["attempted"]
-    assert result["updated"].get("summary_nodes") == 1
-    assert result["complete"] is False
+    report = excinfo.value.report
+    assert "messages" in report["failures"]
+    assert "summary_nodes" in report["attempted"]
+    assert report["updated"].get("summary_nodes") == 1
+    assert report["complete"] is False
 
 
 def test_a_failed_table_leaves_its_own_rows_unstamped(
@@ -178,7 +181,8 @@ def test_a_failed_table_leaves_its_own_rows_unstamped(
     store.execute("INSERT INTO summary_nodes(session_id) VALUES('known-a')")
     store.commit()
 
-    backfill_scopes(store, _resolver)
+    with pytest.raises(ScopeBackfillIncompleteError):
+        backfill_scopes(store, _resolver)
 
     assert store.execute("SELECT access_scope FROM messages").fetchone()[0] is None
     assert (
@@ -194,8 +198,9 @@ def test_rerunning_after_supplying_the_missing_owner_completes(
     _message(store, "known-a")
     _message(store, "orphan")
 
-    first = backfill_scopes(store, _resolver)
-    assert first["complete"] is False
+    with pytest.raises(ScopeBackfillIncompleteError) as excinfo:
+        backfill_scopes(store, _resolver)
+    assert excinfo.value.report["complete"] is False
 
     second = backfill_scopes(store, _resolver, overrides={"orphan": "principal-c"})
     assert second["complete"] is True

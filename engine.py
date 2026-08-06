@@ -910,13 +910,12 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             overrides=overrides,
             fallback_owner=fallback_owner,
         )
-        if not result.get("complete", True):
-            # Some tables failed. Recording "enabled" here would put an
-            # enforcing policy over a partly-stamped store; leaving the marker
-            # unset leaves it stamped-without-marker, which fails closed until
-            # the operator supplies the missing owners and re-runs. The backfill
-            # is idempotent, so re-running resumes rather than redoing.
-            return result
+        # An incomplete backfill raises ScopeBackfillIncompleteError out of
+        # setup_teams_scope, so control never reaches the lines below and the
+        # marker stays unset -- leaving the store stamped-without-marker, which
+        # fails closed until the operator supplies the missing owners and
+        # re-runs. The backfill is idempotent, so re-running resumes.
+        #
         # Durable BEFORE in-process, so a crash between the two lands on
         # "enabled" rather than on stamps with no recorded decision.
         persist_teams_enabled(self._store.connection, True)
