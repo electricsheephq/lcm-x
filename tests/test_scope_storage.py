@@ -89,8 +89,10 @@ def test_backfill_resumes_after_a_committed_batch(tmp_path):
             backfill_scopes(store.connection, interrupted_owner, batch_size=1)
         except ScopeBackfillIncompleteError as exc:
             assert "simulated setup interruption" in exc.report["failures"]["messages"]
-            assert "summary_nodes" in exc.report["attempted"]
             assert exc.report["complete"] is False
+            # This fixture is a MessageStore, so `messages` is the only
+            # scope-bearing table present -- the cross-table isolation property
+            # is pinned in tests/test_teams_preflight.py, which builds two.
         else:
             raise AssertionError("the interruption must stop the first run")
         assert store.connection.execute(
