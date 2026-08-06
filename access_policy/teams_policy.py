@@ -36,6 +36,22 @@ _STORE_WIDE_KINDS = frozenset(
 )
 
 
+# The OTHER half of store-wide authority, reached by `required_scope` rather than
+# by `kind`. `_authorize_doctor_command` (command.py) asks for "admin" with
+# kind="slash_command", and nothing below read it -- so the gate ran, allowed
+# every principal, and `/lcm doctor clean` handed one principal every other
+# principal's session ids, message counts and token totals via
+# `scan_session_cleanup_stats`, which takes no filter at all.
+#
+# "admin" ONLY, deliberately. "owner_only" must NEVER be added here: it is
+# overloaded, and on `on_session_reset` it means owner OF THE TARGET -- a
+# principal resetting its OWN session, carried with `session_id: self._session_id`.
+# Denying the whole word is precisely the conflation that once denied principal A
+# its own session load. The two store-wide `owner_only` sites are already covered
+# by kind above.
+_ADMIN_REQUIRED_SCOPES = frozenset({"admin"})
+
+
 def principal_of(context: AccessContextV1 | None) -> str:
     """The owner scope a row would be stamped with for this context.
 
@@ -104,6 +120,13 @@ class TeamsPolicy:
         # session load: neither principal holds `owner_only`, and no fixture
         # tweak makes that coherent.
         if str(expected_scope.get("kind") or "") in _STORE_WIDE_KINDS:
+            return Decision.deny(DenialReason.SCOPE_FORBIDDEN)
+
+        # Administrative authority, requested by scope rather than by kind. It
+        # belongs to the connector -- #497 gives it the audit/migration/backup
+        # families and authenticates it separately -- never to a principal
+        # because it happens to be the one logged in.
+        if str(expected_scope.get("required_scope") or "") in _ADMIN_REQUIRED_SCOPES:
             return Decision.deny(DenialReason.SCOPE_FORBIDDEN)
 
         # Owner OF THE TARGET -- an OWNER comparison, not a session-id one.
