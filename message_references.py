@@ -341,8 +341,12 @@ def _authorize_message_target(
     authorize_target,
 ) -> None:
     try:
-        allowed = authorize_target is not None and bool(
-            authorize_target(authorization_context, store_id, scope)
+        allowed = (
+            authorization_context is not None
+            and authorize_target is not None
+            and bool(
+                authorize_target(authorization_context, store_id, scope)
+            )
         )
     except Exception:
         allowed = False

@@ -438,6 +438,36 @@ def test_issue_target_preauthorization_hides_message_existence(store, target_exi
     assert store.connection.in_transaction is False
 
 
+def test_issue_missing_context_hides_message_existence(store):
+    existing_id = _seed(store)
+    missing_id = 999999
+    calls: list[tuple[object, int, object]] = []
+
+    def allow_requested_target(context, candidate_store_id, scope):
+        calls.append((context, candidate_store_id, scope))
+        return True
+
+    outcomes = []
+    for candidate_store_id in (existing_id, missing_id):
+        with pytest.raises(ReferenceError) as denied:
+            issue_message_reference(
+                store,
+                candidate_store_id,
+                {"session_id": "session-a"},
+                authorize_target=allow_requested_target,
+                authorize_issue=_allow_issue,
+            )
+        outcomes.append(denied.value.as_dict())
+
+    assert outcomes == [
+        {
+            "error_code": ReferenceErrorCode.REFERENCE_FORBIDDEN.value,
+            "error": "message reference issuance is not authorized by the host",
+        }
+    ] * 2
+    assert calls == []
+
+
 def test_issue_requires_target_preauthorization(store):
     store_id = _seed(store)
     statements: list[str] = []

@@ -169,6 +169,50 @@ def test_completed_named_migrations_use_read_only_healthy_fast_path(tmp_path):
     )
 
 
+def test_named_migration_validation_uses_one_snapshot_during_startup_race(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "migration-race.db"
+    seed = sqlite3.connect(path)
+    seed.executescript(
+        """
+        CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE lcm_migration_state(
+            step_name TEXT PRIMARY KEY,
+            completed_at REAL NOT NULL
+        );
+        """
+    )
+    seed.commit()
+    seed.close()
+
+    loser = sqlite3.connect(path, timeout=30.0)
+    winner = sqlite3.connect(path, timeout=30.0)
+    db_bootstrap.configure_connection(loser)
+    db_bootstrap.configure_connection(winner)
+    triggered = False
+
+    original_marker_exists = db_bootstrap._migration_marker_exists
+
+    def interleave_marker(conn, step_name):
+        nonlocal triggered
+        result = original_marker_exists(conn, step_name)
+        if not triggered and conn is loser and step_name == DATABASE_UUID_MIGRATION:
+            triggered = True
+            ensure_retrieval_reference_migrations(winner)
+        return result
+
+    monkeypatch.setattr(db_bootstrap, "_migration_marker_exists", interleave_marker)
+    try:
+        database_uuid = ensure_retrieval_reference_migrations(loser)
+        assert database_uuid == get_database_uuid(winner)
+    finally:
+        loser.close()
+        winner.close()
+
+    assert triggered
+
+
 def test_missing_or_corrupt_post_migration_uuid_fails_closed(tmp_path):
     path = tmp_path / "identity.db"
     conn = _open(path)

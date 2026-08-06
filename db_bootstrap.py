@@ -666,6 +666,23 @@ def _named_migration_ownership(conn: sqlite3.Connection, name: str):
             conn.execute(f"RELEASE {savepoint}")
 
 
+@contextmanager
+def _consistent_read_snapshot(conn: sqlite3.Connection):
+    """Pin a read-only migration validation to one SQLite snapshot."""
+    owns_transaction = not conn.in_transaction
+    if owns_transaction:
+        conn.execute("BEGIN")
+    try:
+        yield
+    except BaseException:
+        if owns_transaction and conn.in_transaction:
+            conn.rollback()
+        raise
+    else:
+        if owns_transaction and conn.in_transaction:
+            conn.commit()
+
+
 def _ensure_database_uuid_migration(conn: sqlite3.Connection) -> str:
     marker_exists = _migration_marker_exists(conn, DATABASE_UUID_MIGRATION)
     value = _read_database_uuid_value(conn)
@@ -796,42 +813,43 @@ def _completed_retrieval_reference_migrations(
     conn: sqlite3.Connection,
 ) -> str | None:
     """Validate known V1 provenance or identify a completely fresh boundary."""
-    identity_complete = _migration_marker_exists(conn, DATABASE_UUID_MIGRATION)
-    registry_complete = _migration_marker_exists(
-        conn, RETRIEVAL_REFERENCES_MIGRATION
-    )
-    database_uuid_value = _read_database_uuid_value(conn)
-    registry_table_exists = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-        (RETRIEVAL_REFERENCES_TABLE,),
-    ).fetchone() is not None
-
-    if not identity_complete:
-        if (
-            database_uuid_value is not None
-            or registry_complete
-            or registry_table_exists
-        ):
-            raise DatabaseIdentityError(
-                "unmarked retrieval-reference authority state cannot be adopted"
-            )
-        return None
-
-    database_uuid = get_database_uuid(conn)
-    if not registry_complete:
-        if registry_table_exists:
-            raise RetrievalReferenceSchemaError(
-                "unmarked retrieval_references_v1 table cannot be adopted"
-            )
-        return None
-
-    errors = verify_retrieval_references_schema(conn)
-    if errors:
-        raise RetrievalReferenceSchemaError(
-            "completed retrieval_references_v1 migration is damaged: "
-            + "; ".join(errors)
+    with _consistent_read_snapshot(conn):
+        identity_complete = _migration_marker_exists(conn, DATABASE_UUID_MIGRATION)
+        registry_complete = _migration_marker_exists(
+            conn, RETRIEVAL_REFERENCES_MIGRATION
         )
-    return database_uuid
+        database_uuid_value = _read_database_uuid_value(conn)
+        registry_table_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (RETRIEVAL_REFERENCES_TABLE,),
+        ).fetchone() is not None
+
+        if not identity_complete:
+            if (
+                database_uuid_value is not None
+                or registry_complete
+                or registry_table_exists
+            ):
+                raise DatabaseIdentityError(
+                    "unmarked retrieval-reference authority state cannot be adopted"
+                )
+            return None
+
+        database_uuid = get_database_uuid(conn)
+        if not registry_complete:
+            if registry_table_exists:
+                raise RetrievalReferenceSchemaError(
+                    "unmarked retrieval_references_v1 table cannot be adopted"
+                )
+            return None
+
+        errors = verify_retrieval_references_schema(conn)
+        if errors:
+            raise RetrievalReferenceSchemaError(
+                "completed retrieval_references_v1 migration is damaged: "
+                + "; ".join(errors)
+            )
+        return database_uuid
 
 
 def ensure_retrieval_reference_migrations(conn: sqlite3.Connection) -> str:
