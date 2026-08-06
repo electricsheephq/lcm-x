@@ -150,10 +150,25 @@ class TeamsPolicy:
 
         effective = context if context is not None else self._context
         narrowed = dict(requested_narrowing)
-        if effective is not None:
-            collection = str(effective.default_write_collection_id or "")
-            if collection and "source" in narrowed:
-                narrowed["source"] = collection
+        principal = principal_of(effective)
+        if not principal:
+            return narrowed
+
+        # Narrow by the OWNER STAMP, not by a collection id.
+        #
+        # This first shipped setting `source` to default_write_collection_id.
+        # On the synthetic smoke that worked, because the fixture seeds rows
+        # with the same constant it puts in the context. On REAL data the two
+        # are unrelated -- stored `source` values look like
+        # "openclaw-lcm:agent:acorn:<uuid>" -- so the filter matched nothing and
+        # recall returned an empty corpus to EVERY principal. Isolation by
+        # breaking retrieval, which a positive control catches and a leak probe
+        # does not.
+        #
+        # access_scope is the property the rows actually carry, and it is the
+        # same value the write path stamps, so read and write agree by
+        # construction.
+        narrowed["access_scope"] = principal
         return narrowed
 
     def authorize_stored_scope(

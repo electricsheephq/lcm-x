@@ -2414,6 +2414,10 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 externalized_refs.append(ref)
 
     requested_session_scope = str(args.get("session_scope", "current")).lower()
+    # The OWNER predicate a Teams policy narrows with. Absent (default-off and
+    # every non-Teams caller) it stays None and the query is byte-identical to
+    # what it was before.
+    requested_access_scope = args.get("access_scope")
     raw_session_id_arg = args.get("session_id")
     explicit_session_id = (
         str(raw_session_id_arg).strip() if raw_session_id_arg is not None else ""
@@ -2502,6 +2506,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 role=role,
                 time_from=time_from,
                 time_to=time_to,
+                access_scope=requested_access_scope,
             )
             for hit in msg_hits:
                 results.append(
@@ -3075,6 +3080,10 @@ def _lcm_grep_semantic(
     knn_limit = candidate_limit if candidate_limit is not None else limit
 
     requested_session_scope = str(args.get("session_scope", "current")).lower()
+    # The OWNER predicate a Teams policy narrows with. Absent (default-off and
+    # every non-Teams caller) it stays None and the query is byte-identical to
+    # what it was before.
+    requested_access_scope = args.get("access_scope")
     raw_session_id_arg = args.get("session_id")
     explicit_session_id = (
         str(raw_session_id_arg).strip() if raw_session_id_arg is not None else ""
@@ -4253,6 +4262,11 @@ def _lcm_recall_fts_arm(
                 fts_args[key] = authorized_scope[key]
             else:
                 fts_args.pop(key, None)
+        # The owner predicate is ADDED, never removed by the loop above: a
+        # policy that scopes to a principal must be able to say so in a term
+        # the stored rows actually carry.
+        if authorized_scope.get("access_scope"):
+            fts_args["access_scope"] = authorized_scope["access_scope"]
         # A resolved session_id with no scope is incoherent for this tool
         # ("session_id is only valid with session_scope=session"), so name the
         # scope the policy's own narrowing implies instead of erroring out.

@@ -1352,6 +1352,7 @@ class VectorStore:
         conversation_ids: Sequence[str] | None,
         source: str | None,
         limit: int,
+        access_scope: str | None = None,
     ) -> list[str]:
         """Enumerate at most ``limit`` live candidate ids, most-recent first.
 
@@ -1402,6 +1403,13 @@ class VectorStore:
         if until is not None:
             where.append(f"{recency_expr} <= ?")
             args.append(float(until))
+        if access_scope is not None:
+            # The OWNER predicate, same as the FTS corpus. Applied in the WHERE
+            # clause so it is enforced BEFORE the bound -- a filter applied after
+            # a LIMIT would return another principal's rows whenever the bound
+            # bit first, which is precisely when it matters.
+            where.append("m.access_scope = ?")
+            args.append(str(access_scope))
         args.append(int(limit))
         with self._optional_temp_id_table(conversation_ids) as conversation_table:
             conversation_join = (
@@ -2108,6 +2116,7 @@ class VectorStore:
         scan_max_rows: int = 0,
         scan_budget_s: float = 0.0,
         deadline: float | None = None,
+        access_scope: str | None = None,
     ) -> KNNResult:
         operation_started = _monotonic()
         k = int(k)
@@ -2151,6 +2160,11 @@ class VectorStore:
         if (
             numpy is not None
             and source is None
+            # An owner-scoped query takes the exact path for the same reason a
+            # source-filtered one does: the binary prescreen mirrors the whole
+            # corpus and cannot express a per-row filter, so running it would
+            # prescreen across every principal before any scoping applied.
+            and access_scope is None
             and not self._scan_bounds_requested(scan_max_rows, scan_budget_s)
             and self._binary_fully_synced(identity, chunk=False)
         ):
@@ -2226,6 +2240,7 @@ class VectorStore:
                     conversation_ids=conversation_ids,
                     source=source,
                     limit=probe_limit,
+                    access_scope=access_scope,
                 ),
                 scan_deadline,
             )
@@ -2609,6 +2624,7 @@ class VectorStore:
         conversation_ids: Sequence[str] | None,
         source: str | None,
         limit: int,
+        access_scope: str | None = None,
     ) -> list[str]:
         """Enumerate at most ``limit`` live chunk ids, most-recent-message first.
 
@@ -2641,6 +2657,13 @@ class VectorStore:
         if source is not None:
             where.append("m.source = ?")
             args.append(str(source))
+        if access_scope is not None:
+            # Owner predicate for the CHUNK corpus, mirroring the summary path.
+            # In the WHERE clause so it is enforced before the bound: a filter
+            # applied after LIMIT returns another principal's rows exactly when
+            # the bound bites, which is when it matters most.
+            where.append("cm.access_scope = ?")
+            args.append(str(access_scope))
         args.append(int(limit))
         with self._optional_temp_id_table(conversation_ids) as conversation_table:
             conversation_join = (
@@ -2758,6 +2781,7 @@ class VectorStore:
         scan_max_rows: int = 0,
         scan_budget_s: float = 0.0,
         deadline: float | None = None,
+        access_scope: str | None = None,
     ) -> KNNResult:
         """Chunk KNN with the summary coverage contract.
 
@@ -2880,6 +2904,7 @@ class VectorStore:
                     conversation_ids=conversation_ids,
                     source=source,
                     limit=probe_limit,
+                    access_scope=access_scope,
                 ),
                 scan_deadline,
             )

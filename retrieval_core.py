@@ -276,6 +276,9 @@ def run_knn(
     )
     conversation_ids = authorized_scope.get("conversation_ids", conversation_ids)
     source = authorized_scope.get("source", source)
+    # The owner predicate the policy narrowed with. Absent for every non-Teams
+    # caller, so the query is unchanged by default.
+    access_scope = authorized_scope.get("access_scope")
     if time.monotonic() >= deadline:
         raise TimeoutError("semantic vector search deadline exhausted")
     return _run_pooled_knn(
@@ -296,6 +299,7 @@ def run_knn(
             scan_max_rows=scan_max_rows,
             scan_budget_s=scan_budget_s,
             deadline=deadline,
+            access_scope=access_scope,
         ),
     )
 
@@ -345,6 +349,9 @@ def run_chunk_knn(
     )
     conversation_ids = authorized_scope.get("conversation_ids", conversation_ids)
     source = authorized_scope.get("source", source)
+    # The owner predicate the policy narrowed with. Absent for every non-Teams
+    # caller, so the query is unchanged by default.
+    access_scope = authorized_scope.get("access_scope")
     if time.monotonic() >= deadline:
         raise TimeoutError("chunk vector search deadline exhausted")
     return _run_pooled_knn(
@@ -365,6 +372,7 @@ def run_chunk_knn(
             scan_max_rows=scan_max_rows,
             scan_budget_s=scan_budget_s,
             deadline=deadline,
+            access_scope=access_scope,
         ),
     )
 

@@ -1134,6 +1134,7 @@ class MessageStore:
                role: str | None = None,
                time_from: float | None = None,
                time_to: float | None = None,
+               access_scope: str | None = None,
                allow_operators: bool = False) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
@@ -1189,6 +1190,15 @@ class MessageStore:
                 if session_id is not None:
                     where.append("m.session_id = ?")
                     args.append(session_id)
+                if access_scope is not None:
+                    # The OWNER predicate. Teams scoping cannot ride on `source`:
+                    # a caller's collection id is not a property stored rows
+                    # carry, so filtering by it matched nothing on real data and
+                    # returned an empty corpus to everyone -- isolation by
+                    # breaking retrieval. The stamp is the thing rows actually
+                    # have, and it is the same value the write path assigns.
+                    where.append("m.access_scope = ?")
+                    args.append(access_scope)
                 if source_clause:
                     where.append(source_clause)
                     args.extend(source_args)
@@ -1228,6 +1238,7 @@ class MessageStore:
                     source=source,
                     conversation_id=conversation_id,
                     role=role,
+                    access_scope=access_scope,
                     time_from=time_from,
                     time_to=time_to,
                 )
@@ -1270,7 +1281,8 @@ class MessageStore:
                      conversation_id: str | None = None,
                      role: str | None = None,
                      time_from: float | None = None,
-                     time_to: float | None = None) -> List[Dict[str, Any]]:
+                     time_to: float | None = None,
+                     access_scope: str | None = None) -> List[Dict[str, Any]]:
         # LIKE keeps every character the index cannot spell (emoji, punctuation)
         # because substring matching is the only way to find those rows.
         safe_query = sanitize_like_query(query)
@@ -1285,6 +1297,12 @@ class MessageStore:
         if session_id is not None:
             where.append("session_id = ?")
             args.append(session_id)
+        if access_scope is not None:
+            # Same owner predicate as the FTS path. The fallback runs whenever
+            # FTS errors, so omitting it here would mean a query failure quietly
+            # WIDENS the corpus back to every principal.
+            where.append("access_scope = ?")
+            args.append(access_scope)
         source_clause, source_args = _source_filter_clause("source", source)
         if source_clause:
             where.append(source_clause)
