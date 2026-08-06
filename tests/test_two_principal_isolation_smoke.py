@@ -26,7 +26,7 @@ from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.externalize import externalize_ingest_payload
 from hermes_lcm.rollup_store import RollupStore
-from hermes_lcm.teams import ensure_teams_catalog
+from hermes_lcm.teams import CatalogRevisions, ensure_teams_catalog, set_revisions
 from hermes_lcm.vector_store import EmbeddingIdentity, VectorStore
 
 
@@ -102,12 +102,22 @@ def _engine(
     engine.lcm_teams_enabled = teams_enabled
     if teams_enabled:
         # A real Teams store always has a catalog -- enable_teams creates it --
-        # and the catalog owns the revisions a context is validated against.
-        # Without one, policy resolution fails closed on the grounds that the
-        # store cannot say whether this context was revoked, and the positive
-        # control would go red for a reason that has nothing to do with
-        # isolation.
+        # and the catalog OWNS the revisions a context is validated against.
+        # Seed it at this context's own revisions, which is what provisioning
+        # does: a tenant is created at whatever revisions its control plane has
+        # already issued contexts against. Without this the store reads every
+        # context as revoked, and the positive control goes red for a reason
+        # that has nothing to do with isolation.
         ensure_teams_catalog(engine._store.connection)
+        set_revisions(
+            engine._store.connection,
+            context.tenant_id,
+            CatalogRevisions(
+                policy_revision=context.policy_revision,
+                membership_revision=context.membership_revision,
+                revocation_epoch=context.revocation_epoch,
+            ),
+        )
     engine.get_lcm_access_context = lambda context=context: context
     engine._session_id = context.session_id
     engine._conversation_id = context.conversation_id

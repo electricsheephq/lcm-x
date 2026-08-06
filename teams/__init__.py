@@ -15,8 +15,10 @@ from .catalog import (
     TEAMS_CATALOG_MIGRATION,
     TEAMS_TABLES,
     CatalogRevisions,
+    bump_revision,
     ensure_teams_catalog,
     read_revisions,
+    set_revisions,
     teams_catalog_exists,
     verify_teams_catalog,
 )
@@ -25,8 +27,10 @@ __all__ = [
     "TEAMS_CATALOG_MIGRATION",
     "TEAMS_TABLES",
     "CatalogRevisions",
+    "bump_revision",
     "ensure_teams_catalog",
     "read_revisions",
+    "set_revisions",
     "teams_catalog_exists",
     "verify_teams_catalog",
 ]

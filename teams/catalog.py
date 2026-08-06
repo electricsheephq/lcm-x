@@ -167,6 +167,34 @@ def read_revisions(conn: sqlite3.Connection, tenant_id: str) -> CatalogRevisions
     )
 
 
+def set_revisions(
+    conn: sqlite3.Connection, tenant_id: str, revisions: CatalogRevisions
+) -> None:
+    """Write a tenant's revisions outright.
+
+    Provisioning needs this: a tenant is created at whatever revisions its
+    control plane already issued contexts against, which is not necessarily
+    zero. Bumping from zero would only reach those numbers by accident.
+    """
+
+    conn.execute(
+        "INSERT INTO lcm_teams_revisions("
+        "tenant_id, policy_revision, membership_revision, revocation_epoch"
+        ") VALUES(?, ?, ?, ?) "
+        "ON CONFLICT(tenant_id) DO UPDATE SET "
+        "policy_revision = excluded.policy_revision, "
+        "membership_revision = excluded.membership_revision, "
+        "revocation_epoch = excluded.revocation_epoch",
+        (
+            tenant_id,
+            int(revisions.policy_revision),
+            int(revisions.membership_revision),
+            int(revisions.revocation_epoch),
+        ),
+    )
+    conn.commit()
+
+
 def bump_revision(conn: sqlite3.Connection, tenant_id: str, field: str) -> int:
     """Advance one revision counter and return its new value.
 
