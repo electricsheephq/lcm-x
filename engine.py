@@ -1826,12 +1826,15 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             )
             if not decision.allowed:
                 raise AuthorizationRequiredError(
-                    "authorize_operation", decision.denial_reason
+                    "authorize_operation", decision.public().denial_reason
                 )
             authorized_scope = policy.resolve_authorized_targets(
                 access_context, "write", expected_scope
             )
             if isinstance(authorized_scope, dict):
+                resolved_partition = authorized_scope.get("partition_key")
+                if resolved_partition is not None:
+                    scope = str(resolved_partition)
                 source_scope = authorized_scope.get("source_scope", access_context)
                 derived_scope = authorized_scope.get("derived_scope", access_context)
                 if (
@@ -1844,7 +1847,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                         access_context, "write", mismatch.denial_reason, mismatch.public()
                     )
                     raise AuthorizationRequiredError(
-                        "authorize_operation", mismatch.denial_reason
+                        "authorize_operation", mismatch.public().denial_reason
                     )
             captured_decision = decision
             raw_database_path = str(self._dag.db_path)
@@ -1865,7 +1868,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 # thread. Never resolve policy on this shared worker.
                 if not captured_decision.allowed:
                     raise AuthorizationRequiredError(
-                        "authorize_operation", captured_decision.denial_reason
+                        "authorize_operation", captured_decision.public().denial_reason
                     )
                 private_dag = SummaryDAG(database_path)
                 try:
@@ -2701,7 +2704,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         )
         if not decision.allowed:
             raise AuthorizationRequiredError(
-                "authorize_operation", decision.denial_reason
+                "authorize_operation", decision.public().denial_reason
             )
         if "hermes_home" in kwargs:
             self._rebind_storage_for_home(str(kwargs.get("hermes_home") or ""))
@@ -3319,7 +3322,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         )
         if not decision.allowed:
             raise AuthorizationRequiredError(
-                "authorize_operation", decision.denial_reason
+                "authorize_operation", decision.public().denial_reason
             )
         protected_messages = protect_messages_for_ingest(
             kept,
@@ -3351,7 +3354,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         )
         if not decision.allowed:
             raise AuthorizationRequiredError(
-                "authorize_operation", decision.denial_reason
+                "authorize_operation", decision.public().denial_reason
             )
         ended_generation = self._in_process_auxiliary_caller_generation(session_id)
         active_auxiliary_end = session_id in self._active_auxiliary_session_ids()
@@ -3688,14 +3691,15 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             "kind": "session_reset",
             "session_id": self._session_id,
             "conversation_id": self._conversation_id,
+            "required_scope": "owner_only",
         }
-        decision = policy.authorize_operation(access_context, "write", expected_scope)
+        decision = policy.authorize_operation(access_context, "owner_only", expected_scope)
         policy.audit_decision(
-            access_context, "write", decision.denial_reason, decision.public()
+            access_context, "owner_only", decision.denial_reason, decision.public()
         )
         if not decision.allowed:
             raise AuthorizationRequiredError(
-                "authorize_operation", decision.denial_reason
+                "authorize_operation", decision.public().denial_reason
             )
         if self._host_fallback_compressor is not None:
             compressor = self._host_fallback_compressor
@@ -3929,8 +3933,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         }
         if binding and binding.get("target_free"):
             target_scope = {
-                "session_id": self._session_id,
-                "conversation_id": self._conversation_id,
+                "session_id": self.current_session_id,
+                "conversation_id": self.current_conversation_id,
             }
         expected_scope = {
             "kind": "tool_call",
@@ -3948,7 +3952,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         )
         if not decision.allowed:
             raise AuthorizationRequiredError(
-                "authorize_operation", decision.denial_reason
+                "authorize_operation", decision.public().denial_reason
             )
         authorized_scope = policy.resolve_authorized_targets(
             access_context, operation, expected_scope
@@ -4734,7 +4738,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         )
         if not decision.allowed:
             raise AuthorizationRequiredError(
-                "authorize_operation", decision.denial_reason
+                "authorize_operation", decision.public().denial_reason
             )
         replay_messages = quarantine_suspicious_assistant_messages(
             messages,

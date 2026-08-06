@@ -4227,7 +4227,7 @@ def _lcm_recall_fts_arm(
     )
     if not decision.allowed:
         raise AuthorizationRequiredError(
-            "authorize_operation", decision.denial_reason
+            "authorize_operation", decision.public().denial_reason
         )
     authorized_scope = policy.resolve_authorized_targets(
         access_context, "read", expected_scope

@@ -55,7 +55,7 @@ def backup_database(engine) -> dict[str, Any]:
         access_context, "owner_only", decision.denial_reason, decision.public()
     )
     if not decision.allowed:
-        raise AuthorizationRequiredError("authorize_operation", decision.denial_reason)
+        raise AuthorizationRequiredError("authorize_operation", decision.public().denial_reason)
     db_path = Path(engine._store.db_path)
     if not db_path.exists():
         return {
@@ -111,7 +111,7 @@ def rotate_backup_database(engine) -> dict[str, Any]:
         access_context, "owner_only", decision.denial_reason, decision.public()
     )
     if not decision.allowed:
-        raise AuthorizationRequiredError("authorize_operation", decision.denial_reason)
+        raise AuthorizationRequiredError("authorize_operation", decision.public().denial_reason)
     db_path = Path(engine._store.db_path)
     if not db_path.exists():
         return {

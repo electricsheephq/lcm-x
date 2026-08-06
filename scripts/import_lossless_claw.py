@@ -227,19 +227,19 @@ def _authorize_import(
         access_context, operation, decision.denial_reason, decision.public()
     )
     if not decision.allowed:
-        raise AuthorizationRequiredError("authorize_operation", decision.denial_reason)
+        raise AuthorizationRequiredError("authorize_operation", decision.public().denial_reason)
     if apply and _target_has_stamped_scope(target_path) and access_context is None:
         missing = Decision.deny(DenialReason.CONTEXT_MISSING)
         policy.audit_decision(
             access_context, operation, missing.denial_reason, missing.public()
         )
-        raise AuthorizationRequiredError("authorize_operation", missing.denial_reason)
+        raise AuthorizationRequiredError("authorize_operation", missing.public().denial_reason)
     if apply and teams_enabled and _access_scope_from_context(access_context) is None:
         invalid = Decision.deny(DenialReason.CONTEXT_INVALID)
         policy.audit_decision(
             access_context, operation, invalid.denial_reason, invalid.public()
         )
-        raise AuthorizationRequiredError("authorize_operation", invalid.denial_reason)
+        raise AuthorizationRequiredError("authorize_operation", invalid.public().denial_reason)
 
 
 def _access_scope_from_context(context: Any) -> str | None:

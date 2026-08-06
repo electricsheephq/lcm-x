@@ -171,13 +171,14 @@ class AuxiliarySessionMixin:
         policy = policy_for_engine(self)
         access_context = policy_access_context(self)
         expected_scope = {"kind": "auxiliary_session", "session_id": session_id}
-        decision = policy.authorize_operation(access_context, "write", expected_scope)
+        expected_scope["required_scope"] = "owner_only"
+        decision = policy.authorize_operation(access_context, "owner_only", expected_scope)
         policy.audit_decision(
-            access_context, "write", decision.denial_reason, decision.public()
+            access_context, "owner_only", decision.denial_reason, decision.public()
         )
         if not decision.allowed:
             raise AuthorizationRequiredError(
-                "authorize_operation", decision.denial_reason
+                "authorize_operation", decision.public().denial_reason
             )
         generation = self._in_process_auxiliary_caller_generation(session_id)
         with self._auxiliary_session_lock:
@@ -252,13 +253,14 @@ class AuxiliarySessionMixin:
         policy = policy_for_engine(self)
         access_context = policy_access_context(self)
         expected_scope = {"kind": "auxiliary_session", "session_id": session_id}
-        decision = policy.authorize_operation(access_context, "write", expected_scope)
+        expected_scope["required_scope"] = "owner_only"
+        decision = policy.authorize_operation(access_context, "owner_only", expected_scope)
         policy.audit_decision(
-            access_context, "write", decision.denial_reason, decision.public()
+            access_context, "owner_only", decision.denial_reason, decision.public()
         )
         if not decision.allowed:
             raise AuthorizationRequiredError(
-                "authorize_operation", decision.denial_reason
+                "authorize_operation", decision.public().denial_reason
             )
         if not session_id:
             return False
@@ -334,13 +336,14 @@ class AuxiliarySessionMixin:
             "session_id": new_session_id,
             "old_session_id": old_session_id,
         }
-        decision = policy.authorize_operation(access_context, "write", expected_scope)
+        expected_scope["required_scope"] = "owner_only"
+        decision = policy.authorize_operation(access_context, "owner_only", expected_scope)
         policy.audit_decision(
-            access_context, "write", decision.denial_reason, decision.public()
+            access_context, "owner_only", decision.denial_reason, decision.public()
         )
         if not decision.allowed:
             raise AuthorizationRequiredError(
-                "authorize_operation", decision.denial_reason
+                "authorize_operation", decision.public().denial_reason
             )
         generation = self._in_process_auxiliary_caller_generation(new_session_id)
         if generation and self._auxiliary_generation_is_retired(new_session_id, generation):
@@ -514,13 +517,14 @@ class AuxiliarySessionMixin:
         policy = policy_for_engine(self)
         access_context = policy_access_context(self)
         expected_scope = {"kind": "auxiliary_session", "session_id": session_id}
-        decision = policy.authorize_operation(access_context, "write", expected_scope)
+        expected_scope["required_scope"] = "owner_only"
+        decision = policy.authorize_operation(access_context, "owner_only", expected_scope)
         policy.audit_decision(
-            access_context, "write", decision.denial_reason, decision.public()
+            access_context, "owner_only", decision.denial_reason, decision.public()
         )
         if not decision.allowed:
             raise AuthorizationRequiredError(
-                "authorize_operation", decision.denial_reason
+                "authorize_operation", decision.public().denial_reason
             )
         with self._auxiliary_session_lock:
             self._auxiliary_session_ids.discard(session_id)

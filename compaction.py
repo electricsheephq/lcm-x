@@ -407,7 +407,7 @@ class CompactionMixin:
         )
         if not decision.allowed:
             raise AuthorizationRequiredError(
-                "authorize_operation", decision.denial_reason
+                "authorize_operation", decision.public().denial_reason
             )
         authorized_scope = policy.resolve_authorized_targets(
             access_context, "write", expected_scope
@@ -425,7 +425,7 @@ class CompactionMixin:
                     access_context, "write", mismatch.denial_reason, mismatch.public()
                 )
                 raise AuthorizationRequiredError(
-                    "authorize_operation", mismatch.denial_reason
+                    "authorize_operation", mismatch.public().denial_reason
                 )
 
         self._last_compression_status = "running"

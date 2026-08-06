@@ -59,13 +59,14 @@ class ResetStateMixin:
             "session_id": getattr(self, "_session_id", ""),
             "conversation_id": getattr(self, "_conversation_id", ""),
         }
-        decision = policy.authorize_operation(access_context, "write", expected_scope)
+        expected_scope["required_scope"] = "owner_only"
+        decision = policy.authorize_operation(access_context, "owner_only", expected_scope)
         policy.audit_decision(
-            access_context, "write", decision.denial_reason, decision.public()
+            access_context, "owner_only", decision.denial_reason, decision.public()
         )
         if not decision.allowed:
             raise AuthorizationRequiredError(
-                "authorize_operation", decision.denial_reason
+                "authorize_operation", decision.public().denial_reason
             )
         self._reset_session_counters()
         self._reset_compaction_progress()

@@ -163,7 +163,9 @@ def test_non_widening_rollup_scope_refuses_fixture_widening(tmp_path: Path, monk
     monkeypatch.setattr(command_module, "policy_for_engine", lambda engine: policy)
     monkeypatch.setattr(command_module, "policy_access_context", lambda engine: source)
     try:
-        with pytest.raises(AuthorizationRequiredError, match="scope_mismatch"):
+        with pytest.raises(
+            AuthorizationRequiredError, match="target_not_found_or_forbidden"
+        ):
             command_module._rollups_rebuild_text(["day", "2026-01-01"], engine)
         assert engine._store._conn.execute("SELECT COUNT(*) FROM lcm_rollups").fetchone()[0] == 0
     finally:
@@ -189,7 +191,9 @@ def test_rollup_rebuild_rejects_partition_narrowing_mismatch(
     monkeypatch.setattr(command_module, "policy_for_engine", lambda _engine: WrongPartitionPolicy())
     monkeypatch.setattr(command_module, "policy_access_context", lambda _engine: None)
     try:
-        with pytest.raises(AuthorizationRequiredError, match="scope_mismatch"):
+        with pytest.raises(
+            AuthorizationRequiredError, match="target_not_found_or_forbidden"
+        ):
             command_module._rollups_rebuild_text(["day", "2026-01-01"], engine)
         assert engine._store._conn.execute("SELECT COUNT(*) FROM lcm_rollups").fetchone()[0] == 0
     finally:

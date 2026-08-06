@@ -59,7 +59,10 @@ class FailClosedPolicy:
     # so returning one would let `if policy.select_collection(scope):` sail
     # straight through -- a fail-closed policy failing open at the call site.
     def _refuse(self, primitive: str) -> Any:
-        raise AuthorizationRequiredError(primitive, self.denial_reason)
+        raise AuthorizationRequiredError(
+            primitive,
+            self._deny().public().denial_reason,
+        )
 
     def select_collection(self, target_scope: TargetScope) -> Any:
         return self._refuse("select_collection")

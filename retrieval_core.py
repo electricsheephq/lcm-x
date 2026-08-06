@@ -269,7 +269,7 @@ def run_knn(
     )
     if not decision.allowed:
         raise AuthorizationRequiredError(
-            "authorize_operation", decision.denial_reason
+            "authorize_operation", decision.public().denial_reason
         )
     authorized_scope = policy.resolve_authorized_targets(
         access_context, "read", expected_scope
@@ -338,7 +338,7 @@ def run_chunk_knn(
     )
     if not decision.allowed:
         raise AuthorizationRequiredError(
-            "authorize_operation", decision.denial_reason
+            "authorize_operation", decision.public().denial_reason
         )
     authorized_scope = policy.resolve_authorized_targets(
         access_context, "read", expected_scope
@@ -494,7 +494,7 @@ def hydrate_chunk_hits(
             )
             if not decision.allowed:
                 raise AuthorizationRequiredError(
-                    "authorize_stored_scope", decision.denial_reason
+                    "authorize_stored_scope", decision.public().denial_reason
                 )
         hydrated: list[tuple[dict[str, Any], float]] = []
         for cid in ordered_ids:  # preserve KNN rank order
@@ -629,7 +629,7 @@ def hydrate_semantic_nodes(
             )
             if not decision.allowed:
                 raise AuthorizationRequiredError(
-                    "authorize_stored_scope", decision.denial_reason
+                    "authorize_stored_scope", decision.public().denial_reason
                 )
             node = read_dag.get_node(node_id)
             require_remaining("node lookup")

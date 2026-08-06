@@ -1791,6 +1791,25 @@ def _doctor_text(engine) -> str:
     return "\n".join(lines)
 
 
+def _authorize_doctor_command(engine) -> None:
+    """Require admin authority before slash-command scope diagnostics run."""
+    policy = policy_for_engine(engine)
+    access_context = policy_access_context(engine)
+    expected_scope = {
+        "kind": "slash_command",
+        "command": "doctor",
+        "required_scope": "admin",
+    }
+    decision = policy.authorize_operation(access_context, "admin", expected_scope)
+    policy.audit_decision(
+        access_context, "admin", decision.denial_reason, decision.public()
+    )
+    if not decision.allowed:
+        raise AuthorizationRequiredError(
+            "authorize_operation", decision.public().denial_reason
+        )
+
+
 def _doctor_clean_text(engine) -> str:
     scan = _scan_clean_candidates(engine)
     if scan["error"]:
@@ -2474,7 +2493,7 @@ def _rollups_rebuild_text(tokens: list[str], engine) -> str:
     )
     if not decision.allowed:
         raise AuthorizationRequiredError(
-            "authorize_operation", decision.denial_reason
+            "authorize_operation", decision.public().denial_reason
         )
     authorized_scope = policy.resolve_authorized_targets(
         access_context, "write", expected_scope
@@ -2487,7 +2506,7 @@ def _rollups_rebuild_text(tokens: list[str], engine) -> str:
                 access_context, "write", mismatch.denial_reason, mismatch.public()
             )
             raise AuthorizationRequiredError(
-                "authorize_operation", mismatch.denial_reason
+                "authorize_operation", mismatch.public().denial_reason
             )
         source_scope = authorized_scope.get("source_scope", access_context)
         derived_scope = authorized_scope.get("derived_scope", access_context)
@@ -2501,7 +2520,7 @@ def _rollups_rebuild_text(tokens: list[str], engine) -> str:
                 access_context, "write", mismatch.denial_reason, mismatch.public()
             )
             raise AuthorizationRequiredError(
-                "authorize_operation", mismatch.denial_reason
+                "authorize_operation", mismatch.public().denial_reason
             )
 
     targets = _rollup_period_targets(kind, target_date)
@@ -5100,6 +5119,7 @@ def handle_lcm_command(raw_args: str | None, engine) -> str:
 
     if head == "doctor":
         if not rest:
+            _authorize_doctor_command(engine)
             return _doctor_text(engine)
         if len(rest) == 1 and rest[0].lower() == "clean":
             return _doctor_clean_text(engine)
