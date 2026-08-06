@@ -155,6 +155,7 @@ from .scope_storage import (
     setup_teams_scope,
     teams_enabled as storage_teams_enabled,
 )
+from .teams import ensure_teams_catalog
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 from . import tools as lcm_tools
 
@@ -910,6 +911,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             overrides=overrides,
             fallback_owner=fallback_owner,
         )
+        # After the backfill, so a store whose stamping failed does not acquire
+        # catalog tables it never gets to use.
+        result["catalog"] = ensure_teams_catalog(self._store.connection)
         # An incomplete backfill raises ScopeBackfillIncompleteError out of
         # setup_teams_scope, so control never reaches the lines below and the
         # marker stays unset -- leaving the store stamped-without-marker, which

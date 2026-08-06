@@ -297,6 +297,10 @@ _KNOWN_FEATURE_TABLE_PREFIXES = (
     "lcm_assertion",
     "lcm_query",
     "lcm_trajectory",
+    # The Teams catalog is an opt-in family like the rest. Without this entry a
+    # Teams-enabled store reads as carrying tables no known build owns, and the
+    # repair path refuses to repair it.
+    "lcm_teams",
 )
 
 # The known opt-in feature families whose derived tables an interim build may
