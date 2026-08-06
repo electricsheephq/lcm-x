@@ -979,6 +979,7 @@ def _doctor_repair_text(engine) -> str:
 
 
 def _doctor_repair_apply_text(engine) -> str:
+    _authorize_doctor_command(engine)
     backup = backup_database(engine)
     if not backup["ok"]:
         return "\n".join([
@@ -1132,6 +1133,7 @@ def _doctor_repair_schema_stamp_apply_text(engine) -> str:
             _schema_stamp_note(plan),
         ])
 
+    _authorize_doctor_command(engine)
     backup = backup_database(engine)
     if not backup["ok"]:
         return "\n".join([
@@ -1238,6 +1240,7 @@ def _doctor_source_apply_text(engine) -> str:
             "note: no legacy blank-source rows needed normalization",
         ])
 
+    _authorize_doctor_command(engine)
     backup = backup_database(engine)
     if not backup["ok"]:
         return "\n".join([
@@ -2055,6 +2058,7 @@ def _doctor_clean_apply_text(engine) -> str:
             "note: nothing was deleted",
         ])
 
+    _authorize_doctor_command(engine)
     backup = backup_database(engine)
     if not backup["ok"]:
         return "\n".join([

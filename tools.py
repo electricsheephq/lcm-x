@@ -892,6 +892,51 @@ def lcm_compile_evidence(args: Dict[str, Any], **kwargs) -> str:
     mode = str(args.get("mode") or "proposal").strip().casefold()
     if mode not in {"proposal", "auto"}:
         return json.dumps({"error": "mode must be one of: proposal, auto"})
+    if mode == "proposal" and args.get("persist_view") is True:
+        # The persisted query view is principal-scoped data. Keep the write
+        # decision beside the branch that can materialize it so direct handler
+        # calls cannot bypass the engine's ordinary tool-boundary gate.
+        policy = policy_for_engine(engine)
+        access_context = policy_access_context(engine)
+        target_scope = {
+            key: args[key]
+            for key in ("baseline_refs", "proposal")
+            if key in args
+        }
+        expected_scope = {
+            "kind": "tool_call",
+            "tool_name": "lcm_compile_evidence",
+            "caller_session_id": engine._session_id,
+            "caller_conversation_id": engine._conversation_id,
+            "target_scope": target_scope,
+            **target_scope,
+            "required_scope": "write",
+        }
+        decision = policy.authorize_operation(
+            access_context, "write", expected_scope
+        )
+        policy.audit_decision(
+            access_context, "write", decision.denial_reason, decision.public()
+        )
+        if not decision.allowed:
+            raise AuthorizationRequiredError(
+                "authorize_operation", decision.public().denial_reason
+            )
+        authorized_scope = policy.resolve_authorized_targets(
+            access_context, "write", expected_scope
+        )
+        if isinstance(authorized_scope, Mapping):
+            resolved_target_scope = authorized_scope.get(
+                "target_scope", authorized_scope
+            )
+            if isinstance(resolved_target_scope, Mapping):
+                narrowed_args = dict(args)
+                for key in ("baseline_refs", "proposal"):
+                    if key in resolved_target_scope:
+                        narrowed_args[key] = resolved_target_scope[key]
+                    else:
+                        narrowed_args.pop(key, None)
+                args = narrowed_args
     if mode == "auto":
         result = compile_preanswer_evidence(
             args.get("question"),
