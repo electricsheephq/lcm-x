@@ -650,9 +650,32 @@ def test_fallback_chunks_obey_the_shared_token_estimator(tmp_path, monkeypatch):
     assert all(token_module._fallback_token_estimate(chunk) <= 5 for chunk in chunks)
 
 
-def test_chunked_path_pools_oversize_documents(tmp_path):
-    """Every document over the test-lowered token budget takes the chunk path
-    and each state still yields exactly one usable vector."""
+def test_tiktoken_chunks_preserve_multibyte_boundaries(monkeypatch):
+    tiktoken = pytest.importorskip("tiktoken")
+    encoder = tiktoken.get_encoding("cl100k_base")
+    monkeypatch.setattr(token_module, "_get_encoder", lambda: encoder)
+    store = object.__new__(TrajectoryStore)
+    document = "漢字かな交じり文" * 20
+    token_budget = 7
+
+    token_ids = encoder.encode(document)
+    naive_rejoin = "".join(
+        encoder.decode(token_ids[start:start + token_budget])
+        for start in range(0, len(token_ids), token_budget)
+    )
+    assert "\ufffd" in naive_rejoin
+
+    chunks = store._state_token_chunks(document, token_budget=token_budget)
+
+    assert "".join(chunks) == document
+    assert all("\ufffd" not in chunk for chunk in chunks)
+    assert len(chunks) > 1
+    assert all(len(encoder.encode(chunk)) <= token_budget for chunk in chunks)
+
+
+def test_exact_budget_document_stays_normal_and_oversize_is_chunked(tmp_path):
+    """The exact-budget document remains normal while only the oversized state
+    takes the chunk path; both still yield exactly one usable vector."""
     asset_root = tmp_path / "assets"
     asset_root.mkdir()
     provider = StateVectorProvider()
@@ -660,24 +683,29 @@ def test_chunked_path_pools_oversize_documents(tmp_path):
         tmp_path / "lcm.db", _identity(), asset_root=asset_root,
         embedding_provider=provider,
     )
-    long_text = "alpha-answer " + ("token " * 400)  # well over a 5-token budget
+    exact_budget_text = "widget configuration export panel form"
+    document_token_budget = token_module.count_tokens(exact_budget_text)
+    long_text = "alpha-answer " + ("token " * 400)  # well over the exact fixture
     store.insert(_source(
         asset_root,
         trajectory_id="answerpath",
         ordinal=0,
         goal="Update the account settings",
         texts=(
-            "widget configuration export panel form",
+            exact_budget_text,
             long_text,
         ),
     ))
     store.finalize(["answerpath"])
     stats = store.build_state_semantic_index(
-        provider, document_token_budget=5, batch_token_budget=50, batch_max_items=4
+        provider,
+        document_token_budget=document_token_budget,
+        batch_token_budget=50,
+        batch_max_items=4,
     )
-    # Both documents exceed five cl100k tokens; the old expectation of one
-    # chunked state confused word count with the provider tokenizer.
-    assert stats["chunked_states"] == 2
+    assert token_module.count_tokens(exact_budget_text) == document_token_budget
+    assert token_module.count_tokens(long_text) > document_token_budget
+    assert stats["chunked_states"] == 1
     assert stats["states_embedded"] == 2
     oversize = _state_id(store, "answerpath", 1)
     row = store._conn.execute(

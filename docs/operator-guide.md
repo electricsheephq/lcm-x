@@ -79,7 +79,7 @@ If you installed a symlink from a separate checkout:
 
 Restart Hermes after updating.
 
-## Upgrade from v0.20.0 to v0.21.0-rc1
+## Upgrade from v0.20.0 to v0.21.0-rc2
 
 1. While the old runtime is running, run `/lcm backup`. If Hermes or any other
    SQLite writer may still be running, this is the only supported online backup
@@ -91,7 +91,7 @@ Restart Hermes after updating.
    live.
 3. Update the plugin checkout to the RC and restart Hermes.
 4. Send one normal message, then confirm `lcm_status` reports plugin version
-   `0.21.0-rc1` and the expected database path.
+   `0.21.0-rc2` and the expected database path.
 5. For a migration-shape audit, query that database with
    `SELECT value FROM metadata WHERE key = 'schema_version';`; the expected
    result is `5`.
@@ -135,7 +135,7 @@ Typical output:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm v0.21.0-rc1 (15 tools)
+  ✓ hermes-lcm v0.21.0-rc2 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm
