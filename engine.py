@@ -149,6 +149,8 @@ from .sqlite_util import (
 from .store import MessageStore
 from .scope_storage import (
     mark_teams_enabled,
+    persist_teams_enabled,
+    resolve_startup_teams_state,
     setup_teams_scope,
     teams_enabled as storage_teams_enabled,
 )
@@ -821,9 +823,33 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     model=self._assertion_extraction_model(),
                     timeout_seconds=self._assertion_extraction_timeout(),
                 )
+            self._restore_persisted_teams_state()
         except Exception:
             self._close_storage()
             raise
+
+    def _restore_persisted_teams_state(self) -> None:
+        """Recover the Teams decision from the store before any read or write.
+
+        Enablement used to live only on this object, so every restart silently
+        dropped it while the per-owner stamps stayed in the database -- a
+        permissive policy over scoped data, reported as healthy by doctor.
+        Reading the durable record here, inside _bind_storage, puts it back
+        before any path can consult the flag.
+        """
+
+        connection = getattr(self._store, "connection", None)
+        if connection is None:
+            return
+        enabled, reason = resolve_startup_teams_state(connection)
+        self._teams_state_reason = reason
+        if enabled:
+            mark_teams_enabled(self)
+        else:
+            # Explicitly cleared rather than left alone: rebinding to a
+            # different store must not inherit the previous store's answer.
+            if hasattr(self, _access_policy.TEAMS_ENABLED_ATTR):
+                delattr(self, _access_policy.TEAMS_ENABLED_ATTR)
 
     def _access_scope_for_storage_session(self, session_id: str) -> str | None:
         """Return the Teams owner scope for a writer's session, if enabled."""
@@ -879,8 +905,32 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             owner_for_session or self._preteams_owner_for_session,
             batch_size=batch_size,
         )
+        # Durable BEFORE in-process, so a crash between the two lands on
+        # "enabled" rather than on stamps with no recorded decision.
+        persist_teams_enabled(self._store.connection, True)
         mark_teams_enabled(self)
+        self._teams_state_reason = "enabled"
         return result
+
+    def disable_teams(self) -> dict[str, object]:
+        """Record that Teams is off, without unstamping anything.
+
+        Additive-only by design: the access_scope values stay exactly as they
+        are. Stripping them would destroy the attribution a later re-enable
+        depends on, and would be the one genuinely irreversible operation in
+        this feature. Disable is a decision, not a migration.
+
+        Because the stamps remain, the durable ``false`` matters -- it is what
+        distinguishes "an operator turned this off" from "an enable died
+        partway", which :func:`resolve_startup_teams_state` must treat very
+        differently.
+        """
+
+        persist_teams_enabled(self._store.connection, False)
+        if hasattr(self, _access_policy.TEAMS_ENABLED_ATTR):
+            delattr(self, _access_policy.TEAMS_ENABLED_ATTR)
+        self._teams_state_reason = "disabled"
+        return {"teams_enabled": False, "stamps_retained": True}
 
     # Host adapters may use either verb; both routes share the same idempotent
     # setup/backfill implementation and do not alter the default-off path.

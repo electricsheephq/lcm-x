@@ -17,6 +17,7 @@ from typing import Callable, Iterable
 from .db_bootstrap import (
     SCOPE_MIGRATION_STEP,
     add_column_if_missing,
+    ensure_metadata_table,
     mark_migration_step_complete,
 )
 
@@ -80,6 +81,84 @@ def mark_teams_enabled(engine: object) -> None:
     """Publish the Teams setup completion flag after backfill succeeds."""
 
     setattr(engine, _TEAMS_ENABLED_ATTRIBUTE, True)
+
+
+# The DURABLE record of the operator's decision. Deliberately not a
+# lcm_migration_state step: those are append-only completion markers, and this
+# has to be revocable by disable_teams. Deliberately not ``scope_v1`` either --
+# that records "the access_scope columns exist", which ordinary bootstrap writes
+# whether or not anyone enabled Teams.
+TEAMS_ENABLED_METADATA_KEY = "teams_enabled_v1"
+
+
+def read_persisted_teams_enabled(conn: sqlite3.Connection) -> bool | None:
+    """Return the recorded decision, or None when none was ever recorded."""
+
+    ensure_metadata_table(conn)
+    row = conn.execute(
+        "SELECT value FROM metadata WHERE key = ?", (TEAMS_ENABLED_METADATA_KEY,)
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    return str(row[0]).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def persist_teams_enabled(conn: sqlite3.Connection, enabled: bool) -> None:
+    """Record the operator's enable/disable decision so a restart keeps it."""
+
+    ensure_metadata_table(conn)
+    conn.execute(
+        "INSERT INTO metadata(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (TEAMS_ENABLED_METADATA_KEY, "true" if enabled else "false"),
+    )
+    conn.commit()
+
+
+def access_scope_stamps_exist(conn: sqlite3.Connection) -> bool:
+    """True when any row carries a non-NULL access_scope."""
+
+    for table in _ACCESS_SCOPE_TABLES:
+        try:
+            row = conn.execute(
+                f"SELECT 1 FROM {table} WHERE {ACCESS_SCOPE_COLUMN} IS NOT NULL LIMIT 1"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # Table or column absent on this store; nothing stamped there.
+            continue
+        if row is not None:
+            return True
+    return False
+
+
+def resolve_startup_teams_state(conn: sqlite3.Connection) -> tuple[bool, str]:
+    """Decide the Teams flag a freshly-bound engine must start with.
+
+    Returns ``(teams_enabled, reason)``.
+
+    The third case is the one that matters. ``enable_teams`` stamps rows in
+    committed batches and only records the flag once the whole backfill
+    succeeds, so an enable that dies partway -- one unresolvable owner is
+    enough -- leaves per-owner stamps behind with no recorded decision. Reading
+    that as "Teams is off" hands a permissive policy real scoped data, with no
+    restart required and nothing in the logs.
+
+    Reporting it as ENABLED is what makes it safe: with no context accessor
+    wired, ``policy_for_engine`` resolves enabled-but-unwired to FailClosedPolicy
+    rather than to the permissive default. The store refuses work until an
+    operator finishes the enable or explicitly disables, which is the direction
+    to fail in when the alternative is silently serving one principal's memory
+    to another.
+    """
+
+    persisted = read_persisted_teams_enabled(conn)
+    if persisted is True:
+        return True, "enabled"
+    if persisted is False:
+        return False, "disabled"
+    if access_scope_stamps_exist(conn):
+        return True, "stamped-without-marker"
+    return False, "never-enabled"
 
 
 @dataclass(frozen=True)
