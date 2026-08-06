@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from enum import Enum
 
 from ..access_context.denials import DenialReason
 from ..access_context.model import AccessContextV1
@@ -46,23 +47,41 @@ def policy_for_engine(engine: object) -> "TrustedOwnerPolicy | FailClosedPolicy"
     if not teams_enabled or not isinstance(context, AccessContextV1):
         return resolve_policy(context, teams_enabled)
 
-    revisions = _catalog_revisions(engine, context)
-    if revisions is None:
-        # Teams is on with a valid context, but the catalog that owns the
-        # revisions is missing or unreadable. Falling through with "no
-        # revisions" would resolve permissive on a store that cannot say
-        # whether this context has been revoked -- the exact silent-permissive
-        # shape this seam exists to prevent.
+    status, revisions = _catalog_revisions(engine, context)
+    if status is _CatalogLookup.UNREADABLE:
+        # A store IS bound, and it cannot say whether this context has been
+        # revoked. Falling through with "no revisions" would resolve permissive
+        # on exactly the store that failed to answer -- the silent-permissive
+        # shape this seam exists to prevent. Note zero is NOT a safe default
+        # either: zero is a real revision value, so a context minted at zero
+        # would validate against a catalog nobody could read.
         return FailClosedPolicy(DenialReason.CONTEXT_INVALID)
     return resolve_policy(context, teams_enabled, current_revisions=revisions)
 
 
-def _catalog_revisions(engine: object, context: AccessContextV1):
-    """Read the tenant's CURRENT revisions, or None if they cannot be read.
+class _CatalogLookup(Enum):
+    OK = "ok"
+    UNREADABLE = "unreadable"
+    NOT_STORE_BACKED = "not_store_backed"
 
-    Deliberately not defaulted to zero on failure: zero is a real revision
-    value, and a context minted at zero would then validate against a store
-    whose catalog could not be consulted.
+
+def _catalog_revisions(
+    engine: object, context: AccessContextV1
+) -> tuple["_CatalogLookup", object | None]:
+    """Read the tenant's CURRENT revisions from the catalog.
+
+    Two absences that look alike and must not be treated alike:
+
+    UNREADABLE -- a store is bound but its catalog is missing or unreadable.
+    That is an inconsistent Teams store and it fails closed.
+
+    NOT_STORE_BACKED -- the caller passed a context carrier with no store at
+    all. ``scripts/import_lossless_claw`` does this deliberately: its ``engine``
+    parameter is typed ``object | None`` and exists only to carry a context, so
+    there is no catalog for it to be inconsistent with. Revocation is therefore
+    NOT enforced on that path; it gets a real authenticated surface in the
+    connector phase, and until then this is a stated limitation rather than a
+    silent one.
     """
 
     from ..teams.catalog import read_revisions, teams_catalog_exists
@@ -70,13 +89,13 @@ def _catalog_revisions(engine: object, context: AccessContextV1):
     store = getattr(engine, "_store", None)
     connection = getattr(store, "connection", None)
     if connection is None:
-        return None
+        return _CatalogLookup.NOT_STORE_BACKED, None
     try:
         if not teams_catalog_exists(connection):
-            return None
-        return read_revisions(connection, context.tenant_id)
+            return _CatalogLookup.UNREADABLE, None
+        return _CatalogLookup.OK, read_revisions(connection, context.tenant_id)
     except Exception:
-        return None
+        return _CatalogLookup.UNREADABLE, None
 
 
 def resolve_policy(

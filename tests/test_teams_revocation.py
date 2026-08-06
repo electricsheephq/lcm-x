@@ -175,3 +175,22 @@ def test_each_counter_is_checked_independently(store: sqlite3.Connection) -> Non
     policy = policy_for_engine(_Engine(store, _context(revocation_epoch=0)))
 
     assert isinstance(policy, FailClosedPolicy)
+
+
+def test_a_context_carrier_with_no_store_is_not_treated_as_an_inconsistent_store(
+    store: sqlite3.Connection,
+) -> None:
+    """scripts/import_lossless_claw passes an object, not an engine.
+
+    Its `engine` parameter is typed `object | None` and exists only to carry a
+    context, so there is no catalog for it to be inconsistent with. Revocation
+    is NOT enforced on that path -- stated here so the limitation is visible
+    rather than discovered, and so the two absences stay distinguishable.
+    """
+    from types import SimpleNamespace
+
+    carrier = SimpleNamespace(
+        lcm_teams_enabled=True, get_lcm_access_context=lambda: _context()
+    )
+
+    assert isinstance(policy_for_engine(carrier), TrustedOwnerPolicy)

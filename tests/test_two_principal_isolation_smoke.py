@@ -26,6 +26,7 @@ from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.externalize import externalize_ingest_payload
 from hermes_lcm.rollup_store import RollupStore
+from hermes_lcm.teams import ensure_teams_catalog
 from hermes_lcm.vector_store import EmbeddingIdentity, VectorStore
 
 
@@ -99,6 +100,14 @@ def _engine(
     engine = LCMEngine(config=config, hermes_home=str(db_path.parent))
     # These are the exact module-constant names in access_policy/resolution.py.
     engine.lcm_teams_enabled = teams_enabled
+    if teams_enabled:
+        # A real Teams store always has a catalog -- enable_teams creates it --
+        # and the catalog owns the revisions a context is validated against.
+        # Without one, policy resolution fails closed on the grounds that the
+        # store cannot say whether this context was revoked, and the positive
+        # control would go red for a reason that has nothing to do with
+        # isolation.
+        ensure_teams_catalog(engine._store.connection)
     engine.get_lcm_access_context = lambda context=context: context
     engine._session_id = context.session_id
     engine._conversation_id = context.conversation_id
