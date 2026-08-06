@@ -641,8 +641,31 @@ def verify_scope_storage(
         status = "fail"
         message = "; ".join(errors)
     elif not teams_enabled:
-        status = "not-enabled"
-        message = "Teams not enabled: NULL access_scope values remain legacy-compatible"
+        # ``teams_enabled`` is the CALLER's belief, and after an aborted enable
+        # that belief is wrong in the dangerous direction. Ask the database
+        # instead, or the doctor reports a reassuring "legacy-compatible" on a
+        # store full of real per-owner stamps -- green in exactly the state you
+        # would run the doctor to detect.
+        _, persisted_reason = resolve_startup_teams_state(conn)
+        if persisted_reason == "stamped-without-marker":
+            status = "stamped-without-marker"
+            message = (
+                "access_scope stamps exist but no enable decision is recorded: "
+                "an enable aborted partway. Complete the enable or disable "
+                "Teams explicitly; until then the store fails closed."
+            )
+        elif persisted_reason == "disabled":
+            status = "not-enabled"
+            message = (
+                "Teams explicitly disabled; existing access_scope stamps are "
+                "retained so a later re-enable keeps its attribution"
+            )
+        else:
+            status = "not-enabled"
+            message = (
+                "Teams not enabled: NULL access_scope values remain "
+                "legacy-compatible"
+            )
     elif observed_rows == 0:
         status = "nothing-to-verify"
         message = "nothing to verify: no scope-bearing rows were observed"

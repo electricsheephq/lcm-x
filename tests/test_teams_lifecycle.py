@@ -153,3 +153,52 @@ def test_stamp_detection_tolerates_absent_tables(store: sqlite3.Connection) -> N
     store.execute("DROP TABLE messages")
     store.commit()
     assert access_scope_stamps_exist(store) is False
+
+
+def _doctor_status(result: dict) -> str:
+    """Mirror of the mapping in tools.py's lcm_doctor scope_storage check."""
+    status = str(result.get("status"))
+    if status in {"fail", "stamped-without-marker"}:
+        return "fail"
+    if status == "nothing-to-verify":
+        return "warn"
+    return "pass"
+
+
+def test_doctor_is_not_green_on_an_aborted_enable(store: sqlite3.Connection) -> None:
+    """The check you would run to detect the bypass used to report pass.
+
+    verify_scope_storage takes teams_enabled from the CALLER, and after an
+    aborted enable that belief is wrong in the dangerous direction, so the
+    status fell through to not-enabled with a reassuring "legacy-compatible"
+    message on a store full of real per-owner stamps.
+    """
+    _stamp(store)
+
+    result = scope_storage.verify_scope_storage(store, teams_enabled=False)
+
+    assert result["status"] == "stamped-without-marker"
+    assert _doctor_status(result) == "fail"
+    assert "aborted partway" in str(result["message"])
+
+
+def test_doctor_still_passes_a_store_that_never_enabled_teams(
+    store: sqlite3.Connection,
+) -> None:
+    result = scope_storage.verify_scope_storage(store, teams_enabled=False)
+    assert result["status"] == "not-enabled"
+    assert _doctor_status(result) == "pass"
+
+
+def test_doctor_passes_a_deliberately_disabled_store_and_says_stamps_are_kept(
+    store: sqlite3.Connection,
+) -> None:
+    """Same stamps as the aborted case, opposite verdict."""
+    _stamp(store)
+    persist_teams_enabled(store, False)
+
+    result = scope_storage.verify_scope_storage(store, teams_enabled=False)
+
+    assert result["status"] == "not-enabled"
+    assert _doctor_status(result) == "pass"
+    assert "retained" in str(result["message"])

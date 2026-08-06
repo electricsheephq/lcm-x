@@ -6630,7 +6630,11 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
         checks.append({
             "check": "scope_storage",
             "status": (
-                "fail" if scope_status == "fail"
+                # stamped-without-marker is a FAILURE, not a variety of
+                # not-enabled: real per-owner stamps with no recorded decision.
+                # The previous mapping was an else-pass, so this state -- the
+                # one worth running a doctor for -- reported green.
+                "fail" if scope_status in {"fail", "stamped-without-marker"}
                 else "warn" if scope_status == "nothing-to-verify"
                 else "pass"
             ),
