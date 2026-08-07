@@ -633,10 +633,37 @@ class TrajectoryStore:
         ).fetchone()
         if exists is None:
             return
-        row = self._conn.execute(
-            "SELECT schema_version FROM lcm_trajectory_corpora "
-            "WHERE singleton = 1"
-        ).fetchone()
+        try:
+            row = self._conn.execute(
+                "SELECT schema_version FROM lcm_trajectory_corpora "
+                "WHERE singleton = 1"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # Two very different tables reach this branch, and only one of them
+            # should be tolerated:
+            #
+            #   LEGACY   -- a corpora table written before the ``schema_version``
+            #               column existed. It still carries the core identity
+            #               columns, and failing the open on it would brick a
+            #               store that is merely old. Treat it as unversioned,
+            #               the same way the table-absent branch above does.
+            #   MALFORMED -- a table that is missing the core columns as well.
+            #               Nothing can be recovered from it, and swallowing the
+            #               error here lets the open continue until some later
+            #               INSERT fails on an arbitrary column, reporting the
+            #               wrong cause and doing so AFTER FTS repair has run.
+            #
+            # Distinguish them by a column the legacy table certainly has.
+            columns = {
+                str(row[1])
+                for row in self._conn.execute(
+                    "PRAGMA table_info(lcm_trajectory_corpora)"
+                )
+            }
+            if "identity_digest" not in columns:
+                raise
+            return
+
         if row is not None and int(row["schema_version"]) != TRAJECTORY_SCHEMA_VERSION:
             raise CorpusIdentityError(
                 "trajectory database corpus identity does not match requested identity"
@@ -663,6 +690,12 @@ class TrajectoryStore:
             if missing:
                 raise TrajectorySchemaUnavailableError(
                     f"trajectory schema unavailable for read-only query: {missing}"
+                )
+            findings = _verify_trajectory_schema(self.connection)
+            if findings:
+                raise TrajectorySchemaUnavailableError(
+                    "trajectory schema unavailable for read-only query: "
+                    f"{findings}"
                 )
             return
 
@@ -1709,6 +1742,8 @@ class TrajectoryStore:
         character window if the encoder is unavailable."""
         from .tokens import _fallback_token_estimate, _get_encoder
 
+        if token_budget < 1:
+            raise ValueError("token_budget must be positive")
         encoder = _get_encoder()
         if encoder is None:
             # Use the shared estimator itself rather than ``budget * 4``:
@@ -1736,11 +1771,37 @@ class TrajectoryStore:
                 start += accepted
             return chunks or [document]
         token_ids = encoder.encode(document)
+        encoded = bytearray()
+        token_byte_offsets = [0]
+        for token_id in token_ids:
+            encoded.extend(encoder.decode_single_token_bytes(token_id))
+            token_byte_offsets.append(len(encoded))
+
         chunks: list[str] = []
-        for start in range(0, len(token_ids), token_budget):
-            piece = encoder.decode(token_ids[start:start + token_budget])
-            if piece:
-                chunks.append(piece)
+        start = 0
+        while start < len(token_ids):
+            end = min(len(token_ids), start + token_budget)
+            while end > start:
+                piece_bytes = encoded[
+                    token_byte_offsets[start]:token_byte_offsets[end]
+                ]
+                try:
+                    piece = piece_bytes.decode("utf-8", errors="strict")
+                except UnicodeDecodeError:
+                    end -= 1
+                    continue
+                # Re-encoding a boundary-safe piece can differ from slicing the
+                # full-document token stream. Keep the provider-facing budget
+                # authoritative rather than assuming the sliced count survives.
+                if len(encoder.encode(piece)) <= token_budget:
+                    chunks.append(piece)
+                    start = end
+                    break
+                end -= 1
+            else:
+                raise ValueError(
+                    "token_budget is too small to preserve a Unicode character boundary"
+                )
         return chunks or [document]
 
     def build_state_semantic_index(

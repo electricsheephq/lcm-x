@@ -186,6 +186,9 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
             contract = compile_answer_contract(question, question_date)
             if contract.status != "planned":
                 return {"context": recall_policy}
+            baseline_was_internal = not isinstance(
+                payload.get("baseline_refs"), (list, tuple)
+            )
             baseline_refs = _answer_ready_baseline(active_engine, question, payload)
             result = compile_preanswer_evidence(
                 question,
@@ -196,6 +199,7 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
                     "lcm_recall", recall_args
                 ),
                 enabled=True,
+                render_baseline_context=baseline_was_internal,
             )
             try:
                 active_engine._last_preanswer_evidence_trace = result
@@ -258,6 +262,7 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
                     question,
                     baseline_refs=compiler_refs,
                     question_date=question_date,
+                    engine=active_engine,
                 )
                 if prepared["status"] == "selector_required":
                     proposal, selector_usage = call_selective_auxiliary_selector(

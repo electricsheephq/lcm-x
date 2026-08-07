@@ -27,7 +27,7 @@ class AssertionStateResult:
     as_of: float | None
     assertions: tuple[dict[str, Any], ...]
     relations: tuple[dict[str, Any], ...]
-    active_assertion_ids: tuple[str, ...]
+    active_assertion_ids: tuple[str, ...] | None
     conflict_assertion_ids: tuple[str, ...]
     assertions_truncated: bool
     relations_truncated: bool
@@ -172,14 +172,22 @@ def query_assertion_state(
     for row in rows:
         assertion_id = str(row["assertion_id"])
         item = dict(row)
-        item["active"] = assertion_id in active_ids
-        item["lifecycle_status"] = tuple(sorted(lifecycle[assertion_id]))
+        item["active"] = None if relations_truncated else assertion_id in active_ids
+        item["lifecycle_status"] = (
+            None
+            if relations_truncated
+            else tuple(sorted(lifecycle[assertion_id]))
+        )
         item["unresolved_conflict"] = assertion_id in unresolved_conflicts
         item["attribution"] = _attribution(item)
-        item["semantic_state"] = _semantic_state(
-            item,
-            lifecycle[assertion_id],
-            recommendation_dispositions.get(assertion_id, set()),
+        item["semantic_state"] = (
+            "unknown"
+            if relations_truncated
+            else _semantic_state(
+                item,
+                lifecycle[assertion_id],
+                recommendation_dispositions.get(assertion_id, set()),
+            )
         )
         annotated.append(item)
     return AssertionStateResult(
@@ -188,8 +196,10 @@ def query_assertion_state(
         as_of=as_of,
         assertions=tuple(annotated),
         relations=tuple(relations),
-        active_assertion_ids=tuple(
-            assertion_id for assertion_id in ids if assertion_id in active_ids
+        active_assertion_ids=(
+            None
+            if relations_truncated
+            else tuple(assertion_id for assertion_id in ids if assertion_id in active_ids)
         ),
         conflict_assertion_ids=tuple(
             assertion_id for assertion_id in ids if assertion_id in unresolved_conflicts

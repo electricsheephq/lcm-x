@@ -377,7 +377,7 @@ def test_plugin_entrypoint_registers_lcm_context_engine():
     identity = engine.get_status()["runtime_identity"]
     repo_root = Path(__file__).resolve().parent.parent
     assert identity["plugin_name"] == "hermes-lcm"
-    assert identity["plugin_version"] == "0.20.0"
+    assert identity["plugin_version"] == "0.21.0-rc2"
     assert Path(identity["plugin_path"]) == repo_root
     assert identity["database_path_source"] in {"config.database_path", "hermes_home", "default_home"}
     assert identity["plugin_git_commit"]
@@ -856,11 +856,24 @@ def test_pre_llm_hook_requirements_mode_uses_compiler_without_selector(
     module.register(ctx)
     prompt = "How long is your commute?"
     answer = "My commute is 35 minutes."
+    observed_before_question = datetime(
+        2026, 7, 19, tzinfo=timezone.utc
+    ).timestamp()
     prompt_id = ctx.engine._store.append(
-        "prior-session", {"role": "user", "content": prompt}
+        "prior-session",
+        {
+            "role": "user",
+            "content": prompt,
+            "timestamp": observed_before_question,
+        },
     )
     answer_id = ctx.engine._store.append(
-        "prior-session", {"role": "assistant", "content": answer}
+        "prior-session",
+        {
+            "role": "assistant",
+            "content": answer,
+            "timestamp": observed_before_question,
+        },
     )
     baseline = [{"exact_ref": f"lcm:{prompt_id}:0-{len(prompt)}", "quote": prompt}]
     product_calls = []
@@ -886,6 +899,67 @@ def test_pre_llm_hook_requirements_mode_uses_compiler_without_selector(
     trace = ctx.engine._last_preanswer_evidence_trace
     assert trace["state"] == "answer_sufficient"
     assert trace["provenance"]["selector_calls"] == 0
+    ctx.engine.shutdown()
+
+
+def test_pre_llm_hook_renders_internally_recalled_answer_sufficient_fact(
+    tmp_path, monkeypatch
+):
+    _ensure_agent_context_engine_importable(monkeypatch)
+    module = _load_plugin_entrypoint_module(
+        "hermes_lcm_packaging_requirements_internal_baseline"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    monkeypatch.setenv("LCM_PREANSWER_EVIDENCE_ENABLED", "true")
+    monkeypatch.setenv("LCM_PREANSWER_EVIDENCE_MODE", "requirements_v1")
+    monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "false")
+    hooks = {}
+
+    class _Ctx:
+        def __init__(self):
+            self.engine = None
+
+        def register_context_engine(self, engine):
+            self.engine = engine
+
+        def register_hook(self, name, callback):
+            hooks.setdefault(name, []).append(callback)
+
+    ctx = _Ctx()
+    module.register(ctx)
+    assert ctx.engine is not None
+    fact = "You need 15 points to redeem the reward."
+    fact_id = ctx.engine._store.append(
+        "prior-session", {"role": "user", "content": fact, "timestamp": 100.0}
+    )
+
+    def handle(tool, args, **_kwargs):
+        assert tool == "lcm_recall"
+        return json.dumps(
+            {
+                "hits": [
+                    {
+                        "exact_ref": f"lcm:{fact_id}:0-{len(fact)}",
+                        "content": fact,
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(ctx.engine, "handle_tool_call", handle)
+    ctx.engine.on_session_start("active-session", platform="cli")
+    response = hooks["pre_llm_call"][0](
+        session_id="active-session",
+        user_message="How many points do I need to redeem the reward?",
+        enabled_toolsets=["context_engine"],
+    )
+
+    assert "lcm-answer-brief" in response["context"]
+    assert "15 point" in response["context"]
+    assert f"lcm:{fact_id}:9-18" in response["context"]
+    trace = ctx.engine._last_preanswer_evidence_trace
+    assert trace["state"] == "answer_sufficient"
+    assert trace["reason_code"] == "baseline_already_answer_sufficient"
     ctx.engine.shutdown()
 
 

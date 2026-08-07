@@ -63,6 +63,24 @@ _STATE_CHANGING_RELATIONS = frozenset({
     "reverses",
     "supersedes",
 })
+_STATE_CHANGING_CUES = {
+    "cancels": re.compile(
+        r"\b(?:cancel(?:led|ed|s|ing)?|call(?:ed)?\s+off|no\s+longer|"
+        r"revoke(?:d|s|ing)?|withdraw(?:n|s|ing)?)\b",
+        re.IGNORECASE,
+    ),
+    "reverses": re.compile(
+        r"\b(?:chang(?:e|ed|ing)\s+(?:my|our)\s+mind|no\s+longer|"
+        r"retract(?:ed|s|ing)?|revers(?:e|ed|es|ing)|take\s+back|took\s+back)\b",
+        re.IGNORECASE,
+    ),
+    "supersedes": re.compile(
+        r"\b(?:actually|but\s+now|chang(?:e|ed|ing)|correct(?:ion|ed|ing)?|"
+        r"instead|no\s+longer|now|replac(?:e|ed|es|ing)|"
+        r"supersed(?:e|ed|es|ing)|updat(?:e|ed|es|ing))\b",
+        re.IGNORECASE,
+    ),
+}
 
 _PAYLOAD_KEYS = frozenset({
     "schema_version",
@@ -427,6 +445,56 @@ def _timestamp(value: Any, field: str) -> float | None:
         raise ValueError(f"{field} must be unambiguous ISO-8601") from exc
 
 
+def _source_supports_assertion_value(
+    source: str,
+    value: Any,
+    *,
+    kind: str,
+    context: str | None = None,
+) -> bool:
+    context = source if context is None else context
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        value = str(value).lower()
+    if isinstance(value, (int, float)):
+        return any(
+            abs(float(match.group(0).replace(",", "")) - float(value)) < 1e-9
+            for match in re.finditer(r"[-+]?\d[\d,]*(?:\.\d+)?", source)
+        )
+    if isinstance(value, Mapping):
+        return all(
+            _source_supports_assertion_value(
+                source, item, kind=kind, context=context
+            )
+            for item in value.values()
+        )
+    if isinstance(value, (list, tuple)):
+        return all(
+            _source_supports_assertion_value(
+                source, item, kind=kind, context=context
+            )
+            for item in value
+        )
+    text = str(value).strip().casefold()
+    if not text:
+        return False
+    if kind == "commitment" and text in {"committed", "promised"}:
+        return bool(re.search(r"\b(?:commit|promise|will)\b", context, re.IGNORECASE))
+    if kind in {"action", "event", "status"} and text == "completed":
+        return True
+    if kind == "status" and text in {"canceled", "cancelled"}:
+        return bool(_STATE_CHANGING_CUES["cancels"].search(source))
+    value_tokens = tuple(re.findall(r"[\w]+", text))
+    source_tokens = tuple(re.findall(r"[\w]+", source.casefold()))
+    if not value_tokens:
+        return text in source.casefold()
+    return any(
+        source_tokens[index:index + len(value_tokens)] == value_tokens
+        for index in range(len(source_tokens) - len(value_tokens) + 1)
+    )
+
+
 def _assertion_candidate(
     snapshot: SourceSnapshot, raw: Any, *, index: int
 ) -> AssertionCandidate:
@@ -454,16 +522,36 @@ def _assertion_candidate(
     elif resolution == "explicit":
         if subject.endswith(":self"):
             raise ValueError(f"{label} explicit identity cannot use a self key")
+        identity_tokens = tuple(re.findall(r"[\w]+", subject.split(":", 1)[1]))
+        source_tokens = tuple(
+            re.findall(r"[\w]+", snapshot.content[start:end].casefold())
+        )
+        if not any(
+            source_tokens[index:index + len(identity_tokens)] == identity_tokens
+            for index in range(len(source_tokens) - len(identity_tokens) + 1)
+        ):
+            raise ValueError(
+                f"{label} explicit identity is not in the exact source span"
+            )
     else:
         raise ValueError(f"{label} subject identity is ambiguous or unsupported")
+    source_span = snapshot.content[start:end]
+    kind = str(row["kind"] or "").strip().lower()
+    value_text = str(row["value_text"] or "")
+    if not _source_supports_assertion_value(
+        source_span, row["object_value"], kind=kind, context=snapshot.content
+    ) or not _source_supports_assertion_value(
+        source_span, value_text, kind=kind, context=snapshot.content
+    ):
+        raise ValueError(f"{label} assertion value is not in the exact source span")
     return AssertionCandidate(
         source_span_start=start,
         source_span_end=end,
         subject_key=subject,
         predicate_key=_canonical_predicate(row["predicate_key"]),
         object_value=row["object_value"],
-        value_text=str(row["value_text"] or ""),
-        kind=str(row["kind"] or "").strip().lower(),
+        value_text=value_text,
+        kind=kind,
         polarity=str(row["polarity"] or "").strip().lower(),
         strength=row.get("strength"),
         scope_key=_canonical_scope(row.get("scope_key", "")),
@@ -615,6 +703,14 @@ def parse_assertion_extraction(
             float(from_row["observed_at"]) < float(to_row["observed_at"])
         ):
             raise ValueError(f"{label} state change cannot precede its target evidence")
+        relation_quote = snapshot.content[start:end]
+        if (
+            relation_type in _STATE_CHANGING_RELATIONS
+            and _STATE_CHANGING_CUES[relation_type].search(relation_quote) is None
+        ):
+            raise ValueError(
+                f"{label} {relation_type} requires an explicit semantic cue in its exact source span"
+            )
         relations.append(AssertionRelationCandidate(
             source_span_start=start,
             source_span_end=end,

@@ -380,6 +380,28 @@ def _named_operands(text: str, operation: str) -> tuple[str, ...]:
             )
             if len(values) == 2:
                 return values
+    if operation == "sum":
+        enumeration = re.search(
+            r"\b(?:spend|spent)\s+(?:on\s+)?(.{1,240}?)(?:\?|$)|"
+            r"\b(?:across|of|for|on)\s+(.{1,240}?)(?:\?|$)",
+            normalized,
+            re.IGNORECASE,
+        )
+        if enumeration:
+            tail = next(group for group in enumeration.groups() if group is not None)
+            parts = [part.strip() for part in tail.split(",")]
+            if len(parts) >= 3:
+                parts[-1] = re.sub(
+                    r"^(?:and|plus)\s+", "", parts[-1], flags=re.IGNORECASE
+                )
+                values = tuple(
+                    value
+                    for raw in parts
+                    if (value := _clean_operand(raw)) is not None
+                )
+                if len(values) == len(parts) and len(values) <= 8:
+                    return values
+                return ()
     pair = re.search(
         r"\b(?:spend|spent|across|between|from|of|for|doing|on)\s+(.{1,80}?)\s+"
         r"(?:and|plus)\s+(?:doing|on|the)?\s*(.{1,80}?)(?:\?|$)",
@@ -450,9 +472,9 @@ def _time_window(text: str, canonical_as_of: str | None) -> TemporalWindow | Non
             raw = rolling.group(1)
             amount = int(raw) if raw.isdigit() else _WORD_NUMBERS[raw]
             if rolling.group(2) == "day":
-                start = anchor - timedelta(days=amount)
+                start = anchor - timedelta(days=amount - 1)
             elif rolling.group(2) == "week":
-                start = anchor - timedelta(days=amount * 7)
+                start = anchor - timedelta(days=amount * 7 - 1)
             else:
                 month_index = anchor.year * 12 + anchor.month - 1 - amount
                 year, month_zero = divmod(month_index, 12)

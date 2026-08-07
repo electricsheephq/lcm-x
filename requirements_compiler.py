@@ -712,14 +712,26 @@ def _ordered_event_candidate(
     key = _finite_event_key(quote, contract.requested_unit or "event")
     if key is None:
         return None
+    label = None
+    if contract.answer_kind == "place":
+        place = re.search(
+            r"\b(?:arrived\s+in|flew\s+to|stayed\s+in|travelled\s+to|"
+            r"traveled\s+to|visited|went\s+to)\s+"
+            r"([A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*){0,3})\b",
+            quote,
+        )
+        if place is not None:
+            label = place.group(1).strip()
+    quote_without_dates = _DATE_TEXT_RE.sub(" ", quote)
     names = [
         name
         for name in re.findall(
-            r"\b[A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*){0,3}\b", quote
+            r"\b[A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*){0,3}\b",
+            quote_without_dates,
         )
         if name not in {"I", "The", "A", "An", "My", "We", "On", "In"}
     ]
-    label = names[0] if names else quote[:300]
+    label = label or (names[-1] if names else quote[:300])
     slot_names = []
     for slot in contract.slots:
         if slot.anchor and not _tokens(slot.anchor).issubset(_tokens(quote)):
@@ -953,12 +965,9 @@ def _available_as_of(candidate: Mapping[str, Any], contract: AnswerContract) -> 
     event_day, _ = _candidate_event_day(candidate)
     if event_day is not None and event_day > date.fromisoformat(contract.question_as_of):
         return False
-    if (
-        contract.temporal_window is None
-        and contract.operation
-        not in {"latest", "previous", "date_filter", "date_interval", "order"}
-    ):
-        return True
+    # ours: availability is enforced for every operation (the temporal-only
+    # early return was deliberately removed); theirs: observed_at leads and the
+    # check falls through when the candidate carries no availability signal.
     observed = candidate.get("observed_at")
     if observed is not None:
         try:
@@ -1206,6 +1215,7 @@ def _compute(
         messages=engine._store,
         assertions=getattr(engine, "_assertions", None),
         as_of=question_date_as_of_epoch(contract.question_as_of),
+        session_dates=getattr(engine, "_session_occurrence_dates", None),
     )
     if grounding.status != "grounded":
         return None, operands, f"grounding_failed:{grounding.reason}"
@@ -1691,7 +1701,33 @@ def _finite_event_key(
     return bounded_key(base, 300)
 
 
-def _source_event_clause(quote: str, *, role: Any, unit: str | None) -> bool:
+def _question_event_verbs(question: str | None) -> str | None:
+    normalized = " ".join(str(question or "").casefold().split())
+    actions = (
+        (r"\battend(?:ed|ing)?\b", r"attended"),
+        (r"\bvisit(?:ed|ing)?\b", r"visited"),
+        (r"\b(?:go|went|going)\s+to\b", r"went to"),
+        (r"\b(?:take|took|taking)\b", r"took"),
+        (r"\bview(?:ed|ing)?\b", r"viewed"),
+        (r"\badd(?:ed|ing)?\b", r"added"),
+        (r"\b(?:buy|bought|buying)\b", r"bought"),
+        (r"\breturn(?:ed|ing)?\s+from\b", r"returned from"),
+        (r"\bparticipat(?:e|ed|ing)\s+in\b", r"participated in"),
+        (r"\bcomplet(?:e|ed|ing)\b", r"completed"),
+        (r"\bjoin(?:ed|ing)?\b", r"joined"),
+        (r"\btravel(?:ed|led|ing)?\s+to\b", r"traveled to"),
+    )
+    matched = [source for pattern, source in actions if re.search(pattern, normalized)]
+    return "(?:" + "|".join(matched) + ")" if matched else None
+
+
+def _source_event_clause(
+    quote: str,
+    *,
+    role: Any,
+    unit: str | None,
+    question: str | None = None,
+) -> bool:
     """Return true only for a first-person, source-stated event occurrence."""
     if str(role or "").casefold() != "user" or not unit:
         return False
@@ -1731,17 +1767,41 @@ def _source_event_clause(quote: str, *, role: Any, unit: str | None) -> bool:
         normalized,
     ):
         return False
+    # ours: the positive match binds to the verbs the question actually asked
+    # about (unit-specific for vacation-like units); theirs: the negation guards
+    # above scope "never/didn't/no/none/without" to the event assertion.
+    event_verbs = r"(?:took|went on|returned from|completed)"
+    if unit not in {"vacation", "holiday", "trip"}:
+        event_verbs = _question_event_verbs(question) or (
+            r"(?:attended|visited|went to|took|returned from|participated in|"
+            r"completed|joined|traveled to)"
+        )
+    if re.search(
+        rf"\b(?:i|we)\s+{event_verbs}\s+"
+        rf"(?:(?!(?:for|during|before|after|about|because)\b)[\w'-]+\s+){{0,3}}"
+        rf"(?:{forms})\b",
+        normalized,
+        re.IGNORECASE,
+    ):
+        return True
+    # A first-person action placed *inside* the counted event asserts that the
+    # event happened, whatever the action's own verb was: "I visited Lisbon
+    # during my spring vacation" is a vacation. "during" is containment and is
+    # the only preposition in the blocked list above that carries it -- "for my
+    # vacation" is a purpose, not an occurrence, so "I bought clothes for my
+    # vacation" stays out of the count.
     return bool(
         re.search(
-            r"\b(?:i|we)\s+(?:attended|visited|went to|took|viewed|added|bought|"
-            r"returned from|participated in|completed|joined|traveled to)\b",
+            rf"\b(?:i|we)\s+[\w'-]+(?:\s+[\w'-]+){{0,4}}\s+during\s+"
+            rf"(?:my|our)\s+(?:[\w'-]+\s+){{0,2}}(?:{forms})\b",
             normalized,
+            re.IGNORECASE,
         )
-        and re.search(rf"\b(?:{forms})\b", normalized)
     )
 
 
 def _finite_enumeration(
+    question: str,
     contract: AnswerContract,
     *,
     engine: Any,
@@ -1782,6 +1842,7 @@ def _finite_enumeration(
                 clause,
                 role=row.get("role"),
                 unit=contract.requested_unit,
+                question=question,
             ):
                 continue
             certificate["material_clauses"] += 1
@@ -1825,6 +1886,10 @@ def _finite_enumeration(
                 {
                     **hydrated,
                     "key": grounding_key,
+                    # ours names the undated key "grounding_key"; theirs names
+                    # the dated key "dedupe_key". Both names are published so
+                    # every consumer on either side resolves.
+                    "grounding_key": grounding_key,
                     "dedupe_key": dedupe_key,
                     "unit": contract.requested_unit,
                     "value": None,
@@ -1858,7 +1923,7 @@ def _finite_enumeration(
             "span_start": item["span_start"],
             "span_end": item["span_end"],
             "quote": item["quote"],
-            "key": item["key"],
+            "key": item["grounding_key"],
             "unit": item["unit"],
             "occurrence_time": item["occurrence_time"],
         }
@@ -1869,6 +1934,7 @@ def _finite_enumeration(
         messages=engine._store,
         assertions=getattr(engine, "_assertions", None),
         as_of=question_date_as_of_epoch(contract.question_as_of),
+        session_dates=getattr(engine, "_session_occurrence_dates", None),
         engine=engine,
     )
     if grounding.status != "grounded":
@@ -2001,6 +2067,43 @@ def _deliver(
     )
 
 
+def _record_baseline_fact(
+    result: dict[str, Any],
+    candidate: Mapping[str, Any],
+    contract: AnswerContract,
+    *,
+    render_context: bool,
+    time_basis_field: str | None = None,
+) -> None:
+    direct_fact = {
+        "value": candidate["value"],
+        "unit": candidate.get("unit"),
+        "exact_ref": candidate["exact_ref"],
+    }
+    if time_basis_field is not None:
+        direct_fact["time_basis"] = candidate.get(time_basis_field)
+    if render_context:
+        _deliver(
+            result,
+            state="answer_sufficient",
+            reason_code="baseline_already_answer_sufficient",
+            context=_render_fact(candidate, contract),
+            evidence=[candidate],
+            novel_refs=(),
+        )
+        result["direct_fact"] = direct_fact
+        return
+    result.update(
+        {
+            "state": "answer_sufficient",
+            "reason_code": "baseline_already_answer_sufficient",
+            "direct_fact": direct_fact,
+            "closed_requirements": ["answer"],
+            "open_requirements": [],
+        }
+    )
+
+
 def compile_preanswer_evidence(
     question: Any,
     *,
@@ -2010,6 +2113,7 @@ def compile_preanswer_evidence(
     question_date: Any = None,
     retrieve: Callable[[dict[str, Any]], Any] | None = None,
     enabled: bool = False,
+    render_baseline_context: bool = False,
     budgets: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compile one bounded exact evidence brief or return an unchanged baseline."""
@@ -2053,35 +2157,21 @@ def compile_preanswer_evidence(
     if contract.operation == "scalar":
         direct, reason = _select_scalar(baseline_candidates, contract)
         if direct is not None:
-            result.update(
-                {
-                    "state": "answer_sufficient",
-                    "reason_code": "baseline_already_answer_sufficient",
-                    "direct_fact": {
-                        "value": direct["value"],
-                        "unit": direct.get("unit"),
-                        "exact_ref": direct["exact_ref"],
-                    },
-                    "closed_requirements": ["answer"],
-                    "open_requirements": [],
-                }
+            _record_baseline_fact(
+                result,
+                direct,
+                contract,
+                render_context=render_baseline_context,
             )
             return _finish(result, started=started)
     elif contract.operation in {"sum", "difference", "date_interval", "order"}:
         direct, _ = _select_scalar(baseline_candidates, contract)
         if direct is not None:
-            result.update(
-                {
-                    "state": "answer_sufficient",
-                    "reason_code": "baseline_already_answer_sufficient",
-                    "direct_fact": {
-                        "value": direct["value"],
-                        "unit": direct.get("unit"),
-                        "exact_ref": direct["exact_ref"],
-                    },
-                    "closed_requirements": ["answer"],
-                    "open_requirements": [],
-                }
+            _record_baseline_fact(
+                result,
+                direct,
+                contract,
+                render_context=render_baseline_context,
             )
             return _finish(result, started=started)
         computation, operands, reason = _compute(
@@ -2101,54 +2191,33 @@ def compile_preanswer_evidence(
     elif contract.operation in {"latest", "previous"}:
         chosen, reason = _select_state(baseline_candidates, contract)
         if chosen is not None:
-            result.update(
-                {
-                    "state": "answer_sufficient",
-                    "reason_code": "baseline_already_answer_sufficient",
-                    "direct_fact": {
-                        "value": chosen["value"],
-                        "unit": None,
-                        "exact_ref": chosen["exact_ref"],
-                        "time_basis": chosen["selection_time_basis"],
-                    },
-                    "closed_requirements": ["answer"],
-                    "open_requirements": [],
-                }
+            _record_baseline_fact(
+                result,
+                chosen,
+                contract,
+                render_context=render_baseline_context,
+                time_basis_field="selection_time_basis",
             )
             return _finish(result, started=started)
     elif contract.operation == "date_filter":
         chosen, reason = _select_temporal_event(baseline_candidates, contract)
         if chosen is not None:
-            result.update(
-                {
-                    "state": "answer_sufficient",
-                    "reason_code": "baseline_already_answer_sufficient",
-                    "direct_fact": {
-                        "value": chosen["value"],
-                        "unit": None,
-                        "exact_ref": chosen["exact_ref"],
-                        "time_basis": chosen.get("temporal_match_basis"),
-                    },
-                    "closed_requirements": ["answer"],
-                    "open_requirements": [],
-                }
+            _record_baseline_fact(
+                result,
+                chosen,
+                contract,
+                render_context=render_baseline_context,
+                time_basis_field="temporal_match_basis",
             )
             return _finish(result, started=started)
     else:
         direct, reason = _select_text(baseline_candidates, contract)
         if direct is not None:
-            result.update(
-                {
-                    "state": "answer_sufficient",
-                    "reason_code": "baseline_already_answer_sufficient",
-                    "direct_fact": {
-                        "value": direct["value"],
-                        "unit": None,
-                        "exact_ref": direct["exact_ref"],
-                    },
-                    "closed_requirements": ["answer"],
-                    "open_requirements": [],
-                }
+            _record_baseline_fact(
+                result,
+                direct,
+                contract,
+                render_context=render_baseline_context,
             )
             return _finish(result, started=started)
 
@@ -2233,6 +2302,7 @@ def compile_preanswer_evidence(
         and contract.requested_unit is not None
     ):
         computation, selected, coverage_certificate, reason = _finite_enumeration(
+            str(question),
             contract,
             engine=engine,
             scan_limit=limits.max_scan_rows,

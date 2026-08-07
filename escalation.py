@@ -12,6 +12,7 @@ from __future__ import annotations
 import inspect
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -70,6 +71,11 @@ class SummaryCircuitBreaker:
     cooldown_seconds: int = 300
     _failures: dict[str, int] = field(default_factory=dict)
     _open_until: dict[str, float] = field(default_factory=dict)
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock,
+        repr=False,
+        compare=False,
+    )
 
     def _key(self, model: str | None) -> str:
         return (model or "").strip() or _DEFAULT_ROUTE_KEY
@@ -77,33 +83,36 @@ class SummaryCircuitBreaker:
     def allows(self, model: str | None, *, now: float | None = None) -> bool:
         key = self._key(model)
         current_time = time.monotonic() if now is None else now
-        opened_until = self._open_until.get(key, 0.0)
-        if opened_until <= current_time:
-            if key in self._open_until:
-                self._open_until.pop(key, None)
-            return True
-        return False
+        with self._lock:
+            opened_until = self._open_until.get(key, 0.0)
+            if opened_until <= current_time:
+                if key in self._open_until:
+                    self._open_until.pop(key, None)
+                return True
+            return False
 
     def record_success(self, model: str | None) -> None:
         key = self._key(model)
-        self._failures.pop(key, None)
-        self._open_until.pop(key, None)
+        with self._lock:
+            self._failures.pop(key, None)
+            self._open_until.pop(key, None)
 
     def record_failure(self, model: str | None, *, now: float | None = None) -> None:
         key = self._key(model)
-        failures = self._failures.get(key, 0) + 1
-        self._failures[key] = failures
-        threshold = max(1, int(self.failure_threshold or 1))
-        if failures >= threshold:
-            current_time = time.monotonic() if now is None else now
-            cooldown = max(0, int(self.cooldown_seconds or 0))
-            self._open_until[key] = current_time + cooldown
-            logger.warning(
-                "LCM summary route circuit opened for %s after %d failure(s); cooldown=%ss",
-                key,
-                failures,
-                cooldown,
-            )
+        with self._lock:
+            failures = self._failures.get(key, 0) + 1
+            self._failures[key] = failures
+            threshold = max(1, int(self.failure_threshold or 1))
+            if failures >= threshold:
+                current_time = time.monotonic() if now is None else now
+                cooldown = max(0, int(self.cooldown_seconds or 0))
+                self._open_until[key] = current_time + cooldown
+                logger.warning(
+                    "LCM summary route circuit opened for %s after %d failure(s); cooldown=%ss",
+                    key,
+                    failures,
+                    cooldown,
+                )
 
 
 @dataclass
@@ -123,6 +132,11 @@ class SummarySpendGuard:
     backoff_seconds: float = 1800.0
     _calls: list[float] = field(default_factory=list)
     _backoff_until: float = 0.0
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock,
+        repr=False,
+        compare=False,
+    )
 
     def _prune(self, current_time: float) -> None:
         cutoff = current_time - self.window_seconds
@@ -133,16 +147,27 @@ class SummarySpendGuard:
         if self.max_calls <= 0:
             return True
         current_time = time.monotonic() if now is None else now
-        if current_time < self._backoff_until:
-            return False
-        self._prune(current_time)
-        return len(self._calls) < self.max_calls
+        with self._lock:
+            if current_time < self._backoff_until:
+                return False
+            self._prune(current_time)
+            return len(self._calls) < self.max_calls
 
-    def record_call(self, *, now: float | None = None) -> None:
+    def try_record_call(self, *, now: float | None = None) -> bool:
+        """Atomically reserve one provider call if the budget allows it."""
         if self.max_calls <= 0:
-            return
+            return True
         current_time = time.monotonic() if now is None else now
-        self._prune(current_time)
+        with self._lock:
+            if current_time < self._backoff_until:
+                return False
+            self._prune(current_time)
+            if len(self._calls) >= self.max_calls:
+                return False
+            self._record_call_locked(current_time)
+            return True
+
+    def _record_call_locked(self, current_time: float) -> None:
         self._calls.append(current_time)
         if len(self._calls) >= self.max_calls and self._backoff_until <= current_time:
             self._backoff_until = current_time + max(0.0, self.backoff_seconds)
@@ -157,9 +182,18 @@ class SummarySpendGuard:
                 self.backoff_seconds,
             )
 
+    def record_call(self, *, now: float | None = None) -> None:
+        if self.max_calls <= 0:
+            return
+        current_time = time.monotonic() if now is None else now
+        with self._lock:
+            self._prune(current_time)
+            self._record_call_locked(current_time)
+
     def clear(self) -> None:
-        self._calls.clear()
-        self._backoff_until = 0.0
+        with self._lock:
+            self._calls.clear()
+            self._backoff_until = 0.0
 
 
 def _strip_reasoning_blocks(text: str) -> str:
@@ -350,14 +384,12 @@ def _invoke_summary_llm_chain(
             continue
         # Check the spend guard per-route so a mid-chain trip stops the
         # remaining fallbacks instead of over-spending by up to len(chain)-1.
-        if spend_guard is not None and not spend_guard.allows():
+        if spend_guard is not None and not spend_guard.try_record_call():
             logger.warning(
                 "LCM summary spend guard active; skipping LLM summarization and "
                 "deferring to deterministic fallback"
             )
             break
-        if spend_guard is not None:
-            spend_guard.record_call()
         try:
             result = _invoke_summary_llm(
                 prompt,

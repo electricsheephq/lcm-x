@@ -19,6 +19,7 @@ from hermes_lcm.trajectory_store import (
     TrajectoryAssetError,
     TrajectorySource,
     TrajectoryState,
+    TrajectorySchemaUnavailableError,
     TrajectoryStore,
     TrajectoryStoreError,
 )
@@ -258,6 +259,32 @@ def test_corpus_identity_is_strict_and_read_only_open_does_not_mutate(tmp_path: 
     finally:
         readonly.close()
     assert db_path.stat().st_mtime_ns == before
+
+
+def test_read_only_open_rejects_malformed_current_trajectory_schema(tmp_path: Path):
+    db_path = tmp_path / "lcm.db"
+    asset_root = tmp_path / "assets"
+    asset_root.mkdir()
+    store = TrajectoryStore(db_path, _identity(), asset_root=asset_root)
+    store.close()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "ALTER TABLE lcm_trajectory_states "
+            "RENAME COLUMN search_text TO malformed_search_text"
+        )
+        conn.commit()
+
+    with pytest.raises(
+        TrajectorySchemaUnavailableError,
+        match=r"column:lcm_trajectory_states\.search_text",
+    ):
+        TrajectoryStore(
+            db_path,
+            _identity(),
+            asset_root=asset_root,
+            read_only=True,
+        )
 
 
 def test_newer_trajectory_schema_is_rejected_before_fts_repair(tmp_path: Path):

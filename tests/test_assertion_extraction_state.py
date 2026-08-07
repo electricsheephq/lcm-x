@@ -363,6 +363,53 @@ def test_unrelated_identity_and_ambiguous_subject_fail_closed(state_db):
         )
 
 
+def test_explicit_subject_must_occur_in_exact_source_span(state_db):
+    messages, store = state_db
+    snapshot = _source(messages, store, "Alice likes tea.", 100.0)
+    wire = _assertion(
+        snapshot,
+        "Alice likes tea",
+        subject="person:bob",
+        resolution="explicit",
+        predicate="preference.drink",
+        value="tea",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="explicit identity is not in the exact source span",
+    ):
+        parse_assertion_extraction(
+            snapshot,
+            _payload(snapshot, [wire]),
+            store=store,
+        )
+
+
+def test_assertion_value_must_occur_in_exact_source_span(state_db):
+    messages, store = state_db
+    snapshot = _source(messages, store, "Alice likes tea.", 100.0)
+    wire = _assertion(
+        snapshot,
+        "Alice likes tea",
+        subject="person:alice",
+        resolution="explicit",
+        predicate="preference.drink",
+        value="coffee",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="assertion value is not in the exact source span",
+    ):
+        parse_assertion_extraction(
+            snapshot,
+            _payload(snapshot, [wire]),
+            store=store,
+        )
+    assert store.query_assertions(subject_key="person:alice") == []
+
+
 def test_strict_payload_rejects_bad_spans_unknown_fields_and_implicit_updates(state_db):
     messages, store = state_db
     snapshot = _source(messages, store, "I prefer tea.", 100.0)
@@ -408,3 +455,85 @@ def test_strict_payload_rejects_bad_spans_unknown_fields_and_implicit_updates(st
         parse_assertion_extraction(
             update, _payload(update, [update_wire], [relation]), store=store
         )
+
+
+def test_state_changing_relation_requires_semantic_cue_in_exact_quote(state_db):
+    messages, store = state_db
+    old = _source(messages, store, "I prefer tea.", 100.0)
+    old_wire = _assertion(
+        old,
+        "I prefer tea",
+        predicate="drink.preference",
+        value="tea",
+        kind="preference",
+    )
+    old_id = store.publish_source(
+        old,
+        parse_assertion_extraction(
+            old, _payload(old, [old_wire]), store=store
+        ).assertions,
+    ).assertion_ids[0]
+
+    plain = _source(messages, store, "I prefer coffee.", 200.0)
+    plain_wire = _assertion(
+        plain,
+        "I prefer coffee",
+        predicate="drink.preference",
+        value="coffee",
+        kind="preference",
+    )
+    with pytest.raises(ValueError, match="requires an explicit semantic cue"):
+        parse_assertion_extraction(
+            plain,
+            _payload(
+                plain,
+                [plain_wire],
+                [_relation(
+                    plain,
+                    "I prefer coffee",
+                    relation_type="supersedes",
+                    target_id=old_id,
+                )],
+            ),
+            store=store,
+        )
+
+
+def test_relation_truncation_marks_lifecycle_and_active_state_unknown():
+    target = "a" * 64
+    row = {
+        "assertion_id": target,
+        "subject_key": "user:self",
+        "predicate_key": "drink.preference",
+        "scope_key": "",
+        "kind": "preference",
+        "object_value": "tea",
+        "polarity": "positive",
+        "value_text": "tea",
+        "speaker_role": "user",
+    }
+    relations = [
+        {
+            "relation_type": "confirms",
+            "from_assertion_id": target,
+            "to_assertion_id": target,
+        }
+        for _ in range(500)
+    ]
+
+    class FakeStore:
+        def query_assertions(self, **_kwargs):
+            return [row]
+
+        def query_relations(self, *, limit, **_kwargs):
+            return relations[:limit]
+
+    state = query_assertion_state(
+        FakeStore(), subject_key="user:self", predicate_key="drink.preference"
+    )
+
+    assert state.relations_truncated is True
+    assert state.active_assertion_ids is None
+    assert state.assertions[0]["active"] is None
+    assert state.assertions[0]["lifecycle_status"] is None
+    assert state.assertions[0]["semantic_state"] == "unknown"
