@@ -150,7 +150,40 @@ def _config_bool_disabled(value) -> bool:
 
 
 def _hermes_config_path() -> Path:
-    home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    """The ACTIVE profile's config.yaml.
+
+    Prefers the context-local home over the process environment, because under a
+    multiplexed gateway -- one process serving many profiles, which is the
+    canonical deployment model -- ``os.environ["HERMES_HOME"]`` is whatever the
+    process BOOTED with and never changes, while ``get_hermes_home()`` follows
+    the context-local override that ``gateway/run.py::_profile_runtime_scope``
+    installs per routed turn.
+
+    Reading the env here meant every routed profile loaded the BOOT profile's
+    LCM settings: compaction thresholds, ``ignore_session_patterns``,
+    ``assertions_enabled`` -- and ``database_path``, which decides which
+    ``lcm.db`` this plugin opens at all.
+
+    This is the same seam ``hermes_cli/plugins.py::_plugin_manager_scope_key``
+    keys its per-profile PluginManager on. Every other per-profile resolution --
+    config, skills, memory, plugins -- already follows the contextvar; LCM's own
+    config was the one that did not.
+
+    The env stays as the fallback so the plugin still works standalone, outside
+    a gateway, where ``hermes_cli`` may not be importable at all.
+    """
+
+    home: Path | None = None
+    try:
+        from hermes_cli.config import get_hermes_home
+
+        resolved = str(get_hermes_home() or "").strip()
+        if resolved:
+            home = Path(resolved)
+    except Exception:
+        home = None
+    if home is None:
+        home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
     return home / "config.yaml"
 
 

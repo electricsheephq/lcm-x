@@ -1073,7 +1073,24 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             if store is not None:
                 store._hermes_home = hermes_home
             self._reset_profile_runtime_state()
-            logger.info("LCM rebound Hermes home for configured database path %s", hermes_home)
+            # This relabels the home; it does NOT switch the file, because an
+            # explicit `database_path` is an operator override that outranks the
+            # profile. That is right for a single-profile deployment and is an
+            # ISOLATION HAZARD under a multiplexed gateway, where it silently
+            # collapses every routed profile onto one lcm.db.
+            #
+            # It used to log this at INFO as "rebound", which is the one thing it
+            # is not -- an operator grepping for a mis-binding would read that
+            # line as confirmation the switch happened. Say what actually
+            # occurred, and say it loudly enough to find.
+            logger.warning(
+                "LCM did NOT switch stores for Hermes home %s: an explicit "
+                "database_path (%s) pins the file, so this profile shares the "
+                "configured store. Under a multiplexed gateway every routed "
+                "profile shares it. Unset database_path for per-profile memory.",
+                hermes_home,
+                self._config.database_path,
+            )
             return True
 
         db_path = self._resolve_db_path(hermes_home)
