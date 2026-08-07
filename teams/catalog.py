@@ -25,6 +25,7 @@ TEAMS_TABLES = (
     "lcm_teams_memberships",
     "lcm_teams_revisions",
     "lcm_teams_audit",
+    "lcm_teams_requests",
 )
 
 
@@ -83,6 +84,25 @@ CREATE TABLE IF NOT EXISTS lcm_teams_audit (
 
 CREATE INDEX IF NOT EXISTS idx_lcm_teams_audit_time
     ON lcm_teams_audit(occurred_at);
+
+-- Connector request ledger. #497 requires that a duplicate management request
+-- produce ONE effect, and that the same id carrying a DIFFERENT payload be
+-- rejected rather than silently applied on top of the first. Both need the
+-- original digest kept, so the id alone is not enough.
+--
+-- `result_json` stores what the first execution returned, so a replay can be
+-- answered from the ledger instead of re-running the effect. That is the whole
+-- point: idempotency by replaying the ANSWER, not by re-doing the work and
+-- hoping it is harmless.
+CREATE TABLE IF NOT EXISTS lcm_teams_requests (
+    request_id     TEXT PRIMARY KEY,
+    payload_digest TEXT NOT NULL,
+    capability     TEXT NOT NULL,
+    tenant_id      TEXT,
+    principal_id   TEXT,
+    recorded_at    REAL NOT NULL,
+    result_json    TEXT
+);
 """
 
 

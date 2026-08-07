@@ -281,6 +281,11 @@
       "reason": "Authorization decision audit log owned by the Teams control plane."
     },
     {
+      "table": "lcm_teams_requests",
+      "class": "infra",
+      "reason": "Connector idempotency ledger: request id, payload DIGEST and the prior result envelope. It records that a management request happened, never any principal's memory content."
+    },
+    {
       "table": "lcm_teams_revisions",
       "class": "infra",
       "reason": "Tenant policy, membership, and revocation revision counters."
