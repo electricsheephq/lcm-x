@@ -546,6 +546,31 @@ def test_corpus_advance_requires_bounded_delta_search(tmp_path):
         engine.shutdown()
 
 
+def test_corpus_advance_during_retrieval_rejects_view_publication(tmp_path):
+    engine = _engine(tmp_path)
+    try:
+        paris_id = _append(engine, "I visited Paris.")
+        started = _start(engine)
+        found = _search(engine, started["retrieval_id"], paris_id)
+        citation = found["evidence"][0]["citation"]
+
+        _append(engine, "I also visited Rome.")
+        finished = _call(
+            engine,
+            action="finish",
+            retrieval_id=started["retrieval_id"],
+            resolved_slots=[{
+                "slot_id": "visits",
+                "evidence_refs": [citation],
+            }],
+            selected_refs=[citation],
+        )
+
+        assert finished["query_view"]["persistence"]["status"] == "stale_before_publish"
+    finally:
+        engine.shutdown()
+
+
 def test_no_progress_terminates_and_incomplete_finish_falls_back(tmp_path):
     engine = _engine(tmp_path)
     try:

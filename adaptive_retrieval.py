@@ -22,6 +22,7 @@ from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
 import uuid
 
 from .query_view_store import (
+    CorpusSnapshot,
     QueryViewBuildInProgressError,
     QueryViewIdentity,
     QueryViewStore,
@@ -333,6 +334,7 @@ class RetrievalState:
     view_delta_events: tuple[dict[str, Any], ...] = ()
     view_delta_truncated: bool = False
     cached_trace: dict[str, Any] | None = None
+    view_corpus_snapshot: CorpusSnapshot | None = None
 
 
 def _parse_requirements(raw: Any) -> tuple[EvidenceRequirement, ...]:
@@ -902,6 +904,11 @@ class AdaptiveRetrievalRegistry:
                 created_at=now,
                 updated_at=now,
                 slot_refs={item.slot_id: [] for item in parsed_requirements},
+                view_corpus_snapshot=(
+                    self._query_views.corpus_snapshot()
+                    if self._query_views is not None
+                    else None
+                ),
             )
             if self._query_views is not None:
                 lookup = self._query_views.lookup(parsed_identity, record_hit=False)
@@ -1188,7 +1195,10 @@ class AdaptiveRetrievalRegistry:
             return {"status": "skipped", "reason": "computation did not validate"}
         token = None
         try:
-            token = self._query_views.claim_build(state.identity)
+            token = self._query_views.claim_build(
+                state.identity,
+                corpus_snapshot=state.view_corpus_snapshot,
+            )
             dependencies = [
                 self._query_views.snapshot_dependency(
                     item.store_id,

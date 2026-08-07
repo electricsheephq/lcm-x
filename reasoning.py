@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation, localcontext
 import calendar
 import math
 import re
@@ -35,6 +36,8 @@ _MAX_OPERANDS = 50
 _MAX_QUESTION_CHARS = 4_000
 _MAX_QUOTE_CHARS = 24_000
 _MAX_LABEL_CHARS = 300
+_MAX_NUMERIC_DIGITS = 1_000
+_MAX_DECIMAL_ABS = Decimal("1e308")
 _MAX_CALLER_SESSION_DATE_NOTE_CHARS = 64
 _MAX_TEMPORAL_TRUST_NOTES = 8
 _MAX_TEMPORAL_TRUST_NOTE_CHARS = 512
@@ -90,13 +93,22 @@ def resolve_occurrence_time_with_trust(
     *,
     observed_at: Any,
     session_date: Any = None,
+    trusted_session_date: Any = None,
     engine: Any = None,
     session_id: Any = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Lazy import keeps plugin bootstrap order independent of this optional parser."""
+    """Lazy import keeps plugin bootstrap order independent of this optional parser.
+
+    ``session_date`` is the *caller-declared* anchor: it is compared against the
+    engine sidecar to detect disagreement, but it is the least trusted anchor of
+    the three.  ``trusted_session_date`` is a host-derived anchor (the trusted
+    session-date map, or the day of the stored observation) and outranks the
+    caller's declaration.  The engine sidecar outranks both.
+    """
     from .occurrence_time import resolve_occurrence_time as _resolve
 
     caller_session_date = str(session_date or "").strip() or None
+    host_session_date = str(trusted_session_date or "").strip() or None
     sidecar_dates = getattr(engine, "_session_occurrence_dates", {}) or {}
     session_key = str(session_id or "")
     sidecar_session_date = (
@@ -118,7 +130,7 @@ def resolve_occurrence_time_with_trust(
             caller_session_date_note[:_MAX_CALLER_SESSION_DATE_NOTE_CHARS - 3]
             + "..."
         )
-    anchor = sidecar_session_date or caller_session_date
+    anchor = sidecar_session_date or host_session_date or caller_session_date
     result = _resolve(text, observed_at=observed_at, session_date=anchor)
     source = str(result.get("event_time_source") or "unknown")
     reason = str(result.get("reason") or "")
@@ -232,11 +244,18 @@ class EvidencePlan:
     exact_operands: int | None = None
     temporal_window: TemporalWindow | None = None
     question_anchor: date | None = None
-    interval_unit: Literal["auto", "day", "week", "month", "year"] = "day"
+    interval_unit: Literal["day", "week", "month", "year"] = "day"
+    # ``interval_unit`` always carries a real unit -- the default reporting unit
+    # for an interval is the day. This flag records whether that unit is
+    # authoritative. It is cleared only for a bare "how long ago" question,
+    # which names no unit at all: there the interval is reported in its
+    # coarsest exact calendar unit instead of the day default.
+    interval_unit_fixed: bool = True
     difference_direction: Literal[
         "absolute", "first_minus_second", "second_minus_first"
     ] | None = None
     order_direction: Literal["ascending", "descending"] | None = None
+    order_index: int | None = None
     requires_complete_evidence: bool = False
     result_unit: str | None = None
 
@@ -253,8 +272,10 @@ class EvidencePlan:
                 self.question_anchor.isoformat() if self.question_anchor else None
             ),
             "interval_unit": self.interval_unit,
+            "interval_unit_fixed": self.interval_unit_fixed,
             "difference_direction": self.difference_direction,
             "order_direction": self.order_direction,
+            "order_index": self.order_index,
             "requires_complete_evidence": self.requires_complete_evidence,
             "result_unit": self.result_unit,
         }
@@ -393,10 +414,13 @@ def question_date_as_of_epoch(value: Any) -> float | None:
     parsed = _parse_day(value)
     if parsed is None:
         return None
-    next_day = datetime.combine(
-        parsed + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
-    )
-    return next_day.timestamp() - 1e-6
+    try:
+        next_day = datetime.combine(
+            parsed + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+        )
+        return next_day.timestamp() - 1e-6
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _subtract_months_clamped(anchor: date, months: int) -> date:
@@ -485,6 +509,46 @@ def _bounded_sum_count(question: str) -> int | None:
     return _WORD_NUMBERS.get(match.group(1), int(match.group(1)) if match.group(1).isdigit() else 0) or None
 
 
+def _requested_result_unit(question: str) -> str | None:
+    """Return only an explicitly requested arithmetic output unit."""
+    match = re.search(
+        r"\bhow\s+many\s+"
+        r"(minutes?|mins?|hours?|hrs?|days?|weeks?|months?|pages?|points?|"
+        r"items?|events?)\b",
+        question,
+        re.IGNORECASE,
+    )
+    if match:
+        return normalize_unit(match.group(1))
+    match = re.search(
+        r"\b(?:in|into|as|measured\s+in|expressed\s+in)\s+"
+        r"(usd|dollars?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|"
+        r"pages?|points?|items?|events?)\b",
+        question,
+        re.IGNORECASE,
+    )
+    if match:
+        return normalize_unit(match.group(1))
+    if re.search(r"(?:\$|\b(?:usd|dollars?)\b)", question, re.IGNORECASE):
+        return "usd"
+    return None
+
+
+def _requested_order_ordinal(question: str) -> str | None:
+    """Return an ordinal only when the question requests one result position."""
+    match = re.search(
+        r"\b(?:which|what|who)\b[^?]{0,80}\b"
+        r"(?:"
+        r"(?:was|were|is|came|happened|occurred)"
+        r"|(?:did|do|does|have|has|had|will|would|can|could|should)"
+        r"\s+\w+(?:\s+\w+){1,4}"
+        r")\s+(?:the\s+)?"
+        r"(previous|first|earliest|second|third)\b\s*\??$",
+        question,
+    )
+    return match.group(1) if match else None
+
+
 def compile_evidence_plan(question: str, question_date: Any = None) -> PlanDecision:
     text = str(question or "").strip()
     if not text:
@@ -504,9 +568,11 @@ def compile_evidence_plan(question: str, question_date: Any = None) -> PlanDecis
         "absolute", "first_minus_second", "second_minus_first"
     ] | None = None
     order: Literal["ascending", "descending"] | None = None
+    order_index: int | None = None
     requires_complete = False
-    interval_unit: Literal["auto", "day", "week", "month", "year"] = "day"
-    if re.search(r"\bhow long ago\b", normalized):
+    interval_unit: Literal["day", "week", "month", "year"] = "day"
+    interval_unit_fixed = True
+    if re.search(r"\bhow long\s+ago\b", normalized):
         if question_anchor is None:
             return PlanDecision(
                 "fallback",
@@ -516,14 +582,13 @@ def compile_evidence_plan(question: str, question_date: Any = None) -> PlanDecis
             r"\bin\s+(?:calendar\s+)?(days?|weeks?|months?|years?)\b",
             normalized,
         )
-        interval_unit = (
-            requested_interval_unit.group(1).rstrip("s")
-            if requested_interval_unit
-            else "auto"
-        )  # type: ignore[assignment]
+        if requested_interval_unit:
+            interval_unit = requested_interval_unit.group(1).rstrip("s")  # type: ignore[assignment]
+        else:
+            interval_unit_fixed = False
         operation, exact, minimum = "date_interval", 1, 1
     elif re.search(
-        r"\b(how long|time between|interval between|how many\s+(?:calendar\s+)?days?\s+between|since when)\b",
+        r"\b(how long(?!\s+ago)|time between|interval between|how many\s+(?:calendar\s+)?days?\s+between|since when)\b",
         normalized,
     ):
         operation, exact, minimum = "date_interval", 2, 2
@@ -586,6 +651,15 @@ def compile_evidence_plan(question: str, question_date: Any = None) -> PlanDecis
             minimum = exact
             requires_complete = False
         order = "descending" if re.search(r"\b(reverse|latest first|newest first|descending)\b", normalized) else "ascending"
+        requested_ordinal = _requested_order_ordinal(normalized)
+        if requested_ordinal == "previous":
+            order, order_index, minimum = "descending", 1, max(minimum, 2)
+        elif requested_ordinal == "third":
+            order_index, minimum = 2, max(minimum, 3)
+        elif requested_ordinal == "second":
+            order_index, minimum = 1, max(minimum, 2)
+        elif requested_ordinal in {"first", "earliest"}:
+            order_index = 0
     elif temporal is not None:
         operation = "date_filter"
         exact = _bounded_sum_count(text)
@@ -613,9 +687,16 @@ def compile_evidence_plan(question: str, question_date: Any = None) -> PlanDecis
         temporal_window=temporal,
         question_anchor=question_anchor,
         interval_unit=interval_unit,
+        interval_unit_fixed=interval_unit_fixed,
         difference_direction=direction,
         order_direction=order,
+        order_index=order_index,
         requires_complete_evidence=requires_complete,
+        result_unit=(
+            _requested_result_unit(text)
+            if operation in {"sum", "difference"}
+            else None
+        ),
     ))
 
 
@@ -660,14 +741,25 @@ def _explicit_units(text: str) -> set[str]:
     return {unit for pattern, unit in checks if re.search(pattern, text, re.IGNORECASE)}
 
 
-def _explicit_numbers(text: str) -> list[float]:
+def _parse_numeric_literal(value: str) -> int | Decimal | None:
+    normalized = value.replace(",", "")
+    digits = normalized.lstrip("-").replace(".", "")
+    if not digits or len(digits) > _MAX_NUMERIC_DIGITS:
+        return None
+    try:
+        return Decimal(normalized) if "." in normalized else int(normalized)
+    except (InvalidOperation, ValueError, OverflowError):
+        return None
+
+
+def _explicit_numbers(text: str) -> list[int | Decimal]:
     values = [
-        float(match.group(0).replace(",", ""))
+        parsed
         for match in _NUMBER_RE.finditer(text)
-        if math.isfinite(float(match.group(0).replace(",", "")))
+        if (parsed := _parse_numeric_literal(match.group(0))) is not None
     ]
     values.extend(
-        float(_WORD_NUMBERS[match.group(0).casefold()])
+        _WORD_NUMBERS[match.group(0).casefold()]
         for match in re.finditer(
             r"\b(?:" + "|".join(_WORD_NUMBERS) + r")\b",
             text,
@@ -677,7 +769,26 @@ def _explicit_numbers(text: str) -> list[float]:
     return values
 
 
-def _numeric_value_has_unit(value: float, unit: str, quote: str) -> bool:
+def _decimal_value(value: int | float) -> Decimal | None:
+    try:
+        converted = Decimal(value) if isinstance(value, int) else Decimal(str(value))
+    except (InvalidOperation, ValueError, OverflowError):
+        return None
+    if not converted.is_finite() or abs(converted) > _MAX_DECIMAL_ABS:
+        return None
+    return converted
+
+
+def _numeric_values_match(parsed: int | Decimal, value: int | float) -> bool:
+    converted = _decimal_value(value)
+    if converted is None:
+        return False
+    if isinstance(value, int):
+        return parsed == value
+    return abs(Decimal(parsed) - converted) <= Decimal("1e-9")
+
+
+def _numeric_value_has_unit(value: int | float, unit: str, quote: str) -> bool:
     unit_patterns = {
         "page": r"pages?",
         "hour": r"(?:hours?|hrs?)",
@@ -690,11 +801,12 @@ def _numeric_value_has_unit(value: float, unit: str, quote: str) -> bool:
         "event": r"events?",
     }
     mentions = [
-        (match, float(match.group(0).replace(",", "")))
+        (match, parsed)
         for match in _NUMBER_RE.finditer(quote)
+        if (parsed := _parse_numeric_literal(match.group(0))) is not None
     ]
     mentions.extend(
-        (match, float(_WORD_NUMBERS[match.group(0).casefold()]))
+        (match, _WORD_NUMBERS[match.group(0).casefold()])
         for match in re.finditer(
             r"\b(?:" + "|".join(_WORD_NUMBERS) + r")\b",
             quote,
@@ -702,7 +814,7 @@ def _numeric_value_has_unit(value: float, unit: str, quote: str) -> bool:
         )
     )
     for match, parsed in mentions:
-        if abs(parsed - value) > 1e-9:
+        if not _numeric_values_match(parsed, value):
             continue
         before = quote[max(0, match.start() - 24):match.start()]
         after = quote[match.end():match.end() + 24]
@@ -774,6 +886,7 @@ def _ground_one(
     messages: MessageStore,
     assertions: AssertionStore | None,
     as_of: float | None,
+    session_dates: Mapping[str, Any] | None = None,
     engine: Any = None,
 ) -> tuple[GroundedEvidence | None, str | None]:
     if not isinstance(raw, dict):
@@ -819,7 +932,7 @@ def _ground_one(
             return None, "assertion state is unavailable"
         active = bool(state_row["active"])
         conflict = bool(state_row["unresolved_conflict"])
-        group_active_ids = state.active_assertion_ids
+        group_active_ids = state.active_assertion_ids or ()
         group_truncated = state.assertions_truncated or state.relations_truncated
     else:
         for field in ("store_id", "span_start", "span_end", "quote"):
@@ -863,10 +976,10 @@ def _ground_one(
     value = raw.get("value")
     if isinstance(value, bool) or not isinstance(value, (int, float, str, type(None))):
         return None, "operand value must be a number, string, or null"
-    if isinstance(value, float) and not math.isfinite(value):
-        return None, "operand numeric value must be finite"
     if isinstance(value, (int, float)):
-        if not any(abs(number - float(value)) < 1e-9 for number in _explicit_numbers(quote)):
+        if _decimal_value(value) is None:
+            return None, "operand numeric value exceeds the bounded decimal range"
+        if not any(_numeric_values_match(number, value) for number in _explicit_numbers(quote)):
             return None, f"numeric value {value} is not explicit in its exact quote"
     elif isinstance(value, str) and value not in quote:
         return None, "string value is not explicit in its exact quote"
@@ -875,7 +988,7 @@ def _ground_one(
     if unit and len(unit) > 100:
         return None, "unit exceeds 100 characters"
     if unit and isinstance(value, (int, float)) and not _numeric_value_has_unit(
-        float(value), unit, quote
+        value, unit, quote
     ):
         return None, f"unit {unit} is not attached to value {value} in its exact quote"
     label, error = _bounded_optional_text(raw.get("label"), "label")
@@ -896,6 +1009,17 @@ def _ground_one(
         assertion_day = _day_from_epoch(assertion_row.get("event_at"))
     evidence_day = assertion_day
 
+    source_observed_at = stored.get("observed_at")
+    trusted_session_date = (session_dates or {}).get(
+        str(stored.get("session_id") or "")
+    )
+    source_session_day = _parse_day(trusted_session_date)
+    if source_session_day is None:
+        try:
+            source_session_day = _day_from_epoch(source_observed_at)
+        except (OSError, OverflowError, ValueError):
+            source_session_day = None
+
     occurrence_day = None
     resolved_occurrence: Mapping[str, Any] | None = None
     temporal_trust: Literal[
@@ -907,14 +1031,41 @@ def _ground_one(
     if raw_occurrence is not None:
         if not isinstance(raw_occurrence, dict):
             return None, "occurrence_time must be an object"
+        # Anchor precedence, reconciling both caller forms. The two ranks are
+        # kept *separate* rather than collapsed into one chain, because they
+        # answer different questions:
+        #   * ``session_date`` is the operand's OWN declared anchor -- what the
+        #     caller claims the source session day was. It is the term the
+        #     engine sidecar is compared against, so it must be passed through
+        #     verbatim or the sidecar-override detection has nothing to detect.
+        #   * ``trusted_session_date`` is the host-derived anchor: the trusted
+        #     ``session_dates`` map, falling back to the day of the stored
+        #     observation. It is what the occurrence is actually resolved
+        #     against, because a caller's declaration is never evidence.
+        # ``resolve_occurrence_time_with_trust`` ranks them
+        # sidecar > trusted > caller-declared. Feeding the declared date in as
+        # the resolution anchor (as a single chain would) lets a caller relabel
+        # a stored observation just by declaring a different session date;
+        # feeding the map in as the *caller* term defeats the override check,
+        # since tools.py sources that map from ``engine._session_occurrence_dates``
+        # -- the very attribute the resolver reads for the sidecar -- so the two
+        # would always be equal.
+        declared_session_date = (
+            str(raw_occurrence.get("session_date") or "").strip() or None
+        )
         resolved, resolved_trust = resolve_occurrence_time_with_trust(
             quote,
             observed_at=(
-                stored.get("observed_at")
-                if stored.get("observed_at") is not None
+                source_observed_at
+                if source_observed_at is not None
                 else stored.get("timestamp")
             ),
-            session_date=raw_occurrence.get("session_date"),
+            session_date=declared_session_date,
+            trusted_session_date=(
+                source_session_day.isoformat()
+                if source_session_day is not None
+                else None
+            ),
             engine=engine,
             session_id=stored.get("session_id"),
         )
@@ -925,6 +1076,11 @@ def _ground_one(
         temporal_certified = resolved_trust["temporal_certified"]
         note = str(resolved_trust.get("trust_note") or "").strip()
         temporal_notes = (note,) if note else ()
+        if (
+            engine is None
+            and resolved.get("reason") == "relative_expression_without_session_date"
+        ):
+            return None, "relative occurrence requires a trusted source observation date"
         supplied_source = str(raw_occurrence.get("event_time_source") or "")
         if supplied_source != resolved["event_time_source"]:
             return None, "occurrence_time source is not supported by the exact quote"
@@ -972,6 +1128,13 @@ def _ground_one(
             except (TypeError, ValueError, OverflowError):
                 return None, "source observation timestamp is invalid"
             if not math.isfinite(stored_observed_at) or stored_observed_at > as_of:
+                return None, "source was observed after the question-date boundary"
+            source_observation_grounded = True
+        elif source_session_day is not None:
+            source_observed_at = datetime.combine(
+                source_session_day, datetime.max.time(), tzinfo=timezone.utc
+            ).timestamp()
+            if source_observed_at > as_of:
                 return None, "source was observed after the question-date boundary"
             source_observation_grounded = True
         elif resolved_occurrence is not None and resolved_occurrence.get("session_date"):
@@ -1037,6 +1200,7 @@ def ground_evidence(
     messages: MessageStore,
     assertions: AssertionStore | None,
     as_of: float | None = None,
+    session_dates: Mapping[str, Any] | None = None,
     engine: Any = None,
 ) -> GroundingDecision:
     if not isinstance(raw_operands, list):
@@ -1052,6 +1216,7 @@ def ground_evidence(
             messages=messages,
             assertions=assertions,
             as_of=as_of,
+            session_dates=session_dates,
             engine=engine,
         )
         if error:
@@ -1092,11 +1257,16 @@ def ground_evidence(
     )
 
 
-def _format_number(value: float) -> str:
-    return str(int(value)) if value.is_integer() else str(round(value, 6)).rstrip("0").rstrip(".")
+def _format_number(value: int | float | Decimal) -> str:
+    if isinstance(value, int):
+        return str(value)
+    decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
+    if decimal_value == decimal_value.to_integral_value():
+        return str(int(decimal_value))
+    return format(round(decimal_value, 6), "f").rstrip("0").rstrip(".")
 
 
-def _format_quantity(value: float, unit: str | None) -> str:
+def _format_quantity(value: int | float | Decimal, unit: str | None) -> str:
     number = _format_number(value)
     if not unit:
         return number
@@ -1117,13 +1287,16 @@ def _trace(
     result_value: int | float | str | tuple[str, ...],
     unit: str | None,
     steps: Sequence[str],
+    entities: Sequence[str] | None = None,
 ) -> ComputationDecision:
     citations = tuple(dict.fromkeys(operand.citation for operand in operands))
-    entities = tuple(dict.fromkeys(
-        label
-        for operand in operands
-        if (label := (operand.label or operand.key))
-    ))
+    traced_entities = tuple(dict.fromkeys(entities)) if entities is not None else tuple(
+        dict.fromkeys(
+            label
+            for operand in operands
+            if (label := (operand.label or operand.key))
+        )
+    )
     evidence_dates = tuple(dict.fromkeys(
         operand.evidence_date.isoformat()
         for operand in operands
@@ -1135,7 +1308,7 @@ def _trace(
         result_value=result_value,
         unit=unit,
         citations=citations,
-        entities=entities,
+        entities=traced_entities,
         evidence_dates=evidence_dates,
         steps=tuple(steps),
         answer=_answer(result, citations),
@@ -1152,12 +1325,102 @@ def _label(operand: GroundedEvidence) -> str | None:
     return None
 
 
+def _count_distinct_subject_tokens(question: str) -> set[str]:
+    auxiliary = r"(?:did|does|do|has|have|had|is|are|was|were)"
+    named = re.search(
+        rf"(?i:\b{auxiliary}\b)\s+"
+        r"([A-Z][\w'-]*(?:\s+[A-Z][\w'-]*){0,3})",
+        question,
+    )
+    if named:
+        tokens = set(_normalized_tokens(named.group(1)))
+        if tokens.isdisjoint({"i", "we", "you", "he", "she", "it", "they"}):
+            return tokens
+    return set()
+
+
+def _named_sum_selectors(question: str) -> tuple[set[str], ...]:
+    match = re.search(
+        r"(?i:\b(?:total|sum)\s+of\s+(?:the\s+)?)(.+?)(?:[?.!]|$)",
+        question,
+    )
+    if not match:
+        return ()
+    parts = re.split(
+        r"\s*(?:[,;&]|\band\b|\bplus\b)\s*",
+        match.group(1),
+        flags=re.IGNORECASE,
+    )
+    selectors = tuple(
+        set(_normalized_tokens(re.sub(r"(?i)^(?:the|a|an)\s+", "", part)))
+        for part in parts
+        if part.strip()
+    )
+    return selectors if len(selectors) >= 2 and all(selectors) else ()
+
+
+def _sum_value_is_bound(
+    operand: GroundedEvidence,
+    requested: set[str],
+) -> bool:
+    if not isinstance(operand.value, (int, float)):
+        return False
+    clauses = re.split(
+        r"\s*(?:[,;]|\band\b|\bplus\b)\s*",
+        operand.quote,
+        flags=re.IGNORECASE,
+    )
+    for selector in (operand.label, operand.key):
+        selector_tokens = set(_normalized_tokens(selector or ""))
+        if not selector_tokens or requested.isdisjoint(selector_tokens):
+            continue
+        for clause in clauses:
+            if not selector_tokens.issubset(_normalized_tokens(clause)):
+                continue
+            if any(
+                _numeric_values_match(number, operand.value)
+                for number in _explicit_numbers(clause)
+            ):
+                return True
+    return False
+
+
 def validate_selector_alignment(
     question: str,
     plan: EvidencePlan,
     operands: Sequence[GroundedEvidence],
 ) -> str | None:
-    """Validate the host selector's only semantic ordering obligation."""
+    """Validate question-aware semantic obligations on host-selected operands."""
+    if plan.operation == "sum":
+        selectors = _named_sum_selectors(question)
+        if not selectors:
+            return None
+        unmatched = set(range(len(operands)))
+        for selector in selectors:
+            matches = [
+                index
+                for index in unmatched
+                if _sum_value_is_bound(operands[index], selector)
+            ]
+            if len(matches) != 1:
+                return (
+                    "named sum values must be bound to distinct requested summands"
+                )
+            unmatched.remove(matches[0])
+        if unmatched:
+            return "named sum values must be bound to distinct requested summands"
+        return None
+    if plan.operation == "count_distinct":
+        subject_tokens = _count_distinct_subject_tokens(question)
+        if subject_tokens and any(
+            subject_tokens.intersection(_normalized_tokens(operand.key or ""))
+            for operand in operands
+        ):
+            return (
+                "count_distinct canonical keys must identify counted entities, "
+                "not the question subject"
+            )
+        return None
     if plan.operation != "difference" or plan.difference_direction == "absolute":
         return None
     if len(operands) != 2 or any(not operand.label for operand in operands):
@@ -1174,22 +1437,39 @@ def validate_selector_alignment(
     return None
 
 
+def _cardinality_error(plan: EvidencePlan, operands: Sequence[Any]) -> str | None:
+    if plan.exact_operands is not None and len(operands) != plan.exact_operands:
+        return f"{plan.operation} requires exactly {plan.exact_operands} operands"
+    if not plan.minimum_operands <= len(operands) <= plan.maximum_operands:
+        return (
+            f"{plan.operation} requires between {plan.minimum_operands} "
+            f"and {plan.maximum_operands} operands"
+        )
+    return None
+
+
+def _apply_arithmetic(
+    plan: EvidencePlan,
+    values: Sequence[int | Decimal],
+) -> int | Decimal | None:
+    if plan.operation == "sum":
+        return sum(values)
+    if len(values) != 2:
+        return None
+    if plan.difference_direction == "first_minus_second":
+        return values[0] - values[1]
+    if plan.difference_direction == "second_minus_first":
+        return values[1] - values[0]
+    return abs(values[0] - values[1])
+
+
 def execute_plan(
     plan: EvidencePlan,
     operands: Sequence[GroundedEvidence],
 ) -> ComputationDecision:
-    if plan.exact_operands is not None and len(operands) != plan.exact_operands:
-        return ComputationDecision(
-            "fallback", reason=f"{plan.operation} requires exactly {plan.exact_operands} operands"
-        )
-    if not plan.minimum_operands <= len(operands) <= plan.maximum_operands:
-        return ComputationDecision(
-            "fallback",
-            reason=(
-                f"{plan.operation} requires between {plan.minimum_operands} "
-                f"and {plan.maximum_operands} operands"
-            ),
-        )
+    cardinality_error = _cardinality_error(plan, operands)
+    if cardinality_error:
+        return ComputationDecision("fallback", reason=cardinality_error)
     selected = list(operands)
     temporal_steps: list[str] = []
     if plan.temporal_window and plan.operation != "date_interval":
@@ -1212,6 +1492,9 @@ def execute_plan(
         temporal_steps.append(
             f"Selected {len(selected)} of {before_count} dated evidence items"
         )
+        cardinality_error = _cardinality_error(plan, selected)
+        if cardinality_error:
+            return ComputationDecision("fallback", reason=cardinality_error)
         if not selected:
             return ComputationDecision(
                 "fallback", reason="no grounded evidence falls inside the resolved date window"
@@ -1227,6 +1510,9 @@ def execute_plan(
                 "fallback", reason="count_distinct requires one canonical key per operand"
             )
         keys = tuple(dict.fromkeys(operand.key for operand in selected if operand.key))
+        cardinality_error = _cardinality_error(plan, keys)
+        if cardinality_error:
+            return ComputationDecision("fallback", reason=cardinality_error)
         units = {operand.unit for operand in selected if operand.unit}
         if len(units) > 1:
             return ComputationDecision("fallback", reason="count_distinct has mixed units")
@@ -1235,7 +1521,7 @@ def execute_plan(
                 "fallback", reason="every counted operand must carry the compatible unit"
             )
         unit = next(iter(units), "item")
-        result = _format_quantity(float(len(keys)), unit)
+        result = _format_quantity(len(keys), unit)
         return _trace(
             plan,
             selected,
@@ -1255,10 +1541,10 @@ def execute_plan(
         units = {operand.unit for operand in selected if operand.unit}
         requested_unit = normalize_unit(plan.result_unit)
         time_factors = {
-            "minute": 1.0,
-            "hour": 60.0,
-            "day": 1_440.0,
-            "week": 10_080.0,
+            "minute": 1,
+            "hour": 60,
+            "day": 1_440,
+            "week": 10_080,
         }
         time_dimension = bool(units) and units.issubset(time_factors)
         if time_dimension and any(operand.unit is None for operand in selected):
@@ -1291,42 +1577,69 @@ def execute_plan(
                     "fallback",
                     reason="numeric units present in evidence must be supplied explicitly",
                 )
-        values = [float(operand.value) for operand in selected]  # type: ignore[arg-type]
-        if time_dimension and unit in time_factors:
-            values = [
-                value * time_factors[str(operand.unit)] / time_factors[unit]
-                for value, operand in zip(values, selected)
-            ]
-        if plan.operation == "sum":
-            result_value = sum(values)
+        raw_values = [operand.value for operand in selected]
+        use_decimal = time_dimension or any(isinstance(value, float) for value in raw_values)
+        if use_decimal:
+            converted = [_decimal_value(value) for value in raw_values]  # type: ignore[arg-type]
+            if any(value is None for value in converted):
+                return ComputationDecision(
+                    "fallback", reason="numeric operand exceeds the bounded decimal range"
+                )
+            with localcontext() as context:
+                context.prec = _MAX_NUMERIC_DIGITS
+                values: list[int | Decimal] = [
+                    value for value in converted if value is not None
+                ]
+                if time_dimension and unit in time_factors:
+                    values = [
+                        Decimal(value)
+                        * Decimal(time_factors[str(operand.unit)])
+                        / Decimal(time_factors[unit])
+                        for value, operand in zip(values, selected)
+                    ]
+                result_value = _apply_arithmetic(plan, values)
         else:
-            if len(values) != 2:
+            values = [int(value) for value in raw_values]  # type: ignore[arg-type]
+            result_value = _apply_arithmetic(plan, values)
+        if result_value is None:
+            return ComputationDecision(
+                "fallback", reason="difference requires exactly two operands"
+            )
+        if (
+            plan.operation == "difference"
+            and plan.difference_direction != "absolute"
+            and result_value < 0
+        ):
+            return ComputationDecision(
+                "fallback",
+                reason="directed difference premise is contradicted by the operands",
+            )
+        decimal_result = Decimal(result_value)
+        if not decimal_result.is_finite() or abs(decimal_result) > _MAX_DECIMAL_ABS:
+            return ComputationDecision(
+                "fallback", reason="numeric result exceeds the bounded decimal range"
+            )
+        public_value: int | float
+        if decimal_result == decimal_result.to_integral_value():
+            public_value = int(decimal_result)
+        else:
+            public_value = float(decimal_result)
+            if not math.isfinite(public_value):
                 return ComputationDecision(
-                    "fallback", reason="difference requires exactly two operands"
+                    "fallback", reason="numeric result exceeds the bounded decimal range"
                 )
-            if plan.difference_direction == "first_minus_second":
-                result_value = values[0] - values[1]
-            elif plan.difference_direction == "second_minus_first":
-                result_value = values[1] - values[0]
-            else:
-                result_value = abs(values[0] - values[1])
-            if plan.difference_direction != "absolute" and result_value < 0:
-                return ComputationDecision(
-                    "fallback",
-                    reason="directed difference premise is contradicted by the operands",
-                )
-        result = _format_quantity(result_value, unit)
+        result = _format_quantity(decimal_result, unit)
         return _trace(
             plan,
             selected,
             result=result,
-            result_value=(int(result_value) if result_value.is_integer() else result_value),
+            result_value=public_value,
             unit=unit,
             steps=[
                 *temporal_steps,
                 f"{plan.operation}:{plan.difference_direction or 'n/a'}"
                 f"({', '.join(_format_number(value) for value in values)}) "
-                f"= {_format_number(result_value)}",
+                f"= {_format_number(decimal_result)}",
             ],
         )
 
@@ -1356,8 +1669,12 @@ def execute_plan(
                 f"to {selected[1].evidence_date.isoformat()} is {days} days"  # type: ignore[union-attr]
             )
         interval_unit = plan.interval_unit
+        # A plan whose unit is not authoritative is reported in its coarsest
+        # exact calendar unit, so the calendar arithmetic below is needed
+        # whenever the question named no unit of its own.
+        coarsest_fit = not plan.interval_unit_fixed
         complete_months = complete_years = 0
-        if interval_unit in {"auto", "month", "year"}:
+        if coarsest_fit or interval_unit in {"month", "year"}:
             if len(selected) == 1:
                 first_day, second_day = (
                     selected[0].evidence_date,
@@ -1387,7 +1704,7 @@ def execute_plan(
             if (later.month, later.day) < (earlier.month, anniversary_day):
                 complete_years -= 1
 
-        if interval_unit == "auto":
+        if coarsest_fit:
             if complete_years > 0:
                 interval_unit = "year"
             elif complete_months > 0:
@@ -1439,16 +1756,29 @@ def execute_plan(
         labels = tuple(label for operand in selected if (label := _label(operand)))
         if len(labels) != len(selected):
             return ComputationDecision("fallback", reason="order requires grounded labels")
+        projected_labels = labels
+        if plan.order_index is not None:
+            if plan.order_index >= len(labels):
+                return ComputationDecision(
+                    "fallback", reason="order does not have the requested ordinal operand"
+                )
+            projected_labels = (labels[plan.order_index],)
         return _trace(
             plan,
             selected,
-            result=" -> ".join(labels),
-            result_value=labels,
+            result=" -> ".join(projected_labels),
+            result_value=projected_labels,
             unit=None,
             steps=[
                 f"Sorted {len(labels)} grounded items by date "
-                f"({plan.order_direction or 'ascending'})"
+                f"({plan.order_direction or 'ascending'})",
+                *(
+                    [f"Projected ordinal index {plan.order_index}"]
+                    if plan.order_index is not None
+                    else []
+                ),
             ],
+            entities=projected_labels,
         )
 
     if any(operand.assertion_id is None for operand in selected):
@@ -1528,6 +1858,8 @@ def verify_final_answer(candidate: Any, trace: ComputationTrace) -> Verification
     if text == trace.answer:
         return VerificationDecision("verified")
     without_citations = re.sub(r"\s*\[lcm:\d+:\d+-\d+\]", "", text).strip()
+    if re.search(r"\b(?:no|not|never)\b|n['’]t\b", without_citations, re.IGNORECASE):
+        return VerificationDecision("fallback", "candidate negates the verified result")
     if trace.result.casefold() not in without_citations.casefold():
         return VerificationDecision("fallback", "candidate does not preserve the verified result")
     expected_numbers = _explicit_numbers(trace.result)

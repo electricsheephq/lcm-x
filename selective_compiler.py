@@ -17,6 +17,7 @@ import time
 from typing import Any, Mapping, Sequence
 
 from .evidence_compiler import compile_evidence, derive_evidence_request
+from .reasoning import question_date_as_of_epoch
 
 
 SELECTIVE_SELECTOR_VERSION = "selective-evidence-selector-v1"
@@ -107,7 +108,51 @@ def _facet(request: Mapping[str, Any]) -> str:
     return "operand" if name == "operands" else name or "operand"
 
 
-def _handles(refs: Sequence[Any], *, max_handles: int = 18, max_quote_chars: int = 420):
+def _ref_observed_at(raw: Mapping[str, Any], *, engine: Any = None) -> float | None:
+    candidates: list[float] = []
+    match = _EXACT_REF_RE.fullmatch(str(raw.get("exact_ref") or "").strip())
+    store = getattr(engine, "_store", None)
+    if match is not None and store is not None:
+        try:
+            stored = store.get(int(match.group("store")))
+        except (TypeError, ValueError, OverflowError):
+            stored = None
+        if isinstance(stored, Mapping):
+            value = stored.get("observed_at")
+            if value is None:
+                value = stored.get("timestamp")
+            if value is not None and not isinstance(value, bool):
+                try:
+                    observed_at = float(value)
+                except (TypeError, ValueError, OverflowError):
+                    pass
+                else:
+                    if math.isfinite(observed_at):
+                        candidates.append(observed_at)
+    for field in ("observed_at", "timestamp"):
+        value = raw.get(field)
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            observed_at = float(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(observed_at):
+            candidates.append(observed_at)
+    dated_at = question_date_as_of_epoch(raw.get("date"))
+    if dated_at is not None:
+        candidates.append(dated_at)
+    return max(candidates) if candidates else None
+
+
+def _handles(
+    refs: Sequence[Any],
+    *,
+    question_cutoff: float | None = None,
+    engine: Any = None,
+    max_handles: int = 18,
+    max_quote_chars: int = 420,
+):
     output: list[dict[str, Any]] = []
     seen: set[str] = set()
     for raw in list(refs)[:50]:
@@ -118,6 +163,10 @@ def _handles(refs: Sequence[Any], *, max_handles: int = 18, max_quote_chars: int
         match = _EXACT_REF_RE.fullmatch(exact_ref)
         if match is None or not quote or exact_ref in seen:
             continue
+        if question_cutoff is not None:
+            observed_at = _ref_observed_at(raw, engine=engine)
+            if observed_at is None or observed_at > question_cutoff:
+                continue
         span_length = int(match.group("end")) - int(match.group("start"))
         if span_length < len(quote):
             continue
@@ -177,6 +226,7 @@ def prepare_selective_compiler(
     *,
     baseline_refs: Sequence[Any] = (),
     question_date: Any = None,
+    engine: Any = None,
 ) -> dict[str, Any]:
     result = _base("not_routed", "operation_not_selective")
     try:
@@ -186,7 +236,11 @@ def prepare_selective_compiler(
         return result
     if not _route(derived):
         return result
-    handles = _handles(baseline_refs)
+    handles = _handles(
+        baseline_refs,
+        question_cutoff=question_date_as_of_epoch(derived.get("as_of")),
+        engine=engine,
+    )
     if not handles:
         result["reason_code"] = "no_exact_evidence_handles"
         return result
@@ -330,7 +384,10 @@ def compile_selective_evidence(
     if not enabled:
         return _fallback("feature_disabled")
     prepared = prepare_selective_compiler(
-        question, baseline_refs=compiler_refs, question_date=question_date
+        question,
+        baseline_refs=compiler_refs,
+        question_date=question_date,
+        engine=engine,
     )
     if prepared["status"] != "selector_required":
         return _fallback(prepared["reason_code"])

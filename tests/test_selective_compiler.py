@@ -233,3 +233,60 @@ def test_latest_state_is_routed_but_never_claims_finite_coverage_from_wording(tm
     assert prepared["request"]["operation"] == "latest_fact"
     assert prepared["request"]["expected_operands"] is None
     assert prepared["provenance"]["finite_coverage_claimed"] is False
+
+
+def test_historical_cutoff_excludes_future_handles_before_selector_prompt():
+    past = "The first purchase cost $20."
+    future = "The second purchase cost $30."
+
+    prepared = prepare_selective_compiler(
+        "What was the total cost of the two purchases?",
+        baseline_refs=[
+            {
+                "exact_ref": f"lcm:1:0-{len(past)}",
+                "quote": past,
+                "date": "2024-01-01",
+            },
+            {
+                "exact_ref": f"lcm:2:0-{len(future)}",
+                "quote": future,
+                "date": "2026-01-01",
+            },
+        ],
+        question_date="2024-12-31",
+    )
+
+    assert prepared["status"] == "selector_required"
+    assert [item["exact_ref"] for item in prepared["compiler_refs"]] == [
+        f"lcm:1:0-{len(past)}"
+    ]
+    assert future not in prepared["prompt"]
+
+
+def test_historical_cutoff_hydrates_trusted_store_timestamp(tmp_path):
+    engine = _engine(tmp_path)
+    past = _evidence(engine, "The first purchase cost $20.")
+    future = _evidence(engine, "The second purchase cost $30.")
+    engine._store._conn.executemany(
+        "UPDATE messages SET timestamp = ? WHERE store_id = ?",
+        [
+            (1_704_067_200, int(past["exact_ref"].split(":")[1])),
+            (1_767_225_600, int(future["exact_ref"].split(":")[1])),
+        ],
+    )
+    engine._store._conn.commit()
+    past["date"] = "2024-01-01"
+    future["date"] = "2024-01-01"
+    try:
+        prepared = prepare_selective_compiler(
+            "What was the total cost of the two purchases?",
+            baseline_refs=[past, future],
+            question_date="2024-12-31",
+            engine=engine,
+        )
+    finally:
+        engine._store.close()
+
+    assert [item["exact_ref"] for item in prepared["compiler_refs"]] == [
+        past["exact_ref"]
+    ]

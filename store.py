@@ -15,7 +15,7 @@ import math
 import sqlite3
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -113,6 +113,10 @@ def _normalize_observed_at(value: Any) -> float | None:
     else:
         return None
     if not math.isfinite(observed_at) or observed_at <= 0:
+        return None
+    try:
+        datetime.fromtimestamp(observed_at, tz=timezone.utc)
+    except (OSError, OverflowError, ValueError):
         return None
     return observed_at
 

@@ -654,10 +654,15 @@ class QueryViewStore:
             assertion_id=normalized_assertion,
         )
 
-    def claim_build(self, identity: QueryViewIdentity) -> QueryViewBuildToken:
+    def claim_build(
+        self,
+        identity: QueryViewIdentity,
+        *,
+        corpus_snapshot: CorpusSnapshot | None = None,
+    ) -> QueryViewBuildToken:
         canonical = identity.canonical_json
         view_id = identity.view_id
-        snapshot = self.corpus_snapshot()
+        snapshot = corpus_snapshot or self.corpus_snapshot()
         nonce = uuid.uuid4().hex
         now = self._now()
         lease = now + _BUILD_LEASE_SECONDS

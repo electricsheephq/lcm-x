@@ -168,11 +168,9 @@ def test_grounding_rejects_unproven_values_labels_keys_and_refs(evidence_db):
 def test_relative_occurrence_time_grounds_without_aliasing_late_observation(evidence_db):
     messages, assertions = evidence_db
     content = "I completed the plank challenge 5 days ago."
-    # Legacy/benchmark rows have no trustworthy host observation time. The
-    # adapter sidecar may anchor relative text without relabelling ingest time.
-    store_id = messages.append("session-a", {"role": "user", "content": content})
+    store_id = _message(messages, content, "2023-03-20")
     occurrence = {
-        "observed_at": _epoch("2026-07-19"),
+        "observed_at": _epoch("2023-03-20"),
         "event_at": _epoch("2023-03-15"),
         "event_date": "2023-03-15",
         "event_time_source": "relative_to_session",
@@ -493,7 +491,31 @@ def test_session_sidecar_cannot_override_real_host_observation_after_as_of(evide
         as_of=question_date_as_of_epoch("2023-03-20"),
     )
     assert decision.status == "fallback"
-    assert "observed after the question-date boundary" in decision.reason
+    assert "occurrence_time date is not supported" in decision.reason
+
+
+def test_relative_occurrence_uses_stored_observation_not_caller_session_date(evidence_db):
+    messages, assertions = evidence_db
+    content = "I completed the plank challenge 5 days ago."
+    store_id = _message(messages, content, "2026-07-19")
+    occurrence = {
+        "observed_at": _epoch("2023-03-20"),
+        "event_at": _epoch("2023-03-15"),
+        "event_date": "2023-03-15",
+        "event_time_source": "relative_to_session",
+        "session_date": "2023-03-20",
+        "precision": "day",
+        "policy_version": "occurrence-time-v1",
+    }
+    decision = ground_evidence(
+        [_raw(store_id, content, content, date="2023-03-15", occurrence_time=occurrence)],
+        messages=messages,
+        assertions=assertions,
+        as_of=question_date_as_of_epoch("2026-07-19"),
+    )
+
+    assert decision.status == "fallback"
+    assert "occurrence_time date is not supported" in decision.reason
 
 
 def test_assertion_observation_time_is_not_silently_used_as_event_time(evidence_db):
@@ -564,6 +586,160 @@ def test_sum_difference_count_and_mixed_unit_fallback(evidence_db):
     count_plan = compile_evidence_plan("How many distinct items were there?").plan
     count = execute_plan(count_plan, (counted, counted_again))
     assert count.trace.result == "1 item"
+
+
+def test_sum_preserves_large_integers_and_bounds_decimal_overflow(evidence_db):
+    messages, assertions = evidence_db
+    first = "The first total is 9007199254740993 items."
+    second = "The second total is 1 item."
+    first_id = _message(messages, first, "2024-02-01")
+    second_id = _message(messages, second, "2024-02-02")
+    engine = SimpleNamespace(_store=messages, _assertions=assertions)
+
+    exact = json.loads(lcm_compute(
+        {
+            "question": "What is the combined total?",
+            "evidence_complete": True,
+            "operands": [
+                _raw(first_id, first, first, value=9007199254740993, unit="item"),
+                _raw(second_id, second, second, value=1, unit="item"),
+            ],
+        },
+        engine=engine,
+    ))
+    assert exact["status"] == "computed"
+    assert exact["trace"]["result_value"] == 9007199254740994
+    assert exact["trace"]["result"] == "9007199254740994 items"
+
+    comparison = "The comparison total is 9007199254740992 items."
+    comparison_id = _message(messages, comparison, "2024-02-03")
+    exact_difference = json.loads(lcm_compute(
+        {
+            "question": "How much more is the first total than the comparison total?",
+            "evidence_complete": True,
+            "operands": [
+                _raw(
+                    first_id,
+                    first,
+                    first,
+                    value=9007199254740993,
+                    unit="item",
+                    label="first total",
+                ),
+                _raw(
+                    comparison_id,
+                    comparison,
+                    comparison,
+                    value=9007199254740992,
+                    unit="item",
+                    label="comparison total",
+                ),
+            ],
+        },
+        engine=engine,
+    ))
+    assert exact_difference["status"] == "computed"
+    assert exact_difference["trace"]["result_value"] == 1
+    assert exact_difference["trace"]["result"] == "1 item"
+
+    operands = _ground(
+        messages,
+        assertions,
+        [
+            _raw(first_id, first, first, value=9007199254740993, unit="item"),
+            _raw(second_id, second, second, value=1, unit="item"),
+        ],
+    )
+    overflowing = tuple(
+        replace(operand, value=1e308) for operand in operands
+    )
+    bounded = execute_plan(
+        compile_evidence_plan("What is the combined total?").plan,
+        overflowing,
+    )
+    assert bounded.status == "fallback"
+    assert bounded.reason == "numeric result exceeds the bounded decimal range"
+
+
+def test_planner_populates_requested_result_unit_for_time_arithmetic(evidence_db):
+    messages, assertions = evidence_db
+    first = "Jogging took 1 hour."
+    second = "Yoga took 30 minutes."
+    first_id = _message(messages, first, "2024-02-01")
+    second_id = _message(messages, second, "2024-02-02")
+    engine = SimpleNamespace(_store=messages, _assertions=assertions)
+    operands = [
+        _raw(first_id, first, first, value=1, unit="hour", label="jogging"),
+        _raw(second_id, second, second, value=30, unit="minute", label="yoga"),
+    ]
+
+    hours = compile_evidence_plan("What is the combined total in hours?").plan
+    minutes = compile_evidence_plan("What is the combined total in minutes?").plan
+    how_many_hours = compile_evidence_plan("How many hours was the combined total?").plan
+    assert hours.result_unit == "hour"
+    assert minutes.result_unit == "minute"
+    assert how_many_hours.result_unit == "hour"
+
+    in_hours = json.loads(lcm_compute(
+        {
+            "question": "What is the combined total in hours?",
+            "evidence_complete": True,
+            "operands": operands,
+        },
+        engine=engine,
+    ))
+    in_minutes = json.loads(lcm_compute(
+        {
+            "question": "What is the combined total in minutes?",
+            "evidence_complete": True,
+            "operands": operands,
+        },
+        engine=engine,
+    ))
+    difference = json.loads(lcm_compute(
+        {
+            "question": "How much more time did jogging take than yoga, in minutes?",
+            "evidence_complete": True,
+            "operands": operands,
+        },
+        engine=engine,
+    ))
+    assert in_hours["trace"]["result"] == "1.5 hours"
+    assert in_hours["trace"]["result_value"] == 1.5
+    assert in_minutes["trace"]["result"] == "90 minutes"
+    assert in_minutes["trace"]["result_value"] == 90
+    assert difference["trace"]["result"] == "30 minutes"
+    assert difference["trace"]["result_value"] == 30
+
+
+def test_explicit_time_result_unit_wins_over_incidental_currency(evidence_db):
+    messages, assertions = evidence_db
+    first = "The $10 premium service took 2 hours."
+    second = "The $5 basic service took 1 hour."
+    first_id = _message(messages, first, "2024-02-01")
+    second_id = _message(messages, second, "2024-02-02")
+    question = (
+        "What is the difference in hours between the $10 premium service "
+        "and the $5 basic service?"
+    )
+    engine = SimpleNamespace(_store=messages, _assertions=assertions)
+
+    plan = compile_evidence_plan(question).plan
+    assert plan.result_unit == "hour"
+
+    result = json.loads(lcm_compute(
+        {
+            "question": question,
+            "evidence_complete": True,
+            "operands": [
+                _raw(first_id, first, first, value=2, unit="hour", label="premium service"),
+                _raw(second_id, second, second, value=1, unit="hour", label="basic service"),
+            ],
+        },
+        engine=engine,
+    ))
+    assert result["status"] == "computed", result
+    assert result["trace"]["result"] == "1 hour"
 
 
 def test_directed_difference_validates_question_order(evidence_db):
@@ -641,6 +817,119 @@ def test_date_filter_interval_order_and_cardinality(evidence_db):
         "PlankChallenge -> launch"
     )
     assert execute_plan(interval_plan, operands[:1]).status == "fallback"
+
+
+def test_temporal_filter_revalidates_exact_cardinality(evidence_db):
+    messages, assertions = evidence_db
+    rows = [
+        ("Alpha happened on 2023-03-15.", "Alpha", "2023-03-15"),
+        ("Beta happened on 2023-03-15.", "Beta", "2023-03-15"),
+        ("Gamma happened on 2023-03-14.", "Gamma", "2023-03-14"),
+    ]
+    raw = []
+    for content, label, day in rows:
+        store_id = _message(messages, content, day)
+        raw.append(_raw(store_id, content, content, label=label, date=day))
+    engine = SimpleNamespace(_store=messages, _assertions=assertions)
+    args = {
+        "question": "Which three events happened 5 days ago?",
+        "question_date": "2023-03-20",
+        "operands": raw,
+    }
+
+    filtered = json.loads(lcm_compute(args, engine=engine))
+    assert filtered["status"] == "fallback"
+    assert filtered["reason"] == "date_filter requires exactly 3 operands"
+
+    # A direct executor control proves a complete in-window population remains valid.
+    grounded = _ground(
+        messages,
+        assertions,
+        raw[:2] + [
+            _raw(
+                _message(messages, "Gamma happened on 2023-03-15.", "2023-03-15"),
+                "Gamma happened on 2023-03-15.",
+                "Gamma happened on 2023-03-15.",
+                label="Gamma",
+                date="2023-03-15",
+            )
+        ],
+        question_date="2023-03-20",
+    )
+    complete = execute_plan(
+        compile_evidence_plan(args["question"], args["question_date"]).plan,
+        grounded,
+    )
+    assert complete.status == "computed"
+    assert complete.trace.result_value == ("Alpha", "Beta", "Gamma")
+
+
+def test_order_projects_requested_ordinal_and_preserves_full_order(evidence_db):
+    messages, assertions = evidence_db
+    rows = [
+        ("Alpha happened on 2023-03-10.", "Alpha", "2023-03-10"),
+        ("Beta happened on 2023-03-11.", "Beta", "2023-03-11"),
+        ("Gamma happened on 2023-03-12.", "Gamma", "2023-03-12"),
+    ]
+    operands = []
+    for content, label, day in rows:
+        store_id = _message(messages, content, day)
+        operands.append(_raw(store_id, content, content, label=label, date=day))
+    engine = SimpleNamespace(_store=messages, _assertions=assertions)
+
+    for question, expected in (
+        ("Which event was first?", "Alpha"),
+        ("Which event was second?", "Beta"),
+        ("Which event was third?", "Gamma"),
+        ("Which event was previous?", "Beta"),
+        ("Which city did I visit second?", "Beta"),
+        ("What restaurant did I visit first?", "Alpha"),
+    ):
+        result = json.loads(lcm_compute(
+            {
+                "question": question,
+                "question_date": "2023-03-20",
+                "evidence_complete": True,
+                "operands": list(reversed(operands)),
+            },
+            engine=engine,
+        ))
+        assert result["status"] == "computed", (question, result)
+        assert result["trace"]["result"] == expected
+        assert result["trace"]["result_value"] == [expected]
+
+    full = json.loads(lcm_compute(
+        {
+            "question": "Put the events in chronological order.",
+            "question_date": "2023-03-20",
+            "evidence_complete": True,
+            "operands": list(reversed(operands)),
+        },
+        engine=engine,
+    ))
+    assert full["trace"]["result"] == "Alpha -> Beta -> Gamma"
+
+
+def test_how_long_ago_uses_one_anchored_operand(evidence_db):
+    messages, assertions = evidence_db
+    content = "I visited Paris on 2023-03-18."
+    store_id = _message(messages, content, "2023-03-18")
+    operands = _ground(
+        messages,
+        assertions,
+        [_raw(store_id, content, content, date="2023-03-18")],
+        question_date="2023-03-20",
+    )
+
+    plan = compile_evidence_plan(
+        "How long ago did I visit Paris?",
+        "2023-03-20",
+    ).plan
+
+    assert plan.operation == "date_interval"
+    assert plan.exact_operands == 1
+    assert plan.interval_unit == "day"
+    assert execute_plan(plan, operands).trace.result == "2 days"
 
 
 def test_latest_fact_requires_complete_nonconflicting_assertion_state(evidence_db):
@@ -746,6 +1035,8 @@ def test_verifier_preserves_result_entities_units_and_exact_citations(evidence_d
     cited = " ".join(f"[{citation}]" for citation in trace.citations)
     assert verify_final_answer(f"Alice spent $12 more than Bob. {cited}", trace).status == "verified"
     for candidate in (
+        f"Alice did not spend $12 more than Bob. {cited}",
+        f"Alice never spent $12 more than Bob. {cited}",
         f"Alice spent $13 more than Bob. {cited}",
         f"Alice spent 12 pages more than Bob. {cited}",
         f"Charlie spent $12 more than Bob. {cited}",
@@ -758,6 +1049,22 @@ def test_question_date_boundary_is_utc_end_of_day():
     boundary = question_date_as_of_epoch("2024-02-29")
     assert datetime.fromtimestamp(boundary, tz=timezone.utc).date() == date(2024, 2, 29)
     assert question_date_as_of_epoch("2024-02-30") is None
+    assert question_date_as_of_epoch("9999-12-31") is None
+    assert question_date_as_of_epoch("9999-12-30") is not None
+
+
+def test_public_compute_rejects_terminal_question_date_without_overflow(evidence_db):
+    messages, assertions = evidence_db
+    result = json.loads(lcm_compute(
+        {
+            "question": "What happened 1 day ago?",
+            "question_date": "9999-12-31",
+            "operands": [],
+        },
+        engine=SimpleNamespace(_store=messages, _assertions=assertions),
+    ))
+    assert result["status"] == "fallback"
+    assert result["reason"] == "question_date must be a valid timezone-unambiguous ISO date"
 
 
 def test_public_compute_tool_reports_stages_and_discards_mutated_candidate(evidence_db):
@@ -820,3 +1127,89 @@ def test_public_compute_tool_requires_closed_cardinality(evidence_db):
     ))
     assert response["status"] == "fallback"
     assert response["reason"] == "operation requires explicit evidence_complete=true"
+
+
+def test_count_distinct_rejects_question_subject_as_canonical_key(evidence_db):
+    messages, assertions = evidence_db
+    paris = "Alice visited Paris."
+    rome = "Alice visited Rome."
+    paris_id = _message(messages, paris, "2024-02-01")
+    rome_id = _message(messages, rome, "2024-02-02")
+    args = {
+        "question": "How many cities did Alice visit?",
+        "evidence_complete": True,
+        "operands": [
+            _raw(paris_id, paris, paris, key="alice", unit="item"),
+            _raw(rome_id, rome, rome, key="alice", unit="item"),
+        ],
+    }
+    engine = SimpleNamespace(_store=messages, _assertions=assertions)
+
+    rejected = json.loads(lcm_compute(args, engine=engine))
+    accepted = json.loads(lcm_compute(
+        {
+            **args,
+            "operands": [
+                _raw(paris_id, paris, paris, key="paris", unit="item"),
+                _raw(rome_id, rome, rome, key="rome", unit="item"),
+            ],
+        },
+        engine=engine,
+    ))
+
+    assert rejected["status"] == "fallback"
+    assert rejected["reason"] == (
+        "count_distinct canonical keys must identify counted entities, "
+        "not the question subject"
+    )
+    assert accepted["status"] == "computed"
+    assert accepted["trace"]["result_value"] == 2
+
+
+def test_named_sum_binds_each_value_to_its_requested_summand(evidence_db):
+    messages, assertions = evidence_db
+    taxi = "Taxi $20, dinner $50."
+    hotel = "Hotel $100, flight $500."
+    taxi_id = _message(messages, taxi, "2024-02-01")
+    hotel_id = _message(messages, hotel, "2024-02-02")
+    question = "What was the total of the taxi and hotel?"
+    engine = SimpleNamespace(_store=messages, _assertions=assertions)
+
+    wrong_values = json.loads(lcm_compute(
+        {
+            "question": question,
+            "evidence_complete": True,
+            "operands": [
+                _raw(taxi_id, taxi, taxi, value=50, unit="usd", label="Taxi"),
+                _raw(hotel_id, hotel, hotel, value=500, unit="usd", label="Hotel"),
+            ],
+        },
+        engine=engine,
+    ))
+    wrong_labels = json.loads(lcm_compute(
+        {
+            "question": question,
+            "evidence_complete": True,
+            "operands": [
+                _raw(taxi_id, taxi, taxi, value=20, unit="usd", label="dinner"),
+                _raw(hotel_id, hotel, hotel, value=100, unit="usd", label="flight"),
+            ],
+        },
+        engine=engine,
+    ))
+    correct = json.loads(lcm_compute(
+        {
+            "question": question,
+            "evidence_complete": True,
+            "operands": [
+                _raw(taxi_id, taxi, taxi, value=20, unit="usd", label="Taxi"),
+                _raw(hotel_id, hotel, hotel, value=100, unit="usd", label="Hotel"),
+            ],
+        },
+        engine=engine,
+    ))
+
+    assert wrong_values["status"] == "fallback"
+    assert wrong_labels["status"] == "fallback"
+    assert correct["status"] == "computed"
+    assert correct["trace"]["result_value"] == 120

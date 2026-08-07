@@ -178,6 +178,8 @@ def normalize_question_date(value: Any) -> tuple[QuestionDate | None, str | None
         )
     except ValueError:
         return None, "question_date_invalid"
+    if day == date.max:
+        return None, "question_date_invalid"
     suffix = raw[match.end() :]
     weekday_match = _WEEKDAY_SUFFIX_RE.match(suffix)
     if weekday_match is not None:
@@ -764,6 +766,7 @@ def build_evidence_pack(
             messages=engine._store,
             assertions=getattr(engine, "_assertions", None),
             as_of=as_of,
+            session_dates=getattr(engine, "_session_occurrence_dates", None),
         )
         if resolved
         else None

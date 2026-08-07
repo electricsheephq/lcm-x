@@ -371,7 +371,7 @@ def test_scoped_third_party_preference_preserves_role_strength_and_exact_span(st
     )
     _publish(store, snapshot, [_wire(
         snapshot,
-        "prefers tea in the morning",
+        "Alex says he strongly prefers tea in the morning",
         subject="person:alex",
         resolution="explicit",
         predicate="drink.preference",

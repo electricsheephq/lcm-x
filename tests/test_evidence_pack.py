@@ -303,6 +303,26 @@ def test_pack_reports_observation_separately_from_unknown_occurrence(tmp_path):
     assert item["occurrence_time"]["event_date"] is None
 
 
+def test_pack_treats_out_of_range_host_timestamp_as_malformed(tmp_path):
+    engine = _engine(tmp_path)
+    content = "I visited Paris."
+    store_id = _append(engine, content, observed_at=1_715_000_000_000)
+    stored = engine._store.get(store_id)
+    try:
+        payload = json.loads(lcm_evidence_pack({
+            "question": "Where did I visit?",
+            "baseline_refs": [
+                _whole_ref(store_id, content, quote=content, key="paris")
+            ],
+        }, engine=engine))
+    finally:
+        engine._store.close()
+
+    assert stored["observed_at"] is None
+    assert stored["observed_at_source"] is None
+    assert payload["evidence"][0]["observation_time"]["source"] == "ingest_fallback"
+
+
 def test_pack_computes_explicit_three_item_order_without_open_cardinality_claim(tmp_path):
     engine = _engine(tmp_path)
     rows = [
