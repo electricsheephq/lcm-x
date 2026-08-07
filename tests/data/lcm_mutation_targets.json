@@ -281,6 +281,21 @@
       "reason": "Authorization decision audit log owned by the Teams control plane."
     },
     {
+      "table": "lcm_teams_collections",
+      "class": "infra",
+      "reason": "Teams control-plane collection registry: id, tenant and own/shared kind. Names a collection; stores none of its contents."
+    },
+    {
+      "table": "lcm_teams_memberships",
+      "class": "infra",
+      "reason": "Teams control-plane grant edges: which principal may act on which collection. Authorization metadata, not principal memory."
+    },
+    {
+      "table": "lcm_teams_principals",
+      "class": "infra",
+      "reason": "Teams control-plane identity: principal id, tenant and active/suspended status. Holds no memory content -- a principal's MEMORY lives in messages/summary_nodes under its access_scope stamp, and suspension deliberately leaves those untouched."
+    },
+    {
       "table": "lcm_teams_requests",
       "class": "infra",
       "reason": "Connector idempotency ledger: request id, payload DIGEST and the prior result envelope. It records that a management request happened, never any principal's memory content."

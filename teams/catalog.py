@@ -314,3 +314,195 @@ def bump_revision(conn: sqlite3.Connection, tenant_id: str, field: str) -> int:
     )
     conn.commit()
     return getattr(read_revisions(conn, tenant_id), field)
+
+
+# ---------------------------------------------------------------------------
+# Principals, collections and memberships
+#
+# These were the accessors the catalog promised and did not have, which is why
+# TeamsPolicy decides from the CONTEXT rather than from the catalog: with no way
+# to ask "which collections may this principal read", a shared collection could
+# not be modelled at all, and the policy could only answer the private case.
+#
+# Every write bumps the matching revision. That is not bookkeeping -- the narrow
+# host carrier deliberately does NOT send revisions, so the catalog is the only
+# thing that can say a membership changed, and a stale context is detected by
+# comparing against these counters.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Principal:
+    principal_id: str
+    tenant_id: str
+    status: str
+
+
+@dataclass(frozen=True)
+class Membership:
+    principal_id: str
+    collection_id: str
+    grants: tuple[str, ...]
+
+
+# ``status`` is CHECK-constrained to these two. Note what is MISSING: there is
+# no 'archived'. The ratified contract calls removal "disable-then-archive,
+# never destructive delete", so archive needs either a third status or an
+# archived_at column, and adding it is a schema migration rather than an
+# accessor. Suspend is what exists today, and it is what `principals.suspend`
+# maps to; `principals.archive` cannot be honoured until that migration lands.
+PRINCIPAL_STATUSES = ("active", "suspended")
+
+
+def provision_principal(
+    conn: sqlite3.Connection,
+    *,
+    principal_id: str,
+    tenant_id: str,
+    now: float,
+    status: str = "active",
+) -> Principal:
+    """Create or re-activate a principal. Idempotent by primary key."""
+
+    if status not in PRINCIPAL_STATUSES:
+        raise ValueError(f"status must be one of {PRINCIPAL_STATUSES}")
+    conn.execute(
+        "INSERT INTO lcm_teams_principals(principal_id, tenant_id, status,"
+        " created_at, updated_at) VALUES(?,?,?,?,?)"
+        " ON CONFLICT(principal_id) DO UPDATE SET status=excluded.status,"
+        " updated_at=excluded.updated_at",
+        (str(principal_id), str(tenant_id), status, float(now), float(now)),
+    )
+    conn.commit()
+    bump_revision(conn, str(tenant_id), "membership_revision")
+    return Principal(str(principal_id), str(tenant_id), status)
+
+
+def suspend_principal(
+    conn: sqlite3.Connection, *, principal_id: str, tenant_id: str, now: float
+) -> Principal:
+    """Suspend without unstamping anything.
+
+    The principal's rows keep their access_scope, exactly as `disable_teams`
+    keeps stamps: attribution is what a later re-provision and every audit
+    answer depend on. Suspension also bumps the revocation epoch, so contexts
+    already issued to this principal stop validating rather than running to
+    their natural expiry.
+    """
+
+    conn.execute(
+        "UPDATE lcm_teams_principals SET status='suspended', updated_at=?"
+        " WHERE principal_id=?",
+        (float(now), str(principal_id)),
+    )
+    conn.commit()
+    bump_revision(conn, str(tenant_id), "revocation_epoch")
+    return Principal(str(principal_id), str(tenant_id), "suspended")
+
+
+def read_principal(conn: sqlite3.Connection, principal_id: str) -> Principal | None:
+    row = conn.execute(
+        "SELECT principal_id, tenant_id, status FROM lcm_teams_principals"
+        " WHERE principal_id = ?",
+        (str(principal_id),),
+    ).fetchone()
+    return Principal(str(row[0]), str(row[1]), str(row[2])) if row else None
+
+
+def create_collection(
+    conn: sqlite3.Connection,
+    *,
+    collection_id: str,
+    tenant_id: str,
+    kind: str,
+    now: float,
+) -> str:
+    if kind not in ("own", "shared"):
+        raise ValueError("kind must be 'own' or 'shared'")
+    conn.execute(
+        "INSERT OR IGNORE INTO lcm_teams_collections(collection_id, tenant_id,"
+        " kind, created_at) VALUES(?,?,?,?)",
+        (str(collection_id), str(tenant_id), kind, float(now)),
+    )
+    conn.commit()
+    return str(collection_id)
+
+
+def grant_membership(
+    conn: sqlite3.Connection,
+    *,
+    principal_id: str,
+    collection_id: str,
+    grants: "tuple[str, ...] | list[str]",
+    tenant_id: str,
+    now: float,
+) -> Membership:
+    """Grant a principal access to a collection. Idempotent."""
+
+    normalized = tuple(sorted({str(g).strip() for g in grants if str(g).strip()}))
+    conn.execute(
+        "INSERT INTO lcm_teams_memberships(principal_id, collection_id, grants,"
+        " created_at) VALUES(?,?,?,?)"
+        " ON CONFLICT(principal_id, collection_id) DO UPDATE SET grants=excluded.grants",
+        (str(principal_id), str(collection_id), ",".join(normalized), float(now)),
+    )
+    conn.commit()
+    bump_revision(conn, str(tenant_id), "membership_revision")
+    return Membership(str(principal_id), str(collection_id), normalized)
+
+
+def revoke_membership(
+    conn: sqlite3.Connection, *, principal_id: str, collection_id: str, tenant_id: str
+) -> bool:
+    """Remove a grant and bump the revocation epoch.
+
+    #498 requires revocation to block the NEXT operation, not eventually. The
+    epoch bump is what does that: a context issued before it stops validating
+    immediately, rather than remaining good until its lease expires.
+    """
+
+    cursor = conn.execute(
+        "DELETE FROM lcm_teams_memberships WHERE principal_id=? AND collection_id=?",
+        (str(principal_id), str(collection_id)),
+    )
+    conn.commit()
+    bump_revision(conn, str(tenant_id), "revocation_epoch")
+    bump_revision(conn, str(tenant_id), "membership_revision")
+    return cursor.rowcount > 0
+
+
+def read_memberships(
+    conn: sqlite3.Connection, principal_id: str
+) -> tuple[Membership, ...]:
+    rows = conn.execute(
+        "SELECT principal_id, collection_id, grants FROM lcm_teams_memberships"
+        " WHERE principal_id = ? ORDER BY collection_id",
+        (str(principal_id),),
+    ).fetchall()
+    return tuple(
+        Membership(
+            str(r[0]),
+            str(r[1]),
+            tuple(g for g in str(r[2]).split(",") if g),
+        )
+        for r in rows
+    )
+
+
+def authorized_collections(
+    conn: sqlite3.Connection, principal_id: str, *, grant: str = "read"
+) -> tuple[str, ...]:
+    """The collections this principal may act on -- the question the policy asks.
+
+    A SUSPENDED principal gets nothing, regardless of surviving membership rows.
+    Suspension is deliberately non-destructive, so the rows are still there; if
+    this read went straight to memberships, suspending someone would remove
+    their status and leave their access intact.
+    """
+
+    principal = read_principal(conn, principal_id)
+    if principal is None or principal.status != "active":
+        return ()
+    return tuple(
+        m.collection_id for m in read_memberships(conn, principal_id) if grant in m.grants
+    )
