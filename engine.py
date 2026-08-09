@@ -5057,7 +5057,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             content = sanitize_pre_compaction_content(content)
 
             if role == "assistant":
-                tool_calls = msg.get("tool_calls", [])
+                # tool_calls may be None when an assistant message is reconstructed
+                # from a stored row that serialized an empty value as null; fall back
+                # to an empty list rather than crashing the list comprehension.
+                tool_calls = msg.get("tool_calls") or []
                 matched_tool_calls = [
                     tc for tc in tool_calls
                     if not _tool_call_id(tc) or _tool_call_id(tc) in matched_tool_ids
