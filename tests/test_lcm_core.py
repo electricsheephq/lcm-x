@@ -6845,6 +6845,55 @@ class TestExtraction:
         assert "[with media attachment]" in serialized
         assert "data:image/png;base64" not in serialized
 
+    def test_serialize_messages_treats_none_tool_calls_as_empty(self, tmp_path):
+        """Regression: assistant messages with tool_calls=None must not crash.
+
+        Reproduces TypeError: 'NoneType' object is not iterable in
+        LCMEngine._serialize_messages when an assistant message arrives
+        with tool_calls explicitly set to None (e.g. reconstructed from
+        a stored row that serialized an empty value as null).
+        """
+        from hermes_lcm.config import LCMConfig
+        from hermes_lcm.engine import LCMEngine
+
+        engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db")))
+
+        serialized = engine._serialize_messages([
+            {
+                "role": "assistant",
+                "content": "Hello there.",
+                "tool_calls": None,
+            }
+        ])
+
+        assert "[ASSISTANT]: Hello there." in serialized
+        assert "[Tool calls:" not in serialized
+
+    def test_serialize_messages_treats_none_tool_calls_as_empty_with_matched_tool_result(self, tmp_path):
+        """Regression: assistant tool_calls=None must still compose cleanly
+        when a later tool result is present in the same chunk."""
+        from hermes_lcm.config import LCMConfig
+        from hermes_lcm.engine import LCMEngine
+
+        engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db")))
+
+        serialized = engine._serialize_messages([
+            {
+                "role": "assistant",
+                "content": "Calling the tool.",
+                "tool_calls": None,
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_abc",
+                "content": "result body",
+            },
+        ])
+
+        assert "[ASSISTANT]: Calling the tool." in serialized
+        assert "[TOOL RESULT call_abc]: result body" in serialized
+        assert "[Tool calls:" not in serialized
+
     def test_serialize_messages_leaves_non_media_application_data_uri_alone(self, tmp_path):
         from hermes_lcm.config import LCMConfig
         from hermes_lcm.engine import LCMEngine
