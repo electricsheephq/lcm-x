@@ -5057,9 +5057,16 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             content = sanitize_pre_compaction_content(content)
 
             if role == "assistant":
-                # tool_calls may be None when an assistant message is reconstructed
-                # from a stored row that serialized an empty value as null; fall back
-                # to an empty list rather than crashing the list comprehension.
+                # tool_calls may be None for two reasons:
+                #  (a) an assistant message emitted by _apply_ignored_active_replay_placeholders
+                #      (or the host's in-memory OpenAI chat-completion history) when the
+                #      assistant turn had no tool calls, with the field set to None for
+                #      shape uniformity;
+                #  (b) a stored row that round-tripped an empty value as NULL —
+                #      NOTE: MessageStore.to_openai_msg strips the key entirely in that
+                #      case, so path (b) actually reaches us as a missing key, not None.
+                # In both cases, fall back to an empty list rather than crashing the
+                # list comprehension.
                 tool_calls = msg.get("tool_calls") or []
                 matched_tool_calls = [
                     tc for tc in tool_calls
