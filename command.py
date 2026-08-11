@@ -49,6 +49,8 @@ from .presets import (
     unsupported_runtime_fields_text,
 )
 from .maintenance import backup_database, rotate_backup_database
+from .assertion_rebuild import rebuild_assertions
+from .assertion_store import AssertionSchemaUnavailableError, AssertionStore
 from . import rollup_builder
 from .rollup_store import RollupStore
 from .session_patterns import build_session_match_keys, matches_session_pattern
@@ -460,6 +462,7 @@ def _help_text(error: str | None = None) -> str:
         "- /lcm rotate apply: backup-first rotate that advances the lifecycle frontier past pre-tail raw messages",
         "- /lcm rollups: show temporal-rollup status for the current session",
         "- /lcm rollups rebuild <day|week|month|all> [date]: synchronously rebuild a bounded UTC target set",
+        "- /lcm assertions rebuild [--apply] [--limit N]: preview or run one bounded exact-row assertion batch",
         "- /lcm preset show [name]: inspect shipped preset metadata and benchmark provenance",
         "- /lcm preset suggest: preview the best shipped preset for the current engine state",
         "- /lcm preset apply <name> --dry-run: preview env-var changes without mutating live config",
@@ -2529,6 +2532,137 @@ def _rollups_text(tokens: list[str], engine) -> str:
     else:
         result = _help_text("`/lcm rollups` accepts only `rebuild <day|week|month|all> [date]`.")
     return _bounded_rollups_text(result)
+
+
+def _parse_assertion_rebuild_args(tokens: list[str]) -> tuple[bool, int] | str:
+    apply = False
+    limit = 100
+    saw_limit = False
+    index = 0
+    while index < len(tokens):
+        token = tokens[index].lower()
+        if token in {"apply", "--apply"}:
+            if apply:
+                return "assertion rebuild apply mode was specified more than once"
+            apply = True
+            index += 1
+            continue
+        if token == "--limit":
+            if saw_limit or index + 1 >= len(tokens):
+                return "`--limit` requires one integer value and may appear once"
+            value = tokens[index + 1]
+            index += 2
+        elif token.startswith("--limit="):
+            if saw_limit:
+                return "`--limit` may appear once"
+            value = token.split("=", 1)[1]
+            index += 1
+        else:
+            return f"unsupported assertion rebuild argument: {tokens[index]}"
+        saw_limit = True
+        try:
+            limit = int(value)
+        except ValueError:
+            return "assertion rebuild limit must be an integer"
+        if not 1 <= limit <= 500:
+            return "assertion rebuild limit must be between 1 and 500"
+    return apply, limit
+
+
+def _assertions_rebuild_text(tokens: list[str], engine) -> str:
+    if not bool(getattr(engine._config, "assertions_enabled", False)):
+        return "\n".join([
+            "LCM assertion rebuild",
+            "status: disabled",
+            "error: V4 assertions are disabled",
+            "note: set LCM_ASSERTIONS_ENABLED=true and restart Hermes before planning a rebuild",
+        ])
+    parsed = _parse_assertion_rebuild_args(tokens)
+    if isinstance(parsed, str):
+        return _help_text(parsed)
+    apply, limit = parsed
+
+    assertions = getattr(engine, "_assertions", None)
+    if assertions is None:
+        return "\n".join([
+            "LCM assertion rebuild",
+            "status: unavailable",
+            "error: the enabled assertion store is not bound",
+        ])
+    extractor = getattr(engine, "_assertion_extractor", None)
+    if apply and not callable(extractor):
+        return "\n".join([
+            "LCM assertion rebuild",
+            "status: refused",
+            "mode: apply",
+            "error: no structured assertion extractor is configured",
+            "note: no provider call or database write was attempted",
+        ])
+
+    reader: AssertionStore | None = None
+    try:
+        target = assertions
+        if not apply:
+            reader = AssertionStore(engine._store.db_path, read_only=True)
+            target = reader
+        result = rebuild_assertions(
+            target,
+            apply=apply,
+            extractor=extractor if apply else None,
+            limit=limit,
+        )
+    except AssertionSchemaUnavailableError as exc:
+        return "\n".join([
+            "LCM assertion rebuild",
+            "status: unavailable",
+            f"error: {exc}",
+        ])
+    except Exception as exc:  # pragma: no cover - defensive operator surface
+        return "\n".join([
+            "LCM assertion rebuild",
+            "status: error",
+            f"error: {type(exc).__name__}: {exc}",
+        ])
+    finally:
+        if reader is not None:
+            reader.close()
+
+    status = "complete" if result.failed_count == 0 and result.stale_or_missing_count == 0 else "partial"
+    lines = [
+        "LCM assertion rebuild",
+        f"status: {status}",
+        f"mode: {result.mode}",
+        f"extraction_version: {result.extraction_version}",
+        f"limit: {limit}",
+        f"pending: {result.pending_count}",
+        f"selected: {result.selected_count}",
+        f"processed: {result.processed_count}",
+        f"already_current: {result.already_current_count}",
+        f"stale_or_missing: {result.stale_or_missing_count}",
+        f"failed: {result.failed_count}",
+        f"assertions_written: {result.assertions_written}",
+        f"relations_written: {result.relations_written}",
+        f"remaining: {result.remaining_count}",
+        f"plan_digest: {result.plan_digest}",
+        f"receipt_digest: {result.receipt_digest}",
+    ]
+    for failure in result.failures[:5]:
+        lines.append(f"failure[{failure.source_store_id}]: {failure.error}")
+    if len(result.failures) > 5:
+        lines.append(f"failures_omitted: {len(result.failures) - 5}")
+    if not apply:
+        lines.append("note: read-only dry-run; extractor was not invoked")
+    return "\n".join(lines)
+
+
+def _assertions_text(tokens: list[str], engine) -> str:
+    if tokens and tokens[0].lower() == "rebuild":
+        return _assertions_rebuild_text(tokens[1:], engine)
+    return _help_text(
+        "`/lcm assertions` requires `rebuild [--apply] [--limit N]`"
+    )
+
+
 def _resolve_storage_dtype(config, override: str | None = None) -> str:
     """Resolve the vector storage dtype: an explicit --dtype flag, else config.
 
@@ -4914,6 +5048,9 @@ def handle_lcm_command(raw_args: str | None, engine) -> str:
 
     if head == "rollups":
         return _rollups_text(rest, engine)
+
+    if head == "assertions":
+        return _assertions_text(rest, engine)
 
     if head == "preset":
         return _preset_text(rest, engine)

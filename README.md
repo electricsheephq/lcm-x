@@ -27,6 +27,7 @@ OpenClaw. For an interactive visualization of the LCM idea, see
 - [LCM vs built-in compression](#lcm-vs-built-in-compression)
 - [Quick start](#quick-start)
 - [Commands and tools](#commands-and-tools)
+- [Recall skill and policy](#recall-skill-and-policy)
 - [Configuration](#configuration)
 - [Retrieval contract](#retrieval-contract)
 - [OpenClaw/lossless-claw import](#openclawlossless-claw-import)
@@ -77,7 +78,7 @@ Core capabilities:
 - **Summary DAG** - builds depth-aware summary nodes over compacted history
 - **Bounded recovery** - pages raw messages, child summaries, and externalized
   payloads instead of dumping everything into the prompt
-- **Agent tools** - `lcm_grep`, `lcm_recall`, `lcm_recent`, `lcm_load_session`,
+- **Agent tools** - `lcm_grep`, `lcm_recall`, `lcm_query_state`, `lcm_compute`, `lcm_compile_evidence`, `lcm_evidence_pack`, `lcm_retrieve`, `lcm_recent`, `lcm_load_session`,
   `lcm_describe`, `lcm_expand`, `lcm_expand_query`, `lcm_status`, `lcm_inspect`,
   and `lcm_doctor`
 - **Source-aware retrieval** - filters raw rows and summaries by descendant
@@ -157,6 +158,11 @@ From an existing checkout, install a symlink:
 HERMES_PROFILE=myprofile ./scripts/install.sh
 ```
 
+Run `scripts/install.sh` even when the checkout already lives at the canonical
+plugin path. It leaves that checkout in place and exposes the bundled
+`hermes-lcm` skill in the matching global/profile `skills/` directory. The
+installer preflights both paths and refuses conflicts before creating links.
+
 ### Activate it
 
 The plugin has two names:
@@ -192,12 +198,14 @@ Expected signals:
 - tool list includes `lcm_grep`, `lcm_recall`, `lcm_recent`,
   `lcm_load_session`, `lcm_describe`, `lcm_expand`, `lcm_expand_query`,
   `lcm_status`, `lcm_inspect`, and `lcm_doctor`
+- the normal available-skills index includes `hermes-lcm`; current hosts can
+  also resolve the explicit plugin-qualified skill `hermes-lcm:hermes-lcm`
 
 Typical output:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm v0.20.0 (10 tools)
+  ✓ hermes-lcm v0.21.0-rc2 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm
@@ -210,7 +218,7 @@ best-effort git identity:
 
 If startup logs say LCM tools are available through `context-engine schemas` or
 mention the `Path B fallback`, that is expected on older Hermes hosts such as
-Hermes Agent v0.16. The ten `lcm_*` tools remain available through the
+Hermes Agent v0.16. All 15 `lcm_*` tools remain available through the
 context-engine path; standalone plugin-registry registration is not required
 there.
 
@@ -236,6 +244,17 @@ If you installed a symlink from a separate checkout:
 
 Restart Hermes after updating.
 
+For the `v0.21.0-rc2` line, take a normal backup of `lcm.db` before updating,
+then update the checkout and restart Hermes. No manual core migration or
+backfill is required: the core schema remains version 5. New assertion,
+query-view, and adaptive-retrieval state is additive, created only after the
+corresponding opt-in is enabled, and stored in the same profile database under
+named feature markers. The five new query/evidence tool schemas are visible in
+the tool list on stock installs, but automatic extraction, pre-answer evidence,
+assertion storage, query-view storage, and adaptive retrieval remain off. See
+[the operator upgrade and opt-in notes](docs/operator-guide.md#upgrade-from-v0200-to-v0210-rc2)
+before enabling them.
+
 ## Commands and tools
 
 ### Agent tools
@@ -248,14 +267,44 @@ outside the LCM database.
 |------|-----|
 | `lcm_grep` | Search current-session raw messages and summaries. Opt into `content_scope='externalized'|'both'` for bounded active-session payload search, or `session_scope='all'|'session'` for bounded raw-message archive recovery; broader scopes return raw-message hits only. |
 | `lcm_recall` | Search the entire memory across ALL conversations and all time by meaning. Fuses full-text, summary-vector, and chunk-vector arms with RRF, then applies a soft current-conversation (`scope_bias`) and recency prior. Returns bounded summary and verbatim-excerpt hits with `lcm_expand` handles; works FTS-only when embeddings are disabled. |
+| `lcm_query_state` | Query the opt-in V4 assertion sidecar for bounded current or historical facts, preferences, recommendations, commitments, actions, and status. Every result carries an exact message ref/span/quote; conflicts stay visible. |
+| `lcm_compute` | Execute supported dates, distinct counts, compatible-unit sums, directed/absolute differences, ordering, and latest-state operations over exact cited evidence. Planning, arithmetic, and trace verification are dependency-free and provider-neutral; ambiguous or incomplete inputs fail closed. |
+| `lcm_compile_evidence` | Validate one bounded provider-neutral semantic proposal against exact stored refs and return a compact evidence brief with explicit sufficiency state and an optional canonical computation. It never returns final prose or treats model claims as finite-coverage proof. |
+| `lcm_evidence_pack` | Hydrate and validate bounded baseline exact refs in the same `lcm.db`, repair only unique in-window quote spans, preserve occurrence/observation time separation, and optionally emit an immutable canonical computation trace without prose. |
+| `lcm_retrieve` | Opt-in bounded controller for one continuous answerer tool turn. It tracks typed evidence slots, permits at most three targeted calls to existing retrieval tools, accepts only exact observed refs, caps the evidence context, and can finish through `lcm_compute`. It persists evidence views and traces, never final prose. |
 | `lcm_recent` | Retrieve recent summaries by natural UTC period, preferring ready rollups and transparently falling back to time-bounded leaf summaries. |
-| `lcm_load_session` | Load one ordered raw-message transcript page for an explicit `session_id`. Continues with `after_store_id` from `next_cursor`. |
+| `lcm_load_session` | Load one ordered raw-message transcript page for an explicit `session_id`. Continues with `after_store_id` from `next_cursor`; opt into exact slice refs with `include_exact_ref=true`. |
 | `lcm_describe` | Inspect the current-session DAG or preview an `externalized_ref` without loading full content. |
-| `lcm_expand` | Recover source messages, child summaries, or externalized payloads with pagination. Use `store_id` to fetch a single raw message from a cross-session `lcm_grep` result. |
+| `lcm_expand` | Recover source messages, child summaries, or externalized payloads with pagination. Use `store_id` to fetch a single raw message from a cross-session `lcm_grep` result and `include_exact_ref=true` when its returned slice must be cited or computed. |
 | `lcm_expand_query` | Answer a question using expanded current-session LCM context while returning a bounded answer. |
 | `lcm_status` | Show runtime health, context pressure, config, source lineage, and lifecycle stats. |
 | `lcm_inspect` | Read-only operator inventory for current-session lineage, frontier/fresh-tail metadata, externalized refs/readability, compaction skip/no-op reasons, and matched ignore/stateless patterns. Returns metadata only; use retrieval tools for content. |
 | `lcm_doctor` | Run database, FTS, lifecycle, config, and context-pressure diagnostics. |
+
+## Recall skill and policy
+
+Hermes-LCM ships `skills/hermes-lcm/SKILL.md` plus progressive-disclosure
+references for configuration, architecture, diagnostics, recall routing, and
+session lifecycle. The installer links that directory into the active Hermes
+profile so it appears in ordinary skill discovery. On hosts with plugin skill
+registration, it is also available explicitly as `hermes-lcm:hermes-lcm`.
+
+When LCM is the active context engine for a bound session, the plugin registers
+one deterministic `pre_llm_call` hook. Hermes injects the canonical policy into
+the current user-message context, not the system prompt, preserving the stable
+system-prompt cache prefix. The policy:
+
+- treats summaries as recall cues rather than exact proof;
+- prefers newer source-backed evidence and verifies contradictions;
+- teaches narrow FTS query construction and bounded scope selection;
+- routes current compacted, cross-conversation, and recent/time-bounded recall
+  through the appropriate existing tools;
+- does not force a tool call when the current context is already sufficient.
+
+The canonical bytes live in
+`skills/hermes-lcm/references/recall-policy.md`. Merely loading the plugin does
+not inject them when another context engine is serving the session. Older hosts
+without skill or hook registration keep their existing schema-driven behavior.
 
 ### Slash commands
 

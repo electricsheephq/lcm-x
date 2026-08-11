@@ -11,9 +11,11 @@ row identity (`store_id`) for DAG/source lookup.
 
 import json
 import logging
+import math
 import sqlite3
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -42,6 +44,7 @@ from .search_query import (
     normalize_search_sort,
     requires_like_fallback,
     sanitize_fts5_query,
+    sanitize_like_query,
     AGE_DECAY_RATE,
     should_apply_directness_rank_adjustment,
 )
@@ -54,8 +57,10 @@ logger = logging.getLogger(__name__)
 _MESSAGE_ROLE_BIAS_SQL = "CASE m.role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 WHEN 'tool' THEN 2 ELSE 1 END"
 _MESSAGE_SELECT_COLUMNS = (
     "store_id, session_id, source, role, content, tool_call_id, "
-    "tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id"
+    "tool_calls, tool_name, timestamp, token_estimate, pinned, conversation_id, "
+    "ingested_at, observed_at, observed_at_source"
 )
+_MESSAGE_SELECT_COLUMN_COUNT = len(_MESSAGE_SELECT_COLUMNS.split(","))
 _UNKNOWN_SOURCE = "unknown"
 
 
@@ -74,6 +79,43 @@ def _normalize_source_value(source: str | None) -> str:
 
 def _normalize_conversation_id_value(conversation_id: str | None) -> str:
     return (conversation_id or "").strip()
+
+
+def _normalize_observed_at(value: Any) -> float | None:
+    """Return a trustworthy host/source timestamp without inventing one.
+
+    Numeric Unix seconds and timezone-aware ISO-8601 strings are accepted.
+    Naive wall-clock strings, booleans, non-finite values, and non-positive
+    values are rejected so LCM write time is never silently relabelled as
+    source observation time.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        observed_at = float(value)
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            observed_at = float(raw)
+        except ValueError:
+            try:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                return None
+            observed_at = parsed.timestamp()
+    else:
+        return None
+    if not math.isfinite(observed_at) or observed_at <= 0:
+        return None
+    try:
+        datetime.fromtimestamp(observed_at, tz=timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return None
+    return observed_at
 
 
 def _source_filter_clause(column: str, source: str | None) -> tuple[str | None, list[str]]:
@@ -261,7 +303,10 @@ class MessageStore:
                 tool_name TEXT,
                 timestamp REAL NOT NULL,
                 token_estimate INTEGER DEFAULT 0,
-                pinned INTEGER DEFAULT 0
+                pinned INTEGER DEFAULT 0,
+                ingested_at REAL,
+                observed_at REAL,
+                observed_at_source TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_msg_session
                 ON messages(session_id, store_id);
@@ -280,6 +325,7 @@ class MessageStore:
         run_versioned_migrations(self._conn)
         self._ensure_source_column()
         self._ensure_conversation_id_column()
+        self._ensure_time_contract_columns()
         self._conn.commit()
 
     def _ensure_source_column(self) -> None:
@@ -306,6 +352,38 @@ class MessageStore:
             "CREATE INDEX IF NOT EXISTS idx_msg_conversation_session ON messages(conversation_id, session_id, store_id)"
         )
 
+    def _ensure_time_contract_columns(self) -> None:
+        """Add the backward-compatible V4.2 source-time sidecar columns.
+
+        ``timestamp`` remains the historical LCM write timestamp. Existing
+        rows receive only an ``ingested_at`` copy; their ``observed_at`` stays
+        NULL because no source timestamp can be recovered honestly.
+        """
+        columns = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(messages)").fetchall()
+        }
+        add_column_if_missing(
+            self._conn,
+            columns,
+            "ingested_at",
+            "ALTER TABLE messages ADD COLUMN ingested_at REAL",
+        )
+        add_column_if_missing(
+            self._conn,
+            columns,
+            "observed_at",
+            "ALTER TABLE messages ADD COLUMN observed_at REAL",
+        )
+        add_column_if_missing(
+            self._conn,
+            columns,
+            "observed_at_source",
+            "ALTER TABLE messages ADD COLUMN observed_at_source TEXT",
+        )
+        self._conn.execute(
+            "UPDATE messages SET ingested_at = timestamp WHERE ingested_at IS NULL"
+        )
+
     # -- Write operations ---------------------------------------------------
 
     def append(self, session_id: str, msg: Dict[str, Any],
@@ -320,13 +398,16 @@ class MessageStore:
         )
         tool_calls = msg.get("tool_calls")
         tc_json = json.dumps(tool_calls) if tool_calls else None
+        observed_at = _normalize_observed_at(msg.get("timestamp"))
+        ingested_at = time.time()
 
         with self._write_lock:
             cur = self._conn.execute(
                 """INSERT INTO messages
                    (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
-                    tool_name, timestamp, token_estimate, pinned)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    tool_name, timestamp, token_estimate, pinned, ingested_at,
+                    observed_at, observed_at_source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     _normalize_source_value(source),
@@ -336,9 +417,12 @@ class MessageStore:
                     msg.get("tool_call_id"),
                     tc_json,
                     msg.get("tool_name"),
-                    time.time(),
+                    ingested_at,
                     token_estimate,
                     0,
+                    ingested_at,
+                    observed_at,
+                    "host_message_timestamp" if observed_at is not None else None,
                 ),
             )
             self._conn.commit()
@@ -385,11 +469,13 @@ class MessageStore:
                 tc = msg.get("tool_calls")
                 tc_json = json.dumps(tc) if tc else None
                 ts = time.time()
+                observed_at = _normalize_observed_at(msg.get("timestamp"))
                 cur = self._conn.execute(
                     """INSERT INTO messages
                        (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
-                        tool_name, timestamp, token_estimate, pinned)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        tool_name, timestamp, token_estimate, pinned, ingested_at,
+                        observed_at, observed_at_source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         _normalize_source_value(source),
@@ -402,6 +488,9 @@ class MessageStore:
                         ts,
                         est,
                         0,
+                        ts,
+                        observed_at,
+                        "host_message_timestamp" if observed_at is not None else None,
                     ),
                 )
                 ids.append(cur.lastrowid)
@@ -511,6 +600,55 @@ class MessageStore:
         ).fetchall()
         return {row[0]: self._row_to_dict(row) for row in rows}
 
+    def scan_evidence_rows(self, *, limit: int = 4096) -> Dict[str, Any]:
+        """Return one bounded, read-only whole-corpus evidence snapshot.
+
+        The window metadata and rows come from one SQLite statement, so a
+        caller cannot accidentally certify finite coverage from a count and a
+        row page taken at different corpus generations.  This API deliberately
+        has no query or session filter: a narrower scan is not whole-corpus
+        coverage.  Callers must treat ``truncated`` as an honest fallback.
+        """
+        bounded_limit = min(4096, max(1, int(limit)))
+        rows = self._conn.execute(
+            f"""
+            WITH snapshot AS (
+                SELECT {_MESSAGE_SELECT_COLUMNS},
+                       COUNT(*) OVER () AS snapshot_total_rows,
+                       MAX(store_id) OVER () AS snapshot_max_store_id,
+                       SUM(CASE WHEN observed_at IS NULL THEN 1 ELSE 0 END)
+                           OVER () AS snapshot_observed_at_missing_rows
+                FROM messages
+            )
+            SELECT * FROM snapshot
+            ORDER BY store_id
+            LIMIT ?
+            """,
+            (bounded_limit,),
+        ).fetchall()
+        if not rows:
+            return {
+                "rows": [],
+                "snapshot_max_store_id": 0,
+                "total_rows": 0,
+                "returned_rows": 0,
+                "truncated": False,
+                "observed_at_missing_rows": 0,
+            }
+        message_column_count = _MESSAGE_SELECT_COLUMN_COUNT
+        total_rows = int(rows[0][message_column_count] or 0)
+        snapshot_max_store_id = int(rows[0][message_column_count + 1] or 0)
+        observed_at_missing_rows = int(rows[0][message_column_count + 2] or 0)
+        messages = [self._row_to_dict(row[:message_column_count]) for row in rows]
+        return {
+            "rows": messages,
+            "snapshot_max_store_id": snapshot_max_store_id,
+            "total_rows": total_rows,
+            "returned_rows": len(messages),
+            "truncated": total_rows > len(messages),
+            "observed_at_missing_rows": observed_at_missing_rows,
+        }
+
     def get_range(self, session_id: str, start_id: int = 0,
                   end_id: int | None = None,
                   limit: int = 1000,
@@ -608,6 +746,34 @@ class MessageStore:
             args,
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
+
+    def load_session_window(
+        self,
+        session_id: str,
+        *,
+        anchor_store_id: int,
+        before: int = 2,
+        after: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """Load one bounded ordered window around an exact message anchor."""
+        before = min(12, max(0, int(before)))
+        after = min(12, max(0, int(after)))
+        prior = self._conn.execute(
+            f"""SELECT {_MESSAGE_SELECT_COLUMNS}
+                FROM messages
+                WHERE session_id = ? AND store_id < ?
+                ORDER BY store_id DESC LIMIT ?""",
+            (session_id, anchor_store_id, before),
+        ).fetchall()
+        following = self._conn.execute(
+            f"""SELECT {_MESSAGE_SELECT_COLUMNS}
+                FROM messages
+                WHERE session_id = ? AND store_id >= ?
+                ORDER BY store_id LIMIT ?""",
+            (session_id, anchor_store_id, after + 1),
+        ).fetchall()
+        rows = list(reversed(prior)) + list(following)
+        return [self._row_to_dict(row) for row in rows]
 
     def get_session_messages(self, session_id: str,
                              limit: int = 10000) -> List[Dict[str, Any]]:
@@ -937,7 +1103,8 @@ class MessageStore:
                conversation_id: str | None = None,
                role: str | None = None,
                time_from: float | None = None,
-               time_to: float | None = None) -> List[Dict[str, Any]]:
+               time_to: float | None = None,
+               allow_operators: bool = False) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
         Retrieval contract:
@@ -948,11 +1115,17 @@ class MessageStore:
         - ``source='unknown'`` means the explicit unknown-source bucket, with
           legacy blank-source rows treated as equivalent for back-compat
         - ``conversation_id`` limits rows to one gateway conversation/session key
+        - ``allow_operators`` marks a query the CALLER composed as FTS5 syntax,
+          keeping its bare AND/OR/NOT/NEAR. Never set it for user or agent text
         """
-        safe_query = sanitize_fts5_query(query)
+        safe_query = sanitize_fts5_query(query, allow_operators=allow_operators)
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
-        if requires_like_fallback(query):
+        # LIKE is the fallback for text sanitization LOSES (CJK/emoji) and for a
+        # query with no term left after it. A raw natural-language question is
+        # NOT one of those: it sanitizes to a term form the index answers, so it
+        # stays on the FTS path (F31 §3).
+        if requires_like_fallback(query, safe_query):
             return self._search_like(
                 query,
                 session_id=session_id,
@@ -1005,6 +1178,7 @@ class MessageStore:
                 rows = self._conn.execute(
                     f"""SELECT m.store_id, m.session_id, m.source, m.role, m.content, m.tool_call_id,
                               m.tool_calls, m.tool_name, m.timestamp, m.token_estimate, m.pinned, m.conversation_id,
+                              m.ingested_at, m.observed_at, m.observed_at_source,
                               rank as search_rank,
                               snippet(messages_fts, 0, '>>>', '<<<', '...', 40) as snippet
                        FROM messages_fts fts
@@ -1031,7 +1205,7 @@ class MessageStore:
             raw_primary_values: list[float] = []
             for r in rows:
                 d = self._row_to_dict(r)
-                base_columns = 12
+                base_columns = _MESSAGE_SELECT_COLUMN_COUNT
                 d["search_rank"] = r[base_columns] if len(r) > base_columns else None
                 d["snippet"] = r[base_columns + 1] if len(r) > (base_columns + 1) else ""
                 d["_directness_score"] = _message_directness_score(d.get("role"), d.get("content"), terms, phrases)
@@ -1067,7 +1241,9 @@ class MessageStore:
                      role: str | None = None,
                      time_from: float | None = None,
                      time_to: float | None = None) -> List[Dict[str, Any]]:
-        safe_query = sanitize_fts5_query(query)
+        # LIKE keeps every character the index cannot spell (emoji, punctuation)
+        # because substring matching is the only way to find those rows.
+        safe_query = sanitize_like_query(query)
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
         if not terms:
@@ -1307,6 +1483,7 @@ class MessageStore:
         cols = [
             "store_id", "session_id", "source", "role", "content", "tool_call_id",
             "tool_calls", "tool_name", "timestamp", "token_estimate", "pinned", "conversation_id",
+            "ingested_at", "observed_at", "observed_at_source",
         ]
         d = dict(zip(cols, row[:len(cols)]))
         d["source"] = _normalize_source_value(d.get("source"))

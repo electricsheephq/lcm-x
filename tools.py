@@ -45,6 +45,17 @@ from .ingest_protection import (
     sensitive_pattern_status,
 )
 from .model_routing import apply_lcm_model_route
+from .assertion_state import query_assertion_state
+from .assertion_store import ASSERTION_KINDS
+from .reasoning import (
+    compile_evidence_plan,
+    execute_plan,
+    ground_evidence,
+    question_date_as_of_epoch,
+    validate_selector_alignment,
+    verify_final_answer,
+    resolve_occurrence_time,
+)
 from .presets import preset_status_payload
 from .rollup_periods import (
     CoverageNode,
@@ -265,7 +276,25 @@ _LCM_RECALL_LIMIT_CAP = 25
 _LCM_RECALL_DEFAULT_SCOPE_BIAS = 0.5
 _LCM_RECALL_SNIPPET_CHARS = 300
 _LCM_RECALL_RESPONSE_CHAR_CAP = 64_000
+_LCM_QUERY_STATE_DEFAULT_LIMIT = 25
+_LCM_QUERY_STATE_LIMIT_CAP = 50
+_LCM_QUERY_STATE_RESPONSE_CHAR_CAP = 64_000
+_LCM_COMPUTE_RESPONSE_CHAR_CAP = 64_000
 _LCM_RECALL_VALID_INCLUDE = frozenset({"all", "summaries", "verbatim"})
+_LCM_RECALL_VALID_DETAIL = frozenset({"snippets", "answer_ready"})
+_LCM_RECALL_ANSWER_READY_PER_SESSION_LIMIT = 5
+_LCM_RECALL_ANSWER_READY_EXPANDED_HIT_LIMIT = 8
+# Bounded per-node fan-out when reference-strict delivery carries summary-KNN
+# relevance onto the source messages beneath a ranked node. Small on purpose:
+# the point is to make the SESSION reachable with citable evidence, and the FTS
+# and chunk arms are what rank individual messages inside it.
+_LCM_RECALL_SUMMARY_SOURCE_PER_NODE = 4
+# How many candidate rows reference-strict selection reads per batch while it
+# walks the ranking. Verification needs the row, so the walk reads AHEAD of the
+# cursor in waves: a bounded number of batched reads per request rather than one
+# read per candidate it has to skip.
+_LCM_RECALL_STRICT_READ_WAVE = 32
+_LCM_RECALL_ANSWER_READY_CONTENT_CHARS = 2_400
 # Recency boost half-life (30 days) and its floor: a memory's rank_score is
 # multiplied by 2**(-age/half_life), clamped so age never zeroes an otherwise
 # strong hit — it only nudges toward newer memories.
@@ -283,6 +312,188 @@ _LCM_INSPECT_REF_SCAN_MESSAGE_LIMIT = 10_000
 _LCM_INSPECT_PAYLOAD_METADATA_READ_BYTES = 16_384
 _LCM_INSPECT_MAX_RESPONSE_CHARS = 20_000
 _OPERATOR_TEXT_FIELD_MAX_CHARS = 1_000
+
+
+def _shape_assertion_state_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "assertion_id": row["assertion_id"],
+        "subject_key": row["subject_key"],
+        "predicate_key": row["predicate_key"],
+        "object_value": row["object_value"],
+        "value_text": row["value_text"],
+        "kind": row["kind"],
+        "polarity": row["polarity"],
+        "strength": row["strength"],
+        "scope_key": row["scope_key"],
+        "speaker_role": row["speaker_role"],
+        "observed_at": row["observed_at"],
+        "event_at": row["event_at"],
+        "valid_from": row["valid_from"],
+        "valid_to": row["valid_to"],
+        "confidence": row["confidence"],
+        "active": row["active"],
+        "lifecycle_status": (
+            list(row["lifecycle_status"])
+            if row["lifecycle_status"] is not None
+            else None
+        ),
+        "unresolved_conflict": row["unresolved_conflict"],
+        "attribution": row["attribution"],
+        "semantic_state": row["semantic_state"],
+        "source_ref": {
+            "store_id": row["source_store_id"],
+            "session_id": row["source_session_id"],
+            "source": row["source_name"],
+            "role": row["source_role"],
+            "span_start": row["source_span_start"],
+            "span_end": row["source_span_end"],
+            "quote": row["source_quote"],
+            "content_sha256": row["source_content_sha256"],
+        },
+    }
+
+
+def _shape_assertion_state_relation(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "relation_id": row["relation_id"],
+        "relation_type": row["relation_type"],
+        "from_assertion_id": row["from_assertion_id"],
+        "to_assertion_id": row["to_assertion_id"],
+        "confidence": row["confidence"],
+        "source_ref": {
+            "store_id": row["source_store_id"],
+            "session_id": row["source_session_id"],
+            "span_start": row["source_span_start"],
+            "span_end": row["source_span_end"],
+            "quote": row["source_quote"],
+            "content_sha256": row["source_content_sha256"],
+        },
+    }
+
+
+def lcm_query_state(args: Dict[str, Any], **kwargs) -> str:
+    """Return bounded typed assertion state with exact source provenance."""
+    engine = _require_engine(kwargs)
+    if engine is None:
+        return json.dumps({"error": "LCM engine not initialized"})
+    store = getattr(engine, "_assertions", None)
+    if store is None:
+        return json.dumps({
+            "status": "disabled",
+            "error": "V4 assertions are not enabled for this profile",
+        })
+
+    subject_key = str(args.get("subject_key") or "").strip()
+    if not subject_key:
+        return json.dumps({"error": "subject_key is required"})
+    predicate_key = str(args.get("predicate_key") or "").strip() or None
+    scope_key = None
+    if "scope_key" in args:
+        scope_key = str(args.get("scope_key") or "").strip()
+
+    raw_kinds = args.get("kinds")
+    kinds: list[str] | None = None
+    if raw_kinds is not None:
+        if not isinstance(raw_kinds, list) or not raw_kinds:
+            return json.dumps({"error": "kinds must be a non-empty array"})
+        kinds = [str(value or "").strip().lower() for value in raw_kinds]
+        if len(kinds) > len(ASSERTION_KINDS) or any(
+            value not in ASSERTION_KINDS for value in kinds
+        ):
+            return json.dumps({"error": "kinds contains an unsupported assertion kind"})
+
+    speaker_role, role_error = _parse_grep_role(args.get("speaker_role"))
+    if role_error:
+        return json.dumps({"error": role_error.replace("role", "speaker_role", 1)})
+    as_of, as_of_error = _parse_optional_timestamp(args.get("as_of"), "as_of")
+    if as_of_error:
+        return json.dumps({"error": as_of_error})
+    parsed_limit, limit_error = _parse_strict_int(
+        args.get("limit", _LCM_QUERY_STATE_DEFAULT_LIMIT),
+        "limit",
+    )
+    if limit_error:
+        return json.dumps({"error": limit_error})
+    if parsed_limit is None or parsed_limit <= 0:
+        return json.dumps({"error": "limit must be a positive integer"})
+    requested_limit = parsed_limit
+    limit = min(requested_limit, _LCM_QUERY_STATE_LIMIT_CAP)
+
+    try:
+        result = query_assertion_state(
+            store,
+            subject_key=subject_key,
+            predicate_key=predicate_key,
+            kinds=kinds,
+            scope_key=scope_key,
+            speaker_role=speaker_role,
+            as_of=as_of,
+            limit=limit,
+        )
+    except (TypeError, ValueError, sqlite3.Error) as exc:
+        return json.dumps({"error": f"state query failed: {exc}"})
+
+    assertions = [_shape_assertion_state_row(row) for row in result.assertions]
+    relations = [_shape_assertion_state_relation(row) for row in result.relations]
+    response: dict[str, Any] = {
+        "status": "ok",
+        "query": {
+            "subject_key": subject_key,
+            "predicate_key": predicate_key,
+            "kinds": kinds,
+            "scope_key": scope_key,
+            "speaker_role": speaker_role,
+            "as_of": as_of,
+        },
+        "limit": limit,
+        "assertions": assertions,
+        "relations": relations,
+        "active_assertion_ids": (
+            list(result.active_assertion_ids)
+            if result.active_assertion_ids is not None
+            else None
+        ),
+        "conflict_assertion_ids": list(result.conflict_assertion_ids),
+        "assertions_truncated": result.assertions_truncated,
+        "relations_truncated": result.relations_truncated,
+        "response_truncated": False,
+        "response_char_cap": _LCM_QUERY_STATE_RESPONSE_CHAR_CAP,
+        "provenance": {
+            "store": "same_profile_lcm.db",
+            "evidence": "exact_source_spans",
+            "recency_resolution": "disabled",
+        },
+    }
+    if requested_limit > _LCM_QUERY_STATE_LIMIT_CAP:
+        response["limit_clamped_from"] = requested_limit
+
+    omitted = 0
+    while assertions:
+        encoded = json.dumps(response, ensure_ascii=False, separators=(",", ":"))
+        if len(encoded) <= _LCM_QUERY_STATE_RESPONSE_CHAR_CAP:
+            return encoded
+        assertions.pop()
+        omitted += 1
+        retained_ids = {row["assertion_id"] for row in assertions}
+        relations[:] = [
+            relation
+            for relation in relations
+            if relation["from_assertion_id"] in retained_ids
+            or relation["to_assertion_id"] in retained_ids
+        ]
+        if response["active_assertion_ids"] is not None:
+            response["active_assertion_ids"] = [
+                value
+                for value in response["active_assertion_ids"]
+                if value in retained_ids
+            ]
+        response["conflict_assertion_ids"] = [
+            value for value in response["conflict_assertion_ids"] if value in retained_ids
+        ]
+        response["response_truncated"] = True
+        response["assertions_truncated"] = True
+        response["assertions_omitted_by_response_cap"] = omitted
+    return json.dumps(response, ensure_ascii=False, separators=(",", ":"))
 
 
 def _bounded_operator_field(value: object) -> tuple[str, bool]:
@@ -384,6 +595,437 @@ def _bounded_inspect_json(response: dict[str, Any]) -> str:
         compact["truncation"]["omitted_top_level_sections"] = omitted
         encoded = json.dumps(compact, ensure_ascii=False)
     return encoded
+
+
+def _compute_stage(
+    transport: str,
+    started_at: float,
+    *,
+    provider: str,
+    model: str,
+    **details: Any,
+) -> dict[str, Any]:
+    return {
+        "transport": transport,
+        "provider": provider,
+        "model": model,
+        "latency_ms": round((time.perf_counter() - started_at) * 1_000.0, 3),
+        **details,
+    }
+
+
+def lcm_compute(args: Dict[str, Any], **kwargs) -> str:
+    """Run a pure operation over exact, selector-supplied evidence refs."""
+    total_started = time.perf_counter()
+    engine = _require_engine(kwargs)
+    if engine is None:
+        return json.dumps({"error": "LCM engine not initialized"})
+
+    question = str(args.get("question") or "").strip()
+    question_date = args.get("question_date")
+    stages: dict[str, Any] = {}
+    planner_started = time.perf_counter()
+    as_of: float | None = None
+    if question_date is not None:
+        as_of = question_date_as_of_epoch(question_date)
+        if as_of is None:
+            stages["planner"] = _compute_stage(
+                "deterministic_local",
+                planner_started,
+                provider="none",
+                model="none",
+                status="fallback",
+            )
+            return json.dumps({
+                "status": "fallback",
+                "reason": "question_date must be a valid timezone-unambiguous ISO date",
+                "next_path": "evidence_only",
+                "provenance": {"stages": stages},
+                "metrics": {
+                    "total_latency_ms": round(
+                        (time.perf_counter() - total_started) * 1_000.0, 3
+                    )
+                },
+            })
+
+    plan_decision = compile_evidence_plan(question, question_date)
+    stages["planner"] = _compute_stage(
+        "deterministic_local",
+        planner_started,
+        provider="none",
+        model="none",
+        status=plan_decision.status,
+    )
+    if plan_decision.status != "planned" or plan_decision.plan is None:
+        return json.dumps({
+            "status": plan_decision.status,
+            "reason": plan_decision.reason,
+            "next_path": "evidence_only",
+            "provenance": {"stages": stages},
+            "metrics": {
+                "total_latency_ms": round(
+                    (time.perf_counter() - total_started) * 1_000.0, 3
+                )
+            },
+        })
+    plan = plan_decision.plan
+
+    selector_started = time.perf_counter()
+    if plan.requires_complete_evidence and args.get("evidence_complete") is not True:
+        stages["selector"] = _compute_stage(
+            "host_tool_arguments",
+            selector_started,
+            provider="unknown_to_plugin",
+            model="unknown_to_plugin",
+            status="fallback",
+            evidence_complete=False,
+        )
+        return json.dumps({
+            "status": "fallback",
+            "reason": "operation requires explicit evidence_complete=true",
+            "plan": plan.as_dict(),
+            "next_path": "evidence_only",
+            "provenance": {"stages": stages},
+            "metrics": {
+                "total_latency_ms": round(
+                    (time.perf_counter() - total_started) * 1_000.0, 3
+                )
+            },
+        })
+
+    raw_operands = args.get("operands")
+    try:
+        grounding = ground_evidence(
+            raw_operands,
+            messages=engine._store,
+            assertions=getattr(engine, "_assertions", None),
+            as_of=as_of,
+            session_dates=getattr(engine, "_session_occurrence_dates", None),
+        )
+    except (TypeError, ValueError, sqlite3.Error) as exc:
+        grounding = None
+        grounding_reason = f"selector validation failed: {exc}"
+    else:
+        grounding_reason = grounding.reason
+    if grounding is None or grounding.status != "grounded":
+        stages["selector"] = _compute_stage(
+            "host_tool_arguments",
+            selector_started,
+            provider="unknown_to_plugin",
+            model="unknown_to_plugin",
+            status="fallback",
+            evidence_complete=bool(args.get("evidence_complete") is True),
+            operand_count=(len(raw_operands) if isinstance(raw_operands, list) else 0),
+        )
+        return json.dumps({
+            "status": "fallback",
+            "reason": grounding_reason,
+            "plan": plan.as_dict(),
+            "next_path": "evidence_only",
+            "provenance": {"stages": stages},
+            "metrics": {
+                "total_latency_ms": round(
+                    (time.perf_counter() - total_started) * 1_000.0, 3
+                )
+            },
+        })
+    alignment_error = validate_selector_alignment(question, plan, grounding.operands)
+    if alignment_error:
+        stages["selector"] = _compute_stage(
+            "host_tool_arguments",
+            selector_started,
+            provider="unknown_to_plugin",
+            model="unknown_to_plugin",
+            status="fallback",
+            evidence_complete=bool(args.get("evidence_complete") is True),
+            operand_count=len(grounding.operands),
+        )
+        return json.dumps({
+            "status": "fallback",
+            "reason": alignment_error,
+            "plan": plan.as_dict(),
+            "next_path": "evidence_only",
+            "provenance": {"stages": stages},
+            "metrics": {
+                "total_latency_ms": round(
+                    (time.perf_counter() - total_started) * 1_000.0, 3
+                )
+            },
+        })
+    stages["selector"] = _compute_stage(
+        "host_tool_arguments",
+        selector_started,
+        provider="unknown_to_plugin",
+        model="unknown_to_plugin",
+        status="validated",
+        evidence_complete=bool(args.get("evidence_complete") is True),
+        operand_count=len(grounding.operands),
+    )
+
+    executor_started = time.perf_counter()
+    computed = execute_plan(plan, grounding.operands)
+    stages["executor"] = _compute_stage(
+        "deterministic_local",
+        executor_started,
+        provider="none",
+        model="none",
+        status=computed.status,
+        operation=plan.operation,
+    )
+    if computed.status != "computed" or computed.trace is None:
+        return json.dumps({
+            "status": "fallback",
+            "reason": computed.reason,
+            "plan": plan.as_dict(),
+            "next_path": "evidence_only",
+            "provenance": {"stages": stages},
+            "metrics": {
+                "operand_count": len(grounding.operands),
+                "total_latency_ms": round(
+                    (time.perf_counter() - total_started) * 1_000.0, 3
+                ),
+            },
+        })
+
+    trace = computed.trace
+    candidate_present = "candidate_answer" in args
+    candidate = str(args.get("candidate_answer") or "")
+    verification_payload: dict[str, Any]
+    answer = trace.answer
+    candidate_used = False
+    if candidate_present:
+        verifier_started = time.perf_counter()
+        verification = verify_final_answer(candidate, trace)
+        stages["verifier"] = _compute_stage(
+            "deterministic_local",
+            verifier_started,
+            provider="none",
+            model="none",
+            status=verification.status,
+        )
+        verification_payload = {
+            "status": verification.status,
+            "reason": verification.reason,
+        }
+        if verification.status == "verified":
+            answer = candidate.strip()
+            candidate_used = True
+    else:
+        verification_payload = {"status": "not_requested", "reason": ""}
+
+    final_started = time.perf_counter()
+    if candidate_used:
+        final_stage = {
+            "transport": "host_supplied_candidate",
+            "provider": "unknown_to_plugin",
+            "model": "unknown_to_plugin",
+        }
+    else:
+        final_stage = {
+            "transport": "deterministic_canonical",
+            "provider": "none",
+            "model": "none",
+        }
+    stages["final_answerer"] = {
+        **final_stage,
+        "latency_ms": round((time.perf_counter() - final_started) * 1_000.0, 3),
+        "candidate_used": candidate_used,
+    }
+    response = {
+        "status": "computed",
+        "plan": plan.as_dict(),
+        "trace": trace.as_dict(),
+        "answer": answer,
+        "candidate_verification": verification_payload,
+        "provenance": {
+            "runtime_inputs": ["question", "question_date", "exact_retrieved_evidence"],
+            "stages": stages,
+        },
+        "metrics": {
+            "operand_count": len(grounding.operands),
+            "answer_chars": len(answer),
+            "total_latency_ms": round(
+                (time.perf_counter() - total_started) * 1_000.0, 3
+            ),
+        },
+        "response_char_cap": _LCM_COMPUTE_RESPONSE_CHAR_CAP,
+    }
+    encoded = json.dumps(response, ensure_ascii=False)
+    if len(encoded) > _LCM_COMPUTE_RESPONSE_CHAR_CAP:
+        return json.dumps({
+            "status": "fallback",
+            "reason": "deterministic response exceeded its bounded response cap",
+            "next_path": "evidence_only",
+            "provenance": {"stages": stages},
+        })
+    return encoded
+
+
+def lcm_evidence_pack(args: Dict[str, Any], **kwargs) -> str:
+    """Build a bounded exact-evidence packet and optional canonical trace."""
+    engine = _require_engine(kwargs)
+    if engine is None:
+        return json.dumps({"error": "LCM engine not initialized"})
+    # Lazy import preserves the plugin's order-independent module bootstrap.
+    from .evidence_pack import build_evidence_pack
+    return build_evidence_pack(
+        args,
+        engine=engine,
+        retrieve=lambda recall_args: lcm_recall(recall_args, engine=engine),
+    )
+
+
+def lcm_compile_evidence(args: Dict[str, Any], **kwargs) -> str:
+    """Compile evidence through legacy proposal or deterministic auto mode."""
+    engine = _require_engine(kwargs)
+    if engine is None:
+        return json.dumps({"error": "LCM engine not initialized"})
+    # Lazy import preserves the plugin's order-independent module bootstrap.
+    from .evidence_compiler import compile_evidence, compile_preanswer_evidence
+
+    mode = str(args.get("mode") or "proposal").strip().casefold()
+    if mode not in {"proposal", "auto"}:
+        return json.dumps({"error": "mode must be one of: proposal, auto"})
+    if mode == "auto":
+        result = compile_preanswer_evidence(
+            args.get("question"),
+            engine=engine,
+            baseline_refs=args.get("baseline_refs") or (),
+            question_as_of=args.get("question_date"),
+            retrieve=lambda recall_args: lcm_recall(recall_args, engine=engine),
+            enabled=True,
+            budgets=args.get("budgets"),
+        )
+        return json.dumps(result, ensure_ascii=False)
+
+    proposal = args.get("proposal")
+    result = compile_evidence(
+        args.get("question"),
+        engine=engine,
+        baseline_refs=args.get("baseline_refs") or (),
+        question_date=args.get("question_date"),
+        selector=lambda _request: proposal,
+        retrieve=lambda recall_args: lcm_recall(recall_args, engine=engine),
+        enabled=True,
+        persist_view=args.get("persist_view") is True,
+        budgets=args.get("budgets"),
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
+_LCM_RETRIEVE_RESPONSE_CHAR_CAP = 64_000
+_LCM_RETRIEVE_ARGUMENTS = frozenset({
+    "action",
+    "retrieval_id",
+    "question",
+    "question_date",
+    "identity",
+    "requirements",
+    "missing_slot",
+    "tool",
+    "tool_args",
+    "resolved_slots",
+    "selected_refs",
+    "computation",
+})
+
+
+def lcm_retrieve(args: Dict[str, Any], **kwargs) -> str:
+    """Drive one bounded retrieval episode inside the answerer's tool turn."""
+    engine = _require_engine(kwargs)
+    if engine is None:
+        return json.dumps({"error": "LCM engine not initialized"})
+    controller = getattr(engine, "_adaptive_retrieval", None)
+    if controller is None:
+        return json.dumps({
+            "status": "disabled",
+            "reason": "adaptive retrieval is disabled",
+            "enable_with": "LCM_ADAPTIVE_RETRIEVAL_ENABLED=true",
+            "provenance": {
+                "controller": {
+                    "transport": "deterministic_local",
+                    "provider": "none",
+                    "model": "none",
+                }
+            },
+        })
+    if not isinstance(args, dict):
+        return json.dumps({"status": "error", "error": "arguments must be an object"})
+    unknown = set(args) - _LCM_RETRIEVE_ARGUMENTS
+    if unknown:
+        return json.dumps({
+            "status": "error",
+            "error": (
+                "unsupported lcm_retrieve arguments: "
+                + ", ".join(sorted(str(value) for value in unknown))
+            ),
+        })
+
+    action = str(args.get("action") or "").strip().casefold()
+    def dispatch(name: str, payload: dict[str, Any]) -> str:
+        return engine.handle_tool_call(name, payload)
+    try:
+        if action == "start":
+            result = controller.start(
+                question=args.get("question"),
+                question_date=args.get("question_date"),
+                identity=args.get("identity"),
+                requirements=args.get("requirements"),
+                engine=engine,
+            )
+        elif action == "search":
+            result = controller.search(
+                retrieval_id=args.get("retrieval_id"),
+                missing_slot=args.get("missing_slot"),
+                tool=args.get("tool"),
+                tool_args=args.get("tool_args"),
+                resolved_slots=args.get("resolved_slots"),
+                engine=engine,
+                dispatch=dispatch,
+            )
+        elif action == "finish":
+            result = controller.finish(
+                retrieval_id=args.get("retrieval_id"),
+                resolved_slots=args.get("resolved_slots"),
+                selected_refs=args.get("selected_refs"),
+                computation=args.get("computation"),
+                engine=engine,
+                dispatch=dispatch,
+            )
+        elif action == "status":
+            result = controller.status(
+                retrieval_id=args.get("retrieval_id"), engine=engine
+            )
+        elif action == "abandon":
+            result = controller.abandon(
+                retrieval_id=args.get("retrieval_id"), engine=engine
+            )
+        else:
+            raise ValueError(
+                "action must be one of: start, search, finish, status, abandon"
+            )
+    except (TypeError, ValueError, sqlite3.Error) as exc:
+        result = {
+            "status": "error",
+            "error": str(exc)[:1_000],
+            "provenance": {
+                "controller": {
+                    "transport": "deterministic_local",
+                    "provider": "none",
+                    "model": "none",
+                }
+            },
+        }
+    encoded = json.dumps(result, ensure_ascii=False)
+    if len(encoded) > _LCM_RETRIEVE_RESPONSE_CHAR_CAP:
+        return json.dumps({
+            "status": "error",
+            "error": "adaptive retrieval response exceeded its bounded response cap",
+            "response_char_cap": _LCM_RETRIEVE_RESPONSE_CHAR_CAP,
+        })
+    return encoded
+
+
 _TEMPORAL_ROLLUP_PERIOD_KINDS = ("day", "week", "month")
 _TEMPORAL_ROLLUP_STATUSES = ("ready", "stale", "building", "failed")
 
@@ -1104,7 +1746,13 @@ def _slice_loaded_content(content: Any, max_content_chars: int) -> dict[str, Any
     }
 
 
-def _serialize_loaded_message(engine: "LCMEngine", row: dict[str, Any], max_content_chars: int) -> dict[str, Any]:
+def _serialize_loaded_message(
+    engine: "LCMEngine",
+    row: dict[str, Any],
+    max_content_chars: int,
+    *,
+    include_exact_ref: bool = False,
+) -> dict[str, Any]:
     stored_session_id = row.get("session_id", "")
     content_slice = _slice_loaded_content(row.get("content", "") or "", max_content_chars)
     item: dict[str, Any] = {
@@ -1126,6 +1774,9 @@ def _serialize_loaded_message(engine: "LCMEngine", row: dict[str, Any], max_cont
         item["tool_calls"] = row.get("tool_calls")
     if row.get("tool_name"):
         item["tool_name"] = row.get("tool_name")
+    store_id = row.get("store_id")
+    if include_exact_ref and isinstance(store_id, int) and content_slice["content_returned_chars"] > 0:
+        item["exact_ref"] = f"lcm:{store_id}:0-{content_slice['content_returned_chars']}"
     return item
 
 
@@ -1175,6 +1826,10 @@ def lcm_load_session(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps({"error": time_to_error})
     if time_from is not None and time_to is not None and time_to < time_from:
         return json.dumps({"error": "time_to must be greater than or equal to time_from"})
+    raw_include_exact_ref = args.get("include_exact_ref", False)
+    if not isinstance(raw_include_exact_ref, bool):
+        return json.dumps({"error": "include_exact_ref must be a boolean"})
+    include_exact_ref = raw_include_exact_ref
 
     total_messages = engine._store.count_session_load_messages(
         session_id,
@@ -1201,7 +1856,15 @@ def lcm_load_session(args: Dict[str, Any], **kwargs) -> str:
         "after_store_id": after_store_id,
         "total_messages": total_messages,
         "returned_messages": len(page_rows),
-        "messages": [_serialize_loaded_message(engine, row, max_content_chars) for row in page_rows],
+        "messages": [
+            _serialize_loaded_message(
+                engine,
+                row,
+                max_content_chars,
+                include_exact_ref=include_exact_ref,
+            )
+            for row in page_rows
+        ],
         "next_cursor": next_cursor,
         "has_more": has_more,
     }
@@ -2285,6 +2948,20 @@ def _lcm_grep_embed_query(
     return [float(value) for value in vector]
 
 
+def _lcm_embedding_query_metric(provider: Any) -> dict[str, Any]:
+    """Return non-secret provider accounting for one completed query embed."""
+    raw_tokens = getattr(provider, "last_usage_tokens", None)
+    try:
+        usage_tokens = max(0, int(raw_tokens)) if raw_tokens is not None else None
+    except (TypeError, ValueError, OverflowError):
+        usage_tokens = None
+    return {
+        "provider": str(getattr(provider, "provider_id", "") or "unknown"),
+        "model": str(getattr(provider, "model_id", "") or "unknown"),
+        "usage_tokens": usage_tokens,
+    }
+
+
 def _lcm_grep_resolve_provider(
     engine: "LCMEngine", *, deadline: float | None = None
 ) -> Any:
@@ -2828,6 +3505,664 @@ def _lcm_recall_excerpt_expand_hint(hit: dict[str, Any]) -> str:
     return f"lcm_expand(store_id={hit.get('store_id')}, content_offset={offset})"
 
 
+def _lcm_recall_diverse_entries(
+    ordered: list[dict[str, Any]],
+    *,
+    limit: int,
+    per_session_limit: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Select a stable rank-preserving result set with bounded session density."""
+    selected: list[dict[str, Any]] = []
+    session_counts: dict[str, int] = {}
+    dropped = 0
+    for entry in ordered:
+        hit = entry["hit"]
+        raw_session_id = hit.get("session_id")
+        # Missing session identities must not collapse into one synthetic session.
+        # Exact refs remain independently eligible in their existing rank order.
+        session_key = (
+            str(raw_session_id)
+            if raw_session_id not in {None, ""}
+            else f"missing:{_hit_identity(hit)!r}"
+        )
+        if session_counts.get(session_key, 0) >= per_session_limit:
+            dropped += 1
+            continue
+        session_counts[session_key] = session_counts.get(session_key, 0) + 1
+        selected.append(entry)
+        if len(selected) >= limit:
+            break
+    return selected, dropped
+
+
+def _lcm_recall_reference_shape(hit: dict[str, Any], *, hydratable: bool) -> str | None:
+    """Name the delivery shape that gives this hit a truthful source reference.
+
+    Reference-strict delivery (FINDING-F35 §2). This is only the CHEAP,
+    rank-ordered ADMISSION test -- it says a candidate could plausibly resolve to
+    a ``(store_id, char_start, char_end)`` span, not that it does. Truth is
+    established later by :func:`_lcm_recall_verified_span`, which reads the row
+    and checks that the delivered text really sits at the claimed offset.
+
+    A summary is rejected here and cannot be given a reference. Its text is
+    model-generated prose, not a verbatim span of any row, so
+    ``lcm:<store_id>:<start>-<end>`` would assert bytes that are not at that
+    offset. ``SummaryNode.source_ids`` is the list of *every* message a leaf node
+    summarizes, so even a message-sourced node's first source is lineage, not a
+    citation (#164a). The summary arm keeps its ranking influence through
+    :func:`_lcm_recall_summary_source_hits`, which lets the nodes' SOURCE
+    MESSAGES compete as ordinary citable candidates.
+    """
+    if hit.get("kind") == "summary":
+        return None
+    if hit.get("store_id") is None:
+        return None
+    if hydratable:
+        return "content_offset"
+    if hit.get("chunk_span"):
+        return "chunk_span"
+    # An arm that already knows where its excerpt sits (the chunk arm's
+    # char_start, a summary-source hit's row prefix) can be cited without
+    # hydration -- subject to the verification below.
+    if hit.get("content_offset") is not None:
+        return "content_offset"
+    return None
+
+
+def _lcm_recall_verified_span(
+    item: dict[str, Any], row: dict[str, Any] | None
+) -> tuple[int, int] | None:
+    """Return the ``(offset, chars)`` the delivered text ACTUALLY occupies.
+
+    The one honest definition of a validated source reference: the bytes handed
+    to the caller must be present at the claimed offset of the CURRENT row. That
+    single check subsumes three failure modes a structural test misses --
+
+    * a stale ``chunk_span`` whose row was deleted or rewritten between chunk
+      hydration and response shaping (no coherent snapshot spans those reads);
+    * an FTS snippet, which is a match window with markers rather than a
+      verbatim prefix, so its ``content_offset`` of 0 is not a real location;
+    * a hydration miss, where the promised window never arrived.
+
+    Returning the span rather than a bool is deliberate: the caller PUBLISHES it
+    (``content_offset``/``content_returned_chars``) so consumers do not have to
+    re-derive it. ``__init__.py``'s ``_answer_ready_baseline`` substitutes offset
+    0 when the field is absent, which silently fabricates a reference for every
+    hit whose excerpt does not start at the beginning of its row.
+    """
+    if item.get("kind") == "summary" or item.get("store_id") is None:
+        return None
+    text = item.get("content") if item.get("content") is not None else item.get("snippet")
+    text = str(text or "")
+    if not text:
+        return None
+    raw_offset = item.get("content_offset")
+    if raw_offset is None:
+        return None
+    try:
+        offset = int(raw_offset)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if offset < 0 or row is None:
+        return None
+    content = str(row.get("content") or "")
+    if content[offset:offset + len(text)] != text:
+        return None
+    return offset, len(text)
+
+
+def _lcm_recall_citable_entries(
+    ordered: list[dict[str, Any]],
+    *,
+    limit: int,
+    per_session_limit: int,
+    expanded_limit: int,
+    engine: "LCMEngine" | None = None,
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Reference-strict selection helper (kept for direct unit use)."""
+    selector = _LcmRecallStrictSelector(
+        ordered,
+        engine=engine,
+        per_session_limit=per_session_limit,
+        expanded_limit=expanded_limit,
+    )
+    selected = selector.take(limit)
+    return selected, selector.diversity_dropped, selector.unreferenced_dropped
+
+
+class _LcmRecallSelectionLedger:
+    """Per-entry lifecycle, and every resource an entry holds while it is live.
+
+    Session density, the hydration budget and row retention used to be three
+    counters maintained by hand at four call sites, and each review round found a
+    different seam where one of them leaked: a refund that never happened, a
+    refund applied twice, a store that stayed pinned after its entry was let go.
+    All three are consequences of ONE fact -- whether an entry is still live --
+    so they are DERIVED from that fact here instead of tracked alongside it.
+
+    ``PENDING -> ADMITTED -> (DELIVERED | RELEASED)``. Transitions are one-way.
+    Resources are charged on ADMITTED and refunded exactly once on RELEASED;
+    DELIVERED is terminal and keeps them. A second release is a counted no-op,
+    not a second refund -- the double-refund that let three hits through a cap
+    of two.
+    """
+
+    ADMITTED = "admitted"
+    DELIVERED = "delivered"
+    RELEASED = "released"
+
+    def __init__(self) -> None:
+        # Keyed by id(); the entry itself is held so the id cannot be recycled.
+        self._records: dict[int, dict[str, Any]] = {}
+        self._session_counts: dict[str, int] = {}
+        self._live_stores: dict[int, int] = {}
+        self._live = 0
+        self.double_releases = 0
+
+    def state(self, entry: dict[str, Any]) -> str | None:
+        record = self._records.get(id(entry))
+        return record["state"] if record else None
+
+    @property
+    def live_count(self) -> int:
+        """ADMITTED or DELIVERED -- the entries currently holding resources."""
+        return self._live
+
+    def delivered_entries(self) -> list[dict[str, Any]]:
+        return [
+            record["entry"]
+            for record in self._records.values()
+            if record["state"] == self.DELIVERED
+        ]
+
+    def session_count(self, session_key: str) -> int:
+        return self._session_counts.get(session_key, 0)
+
+    def holds_store(self, store_id: Any) -> bool:
+        return store_id is not None and int(store_id) in self._live_stores
+
+    def admit(
+        self, entry: dict[str, Any], *, session_key: str, store_id: Any
+    ) -> None:
+        """PENDING -> ADMITTED, charging every resource in this one place."""
+        self._records[id(entry)] = {
+            "entry": entry,
+            "state": self.ADMITTED,
+            "session_key": session_key,
+            "store_id": None if store_id is None else int(store_id),
+        }
+        self._session_counts[session_key] = self._session_counts.get(session_key, 0) + 1
+        if store_id is not None:
+            key = int(store_id)
+            self._live_stores[key] = self._live_stores.get(key, 0) + 1
+        self._live += 1
+
+    def deliver(self, entry: dict[str, Any]) -> bool:
+        """ADMITTED -> DELIVERED. Terminal; the entry keeps what it holds."""
+        record = self._records.get(id(entry))
+        if record is None or record["state"] != self.ADMITTED:
+            return False
+        record["state"] = self.DELIVERED
+        return True
+
+    def release(self, entry: dict[str, Any]) -> bool:
+        """ADMITTED -> RELEASED, refunding once. Idempotent by construction."""
+        record = self._records.get(id(entry))
+        if record is None or record["state"] != self.ADMITTED:
+            self.double_releases += 1
+            return False
+        record["state"] = self.RELEASED
+        session_key = record["session_key"]
+        if self._session_counts.get(session_key):
+            self._session_counts[session_key] -= 1
+        store_id = record["store_id"]
+        if store_id is not None and self._live_stores.get(store_id):
+            self._live_stores[store_id] -= 1
+            if not self._live_stores[store_id]:
+                del self._live_stores[store_id]
+        self._live -= 1
+        return True
+
+
+class _LcmRecallStrictSelector:
+    """Rank-ordered admission that VERIFIES a candidate before it is admitted.
+
+    Reference-strict replacement for :func:`_lcm_recall_diverse_entries`. Same
+    stable rank-preserving walk with bounded session density, plus the rule that
+    makes the mode meaningful: a candidate is admitted only once its delivered
+    text has been found at its claimed offset in the CURRENT row.
+
+    Verifying BEFORE admission is what keeps the invariant whole. A candidate
+    that fails never becomes a result, so it cannot spend a session slot a valid
+    lower-ranked candidate needs; the walk simply continues, which IS the
+    backfill -- there is no separate replacement pass for another stage to
+    bypass. Reads stay batched: the walk prefetches a wave of rows ahead of the
+    cursor, and remembers what it ATTEMPTED, so a row the store does not have
+    settles the candidate instead of dragging in the rest of the corpus.
+
+    Two rejections, two different lifetimes. Failing the shape test or
+    verification is a PERMANENT property of the candidate, so it is discarded and
+    its row released. Being over the session cap is not -- density is a
+    refundable resource, and a later stage handing back a slot (delta dropping a
+    reference the caller already holds) can make a blocked candidate admissible.
+    Those are DEFERRED in rank order and reconsidered on the next wave, which is
+    what lets a refund actually reach the ranking instead of arriving after the
+    walk has consumed it. The reserve is bounded, because no more slots can ever
+    be refunded than were admitted.
+
+    Two candidate shapes are proved differently. Inside the hydration budget the
+    delivered text is a window cut from the row, so the row's existence IS the
+    proof and the same snapshot is handed to hydration. Past that budget the hit
+    ships its own excerpt, so the excerpt must be found at its offset. When a row
+    surfaced through several arms, each arm's representation is tried in turn: an
+    FTS match window is not a verbatim prefix and will not verify, but the chunk
+    or summary-source representation of the same row does, and delivering that is
+    not a swap -- it is the same row, quoted somewhere it really says.
+    """
+
+    def __init__(
+        self,
+        ordered: list[dict[str, Any]],
+        *,
+        engine: "LCMEngine" | None,
+        per_session_limit: int,
+        expanded_limit: int,
+        wave_size: int = _LCM_RECALL_STRICT_READ_WAVE,
+    ) -> None:
+        self._ordered = ordered
+        self._engine = engine
+        self._cursor = 0
+        self._per_session_limit = per_session_limit
+        self._expanded_limit = expanded_limit
+        self._wave_size = max(1, wave_size)
+        # How far the ranking is known to be SETTLED. Monotone: an entry the
+        # ledger knows, or one rejected in-budget, can never become admissible
+        # again, so this only ever advances. It is a scan hint, never a source
+        # of truth -- the resume point itself is derived on demand.
+        self._settled_prefix = 0
+        self._blocked: set[int] = set()
+        # id(entry) -> the budget the rejection was made under.
+        self._rejected: dict[int, bool] = {}
+        self._examining = 0
+        self._prefetched_to = 0
+        self._missing: set[int] = set()
+        self.ledger = _LcmRecallSelectionLedger()
+        self.rows: dict[int, dict[str, Any]] = {}
+        self.batched_reads = 0
+
+    @property
+    def unreferenced_dropped(self) -> int:
+        """Candidates currently held out for want of a validated reference."""
+        return len(self._rejected)
+
+    @property
+    def diversity_dropped(self) -> int:
+        """Candidates the density cap is still keeping out of the response."""
+        return len(self._blocked)
+
+    def exhausted(self) -> bool:
+        return self._cursor >= len(self._ordered)
+
+    def deliver(self, entry: dict[str, Any]) -> bool:
+        return self.ledger.deliver(entry)
+
+    def release(self, entry: dict[str, Any]) -> bool:
+        """Hand back the slot an entry a later stage discarded never used."""
+        released = self.ledger.release(entry)
+        if released:
+            self._forget(entry["hit"].get("store_id"))
+            # Resume from the earliest candidate that could still be admitted.
+            # DERIVED, never stored: a remembered resume position is state that
+            # outlives its precondition -- cleared by one rewind, not re-armed by
+            # the next skip, and a candidate silently becomes unreachable. Asking
+            # the ranking costs a scan and cannot go stale.
+            resume = self._earliest_revisitable()
+            if resume < self._cursor:
+                self._cursor = resume
+                self._prefetched_to = min(self._prefetched_to, self._cursor)
+        return released
+
+    def _prefetch(self) -> bool:
+        """Read the next WINDOW of candidate rows in ONE batch.
+
+        The window is a span of POSITIONS, not a quota of new ids. Counting new
+        ids instead lets a window that mostly hits rows already held scan far
+        past itself to fill its quota, so every rewind pulls in another wave and
+        retention grows without bound. Advancing by position keeps read-ahead --
+        and therefore retention -- inside a single window.
+
+        Starts at the candidate being examined, NOT after it, so the row the walk
+        needs right now is always inside the window it triggers.
+        """
+        if self._engine is None:
+            return False
+        start = max(self._examining, self._prefetched_to)
+        if start >= len(self._ordered):
+            return False
+        window: list[int] = []
+        index = start
+        while index < len(self._ordered) and index - start < self._wave_size:
+            hit = self._ordered[index]["hit"]
+            index += 1
+            store_id = hit.get("store_id")
+            if hit.get("kind") == "summary" or store_id is None:
+                continue
+            store_id = int(store_id)
+            if store_id not in window:
+                window.append(store_id)
+        self._prefetched_to = index
+        wanted = [
+            store_id
+            for store_id in window
+            if store_id not in self.rows and store_id not in self._missing
+        ]
+        if wanted:
+            self.batched_reads += 1
+            fetched = self._engine._store.get_batch(wanted)
+            # A row the store does not have is remembered as MISSING, or the walk
+            # cannot tell "not fetched yet" from "fetched and absent" and keeps
+            # calling for windows that can never contain it. Rows merely evicted
+            # stay re-fetchable, which is what lets the walk revisit a candidate
+            # it skipped earlier without holding its row all along.
+            self._missing.update(sid for sid in wanted if sid not in fetched)
+            self.rows.update(fetched)
+        self._trim_rows(window)
+        return True
+
+    def _trim_rows(self, window: list[int]) -> None:
+        """Hold only the current window and whatever is live."""
+        keep = set(window)
+        for store_id in list(self.rows):
+            if store_id not in keep and not self.ledger.holds_store(store_id):
+                del self.rows[store_id]
+
+    def _row_for(self, store_id: Any) -> dict[str, Any] | None:
+        if store_id is None:
+            return None
+        store_id = int(store_id)
+        while (
+            store_id not in self.rows
+            and store_id not in self._missing
+            and self._prefetch()
+        ):
+            pass
+        return self.rows.get(store_id)
+
+    def _forget(self, store_id: Any) -> None:
+        """Drop a row nothing live or still-in-play depends on."""
+        if store_id is None:
+            return
+        store_id = int(store_id)
+        if self.ledger.holds_store(store_id):
+            return
+        self.rows.pop(store_id, None)
+
+    def _verify(self, entry: dict[str, Any], *, hydratable: bool) -> bool:
+        """Prove this candidate can be cited, adopting a representation if needed."""
+        hit = entry["hit"]
+        row = self._row_for(hit.get("store_id"))
+        if row is None or not str(row.get("content") or ""):
+            return False
+        if hydratable:
+            # Hydration cuts the delivered window out of this very row.
+            return True
+        for candidate in [hit, *entry.get("_alternates", [])]:
+            probe = {
+                "kind": hit.get("kind"),
+                "store_id": hit.get("store_id"),
+                "snippet": candidate.get("snippet"),
+                "content_offset": candidate.get("content_offset"),
+            }
+            span = _lcm_recall_verified_span(probe, row)
+            if span is None:
+                continue
+            if candidate is not hit:
+                # Same row, quoted where it really says it.
+                hit["snippet"] = candidate.get("snippet")
+                hit["content_offset"] = candidate.get("content_offset")
+                if candidate.get("chunk_span"):
+                    hit["chunk_span"] = candidate["chunk_span"]
+                hit["expand_hint"] = _lcm_recall_excerpt_expand_hint(hit)
+            entry["_strict_span"] = span
+            return True
+        return False
+
+    @staticmethod
+    def _session_key(hit: dict[str, Any]) -> str:
+        raw_session_id = hit.get("session_id")
+        # Missing session identities must not collapse into one synthetic session.
+        return (
+            str(raw_session_id)
+            if raw_session_id not in {None, ""}
+            else f"missing:{_hit_identity(hit)!r}"
+        )
+
+    def _admit(self, entry: dict[str, Any]) -> None:
+        hit = entry["hit"]
+        self.ledger.admit(
+            entry,
+            session_key=self._session_key(hit),
+            store_id=hit.get("store_id"),
+        )
+
+    def _is_settled(self, entry: dict[str, Any]) -> bool:
+        """True when this candidate can never be admitted, whatever happens next.
+
+        Terminal for exactly two reasons: the ledger already knows it (admitted,
+        delivered or released -- none of which return to the pool), or it was
+        rejected IN-BUDGET, which means the row itself is unusable. Everything
+        else -- density-blocked, post-budget rejected -- is revisitable by
+        definition, because the only thing standing in its way is a budget a
+        refund can give back.
+        """
+        return (
+            self.ledger.state(entry) is not None
+            or self._rejected.get(id(entry)) is True
+        )
+
+    def _earliest_revisitable(self) -> int:
+        """Position of the first candidate a refund could still make admissible."""
+        index = self._settled_prefix
+        while index < len(self._ordered) and self._is_settled(self._ordered[index]):
+            index += 1
+        self._settled_prefix = index
+        return index
+
+    def _next_admissible(self) -> dict[str, Any] | None:
+        """Walk forward to the next candidate that can be admitted right now.
+
+        Entries the ledger already knows (live or released) are skipped, as are
+        entries whose rejection still applies under the current budget.
+        """
+        while self._cursor < len(self._ordered):
+            entry = self._ordered[self._cursor]
+            self._examining = self._cursor
+            self._cursor += 1
+            hit = entry["hit"]
+            if self.ledger.state(entry) is not None:
+                continue
+            hydratable = self.ledger.live_count < self._expanded_limit
+            # A rejection is only as durable as the rule that produced it. An
+            # IN-BUDGET rejection means the row itself is unusable -- missing,
+            # empty, or not a message at all -- which no later budget can undo.
+            # A POST-BUDGET rejection only means the candidate's own excerpt did
+            # not check out, and that same candidate is still admissible
+            # in-budget, where the delivered text is a window cut from the row
+            # rather than an excerpt it carried. Skipping it there would underfill
+            # against a rule that no longer applies.
+            rejected_under = self._rejected.get(id(entry))
+            if rejected_under is True or (rejected_under is False and not hydratable):
+                continue
+            # Verification is deliberately NOT carried across examinations. It is
+            # only valid while the row it was proved against is still held, and a
+            # blocked candidate releases its row -- which may then be rewritten or
+            # deleted before a refund brings the walk back. Re-proving against the
+            # row as REFETCHED is what makes the rewind safe.
+            if _lcm_recall_reference_shape(hit, hydratable=hydratable) is None or (
+                not self._verify(entry, hydratable=hydratable)
+            ):
+                self._rejected[id(entry)] = hydratable
+                self._blocked.discard(id(entry))
+                self._forget(hit.get("store_id"))
+                continue
+            session_key = self._session_key(hit)
+            if self.ledger.session_count(session_key) >= self._per_session_limit:
+                # Refundable, unlike a shape or verification failure, so the
+                # candidate is not consumed -- only its POSITION is remembered,
+                # and the row it is not using is released. It stays in the
+                # ranking, so no bound on a buffer can discard it.
+                self._blocked.add(id(entry))
+                self._forget(hit.get("store_id"))
+                continue
+            # No blind refetch here: verification above just proved this
+            # candidate against the row as it stands and left that row held, so
+            # hydration reads the same bytes the admission was granted on.
+            self._blocked.discard(id(entry))
+            self._rejected.pop(id(entry), None)
+            self._admit(entry)
+            return entry
+        return None
+
+    def take(self, target: int) -> list[dict[str, Any]]:
+        """Top the live set up to ``target`` verified candidates.
+
+        Expressed as a target rather than a count so a slot handed back between
+        waves is immediately reusable: the next wave asks for whatever the
+        response is still missing.
+        """
+        taken: list[dict[str, Any]] = []
+        while self.ledger.live_count < target:
+            entry = self._next_admissible()
+            if entry is None:
+                break
+            taken.append(entry)
+        return taken
+
+
+
+def _lcm_recall_content_window(
+    content: Any,
+    *,
+    match_start: int,
+    match_end: int,
+    char_cap: int,
+) -> dict[str, Any]:
+    """Return a bounded window centered on the selected evidence span."""
+    text = str(content or "")
+    content_chars = len(text)
+    start = min(max(0, int(match_start)), content_chars)
+    end = min(max(start, int(match_end)), content_chars)
+    if content_chars <= char_cap:
+        offset = 0
+    else:
+        midpoint = (start + end) // 2
+        offset = min(max(0, midpoint - char_cap // 2), content_chars - char_cap)
+    bounded = text[offset:offset + char_cap]
+    return {
+        "content": bounded,
+        "content_chars": content_chars,
+        "content_offset": offset,
+        "content_returned_chars": len(bounded),
+        "content_truncated": len(bounded) < content_chars,
+        "evidence_span": {"char_start": start, "char_end": end},
+    }
+
+
+def _lcm_recall_answer_ready_content(
+    engine: "LCMEngine",
+    entries: list[dict[str, Any]],
+    *,
+    query: str,
+    expanded_limit: int = _LCM_RECALL_ANSWER_READY_EXPANDED_HIT_LIMIT,
+    rows_by_id: dict[int, dict[str, Any]] | None = None,
+) -> dict[tuple, dict[str, Any]]:
+    """Hydrate selected exact refs with bounded reads and no retrieval search.
+
+    ``rows_by_id`` lets a caller that has ALREADY read these rows hand them over
+    instead of paying for a second read. Reference-strict selection verifies each
+    candidate against its row before admitting it, so reusing that same snapshot
+    also removes the window in which a row could vanish between the two reads and
+    leave an admitted candidate unhydrated.
+    """
+    selected = entries[:expanded_limit]
+    store_ids = [
+        int(entry["hit"]["store_id"])
+        for entry in selected
+        if entry["hit"].get("kind") == "message_excerpt"
+        and entry["hit"].get("store_id") is not None
+    ]
+    stored_by_id = (
+        rows_by_id if rows_by_id is not None else engine._store.get_batch(store_ids)
+    )
+    hydrated: dict[tuple, dict[str, Any]] = {}
+
+    for entry in selected:
+        hit = entry["hit"]
+        identity = _hit_identity(hit)
+        if hit.get("kind") == "summary":
+            raw_node_id = hit.get("node_id")
+            if raw_node_id is None:
+                continue
+            node = engine._dag.get_node(int(raw_node_id))
+            if node is None:
+                continue
+            content = node.summary or ""
+            window = _lcm_recall_content_window(
+                content,
+                match_start=0,
+                match_end=min(len(content), _LCM_RECALL_SNIPPET_CHARS),
+                char_cap=_LCM_RECALL_ANSWER_READY_CONTENT_CHARS,
+            )
+            hydrated[identity] = {
+                **window,
+                "content_source": "summary",
+            }
+            continue
+
+        raw_store_id = hit.get("store_id")
+        if raw_store_id is None:
+            continue
+        stored = stored_by_id.get(int(raw_store_id))
+        if stored is None:
+            continue
+        content = str(stored.get("content") or "")
+        span = hit.get("chunk_span") or {}
+        try:
+            match_start = int(span["char_start"])
+            match_end = int(span["char_end"])
+        except (KeyError, TypeError, ValueError):
+            match_start = _content_offset_for_query_match(content, query)
+            match_end = match_start + min(
+                max(1, len(query)), _LCM_RECALL_SNIPPET_CHARS
+            )
+        window = _lcm_recall_content_window(
+            content,
+            match_start=match_start,
+            match_end=match_end,
+            char_cap=_LCM_RECALL_ANSWER_READY_CONTENT_CHARS,
+        )
+        hydrated[identity] = {
+            **window,
+            "content_source": "message",
+            "role": stored.get("role"),
+            "source": stored.get("source") or "",
+        }
+    return hydrated
+
+
+def _lcm_recall_exact_ref(hit: dict[str, Any], hydrated: dict[str, Any] | None) -> str | None:
+    """Return the exact identity for an opt-in delta item."""
+    if hit.get("kind") == "summary":
+        node_id = hit.get("node_id")
+        return f"lcm-summary:{node_id}" if node_id is not None else None
+    store_id = hit.get("store_id")
+    if store_id is None or hydrated is None or "content" not in hydrated:
+        return None
+    start = int(hydrated.get("content_offset") or 0)
+    end = start + len(str(hydrated.get("content") or ""))
+    return f"lcm:{int(store_id)}:{start}-{end}"
+
+
 def _lcm_recall_bounded_reason(
     arm: str, scanned: int | None, total: int | None
 ) -> str:
@@ -2903,14 +4238,164 @@ def _lcm_recall_fts_arm(
     return hits, None
 
 
+def _lcm_recall_scan_bounds(engine: "LCMEngine") -> dict[str, Any]:
+    """Full-corpus scan settings shared by both vector arms.
+
+    lcm_recall promises "all conversations, all time", so both arms scan the
+    WHOLE corpus in ``recall_scan_rows``-sized batches. The optional cap and
+    latency budget default to 0 (no early stop); either one firing degrades the
+    arm to ``coverage='bounded'``, which the caller already discloses.
+    """
+    return {
+        "full_scan": True,
+        "scan_max_rows": max(0, int(getattr(engine._config, "recall_scan_max_rows", 0))),
+        "scan_budget_s": max(
+            0.0, float(getattr(engine._config, "recall_scan_budget_s", 0.0))
+        ),
+    }
+
+
+def _lcm_recall_summary_source_hits(
+    engine: "LCMEngine",
+    nodes: list[tuple[Any, float]],
+    *,
+    current: str | None,
+    candidate_limit: int,
+    lead_limit: int,
+    deadline: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Carry summary-KNN relevance onto the nodes' SOURCE MESSAGES.
+
+    Reference-strict delivery cannot hand out a summary, and simply dropping the
+    hits would silently amputate the arm: RRF keys a summary by node and a
+    message by store_id, so with rerank off (the default) removing summary
+    entries after fusion leaves every message score and the whole order exactly
+    as if the arm had never run -- a session reachable ONLY by summary KNN would
+    contribute no evidence at all.
+
+    So the arm emits ordinary ``message_excerpt`` candidates for the rows beneath
+    each ranked node, in node-rank order. They are NOT the summary wearing a
+    message's content: each is a real row with its own identity, its own verbatim
+    excerpt and its own truthful ``content_offset``, fused by RRF against the FTS
+    and chunk arms like any other candidate and competing on merit rather than
+    inheriting the node's slot. The node handles come back separately as
+    non-evidence leads.
+
+    Bounded fan-out: within a node there is no per-message relevance signal (that
+    is what the FTS and chunk arms are for), so a deterministic ``store_id``-
+    ordered slice per node is taken and the arm stays inside its candidate
+    budget. The purpose is to make the SESSION reachable with citable evidence,
+    not to rank inside it.
+    """
+    def require_remaining(stage: str) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"summary source expansion deadline exhausted before {stage}")
+        return remaining
+
+    require_remaining("database connection")
+    db_path = Path(engine._store.db_path).resolve()
+    uri = f"{db_path.as_uri()}?mode=ro"
+    conn: sqlite3.Connection | None = None
+    expired = [False]
+
+    def interrupt_if_expired() -> int:
+        if time.monotonic() >= deadline:
+            expired[0] = True
+            return 1
+        return 0
+
+    try:
+        conn = sqlite3.connect(
+            uri,
+            uri=True,
+            timeout=max(0.001, require_remaining("database connection")),
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.set_progress_handler(interrupt_if_expired, 1000)
+        read_store = copy.copy(engine._store)
+        read_dag = copy.copy(engine._dag)
+        read_store._conn = conn
+        read_dag._conn = conn
+        read_store._write_lock = threading.RLock()
+        read_dag._db_lock = threading.RLock()
+
+        leads: list[dict[str, Any]] = []
+        ordered_ids: list[int] = []
+        seen: set[int] = set()
+        for node, _score in nodes:
+            require_remaining("lineage traversal")
+            if len(leads) < max(0, lead_limit):
+                lead: dict[str, Any] = {
+                    "node_id": node.node_id,
+                    "session_id": node.session_id,
+                    "from_current_session": bool(current)
+                    and node.session_id == current,
+                }
+                hint = _lcm_recall_summary_expand_hint(lead)
+                if hint:
+                    lead["expand_hint"] = hint
+                leads.append(lead)
+            if len(ordered_ids) >= candidate_limit:
+                continue
+            for store_id in read_dag.source_message_ids(
+                node.node_id, limit=_LCM_RECALL_SUMMARY_SOURCE_PER_NODE
+            ):
+                if store_id in seen:
+                    continue
+                seen.add(store_id)
+                ordered_ids.append(store_id)
+        require_remaining("message hydration")
+
+        hits: list[dict[str, Any]] = []
+        rows = (
+            read_store.get_batch(ordered_ids[:candidate_limit]) if ordered_ids else {}
+        )
+        for store_id in ordered_ids[:candidate_limit]:
+            require_remaining("message shaping")
+            row = rows.get(store_id)
+            if row is None:
+                continue
+            content = str(row.get("content") or "")
+            if not content:
+                continue
+            session_id = row.get("session_id")
+            hit = {
+                "kind": "message_excerpt",
+                "store_id": store_id,
+                "session_id": session_id,
+                "source": row.get("source") or "",
+                "role": row.get("role"),
+                "timestamp": row.get("timestamp") or 0,
+                # The excerpt is the row's own prefix, so offset 0 is the truth
+                # here rather than the fabricated default a consumer would guess.
+                "content_offset": 0,
+                "snippet": content[:_LCM_RECALL_SNIPPET_CHARS],
+                "from_current_session": bool(current) and session_id == current,
+            }
+            hit["expand_hint"] = _lcm_recall_excerpt_expand_hint(hit)
+            hits.append(hit)
+        return hits, leads
+    except sqlite3.OperationalError as exc:
+        if expired[0] or time.monotonic() >= deadline:
+            raise TimeoutError("summary source expansion deadline exhausted") from exc
+        raise
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _lcm_recall_summary_arm(
     engine: "LCMEngine",
     *,
     query_vector: list[float],
     provider: Any,
     candidate_limit: int,
+    lead_limit: int,
     deadline: float,
-) -> tuple[list[dict[str, Any]], str]:
+    reference_strict: bool = False,
+) -> tuple[list[dict[str, Any]], str, int | None, int | None, list[dict[str, Any]]]:
     """Summary KNN arm: embedded summaries across ALL sessions (no filter)."""
     knn_results = _run_within_deadline(
         lambda: run_knn(
@@ -2925,6 +4410,7 @@ def _lcm_recall_summary_arm(
             source=None,
             vector_store_cls=VectorStore,
             scan_rows=max(1, int(getattr(engine._config, "recall_scan_rows", 25_000))),
+            **_lcm_recall_scan_bounds(engine),
         ),
         remaining_s=deadline - time.monotonic(),
         name="lcm-recall-summary-knn",
@@ -2932,7 +4418,7 @@ def _lcm_recall_summary_arm(
     coverage = knn_results.coverage
     ranked_rows = list(knn_results)
     if coverage == "none" or not ranked_rows:
-        return [], coverage, knn_results.scanned, knn_results.total
+        return [], coverage, knn_results.scanned, knn_results.total, []
     nodes = _run_within_deadline(
         lambda: hydrate_semantic_nodes(
             engine,
@@ -2944,11 +4430,27 @@ def _lcm_recall_summary_arm(
         name="lcm-recall-summary-hydrate",
     )
     current = engine.current_session_id
+    if reference_strict:
+        source_hits, leads = _lcm_recall_summary_source_hits(
+            engine,
+            nodes,
+            current=current,
+            candidate_limit=candidate_limit,
+            lead_limit=lead_limit,
+            deadline=deadline,
+        )
+        return source_hits, coverage, knn_results.scanned, knn_results.total, leads
     hits: list[dict[str, Any]] = []
     for node, _score in nodes:
+        source_store_id = (
+            int(node.source_ids[0])
+            if node.source_type == "messages" and node.source_ids
+            else None
+        )
         hit = {
             "kind": "summary",
             "node_id": node.node_id,
+            "store_id": source_store_id,
             "session_id": node.session_id,
             "timestamp": node.latest_at or node.created_at or 0,
             "snippet": (node.summary or "")[:_LCM_RECALL_SNIPPET_CHARS],
@@ -2956,7 +4458,7 @@ def _lcm_recall_summary_arm(
         }
         hit["expand_hint"] = _lcm_recall_summary_expand_hint(hit)
         hits.append(hit)
-    return hits, coverage, knn_results.scanned, knn_results.total
+    return hits, coverage, knn_results.scanned, knn_results.total, []
 
 
 def _lcm_recall_chunk_arm(
@@ -2981,6 +4483,7 @@ def _lcm_recall_chunk_arm(
             source=None,
             vector_store_cls=VectorStore,
             scan_rows=max(1, int(getattr(engine._config, "recall_scan_rows", 25_000))),
+            **_lcm_recall_scan_bounds(engine),
         ),
         remaining_s=deadline - time.monotonic(),
         name="lcm-recall-chunk-knn",
@@ -3105,6 +4608,30 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     if include not in _LCM_RECALL_VALID_INCLUDE:
         return json.dumps({"error": "include must be one of: all, summaries, verbatim"})
 
+    detail = str(args.get("detail") or "snippets").strip().lower()
+    if detail not in _LCM_RECALL_VALID_DETAIL:
+        return json.dumps({"error": "detail must be one of: snippets, answer_ready"})
+
+    # Reference-strict delivery applies to the citation-bearing mode only: the
+    # default 'snippets' response makes no source-span claim and carries no
+    # hydration, so strictness there would drop evidence for no reference gain.
+    reference_strict = detail == "answer_ready" and bool(
+        getattr(engine._config, "recall_reference_strict", True)
+    )
+
+    delta_requested = "seen_refs" in args
+    raw_seen_refs = args.get("seen_refs")
+    if delta_requested and detail != "answer_ready":
+        return json.dumps({"error": "seen_refs requires detail='answer_ready'"})
+    if delta_requested and not isinstance(raw_seen_refs, list):
+        return json.dumps({"error": "seen_refs must be an array"})
+    if delta_requested and len(raw_seen_refs) > 100:
+        return json.dumps({"error": "seen_refs accepts at most 100 refs"})
+    seen_refs = {str(value) for value in (raw_seen_refs or [])}
+    include_occurrence_time = bool(args.get("include_occurrence_time", False))
+    if include_occurrence_time and detail != "answer_ready":
+        return json.dumps({"error": "include_occurrence_time requires detail='answer_ready'"})
+
     # lcm_recall fans out three arms + fusion/hydration/rerank, so it uses its own
     # (larger) budget rather than lcm_grep's single-arm query deadline (sprint-opt-2).
     timeout_s = max(0.001, float(getattr(engine._config, "recall_query_timeout_s", 8.0)))
@@ -3123,8 +4650,13 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     run_chunk = include in {"all", "verbatim"}
 
     arm_hits: dict[str, list[dict[str, Any]]] = {}
+    # Node handles from the summary arm. Reference-strict delivery routes summary
+    # relevance through the source messages, so the nodes themselves are surfaced
+    # here as non-evidence drill-down leads instead of as hits.
+    summary_leads: list[dict[str, Any]] = []
     coverage: dict[str, str] = {}
     degraded_reasons: list[str] = []
+    embedding_query_metrics: list[dict[str, Any]] = []
     timed_out = False
     provider: Any = None
 
@@ -3176,6 +4708,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     query_vector = _lcm_grep_embed_query(
                         provider, query, remaining_s=deadline - time.monotonic()
                     )
+                    embedding_query_metrics.append(
+                        _lcm_embedding_query_metric(provider)
+                    )
             except VoyageError as exc:
                 provider = None
                 degraded_reasons.append(f"query embedding failed: {exc}")
@@ -3211,6 +4746,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                             query,
                             remaining_s=deadline - time.monotonic(),
                         )
+                        embedding_query_metrics.append(
+                            _lcm_embedding_query_metric(chunk_provider)
+                        )
                 except VoyageError as exc:
                     degraded_reasons.append(f"chunk query embedding failed: {exc}")
                 except TimeoutError:
@@ -3223,12 +4761,14 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             if query_vector is not None:
                 if run_summary:
                     try:
-                        hits, cov, scanned, total = _lcm_recall_summary_arm(
+                        hits, cov, scanned, total, summary_leads = _lcm_recall_summary_arm(
                             engine,
                             query_vector=query_vector,
                             provider=provider,
                             candidate_limit=candidate_limit,
+                            lead_limit=limit,
                             deadline=deadline,
+                            reference_strict=reference_strict,
                         )
                         arm_hits["summary"] = hits
                         coverage["summary"] = cov
@@ -3302,12 +4842,33 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     chunk_by_store: dict[Any, dict[str, Any]] = {}
     for chunk_hit in arm_hits.get("chunk", []):
         chunk_by_store.setdefault(chunk_hit.get("store_id"), chunk_hit)
+    # Every OTHER arm's representation of the same row is kept alongside the
+    # fused base rather than discarded. Fusion picks one base per identity (the
+    # earliest arm, so FTS when it hit), but an FTS snippet is a match window
+    # with markers -- not a verbatim span -- so a row whose only surviving
+    # representation is the FTS one cannot be cited beyond the hydration budget
+    # even though the chunk or summary-source excerpt of that same row could be.
+    # Reference-strict verification tries these in order and delivers the first
+    # that the row actually supports.
+    alternates_by_store: dict[Any, list[dict[str, Any]]] = {}
+    for arm_name in ("summary", "chunk"):
+        for other_hit in arm_hits.get(arm_name, []):
+            if other_hit.get("kind") != "message_excerpt":
+                continue
+            alternates_by_store.setdefault(other_hit.get("store_id"), []).append(
+                other_hit
+            )
     chunk_arm_index = arm_order.index("chunk") if "chunk" in arm_order else None
     fts_arm_index = arm_order.index("fts") if "fts" in arm_order else None
     for entry in ordered:
         hit = entry["hit"]
         if hit.get("kind") != "message_excerpt":
             continue
+        entry["_alternates"] = [
+            other
+            for other in alternates_by_store.get(hit.get("store_id"), [])
+            if other is not hit
+        ]
         chunk_hit = chunk_by_store.get(hit.get("store_id"))
         if chunk_hit is None:
             continue
@@ -3354,10 +4915,102 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         provider, query, ordered, window=rerank_window, deadline=deadline, config=engine._config
     )
 
-    # -- Response shaping (char-capped) --
+    # -- Response shaping (char-capped). The default snippets path retains the
+    # historical order and serialized response exactly. answer_ready applies
+    # stable post-rank diversity before bounded exact-ref hydration.
+    diversity_dropped = 0
+    if detail == "answer_ready":
+        # Take only what the response can hold. Delta used to select the whole
+        # 25-candidate cap up front and filter afterwards, which walked the
+        # ranking to exhaustion while already-seen entries held session quota --
+        # the refill then had nothing left to resume into. Selecting a wave at a
+        # time lets a released slot be reused by the next wave.
+        selection_limit = limit
+        expanded_limit = (
+            _LCM_RECALL_LIMIT_CAP
+            if delta_requested
+            else _LCM_RECALL_ANSWER_READY_EXPANDED_HIT_LIMIT
+        )
+        if reference_strict:
+            strict_selector = _LcmRecallStrictSelector(
+                ordered,
+                engine=engine,
+                per_session_limit=_LCM_RECALL_ANSWER_READY_PER_SESSION_LIMIT,
+                expanded_limit=expanded_limit,
+            )
+            selected_entries = strict_selector.take(selection_limit)
+            strict_rows = strict_selector.rows
+        else:
+            selected_entries, diversity_dropped = _lcm_recall_diverse_entries(
+                ordered,
+                limit=selection_limit,
+                per_session_limit=_LCM_RECALL_ANSWER_READY_PER_SESSION_LIMIT,
+            )
+            strict_rows = None
+        answer_ready_content = _lcm_recall_answer_ready_content(
+            engine,
+            selected_entries,
+            query=query,
+            expanded_limit=expanded_limit,
+            rows_by_id=strict_rows,
+        )
+        if delta_requested:
+            def _novel(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                """Keep the entries carrying a reference the caller lacks.
+
+                A discarded entry hands its session slot back: it is not part of
+                the response, so it must not count against the density budget
+                that decides which novel rows can still be delivered.
+                """
+                kept: list[dict[str, Any]] = []
+                for entry in entries:
+                    exact_ref = (
+                        None
+                        if entry["hit"].get("kind") == "summary"
+                        else _lcm_recall_exact_ref(
+                            entry["hit"],
+                            answer_ready_content.get(_hit_identity(entry["hit"])),
+                        )
+                    )
+                    if exact_ref is not None and exact_ref not in seen_refs:
+                        kept.append(entry)
+                    elif reference_strict:
+                        strict_selector.release(entry)
+                return kept
+
+            selected_entries = _novel(selected_entries)
+            # Delta shaping discards entries the caller has already seen, so it
+            # too must be able to draw on the ranked tail -- otherwise the mode
+            # silently returns short while valid candidates remain, which is the
+            # very underfill the resumable walk exists to prevent.
+            while (
+                reference_strict
+                and len(selected_entries) < limit
+                and not strict_selector.exhausted()
+            ):
+                more = strict_selector.take(limit)
+                if not more:
+                    break
+                answer_ready_content.update(
+                    _lcm_recall_answer_ready_content(
+                        engine,
+                        more,
+                        query=query,
+                        expanded_limit=len(more),
+                        rows_by_id=strict_selector.rows,
+                    )
+                )
+                selected_entries.extend(_novel(more))
+            selected_entries = selected_entries[:limit]
+    else:
+        selected_entries = ordered
+        diversity_dropped = 0
+        answer_ready_content = {}
     hits_out: list[dict[str, Any]] = []
     response_chars = 0
-    for entry in ordered:
+    response_cap_truncated = False
+    unreferenced_omitted = 0
+    for entry in selected_entries:
         hit = entry["hit"]
         arms = sorted({arm_order[index] for index in entry["ranks"].keys()})
         item: dict[str, Any] = {
@@ -3372,14 +5025,78 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         }
         if hit.get("kind") == "summary":
             item["node_id"] = hit.get("node_id")
+            if hit.get("store_id") is not None:
+                item["store_id"] = hit.get("store_id")
         else:
             item["store_id"] = hit.get("store_id")
             if hit.get("chunk_span"):
                 item["chunk_span"] = hit["chunk_span"]
+        if detail == "answer_ready":
+            item["role"] = hit.get("role")
+            item["source"] = hit.get("source") or (
+                "summary" if hit.get("kind") == "summary" else ""
+            )
+            hydrated = answer_ready_content.get(_hit_identity(hit))
+            if hydrated is not None:
+                item.update(hydrated)
+            if delta_requested:
+                exact_ref = _lcm_recall_exact_ref(hit, hydrated)
+                if exact_ref is not None:
+                    item["exact_ref"] = exact_ref
+            if include_occurrence_time and hit.get("kind") != "summary":
+                session_dates = getattr(engine, "_session_occurrence_dates", {}) or {}
+                source_row = engine._store.get(int(hit.get("store_id") or 0))
+                source_row = source_row or {}
+                source_observed_at = source_row.get("observed_at")
+                session_date = session_dates.get(str(hit.get("session_id")))
+                if session_date is None and source_observed_at is not None:
+                    try:
+                        session_date = datetime.fromtimestamp(
+                            float(source_observed_at), tz=timezone.utc
+                        ).date().isoformat()
+                    except (TypeError, ValueError, OverflowError, OSError):
+                        session_date = None
+                occurrence = resolve_occurrence_time(
+                    (hydrated or {}).get("content") or hit.get("snippet") or "",
+                    observed_at=source_observed_at or 0,
+                    session_date=session_date,
+                )
+                occurrence["stored_at"] = source_row.get("ingested_at") or source_row.get("timestamp")
+                item["occurrence_time"] = occurrence
+                item["observation_time"] = {
+                    "observed_at": occurrence.get("observed_at") or None,
+                    "ingested_at": source_row.get("ingested_at") or source_row.get("timestamp"),
+                    "source": (
+                        "benchmark_session_date"
+                        if str(hit.get("session_id")) in session_dates
+                        else "host_message_timestamp"
+                        if source_observed_at is not None
+                        else "ingest_fallback"
+                    ),
+                }
+        if reference_strict:
+            # Selection already proved this candidate against its row, so there
+            # is nothing left to re-check here -- only the proven span to
+            # PUBLISH, so a consumer never has to guess an offset. (__init__.py's
+            # _answer_ready_baseline substitutes 0 when the field is absent.)
+            if hydrated is not None:
+                span = (
+                    int(hydrated["content_offset"]),
+                    int(hydrated["content_returned_chars"]),
+                )
+            else:
+                span = entry.get("_strict_span")
+            if span is None:
+                unreferenced_omitted += 1
+                continue
+            item["content_offset"], item["content_returned_chars"] = span
         item_chars = len(json.dumps(item, ensure_ascii=False))
         if hits_out and response_chars + item_chars > _LCM_RECALL_RESPONSE_CHAR_CAP:
+            response_cap_truncated = True
             break
         response_chars += item_chars
+        if reference_strict:
+            strict_selector.deliver(entry)
         hits_out.append(item)
         if len(hits_out) >= limit:
             break
@@ -3404,6 +5121,16 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 "replacing that score"
             ),
         },
+        "metrics": {
+            "embedding_query_calls": len(embedding_query_metrics),
+            "embedding_query_tokens": sum(
+                int(item["usage_tokens"] or 0) for item in embedding_query_metrics
+            ),
+            "embedding_query_tokens_complete": all(
+                item["usage_tokens"] is not None for item in embedding_query_metrics
+            ),
+            "embedding_queries": embedding_query_metrics,
+        },
         "degraded": degraded,
     }
     if degraded:
@@ -3412,6 +5139,96 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         response["timeout"] = True
     if requested_limit > _LCM_RECALL_LIMIT_CAP:
         response["limit_clamped_from"] = requested_limit
+    if detail == "answer_ready":
+        expansion = {
+            "expanded_hit_count": sum("content" in hit for hit in hits_out),
+            "expanded_hit_limit": _LCM_RECALL_ANSWER_READY_EXPANDED_HIT_LIMIT,
+            "per_session_limit": _LCM_RECALL_ANSWER_READY_PER_SESSION_LIMIT,
+            "diversity_dropped_count": diversity_dropped,
+            "per_hit_char_cap": _LCM_RECALL_ANSWER_READY_CONTENT_CHARS,
+            "snippet_char_cap": _LCM_RECALL_SNIPPET_CHARS,
+            "response_char_cap": _LCM_RECALL_RESPONSE_CHAR_CAP,
+            "response_policy": (
+                "rank-preserving session diversity, then exact-ref hydration; "
+                "whole hits only when enforcing the response cap"
+            ),
+            "hydration_policy": "bounded exact reads only; no additional retrieval search",
+            "response_truncated": response_cap_truncated,
+        }
+        if reference_strict:
+            expansion["reference_strict"] = True
+            expansion["diversity_dropped_count"] = strict_selector.diversity_dropped
+            expansion["unreferenced_dropped_count"] = (
+                strict_selector.unreferenced_dropped
+            )
+            expansion["unreferenced_omitted_count"] = unreferenced_omitted
+            expansion["summary_leads"] = summary_leads
+            expansion["reference_policy"] = (
+                "every delivered hit publishes the (store_id, content_offset, "
+                "content_returned_chars) span its text occupies in the current "
+                "row; a candidate that fails that check is replaced by the "
+                "next-ranked citable one. Summary nodes are never delivered as "
+                "evidence -- their relevance reaches the ranking through the "
+                "source messages beneath them, and the nodes themselves come "
+                "back here as non-evidence drill-down leads"
+            )
+        response["detail"] = detail
+        response["provenance"]["detail"] = detail
+        response["provenance"]["answer_ready"] = expansion
+        if delta_requested:
+            novel_refs = [hit["exact_ref"] for hit in hits_out if hit.get("exact_ref")]
+            response["delta"] = {
+                "protocol": "exact-ref-delta-v1",
+                "seen_ref_count": len(seen_refs),
+                "novel_ref_count": len(novel_refs),
+                "novel_refs": novel_refs,
+                "progress": bool(novel_refs),
+                "termination_reason": None if novel_refs else "no_novel_exact_ref",
+            }
+        if include_occurrence_time:
+            response["provenance"]["occurrence_time"] = {
+                "policy_version": "occurrence-time-v1",
+                "anchor_source": "engine session metadata when available",
+                "observation_is_not_occurrence": True,
+            }
+
+        encoded = json.dumps(response, ensure_ascii=False)
+        if len(encoded) > _LCM_RECALL_RESPONSE_CHAR_CAP:
+            original_query = response["query"]
+            response["query"] = original_query[:4_096]
+            expansion["query_truncated"] = len(response["query"]) < len(original_query)
+            encoded = json.dumps(response, ensure_ascii=False)
+        while len(encoded) > _LCM_RECALL_RESPONSE_CHAR_CAP and (
+            response["hits"] or expansion.get("summary_leads")
+        ):
+            if response["hits"]:
+                response["hits"].pop()
+            else:
+                expansion["summary_leads"].pop()
+            response["total_results"] = len(response["hits"])
+            expansion["response_truncated"] = True
+            expansion["expanded_hit_count"] = sum(
+                "content" in hit for hit in response["hits"]
+            )
+            encoded = json.dumps(response, ensure_ascii=False)
+        if delta_requested:
+            novel_refs = [
+                hit["exact_ref"]
+                for hit in response["hits"]
+                if hit.get("exact_ref")
+            ]
+            response["delta"].update(
+                {
+                    "novel_ref_count": len(novel_refs),
+                    "novel_refs": novel_refs,
+                    "progress": bool(novel_refs),
+                    "termination_reason": (
+                        None if novel_refs else "no_novel_exact_ref"
+                    ),
+                }
+            )
+            encoded = json.dumps(response, ensure_ascii=False)
+        return encoded
     return json.dumps(response)
 
 
@@ -3527,6 +5344,12 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
     source_limit_arg = args.get("source_limit")
     source_limit = _parse_positive_int(source_limit_arg, 0) if source_limit_arg is not None else None
     content_offset = _parse_non_negative_int(args.get("content_offset", 0), 0)
+    raw_include_exact_ref = args.get("include_exact_ref", False)
+    if not isinstance(raw_include_exact_ref, bool):
+        return json.dumps({"error": "include_exact_ref must be a boolean"})
+    include_exact_ref = raw_include_exact_ref
+    if include_exact_ref and raw_store_id_arg is None:
+        return json.dumps({"error": "include_exact_ref is supported only with store_id mode"})
 
     if externalized_ref:
         payload = _get_externalized_payload(engine, externalized_ref)
@@ -3584,6 +5407,10 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
             "next_content_offset": sliced["next_content_offset"],
             "has_more": sliced["has_more"],
         }
+        if include_exact_ref and sliced["content_returned_chars"] > 0:
+            exact_start = sliced["content_offset"]
+            exact_end = exact_start + sliced["content_returned_chars"]
+            result["exact_ref"] = f"lcm:{store_id}:{exact_start}-{exact_end}"
         # Surface externalized-payload metadata when the row references one. Content
         # is not hydrated by default, mirroring the existing _expand_message_sources
         # default. Externalized lookup remains session-scoped (per the existing

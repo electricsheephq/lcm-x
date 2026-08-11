@@ -721,6 +721,14 @@ class CompactionMixin:
                         summary_input_chunk,
                         timeout_seconds=extraction_timeout,
                     )
+                if bool(
+                    getattr(
+                        self._config,
+                        "assertion_extraction_enabled",
+                        False,
+                    )
+                ):
+                    self._schedule_pre_compaction_assertions(summary_input_chunk)
 
                 try:
                     summary_kwargs: dict[str, Any] = {"focus_topic": focus_topic}

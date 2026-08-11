@@ -7,6 +7,7 @@ same schema-version marker, PRAGMA settings, and FTS repair behavior.
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 import logging
 import math
 import os
@@ -266,14 +267,30 @@ _V5_CORE_TABLE_COLUMNS: dict[str, frozenset[str]] = {
     }),
 }
 
+# Marker-gated, backward-compatible source-time sidecars. They are optional in
+# the v5 core-shape classifier because a legitimate pre-V4.2 database will not
+# have them until MessageStore opens it. Their presence is recognised, but an
+# unrelated extra core column still fails closed as a genuinely newer shape.
+_V5_CORE_OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
+    "messages": frozenset({"ingested_at", "observed_at", "observed_at_source"}),
+}
+
 # Core FTS5 virtual tables: presence is enough — their column layout is owned by
 # the FTS5 module, not by this schema contract.
 _V5_CORE_PRESENCE_ONLY = ("messages_fts", "nodes_fts")
 
 # Extra tables are tolerated only when they belong to a known opt-in feature
-# family (temporal-rollup / embedding / chunk) or are FTS5 shadow tables of the
-# core FTS indexes. Anything else means a newer build owns the schema.
-_KNOWN_FEATURE_TABLE_PREFIXES = ("lcm_rollup", "lcm_embedding", "lcm_chunk")
+# family (temporal-rollup / embedding / chunk / assertion / query-view /
+# trajectory) or are FTS5 shadow tables of the core FTS indexes. Anything else
+# means a newer build owns the schema.
+_KNOWN_FEATURE_TABLE_PREFIXES = (
+    "lcm_rollup",
+    "lcm_embedding",
+    "lcm_chunk",
+    "lcm_assertion",
+    "lcm_query",
+    "lcm_trajectory",
+)
 
 # The known opt-in feature families whose derived tables an interim build may
 # have created in an EARLY variant (missing later-added columns/tables). Each is
@@ -297,7 +314,14 @@ _INTERIM_FEATURE_FAMILIES: tuple[dict[str, str], ...] = (
         "prefix": "lcm_chunk",
         "rebuild_hint": "derived chunk cache — re-run `/lcm embed backfill --corpus chunks --apply`",
     },
+    {
+        "name": "assertion",
+        "prefix": "lcm_assertion",
+        "rebuild_hint": "derived assertion state — re-run the bounded assertion rebuild workflow",
+    },
 )
+
+_PRESERVED_FEATURE_FAMILIES = ("lcm_query", "lcm_trajectory")
 
 
 def _family_verifier(prefix: str):
@@ -310,6 +334,16 @@ def _family_verifier(prefix: str):
         return verify_embedding_schema
     if prefix == "lcm_chunk":
         return verify_chunk_schema
+    if prefix == "lcm_assertion":
+        return verify_assertion_schema
+    if prefix == "lcm_query":
+        from .query_view_store import _verify_query_view_schema
+
+        return _verify_query_view_schema
+    if prefix == "lcm_trajectory":
+        from .trajectory_store import _verify_trajectory_schema
+
+        return _verify_trajectory_schema
     return None
 
 
@@ -322,12 +356,35 @@ def _family_verifier(prefix: str):
 # (An early column that was later *renamed* surfaces as a collapsed
 # ``malformed table:`` finding on the embedding/chunk verifiers — not as
 # ``unexpected-column:`` — so it correctly stays on the safe early-variant path.)
-_NEWER_BUILD_FINDING_PREFIXES = ("unexpected-column:",)
+_NEWER_BUILD_FINDING_PREFIXES = (
+    "unexpected-column:",
+    "unexpected-table:",
+    "unexpected-index:",
+    "unexpected-trigger:",
+)
+
+# The assertion family has no shipped legacy shape. A same-name table, index,
+# or trigger whose semantics differ from this build therefore cannot be safely
+# identified as an early, rebuildable variant: it may belong to a future build.
+# Missing assertion objects remain an allowlisted interim signature, while
+# malformed same-name objects fail closed and are never dropped by downgrade
+# remediation. Older embedding/chunk families retain their established rename
+# handling.
+_ASSERTION_NEWER_BUILD_FINDING_PREFIXES = (
+    "malformed table:",
+    "malformed index:",
+    "malformed trigger:",
+)
 
 
-def _family_reports_newer_shape(findings: Iterable[str]) -> bool:
-    """True when any verifier finding is an extra/unknown-piece (newer) signature."""
-    return any(str(finding).startswith(_NEWER_BUILD_FINDING_PREFIXES) for finding in findings)
+def _family_reports_newer_shape(
+    findings: Iterable[str], *, family_prefix: str | None = None
+) -> bool:
+    """True when verifier findings cannot be safely treated as an early shape."""
+    prefixes = _NEWER_BUILD_FINDING_PREFIXES
+    if family_prefix == "lcm_assertion":
+        prefixes += _ASSERTION_NEWER_BUILD_FINDING_PREFIXES
+    return any(str(finding).startswith(prefixes) for finding in findings)
 
 
 def _user_table_names(conn: sqlite3.Connection) -> set[str]:
@@ -372,8 +429,8 @@ def classify_version_mismatch(conn: sqlite3.Connection) -> str:
         if table not in tables:
             return VERSION_MISMATCH_GENUINELY_NEWER
 
-    # Core tables must match the v5 column contract exactly — a missing or an
-    # unexpected column both mean this is not a v5-shaped DB.
+    # Core tables must contain every v5 column. Only explicitly recognised,
+    # backward-compatible sidecars may additionally be present.
     for table, expected in _V5_CORE_TABLE_COLUMNS.items():
         try:
             actual = {
@@ -382,7 +439,8 @@ def classify_version_mismatch(conn: sqlite3.Connection) -> str:
             }
         except sqlite3.DatabaseError:
             return VERSION_MISMATCH_GENUINELY_NEWER
-        if actual != set(expected):
+        optional = set(_V5_CORE_OPTIONAL_COLUMNS.get(table, ()))
+        if not set(expected).issubset(actual) or not actual.issubset(set(expected) | optional):
             return VERSION_MISMATCH_GENUINELY_NEWER
 
     # Any extra table must belong to a known feature family or be an FTS5 shadow.
@@ -415,7 +473,24 @@ def classify_version_mismatch(conn: sqlite3.Connection) -> str:
             findings = verify(conn)
         except sqlite3.DatabaseError:
             return VERSION_MISMATCH_GENUINELY_NEWER
-        if _family_reports_newer_shape(findings):
+        if _family_reports_newer_shape(findings, family_prefix=prefix):
+            return VERSION_MISMATCH_GENUINELY_NEWER
+
+    # Query views and trajectories are preserved source/derived records, not
+    # disposable caches. Their init paths cannot safely rebuild an unknown or
+    # partial shape after this routine lowers the numeric stamp, so every
+    # present family must match this build exactly before downgrade.
+    for prefix in _PRESERVED_FEATURE_FAMILIES:
+        if not any(table.startswith(prefix) for table in tables):
+            continue
+        verify = _family_verifier(prefix)
+        if verify is None:
+            return VERSION_MISMATCH_GENUINELY_NEWER
+        try:
+            findings = verify(conn)
+        except (ImportError, sqlite3.DatabaseError):
+            return VERSION_MISMATCH_GENUINELY_NEWER
+        if findings:
             return VERSION_MISMATCH_GENUINELY_NEWER
 
     return VERSION_MISMATCH_INTERIM_STAMP
@@ -447,7 +522,7 @@ def _interim_family_drops(conn: sqlite3.Connection) -> list[dict[str, object]]:
         if not findings:
             # Verifier clean — the family is at the final shape; keep it.
             continue
-        if _family_reports_newer_shape(findings):
+        if _family_reports_newer_shape(findings, family_prefix=prefix):
             # An extra/unknown column is a newer-build signature, never an early
             # interim variant — never drop it (defense in depth; the DB is
             # already classified genuinely-newer and remediation has refused).
@@ -1653,6 +1728,536 @@ def verify_chunk_schema(conn: sqlite3.Connection) -> list[str]:
         ):
             errors.append(f"malformed index: {index}")
     return sorted(set(errors))
+
+
+ASSERTION_MIGRATION_STEP = "assertion_store_v1"
+
+_ASSERTION_TABLE_COLUMNS: dict[str, frozenset[str]] = {
+    "lcm_assertion_sources": frozenset({
+        "source_store_id", "extraction_version", "source_content_sha256",
+        "source_session_id", "source_role", "source_name", "source_timestamp",
+        "candidate_digest", "assertion_count", "relation_count", "processed_at",
+        "invalidated_at", "invalidation_reason",
+    }),
+    "lcm_assertions": frozenset({
+        "assertion_id", "source_store_id", "extraction_version",
+        "source_content_sha256", "subject_key", "predicate_key", "object_json",
+        "value_text", "kind", "polarity", "strength", "scope_key",
+        "speaker_role", "observed_at", "event_at", "valid_from", "valid_to",
+        "source_span_start", "source_span_end", "source_quote", "confidence",
+        "created_at",
+    }),
+    "lcm_assertion_relations": frozenset({
+        "relation_id", "source_store_id", "extraction_version",
+        "source_content_sha256", "from_assertion_id", "relation_type",
+        "to_assertion_id", "source_span_start", "source_span_end",
+        "source_quote", "confidence", "created_at",
+    }),
+}
+
+_ASSERTION_INDEX_SHAPES: dict[
+    str,
+    tuple[str, tuple[tuple[str, int], ...], int, int, str | None],
+] = {
+    "idx_lcm_assertion_sources_current": (
+        "lcm_assertion_sources",
+        (("source_store_id", 0), ("extraction_version", 0)),
+        1,
+        1,
+        "invalidated_atisnull",
+    ),
+    "idx_lcm_assertions_source": (
+        "lcm_assertions",
+        (
+            ("source_store_id", 0),
+            ("extraction_version", 0),
+            ("source_content_sha256", 0),
+        ),
+        0,
+        0,
+        None,
+    ),
+    "idx_lcm_assertions_state": (
+        "lcm_assertions",
+        (
+            ("subject_key", 0),
+            ("predicate_key", 0),
+            ("kind", 0),
+            ("scope_key", 0),
+            ("observed_at", 1),
+        ),
+        0,
+        0,
+        None,
+    ),
+    "idx_lcm_assertion_relations_source": (
+        "lcm_assertion_relations",
+        (
+            ("source_store_id", 0),
+            ("extraction_version", 0),
+            ("source_content_sha256", 0),
+        ),
+        0,
+        0,
+        None,
+    ),
+    "idx_lcm_assertion_relations_from": (
+        "lcm_assertion_relations",
+        (("from_assertion_id", 0), ("relation_type", 0)),
+        0,
+        0,
+        None,
+    ),
+    "idx_lcm_assertion_relations_to": (
+        "lcm_assertion_relations",
+        (("to_assertion_id", 0), ("relation_type", 0)),
+        0,
+        0,
+        None,
+    ),
+}
+
+_ASSERTION_TRIGGER_FRAGMENTS: dict[str, tuple[str, ...]] = {
+    "lcm_assertion_source_insert_guard": (
+        "before insert on lcm_assertion_sources",
+        "from messages",
+        "coalesce(m.observed_at, m.timestamp) = new.source_timestamp",
+        "raise(abort, 'assertion source row is missing or metadata changed')",
+    ),
+    "lcm_assertion_row_insert_guard": (
+        "before insert on lcm_assertions",
+        "join lcm_assertion_sources",
+        "substr(coalesce(m.content, ''), new.source_span_start + 1",
+        "raise(abort, 'assertion source provenance mismatch')",
+    ),
+    "lcm_assertion_relation_insert_guard": (
+        "before insert on lcm_assertion_relations",
+        "from lcm_assertions",
+        "join lcm_assertion_sources",
+        "raise(abort, 'assertion relation provenance mismatch')",
+    ),
+    "lcm_assertion_message_update": (
+        "after update of content on messages",
+        "invalidation_reason = 'source_updated'",
+    ),
+    "lcm_assertion_message_delete": (
+        "after delete on messages",
+        "invalidation_reason = 'source_deleted'",
+    ),
+    "lcm_assertion_source_delete": (
+        "after delete on lcm_assertion_sources",
+        "delete from lcm_assertion_relations",
+        "delete from lcm_assertions",
+    ),
+}
+
+
+def ensure_assertion_tables(conn: sqlite3.Connection) -> None:
+    """Materialize the opt-in V4 assertion family in the existing ``lcm.db``."""
+    # This guard is owned by the rebuildable assertion family. Recreate it so
+    # databases opened after the optional source-time migration compare the
+    # derived observation time, with the legacy write timestamp as fallback.
+    conn.execute("DROP TRIGGER IF EXISTS lcm_assertion_source_insert_guard")
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS lcm_assertion_sources (
+            source_store_id INTEGER NOT NULL,
+            extraction_version TEXT NOT NULL
+                CHECK(length(trim(extraction_version)) BETWEEN 1 AND 128),
+            source_content_sha256 TEXT NOT NULL
+                CHECK(length(source_content_sha256) = 64),
+            source_session_id TEXT NOT NULL,
+            source_role TEXT NOT NULL,
+            source_name TEXT NOT NULL DEFAULT '',
+            source_timestamp REAL NOT NULL,
+            candidate_digest TEXT NOT NULL CHECK(length(candidate_digest) = 64),
+            assertion_count INTEGER NOT NULL DEFAULT 0 CHECK(assertion_count >= 0),
+            relation_count INTEGER NOT NULL DEFAULT 0 CHECK(relation_count >= 0),
+            processed_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+            invalidated_at REAL,
+            invalidation_reason TEXT,
+            PRIMARY KEY(source_store_id, extraction_version, source_content_sha256),
+            CHECK(
+                (invalidated_at IS NULL AND invalidation_reason IS NULL)
+                OR (invalidated_at IS NOT NULL AND length(trim(invalidation_reason)) > 0)
+            )
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_lcm_assertion_sources_current
+            ON lcm_assertion_sources(source_store_id, extraction_version)
+            WHERE invalidated_at IS NULL;
+
+        CREATE TABLE IF NOT EXISTS lcm_assertions (
+            assertion_id TEXT PRIMARY KEY CHECK(length(assertion_id) = 64),
+            source_store_id INTEGER NOT NULL,
+            extraction_version TEXT NOT NULL,
+            source_content_sha256 TEXT NOT NULL CHECK(length(source_content_sha256) = 64),
+            subject_key TEXT NOT NULL CHECK(length(trim(subject_key)) > 0),
+            predicate_key TEXT NOT NULL CHECK(length(trim(predicate_key)) > 0),
+            object_json TEXT NOT NULL,
+            value_text TEXT NOT NULL DEFAULT '',
+            kind TEXT NOT NULL CHECK(kind IN (
+                'fact', 'event', 'preference', 'recommendation', 'commitment',
+                'action', 'status', 'quotation'
+            )),
+            polarity TEXT NOT NULL CHECK(polarity IN ('positive', 'negative', 'unknown')),
+            strength REAL CHECK(strength IS NULL OR (strength >= 0.0 AND strength <= 1.0)),
+            scope_key TEXT NOT NULL DEFAULT '',
+            speaker_role TEXT NOT NULL DEFAULT '',
+            observed_at REAL NOT NULL,
+            event_at REAL,
+            valid_from REAL,
+            valid_to REAL,
+            source_span_start INTEGER NOT NULL CHECK(source_span_start >= 0),
+            source_span_end INTEGER NOT NULL CHECK(source_span_end > source_span_start),
+            source_quote TEXT NOT NULL,
+            confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
+            created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+            CHECK(valid_from IS NULL OR valid_to IS NULL OR valid_to > valid_from)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_lcm_assertions_source
+            ON lcm_assertions(source_store_id, extraction_version, source_content_sha256);
+        CREATE INDEX IF NOT EXISTS idx_lcm_assertions_state
+            ON lcm_assertions(subject_key, predicate_key, kind, scope_key, observed_at DESC);
+
+        CREATE TABLE IF NOT EXISTS lcm_assertion_relations (
+            relation_id TEXT PRIMARY KEY CHECK(length(relation_id) = 64),
+            source_store_id INTEGER NOT NULL,
+            extraction_version TEXT NOT NULL,
+            source_content_sha256 TEXT NOT NULL CHECK(length(source_content_sha256) = 64),
+            from_assertion_id TEXT NOT NULL,
+            relation_type TEXT NOT NULL CHECK(relation_type IN (
+                'confirms', 'supersedes', 'contradicts', 'narrows', 'weakens',
+                'reverses', 'cancels', 'fulfills', 'quotes'
+            )),
+            to_assertion_id TEXT NOT NULL,
+            source_span_start INTEGER NOT NULL CHECK(source_span_start >= 0),
+            source_span_end INTEGER NOT NULL CHECK(source_span_end > source_span_start),
+            source_quote TEXT NOT NULL,
+            confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
+            created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
+            CHECK(from_assertion_id <> to_assertion_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_lcm_assertion_relations_source
+            ON lcm_assertion_relations(source_store_id, extraction_version, source_content_sha256);
+        CREATE INDEX IF NOT EXISTS idx_lcm_assertion_relations_from
+            ON lcm_assertion_relations(from_assertion_id, relation_type);
+        CREATE INDEX IF NOT EXISTS idx_lcm_assertion_relations_to
+            ON lcm_assertion_relations(to_assertion_id, relation_type);
+
+        CREATE TRIGGER IF NOT EXISTS lcm_assertion_source_insert_guard
+        BEFORE INSERT ON lcm_assertion_sources
+        WHEN NOT EXISTS (
+            SELECT 1 FROM messages AS m
+            WHERE m.store_id = NEW.source_store_id
+              AND m.session_id = NEW.source_session_id
+              AND m.role = NEW.source_role
+              AND m.source = NEW.source_name
+              AND COALESCE(m.observed_at, m.timestamp) = NEW.source_timestamp
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'assertion source row is missing or metadata changed');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS lcm_assertion_row_insert_guard
+        BEFORE INSERT ON lcm_assertions
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM messages AS m
+            JOIN lcm_assertion_sources AS s
+              ON s.source_store_id = NEW.source_store_id
+             AND s.extraction_version = NEW.extraction_version
+             AND s.source_content_sha256 = NEW.source_content_sha256
+             AND s.invalidated_at IS NULL
+            WHERE m.store_id = NEW.source_store_id
+              AND NEW.source_span_end <= length(coalesce(m.content, ''))
+              AND substr(
+                    coalesce(m.content, ''),
+                    NEW.source_span_start + 1,
+                    NEW.source_span_end - NEW.source_span_start
+                  ) = NEW.source_quote
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'assertion source provenance mismatch');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS lcm_assertion_relation_insert_guard
+        BEFORE INSERT ON lcm_assertion_relations
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM messages AS m
+            JOIN lcm_assertion_sources AS s
+              ON s.source_store_id = NEW.source_store_id
+             AND s.extraction_version = NEW.extraction_version
+             AND s.source_content_sha256 = NEW.source_content_sha256
+             AND s.invalidated_at IS NULL
+            WHERE m.store_id = NEW.source_store_id
+              AND NEW.source_span_end <= length(coalesce(m.content, ''))
+              AND substr(
+                    coalesce(m.content, ''),
+                    NEW.source_span_start + 1,
+                    NEW.source_span_end - NEW.source_span_start
+                  ) = NEW.source_quote
+              AND EXISTS (
+                    SELECT 1
+                    FROM lcm_assertions AS endpoint
+                    JOIN lcm_assertion_sources AS endpoint_source
+                      ON endpoint_source.source_store_id = endpoint.source_store_id
+                     AND endpoint_source.extraction_version = endpoint.extraction_version
+                     AND endpoint_source.source_content_sha256 = endpoint.source_content_sha256
+                     AND endpoint_source.invalidated_at IS NULL
+                    WHERE endpoint.assertion_id = NEW.from_assertion_id
+                  )
+              AND EXISTS (
+                    SELECT 1
+                    FROM lcm_assertions AS endpoint
+                    JOIN lcm_assertion_sources AS endpoint_source
+                      ON endpoint_source.source_store_id = endpoint.source_store_id
+                     AND endpoint_source.extraction_version = endpoint.extraction_version
+                     AND endpoint_source.source_content_sha256 = endpoint.source_content_sha256
+                     AND endpoint_source.invalidated_at IS NULL
+                    WHERE endpoint.assertion_id = NEW.to_assertion_id
+                  )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'assertion relation provenance mismatch');
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS lcm_assertion_message_update
+        AFTER UPDATE OF content ON messages
+        WHEN OLD.content IS NOT NEW.content
+        BEGIN
+            UPDATE lcm_assertion_sources
+               SET invalidated_at = CAST(strftime('%s','now') AS REAL),
+                   invalidation_reason = 'source_updated'
+             WHERE source_store_id = OLD.store_id
+               AND invalidated_at IS NULL;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS lcm_assertion_message_delete
+        AFTER DELETE ON messages
+        BEGIN
+            UPDATE lcm_assertion_sources
+               SET invalidated_at = CAST(strftime('%s','now') AS REAL),
+                   invalidation_reason = 'source_deleted'
+             WHERE source_store_id = OLD.store_id
+               AND invalidated_at IS NULL;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS lcm_assertion_source_delete
+        AFTER DELETE ON lcm_assertion_sources
+        BEGIN
+            DELETE FROM lcm_assertion_relations
+             WHERE (
+                    source_store_id = OLD.source_store_id
+                AND extraction_version = OLD.extraction_version
+                AND source_content_sha256 = OLD.source_content_sha256
+             )
+                OR from_assertion_id IN (
+                    SELECT assertion_id FROM lcm_assertions
+                     WHERE source_store_id = OLD.source_store_id
+                       AND extraction_version = OLD.extraction_version
+                       AND source_content_sha256 = OLD.source_content_sha256
+                )
+                OR to_assertion_id IN (
+                    SELECT assertion_id FROM lcm_assertions
+                     WHERE source_store_id = OLD.source_store_id
+                       AND extraction_version = OLD.extraction_version
+                       AND source_content_sha256 = OLD.source_content_sha256
+                );
+            DELETE FROM lcm_assertions
+             WHERE source_store_id = OLD.source_store_id
+               AND extraction_version = OLD.extraction_version
+               AND source_content_sha256 = OLD.source_content_sha256;
+        END;
+        """
+    )
+
+
+@lru_cache(maxsize=1)
+def _expected_assertion_schema_contract() -> tuple[
+    dict[str, tuple[tuple[object, ...], ...]],
+    dict[str, frozenset[str]],
+    dict[str, str],
+]:
+    """Build the exact contract from this build's own idempotent DDL."""
+    scratch = sqlite3.connect(":memory:")
+    try:
+        scratch.execute(
+            """
+            CREATE TABLE messages(
+                store_id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                source TEXT DEFAULT '',
+                role TEXT NOT NULL,
+                content TEXT,
+                timestamp REAL NOT NULL
+            )
+            """
+        )
+        ensure_assertion_tables(scratch)
+        table_shapes = {
+            table: tuple(
+                (
+                    str(row[1]),
+                    str(row[2]).upper(),
+                    int(row[3]),
+                    int(row[5]),
+                    None if row[4] is None else str(row[4]).lower(),
+                )
+                for row in scratch.execute(f"PRAGMA table_info({table})")
+            )
+            for table in _ASSERTION_TABLE_COLUMNS
+        }
+        table_checks = {
+            table: frozenset(_sql_check_expressions(str(row[0] or "")))
+            for table in _ASSERTION_TABLE_COLUMNS
+            if (
+                row := scratch.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone()
+            )
+        }
+        trigger_sql = {
+            str(row[0]): re.sub(r"\s+", "", str(row[1] or "").lower()).rstrip(";")
+            for row in scratch.execute(
+                "SELECT name, sql FROM sqlite_master "
+                "WHERE type='trigger' AND name LIKE 'lcm_assertion%'"
+            )
+        }
+        return table_shapes, table_checks, trigger_sql
+    finally:
+        scratch.close()
+
+
+def verify_assertion_schema(conn: sqlite3.Connection) -> list[str]:
+    """Return shape findings for the optional assertion tables and triggers."""
+    findings: list[str] = []
+    expected_table_shapes, expected_table_checks, expected_trigger_sql = (
+        _expected_assertion_schema_contract()
+    )
+    present_assertion_tables = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name LIKE 'lcm_assertion%'"
+        )
+    }
+    present_assertion_indexes = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='index' AND name LIKE 'idx_lcm_assertion%'"
+        )
+    }
+    present_assertion_triggers = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='trigger' AND name LIKE 'lcm_assertion%'"
+        )
+    }
+    for table in sorted(present_assertion_tables - set(_ASSERTION_TABLE_COLUMNS)):
+        findings.append(f"unexpected-table:{table}")
+    for index in sorted(present_assertion_indexes - set(_ASSERTION_INDEX_SHAPES)):
+        findings.append(f"unexpected-index:{index}")
+    for trigger in sorted(present_assertion_triggers - set(_ASSERTION_TRIGGER_FRAGMENTS)):
+        findings.append(f"unexpected-trigger:{trigger}")
+    for table, expected_columns in _ASSERTION_TABLE_COLUMNS.items():
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?", (table,)
+        ).fetchone()
+        if row is None:
+            findings.append(f"table:{table}")
+            continue
+        actual_columns = {
+            str(column[1]) for column in conn.execute(f"PRAGMA table_info({table})")
+        }
+        for missing in sorted(expected_columns - actual_columns):
+            findings.append(f"column:{table}.{missing}")
+        for extra in sorted(actual_columns - expected_columns):
+            findings.append(f"unexpected-column:{table}.{extra}")
+        actual_shape = tuple(
+            (
+                str(column[1]),
+                str(column[2]).upper(),
+                int(column[3]),
+                int(column[5]),
+                None if column[4] is None else str(column[4]).lower(),
+            )
+            for column in conn.execute(f"PRAGMA table_info({table})")
+        )
+        sql_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        actual_checks = frozenset(
+            _sql_check_expressions(str(sql_row[0] if sql_row else ""))
+        )
+        if (
+            actual_shape != expected_table_shapes[table]
+            or actual_checks != expected_table_checks[table]
+        ):
+            findings.append(f"malformed table:{table}")
+
+    for index, (
+        table,
+        expected_columns,
+        expected_unique,
+        expected_partial,
+        expected_predicate,
+    ) in (
+        _ASSERTION_INDEX_SHAPES.items()
+    ):
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name = ?", (index,)
+        ).fetchone()
+        if row is None:
+            findings.append(f"index:{index}")
+            continue
+        actual_columns = tuple(
+            (str(item[2]), int(item[3]))
+            for item in conn.execute(f"PRAGMA index_xinfo({index})")
+            if int(item[5]) == 1 and item[2] is not None
+        )
+        index_meta = {
+            str(item[1]): (int(item[2]), int(item[4]))
+            for item in conn.execute(f"PRAGMA index_list({table})")
+        }
+        sql_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name = ?", (index,)
+        ).fetchone()
+        sql = " ".join(str(sql_row[0] if sql_row else "").lower().split())
+        actual_predicate = None
+        if " where " in sql:
+            actual_predicate = re.sub(r"\s+", "", sql.split(" where ", 1)[1]).rstrip(";")
+        if (
+            actual_columns != expected_columns
+            or index_meta.get(index) != (expected_unique, expected_partial)
+            or actual_predicate != expected_predicate
+        ):
+            findings.append(f"malformed index:{index}")
+
+    for trigger, required_fragments in _ASSERTION_TRIGGER_FRAGMENTS.items():
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name = ?",
+            (trigger,),
+        ).fetchone()
+        if row is None:
+            findings.append(f"trigger:{trigger}")
+            continue
+        normalized = re.sub(r"\s+", "", str(row[0] or "").lower()).rstrip(";")
+        if (
+            normalized != expected_trigger_sql.get(trigger, "")
+            or any(
+                re.sub(r"\s+", "", fragment.lower()).rstrip(";") not in normalized
+                for fragment in required_fragments
+            )
+        ):
+            findings.append(f"malformed trigger:{trigger}")
+    return sorted(set(findings))
 
 
 def mark_migration_step_complete(conn: sqlite3.Connection, step_name: str) -> None:

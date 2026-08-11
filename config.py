@@ -332,6 +332,25 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("extraction_enabled", "LCM_EXTRACTION_ENABLED", bool),
     _EnvFieldSpec("extraction_model", "LCM_EXTRACTION_MODEL", str),
     _EnvFieldSpec("extraction_output_path", "LCM_EXTRACTION_OUTPUT_PATH", str),
+    _EnvFieldSpec("assertions_enabled", "LCM_ASSERTIONS_ENABLED", bool),
+    _EnvFieldSpec("query_views_enabled", "LCM_QUERY_VIEWS_ENABLED", bool),
+    _EnvFieldSpec(
+        "adaptive_retrieval_enabled", "LCM_ADAPTIVE_RETRIEVAL_ENABLED", bool
+    ),
+    _EnvFieldSpec(
+        "assertion_extraction_enabled", "LCM_ASSERTION_EXTRACTION_ENABLED", bool
+    ),
+    _EnvFieldSpec("assertion_extraction_model", "LCM_ASSERTION_EXTRACTION_MODEL", str),
+    _EnvFieldSpec(
+        "assertion_extraction_max_sources_per_pass",
+        "LCM_ASSERTION_EXTRACTION_MAX_SOURCES_PER_PASS",
+        int,
+    ),
+    _EnvFieldSpec(
+        "assertion_extraction_timeout_seconds",
+        "LCM_ASSERTION_EXTRACTION_TIMEOUT_SECONDS",
+        float,
+    ),
     _EnvFieldSpec("sensitive_patterns_enabled", "LCM_SENSITIVE_PATTERNS_ENABLED", bool),
     _EnvFieldSpec("large_output_externalization_enabled", "LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED", bool),
     _EnvFieldSpec("large_output_externalization_threshold_chars", "LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS", int),
@@ -353,10 +372,17 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("embeddings_enabled", "LCM_EMBEDDINGS_ENABLED", bool),
     _EnvFieldSpec("rerank_enabled", "LCM_RERANK_ENABLED", bool),
     _EnvFieldSpec("recall_scan_rows", "LCM_RECALL_SCAN_ROWS", int),
+    _EnvFieldSpec("recall_scan_max_rows", "LCM_RECALL_SCAN_MAX_ROWS", int),
+    _EnvFieldSpec("recall_scan_budget_s", "LCM_RECALL_SCAN_BUDGET_S", float),
+    _EnvFieldSpec("recall_reference_strict", "LCM_RECALL_REFERENCE_STRICT", bool),
     _EnvFieldSpec("proactive_recall_enabled", "LCM_PROACTIVE_RECALL_ENABLED", bool),
     _EnvFieldSpec("proactive_recall_min_score", "LCM_PROACTIVE_RECALL_MIN_SCORE", float),
     _EnvFieldSpec("proactive_recall_budget_tokens", "LCM_PROACTIVE_RECALL_BUDGET_TOKENS", int),
     _EnvFieldSpec("proactive_recall_provider", "LCM_PROACTIVE_RECALL_PROVIDER", str),
+    _EnvFieldSpec("preanswer_evidence_enabled", "LCM_PREANSWER_EVIDENCE_ENABLED", bool),
+    _EnvFieldSpec("preanswer_evidence_mode", "LCM_PREANSWER_EVIDENCE_MODE", str),
+    _EnvFieldSpec("selective_compiler_enabled", "LCM_SELECTIVE_COMPILER_ENABLED", bool),
+    _EnvFieldSpec("selective_compiler_model", "LCM_SELECTIVE_COMPILER_MODEL", str),
     _EnvFieldSpec("embedding_bounded_scan_rows", "LCM_EMBEDDING_BOUNDED_SCAN_ROWS", int),
     _EnvFieldSpec("embedding_storage_dtype", "LCM_EMBEDDING_STORAGE_DTYPE", str),
     _EnvFieldSpec("embedding_store_dim", "LCM_EMBEDDING_STORE_DIM", int),
@@ -370,6 +396,9 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("recall_query_timeout_s", "LCM_RECALL_QUERY_TIMEOUT_S", float),
     _EnvFieldSpec("embedding_backfill_timeout_s", "LCM_EMBEDDING_BACKFILL_TIMEOUT_S", float),
     _EnvFieldSpec("embedding_max_batch_items", "LCM_EMBEDDING_MAX_BATCH_ITEMS", int),
+    _EnvFieldSpec("embedding_query_spend_max_calls", "LCM_EMBEDDING_QUERY_SPEND_MAX_CALLS", int),
+    _EnvFieldSpec("embedding_query_spend_window_seconds", "LCM_EMBEDDING_QUERY_SPEND_WINDOW_SECONDS", float),
+    _EnvFieldSpec("embedding_query_spend_backoff_seconds", "LCM_EMBEDDING_QUERY_SPEND_BACKOFF_SECONDS", float),
     _EnvFieldSpec("new_session_retain_depth", "LCM_NEW_SESSION_RETAIN_DEPTH", int),
     _EnvFieldSpec("doctor_clean_apply_enabled", "LCM_DOCTOR_CLEAN_APPLY_ENABLED", bool),
     _EnvFieldSpec("empty_lifecycle_gc_enabled", "LCM_EMPTY_LIFECYCLE_GC_ENABLED", bool),
@@ -495,6 +524,27 @@ class LCMConfig:
     # Directory for daily extraction files (empty = auto: ~/.hermes/lcm-extractions/)
     extraction_output_path: str = ""
 
+    # -- V4 assertion sidecar --
+    # Materializes the rebuildable assertion tables in the same profile lcm.db.
+    # This does not enable extraction or backfill; it only binds schema/read APIs.
+    assertions_enabled: bool = False
+    # Materializes demand-shaped query evidence views in the same profile DB.
+    # Default off; enabling this store does not invoke a model or retrieval provider.
+    query_views_enabled: bool = False
+    # Exposes the bounded single-turn retrieval controller. Enabling it also
+    # binds the same-database query-view store needed for warm evidence reuse.
+    # The controller itself never invokes a model or provider.
+    adaptive_retrieval_enabled: bool = False
+    # Enables the separate structured exact-row extractor. Default off: merely
+    # enabling the assertion store never performs a model/provider call.
+    assertion_extraction_enabled: bool = False
+    # Empty falls back to extraction_model, then summary_model.
+    assertion_extraction_model: str = ""
+    # Per pre-compaction batch. Runtime clamps to [1, 8].
+    assertion_extraction_max_sources_per_pass: int = 4
+    # Per exact source provider call. Runtime clamps to [0.1, 120] seconds.
+    assertion_extraction_timeout_seconds: float = 30.0
+
     # -- Sensitive-pattern handling ---
     # Disabled by default. When enabled, named patterns redact matching secrets
     # before LCM storage, FTS indexing, summarization, or externalization.
@@ -583,12 +633,26 @@ class LCMConfig:
     # rescore) KNN: M = knn_prescreen_multiplier x k survivors are rescored.
     # Larger widens the approximate prescreen toward exact recall at more cost.
     knn_prescreen_multiplier: int = 4
-    # lcm_recall candidate-scan bound. lcm_recall promises "all conversations,
-    # all time", so it must NOT inherit the small recency-truncating grep bound
-    # above (that structurally hides the oldest memories). This larger bound
-    # (still deadline-guarded) lets recall cover a realistic forever-memory
-    # corpus while capping worst-case cost on a very large one.
+    # lcm_recall candidate-scan BATCH SIZE. lcm_recall promises "all
+    # conversations, all time", so it must NOT inherit the small
+    # recency-truncating grep bound above (that structurally hides the oldest
+    # memories). It used to be a hard bound, which made the promise false at
+    # scale: at 185k vectors it scored only the 25k most-recent and recall for
+    # ageing content went to zero (FINDING-F31 §2). The scan now covers the
+    # WHOLE corpus and this value bounds only how many vectors are resident per
+    # batch (a running top-k spans the batches), so it trades peak memory, not
+    # coverage.
     recall_scan_rows: int = 25_000
+    # Hard candidate cap for the lcm_recall scan; 0 = unlimited (the default:
+    # cover everything). Set it only for a pathological corpus -- a capped scan
+    # reports coverage='bounded' and discloses the scanned/total ratio, exactly
+    # as the old recency window did.
+    recall_scan_max_rows: int = 0
+    # Optional hard latency budget for the lcm_recall scan, in seconds; 0 = no
+    # early stop (the default). When set, a scan that overruns it stops between
+    # batches and degrades to coverage='bounded' rather than silently paying an
+    # unbounded cost. This is the ONLY thing that truncates a default scan.
+    recall_scan_budget_s: float = 0.0
     # Per-arm RRF fusion weights for lcm_recall's 3-arm hybrid (fts/summary/chunk).
     # Down-weighting the weak FTS arm keeps naive equal-weight fusion from dragging
     # fused recall below its best (vector) arm — measured −21 R@5 on LongMemEval.
@@ -596,6 +660,16 @@ class LCMConfig:
     recall_arm_weights: dict[str, float] = field(
         default_factory=lambda: dict(_DEFAULT_RECALL_ARM_WEIGHTS)
     )
+    # Reference-strict delivery for detail='answer_ready' (FINDING-F35 §2): a hit
+    # that cannot carry a truthful (store_id, char_start, char_end) source span is
+    # never delivered as evidence; the next-ranked citable hit takes its slot and
+    # the omission count is surfaced in provenance.answer_ready. ON by default --
+    # delivering evidence the product cannot cite is a correctness defect, and the
+    # consumers that validate references fail CLOSED on an unreferenced card, so a
+    # single uncitable hit destroys the whole response. Set False only for a host
+    # that renders recall without citations and wants summary hits back; disabled,
+    # the answer_ready response is byte-identical to the pre-F35 delivery.
+    recall_reference_strict: bool = True
     # -- Proactive memory injection (SPEC F, default-OFF) ---
     # At active-context assembly, embed the newest user message and run the
     # lcm_recall pipeline to surface cross-session memories the model would
@@ -615,6 +689,20 @@ class LCMConfig:
     # keep a local fastembed provider for the offline injection path even when
     # interactive search uses voyage). Empty => reuse the main provider/model.
     proactive_recall_provider: str = ""
+    # Product-owned automatic evidence validation at the official
+    # ``pre_llm_call`` seam. Default-off preserves the exact ordinary hook
+    # context and performs no retrieval or computation work.
+    preanswer_evidence_enabled: bool = False
+    # Empty preserves the historical boolean-only behavior: when the master
+    # flag is true it resolves to ``legacy_selective``. Explicit values are
+    # off | legacy_selective | requirements_v1. The master flag remains the
+    # default-off activation boundary.
+    preanswer_evidence_mode: str = ""
+    # Optional minimal semantic selector for code-derived closed operations.
+    # It is independent and default-off; enabling pre-answer evidence alone
+    # still performs only the provider-free session-bundle path.
+    selective_compiler_enabled: bool = False
+    selective_compiler_model: str = ""
     embedding_provider: str = ""
     embedding_model: str = ""
     # Content-aware chunk policy for the raw-history chunk corpus:
@@ -636,6 +724,18 @@ class LCMConfig:
     # Voyage caps a single embeddings request at 1000 input items; document
     # batches split at this many items in addition to the token budget.
     embedding_max_batch_items: int = 1000
+    # Sliding-window spend guard for the latency-sensitive QUERY embedding path
+    # (resolve_provider(for_backfill=False)). The historical hardcoded default
+    # was 60 calls / 60s window / 60s backoff -- a backfill-economy control that
+    # silently gutted retrieval when a tight query loop (e.g. a benchmark firing
+    # hundreds of query embeds in a minute) crossed 60 calls and every further
+    # call was rejected pre-network with ProviderRateLimited (~9k tokens for 451
+    # query embeds is negligible spend, so the low ceiling bought nothing). The
+    # default is now generous; max_calls=0 disables the guard entirely. Backfill
+    # keeps its own bulk contract (max_calls=0) and is unaffected.
+    embedding_query_spend_max_calls: int = 600
+    embedding_query_spend_window_seconds: float = 60.0
+    embedding_query_spend_backoff_seconds: float = 60.0
 
     # -- Session carry-over ---
     # Depth retained after /new (-1 = all, 0 = nothing, 2 = keep d2+)
