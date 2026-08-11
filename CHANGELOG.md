@@ -6,6 +6,16 @@ This repo also publishes GitHub Releases. This file is the repo-root release sur
 
 No additional changes yet.
 
+## v0.21.0-rc2 - 2026-08-05
+
+### Changed
+
+- #492 corrects the optional `tiktoken` trajectory-state chunking path to
+  preserve UTF-8 character boundaries while keeping each decoded chunk within
+  its token budget. If the budget cannot contain one complete Unicode
+  character, the path fails explicitly instead of emitting replacement
+  characters.
+
 ## v0.21.0-rc1 - 2026-08-03
 
 ### Highlights
