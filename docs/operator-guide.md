@@ -146,10 +146,12 @@ For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
 best-effort git identity:
 `plugin_git_commit`, `plugin_git_branch`, and `plugin_git_dirty`.
 
-The product-owned recall policy is injected through the host's ephemeral
-`pre_llm_call` user-context seam only after an LCM engine is bound to the
-session. It does not modify the system prompt or activate when another context
-engine is serving the turn. Its canonical file and digest source is
+The product-owned recall policy is distributed through the bundled
+`hermes-lcm` skill. It is deliberately not injected through the host's
+`pre_llm_call` user-context seam because current Hermes persists that context
+as user `api_content` and replays it on later turns. Bounded pre-answer
+evidence may still use the hook when explicitly enabled, but the hook never
+prepends the policy. The canonical file and digest source is
 `skills/hermes-lcm/references/recall-policy.md`.
 
 ## Troubleshooting

@@ -146,7 +146,13 @@ def test_stable_active_use_blocks_rebind_and_keeps_ingest_in_original_session(tm
             ],
         )
         lifecycle_rows = engine._store.search("late lifecycle payload")
-        assert lifecycle_rows == []
+        assert len(lifecycle_rows) == 1
+        assert lifecycle_rows[0]["session_id"] == "session-a"
+        assert lifecycle_rows[0]["conversation_id"] == "conversation-a"
+        assert all(
+            row["session_id"] != "session-b"
+            for row in lifecycle_rows
+        )
 
         def reject_reentrant_rebind(selected):
             with pytest.raises(RuntimeError, match="during stable engine use"):
@@ -12386,7 +12392,7 @@ class TestPostCompactionIngestion:
         """
         database_path = str(tmp_path / "session-end-binding-lock.db")
         engine = LCMEngine(config=LCMConfig(database_path=database_path))
-        underlying_lifecycle_lock = engine._session_lifecycle_lock
+        underlying_lifecycle_lock = engine._stable_use_lock
         snapshot = self._summary_only_snapshot()
         a_tail = {"role": "user", "content": "A-only tail must not land under B"}
         paused_before_reconcile = threading.Event()
@@ -12423,7 +12429,7 @@ class TestPostCompactionIngestion:
                     underlying_lifecycle_lock.release()
                     return False
 
-            engine._session_lifecycle_lock = ObservedLifecycleLock()
+            engine._stable_use_lock = ObservedLifecycleLock()
             original_ingest = engine._ingest_messages
 
             def pause_a_before_reconcile(messages, *, allow_session_end_replay_proof=False):
@@ -12480,7 +12486,7 @@ class TestPostCompactionIngestion:
                 end_thread.join(timeout=5)
             if rebind_thread is not None:
                 rebind_thread.join(timeout=5)
-            engine._session_lifecycle_lock = underlying_lifecycle_lock
+            engine._stable_use_lock = underlying_lifecycle_lock
             engine.shutdown()
 
     def test_plain_history_session_end_records_no_compacted_snapshot_metadata(self, tmp_path):
