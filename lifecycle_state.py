@@ -25,6 +25,10 @@ class LifecycleBindingChangedError(RuntimeError):
     """Raised when publication loses its active session binding."""
 
 
+class LifecyclePublicationConflictError(RuntimeError):
+    """Raised when compaction publication cannot prove its source frontier."""
+
+
 def _synchronized(method):
     """Serialize a read-modify-write method on the store's reentrant lock.
 
@@ -925,3 +929,99 @@ class LifecycleStateStore:
         raise LifecycleBindingChangedError(
             "Lifecycle session binding changed during summary publication"
         )
+
+    def stage_compaction_publication(
+        self,
+        conn: sqlite3.Connection,
+        conversation_id: str,
+        session_id: str,
+        expected_frontier_store_id: int,
+        covered_store_ids: list[int],
+        excluded_store_ids: list[int] | None = None,
+    ) -> int:
+        """Validate and stage one contiguous compaction-frontier advance.
+
+        The caller owns the transaction and inserts the summary node before this
+        callback. Any exception therefore rolls back both the node and frontier.
+        ``expected_frontier_store_id`` is the optimistic publication generation:
+        the lifecycle row must still hold that exact value.
+        """
+        expected_frontier = max(0, int(expected_frontier_store_id or 0))
+        covered_ids = sorted(
+            {
+                int(store_id)
+                for store_id in covered_store_ids
+                if int(store_id) > expected_frontier
+            }
+        )
+        if not covered_ids:
+            raise LifecyclePublicationConflictError(
+                "Compaction publication has no new durable source coverage"
+            )
+        covered_end = covered_ids[-1]
+        excluded_ids = sorted(
+            {
+                int(store_id)
+                for store_id in (excluded_store_ids or [])
+                if expected_frontier < int(store_id) <= covered_end
+            }
+        )
+        if set(covered_ids) & set(excluded_ids):
+            raise LifecyclePublicationConflictError(
+                "Compaction publication coverage overlaps an explicit exclusion"
+            )
+        rows = conn.execute(
+            """
+            SELECT store_id, conversation_id
+            FROM messages
+            WHERE session_id = ? AND store_id > ? AND store_id <= ?
+            ORDER BY store_id
+            """,
+            (session_id, expected_frontier, covered_end),
+        ).fetchall()
+        authoritative_ids = [int(row[0]) for row in rows]
+        proven_ids = sorted(covered_ids + excluded_ids)
+        if authoritative_ids != proven_ids:
+            raise LifecyclePublicationConflictError(
+                "Compaction publication source coverage is not contiguous "
+                f"(expected_frontier={expected_frontier}, "
+                f"authoritative={authoritative_ids}, covered={covered_ids}, "
+                f"excluded={excluded_ids})"
+            )
+        if any(
+            str(row[1] or "").strip() not in {"", conversation_id}
+            for row in rows
+        ):
+            raise LifecyclePublicationConflictError(
+                "Compaction publication source ownership changed"
+            )
+
+        row = conn.execute(
+            """
+            SELECT current_session_id, current_frontier_store_id
+            FROM lcm_lifecycle_state
+            WHERE conversation_id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(
+                "Cannot publish summary without lifecycle state"
+            )
+        if str(row[0] or "") != session_id:
+            raise LifecycleBindingChangedError(
+                "Lifecycle session binding changed during summary publication"
+            )
+        actual_frontier = int(row[1] or 0)
+        if actual_frontier != expected_frontier:
+            raise LifecyclePublicationConflictError(
+                "Compaction publication frontier generation changed "
+                f"(expected={expected_frontier}, actual={actual_frontier})"
+            )
+        self.stage_frontier_advance(
+            conn,
+            conversation_id,
+            session_id,
+            covered_end,
+        )
+        return covered_end
