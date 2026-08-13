@@ -3167,6 +3167,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             source=source,
             conversation_id=conversation_id,
             metadata_factory=self._real_user_scaffold_metadata_rows,
+            metadata_messages=kept,
         )
 
     def on_session_end(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
@@ -4869,6 +4870,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             source=self._session_platform,
             conversation_id=self._conversation_id,
             metadata_factory=self._real_user_scaffold_metadata_rows,
+            metadata_messages=[
+                msg for _idx, msg in messages_to_store_with_index
+            ],
         )
         # Rollup staleness is driven by summary-node PUBLICATION
         # (_invalidate_rollups_for_published_node at every add_node site), not by

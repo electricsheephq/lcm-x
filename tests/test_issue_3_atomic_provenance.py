@@ -69,7 +69,13 @@ def test_provenance_failure_rolls_back_message_batch(
 
 def test_late_session_end_suffix_commits_scaffold_provenance(tmp_path) -> None:
     engine = LCMEngine(
-        config=LCMConfig(database_path=str(tmp_path / "issue-3-late-end.db"))
+        config=LCMConfig(
+            database_path=str(tmp_path / "issue-3-late-end.db"),
+            large_output_externalization_enabled=True,
+            large_output_externalization_threshold_chars=20,
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        ),
+        hermes_home=str(tmp_path / "home"),
     )
     engine.on_session_start(
         "session-a",
@@ -86,6 +92,38 @@ def test_late_session_end_suffix_commits_scaffold_provenance(tmp_path) -> None:
         engine.on_session_end("session-a", [_literal_scaffold()])
         rows = engine._store.get_session_messages("session-a")
         assert len(rows) == 1
+        assert rows[0]["content"].startswith(
+            "[Externalized payload: kind=raw_payload;"
+        )
+        assert engine._has_real_user_scaffold_provenance(rows[0]["store_id"])
+    finally:
+        engine.shutdown()
+
+
+def test_externalized_user_scaffold_keeps_original_occurrence_provenance(
+    tmp_path,
+) -> None:
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "issue-3-externalized.db"),
+            large_output_externalization_enabled=True,
+            large_output_externalization_threshold_chars=20,
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    engine.on_session_start(
+        "issue-3-externalized",
+        platform="cli",
+        context_length=200_000,
+    )
+
+    try:
+        engine._ingest_messages([_literal_scaffold()])
+        rows = engine._store.get_session_messages(engine._session_id)
+        assert rows[0]["content"].startswith(
+            "[Externalized payload: kind=raw_payload;"
+        )
         assert engine._has_real_user_scaffold_provenance(rows[0]["store_id"])
     finally:
         engine.shutdown()
