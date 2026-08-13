@@ -452,7 +452,16 @@ class MessageStore:
                                 messages: List[Dict[str, Any]],
                                 token_estimates: List[int] | None = None,
                                 source: str = "",
-                                conversation_id: str = "") -> List[int]:
+                                conversation_id: str = "",
+                                metadata_factory: Optional[
+                                    Callable[
+                                        [Dict[str, Any], int],
+                                        List[tuple[str, str]],
+                                    ]
+                                ] = None,
+                                metadata_messages: Optional[
+                                    List[Dict[str, Any]]
+                                ] = None) -> List[int]:
         """Persist messages that already passed ingest protection.
 
         This is an internal fast path for callers that need the protected form
@@ -462,10 +471,14 @@ class MessageStore:
         """
         if token_estimates is None:
             token_estimates = [0] * len(messages)
+        if metadata_messages is not None and len(metadata_messages) != len(messages):
+            raise ValueError(
+                "metadata_messages must align one-to-one with protected messages"
+            )
 
         ids = []
         with self._write_lock, self._conn:
-            for msg, est in zip(messages, token_estimates):
+            for index, (msg, est) in enumerate(zip(messages, token_estimates)):
                 tc = msg.get("tool_calls")
                 tc_json = json.dumps(tc) if tc else None
                 ts = time.time()
@@ -493,7 +506,23 @@ class MessageStore:
                         "host_message_timestamp" if observed_at is not None else None,
                     ),
                 )
-                ids.append(cur.lastrowid)
+                store_id = int(cur.lastrowid)
+                ids.append(store_id)
+                if metadata_factory is not None:
+                    metadata_message = (
+                        metadata_messages[index]
+                        if metadata_messages is not None
+                        else msg
+                    )
+                    for key, value in metadata_factory(metadata_message, store_id):
+                        self._conn.execute(
+                            """
+                            INSERT INTO metadata(key, value)
+                            VALUES(?, ?)
+                            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                            """,
+                            (key, value),
+                        )
         return ids
 
     def reassign_session_messages(self, old_session_id: str, new_session_id: str) -> int:

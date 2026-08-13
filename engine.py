@@ -1975,6 +1975,57 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 return selected, boundary
             load_limit = min(total_count, max(load_limit + 1, load_limit * 2))
 
+    def _is_scaffold_shaped_user_message(self, message: Dict[str, Any]) -> bool:
+        """Return whether a user message has the shape of generated context."""
+        return bool(
+            isinstance(message, dict)
+            and message.get("role") == "user"
+            and (
+                self._is_context_summary_content(message.get("content"))
+                or self._is_replayed_context_scaffold_message(message)
+                or self._is_preserved_todo_context_message(message)
+            )
+        )
+
+    @staticmethod
+    def _real_user_scaffold_provenance_key(store_id: int) -> str:
+        return f"real_user_scaffold_store_id:{int(store_id)}"
+
+    def _real_user_scaffold_metadata_rows(
+        self,
+        message: Dict[str, Any],
+        store_id: int,
+    ) -> List[tuple[str, str]]:
+        """Build metadata committed atomically with a scaffold-shaped user row."""
+        if not self._is_scaffold_shaped_user_message(message):
+            return []
+        return [
+            (
+                self._real_user_scaffold_provenance_key(store_id),
+                json.dumps(
+                    {"version": 1, "kind": "user-authored-scaffold"},
+                    sort_keys=True,
+                ),
+            )
+        ]
+
+    def _has_real_user_scaffold_provenance(self, store_id: int) -> bool:
+        try:
+            payload = self._store.read_metadata_json(
+                self._real_user_scaffold_provenance_key(store_id)
+            )
+        except Exception:
+            logger.debug(
+                "LCM real-user scaffold provenance read failed",
+                exc_info=True,
+            )
+            return False
+        return bool(
+            isinstance(payload, dict)
+            and payload.get("version") == 1
+            and payload.get("kind") == "user-authored-scaffold"
+        )
+
     @staticmethod
     def _leading_anchor_count(messages: List[Dict[str, Any]]) -> int:
         """Return the number of non-compactable leading messages.
@@ -3115,6 +3166,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             [count_message_tokens(msg) for msg in protected_messages],
             source=source,
             conversation_id=conversation_id,
+            metadata_factory=self._real_user_scaffold_metadata_rows,
+            metadata_messages=kept,
         )
 
     def on_session_end(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
@@ -4816,6 +4869,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             estimates,
             source=self._session_platform,
             conversation_id=self._conversation_id,
+            metadata_factory=self._real_user_scaffold_metadata_rows,
+            metadata_messages=[
+                msg for _idx, msg in messages_to_store_with_index
+            ],
         )
         # Rollup staleness is driven by summary-node PUBLICATION
         # (_invalidate_rollups_for_published_node at every add_node site), not by
