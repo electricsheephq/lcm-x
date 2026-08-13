@@ -599,6 +599,18 @@ class ReconcileMixin:
         raw_session_count: int,
         allow_session_end_replay_proof: bool = False,
     ) -> int | None:
+        active_lineage_identities = self._active_folded_tail_identity_overrides(
+            messages
+        )
+
+        def active_identity(
+            message: Dict[str, Any],
+        ) -> tuple[str, str, str, str]:
+            return active_lineage_identities.get(
+                id(message),
+                self._message_replay_identity(message),
+            )
+
         sanitized_replay_tail = self._stored_tail_for_sanitized_active_replay(stored_tail)
         effective_session_count = len(sanitized_replay_tail)
         sanitized_tail_collapsed = len(sanitized_replay_tail) < len(stored_tail)
@@ -650,7 +662,7 @@ class ReconcileMixin:
                 and not (
                     self._compiled_ignore_message_patterns
                     and self._is_quarantined_assistant_replay_identity(
-                        self._message_replay_identity(msg)
+                        active_identity(msg)
                     )
                     and self._matches_ignore_message_patterns(msg, stored_row=True)
                 )
@@ -660,7 +672,7 @@ class ReconcileMixin:
                 self._is_replayed_context_scaffold_message(msg) for msg in candidate_messages
             )
             candidate_has_quarantined_replay_evidence = any(
-                self._is_quarantined_assistant_replay_identity(self._message_replay_identity(msg))
+                self._is_quarantined_assistant_replay_identity(active_identity(msg))
                 for msg in candidate_messages
             )
             candidate_identity_messages = (
@@ -669,11 +681,11 @@ class ReconcileMixin:
                 else candidate_visible_messages
             )
             candidate_visible_prefix = [
-                self._message_replay_identity(msg)
+                active_identity(msg)
                 for msg in candidate_visible_messages
             ]
             candidate_prefix = [
-                self._message_replay_identity(msg)
+                active_identity(msg)
                 for msg in candidate_identity_messages
             ]
             if not candidate_prefix:
@@ -697,16 +709,37 @@ class ReconcileMixin:
                 if allow_session_end_replay_proof
                 else ""
             )
+            has_registered_engine_snapshot = (
+                bool(engine_snapshot_digest)
+                and engine_snapshot_digest in engine_snapshot_digests
+            )
+            has_ordered_folded_snapshot_mapping = False
+            if has_registered_engine_snapshot and active_lineage_identities:
+                candidate_store_ids = self._get_store_id_map_for_messages(
+                    candidate_identity_messages
+                )
+                ordered_store_ids = [
+                    int(candidate_store_ids.get(id(message)) or 0)
+                    for message in candidate_identity_messages
+                ]
+                has_ordered_folded_snapshot_mapping = (
+                    bool(ordered_store_ids)
+                    and all(store_id > 0 for store_id in ordered_store_ids)
+                    and ordered_store_ids == sorted(set(ordered_store_ids))
+                )
             has_durable_compacted_snapshot_replay = (
                 (
-                    bool(engine_snapshot_digest)
-                    and engine_snapshot_digest in engine_snapshot_digests
+                    has_registered_engine_snapshot
                 )
                 or (
                     bool(session_end_snapshot_digest)
                     and session_end_snapshot_digest in session_end_snapshot_digests
                 )
-            ) and (matches_sanitized_tail or matches_raw_tail)
+            ) and (
+                matches_sanitized_tail
+                or matches_raw_tail
+                or has_ordered_folded_snapshot_mapping
+            )
             matches_visible_sanitized_tail = (
                 filtered_candidate_placeholders
                 and bool(candidate_visible_prefix)
@@ -773,6 +806,7 @@ class ReconcileMixin:
                 and not matches_raw_tail
                 and not matches_inline_generation_cleanup_tail
                 and not matches_durable_persisted_output_full_replay
+                and not has_durable_compacted_snapshot_replay
             ):
                 continue
 
@@ -799,7 +833,7 @@ class ReconcileMixin:
                 or (
                     self._compiled_ignore_message_patterns
                     and self._is_quarantined_assistant_replay_identity(
-                        self._message_replay_identity(msg)
+                        active_identity(msg)
                     )
                     and self._matches_ignore_message_patterns(msg, stored_row=True)
                 )
@@ -966,8 +1000,14 @@ class ReconcileMixin:
         self,
         messages: List[Dict[str, Any]],
     ) -> list[tuple[str, str, str, str]]:
+        active_lineage_identities = self._active_folded_tail_identity_overrides(
+            messages
+        )
         return [
-            self._message_replay_identity(msg)
+            active_lineage_identities.get(
+                id(msg),
+                self._message_replay_identity(msg),
+            )
             for msg in messages
             if not self._is_replayed_context_scaffold_message(msg)
             and not self._matches_ignore_message_patterns(msg)
@@ -1296,6 +1336,29 @@ class ReconcileMixin:
             logger.debug("LCM folded-tail lineage metadata load failed", exc_info=True)
             return None
 
+    def _active_folded_tail_identity_overrides(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> dict[int, tuple[str, str, str, str]]:
+        """Return exact active-to-source identity overrides for one durable fold."""
+        folded_lineage = self._load_folded_tail_lineage(messages)
+        if folded_lineage is None:
+            return {}
+        folded_message, source_row = folded_lineage
+        return {
+            id(folded_message): self._message_replay_identity(
+                source_row,
+                stored_row=True,
+            )
+        }
+
+    def _is_registered_folded_tail_message(
+        self,
+        message: Dict[str, Any],
+    ) -> bool:
+        """Return whether ``message`` is the unique active durable fold."""
+        return bool(self._active_folded_tail_identity_overrides([message]))
+
     def _get_store_id_map_for_messages(self, messages: List[Dict[str, Any]]) -> dict[int, int]:
         """Map current raw message objects back to store_ids in stable order.
 
@@ -1313,13 +1376,12 @@ class ReconcileMixin:
         old row hijack another occurrence.
         """
         candidates: list[Dict[str, Any]] = []
-        active_lineage_identities: dict[int, tuple[str, str, str, str]] = {}
+        active_lineage_identities = self._active_folded_tail_identity_overrides(
+            messages
+        )
         folded_lineage = self._load_folded_tail_lineage(messages)
         if folded_lineage is not None:
-            folded_message, source_row = folded_lineage
-            active_lineage_identities[id(folded_message)] = (
-                self._message_replay_identity(source_row, stored_row=True)
-            )
+            _folded_message, source_row = folded_lineage
             if int(source_row.get("store_id") or 0) <= int(
                 self._last_compacted_store_id or 0
             ):

@@ -103,6 +103,7 @@ class CompactionMixin:
         if self._session_id and messages:
             try:
                 replay_messages = self._ingest_messages(messages)
+                self._prepare_retained_user_anchor(replay_messages)
                 self._record_ingest_success()
             except Exception as e:
                 # Fail closed for NORMAL threshold compaction: the store did not

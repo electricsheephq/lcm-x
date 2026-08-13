@@ -4495,6 +4495,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
 
     def _is_replayed_context_scaffold_message(self, msg: Dict[str, Any]) -> bool:
         """Return true for active-context scaffolding that should not be re-ingested."""
+        if self._is_registered_folded_tail_message(msg):
+            return False
         role = str(msg.get("role") or "")
         content = normalize_content_value(msg.get("content")) or ""
         if role == "system":
@@ -5993,6 +5995,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 {"type": "text", "text": generated_context},
                 *content,
             ]
+        elif isinstance(content, dict):
+            merged["content"] = [
+                {"type": "text", "text": generated_context},
+                content.copy(),
+            ]
         else:
             normalized = normalize_content_value(content) or ""
             merged["content"] = (
@@ -6463,6 +6470,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     trimmed_result.append(trimmed)
             result = self._sanitize_active_context_messages(trimmed_result)
 
+        existing_folded_lineage = self._load_folded_tail_lineage(result)
         if (
             folded_result_index is not None
             and folded_original_tail is not None
@@ -6475,7 +6483,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 result[folded_result_index] = folded_original_tail
                 result = self._sanitize_active_context_messages(result)
                 self._clear_folded_tail_lineage()
-        else:
+        elif existing_folded_lineage is None:
             self._clear_folded_tail_lineage()
 
         # Persist proof only for the exact provider-visible compacted snapshot

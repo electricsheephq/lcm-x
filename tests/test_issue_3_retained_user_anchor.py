@@ -6,6 +6,7 @@ import hermes_lcm.engine as lcm_engine
 
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.tokens import count_messages_tokens
 
 
 def _tool_chain(*, count: int = 8, content_size: int = 160) -> list[dict]:
@@ -325,6 +326,157 @@ def test_structured_assistant_tail_keeps_content_and_lineage(tmp_path) -> None:
     assert mapped[id(folded)] == store_id
 
 
+def test_dictionary_assistant_tail_keeps_structured_content(tmp_path) -> None:
+    config = LCMConfig(
+        database_path=str(tmp_path / "issue-3-fold-dictionary.db"),
+    )
+    engine = LCMEngine(config=config)
+    engine.on_session_start(
+        "issue-3-fold-dictionary",
+        platform="cli",
+        context_length=200_000,
+    )
+    source = {
+        "role": "assistant",
+        "content": {"type": "text", "text": "dictionary assistant text"},
+        "metadata": {"provider": "test"},
+    }
+
+    try:
+        store_id = engine._store.append_batch(engine._session_id, [source])[0]
+        folded = engine._prepend_generated_context_to_message(
+            source,
+            "[Recent Summary (d0, node 1)]\nsummary",
+        )
+        assert engine._write_folded_tail_lineage(folded, store_id)
+        engine._last_compacted_store_id = store_id
+        mapped = engine._get_store_id_map_for_messages([folded])
+    finally:
+        engine.shutdown()
+
+    assert folded["content"] == [
+        {"type": "text", "text": "[Recent Summary (d0, node 1)]\nsummary"},
+        source["content"],
+    ]
+    assert folded["metadata"] == source["metadata"]
+    assert mapped[id(folded)] == store_id
+
+
+def test_folded_source_is_summarized_after_leaving_fresh_tail(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = LCMConfig(
+        fresh_tail_count=4,
+        leaf_chunk_tokens=1,
+        database_path=str(tmp_path / "issue-3-fold-backlog.db"),
+    )
+    engine = LCMEngine(config=config)
+    engine.on_session_start(
+        "issue-3-fold-backlog",
+        platform="cli",
+        context_length=200_000,
+    )
+    captured: list[str] = []
+
+    def capture_summary(**kwargs) -> tuple[str, int]:
+        captured.append(kwargs["text"])
+        return _summary(**kwargs)
+
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", capture_summary)
+    user_prompt = {"role": "user", "content": "sole user for folded backlog"}
+
+    try:
+        first = engine.compress(
+            [
+                {"role": "system", "content": "stable system prompt"},
+                user_prompt,
+                *_tool_chain(),
+            ]
+        )
+        folded_source = next(
+            row
+            for row in engine._store.get_session_messages(engine._session_id)
+            if row.get("tool_calls") == first[2].get("tool_calls")
+        )
+        captured.clear()
+        second = engine.compress(
+            [
+                *first,
+                {
+                    "role": "assistant",
+                    "content": "later tool work",
+                    "tool_calls": [
+                        {
+                            "id": "issue_3_later",
+                            "type": "function",
+                            "function": {"name": "terminal", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "issue_3_later",
+                    "content": "later tool result",
+                },
+                {"role": "assistant", "content": "later assistant tail"},
+            ]
+        )
+        summarized_source_ids = {
+            source_id
+            for node in engine._dag.get_session_nodes(engine._session_id)
+            for source_id in node.source_ids
+        }
+    finally:
+        engine.shutdown()
+
+    assert any(folded_source["content"] in text for text in captured)
+    assert folded_source["store_id"] in summarized_source_ids
+    _assert_provider_sequence(second)
+
+
+def test_tight_reassembly_keeps_existing_fold_lineage(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = LCMConfig(
+        fresh_tail_count=4,
+        leaf_chunk_tokens=1,
+        database_path=str(tmp_path / "issue-3-fold-tight.db"),
+    )
+    engine = LCMEngine(config=config)
+    engine.on_session_start(
+        "issue-3-fold-tight",
+        platform="cli",
+        context_length=200_000,
+    )
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _summary)
+
+    try:
+        first = engine.compress(
+            [
+                {"role": "system", "content": "stable system prompt"},
+                {"role": "user", "content": "sole user for tight reassembly"},
+                *_tool_chain(),
+            ]
+        )
+        source_map = engine._get_store_id_map_for_messages(first[1:])
+        folded_store_id = source_map[id(first[2])]
+        reassembled = engine._assemble_context(
+            first[0],
+            first[2:],
+            assembly_cap_override=count_messages_tokens(first),
+            include_lcm_note=False,
+            retained_user_message=first[1],
+        )
+        remapped = engine._get_store_id_map_for_messages(reassembled[1:])
+    finally:
+        engine.shutdown()
+
+    assert reassembled[2] == first[2]
+    assert remapped[id(reassembled[2])] == folded_store_id
+
+
 def test_folded_tail_lineage_survives_restart(tmp_path, monkeypatch) -> None:
     database_path = tmp_path / "issue-3-fold-restart.db"
     config = LCMConfig(
@@ -359,12 +511,57 @@ def test_folded_tail_lineage_survives_restart(tmp_path, monkeypatch) -> None:
             platform="cli",
             context_length=200_000,
         )
+        rows_before_replay = second._store.get_session_count(second._session_id)
+        should_compress = second.should_compress_preflight(result)
+        rows_after_replay = second._store.get_session_count(second._session_id)
+        reconciliation = second._last_ingest_reconciliation
         restarted = second._get_store_id_map_for_messages(result[1:])
     finally:
         second.shutdown()
 
+    assert should_compress is False
+    assert rows_after_replay == rows_before_replay, reconciliation
     assert restarted[id(result[2])] == expected_folded_store_id
     assert id(result[1]) in restarted
+
+
+def test_preflight_second_user_invalidates_prepared_anchor(
+    tmp_path,
+) -> None:
+    config = LCMConfig(
+        fresh_tail_count=1,
+        leaf_chunk_tokens=1,
+        context_threshold=0.01,
+        database_path=str(tmp_path / "issue-3-preflight-second-user.db"),
+    )
+    engine = LCMEngine(config=config)
+    engine.on_session_start(
+        "issue-3-preflight-second-user",
+        platform="cli",
+        context_length=200_000,
+    )
+    first = [
+        {"role": "system", "content": "stable system prompt"},
+        {"role": "user", "content": "first and initially sole user"},
+    ]
+
+    try:
+        engine.compress(first)
+        assert engine._leading_anchor_count(first) == 2
+        engine.threshold_tokens = 1
+        messages = [
+            *first,
+            {"role": "user", "content": "second user invalidates the anchor"},
+        ]
+        should_compress = engine.should_compress_preflight(messages)
+        anchor_metadata = engine._store.read_metadata_json(
+            engine._retained_user_anchor_metadata_key()
+        )
+    finally:
+        engine.shutdown()
+
+    assert should_compress is True
+    assert anchor_metadata == {"store_id": 0, "version": 1}
 
 
 def test_second_real_user_disqualifies_first_raw_anchor(
