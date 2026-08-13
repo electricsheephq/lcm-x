@@ -65,3 +65,27 @@ def test_provenance_failure_rolls_back_message_batch(
         assert engine._store.get_session_count(engine._session_id) == 0
     finally:
         engine.shutdown()
+
+
+def test_late_session_end_suffix_commits_scaffold_provenance(tmp_path) -> None:
+    engine = LCMEngine(
+        config=LCMConfig(database_path=str(tmp_path / "issue-3-late-end.db"))
+    )
+    engine.on_session_start(
+        "session-a",
+        platform="cli",
+        context_length=200_000,
+    )
+    engine.on_session_start(
+        "session-b",
+        platform="cli",
+        context_length=200_000,
+    )
+
+    try:
+        engine.on_session_end("session-a", [_literal_scaffold()])
+        rows = engine._store.get_session_messages("session-a")
+        assert len(rows) == 1
+        assert engine._has_real_user_scaffold_provenance(rows[0]["store_id"])
+    finally:
+        engine.shutdown()

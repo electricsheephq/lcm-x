@@ -3166,6 +3166,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             [count_message_tokens(msg) for msg in protected_messages],
             source=source,
             conversation_id=conversation_id,
+            metadata_factory=self._real_user_scaffold_metadata_rows,
         )
 
     def on_session_end(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
