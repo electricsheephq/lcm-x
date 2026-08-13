@@ -4,7 +4,7 @@ Use this page when you need the exact LCM tool contract or archive-migration not
 
 ## Agent Tools
 
-Hermes-LCM's bundled skill and active recall policy route current-session,
+Hermes-LCM's bundled skill and recall-policy reference route current-session,
 cross-conversation, and time-bounded questions through these tools. Use
 `session_search` for Hermes-tracked history that is not present in `lcm.db`.
 
@@ -19,9 +19,9 @@ Recommended escalation:
   `lcm_evidence_pack`/`lcm_compute`.
 
 `lcm_expand` is known-handle drill-down, not broad first-step discovery. The
-canonical runtime policy is
-`skills/hermes-lcm/references/recall-policy.md` and is injected only while LCM
-is the active context engine.
+canonical policy is `skills/hermes-lcm/references/recall-policy.md`. It is
+distributed as product-owned skill guidance, not injected into user
+`api_content`.
 
 | Tool | Use |
 |------|-----|

@@ -162,8 +162,14 @@ def _effective_preanswer_mode(config) -> str:
     return raw if raw in {"off", "legacy_selective", "requirements_v1"} else "off"
 
 
-def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
-    """Keep ordinary baseline bytes, or add one bounded product-owned delta."""
+def _pre_llm_context(active_engine, payload: dict) -> dict | None:
+    """Return bounded evidence only when it is materially available.
+
+    Hermes persists ``pre_llm_call`` context in the current user's
+    ``api_content`` and replays that sidecar on later provider requests.
+    Product policy must therefore stay in the bundled skill instead of this
+    user-attributed hook seam.
+    """
     enabled_toolsets = payload.get("enabled_toolsets")
     context_engine_enabled = not (
         isinstance(enabled_toolsets, (list, tuple, set, frozenset))
@@ -172,11 +178,11 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
     config = getattr(active_engine, "_config", None)
     mode = _effective_preanswer_mode(config)
     if mode == "off" or not context_engine_enabled:
-        return {"context": recall_policy}
+        return None
     try:
         question = str(payload.get("user_message") or "").strip()
         if not question:
-            return {"context": recall_policy}
+            return None
         question_date = _hook_question_date(payload)
 
         if mode == "requirements_v1":
@@ -185,7 +191,7 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
 
             contract = compile_answer_contract(question, question_date)
             if contract.status != "planned":
-                return {"context": recall_policy}
+                return None
             baseline_was_internal = not isinstance(
                 payload.get("baseline_refs"), (list, tuple)
             )
@@ -207,8 +213,8 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
                 pass
             context = result.get("context") if isinstance(result, dict) else None
             if not isinstance(context, str) or not context:
-                return {"context": recall_policy}
-            return {"context": f"{recall_policy}\n\n{context}"}
+                return None
+            return {"context": context}
 
         from .selective_recall import (
             build_selective_session_bundle,
@@ -217,9 +223,10 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
 
         route = route_selective_recall(question, question_date)
         if route["route"] == "ordinary":
-            # This branch deliberately performs no recall, session load, or
-            # auxiliary-model call.  The ordinary policy bytes stay identical.
-            return {"context": recall_policy}
+            # This branch deliberately performs no recall, session load,
+            # auxiliary-model call, or user-attributed product-policy
+            # injection.
+            return None
 
         # Official Hermes hook payloads do not currently include answer-ready
         # refs.  Create that bounded baseline in product code when absent; the
@@ -284,7 +291,7 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
                 logger.warning("LCM selective compiler failed open: %s", exc)
     except Exception as exc:  # pragma: no cover - outer host safety net
         logger.warning("LCM pre-answer evidence failed open: %s", exc)
-        return {"context": recall_policy}
+        return None
     try:
         active_engine._last_preanswer_evidence_trace = (
             {
@@ -306,8 +313,8 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
         if isinstance(value, str) and value:
             augmentations.append(value)
     if not augmentations:
-        return {"context": recall_policy}
-    return {"context": f"{recall_policy}\n\n" + "\n\n".join(augmentations)}
+        return None
+    return {"context": "\n\n".join(augmentations)}
 
 
 def register(ctx):
@@ -398,11 +405,10 @@ def register(ctx):
         # Hermes invokes this hook after the context engine has received
         # on_session_start(). Resolve through LCM's own registry so merely
         # loading the plugin cannot inject guidance when another context
-        # engine is serving the turn. Capture one validated policy value for
-        # deterministic, byte-stable injection across eligible turns.
+        # engine is serving the turn. The hook may add bounded evidence, but
+        # product policy remains in the bundled skill because current Hermes
+        # persists hook context as user-attributed ``api_content``.
         try:
-            recall_policy = get_recall_policy()
-
             def _on_pre_llm_call(**payload):
                 session_id = str(payload.get("session_id") or "")
                 conversation_id = str(
@@ -413,7 +419,6 @@ def register(ctx):
                 result = use_active_lcm_engine(
                     lambda active_engine: _pre_llm_context(
                         active_engine,
-                        recall_policy,
                         payload,
                     ),
                     session_id=session_id,
