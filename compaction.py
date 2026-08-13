@@ -103,6 +103,7 @@ class CompactionMixin:
         if self._session_id and messages:
             try:
                 replay_messages = self._ingest_messages(messages)
+                self._prepare_retained_user_anchor(replay_messages)
                 self._record_ingest_success()
             except Exception as e:
                 # Fail closed for NORMAL threshold compaction: the store did not
@@ -860,6 +861,11 @@ class CompactionMixin:
                     working_messages[0] if leading_anchor_count else None,
                     working_messages[leading_anchor_count:],
                     assembly_cap_override=recovery_assembly_cap,
+                    **(
+                        {"retained_user_message": working_messages[1]}
+                        if leading_anchor_count == 2
+                        else {}
+                    ),
                 )
                 return self._finalize_forced_overflow_result(
                     working_messages,
@@ -880,6 +886,11 @@ class CompactionMixin:
                         active_context_messages[0] if leading_anchor_count else None,
                         active_context_messages[leading_anchor_count:],
                         assembly_cap_override=recovery_assembly_cap,
+                        **(
+                            {"retained_user_message": active_context_messages[1]}
+                            if leading_anchor_count == 2
+                            else {}
+                        ),
                     )
                 finally:
                     self._pending_context_anchor_messages = None
@@ -963,6 +974,11 @@ class CompactionMixin:
                 working_messages[0] if leading_anchor_count else None,
                 working_messages[leading_anchor_count:],
                 assembly_cap_override=recovery_assembly_cap,
+                **(
+                    {"retained_user_message": working_messages[1]}
+                    if leading_anchor_count == 2
+                    else {}
+                ),
             )
         finally:
             self._pending_context_anchor_messages = None
