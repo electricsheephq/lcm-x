@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import types
 
 
@@ -1309,6 +1310,96 @@ def test_post_llm_hook_resolves_registered_active_clone_without_host_context_com
     assert ctx.engine.current_session_id == ""
     active_clone.shutdown()
     ctx.engine.shutdown()
+
+
+def test_post_llm_hook_keeps_ingest_binding_stable_during_concurrent_rebind(
+    monkeypatch,
+    tmp_path,
+):
+    module = _load_plugin_entrypoint_module("hermes_lcm_post_hook_stable_rebind")
+    manager = types.SimpleNamespace(_hooks={})
+    fake_plugins = types.SimpleNamespace(get_plugin_manager=lambda: manager)
+    fake_hermes_cli = types.SimpleNamespace(plugins=fake_plugins)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", fake_plugins)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
+
+    class _CtxNoTool:
+        def register_context_engine(self, engine):
+            self.engine = engine
+
+    ctx = _CtxNoTool()
+    module.register(ctx)
+    active_clone = ctx.engine.clone_for_agent()
+    active_clone.on_session_start(
+        "session-a",
+        platform="discord",
+        conversation_id="conversation-a",
+    )
+    original_ingest = active_clone.ingest
+    ingest_started = threading.Event()
+    release_ingest = threading.Event()
+    rebind_finished = threading.Event()
+    thread_errors = []
+
+    def paused_ingest(messages):
+        ingest_started.set()
+        assert release_ingest.wait(timeout=2)
+        original_ingest(messages)
+
+    def call_hook():
+        try:
+            manager._hooks["post_llm_call"][-1](
+                session_id="session-a",
+                conversation_id="conversation-a",
+                platform="discord",
+                conversation_history=[
+                    {"role": "user", "content": "payload owned by session A"}
+                ],
+            )
+        except Exception as exc:
+            thread_errors.append(exc)
+
+    def rebind():
+        try:
+            active_clone.on_session_start(
+                "session-b",
+                platform="discord",
+                conversation_id="conversation-b",
+            )
+            rebind_finished.set()
+        except Exception as exc:
+            thread_errors.append(exc)
+
+    hook_thread = threading.Thread(target=call_hook)
+    rebind_thread = threading.Thread(target=rebind)
+    try:
+        monkeypatch.setattr(active_clone, "ingest", paused_ingest)
+        hook_thread.start()
+        assert ingest_started.wait(timeout=2)
+        rebind_thread.start()
+        assert not rebind_finished.wait(timeout=0.05)
+        release_ingest.set()
+        hook_thread.join(timeout=2)
+        rebind_thread.join(timeout=2)
+        assert not hook_thread.is_alive()
+        assert not rebind_thread.is_alive()
+        assert thread_errors == []
+
+        rows_a = active_clone._store.get_range(
+            "session-a",
+            conversation_id="conversation-a",
+        )
+        rows_b = active_clone._store.get_range(
+            "session-b",
+            conversation_id="conversation-b",
+        )
+        assert [row["content"] for row in rows_a] == ["payload owned by session A"]
+        assert rows_b == []
+    finally:
+        release_ingest.set()
+        active_clone.shutdown()
+        ctx.engine.shutdown()
 
 
 def test_post_llm_hook_ignores_stale_registered_clone_after_rebind(monkeypatch, tmp_path):
