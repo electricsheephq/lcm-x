@@ -1365,7 +1365,7 @@ def test_post_llm_hook_ignores_stale_registered_clone_after_rebind(monkeypatch, 
             assert singleton_ingests == []
         else:
             assert clone_ingests == []
-            assert singleton_ingests == [history]
+            assert singleton_ingests == []
         assert active_clone.current_session_id == "session-b"
         assert active_clone.current_conversation_id == "agent:main:discord:thread:b:b"
 
@@ -1415,6 +1415,20 @@ def test_post_llm_hook_prefers_active_lcm_clone(monkeypatch, tmp_path):
             self.current_conversation_id = kwargs.get("conversation_id") or session_id
             self.starts.append((session_id, kwargs))
 
+        def _on_session_start_unlocked(self, session_id, **kwargs):
+            self.on_session_start(session_id, **kwargs)
+
+        def _run_stably(self, operation, **_kwargs):
+            from hermes_lcm.engine_registry import (
+                ActiveEngineUseResult,
+                ActiveEngineUseStatus,
+            )
+
+            return ActiveEngineUseResult(
+                ActiveEngineUseStatus.USED,
+                operation(self),
+            )
+
         def ingest(self, history):
             self.ingested.append(list(history))
 
@@ -1444,7 +1458,7 @@ def test_post_llm_hook_prefers_active_lcm_clone(monkeypatch, tmp_path):
     ctx.engine.shutdown()
 
 
-def test_post_llm_hook_rebinds_legacy_singleton_between_gateway_lanes(monkeypatch, tmp_path):
+def test_post_llm_hook_does_not_rebind_live_singleton_on_exact_alias_miss(monkeypatch, tmp_path):
     module = _load_plugin_entrypoint_module("hermes_lcm_post_hook_singleton_rebind")
     manager = types.SimpleNamespace(_hooks={})
     fake_plugins = types.SimpleNamespace(get_plugin_manager=lambda: manager)
@@ -1498,11 +1512,7 @@ def test_post_llm_hook_rebinds_legacy_singleton_between_gateway_lanes(monkeypatc
             "discord",
             [{"role": "user", "content": "topic a"}],
         ),
-        (
-            "telegram-dm",
-            "agent:main:telegram:private:1782862480",
-            "telegram",
-            [{"role": "user", "content": "telegram dm"}],
-        ),
     ]
+    assert ctx.engine.current_session_id == "discord-topic-a"
+    assert ctx.engine.current_conversation_id == "agent:main:discord:thread:a:a"
     ctx.engine.shutdown()

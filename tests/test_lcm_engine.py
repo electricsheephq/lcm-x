@@ -21,6 +21,10 @@ from agent.context_engine import ContextEngine
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.engine_registry import (
+    ActiveEngineUseStatus,
+    use_active_lcm_engine,
+)
 from hermes_lcm.externalize import externalize_ingest_payload
 from hermes_lcm.tokens import count_message_tokens, count_messages_tokens
 
@@ -64,6 +68,146 @@ def test_shutdown_closes_lifecycle_store(tmp_path):
     engine.shutdown()
 
     assert engine._lifecycle._conn is None
+
+
+def test_stable_active_use_blocks_rebind_and_keeps_ingest_in_original_session(tmp_path):
+    config = LCMConfig(database_path=str(tmp_path / "stable-active-use.db"))
+    engine = LCMEngine(config=config)
+    use_started = threading.Event()
+    release_use = threading.Event()
+    rebind_started = threading.Event()
+    rebind_finished = threading.Event()
+    result_holder = {}
+    try:
+        engine.on_session_start(
+            "session-a",
+            platform="discord",
+            conversation_id="conversation-a",
+        )
+
+        def use_session_a():
+            def ingest_while_stable(selected):
+                use_started.set()
+                assert release_use.wait(timeout=2)
+                selected.ingest([{"role": "user", "content": "stable payload for A"}])
+
+            result_holder["use"] = use_active_lcm_engine(
+                ingest_while_stable,
+                session_id="session-a",
+                conversation_id="conversation-a",
+            )
+
+        def rebind_to_b():
+            rebind_started.set()
+            engine.on_session_start(
+                "session-b",
+                platform="discord",
+                conversation_id="conversation-b",
+            )
+            rebind_finished.set()
+
+        use_thread = threading.Thread(target=use_session_a)
+        rebind_thread = threading.Thread(target=rebind_to_b)
+        use_thread.start()
+        assert use_started.wait(timeout=2)
+        rebind_thread.start()
+        assert rebind_started.wait(timeout=2)
+        assert not rebind_finished.wait(timeout=0.05)
+        assert engine.bound_session_id == "session-a"
+
+        release_use.set()
+        use_thread.join(timeout=2)
+        rebind_thread.join(timeout=2)
+        assert not use_thread.is_alive()
+        assert not rebind_thread.is_alive()
+        assert result_holder["use"].status is ActiveEngineUseStatus.USED
+        assert engine.bound_session_id == "session-b"
+
+        rows = engine._store.search("stable payload")
+        assert len(rows) == 1
+        assert rows[0]["session_id"] == "session-a"
+        assert rows[0]["conversation_id"] == "conversation-a"
+
+        late_a = use_active_lcm_engine(
+            lambda selected: selected.ingest(
+                [{"role": "user", "content": "late stale payload for A"}]
+            ),
+            session_id="session-a",
+            conversation_id="conversation-a",
+        )
+        assert late_a.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT
+        assert engine._store.search("late stale payload") == []
+
+        engine.on_session_end(
+            "session-a",
+            [
+                {"role": "user", "content": "stable payload for A"},
+                {"role": "assistant", "content": "late lifecycle payload for A"},
+            ],
+        )
+        lifecycle_rows = engine._store.search("late lifecycle payload")
+        assert lifecycle_rows == []
+
+        def reject_reentrant_rebind(selected):
+            with pytest.raises(RuntimeError, match="during stable engine use"):
+                selected.on_session_start(
+                    "session-c",
+                    conversation_id="conversation-c",
+                )
+            return selected.bound_session_id
+
+        reentrant = use_active_lcm_engine(
+            reject_reentrant_rebind,
+            session_id="session-b",
+            conversation_id="conversation-b",
+        )
+        assert reentrant.status is ActiveEngineUseStatus.USED
+        assert reentrant.value == "session-b"
+        assert engine.bound_session_id == "session-b"
+    finally:
+        release_use.set()
+        engine.shutdown()
+
+
+def test_shutdown_waits_for_stable_use_and_is_terminal_and_idempotent(tmp_path):
+    config = LCMConfig(database_path=str(tmp_path / "stable-shutdown.db"))
+    engine = LCMEngine(config=config)
+    operation_started = threading.Event()
+    release_operation = threading.Event()
+    shutdown_finished = threading.Event()
+    try:
+        engine.on_session_start("session-a", conversation_id="conversation-a")
+
+        def hold_engine(selected):
+            operation_started.set()
+            assert release_operation.wait(timeout=2)
+
+        use_thread = threading.Thread(
+            target=lambda: use_active_lcm_engine(
+                hold_engine,
+                session_id="session-a",
+                conversation_id="conversation-a",
+            )
+        )
+        shutdown_thread = threading.Thread(
+            target=lambda: (engine.shutdown(), shutdown_finished.set())
+        )
+        use_thread.start()
+        assert operation_started.wait(timeout=2)
+        shutdown_thread.start()
+        assert not shutdown_finished.wait(timeout=0.05)
+
+        release_operation.set()
+        use_thread.join(timeout=2)
+        shutdown_thread.join(timeout=2)
+        assert shutdown_finished.is_set()
+        engine.shutdown()
+
+        closed = engine._run_stably(lambda selected: selected)
+        assert closed.status is ActiveEngineUseStatus.CLOSED_ENGINE
+    finally:
+        release_operation.set()
+        engine.shutdown()
 
 
 def test_assertion_store_is_default_off_and_closes_when_enabled(tmp_path):
