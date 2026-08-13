@@ -877,3 +877,30 @@ class LifecycleStateStore:
                 return self.get_by_conversation(conversation_id)
             conn.commit()
             return self.get_by_conversation(conversation_id)
+
+    @staticmethod
+    def stage_frontier_advance(
+        conn: sqlite3.Connection,
+        conversation_id: str,
+        session_id: str,
+        frontier_store_id: int,
+    ) -> None:
+        """Stage a monotonic frontier advance in a caller-owned transaction."""
+        cursor = conn.execute(
+            """
+            UPDATE lcm_lifecycle_state
+            SET current_frontier_store_id = MAX(current_frontier_store_id, ?),
+                updated_at = ?
+            WHERE conversation_id = ? AND current_session_id = ?
+            """,
+            (
+                int(frontier_store_id or 0),
+                time.time(),
+                conversation_id,
+                session_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError(
+                "Cannot publish summary for an unbound lifecycle session"
+            )

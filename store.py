@@ -1566,6 +1566,12 @@ class MessageStore:
         """
         return self._conn
 
+    def rollback_pending_write(self) -> None:
+        """Roll back this store's transaction under its connection-owner lock."""
+        with self._write_lock:
+            if self._conn is not None and self._conn.in_transaction:
+                self._conn.rollback()
+
     def commit(self) -> None:
         """Commit pending writes on the store connection.
 

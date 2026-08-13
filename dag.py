@@ -245,8 +245,17 @@ class SummaryDAG:
 
     # -- Write --------------------------------------------------------------
 
-    def add_node(self, node: SummaryNode) -> int:
-        """Insert a summary node and return its node_id."""
+    def add_node(
+        self,
+        node: SummaryNode,
+        *,
+        before_commit: Callable[[sqlite3.Connection, int], None] | None = None,
+    ) -> int:
+        """Insert a summary node and return its node_id.
+
+        ``before_commit`` may stage related writes on this connection.  The
+        callback and node insert then commit or roll back as one transaction.
+        """
         with self._db_lock:
             conn = self._conn
             if conn is None:
@@ -274,7 +283,10 @@ class SummaryDAG:
                 )
                 if cur.lastrowid is None:
                     raise RuntimeError("SQLite did not return a summary node id")
-                return int(cur.lastrowid)
+                node_id = int(cur.lastrowid)
+                if before_commit is not None:
+                    before_commit(conn, node_id)
+                return node_id
 
             node.node_id = _run_sqlite_write_with_snapshot_retry(
                 conn,
