@@ -427,6 +427,7 @@ class CompactionMixin:
         # replay-safe view so quarantined assistant loops do not enter summaries
         # or provider context after the durable row has been written.
         working_messages = self._ingest_messages(messages)
+        self._prepare_retained_user_anchor(working_messages)
         ingest_cleanup_changed_active_context = working_messages != messages
         cleanup_only_due_to_boundary_cooldown = bool(
             self._preflight_cleanup_only_due_to_boundary_cooldown

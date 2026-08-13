@@ -2026,6 +2026,189 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             and payload.get("kind") == "user-authored-scaffold"
         )
 
+    def _durable_real_user_messages(
+        self,
+        *,
+        stop_after: int = 2,
+        after_store_id: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Return up to ``stop_after`` durable prompt-bearing user occurrences."""
+        if not self._session_id or stop_after <= 0:
+            return []
+        durable_users: List[Dict[str, Any]] = []
+        cursor_store_id = max(0, int(after_store_id))
+        try:
+            while len(durable_users) < stop_after:
+                rows = self._store.load_session_page(
+                    self._session_id,
+                    after_store_id=cursor_store_id,
+                    limit=1000,
+                    roles=["user"],
+                )
+                if not rows:
+                    break
+                for row in rows:
+                    store_id = int(row.get("store_id") or 0)
+                    cursor_store_id = max(cursor_store_id, store_id)
+                    content = normalize_content_value(row.get("content")) or ""
+                    if (
+                        not content.strip()
+                        or self._matches_ignore_message_patterns(row, stored_row=True)
+                    ):
+                        continue
+                    if (
+                        self._is_scaffold_shaped_user_message(row)
+                        and not self._has_real_user_scaffold_provenance(store_id)
+                    ):
+                        continue
+                    durable_users.append(row)
+                    if len(durable_users) >= stop_after:
+                        break
+                if len(rows) < 1000:
+                    break
+        except Exception:
+            logger.debug("LCM durable real-user lookup failed", exc_info=True)
+            return []
+        return durable_users
+
+    def _retained_user_anchor_metadata_key(self) -> str:
+        return self._replay_snapshot_metadata_key("retained_user_anchor")
+
+    def _retained_user_anchor_identity_digest(
+        self,
+        message: Dict[str, Any],
+        *,
+        stored_row: bool = False,
+    ) -> str:
+        identity = self._message_replay_identity(
+            message,
+            stored_row=stored_row,
+        )
+        serialized = json.dumps(
+            list(identity),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _write_retained_user_anchor(self, row: Optional[Dict[str, Any]]) -> bool:
+        """Persist one exact retained-user occurrence, or an explicit empty marker."""
+        if not self._session_id:
+            return False
+        payload: Dict[str, Any] = {"version": 1, "store_id": 0}
+        if row is not None:
+            store_id = int(row.get("store_id") or 0)
+            if store_id <= 0:
+                return False
+            payload = {
+                "version": 1,
+                "store_id": store_id,
+                "identity_sha256": self._retained_user_anchor_identity_digest(
+                    row,
+                    stored_row=True,
+                ),
+            }
+        try:
+            self._store.write_metadata_json(
+                [self._retained_user_anchor_metadata_key()],
+                json.dumps(payload, sort_keys=True),
+                skip_unchanged=True,
+            )
+        except Exception:
+            logger.debug("LCM retained-user anchor metadata write failed", exc_info=True)
+            return False
+        return True
+
+    def _load_retained_user_anchor_row(self) -> Optional[Dict[str, Any]]:
+        """Load the exact registered row, rejecting missing or stale metadata."""
+        if not self._session_id:
+            return None
+        try:
+            payload = self._store.read_metadata_json(
+                self._retained_user_anchor_metadata_key()
+            )
+            if not isinstance(payload, dict) or payload.get("version") != 1:
+                return None
+            store_id = int(payload.get("store_id") or 0)
+            expected_digest = str(payload.get("identity_sha256") or "")
+            if store_id <= 0 or not expected_digest:
+                return None
+            rows = self._store.load_session_page(
+                self._session_id,
+                after_store_id=store_id - 1,
+                limit=1,
+            )
+            if not rows or int(rows[0].get("store_id") or 0) != store_id:
+                return None
+            row = rows[0]
+            if (
+                row.get("role") != "user"
+                or (
+                    self._is_scaffold_shaped_user_message(row)
+                    and not self._has_real_user_scaffold_provenance(store_id)
+                )
+                or self._retained_user_anchor_identity_digest(
+                    row,
+                    stored_row=True,
+                )
+                != expected_digest
+            ):
+                return None
+            return row
+        except Exception:
+            logger.debug("LCM retained-user anchor metadata load failed", exc_info=True)
+            return None
+
+    def _prepare_retained_user_anchor(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Register the sole durable user behind a real system prompt.
+
+        This only establishes durable occurrence lineage. Context assembly
+        decides separately whether to retain the registered row.
+        """
+        if (
+            len(messages) < 2
+            or not isinstance(messages[0], dict)
+            or messages[0].get("role") != "system"
+            or not isinstance(messages[1], dict)
+            or messages[1].get("role") != "user"
+        ):
+            self._write_retained_user_anchor(None)
+            return None
+        registered_row = self._load_retained_user_anchor_row()
+        if (
+            registered_row is not None
+            and self._message_replay_identity(messages[1])
+            == self._message_replay_identity(
+                registered_row,
+                stored_row=True,
+            )
+        ):
+            later_real_users = self._durable_real_user_messages(
+                stop_after=1,
+                after_store_id=int(registered_row.get("store_id") or 0),
+            )
+            if not later_real_users:
+                return registered_row
+            self._write_retained_user_anchor(None)
+            return None
+        durable_users = self._durable_real_user_messages()
+        if len(durable_users) != 1:
+            self._write_retained_user_anchor(None)
+            return None
+        row = durable_users[0]
+        if self._message_replay_identity(messages[1]) != self._message_replay_identity(
+            row,
+            stored_row=True,
+        ):
+            self._write_retained_user_anchor(None)
+            return None
+        if not self._write_retained_user_anchor(row):
+            return None
+        return row
+
     @staticmethod
     def _leading_anchor_count(messages: List[Dict[str, Any]]) -> int:
         """Return the number of non-compactable leading messages.

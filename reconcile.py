@@ -1167,8 +1167,35 @@ class ReconcileMixin:
         the store has, the surplus earliest active occurrences are treated as
         synthetic/carry-over and left unmapped so they cannot steal later stored
         literal copies with the same content.
+
+        One explicitly registered retained-user occurrence may sit at or below
+        the compaction frontier. It is admitted only when exactly one active
+        message has its durable identity, so content duplication cannot make the
+        old row hijack another occurrence.
         """
         candidates: list[Dict[str, Any]] = []
+        retained_anchor_loader = getattr(
+            self,
+            "_load_retained_user_anchor_row",
+            None,
+        )
+        if callable(retained_anchor_loader):
+            retained_anchor = retained_anchor_loader()
+            retained_store_id = int(
+                retained_anchor.get("store_id") or 0
+            ) if retained_anchor else 0
+            if 0 < retained_store_id <= int(self._last_compacted_store_id or 0):
+                retained_identity = self._message_replay_identity(
+                    retained_anchor,
+                    stored_row=True,
+                )
+                active_matches = sum(
+                    1
+                    for message in messages
+                    if self._message_replay_identity(message) == retained_identity
+                )
+                if active_matches == 1:
+                    candidates.append(retained_anchor)
         next_candidate_after = self._last_compacted_store_id
         while True:
             page = self._store.get_session_messages_after(
