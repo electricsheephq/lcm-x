@@ -971,23 +971,35 @@ class LifecycleStateStore:
             raise LifecyclePublicationConflictError(
                 "Compaction publication coverage overlaps an explicit exclusion"
             )
-        owned_rows = conn.execute(
+        exclusion_proofs = filter_exclusion_proofs or {}
+        snapshot_ids = sorted(
+            set(all_covered_ids + excluded_ids + list(exclusion_proofs))
+        )
+        snapshot_rows = conn.execute(
             """
-            SELECT m.store_id, m.conversation_id
-            FROM messages AS m
-            JOIN json_each(?) AS source ON m.store_id = source.value
-            WHERE m.session_id = ?
+            SELECT m.store_id, m.conversation_id, m.content
+            FROM json_each(?) AS source
+            CROSS JOIN messages AS m
+            WHERE m.store_id = source.value AND m.session_id = ?
             ORDER BY m.store_id
             """,
-            (str(all_covered_ids), session_id),
+            (str(snapshot_ids), session_id),
         ).fetchall()
-        if [int(row[0]) for row in owned_rows] != all_covered_ids:
+        if [int(row[0]) for row in snapshot_rows] != snapshot_ids:
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )
-        if any(str(row[1] or "").strip() not in {"", conversation_id} for row in owned_rows):
+        if any(str(row[1] or "").strip() not in {"", conversation_id} for row in snapshot_rows):
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
+            )
+        snapshot_by_id = {int(row[0]): row for row in snapshot_rows}
+        if any(
+            snapshot_by_id[store_id][2] != proof
+            for store_id, proof in exclusion_proofs.items()
+        ):
+            raise LifecyclePublicationConflictError(
+                "Compaction publication filter exclusion changed"
             )
         rows = conn.execute(
             """
@@ -998,15 +1010,6 @@ class LifecycleStateStore:
             """,
             (session_id, expected_frontier, covered_end),
         ).fetchall()
-        exclusion_proofs = filter_exclusion_proofs or {}
-        if any(
-            row[2] != exclusion_proofs[int(row[0])]
-            for row in rows
-            if int(row[0]) in exclusion_proofs
-        ):
-            raise LifecyclePublicationConflictError(
-                "Compaction publication filter exclusion changed"
-            )
         authoritative_ids = [int(row[0]) for row in rows]
         proven_ids = sorted(covered_ids + excluded_ids)
         if authoritative_ids != proven_ids:

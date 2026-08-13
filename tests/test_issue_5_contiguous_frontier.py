@@ -299,9 +299,11 @@ def test_later_publication_conflict_reassembles_committed_leaves(
     assert engine.last_compression_status == "error"
 
 
+@pytest.mark.parametrize("rotate_ahead", [False, True])
 def test_filter_exclusion_content_is_revalidated_in_publication_snapshot(
     tmp_path,
     monkeypatch,
+    rotate_ahead,
 ) -> None:
     identity = "issue-5-filter-race"
     engine = LCMEngine(
@@ -330,6 +332,13 @@ def test_filter_exclusion_content_is_revalidated_in_publication_snapshot(
         active,
         conversation_id=identity,
     )
+    expected_frontier = durable_ids[-1] if rotate_ahead else 0
+    if rotate_ahead:
+        engine._lifecycle.advance_frontier(
+            identity,
+            identity,
+            expected_frontier,
+        )
     engine._ingest_cursor = len(active)
     original_scan = engine._stored_publication_filter_exclusions
 
@@ -356,7 +365,7 @@ def test_filter_exclusion_content_is_revalidated_in_publication_snapshot(
 
     assert nodes == []
     assert state is not None
-    assert state.current_frontier_store_id == 0
+    assert state.current_frontier_store_id == expected_frontier
     assert engine.last_compression_status == "error"
 
 
@@ -435,3 +444,54 @@ def test_below_frontier_source_lineage_is_claimed_once(tmp_path) -> None:
         engine.shutdown()
 
     assert len(nodes) == 1
+
+
+def test_excluded_rows_must_share_conversation_ownership(tmp_path) -> None:
+    identity = "issue-5-excluded-ownership"
+    engine = _engine(tmp_path / "issue-5-excluded-ownership.db", identity)
+    covered_start = engine._store.append(
+        identity,
+        {"role": "assistant", "content": "covered start"},
+        conversation_id=identity,
+    )
+    excluded = engine._store.append(
+        identity,
+        {"role": "assistant", "content": "DROP_ME"},
+        conversation_id="foreign-conversation",
+    )
+    covered_end = engine._store.append(
+        identity,
+        {"role": "assistant", "content": "covered end"},
+        conversation_id=identity,
+    )
+    node = SummaryNode(
+        session_id=identity,
+        summary="must not cross foreign exclusion",
+        token_count=1,
+        source_token_count=1,
+        source_ids=[covered_start, covered_end],
+    )
+
+    def stage(conn, node_id) -> None:
+        engine._lifecycle.stage_compaction_publication(
+            conn,
+            identity,
+            identity,
+            node_id,
+            0,
+            [covered_start, covered_end],
+            [excluded],
+            {excluded: "DROP_ME"},
+        )
+
+    try:
+        with pytest.raises(
+            LifecyclePublicationConflictError,
+            match="source ownership changed",
+        ):
+            engine._dag.add_node(node, before_commit=stage)
+        nodes = engine._dag.get_session_nodes(identity)
+    finally:
+        engine.shutdown()
+
+    assert nodes == []
