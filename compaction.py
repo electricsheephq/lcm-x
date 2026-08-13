@@ -860,10 +860,10 @@ class CompactionMixin:
                     working_messages[0] if leading_anchor_count else None,
                     working_messages[leading_anchor_count:],
                     assembly_cap_override=recovery_assembly_cap,
-                    retained_user_message=(
-                        working_messages[1]
+                    **(
+                        {"retained_user_message": working_messages[1]}
                         if leading_anchor_count == 2
-                        else None
+                        else {}
                     ),
                 )
                 return self._finalize_forced_overflow_result(
@@ -885,10 +885,10 @@ class CompactionMixin:
                         active_context_messages[0] if leading_anchor_count else None,
                         active_context_messages[leading_anchor_count:],
                         assembly_cap_override=recovery_assembly_cap,
-                        retained_user_message=(
-                            active_context_messages[1]
+                        **(
+                            {"retained_user_message": active_context_messages[1]}
                             if leading_anchor_count == 2
-                            else None
+                            else {}
                         ),
                     )
                 finally:
@@ -973,10 +973,10 @@ class CompactionMixin:
                 working_messages[0] if leading_anchor_count else None,
                 working_messages[leading_anchor_count:],
                 assembly_cap_override=recovery_assembly_cap,
-                retained_user_message=(
-                    working_messages[1]
+                **(
+                    {"retained_user_message": working_messages[1]}
                     if leading_anchor_count == 2
-                    else None
+                    else {}
                 ),
             )
         finally:

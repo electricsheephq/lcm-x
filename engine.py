@@ -6663,6 +6663,12 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 )
                 + [tail_messages[-1]]
             )
+            if (
+                retained_user_message is not None
+                and assembly_cap_override is not None
+                and count_messages_tokens(fallback) > assembly_cap_override
+            ):
+                return candidate
             return self._sanitize_active_context_messages(fallback)
         return candidate
 
