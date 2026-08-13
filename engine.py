@@ -485,6 +485,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         # Scope bookkeeping for _fresh_tail_pressure_yield_invocation.
         self._pressure_yield_scope_depth: int = 0
         self._pressure_yield_streak_counted: bool = False
+        # True only when the current preflight found work because the
+        # invocation-local tail bound exposed it. Independent cleanup,
+        # overflow, or maintenance work must still clear a stale blocked
+        # verdict even when a preliminary candidate check armed the yield.
+        self._pressure_yield_preflight_candidate: bool = False
         # Final verdict of the current outermost invocation, applied at scope
         # exit: "blocked" keeps the streak (the invocation counted a genuine
         # tail blockage), "neutral" leaves it untouched (the invocation says
@@ -1039,7 +1044,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         """Whether the most recent compression/preflight decision was a no-op."""
         return self._last_compression_status == "noop"
 
-    def _mark_preflight_compression_requested(self) -> bool:
+    def _mark_preflight_compression_requested(
+        self,
+        *,
+        depends_on_pressure_yield: bool = False,
+    ) -> bool:
         """Record that preflight found work and clear any stale no-op reason.
 
         A preflight that advertises work is by definition not deadlock-blocked
@@ -1052,7 +1061,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         """
         self._last_compression_status = "pending"
         self._last_compression_noop_reason = ""
-        if self._pressure_yield_tail_token_limit <= 0:
+        if not depends_on_pressure_yield:
             self._pressure_yield_invocation_verdict = "clear"
         return True
 
@@ -2011,12 +2020,15 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
           unwinds.
         """
         saved_limit = self._pressure_yield_tail_token_limit
+        saved_streak = self._pressure_yield_blocked_streak
         saved_counted = self._pressure_yield_streak_counted
         saved_verdict = self._pressure_yield_invocation_verdict
+        saved_preflight_candidate = self._pressure_yield_preflight_candidate
         entry_epoch = self._pressure_yield_reset_epoch
         self._pressure_yield_tail_token_limit = 0
         self._pressure_yield_streak_counted = False
         self._pressure_yield_invocation_verdict = None
+        self._pressure_yield_preflight_candidate = False
         self._pressure_yield_scope_depth += 1
         completed = False
         try:
@@ -2031,10 +2043,15 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 self._pressure_yield_tail_token_limit = saved_limit
                 self._pressure_yield_streak_counted = saved_counted
                 self._pressure_yield_invocation_verdict = saved_verdict
+                self._pressure_yield_preflight_candidate = saved_preflight_candidate
+                if self._pressure_yield_scope_depth > 0:
+                    self._pressure_yield_blocked_streak = saved_streak
             else:
                 self._pressure_yield_tail_token_limit = 0
+                self._pressure_yield_blocked_streak = 0
                 self._pressure_yield_streak_counted = False
                 self._pressure_yield_invocation_verdict = None
+                self._pressure_yield_preflight_candidate = False
 
     def _note_fresh_tail_pressure_relieved(self) -> None:
         """Reset the sustained-pressure evidence.
@@ -2165,6 +2182,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         self._pressure_yield_blocked_streak = 0
         self._pressure_yield_streak_counted = False
         self._pressure_yield_invocation_verdict = None
+        self._pressure_yield_preflight_candidate = False
         self._pressure_yield_reset_epoch += 1
 
     def _fresh_tail_start(self, messages: List[Dict[str, Any]]) -> int:

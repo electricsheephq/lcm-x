@@ -94,6 +94,7 @@ class CompactionMixin:
             self._note_fresh_tail_pressure_relieved()
         pre_ingest_placeholder_ambiguous_noop = False
         pre_ingest_noop_reason = ""
+        pre_ingest_placeholder_cleanup_requested = False
         if (
             self.threshold_tokens > 0
             and rough >= self.threshold_tokens
@@ -114,6 +115,9 @@ class CompactionMixin:
                 messages,
                 allow_partial_leaf=self._config.threshold_full_sweep_enabled,
                 observed_tokens=rough,
+            )
+            pre_ingest_placeholder_cleanup_requested = bool(
+                not eligible and self._pressure_yield_tail_token_limit > 0
             )
             pre_ingest_placeholder_ambiguous_noop = not eligible
             pre_ingest_noop_reason = reason
@@ -163,6 +167,10 @@ class CompactionMixin:
             # summarizer spend.
             if self._compression_boundary_cooldown_active():
                 return False
+            if pre_ingest_placeholder_cleanup_requested:
+                return self._mark_preflight_compression_requested(
+                    depends_on_pressure_yield=True,
+                )
             if pre_ingest_placeholder_ambiguous_noop:
                 self._last_compression_status = "noop"
                 self._last_compression_noop_reason = pre_ingest_noop_reason
@@ -178,7 +186,9 @@ class CompactionMixin:
                 observed_tokens=replay_rough,
             )
             if eligible:
-                return self._mark_preflight_compression_requested()
+                return self._mark_preflight_compression_requested(
+                    depends_on_pressure_yield=self._pressure_yield_preflight_candidate,
+                )
             if self._has_ignored_backlog_outside_fresh_tail(replay_messages):
                 return self._mark_preflight_compression_requested()
             if self.threshold_tokens > 0 and replay_rough >= self.threshold_tokens:
@@ -197,6 +207,10 @@ class CompactionMixin:
         if self._should_force_overflow_recovery(observed_tokens=rough):
             return self._mark_preflight_compression_requested()
         if self.threshold_tokens > 0 and rough >= self.threshold_tokens:
+            if pre_ingest_placeholder_cleanup_requested:
+                return self._mark_preflight_compression_requested(
+                    depends_on_pressure_yield=True,
+                )
             if pre_ingest_placeholder_ambiguous_noop:
                 self._last_compression_status = "noop"
                 self._last_compression_noop_reason = pre_ingest_noop_reason
@@ -208,7 +222,9 @@ class CompactionMixin:
                 observed_tokens=rough,
             )
             if eligible:
-                return self._mark_preflight_compression_requested()
+                return self._mark_preflight_compression_requested(
+                    depends_on_pressure_yield=self._pressure_yield_preflight_candidate,
+                )
             if self._has_ignored_backlog_outside_fresh_tail(messages):
                 return self._mark_preflight_compression_requested()
             if self._should_run_deferred_maintenance(messages, observed_tokens=rough):
@@ -318,6 +334,8 @@ class CompactionMixin:
                 force_overflow=force_overflow,
                 allow_partial_leaf=allow_partial_leaf,
             )
+            if eligible:
+                self._pressure_yield_preflight_candidate = True
         return eligible, reason
 
     def _leaf_compaction_candidate_status_once(
@@ -606,7 +624,15 @@ class CompactionMixin:
                 force=force,
             )
 
-        observed_prompt_tokens = current_tokens if current_tokens is not None else None
+        # ``current_tokens`` is optional in the ContextEngine contract. After a
+        # yield-aware preflight, use the current active messages as the
+        # pressure observation when the host calls ``compress(messages)`` so
+        # the follow-up invocation can re-arm the advertised bounded yield.
+        observed_prompt_tokens = (
+            current_tokens
+            if current_tokens is not None
+            else count_messages_tokens(messages)
+        )
         force_overflow = self._should_force_overflow_recovery(
             observed_tokens=observed_prompt_tokens,
             messages=messages,
@@ -965,7 +991,15 @@ class CompactionMixin:
                             "raw backlog outside fresh tail is below leaf chunk threshold"
                         )
                         break
-                to_compact = candidate_raw
+                if force_overflow:
+                    to_compact = candidate_raw
+                elif self._pressure_yield_tail_token_limit > 0:
+                    to_compact = self._select_oldest_leaf_chunk(
+                        candidate_raw,
+                        max(1, int(self._config.leaf_chunk_tokens)),
+                    )
+                else:
+                    to_compact = candidate_raw
 
             if not to_compact:
                 noop_reason = "no eligible leaf chunk selected"
