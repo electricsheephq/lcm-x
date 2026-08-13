@@ -6,10 +6,19 @@ import hermes_lcm.engine as lcm_engine
 
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.lifecycle_state import LifecyclePublicationConflictError
 
 
 def _summary(**_kwargs) -> tuple[str, int]:
     return "Earlier conversation. Expand for details: repeated turns", 1
+
+
+class _ContainsPattern:
+    pattern = "DROP_ME"
+
+    def search(self, text, timeout=None):
+        del timeout
+        return object() if self.pattern in str(text) else None
 
 
 def _engine(database_path, identity: str) -> LCMEngine:
@@ -241,3 +250,105 @@ def test_foreign_conversation_rows_cannot_advance_the_frontier(
     assert engine.last_compression_noop_reason == (
         "summary publication could not prove contiguous source coverage"
     )
+
+
+def test_later_publication_conflict_reassembles_committed_leaves(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    identity = "issue-5-later-conflict"
+    engine = _engine(tmp_path / "issue-5-later-conflict.db", identity)
+    engine._config.threshold_full_sweep_enabled = True
+    engine.threshold_tokens = 1
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _summary)
+    active = [
+        {"role": "assistant", "content": f"historical-{index}"}
+        for index in range(4)
+    ] + [{"role": "user", "content": "fresh tail"}]
+    engine._store.append_batch(identity, active, conversation_id=identity)
+    engine._ingest_cursor = len(active)
+    original_stage = engine._lifecycle.stage_compaction_publication
+    calls = 0
+
+    def fail_second(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise LifecyclePublicationConflictError("injected later conflict")
+        return original_stage(*args, **kwargs)
+
+    monkeypatch.setattr(
+        engine._lifecycle,
+        "stage_compaction_publication",
+        fail_second,
+    )
+
+    try:
+        result = engine.compress(active, current_tokens=100)
+        nodes = engine._dag.get_session_nodes(identity)
+    finally:
+        engine.shutdown()
+
+    assert calls == 2
+    assert len(nodes) == 1
+    assert "Earlier conversation" in "\n".join(
+        str(message.get("content") or "") for message in result
+    )
+    assert engine.last_compression_status == "error"
+
+
+def test_filter_exclusion_content_is_revalidated_in_publication_snapshot(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    identity = "issue-5-filter-race"
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "issue-5-filter-race.db"),
+            fresh_tail_count=1,
+            leaf_chunk_tokens=1,
+            incremental_max_depth=0,
+        )
+    )
+    engine._compiled_ignore_message_patterns = [_ContainsPattern()]
+    engine.on_session_start(
+        identity,
+        platform="cli",
+        conversation_id=identity,
+        context_length=200_000,
+    )
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _summary)
+    active = [
+        {"role": "assistant", "content": "DROP_ME"},
+        {"role": "assistant", "content": "covered"},
+        {"role": "user", "content": "fresh tail"},
+    ]
+    durable_ids = engine._store.append_batch(
+        identity,
+        active,
+        conversation_id=identity,
+    )
+    engine._ingest_cursor = len(active)
+    original_add_node = engine._dag.add_node
+
+    def rewrite_then_add(node, *, before_commit=None):
+        engine._store.connection.execute(
+            "UPDATE messages SET content = ? WHERE store_id = ?",
+            ("no longer filtered", durable_ids[0]),
+        )
+        engine._store.connection.commit()
+        return original_add_node(node, before_commit=before_commit)
+
+    monkeypatch.setattr(engine._dag, "add_node", rewrite_then_add)
+
+    try:
+        engine.compress(active)
+        nodes = engine._dag.get_session_nodes(identity)
+        state = engine._lifecycle.get_by_conversation(identity)
+    finally:
+        engine.shutdown()
+
+    assert nodes == []
+    assert state is not None
+    assert state.current_frontier_store_id == 0
+    assert engine.last_compression_status == "error"

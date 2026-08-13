@@ -938,6 +938,7 @@ class LifecycleStateStore:
         expected_frontier_store_id: int,
         covered_store_ids: list[int],
         excluded_store_ids: list[int] | None = None,
+        filter_exclusion_proofs: dict[int, str | None] | None = None,
     ) -> int:
         """Validate and stage one contiguous compaction-frontier advance.
 
@@ -946,11 +947,7 @@ class LifecycleStateStore:
         """
         expected_frontier = max(0, int(expected_frontier_store_id or 0))
         all_covered_ids = sorted(
-            {
-                int(store_id)
-                for store_id in covered_store_ids
-                if int(store_id) > 0
-            }
+            {int(store_id) for store_id in covered_store_ids if int(store_id) > 0}
         )
         if not all_covered_ids:
             raise LifecyclePublicationConflictError(
@@ -975,7 +972,7 @@ class LifecycleStateStore:
             )
         covered_rows = conn.execute(
             """
-            SELECT store_id, conversation_id
+            SELECT store_id, conversation_id, content
             FROM messages
             WHERE session_id = ? AND store_id >= ? AND store_id <= ?
             ORDER BY store_id
@@ -994,12 +991,18 @@ class LifecycleStateStore:
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )
-        if any(
-            str(row[1] or "").strip() not in {"", conversation_id}
-            for row in owned_rows
-        ):
+        if any(str(row[1] or "").strip() not in {"", conversation_id} for row in covered_rows):
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
+            )
+        exclusion_proofs = filter_exclusion_proofs or {}
+        if any(
+            row[2] != exclusion_proofs[int(row[0])]
+            for row in covered_rows
+            if int(row[0]) in exclusion_proofs
+        ):
+            raise LifecyclePublicationConflictError(
+                "Compaction publication filter exclusion changed"
             )
         rows = [
             row for row in covered_rows if int(row[0]) > expected_frontier
@@ -1013,11 +1016,6 @@ class LifecycleStateStore:
                 f"authoritative={authoritative_ids}, covered={covered_ids}, "
                 f"excluded={excluded_ids})"
             )
-        if any(str(row[1] or "").strip() not in {"", conversation_id} for row in rows):
-            raise LifecyclePublicationConflictError(
-                "Compaction publication source ownership changed"
-            )
-
         row = conn.execute(
             """
             SELECT current_session_id, current_frontier_store_id
@@ -1027,9 +1025,7 @@ class LifecycleStateStore:
             (conversation_id,),
         ).fetchone()
         if row is None:
-            raise RuntimeError(
-                "Cannot publish summary without lifecycle state"
-            )
+            raise RuntimeError("Cannot publish summary without lifecycle state")
         if str(row[0] or "") != session_id:
             raise LifecycleBindingChangedError(
                 "Lifecycle session binding changed during summary publication"

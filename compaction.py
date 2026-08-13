@@ -20,10 +20,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from .dag import SummaryNode
-from .lifecycle_state import (
-    LifecycleBindingChangedError,
-    LifecyclePublicationConflictError,
-)
+from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
 from .message_content import text_content_for_pattern_matching
 from .sanitize import _contains_sensitive_redaction
 from .sqlite_util import _is_sqlite_locked_error
@@ -399,25 +396,22 @@ class CompactionMixin:
             )
         self._last_compression_status = "error"
         binding_changed = isinstance(exc, LifecycleBindingChangedError)
-        publication_conflict = isinstance(
-            exc,
-            LifecyclePublicationConflictError,
-        )
         if binding_changed:
-            failure_reason = "lifecycle_binding_changed"
-            self._last_compression_noop_reason = (
+            failure_reason, noop_reason = (
+                "lifecycle_binding_changed",
                 "summary publication lost its lifecycle binding"
             )
-        elif publication_conflict:
-            failure_reason = "publication_invariant_conflict"
-            self._last_compression_noop_reason = (
+        elif isinstance(exc, LifecyclePublicationConflictError):
+            failure_reason, noop_reason = (
+                "publication_invariant_conflict",
                 "summary publication could not prove contiguous source coverage"
             )
         else:
-            failure_reason = "sqlite_publication_locked"
-            self._last_compression_noop_reason = (
+            failure_reason, noop_reason = (
+                "sqlite_publication_locked",
                 "summary publication blocked by SQLite lock"
             )
+        self._last_compression_noop_reason = noop_reason
         self._ingest_cursor = len(fallback)
         self._ingest_cursor_needs_reconcile = False
         self._last_compaction_duration_ms = (
@@ -475,20 +469,19 @@ class CompactionMixin:
         expected_frontier: int,
         covered_end: int,
         already_proven_store_ids: List[int],
-    ) -> List[int]:
-        """Return immutable stored rows explicitly excluded by active filters."""
+    ) -> Dict[int, str | None]:
         proven = {int(store_id) for store_id in already_proven_store_ids}
         rows = self._store.get_session_messages_after(
             self._session_id,
             after_store_id=expected_frontier,
         )
-        return [
-            store_id
+        return {
+            store_id: row.get("content")
             for row in rows
             if (store_id := int(row.get("store_id") or 0)) <= covered_end
             and store_id not in proven
             and self._matches_ignore_message_patterns(row, stored_row=True)
-        ]
+        }
 
     def _compress_impl(self, messages: List[Dict[str, Any]],
                        current_tokens: int = None,
@@ -946,13 +939,12 @@ class CompactionMixin:
             expected_frontier = int(
                 getattr(publication_state, "current_frontier_store_id", 0)
             )
-            publication_excluded_store_ids.extend(
-                self._stored_publication_filter_exclusions(
-                    expected_frontier,
-                    published_frontier,
-                    consumed_store_ids + publication_excluded_store_ids,
-                )
+            filter_exclusion_proofs = self._stored_publication_filter_exclusions(
+                expected_frontier,
+                published_frontier,
+                consumed_store_ids,
             )
+            publication_excluded_store_ids.extend(filter_exclusion_proofs)
             # The frontier consumes every durable row removed from the active
             # prefix, including trailing dependent replies. Summary lineage
             # excludes those replies; their durable ledger drives replay cleanup.
@@ -969,6 +961,7 @@ class CompactionMixin:
                             expected_frontier,
                             consumed_store_ids,
                             publication_excluded_store_ids,
+                            filter_exclusion_proofs,
                         )
                     before_commit = stage_frontier
                 self._dag.add_node(node, before_commit=before_commit)
@@ -979,13 +972,23 @@ class CompactionMixin:
                     and not isinstance(exc, LifecyclePublicationConflictError)
                 ):
                     raise
+                fallback = working_messages
+                context_is_assembled = False
+                if leaf_passes or dropped_replayed_scaffold_messages:
+                    fallback = self._assemble_committed_compaction_context(
+                        working_messages,
+                        anchor_source_messages,
+                        recovery_assembly_cap,
+                    )
+                    context_is_assembled = True
                 return self._fail_open_after_publication_failure(
-                    working_messages,
+                    fallback,
                     exc,
                     compress_started=_compress_started,
                     threshold_full_sweep_active=threshold_full_sweep_active,
                     recovery_assembly_cap=recovery_assembly_cap,
                     leaf_passes=leaf_passes,
+                    context_is_assembled=context_is_assembled,
                 )
             self._last_compacted_store_id = published_frontier
             self._invalidate_rollups_for_published_node(node)
