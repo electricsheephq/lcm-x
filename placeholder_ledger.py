@@ -445,6 +445,31 @@ class PlaceholderLedgerMixin:
         )
         return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
 
+    def _merged_generated_context_tail_fingerprint(
+        self,
+        msg: Dict[str, Any],
+    ) -> Optional[str]:
+        """Fingerprint the original tail folded into a generated summary."""
+        content = msg.get("content")
+        generated_context = ""
+        tail_text = ""
+        if isinstance(content, str):
+            generated_context, separator, tail_text = content.rpartition(
+                "\n\n---\n\n"
+            )
+            if not separator:
+                return None
+        elif isinstance(content, list) and len(content) > 1:
+            generated_context = text_content_for_pattern_matching(content[:1]) or ""
+            tail_text = text_content_for_pattern_matching(content[1:]) or ""
+        scaffold_probe = msg.copy()
+        scaffold_probe["content"] = generated_context
+        if not self._is_replayed_context_scaffold_message(scaffold_probe):
+            return None
+        if not tail_text:
+            return None
+        return self._ignored_dependent_reply_content_fingerprint(msg, tail_text)
+
     def _load_generated_ignored_dependent_reply_records(
         self,
         keys: Optional[list[str]] = None,
@@ -527,8 +552,13 @@ class PlaceholderLedgerMixin:
     def _is_generated_ignored_dependent_reply(self, msg: Dict[str, Any], text: str) -> bool:
         store_digest = self._ignored_dependent_reply_store_fingerprint(msg)
         content_digest = self._ignored_dependent_reply_content_fingerprint(msg, text)
+        merged_tail_digest = self._merged_generated_context_tail_fingerprint(msg)
         records = self._load_generated_ignored_dependent_reply_records()
         if store_digest and any(record.get("store") == store_digest for record in records):
+            return True
+        if merged_tail_digest and any(
+            record.get("content") == merged_tail_digest for record in records
+        ):
             return True
         if not content_digest:
             return False
@@ -556,7 +586,12 @@ class PlaceholderLedgerMixin:
     ) -> bool:
         store_digest = self._ignored_dependent_reply_store_fingerprint(msg)
         content_digest = self._ignored_dependent_reply_content_fingerprint(msg, text)
+        merged_tail_digest = self._merged_generated_context_tail_fingerprint(msg)
         if store_digest and any(record.get("store") == store_digest for record in records):
+            return True
+        if merged_tail_digest and any(
+            record.get("content") == merged_tail_digest for record in records
+        ):
             return True
         if not content_digest:
             return False
@@ -613,6 +648,17 @@ class PlaceholderLedgerMixin:
                     records,
                 ):
                     break
+                if self._merged_generated_context_tail_fingerprint(msg):
+                    cleaned = msg.copy()
+                    content = msg.get("content")
+                    if isinstance(content, str):
+                        generated_context, _separator, _tail = content.rpartition(
+                            "\n\n---\n\n"
+                        )
+                        cleaned["content"] = generated_context
+                    elif isinstance(content, list):
+                        cleaned["content"] = content[:1]
+                    return [*messages[:idx], cleaned]
                 drop_from = idx
                 idx -= 1
             if drop_from == len(messages):

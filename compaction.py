@@ -428,6 +428,18 @@ class CompactionMixin:
         # or provider context after the durable row has been written.
         working_messages = self._ingest_messages(messages)
         ingest_cleanup_changed_active_context = working_messages != messages
+        preexisting_dependent_reply_records = (
+            self._load_generated_ignored_dependent_reply_records()
+        )
+        cleaned_working_messages = (
+            self._drop_preexisting_generated_ignored_dependent_eof_replies(
+                working_messages,
+                preexisting_dependent_reply_records,
+            )
+        )
+        if cleaned_working_messages != working_messages:
+            working_messages = cleaned_working_messages
+            ingest_cleanup_changed_active_context = True
         cleanup_only_due_to_boundary_cooldown = bool(
             self._preflight_cleanup_only_due_to_boundary_cooldown
             and not force_overflow
@@ -457,6 +469,40 @@ class CompactionMixin:
             )
             return sanitized_messages
         anchor_source_messages = list(working_messages)
+        retained_systemless_user = self._sole_systemless_real_user_message(
+            anchor_source_messages
+        )
+        anchor_source_leading_count = self._leading_anchor_count(
+            anchor_source_messages
+        )
+        if retained_systemless_user is not None and anchor_source_leading_count:
+            retained_systemless_user = None
+        if retained_systemless_user is not None and not force_overflow:
+            retained_identity = self._message_replay_identity(
+                retained_systemless_user
+            )
+            retained_index = next(
+                (
+                    index
+                    for index, message in enumerate(anchor_source_messages)
+                    if self._message_replay_identity(message) == retained_identity
+                ),
+                -1,
+            )
+            if retained_index >= self._fresh_tail_start(anchor_source_messages):
+                retained_systemless_user = None
+        context_anchor_messages = list(anchor_source_messages)
+        if retained_systemless_user is not None:
+            retained_identity = self._message_replay_identity(
+                retained_systemless_user
+            )
+            for index, message in enumerate(context_anchor_messages):
+                if self._message_replay_identity(message) == retained_identity:
+                    context_anchor_messages = [
+                        *context_anchor_messages[:index],
+                        *context_anchor_messages[index + 1 :],
+                    ]
+                    break
         pressure_messages = messages if len(messages) == len(working_messages) else working_messages
         leaf_compacted_this_turn = False
         dropped_replayed_scaffold_messages = False
@@ -525,7 +571,6 @@ class CompactionMixin:
         sweep_stop_reason = ""
         sweep_raw_drained = False
         dependent_reply_message_ids: set[int] = set()
-        preexisting_dependent_reply_records = self._load_generated_ignored_dependent_reply_records()
 
         while leaf_passes < max_leaf_passes:
             if threshold_full_sweep_active and time.monotonic() >= sweep_deadline:
@@ -533,10 +578,10 @@ class CompactionMixin:
                 break
             fresh_tail_start = self._fresh_tail_start(pressure_messages)
 
-            # Keep only a real system prompt anchored. Gateway sessions may
-            # pass only conversation messages, so index 0 can be an old user
-            # turn; that must remain eligible for compaction instead of being
-            # replayed forever as fresh-looking intent.
+            # Keep a real system prompt and, while it is still the session's
+            # sole real request, the first user prompt anchored. Gateway
+            # sessions may start directly with that user prompt; once a later
+            # real user turn exists, the first becomes compactable again.
             leading_anchor_count = self._leading_anchor_count(working_messages)
             if fresh_tail_start <= leading_anchor_count:
                 noop_reason = "no eligible raw backlog outside fresh tail"
@@ -860,6 +905,7 @@ class CompactionMixin:
                     working_messages[1 if leading_anchor_count else 0:],
                     assembly_cap_override=recovery_assembly_cap,
                     preserve_leading_user=leading_anchor_count == 2,
+                    retained_user_message=retained_systemless_user,
                 )
                 return self._finalize_forced_overflow_result(
                     working_messages,
@@ -874,13 +920,16 @@ class CompactionMixin:
             if dropped_replayed_scaffold_messages:
                 leading_anchor_count = self._leading_anchor_count(active_context_messages)
                 anchor_leading_count = self._leading_anchor_count(anchor_source_messages)
-                self._pending_context_anchor_messages = anchor_source_messages[anchor_leading_count:]
+                self._pending_context_anchor_messages = context_anchor_messages[
+                    anchor_leading_count:
+                ]
                 try:
                     sanitized_messages = self._assemble_context(
                         active_context_messages[0] if leading_anchor_count else None,
                         active_context_messages[1 if leading_anchor_count else 0:],
                         assembly_cap_override=recovery_assembly_cap,
                         preserve_leading_user=anchor_leading_count == 2,
+                        retained_user_message=retained_systemless_user,
                     )
                 finally:
                     self._pending_context_anchor_messages = None
@@ -958,13 +1007,16 @@ class CompactionMixin:
         )
         leading_anchor_count = self._leading_anchor_count(working_messages)
         anchor_leading_count = self._leading_anchor_count(anchor_source_messages)
-        self._pending_context_anchor_messages = anchor_source_messages[anchor_leading_count:]
+        self._pending_context_anchor_messages = context_anchor_messages[
+            anchor_leading_count:
+        ]
         try:
             compressed = self._assemble_context(
                 working_messages[0] if leading_anchor_count else None,
                 working_messages[1 if leading_anchor_count else 0:],
                 assembly_cap_override=recovery_assembly_cap,
                 preserve_leading_user=anchor_leading_count == 2,
+                retained_user_message=retained_systemless_user,
             )
         finally:
             self._pending_context_anchor_messages = None

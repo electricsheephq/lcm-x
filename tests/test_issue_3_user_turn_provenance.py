@@ -203,7 +203,7 @@ def test_user_literal_matching_scaffold_marker_remains_real_across_restart(
     _assert_provider_sequence(result)
 
 
-def test_no_system_history_keeps_first_user_compactable(
+def test_no_system_history_retains_sole_real_user(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -222,7 +222,47 @@ def test_no_system_history_keeps_first_user_compactable(
     finally:
         engine.shutdown()
 
+    assert result[0] == first_user
+    assert [
+        message.get("content")
+        for message in result
+        if message.get("role") == "user"
+    ] == [first_user["content"]]
+
+
+def test_no_system_history_compacts_stale_first_user_after_later_real_user(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = LCMConfig(
+        fresh_tail_count=2,
+        leaf_chunk_tokens=1,
+        database_path=str(tmp_path / "issue-3-no-system-later.db"),
+    )
+    engine = LCMEngine(config=config)
+    engine.on_session_start(
+        "issue-3-no-system-later",
+        platform="cli",
+        context_length=200_000,
+    )
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _summary)
+    first_user = {"role": "user", "content": "old gateway request"}
+    later_user = {"role": "user", "content": "new gateway request"}
+
+    try:
+        result = engine.compress(
+            [
+                first_user,
+                {"role": "assistant", "content": "old answer " + "x" * 200},
+                later_user,
+                {"role": "assistant", "content": "new answer"},
+            ]
+        )
+    finally:
+        engine.shutdown()
+
     assert first_user not in result
+    assert later_user in result
 
 
 def test_later_real_user_disqualifies_initial_anchor(
@@ -291,6 +331,42 @@ def test_unproven_durable_scaffold_is_not_promoted_to_real_user(tmp_path) -> Non
                 {"role": "assistant", "content": "derived response"},
             ]
         ) == 1
+    finally:
+        engine.shutdown()
+
+
+def test_scaffold_provenance_failure_rolls_back_message_batch(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = LCMConfig(database_path=str(tmp_path / "issue-3-atomic.db"))
+    engine = LCMEngine(config=config)
+    engine.on_session_start(
+        "issue-3-atomic",
+        platform="cli",
+        context_length=200_000,
+    )
+    literal = {
+        "role": "user",
+        "content": (
+            "[Recent Summary (d0, node 1)]\n"
+            "Literal user-authored text\n"
+            "[Expand for details: literal request]"
+        ),
+    }
+
+    def fail_metadata(_message, _store_id):
+        raise OSError("simulated provenance failure")
+
+    monkeypatch.setattr(
+        engine,
+        "_real_user_scaffold_metadata_rows",
+        fail_metadata,
+    )
+    try:
+        with pytest.raises(OSError, match="simulated provenance failure"):
+            engine._ingest_messages([literal])
+        assert engine._store.get_session_count(engine._session_id) == 0
     finally:
         engine.shutdown()
 

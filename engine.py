@@ -1991,33 +1991,23 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
     def _real_user_scaffold_provenance_key(store_id: int) -> str:
         return f"real_user_scaffold_store_id:{int(store_id)}"
 
-    def _remember_real_user_scaffold_store_ids(
+    def _real_user_scaffold_metadata_rows(
         self,
-        messages: List[Dict[str, Any]],
-        store_ids: List[int],
-    ) -> None:
-        """Persist occurrence proof for genuine user text shaped like scaffolding."""
-        keys = [
-            self._real_user_scaffold_provenance_key(store_id)
-            for message, store_id in zip(messages, store_ids)
-            if self._is_scaffold_shaped_user_message(message)
-        ]
-        if not keys:
-            return
-        try:
-            self._store.write_metadata_json(
-                keys,
+        message: Dict[str, Any],
+        store_id: int,
+    ) -> List[tuple[str, str]]:
+        """Build metadata committed atomically with a scaffold-shaped user row."""
+        if not self._is_scaffold_shaped_user_message(message):
+            return []
+        return [
+            (
+                self._real_user_scaffold_provenance_key(store_id),
                 json.dumps(
                     {"version": 1, "kind": "user-authored-scaffold"},
                     sort_keys=True,
                 ),
-                skip_unchanged=True,
             )
-        except Exception:
-            logger.debug(
-                "LCM real-user scaffold provenance write failed",
-                exc_info=True,
-            )
+        ]
 
     def _has_real_user_scaffold_provenance(self, store_id: int) -> bool:
         try:
@@ -2121,28 +2111,54 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         A system prompt followed by the session's only real user prompt keeps
         both as a stable raw prefix. Once a later real user turn exists, the
         initial prompt becomes stale and compactable again. Gateway sessions
-        without a system prompt retain the historical zero-anchor behavior.
+        without a system prompt keep their raw backlog compactable; their sole
+        real user occurrence is restored separately during context assembly.
 
         Generated summary/objective wrappers are content-collision-prone.
         Marker shape alone is never proof: a scaffold-shaped user occurrence is
         real only when its durable store row carries ingestion provenance.
         """
-        if (
-            not messages
-            or not isinstance(messages[0], dict)
-            or messages[0].get("role") != "system"
-        ):
+        if not messages or not isinstance(messages[0], dict):
             return 0
-        if len(messages) < 2:
+        if messages[0].get("role") != "system":
+            sole_user = self._sole_systemless_real_user_message(messages)
+            if (
+                sole_user is None
+                or self._message_replay_identity(sole_user)
+                != self._message_replay_identity(messages[0])
+            ):
+                return 0
+            durable_users = self._durable_real_user_messages()
+            store_id = (
+                int(durable_users[0].get("store_id") or 0)
+                if len(durable_users) == 1
+                and self._message_replay_identity(
+                    messages[0]
+                )
+                == self._message_replay_identity(
+                    durable_users[0],
+                    stored_row=True,
+                )
+                else 0
+            )
+            if (
+                store_id > 0
+                and store_id <= int(self._last_compacted_store_id or 0)
+            ):
+                return 1
+            return 0
+        first_user_index = 1
+        base_anchor_count = 1
+        if len(messages) <= first_user_index:
             return 1
 
         scaffold_candidates = [
             message
-            for message in messages[1:]
+            for message in messages[first_user_index:]
             if self._is_scaffold_shaped_user_message(message)
         ]
         durable_store_ids_by_message_id = (
-            self._get_store_id_map_for_messages(messages[1:])
+            self._get_store_id_map_for_messages(messages[first_user_index:])
             if scaffold_candidates
             else {}
         )
@@ -2151,23 +2167,63 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             durable_real_users[0] if len(durable_real_users) == 1 else None
         )
         if not self._is_real_user_prompt_message(
-            messages[1],
-            durable_store_id=durable_store_ids_by_message_id.get(id(messages[1])),
+            messages[first_user_index],
+            durable_store_id=durable_store_ids_by_message_id.get(
+                id(messages[first_user_index])
+            ),
             sole_durable_user=sole_durable_user,
         ):
-            return 1
+            return base_anchor_count
         if any(
             self._is_real_user_prompt_message(
                 message,
                 durable_store_id=durable_store_ids_by_message_id.get(id(message)),
                 sole_durable_user=sole_durable_user,
             )
-            for message in messages[2:]
+            for message in messages[first_user_index + 1 :]
         ):
-            return 1
+            return base_anchor_count
         if len(durable_real_users) > 1:
-            return 1
-        return 2
+            return base_anchor_count
+        return first_user_index + 1
+
+    def _sole_systemless_real_user_message(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Return the sole real user occurrence from a system-less history."""
+        if (
+            not messages
+            or not isinstance(messages[0], dict)
+            or messages[0].get("role") == "system"
+        ):
+            return None
+        scaffold_candidates = [
+            message
+            for message in messages
+            if self._is_scaffold_shaped_user_message(message)
+        ]
+        durable_store_ids_by_message_id = (
+            self._get_store_id_map_for_messages(messages)
+            if scaffold_candidates
+            else {}
+        )
+        durable_real_users = self._durable_real_user_messages()
+        if len(durable_real_users) > 1:
+            return None
+        sole_durable_user = (
+            durable_real_users[0] if len(durable_real_users) == 1 else None
+        )
+        real_users = [
+            message
+            for message in messages
+            if self._is_real_user_prompt_message(
+                message,
+                durable_store_id=durable_store_ids_by_message_id.get(id(message)),
+                sole_durable_user=sole_durable_user,
+            )
+        ]
+        return real_users[0].copy() if len(real_users) == 1 else None
 
     def _raw_backlog_tokens(self, messages: List[Dict[str, Any]]) -> int:
         backlog = self._raw_backlog_messages(messages)
@@ -4812,6 +4868,12 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                         self._is_context_summary_content(replay_text)
                         or replay_text_stripped.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX)
                         or replay_text_stripped.startswith(_PRESERVED_TODO_CONTEXT_PREFIX)
+                        or (
+                            replay_msg.get("role") == "assistant"
+                            and self._is_replayed_context_scaffold_message(
+                                replay_msg
+                            )
+                        )
                     ):
                         boundary_seen_synthetic_summary_before = True
                 compression_carried_active_placeholder = False
@@ -4984,16 +5046,13 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 active_replay_messages[absolute_idx] = stubbed_message
 
         estimates = [count_message_tokens(m) for m in protected_messages]
-        stored_ids = self._store._append_protected_batch(
+        self._store._append_protected_batch(
             self._session_id,
             protected_messages,
             estimates,
             source=self._session_platform,
             conversation_id=self._conversation_id,
-        )
-        self._remember_real_user_scaffold_store_ids(
-            protected_messages,
-            stored_ids,
+            metadata_factory=self._real_user_scaffold_metadata_rows,
         )
         # Rollup staleness is driven by summary-node PUBLICATION
         # (_invalidate_rollups_for_published_node at every add_node site), not by
@@ -6144,6 +6203,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         assembly_cap_override: Optional[int] = None,
         include_lcm_note: bool = True,
         preserve_leading_user: bool = False,
+        retained_user_message: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Build the active context from DAG summaries + fresh tail.
 
@@ -6154,7 +6214,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         """
         result = []
 
-        retained_user_msg: Optional[Dict[str, Any]] = None
+        retained_user_msg = (
+            retained_user_message.copy()
+            if retained_user_message is not None
+            else None
+        )
         if (
             preserve_leading_user
             and system_msg is not None
@@ -6165,6 +6229,15 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         ):
             retained_user_msg = tail_messages[0].copy()
             tail_messages = tail_messages[1:]
+        elif retained_user_msg is not None:
+            retained_identity = self._message_replay_identity(retained_user_msg)
+            for index, message in enumerate(tail_messages):
+                if self._message_replay_identity(message) == retained_identity:
+                    tail_messages = [
+                        *tail_messages[:index],
+                        *tail_messages[index + 1 :],
+                    ]
+                    break
 
         # Leading anchors with optional LCM annotation. A true system prompt is
         # always stable. Its immediately following user prompt is also stable
@@ -6504,10 +6577,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         tail_messages: List[Dict[str, Any]],
         assembly_cap_override: Optional[int] = None,
         preserve_leading_user: bool = False,
+        retained_user_message: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         summary_index = 0
         if (
-            preserve_leading_user
+            (preserve_leading_user or retained_user_message is not None)
             and tail_messages
             and tail_messages[0].get("role") == "user"
             and (normalize_content_value(tail_messages[0].get("content")) or "").strip()
@@ -6527,6 +6601,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     assembly_cap_override=assembly_cap_override,
                     include_lcm_note=False,
                     preserve_leading_user=preserve_leading_user,
+                    retained_user_message=retained_user_message,
                 )
                 if any(
                     (
@@ -6543,6 +6618,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             assembly_cap_override=assembly_cap_override,
             include_lcm_note=False,
             preserve_leading_user=preserve_leading_user,
+            retained_user_message=retained_user_message,
         )
         minimum_candidate_len = 1 if system_msg is not None else 0
         if len(candidate) == minimum_candidate_len and tail_messages:

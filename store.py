@@ -452,7 +452,13 @@ class MessageStore:
                                 messages: List[Dict[str, Any]],
                                 token_estimates: List[int] | None = None,
                                 source: str = "",
-                                conversation_id: str = "") -> List[int]:
+                                conversation_id: str = "",
+                                metadata_factory: Optional[
+                                    Callable[
+                                        [Dict[str, Any], int],
+                                        List[tuple[str, str]],
+                                    ]
+                                ] = None) -> List[int]:
         """Persist messages that already passed ingest protection.
 
         This is an internal fast path for callers that need the protected form
@@ -493,7 +499,18 @@ class MessageStore:
                         "host_message_timestamp" if observed_at is not None else None,
                     ),
                 )
-                ids.append(cur.lastrowid)
+                store_id = int(cur.lastrowid)
+                ids.append(store_id)
+                if metadata_factory is not None:
+                    for key, value in metadata_factory(msg, store_id):
+                        self._conn.execute(
+                            """
+                            INSERT INTO metadata(key, value)
+                            VALUES(?, ?)
+                            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                            """,
+                            (key, value),
+                        )
         return ids
 
     def reassign_session_messages(self, old_session_id: str, new_session_id: str) -> int:
