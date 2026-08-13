@@ -4476,13 +4476,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             return True
         if self._looks_like_active_summary_blob(content):
             return True
-        without_injected_context = strip_injected_context_blocks(content)
-        if without_injected_context == content:
-            return False
-        without_injected_context = without_injected_context.lstrip()
-        if without_injected_context.startswith("---"):
-            without_injected_context = without_injected_context[3:].lstrip()
-        return self._looks_like_active_summary_blob(without_injected_context)
+        # Injected-memory shape is not provenance. A genuine user can submit
+        # the same text, so only the durable compacted-snapshot digest may
+        # prove that a memory-prefixed summary came from context assembly.
+        return False
 
     def _restore_ingest_payload_placeholders_in_value(self, value: Any, *, session_id: str) -> Any:
         if isinstance(value, dict):

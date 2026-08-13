@@ -483,16 +483,10 @@ def test_systemless_summary_merge_preserves_assistant_tool_lineage(
     )
 
 
-def test_summary_prefixed_by_proactive_memory_remains_scaffolding(
+def test_memory_prefixed_summary_shape_is_not_user_turn_provenance(
     tmp_path,
 ) -> None:
-    config = LCMConfig(database_path=str(tmp_path / "issue-3-memory-summary.db"))
-    engine = LCMEngine(config=config)
-    engine.on_session_start(
-        "issue-3-memory-summary",
-        platform="cli",
-        context_length=200_000,
-    )
+    database_path = str(tmp_path / "issue-3-memory-summary.db")
     message = {
         "role": "user",
         "content": (
@@ -506,10 +500,56 @@ def test_summary_prefixed_by_proactive_memory_remains_scaffolding(
         ),
     }
 
+    first = LCMEngine(config=LCMConfig(database_path=database_path))
+    first.on_session_start("issue-3-memory-summary", platform="cli", context_length=200_000)
     try:
-        assert engine._is_replayed_context_scaffold_message(message)
+        first._ingest_messages(
+            [
+                {"role": "user", "content": "older request"},
+                {"role": "assistant", "content": "older answer"},
+            ]
+        )
+    finally:
+        first.shutdown()
+
+    rebound = LCMEngine(config=LCMConfig(database_path=database_path))
+    rebound.on_session_start("issue-3-memory-summary", platform="cli", context_length=200_000)
+    try:
+        before_count = rebound._store.get_session_count(rebound._session_id)
+        assert not rebound._is_replayed_context_scaffold_message(message)
+        rebound._ingest_messages([message])
+        rows = rebound._store.get_session_messages(rebound._session_id)
+    finally:
+        rebound.shutdown()
+
+    assert len(rows) == before_count + 1
+    assert rows[-1]["content"] == message["content"]
+
+
+def test_exact_durable_row_wins_over_earlier_unfolded_tail(tmp_path) -> None:
+    config = LCMConfig(database_path=str(tmp_path / "issue-3-exact-row.db"))
+    engine = LCMEngine(config=config)
+    engine.on_session_start("issue-3-exact-row", platform="cli", context_length=200_000)
+    earlier = {"role": "assistant", "content": "same tail"}
+    exact = {
+        "role": "assistant",
+        "content": (
+            "[Recent Summary (d0, node 1)]\n"
+            "Earlier work\n"
+            "[Expand for details: earlier work]\n\n"
+            "---\n\n"
+            "same tail"
+        ),
+    }
+
+    try:
+        engine._ingest_messages([earlier, exact])
+        rows = engine._store.get_session_messages(engine._session_id)
+        mapped_ids = engine._get_store_ids_for_messages([exact])
     finally:
         engine.shutdown()
+
+    assert mapped_ids == [rows[1]["store_id"]]
 
 
 def test_orphan_tool_is_dropped_before_summary_role_selection(tmp_path) -> None:

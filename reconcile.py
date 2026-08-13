@@ -1327,17 +1327,23 @@ class ReconcileMixin:
                 if unfolded_identity is not None
                 else None
             )
+            # Prefer the complete durable occurrence. An earlier row can
+            # legitimately equal the unfolded tail of a later, exact row.
             probe_idx = start_idx
             while probe_idx < len(candidates):
                 stored_identity = stored_identities[probe_idx]
                 if stored_identity == message_identity:
                     return probe_idx
-                if unfolded_identity is not None and stored_identity == unfolded_identity:
-                    return probe_idx
                 if (
                     wanted_cleanup_identity is not None
                     and stored_cleanup_identities[probe_idx] == wanted_cleanup_identity
                 ):
+                    return probe_idx
+                probe_idx += 1
+            probe_idx = start_idx
+            while probe_idx < len(candidates):
+                stored_identity = stored_identities[probe_idx]
+                if unfolded_identity is not None and stored_identity == unfolded_identity:
                     return probe_idx
                 if (
                     unfolded_cleanup_identity is not None
