@@ -6571,12 +6571,16 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         operation: Callable[[Any], Any],
         *,
         validate: Callable[[Any], bool] | None = None,
-        timeout: float = 5.0,
+        timeout: float | None = 5.0,
     ) -> ActiveEngineUseResult:
         """Run one bounded operation while rebind and shutdown are excluded."""
         if self._stable_use_owner_thread == threading.get_ident():
             return ActiveEngineUseResult(ActiveEngineUseStatus.REENTRANT_LIFECYCLE)
-        acquired = self._stable_use_lock.acquire(timeout=max(0.0, float(timeout)))
+        acquired = (
+            self._stable_use_lock.acquire()
+            if timeout is None
+            else self._stable_use_lock.acquire(timeout=max(0.0, float(timeout)))
+        )
         if not acquired:
             return ActiveEngineUseResult(ActiveEngineUseStatus.BUSY)
         self._stable_use_owner_thread = threading.get_ident()
@@ -6597,17 +6601,29 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         with self._exclusive_lifecycle("shutdown"):
             if self._stable_use_closed:
                 return
-            self._stable_use_closed = True
             self._shutdown_unlocked()
+            self._stable_use_closed = True
 
     def _shutdown_unlocked(self):
-        self._unregister_active_engine_binding()
-        if self._adaptive_retrieval is not None:
-            self._adaptive_retrieval.close()
-        self._store.close()
-        self._dag.close()
-        self._lifecycle.close()
-        if self._assertions is not None:
-            self._assertions.close()
-        if self._query_views is not None:
-            self._query_views.close()
+        cleanup = [
+            self._unregister_active_engine_binding,
+            *(
+                [self._adaptive_retrieval.close]
+                if self._adaptive_retrieval is not None
+                else []
+            ),
+            self._store.close,
+            self._dag.close,
+            self._lifecycle.close,
+            *([self._assertions.close] if self._assertions is not None else []),
+            *([self._query_views.close] if self._query_views is not None else []),
+        ]
+        failures = []
+        for close in cleanup:
+            try:
+                close()
+            except Exception as exc:
+                failures.append(exc)
+                logger.warning("LCM shutdown cleanup failed", exc_info=True)
+        if failures:
+            raise failures[0]

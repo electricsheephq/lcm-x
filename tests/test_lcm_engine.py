@@ -10,7 +10,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -208,6 +208,31 @@ def test_shutdown_waits_for_stable_use_and_is_terminal_and_idempotent(tmp_path):
     finally:
         release_operation.set()
         engine.shutdown()
+
+
+def test_shutdown_attempts_all_cleanup_and_remains_retryable_after_failure(tmp_path):
+    config = LCMConfig(database_path=str(tmp_path / "retryable-shutdown.db"))
+    engine = LCMEngine(config=config)
+    attempts = 0
+
+    def flaky_close():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("synthetic cleanup failure")
+
+    engine._adaptive_retrieval = SimpleNamespace(close=flaky_close)
+    with pytest.raises(RuntimeError, match="synthetic cleanup failure"):
+        engine.shutdown()
+
+    assert not engine._stable_use_closed
+    assert engine._store._conn is None
+    assert engine._dag._conn is None
+    assert engine._lifecycle._conn is None
+
+    engine.shutdown()
+    assert attempts == 2
+    assert engine._stable_use_closed
 
 
 def test_assertion_store_is_default_off_and_closes_when_enabled(tmp_path):

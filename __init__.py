@@ -546,17 +546,26 @@ def register(ctx):
 
             try:
                 if host_engine is not None:
-                    result = use_lcm_engine(host_engine, _bind_and_ingest)
+                    result = use_lcm_engine(
+                        host_engine,
+                        _bind_and_ingest,
+                        timeout=None,
+                    )
                 else:
                     result = use_active_lcm_engine(
                         lambda active_engine: active_engine.ingest(history),
                         session_id=session_id,
                         conversation_id=conversation_id,
+                        timeout=None,
                     )
                     if (
                         result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT
                     ):
-                        result = use_cold_lcm_engine(engine, _bind_and_ingest)
+                        result = use_cold_lcm_engine(
+                            engine,
+                            _bind_and_ingest,
+                            timeout=None,
+                        )
 
                 if not result.used:
                     logger.warning(

@@ -1500,6 +1500,7 @@ def test_post_llm_hook_prefers_active_lcm_clone(monkeypatch, tmp_path):
             self.current_conversation_id = ""
             self.starts = []
             self.ingested = []
+            self.stable_timeouts = []
 
         def on_session_start(self, session_id, **kwargs):
             self.current_session_id = session_id
@@ -1515,6 +1516,7 @@ def test_post_llm_hook_prefers_active_lcm_clone(monkeypatch, tmp_path):
                 ActiveEngineUseStatus,
             )
 
+            self.stable_timeouts.append(_kwargs.get("timeout"))
             return ActiveEngineUseResult(
                 ActiveEngineUseStatus.USED,
                 operation(self),
@@ -1545,6 +1547,7 @@ def test_post_llm_hook_prefers_active_lcm_clone(monkeypatch, tmp_path):
         )
     ]
     assert active.ingested == [history]
+    assert active.stable_timeouts == [None]
     assert ctx.engine.current_session_id == ""
     ctx.engine.shutdown()
 

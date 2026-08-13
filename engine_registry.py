@@ -158,7 +158,7 @@ def use_active_lcm_engine(
     *,
     session_id: str = "",
     conversation_id: str = "",
-    timeout: float = 5.0,
+    timeout: float | None = 5.0,
 ) -> ActiveEngineUseResult:
     """Resolve and use one engine while its validated binding stays stable."""
     session_id = str(session_id or "")
@@ -187,7 +187,7 @@ def use_lcm_engine(
     engine: Any,
     operation,
     *,
-    timeout: float = 5.0,
+    timeout: float | None = 5.0,
 ) -> ActiveEngineUseResult:
     """Use a host-supplied or cold prototype engine with stable lifetime."""
     if not _is_usable_lcm_engine(engine):
@@ -202,7 +202,7 @@ def use_cold_lcm_engine(
     engine: Any,
     operation,
     *,
-    timeout: float = 5.0,
+    timeout: float | None = 5.0,
 ) -> ActiveEngineUseResult:
     """Use an unbound prototype only while no other runtime can register."""
     def claim_and_use(selected):
