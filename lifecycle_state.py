@@ -941,24 +941,27 @@ class LifecycleStateStore:
     ) -> int:
         """Validate and stage one contiguous compaction-frontier advance.
 
-        The caller owns the transaction and inserts the summary node before this
-        callback. Any exception therefore rolls back both the node and frontier.
-        ``expected_frontier_store_id`` is the optimistic publication generation:
-        the lifecycle row must still hold that exact value.
+        The caller owns the node/frontier transaction. The expected frontier is
+        its optimistic publication generation.
         """
         expected_frontier = max(0, int(expected_frontier_store_id or 0))
-        covered_ids = sorted(
+        all_covered_ids = sorted(
             {
                 int(store_id)
                 for store_id in covered_store_ids
-                if int(store_id) > expected_frontier
+                if int(store_id) > 0
             }
         )
-        if not covered_ids:
+        if not all_covered_ids:
             raise LifecyclePublicationConflictError(
-                "Compaction publication has no new durable source coverage"
+                "Compaction publication has no durable source coverage"
             )
-        covered_end = covered_ids[-1]
+        covered_end = max(expected_frontier, all_covered_ids[-1])
+        covered_ids = [
+            store_id
+            for store_id in all_covered_ids
+            if store_id > expected_frontier
+        ]
         excluded_ids = sorted(
             {
                 int(store_id)
@@ -970,15 +973,37 @@ class LifecycleStateStore:
             raise LifecyclePublicationConflictError(
                 "Compaction publication coverage overlaps an explicit exclusion"
             )
-        rows = conn.execute(
+        covered_rows = conn.execute(
             """
             SELECT store_id, conversation_id
             FROM messages
-            WHERE session_id = ? AND store_id > ? AND store_id <= ?
+            WHERE session_id = ? AND store_id >= ? AND store_id <= ?
             ORDER BY store_id
             """,
-            (session_id, expected_frontier, covered_end),
+            (
+                session_id,
+                min(expected_frontier + 1, all_covered_ids[0]),
+                covered_end,
+            ),
         ).fetchall()
+        covered_id_set = set(all_covered_ids)
+        owned_rows = [
+            row for row in covered_rows if int(row[0]) in covered_id_set
+        ]
+        if [int(row[0]) for row in owned_rows] != all_covered_ids:
+            raise LifecyclePublicationConflictError(
+                "Compaction publication source ownership changed"
+            )
+        if any(
+            str(row[1] or "").strip() not in {"", conversation_id}
+            for row in owned_rows
+        ):
+            raise LifecyclePublicationConflictError(
+                "Compaction publication source ownership changed"
+            )
+        rows = [
+            row for row in covered_rows if int(row[0]) > expected_frontier
+        ]
         authoritative_ids = [int(row[0]) for row in rows]
         proven_ids = sorted(covered_ids + excluded_ids)
         if authoritative_ids != proven_ids:
@@ -988,10 +1013,7 @@ class LifecycleStateStore:
                 f"authoritative={authoritative_ids}, covered={covered_ids}, "
                 f"excluded={excluded_ids})"
             )
-        if any(
-            str(row[1] or "").strip() not in {"", conversation_id}
-            for row in rows
-        ):
+        if any(str(row[1] or "").strip() not in {"", conversation_id} for row in rows):
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )

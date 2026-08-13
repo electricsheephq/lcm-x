@@ -439,11 +439,10 @@ class CompactionMixin:
             }
         logger.warning(
             "LCM summary publication could not finish; preserving replay-safe "
-            "context (reason=%s, code=%s, name=%s, detail=%s)",
+            "context (reason=%s, code=%s, name=%s)",
             failure_reason,
             getattr(exc, "sqlite_errorcode", None),
             getattr(exc, "sqlite_errorname", None),
-            exc,
         )
         return fallback
 
@@ -479,27 +478,17 @@ class CompactionMixin:
     ) -> List[int]:
         """Return immutable stored rows explicitly excluded by active filters."""
         proven = {int(store_id) for store_id in already_proven_store_ids}
-        excluded: list[int] = []
-        after_store_id = expected_frontier
-        while after_store_id < covered_end:
-            rows = self._store.get_session_messages_after(
-                self._session_id,
-                after_store_id=after_store_id,
-            )
-            if not rows:
-                break
-            for row in rows:
-                store_id = int(row.get("store_id") or 0)
-                if store_id > covered_end:
-                    return excluded
-                after_store_id = max(after_store_id, store_id)
-                if store_id in proven:
-                    continue
-                if self._matches_ignore_message_patterns(row, stored_row=True):
-                    excluded.append(store_id)
-            if int(rows[-1].get("store_id") or 0) >= covered_end:
-                break
-        return excluded
+        rows = self._store.get_session_messages_after(
+            self._session_id,
+            after_store_id=expected_frontier,
+        )
+        return [
+            store_id
+            for row in rows
+            if (store_id := int(row.get("store_id") or 0)) <= covered_end
+            and store_id not in proven
+            and self._matches_ignore_message_patterns(row, stored_row=True)
+        ]
 
     def _compress_impl(self, messages: List[Dict[str, Any]],
                        current_tokens: int = None,
@@ -951,7 +940,12 @@ class CompactionMixin:
             published_frontier = (
                 max(consumed_store_ids) if consumed_store_ids else 0
             )
-            expected_frontier = int(self._last_compacted_store_id or 0)
+            publication_state = self._lifecycle.get_by_conversation(
+                self._conversation_id
+            )
+            expected_frontier = int(
+                getattr(publication_state, "current_frontier_store_id", 0)
+            )
             publication_excluded_store_ids.extend(
                 self._stored_publication_filter_exclusions(
                     expected_frontier,
