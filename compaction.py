@@ -20,8 +20,10 @@ import time
 from typing import Any, Dict, List, Optional
 
 from .dag import SummaryNode
+from .lifecycle_state import LifecycleBindingChangedError
 from .message_content import text_content_for_pattern_matching
 from .sanitize import _contains_sensitive_redaction
+from .sqlite_util import _is_sqlite_locked_error
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 
 logger = logging.getLogger(__name__)
@@ -364,6 +366,97 @@ class CompactionMixin:
             self._last_compression_status = "error"
             self._last_compression_noop_reason = ""
             raise
+
+    def _fail_open_after_publication_failure(
+        self,
+        active_context: List[Dict[str, Any]],
+        exc: BaseException,
+        *,
+        compress_started: float,
+        threshold_full_sweep_active: bool,
+        recovery_assembly_cap: int | None,
+        leaf_passes: int,
+        condensation_passes: int = 0,
+        context_is_assembled: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Return a replay-safe active view after publication cannot finish."""
+        self._store.rollback_pending_write()
+        fallback = active_context
+        if recovery_assembly_cap is not None and not context_is_assembled:
+            leading_anchor_count = self._leading_anchor_count(active_context)
+            fallback = self._assemble_overflow_recovery_context(
+                active_context[0] if leading_anchor_count else None,
+                active_context[leading_anchor_count:],
+                assembly_cap_override=recovery_assembly_cap,
+                **(
+                    {"retained_user_message": active_context[1]}
+                    if leading_anchor_count == 2
+                    else {}
+                ),
+            )
+        self._last_compression_status = "error"
+        binding_changed = isinstance(exc, LifecycleBindingChangedError)
+        failure_reason = (
+            "lifecycle_binding_changed"
+            if binding_changed
+            else "sqlite_publication_locked"
+        )
+        self._last_compression_noop_reason = (
+            "summary publication lost its lifecycle binding"
+            if binding_changed
+            else "summary publication blocked by SQLite lock"
+        )
+        self._ingest_cursor = len(fallback)
+        self._ingest_cursor_needs_reconcile = False
+        self._last_compaction_duration_ms = (
+            time.perf_counter() - compress_started
+        ) * 1000.0
+        if recovery_assembly_cap is not None:
+            self._last_overflow_recovery_failed = (
+                count_messages_tokens(fallback) > recovery_assembly_cap
+            )
+        if threshold_full_sweep_active:
+            self._last_threshold_full_sweep = {
+                **self._last_threshold_full_sweep,
+                "status": "error",
+                "leaf_passes": leaf_passes,
+                "condensation_passes": condensation_passes,
+                "total_passes": leaf_passes + condensation_passes,
+                "duration_ms": round(self._last_compaction_duration_ms, 3),
+                "stop_reason": failure_reason,
+            }
+        logger.warning(
+            "LCM summary publication could not finish; preserving replay-safe "
+            "context (reason=%s, code=%s, name=%s)",
+            failure_reason,
+            getattr(exc, "sqlite_errorcode", None),
+            getattr(exc, "sqlite_errorname", None),
+        )
+        return fallback
+
+    def _assemble_committed_compaction_context(
+        self,
+        working_messages: List[Dict[str, Any]],
+        anchor_source_messages: List[Dict[str, Any]],
+        recovery_assembly_cap: int | None,
+    ) -> List[Dict[str, Any]]:
+        """Assemble and register replay proof for every committed leaf."""
+        leading_anchor_count = self._leading_anchor_count(working_messages)
+        anchor_leading_count = self._leading_anchor_count(anchor_source_messages)
+        self._pending_context_anchor_messages = anchor_source_messages[anchor_leading_count:]
+        try:
+            return self._assemble_context(
+                working_messages[0] if leading_anchor_count else None,
+                working_messages[leading_anchor_count:],
+                assembly_cap_override=recovery_assembly_cap,
+                **(
+                    {"retained_user_message": working_messages[1]}
+                    if leading_anchor_count == 2
+                    else {}
+                ),
+            )
+        finally:
+            self._pending_context_anchor_messages = None
 
     def _compress_impl(self, messages: List[Dict[str, Any]],
                        current_tokens: int = None,
@@ -795,11 +888,42 @@ class CompactionMixin:
                 latest_at=latest_at,
                 expand_hint=self._extract_expand_hint(summary_text),
             )
-            self._dag.add_node(node)
+            published_frontier = (
+                max(consumed_store_ids) if consumed_store_ids else 0
+            )
+            # The frontier consumes every durable row removed from the active
+            # prefix, including trailing dependent replies. Summary lineage
+            # excludes those replies; their durable ledger drives replay cleanup.
+            try:
+                before_commit = None
+                if self._session_id and self._conversation_id:
+                    publication_session_id = self._session_id
+                    publication_conversation_id = self._conversation_id
+                    def stage_frontier(conn, _node_id) -> None:
+                        self._lifecycle.stage_frontier_advance(
+                            conn,
+                            publication_conversation_id,
+                            publication_session_id,
+                            published_frontier,
+                        )
+                    before_commit = stage_frontier
+                self._dag.add_node(node, before_commit=before_commit)
+            except Exception as exc:
+                if (
+                    not _is_sqlite_locked_error(exc)
+                    and not isinstance(exc, LifecycleBindingChangedError)
+                ):
+                    raise
+                return self._fail_open_after_publication_failure(
+                    working_messages,
+                    exc,
+                    compress_started=_compress_started,
+                    threshold_full_sweep_active=threshold_full_sweep_active,
+                    recovery_assembly_cap=recovery_assembly_cap,
+                    leaf_passes=leaf_passes,
+                )
+            self._last_compacted_store_id = published_frontier
             self._invalidate_rollups_for_published_node(node)
-            self._maybe_gc_compacted_tool_results(compacted_chunk, source_store_ids)
-            self._last_compacted_store_id = max(consumed_store_ids) if consumed_store_ids else 0
-            self._persist_frontier_marker()
 
             pressure_remaining_messages = pressure_messages[leading_anchor_count + selected_raw_len:]
             working_messages = working_messages[:leading_anchor_count] + remaining_messages
@@ -807,6 +931,32 @@ class CompactionMixin:
             leaf_compacted_this_turn = True
             leaf_passes += 1
             estimated_active_tokens = max(0, estimated_active_tokens - source_tokens + summary_tokens)
+            if (
+                getattr(self._config, "large_output_transcript_gc_enabled", False)
+                and source_store_ids
+            ):
+                committed_context = self._assemble_committed_compaction_context(
+                    working_messages,
+                    anchor_source_messages,
+                    recovery_assembly_cap,
+                )
+                try:
+                    self._maybe_gc_compacted_tool_results(
+                        compacted_chunk,
+                        source_store_ids,
+                    )
+                except Exception as exc:
+                    if not _is_sqlite_locked_error(exc):
+                        raise
+                    return self._fail_open_after_publication_failure(
+                        committed_context,
+                        exc,
+                        compress_started=_compress_started,
+                        threshold_full_sweep_active=threshold_full_sweep_active,
+                        recovery_assembly_cap=recovery_assembly_cap,
+                        leaf_passes=leaf_passes,
+                        context_is_assembled=True,
+                    )
 
             if threshold_full_sweep_active:
                 leading_anchor_count = self._leading_anchor_count(working_messages)
@@ -938,27 +1088,48 @@ class CompactionMixin:
         # Step 6: Check if condensation is needed. A threshold full sweep only
         # condenses after the eligible raw prefix has been drained, and shares
         # the same total pass/deadline budget as its leaf work.
+        pre_condensation_context = self._assemble_committed_compaction_context(
+            working_messages,
+            anchor_source_messages,
+            recovery_assembly_cap,
+        )
         condensation_passes = 0
-        if threshold_full_sweep_active:
-            if sweep_raw_drained:
-                remaining_passes = max(
-                    0,
-                    _THRESHOLD_FULL_SWEEP_MAX_PASSES - leaf_passes,
-                )
-                condensation_passes, sweep_stop_reason = (
-                    self._run_threshold_sweep_condensation(
-                        target_tokens=sweep_target_tokens,
-                        pass_budget=remaining_passes,
-                        deadline=sweep_deadline,
-                        focus_topic=focus_topic,
+        try:
+            if threshold_full_sweep_active:
+                if sweep_raw_drained:
+                    remaining_passes = max(
+                        0,
+                        _THRESHOLD_FULL_SWEEP_MAX_PASSES - leaf_passes,
                     )
+                    condensation_passes, sweep_stop_reason = (
+                        self._run_threshold_sweep_condensation(
+                            target_tokens=sweep_target_tokens,
+                            pass_budget=remaining_passes,
+                            deadline=sweep_deadline,
+                            focus_topic=focus_topic,
+                        )
+                    )
+            else:
+                condensation_passes = self._maybe_condense(
+                    focus_topic=focus_topic,
+                    leaf_compacted_this_turn=True,
+                    force_overflow=force_overflow,
+                    critical_budget_pressure=critical_budget_pressure,
                 )
-        else:
-            self._maybe_condense(
-                focus_topic=focus_topic,
-                leaf_compacted_this_turn=True,
-                force_overflow=force_overflow,
-                critical_budget_pressure=critical_budget_pressure,
+        except Exception as exc:
+            if not _is_sqlite_locked_error(exc):
+                raise
+            return self._fail_open_after_publication_failure(
+                pre_condensation_context,
+                exc,
+                compress_started=_compress_started,
+                threshold_full_sweep_active=threshold_full_sweep_active,
+                recovery_assembly_cap=recovery_assembly_cap,
+                leaf_passes=leaf_passes,
+                condensation_passes=int(
+                    getattr(exc, "lcm_completed_condensation_passes", 0)
+                ),
+                context_is_assembled=True,
             )
 
         # Step 7: Assemble new active context
@@ -966,22 +1137,13 @@ class CompactionMixin:
             working_messages,
             observed_tokens=observed_prompt_tokens,
         )
-        leading_anchor_count = self._leading_anchor_count(working_messages)
-        anchor_leading_count = self._leading_anchor_count(anchor_source_messages)
-        self._pending_context_anchor_messages = anchor_source_messages[anchor_leading_count:]
-        try:
-            compressed = self._assemble_context(
-                working_messages[0] if leading_anchor_count else None,
-                working_messages[leading_anchor_count:],
-                assembly_cap_override=recovery_assembly_cap,
-                **(
-                    {"retained_user_message": working_messages[1]}
-                    if leading_anchor_count == 2
-                    else {}
-                ),
+        compressed = pre_condensation_context
+        if condensation_passes:
+            compressed = self._assemble_committed_compaction_context(
+                working_messages,
+                anchor_source_messages,
+                recovery_assembly_cap,
             )
-        finally:
-            self._pending_context_anchor_messages = None
         self.compression_count += 1
         self._last_compaction_duration_ms = (time.perf_counter() - _compress_started) * 1000.0
         logger.info(

@@ -21,6 +21,10 @@ from typing import Any, Optional
 from .db_bootstrap import configure_connection, refuse_schema_version_too_new, run_versioned_migrations
 
 
+class LifecycleBindingChangedError(RuntimeError):
+    """Raised when publication loses its active session binding."""
+
+
 def _synchronized(method):
     """Serialize a read-modify-write method on the store's reentrant lock.
 
@@ -877,3 +881,47 @@ class LifecycleStateStore:
                 return self.get_by_conversation(conversation_id)
             conn.commit()
             return self.get_by_conversation(conversation_id)
+
+    @staticmethod
+    def stage_frontier_advance(
+        conn: sqlite3.Connection,
+        conversation_id: str,
+        session_id: str,
+        frontier_store_id: int,
+    ) -> None:
+        """Stage a monotonic frontier advance in a caller-owned transaction.
+
+        This intentionally uses the publishing DAG connection rather than the
+        lifecycle connection or ``self._lock``. SQLite serializes the whole
+        node/frontier write transaction; the conditional UPDATE linearizes it
+        against bind/rollover writers, while MAX keeps same-session advances
+        monotonic.
+        """
+        cursor = conn.execute(
+            """
+            UPDATE lcm_lifecycle_state
+            SET current_frontier_store_id = MAX(current_frontier_store_id, ?),
+                updated_at = ?
+            WHERE conversation_id = ? AND current_session_id = ?
+            """,
+            (
+                int(frontier_store_id or 0),
+                time.time(),
+                conversation_id,
+                session_id,
+            ),
+        )
+        if cursor.rowcount == 1:
+            return
+        row = conn.execute(
+            "SELECT current_session_id FROM lcm_lifecycle_state "
+            "WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(
+                "Cannot publish summary without lifecycle state"
+            )
+        raise LifecycleBindingChangedError(
+            "Lifecycle session binding changed during summary publication"
+        )
