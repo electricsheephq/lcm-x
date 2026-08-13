@@ -2168,6 +2168,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         This only establishes durable occurrence lineage. Context assembly
         decides separately whether to retain the registered row.
         """
+        self._prepared_retained_user_anchor = None
         if (
             len(messages) < 2
             or not isinstance(messages[0], dict)
@@ -2191,6 +2192,14 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 after_store_id=int(registered_row.get("store_id") or 0),
             )
             if not later_real_users:
+                self._prepared_retained_user_anchor = (
+                    self._session_id,
+                    int(registered_row.get("store_id") or 0),
+                    self._replay_identity_sha256(
+                        registered_row,
+                        stored_row=True,
+                    ),
+                )
                 return registered_row
             self._write_retained_user_anchor(None)
             return None
@@ -2207,20 +2216,42 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             return None
         if not self._write_retained_user_anchor(row):
             return None
+        self._prepared_retained_user_anchor = (
+            self._session_id,
+            int(row.get("store_id") or 0),
+            self._replay_identity_sha256(row, stored_row=True),
+        )
         return row
 
-    @staticmethod
-    def _leading_anchor_count(messages: List[Dict[str, Any]]) -> int:
+    def _leading_anchor_count(self, messages: List[Dict[str, Any]]) -> int:
         """Return the number of non-compactable leading messages.
 
-        Only the system prompt is a safe permanent anchor. Hermes gateway
-        sessions can begin with a user message when core passes conversation
-        history without a system prompt; preserving that first user turn as raw
-        active context lets stale requests look current after later compaction.
+        The system prompt is permanent. Its immediately following user turn is
+        also anchored only when this compaction call prepared exact durable proof
+        that it remains the session's sole real user occurrence.
         """
-        if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
+        if (
+            not messages
+            or not isinstance(messages[0], dict)
+            or messages[0].get("role") != "system"
+        ):
+            return 0
+        if (
+            len(messages) < 2
+            or not isinstance(messages[1], dict)
+            or messages[1].get("role") != "user"
+        ):
             return 1
-        return 0
+        prepared = getattr(self, "_prepared_retained_user_anchor", None)
+        if (
+            not isinstance(prepared, tuple)
+            or len(prepared) != 3
+            or prepared[0] != self._session_id
+            or int(prepared[1] or 0) <= 0
+            or self._replay_identity_sha256(messages[1]) != prepared[2]
+        ):
+            return 1
+        return 2
 
     def _raw_backlog_tokens(self, messages: List[Dict[str, Any]]) -> int:
         backlog = self._raw_backlog_messages(messages)
@@ -5950,6 +5981,28 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         return normalized + note
 
     @staticmethod
+    def _prepend_generated_context_to_message(
+        message: Dict[str, Any],
+        generated_context: str,
+    ) -> Dict[str, Any]:
+        """Fold generated context into a same-role tail without losing metadata."""
+        merged = message.copy()
+        content = message.get("content")
+        if isinstance(content, list):
+            merged["content"] = [
+                {"type": "text", "text": generated_context},
+                *content,
+            ]
+        else:
+            normalized = normalize_content_value(content) or ""
+            merged["content"] = (
+                f"{generated_context}\n\n---\n\n{normalized}"
+                if normalized
+                else generated_context
+            )
+        return merged
+
+    @staticmethod
     def _is_preserved_todo_context_message(message: Dict[str, Any]) -> bool:
         content = text_content_for_pattern_matching(message.get("content")) or ""
         return content.lstrip().startswith(_PRESERVED_TODO_CONTEXT_PREFIX)
@@ -6183,11 +6236,12 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         tail_messages: List[Dict[str, Any]],
         assembly_cap_override: Optional[int] = None,
         include_lcm_note: bool = True,
+        retained_user_message: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Build the active context from DAG summaries + fresh tail.
 
         Structure:
-          [leading anchor, normally system prompt]
+          [leading anchors: system and, when proven, the sole real user]
           [highest-depth summary nodes first, then lower]
           [fresh tail messages]
         """
@@ -6207,6 +6261,13 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     leading_msg.get("content", "")
                 )
             result.append(leading_msg)
+        retained_user_msg = (
+            retained_user_message.copy()
+            if retained_user_message is not None
+            else None
+        )
+        if retained_user_msg is not None:
+            result.append(retained_user_msg)
 
         assembly_cap = (
             assembly_cap_override
@@ -6225,7 +6286,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         anchor_part: Optional[str] = None
         summary_budget = None
         if assembly_cap is not None:
-            used = count_message_tokens(leading_msg) if leading_msg is not None else 0
+            used = count_messages_tokens(result)
             kept_tail_reversed: list[Dict[str, Any]] = []
             tail_token_total = 0
             tail_for_selection = self._sanitize_active_context_messages(
@@ -6252,7 +6313,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         # Collect DAG summaries — highest depth first for context hierarchy
         summary_parts: list[str] = []
         last_role = result[-1].get("role", "system") if result else "system"
-        if not result or result[-1].get("role") == "system":
+        if retained_user_msg is not None:
+            summary_role = "assistant"
+        elif not result or result[-1].get("role") == "system":
             # The summary becomes the first provider-visible message: either no
             # leading anchor exists (gateway-style assembly) or the system
             # prompt is the only anchor, which Anthropic extracts into a
@@ -6291,6 +6354,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                         f"[Expand for details: {node.expand_hint}]"
                     )
 
+        retained_generated_context_parts: list[str] = []
         if summary_parts:
             selected_parts = summary_parts
             if summary_budget is not None:
@@ -6305,18 +6369,68 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     selected_parts.append(part)
             if selected_parts:
                 combined = "\n\n---\n\n".join(selected_parts)
-                result.append({"role": summary_role, "content": combined})
+                if retained_user_msg is not None:
+                    retained_generated_context_parts.append(combined)
+                else:
+                    result.append({"role": summary_role, "content": combined})
 
         # Proactive memory injection (SPEC F, default-off). One bounded block is
         # placed adjacent to the summary prefix — a stable position below the
         # cache-stable summaries and above the volatile fresh tail — so the
         # already-volatile tail region absorbs its per-turn variability and the
         # cached summary prefix is left intact. Never inside the fresh tail.
+        proactive_query_messages = tail_messages
+        if retained_user_msg is not None:
+            proactive_query_messages = [retained_user_msg, *tail_messages]
         proactive_msg = self._build_proactive_recall_message(
-            tail_messages, summary_role, active_summary_node_ids
+            proactive_query_messages,
+            summary_role,
+            active_summary_node_ids,
         )
         if proactive_msg is not None:
-            result.append(proactive_msg)
+            if retained_user_msg is not None:
+                proactive_content = normalize_content_value(
+                    proactive_msg.get("content")
+                ) or ""
+                if proactive_content:
+                    retained_generated_context_parts.append(proactive_content)
+            else:
+                result.append(proactive_msg)
+
+        folded_source_store_id = 0
+        folded_result_index: Optional[int] = None
+        folded_original_tail: Optional[Dict[str, Any]] = None
+        if retained_generated_context_parts:
+            generated_context = "\n\n---\n\n".join(
+                retained_generated_context_parts
+            )
+            if (
+                tail_selected
+                and tail_selected[0].get("role") == summary_role
+            ):
+                source_ids = self._get_store_id_map_for_messages(tail_selected)
+                folded_source_store_id = int(
+                    source_ids.get(id(tail_selected[0])) or 0
+                )
+                if folded_source_store_id > 0:
+                    folded_original_tail = tail_selected[0]
+                    folded_result_index = len(result)
+                    tail_selected = [
+                        self._prepend_generated_context_to_message(
+                            folded_original_tail,
+                            generated_context,
+                        ),
+                        *tail_selected[1:],
+                    ]
+                else:
+                    logger.warning(
+                        "LCM omitted generated context because the same-role "
+                        "tail occurrence lacked durable lineage"
+                    )
+            else:
+                result.append(
+                    {"role": summary_role, "content": generated_context}
+                )
 
         # Fresh tail
         result.extend(tail_selected)
@@ -6348,6 +6462,21 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     trimmed["content"] = "\n\n---\n\n".join(parts)
                     trimmed_result.append(trimmed)
             result = self._sanitize_active_context_messages(trimmed_result)
+
+        if (
+            folded_result_index is not None
+            and folded_original_tail is not None
+            and folded_result_index < len(result)
+        ):
+            if not self._write_folded_tail_lineage(
+                result[folded_result_index],
+                folded_source_store_id,
+            ):
+                result[folded_result_index] = folded_original_tail
+                result = self._sanitize_active_context_messages(result)
+                self._clear_folded_tail_lineage()
+        else:
+            self._clear_folded_tail_lineage()
 
         # Persist proof only for the exact provider-visible compacted snapshot
         # assembled by this engine. Ingested input is not trusted replay proof.
@@ -6493,6 +6622,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         system_msg: Optional[Dict[str, Any]],
         tail_messages: List[Dict[str, Any]],
         assembly_cap_override: Optional[int] = None,
+        retained_user_message: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         if tail_messages:
             first = tail_messages[0]
@@ -6504,6 +6634,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     tail_messages[1:],
                     assembly_cap_override=assembly_cap_override,
                     include_lcm_note=False,
+                    retained_user_message=retained_user_message,
                 )
                 if any(
                     (msg.get("content") or "") == content
@@ -6516,10 +6647,22 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             tail_messages,
             assembly_cap_override=assembly_cap_override,
             include_lcm_note=False,
+            retained_user_message=retained_user_message,
         )
-        minimum_candidate_len = 1 if system_msg is not None else 0
+        minimum_candidate_len = (
+            (1 if system_msg is not None else 0)
+            + (1 if retained_user_message is not None else 0)
+        )
         if len(candidate) == minimum_candidate_len and tail_messages:
-            fallback = ([system_msg] if system_msg is not None else []) + [tail_messages[-1]]
+            fallback = (
+                ([system_msg] if system_msg is not None else [])
+                + (
+                    [retained_user_message]
+                    if retained_user_message is not None
+                    else []
+                )
+                + [tail_messages[-1]]
+            )
             return self._sanitize_active_context_messages(fallback)
         return candidate
 
