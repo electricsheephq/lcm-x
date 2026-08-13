@@ -15,6 +15,7 @@ import sqlite3
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -28,10 +29,13 @@ from .config import LCMConfig
 from .dag import SummaryDAG, SummaryNode
 from .diagnostics import _enforce_state_db_containment
 from .engine_registry import (
+    _ACTIVE_ENGINE_COLD_START_LOCK,
     _ACTIVE_ENGINE_REGISTRY_LOCK,
     _ACTIVE_ENGINES_BY_CONVERSATION_ID,
     _ACTIVE_ENGINES_BY_SESSION_ID,
     _remove_registry_entries_for_engine,
+    ActiveEngineUseResult,
+    ActiveEngineUseStatus,
     resolve_active_lcm_engine,  # noqa: F401  (re-exported: hosts import it from .engine)
 )
 from .escalation import (
@@ -382,6 +386,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                  hermes_home: str = ""):
         self._config = config or LCMConfig.from_env()
         self._hermes_home = hermes_home
+        self._stable_use_lock = threading.Lock()
+        self._stable_use_owner_thread: int | None = None
+        self._stable_use_closed = False
         self._assertion_extraction_metrics_lock = threading.RLock()
         self._assertion_extraction_idle = threading.Event()
         self._assertion_extraction_idle.set()
@@ -1780,15 +1787,16 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         conversation_id = str(self._conversation_id or "")
         if not session_id:
             return
-        with _ACTIVE_ENGINE_REGISTRY_LOCK:
-            _remove_registry_entries_for_engine(
-                self,
-                keep_session_id=session_id,
-                keep_conversation_id=conversation_id,
-            )
-            _ACTIVE_ENGINES_BY_SESSION_ID[session_id] = self
-            if conversation_id:
-                _ACTIVE_ENGINES_BY_CONVERSATION_ID[conversation_id] = self
+        with _ACTIVE_ENGINE_COLD_START_LOCK:
+            with _ACTIVE_ENGINE_REGISTRY_LOCK:
+                _remove_registry_entries_for_engine(
+                    self,
+                    keep_session_id=session_id,
+                    keep_conversation_id=conversation_id,
+                )
+                _ACTIVE_ENGINES_BY_SESSION_ID[session_id] = self
+                if conversation_id:
+                    _ACTIVE_ENGINES_BY_CONVERSATION_ID[conversation_id] = self
 
     def _unregister_active_engine_binding(self) -> None:
         with _ACTIVE_ENGINE_REGISTRY_LOCK:
@@ -2489,6 +2497,12 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         self._log_session_filter_diagnostics()
 
     def on_session_start(self, session_id: str, **kwargs) -> None:
+        with self._exclusive_lifecycle("rebind"):
+            if self._stable_use_closed:
+                raise RuntimeError("LCM engine is closed")
+            self._on_session_start_unlocked(session_id, **kwargs)
+
+    def _on_session_start_unlocked(self, session_id: str, **kwargs) -> None:
         if "hermes_home" in kwargs:
             self._rebind_storage_for_home(str(kwargs.get("hermes_home") or ""))
 
@@ -3104,6 +3118,16 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         )
 
     def on_session_end(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
+        with self._exclusive_lifecycle("end"):
+            if self._stable_use_closed:
+                return
+            self._on_session_end_unlocked(session_id, messages)
+
+    def _on_session_end_unlocked(
+        self,
+        session_id: str,
+        messages: List[Dict[str, Any]],
+    ) -> None:
         ended_generation = self._in_process_auxiliary_caller_generation(session_id)
         active_auxiliary_end = session_id in self._active_auxiliary_session_ids()
         if (
@@ -3370,6 +3394,13 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 current_session_bypasses=current_session_bypasses,
             )
             return
+        if session_id != self._session_id:
+            logger.warning(
+                "LCM ignored unverified stale session-end callback for %s while bound to %s",
+                session_id,
+                self._session_id,
+            )
+            return
         try:
             with _temporary_sqlite_busy_timeout(
                 [
@@ -3433,6 +3464,12 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             raise
 
     def on_session_reset(self) -> None:
+        with self._exclusive_lifecycle("reset"):
+            if self._stable_use_closed:
+                return
+            self._on_session_reset_unlocked()
+
+    def _on_session_reset_unlocked(self) -> None:
         if self._host_fallback_compressor is not None:
             compressor = self._host_fallback_compressor
             on_session_reset = getattr(compressor, "on_session_reset", None)
@@ -6517,14 +6554,76 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
 
     # -- Lifecycle ---------------------------------------------------------
 
+    @contextmanager
+    def _exclusive_lifecycle(self, action: str):
+        thread_id = threading.get_ident()
+        if self._stable_use_owner_thread == thread_id:
+            raise RuntimeError(f"LCM lifecycle {action} attempted during stable engine use")
+        with self._stable_use_lock:
+            self._stable_use_owner_thread = thread_id
+            try:
+                yield
+            finally:
+                self._stable_use_owner_thread = None
+
+    def _run_stably(
+        self,
+        operation: Callable[[Any], Any],
+        *,
+        validate: Callable[[Any], bool] | None = None,
+        timeout: float | None = 5.0,
+    ) -> ActiveEngineUseResult:
+        """Run one bounded operation while rebind and shutdown are excluded."""
+        if self._stable_use_owner_thread == threading.get_ident():
+            return ActiveEngineUseResult(ActiveEngineUseStatus.REENTRANT_LIFECYCLE)
+        acquired = (
+            self._stable_use_lock.acquire()
+            if timeout is None
+            else self._stable_use_lock.acquire(timeout=max(0.0, float(timeout)))
+        )
+        if not acquired:
+            return ActiveEngineUseResult(ActiveEngineUseStatus.BUSY)
+        self._stable_use_owner_thread = threading.get_ident()
+        try:
+            if self._stable_use_closed:
+                return ActiveEngineUseResult(ActiveEngineUseStatus.CLOSED_ENGINE)
+            if validate is not None and not validate(self):
+                return ActiveEngineUseResult(ActiveEngineUseStatus.BINDING_CHANGED)
+            return ActiveEngineUseResult(
+                ActiveEngineUseStatus.USED,
+                operation(self),
+            )
+        finally:
+            self._stable_use_owner_thread = None
+            self._stable_use_lock.release()
+
     def shutdown(self):
-        self._unregister_active_engine_binding()
-        if self._adaptive_retrieval is not None:
-            self._adaptive_retrieval.close()
-        self._store.close()
-        self._dag.close()
-        self._lifecycle.close()
-        if self._assertions is not None:
-            self._assertions.close()
-        if self._query_views is not None:
-            self._query_views.close()
+        with self._exclusive_lifecycle("shutdown"):
+            if self._stable_use_closed:
+                return
+            self._shutdown_unlocked()
+            self._stable_use_closed = True
+
+    def _shutdown_unlocked(self):
+        cleanup = [
+            self._unregister_active_engine_binding,
+            *(
+                [self._adaptive_retrieval.close]
+                if self._adaptive_retrieval is not None
+                else []
+            ),
+            self._store.close,
+            self._dag.close,
+            self._lifecycle.close,
+            *([self._assertions.close] if self._assertions is not None else []),
+            *([self._query_views.close] if self._query_views is not None else []),
+        ]
+        failures = []
+        for close in cleanup:
+            try:
+                close()
+            except Exception as exc:
+                failures.append(exc)
+                logger.warning("LCM shutdown cleanup failed", exc_info=True)
+        if failures:
+            raise failures[0]

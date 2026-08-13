@@ -313,7 +313,13 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
 def register(ctx):
     """Plugin entry point — register the LCM context engine and tools."""
     from .config import LCMConfig
-    from .engine import LCMEngine, resolve_active_lcm_engine
+    from .engine import LCMEngine
+    from .engine_registry import (
+        ActiveEngineUseStatus,
+        use_active_lcm_engine,
+        use_cold_lcm_engine,
+        use_lcm_engine,
+    )
     from .schemas import (
         LCM_GREP,
         LCM_RECALL,
@@ -404,13 +410,18 @@ def register(ctx):
                     or payload.get("gateway_session_key")
                     or ""
                 )
-                active_engine = resolve_active_lcm_engine(
+                result = use_active_lcm_engine(
+                    lambda active_engine: _pre_llm_context(
+                        active_engine,
+                        recall_policy,
+                        payload,
+                    ),
                     session_id=session_id,
                     conversation_id=conversation_id,
                 )
-                if active_engine is None or getattr(active_engine, "name", None) != "lcm":
+                if not result.used:
                     return None
-                return _pre_llm_context(active_engine, recall_policy, payload)
+                return result.value
 
             register_hook("pre_llm_call", _on_pre_llm_call)
         except Exception as exc:
@@ -509,13 +520,9 @@ def register(ctx):
             history = kwargs.get("conversation_history")
             if not history:
                 return
-            active_engine = kwargs.get("context_compressor")
-            if not (
-                active_engine is not None
-                and getattr(active_engine, "name", None) == "lcm"
-                and hasattr(active_engine, "ingest")
-            ):
-                active_engine = None
+            host_engine = kwargs.get("context_compressor")
+            if getattr(host_engine, "name", None) != "lcm":
+                host_engine = None
 
             session_id = str(kwargs.get("session_id") or "")
             conversation_id = str(
@@ -525,24 +532,46 @@ def register(ctx):
             )
             platform = str(kwargs.get("platform") or "")
 
-            if active_engine is None:
-                active_engine = resolve_active_lcm_engine(
-                    session_id=session_id,
-                    conversation_id=conversation_id,
-                ) or engine
+            def _bind_and_ingest(active_engine):
+                # The host-supplied engine or genuinely cold plugin prototype
+                # may establish its first binding while the same engine lease
+                # excludes concurrent rebind/shutdown.
+                if session_id and _engine_bound_session_id(active_engine) != session_id:
+                    active_engine._on_session_start_unlocked(
+                        session_id,
+                        platform=platform,
+                        conversation_id=conversation_id or None,
+                    )
+                active_engine.ingest(history)
 
             try:
-                # Session identity is authoritative for rebinding. Older hosts
-                # can deliver stale lane metadata alongside the correct active
-                # session id; rebinding a clone on conversation_id mismatch
-                # alone would move it away from the runtime it is serving.
-                _ensure_engine_bound_to_session(
-                    active_engine,
-                    session_id,
-                    platform=platform,
-                    conversation_id=conversation_id,
-                )
-                active_engine.ingest(history)
+                if host_engine is not None:
+                    result = use_lcm_engine(
+                        host_engine,
+                        _bind_and_ingest,
+                        timeout=None,
+                    )
+                else:
+                    result = use_active_lcm_engine(
+                        lambda active_engine: active_engine.ingest(history),
+                        session_id=session_id,
+                        conversation_id=conversation_id,
+                        timeout=None,
+                    )
+                    if (
+                        result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT
+                    ):
+                        result = use_cold_lcm_engine(
+                            engine,
+                            _bind_and_ingest,
+                            timeout=None,
+                        )
+
+                if not result.used:
+                    logger.warning(
+                        "LCM post_llm_call skipped ingest: stable engine use ended with %s",
+                        result.status.value,
+                    )
             except Exception as exc:
                 logger.debug("LCM post_llm_call ingest error: %s", exc)
 
