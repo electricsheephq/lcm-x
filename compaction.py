@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 from .dag import SummaryNode
 from .message_content import text_content_for_pattern_matching
 from .sanitize import _contains_sensitive_redaction
+from .sqlite_util import _is_sqlite_locked_error
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 
 logger = logging.getLogger(__name__)
@@ -347,6 +348,44 @@ class CompactionMixin:
             selected.append(msg)
             used += msg_tokens
         return selected
+
+    def _fail_open_after_sqlite_publication_lock(
+        self,
+        active_context: List[Dict[str, Any]],
+        exc: BaseException,
+        *,
+        compress_started: float,
+        threshold_full_sweep_active: bool,
+        recovery_assembly_cap: int | None,
+    ) -> List[Dict[str, Any]]:
+        """Return the replay-safe pre-compression view after a locked publish."""
+        fallback = self._sanitize_active_context_messages(
+            active_context,
+            insert_missing_tool_stubs=False,
+        )
+        self._last_compression_status = "error"
+        self._last_compression_noop_reason = (
+            "summary publication blocked by SQLite lock; preserved pre-compression context"
+        )
+        self._ingest_cursor = len(fallback)
+        self._ingest_cursor_needs_reconcile = False
+        self._last_compaction_duration_ms = (time.perf_counter() - compress_started) * 1000.0
+        if recovery_assembly_cap is not None:
+            self._last_overflow_recovery_failed = count_messages_tokens(fallback) > recovery_assembly_cap
+        if threshold_full_sweep_active:
+            self._last_threshold_full_sweep = {
+                **self._last_threshold_full_sweep,
+                "status": "error",
+                "duration_ms": round(self._last_compaction_duration_ms, 3),
+                "stop_reason": "sqlite_publication_locked",
+            }
+        logger.warning(
+            "LCM summary publication blocked by SQLite lock; preserving "
+            "pre-compression context (code=%s, name=%s)",
+            getattr(exc, "sqlite_errorcode", None),
+            getattr(exc, "sqlite_errorname", None),
+        )
+        return fallback
 
     def compress(self, messages: List[Dict[str, Any]],
                  current_tokens: int = None,
@@ -795,11 +834,30 @@ class CompactionMixin:
                 latest_at=latest_at,
                 expand_hint=self._extract_expand_hint(summary_text),
             )
-            self._dag.add_node(node)
-            self._invalidate_rollups_for_published_node(node)
-            self._maybe_gc_compacted_tool_results(compacted_chunk, source_store_ids)
-            self._last_compacted_store_id = max(consumed_store_ids) if consumed_store_ids else 0
-            self._persist_frontier_marker()
+            frontier_before_publication = self._last_compacted_store_id
+            try:
+                # Advance the frontier only after the DAG coverage commit.
+                self._dag.add_node(node)
+                self._invalidate_rollups_for_published_node(node)
+                self._maybe_gc_compacted_tool_results(
+                    compacted_chunk,
+                    source_store_ids,
+                )
+                self._last_compacted_store_id = (
+                    max(consumed_store_ids) if consumed_store_ids else 0
+                )
+                self._persist_frontier_marker()
+            except Exception as exc:
+                if not _is_sqlite_locked_error(exc):
+                    raise
+                self._last_compacted_store_id = frontier_before_publication
+                return self._fail_open_after_sqlite_publication_lock(
+                    anchor_source_messages,
+                    exc,
+                    compress_started=_compress_started,
+                    threshold_full_sweep_active=threshold_full_sweep_active,
+                    recovery_assembly_cap=recovery_assembly_cap,
+                )
 
             pressure_remaining_messages = pressure_messages[leading_anchor_count + selected_raw_len:]
             working_messages = working_messages[:leading_anchor_count] + remaining_messages
@@ -939,26 +997,37 @@ class CompactionMixin:
         # condenses after the eligible raw prefix has been drained, and shares
         # the same total pass/deadline budget as its leaf work.
         condensation_passes = 0
-        if threshold_full_sweep_active:
-            if sweep_raw_drained:
-                remaining_passes = max(
-                    0,
-                    _THRESHOLD_FULL_SWEEP_MAX_PASSES - leaf_passes,
-                )
-                condensation_passes, sweep_stop_reason = (
-                    self._run_threshold_sweep_condensation(
-                        target_tokens=sweep_target_tokens,
-                        pass_budget=remaining_passes,
-                        deadline=sweep_deadline,
-                        focus_topic=focus_topic,
+        try:
+            if threshold_full_sweep_active:
+                if sweep_raw_drained:
+                    remaining_passes = max(
+                        0,
+                        _THRESHOLD_FULL_SWEEP_MAX_PASSES - leaf_passes,
                     )
+                    condensation_passes, sweep_stop_reason = (
+                        self._run_threshold_sweep_condensation(
+                            target_tokens=sweep_target_tokens,
+                            pass_budget=remaining_passes,
+                            deadline=sweep_deadline,
+                            focus_topic=focus_topic,
+                        )
+                    )
+            else:
+                self._maybe_condense(
+                    focus_topic=focus_topic,
+                    leaf_compacted_this_turn=True,
+                    force_overflow=force_overflow,
+                    critical_budget_pressure=critical_budget_pressure,
                 )
-        else:
-            self._maybe_condense(
-                focus_topic=focus_topic,
-                leaf_compacted_this_turn=True,
-                force_overflow=force_overflow,
-                critical_budget_pressure=critical_budget_pressure,
+        except Exception as exc:
+            if not _is_sqlite_locked_error(exc):
+                raise
+            return self._fail_open_after_sqlite_publication_lock(
+                anchor_source_messages,
+                exc,
+                compress_started=_compress_started,
+                threshold_full_sweep_active=threshold_full_sweep_active,
+                recovery_assembly_cap=recovery_assembly_cap,
             )
 
         # Step 7: Assemble new active context
