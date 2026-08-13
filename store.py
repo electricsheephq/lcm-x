@@ -1575,6 +1575,12 @@ class MessageStore:
         """
         self._conn.commit()
 
+    def rollback_pending_write(self) -> None:
+        """Roll back this store's transaction while holding its write owner lock."""
+        with self._write_lock:
+            if self._conn is not None and self._conn.in_transaction:
+                self._conn.rollback()
+
     def backup(self, dest: sqlite3.Connection) -> None:
         """Copy the store's database into the already-open ``dest`` connection.
 

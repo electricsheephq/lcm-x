@@ -146,6 +146,58 @@ def test_locked_frontier_preserves_committed_progress_and_cleans_transactions(
     assert dag_in_transaction is False
 
 
+def test_locked_retained_user_fold_keeps_committed_summary_without_lineage_write(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = LCMConfig(
+        database_path=str(tmp_path / "issue-4-retained-fold-lock.db"),
+        fresh_tail_count=1,
+        leaf_chunk_tokens=1,
+    )
+    engine = LCMEngine(config=config)
+    engine.on_session_start(
+        "issue-4-retained-fold-lock",
+        platform="cli",
+        conversation_id="issue-4-retained-fold-lock",
+        context_length=200_000,
+    )
+    messages = [
+        {"role": "system", "content": "stable system prompt"},
+        {"role": "user", "content": "sole real user objective"},
+        {"role": "assistant", "content": "old assistant details"},
+        {"role": "assistant", "content": "fresh assistant tail"},
+    ]
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _summary)
+    monkeypatch.setattr(
+        engine,
+        "_persist_frontier_marker",
+        lambda: (_ for _ in ()).throw(
+            sqlite3.OperationalError("database is locked")
+        ),
+    )
+
+    def forbidden_lineage_write(*_args) -> bool:
+        raise AssertionError("fail-open recovery must not write folded lineage")
+
+    monkeypatch.setattr(
+        engine,
+        "_write_folded_tail_lineage",
+        forbidden_lineage_write,
+    )
+
+    try:
+        result = engine.compress(messages)
+    finally:
+        engine.shutdown()
+
+    result_text = "\n".join(str(message.get("content") or "") for message in result)
+    assert "sole real user objective" in result_text
+    assert "Earlier conversation" in result_text
+    assert "fresh assistant tail" in result_text
+    assert "old assistant details" not in result_text
+
+
 def test_non_lock_publication_failure_still_raises(
     tmp_path,
     monkeypatch,
@@ -271,6 +323,8 @@ def test_later_leaf_lock_retains_already_committed_progress(
     assert "old user turn" not in result_text
     assert "fresh user turn" in result_text
     assert "next turn" in retry_text
+    assert result_text.count("Lossless Context Management (LCM)") == 0
+    assert retry_text.count("Lossless Context Management (LCM)") <= 1
     assert all(node.source_ids for node in nodes_after_retry)
 
 
@@ -294,7 +348,7 @@ def test_threshold_condensation_lock_reaches_fail_open_handler(
         context_length=200_000,
     )
     engine.threshold_tokens = 1
-    for index in range(2):
+    for index in range(4):
         engine._dag.add_node(
             SummaryNode(
                 session_id=engine._session_id,
@@ -308,11 +362,20 @@ def test_threshold_condensation_lock_reaches_fail_open_handler(
         )
     messages = _messages()
 
-    def locked_condensation(*_args, **_kwargs) -> None:
-        raise sqlite3.OperationalError("database is locked")
+    summary_calls = 0
 
-    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _summary)
-    monkeypatch.setattr(engine, "_condense_summary_nodes", locked_condensation)
+    def lock_second_condensation(**_kwargs) -> tuple[str, int]:
+        nonlocal summary_calls
+        summary_calls += 1
+        if summary_calls == 4:
+            raise sqlite3.OperationalError("database is locked")
+        return _summary()
+
+    monkeypatch.setattr(
+        lcm_engine,
+        "summarize_with_escalation",
+        lock_second_condensation,
+    )
 
     try:
         result = engine.compress(
@@ -329,6 +392,9 @@ def test_threshold_condensation_lock_reaches_fail_open_handler(
     assert engine.last_compression_status == "error"
     assert telemetry["status"] == "error"
     assert telemetry["stop_reason"] == "sqlite_publication_locked"
+    assert telemetry["leaf_passes"] == 2
+    assert telemetry["condensation_passes"] == 1
+    assert telemetry["total_passes"] == 3
 
 
 def test_dag_write_retries_one_stale_snapshot(tmp_path) -> None:

@@ -5951,6 +5951,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 )
             except Exception as exc:
                 if _is_sqlite_locked_error(exc):
+                    setattr(exc, "lcm_completed_condensation_passes", passes)
                     raise
                 logger.warning(
                     "LCM threshold full sweep condensation stopped after %d pass(es): %s",
@@ -6246,6 +6247,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         assembly_cap_override: Optional[int] = None,
         include_lcm_note: bool = True,
         retained_user_message: Optional[Dict[str, Any]] = None,
+        persist_replay_state: bool = True,
     ) -> List[Dict[str, Any]]:
         """Build the active context from DAG summaries + fresh tail.
 
@@ -6472,25 +6474,30 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     trimmed_result.append(trimmed)
             result = self._sanitize_active_context_messages(trimmed_result)
 
-        existing_folded_lineage = self._load_folded_tail_lineage(result)
+        existing_folded_lineage = (
+            self._load_folded_tail_lineage(result)
+            if persist_replay_state
+            else None
+        )
         if (
             folded_result_index is not None
             and folded_original_tail is not None
             and folded_result_index < len(result)
         ):
-            if not self._write_folded_tail_lineage(
+            if persist_replay_state and not self._write_folded_tail_lineage(
                 result[folded_result_index],
                 folded_source_store_id,
             ):
                 result[folded_result_index] = folded_original_tail
                 result = self._sanitize_active_context_messages(result)
                 self._clear_folded_tail_lineage()
-        elif existing_folded_lineage is None:
+        elif persist_replay_state and existing_folded_lineage is None:
             self._clear_folded_tail_lineage()
 
         # Persist proof only for the exact provider-visible compacted snapshot
         # assembled by this engine. Ingested input is not trusted replay proof.
-        self._remember_compacted_active_replay_snapshot(result)
+        if persist_replay_state:
+            self._remember_compacted_active_replay_snapshot(result)
         return result
 
     def _is_budget_droppable_tail_message(self, message: Dict[str, Any]) -> bool:

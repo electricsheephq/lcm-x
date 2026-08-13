@@ -357,6 +357,8 @@ class CompactionMixin:
         compress_started: float,
         threshold_full_sweep_active: bool,
         recovery_assembly_cap: int | None,
+        leaf_passes: int = 0,
+        condensation_passes: int = 0,
     ) -> List[Dict[str, Any]]:
         """Return the replay-safe pre-compression view after a locked publish."""
         fallback = self._sanitize_active_context_messages(
@@ -376,6 +378,9 @@ class CompactionMixin:
             self._last_threshold_full_sweep = {
                 **self._last_threshold_full_sweep,
                 "status": "error",
+                "leaf_passes": leaf_passes,
+                "condensation_passes": condensation_passes,
+                "total_passes": leaf_passes + condensation_passes,
                 "duration_ms": round(self._last_compaction_duration_ms, 3),
                 "stop_reason": "sqlite_publication_locked",
             }
@@ -392,6 +397,9 @@ class CompactionMixin:
         working_messages: List[Dict[str, Any]],
         anchor_source_messages: List[Dict[str, Any]],
         recovery_assembly_cap: int | None,
+        *,
+        include_lcm_note: bool = True,
+        persist_replay_state: bool = True,
     ) -> List[Dict[str, Any]]:
         """Assemble context that includes every leaf already committed this turn."""
         leading_anchor_count = self._leading_anchor_count(working_messages)
@@ -402,6 +410,8 @@ class CompactionMixin:
                 working_messages[0] if leading_anchor_count else None,
                 working_messages[leading_anchor_count:],
                 assembly_cap_override=recovery_assembly_cap,
+                include_lcm_note=include_lcm_note,
+                persist_replay_state=persist_replay_state,
                 **(
                     {"retained_user_message": working_messages[1]}
                     if leading_anchor_count == 2
@@ -413,13 +423,9 @@ class CompactionMixin:
 
     def _rollback_compaction_write_state(self) -> None:
         """Leave every compaction-owned SQLite connection transaction-clean."""
-        for connection in (
-            self._dag.connection,
-            self._store.connection,
-            self._lifecycle.connection,
-        ):
-            if connection is not None and connection.in_transaction:
-                connection.rollback()
+        self._dag.rollback_pending_write()
+        self._store.rollback_pending_write()
+        self._lifecycle.rollback_pending_write()
 
     def compress(self, messages: List[Dict[str, Any]],
                  current_tokens: int = None,
@@ -901,6 +907,8 @@ class CompactionMixin:
                         working_messages,
                         anchor_source_messages,
                         recovery_assembly_cap,
+                        include_lcm_note=False,
+                        persist_replay_state=False,
                     )
                 return self._fail_open_after_sqlite_publication_lock(
                     fallback_context,
@@ -908,6 +916,8 @@ class CompactionMixin:
                     compress_started=_compress_started,
                     threshold_full_sweep_active=threshold_full_sweep_active,
                     recovery_assembly_cap=recovery_assembly_cap,
+                    leaf_passes=leaf_passes
+                    + int(current_publication_committed),
                 )
 
             pressure_remaining_messages = pressure_messages[leading_anchor_count + selected_raw_len:]
@@ -1079,11 +1089,17 @@ class CompactionMixin:
                     working_messages,
                     anchor_source_messages,
                     recovery_assembly_cap,
+                    include_lcm_note=False,
+                    persist_replay_state=False,
                 ),
                 exc,
                 compress_started=_compress_started,
                 threshold_full_sweep_active=threshold_full_sweep_active,
                 recovery_assembly_cap=recovery_assembly_cap,
+                leaf_passes=leaf_passes,
+                condensation_passes=int(
+                    getattr(exc, "lcm_completed_condensation_passes", 0)
+                ),
             )
 
         # Step 7: Assemble new active context

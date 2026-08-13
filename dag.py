@@ -180,6 +180,12 @@ class SummaryDAG:
         """
         return self._conn
 
+    def rollback_pending_write(self) -> None:
+        """Roll back this DAG's transaction while holding its write owner lock."""
+        with self._db_lock:
+            if self._conn is not None and self._conn.in_transaction:
+                self._conn.rollback()
+
     def _init_db(self):
         self._conn = sqlite3.connect(str(self.db_path), timeout=5.0, check_same_thread=False)
         refuse_schema_version_too_new(self._conn)

@@ -105,6 +105,12 @@ class LifecycleStateStore:
         """
         return getattr(self, "_conn", None)
 
+    def rollback_pending_write(self) -> None:
+        """Roll back this store's transaction while holding its owner lock."""
+        with self._lock:
+            if self._conn is not None and self._conn.in_transaction:
+                self._conn.rollback()
+
     def row_count(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) AS count FROM lcm_lifecycle_state").fetchone()
         return int(row["count"] if row else 0)
