@@ -72,9 +72,16 @@ class CompactionMixin:
 
     def should_compress_preflight(self, messages):
         """Pre-flight check — also ingests messages into the store."""
+        with self._fresh_tail_pressure_yield_invocation():
+            return self._should_compress_preflight_impl(messages)
+
+    def _should_compress_preflight_impl(self, messages):
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         if self._bypasses_lcm_context_management():
+            # Bypassed traffic observes nothing about the pressured session's
+            # tail: it must neither extend nor reset the blocked streak.
+            self._pressure_yield_invocation_verdict = "neutral"
             self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
             rough = count_messages_tokens(messages)
             if self._compression_boundary_cooldown_active():
@@ -83,8 +90,11 @@ class CompactionMixin:
                 return True
             return self.threshold_tokens > 0 and rough >= self.threshold_tokens
         rough = count_messages_tokens(messages)
+        if self.threshold_tokens > 0 and rough < self.threshold_tokens:
+            self._note_fresh_tail_pressure_relieved()
         pre_ingest_placeholder_ambiguous_noop = False
         pre_ingest_noop_reason = ""
+        pre_ingest_placeholder_cleanup_requested = False
         if (
             self.threshold_tokens > 0
             and rough >= self.threshold_tokens
@@ -97,9 +107,17 @@ class CompactionMixin:
                 for msg in messages
             )
         ):
+            # Yield-aware (observed_tokens): a persisted-placeholder session
+            # whose only blocker is the fresh tail must not park in the
+            # ambiguous-noop state while compress() would engage the pressure
+            # yield and make progress.
             eligible, reason = self._leaf_compaction_candidate_status(
                 messages,
                 allow_partial_leaf=self._config.threshold_full_sweep_enabled,
+                observed_tokens=rough,
+            )
+            pre_ingest_placeholder_cleanup_requested = bool(
+                not eligible and self._pressure_yield_tail_token_limit > 0
             )
             pre_ingest_placeholder_ambiguous_noop = not eligible
             pre_ingest_noop_reason = reason
@@ -149,6 +167,10 @@ class CompactionMixin:
             # summarizer spend.
             if self._compression_boundary_cooldown_active():
                 return False
+            if pre_ingest_placeholder_cleanup_requested:
+                return self._mark_preflight_compression_requested(
+                    depends_on_pressure_yield=True,
+                )
             if pre_ingest_placeholder_ambiguous_noop:
                 self._last_compression_status = "noop"
                 self._last_compression_noop_reason = pre_ingest_noop_reason
@@ -161,9 +183,12 @@ class CompactionMixin:
                     and self.threshold_tokens > 0
                     and replay_rough >= self.threshold_tokens
                 ),
+                observed_tokens=replay_rough,
             )
             if eligible:
-                return self._mark_preflight_compression_requested()
+                return self._mark_preflight_compression_requested(
+                    depends_on_pressure_yield=self._pressure_yield_preflight_candidate,
+                )
             if self._has_ignored_backlog_outside_fresh_tail(replay_messages):
                 return self._mark_preflight_compression_requested()
             if self.threshold_tokens > 0 and replay_rough >= self.threshold_tokens:
@@ -182,6 +207,10 @@ class CompactionMixin:
         if self._should_force_overflow_recovery(observed_tokens=rough):
             return self._mark_preflight_compression_requested()
         if self.threshold_tokens > 0 and rough >= self.threshold_tokens:
+            if pre_ingest_placeholder_cleanup_requested:
+                return self._mark_preflight_compression_requested(
+                    depends_on_pressure_yield=True,
+                )
             if pre_ingest_placeholder_ambiguous_noop:
                 self._last_compression_status = "noop"
                 self._last_compression_noop_reason = pre_ingest_noop_reason
@@ -190,9 +219,12 @@ class CompactionMixin:
             eligible, reason = self._leaf_compaction_candidate_status(
                 messages,
                 allow_partial_leaf=self._config.threshold_full_sweep_enabled,
+                observed_tokens=rough,
             )
             if eligible:
-                return self._mark_preflight_compression_requested()
+                return self._mark_preflight_compression_requested(
+                    depends_on_pressure_yield=self._pressure_yield_preflight_candidate,
+                )
             if self._has_ignored_backlog_outside_fresh_tail(messages):
                 return self._mark_preflight_compression_requested()
             if self._should_run_deferred_maintenance(messages, observed_tokens=rough):
@@ -265,6 +297,7 @@ class CompactionMixin:
         *,
         force_overflow: bool = False,
         allow_partial_leaf: bool = False,
+        observed_tokens: Optional[int] = None,
     ) -> tuple[bool, str]:
         """Return whether a normal leaf compaction pass can actually run.
 
@@ -274,17 +307,62 @@ class CompactionMixin:
         backlog outside that tail is still smaller than the configured leaf
         chunk. In that case ``compress()`` would immediately no-op, so preflight
         should not advertise a compaction attempt yet.
+
+        When ``observed_tokens`` reports host-observed over-threshold pressure
+        and the protected tail itself is why no pass can run, the fresh-tail
+        pressure yield re-resolves the tail with a derived token bound and the
+        check runs once more (see ``_maybe_engage_fresh_tail_pressure_yield``;
+        the yield arms only once that pressure is sustained).
+        """
+        eligible, reason, filtered_eligible_tokens = self._leaf_compaction_candidate_status_once(
+            messages,
+            force_overflow=force_overflow,
+            allow_partial_leaf=allow_partial_leaf,
+        )
+        if eligible:
+            return eligible, reason
+        if reason in (
+            "no eligible raw backlog outside fresh tail",
+            "raw backlog outside fresh tail is below leaf chunk threshold",
+        ) and self._maybe_engage_fresh_tail_pressure_yield(
+            messages,
+            observed_tokens,
+            eligible_tokens=filtered_eligible_tokens,
+        ):
+            eligible, reason, _ = self._leaf_compaction_candidate_status_once(
+                messages,
+                force_overflow=force_overflow,
+                allow_partial_leaf=allow_partial_leaf,
+            )
+            if eligible:
+                self._pressure_yield_preflight_candidate = True
+        return eligible, reason
+
+    def _leaf_compaction_candidate_status_once(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        force_overflow: bool = False,
+        allow_partial_leaf: bool = False,
+    ) -> tuple[bool, str, int]:
+        """Single candidate-status pass.
+
+        Returns ``(eligible, reason, eligible_tokens)`` where
+        ``eligible_tokens`` is the token count of the FILTERED raw backlog
+        outside the resolved tail — the same view ``compress()`` operates on —
+        so the pressure-yield gate judges tail blockage from the numbers the
+        compaction pass would actually see.
         """
         if not messages:
-            return False, "empty message list"
+            return False, "empty message list", 0
         fresh_tail_start = self._fresh_tail_start(messages)
         leading_anchor_count = self._leading_anchor_count(messages)
         if fresh_tail_start <= leading_anchor_count:
-            return False, "no eligible raw backlog outside fresh tail"
+            return False, "no eligible raw backlog outside fresh tail", 0
 
         candidate_raw = messages[leading_anchor_count:fresh_tail_start]
         if not candidate_raw:
-            return False, "no eligible raw backlog outside fresh tail"
+            return False, "no eligible raw backlog outside fresh tail", 0
         generated_placeholder_hashes = self._load_generated_ignored_placeholder_hashes()
         if self._compiled_ignore_message_patterns or generated_placeholder_hashes:
             previous_store_id_map = self._current_compress_store_ids_by_message_id
@@ -311,21 +389,28 @@ class CompactionMixin:
                 self._current_compress_store_ids_by_message_id = previous_store_id_map
             candidate_raw = filtered_candidate_raw
             if not candidate_raw:
-                return False, "no eligible raw backlog outside fresh tail"
+                return False, "no eligible raw backlog outside fresh tail", 0
 
         if force_overflow:
-            return True, "forced overflow recovery"
+            return True, "forced overflow recovery", 0
 
         raw_tokens_outside_tail = count_messages_tokens(candidate_raw)
         if allow_partial_leaf:
-            return True, "eligible partial threshold-sweep leaf"
+            return True, "eligible partial threshold-sweep leaf", raw_tokens_outside_tail
         if self._config.dynamic_leaf_chunk_enabled:
             working_leaf_chunk_tokens = self._working_leaf_chunk_tokens(raw_tokens_outside_tail)
         else:
             working_leaf_chunk_tokens = self._config.leaf_chunk_tokens
-        if raw_tokens_outside_tail < working_leaf_chunk_tokens:
-            return False, "raw backlog outside fresh tail is below leaf chunk threshold"
-        return True, "eligible raw backlog outside fresh tail"
+        if (
+            raw_tokens_outside_tail < working_leaf_chunk_tokens
+            and self._pressure_yield_tail_token_limit <= 0
+        ):
+            return (
+                False,
+                "raw backlog outside fresh tail is below leaf chunk threshold",
+                raw_tokens_outside_tail,
+            )
+        return True, "eligible raw backlog outside fresh tail", raw_tokens_outside_tail
 
     def _working_leaf_chunk_tokens(self, raw_tokens_outside_tail: int) -> int:
         base = max(1, self._config.leaf_chunk_tokens)
@@ -358,12 +443,13 @@ class CompactionMixin:
                  force: bool = False) -> List[Dict[str, Any]]:
         """Run compaction and leave a terminal public status on every failure."""
         try:
-            return self._compress_impl(
-                messages,
-                current_tokens=current_tokens,
-                focus_topic=focus_topic,
-                force=force,
-            )
+            with self._fresh_tail_pressure_yield_invocation():
+                return self._compress_impl(
+                    messages,
+                    current_tokens=current_tokens,
+                    focus_topic=focus_topic,
+                    force=force,
+                )
         except BaseException:
             self._last_compression_status = "error"
             self._last_compression_noop_reason = ""
@@ -519,6 +605,9 @@ class CompactionMixin:
 
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         if self._bypasses_lcm_context_management():
+            # Bypassed traffic observes nothing about the pressured session's
+            # tail: it must neither extend nor reset the blocked streak.
+            self._pressure_yield_invocation_verdict = "neutral"
             bypass_current_tokens = current_tokens
             if bypass_current_tokens is None or bypass_current_tokens <= 0:
                 auxiliary_session_id = self._thread_context_session_id()
@@ -535,7 +624,15 @@ class CompactionMixin:
                 force=force,
             )
 
-        observed_prompt_tokens = current_tokens if current_tokens is not None else None
+        # ``current_tokens`` is optional in the ContextEngine contract. After a
+        # yield-aware preflight, use the current active messages as the
+        # pressure observation when the host calls ``compress(messages)`` so
+        # the follow-up invocation can re-arm the advertised bounded yield.
+        observed_prompt_tokens = (
+            current_tokens
+            if current_tokens is not None
+            else count_messages_tokens(messages)
+        )
         force_overflow = self._should_force_overflow_recovery(
             observed_tokens=observed_prompt_tokens,
             messages=messages,
@@ -578,6 +675,7 @@ class CompactionMixin:
             self._ingest_cursor = len(sanitized_messages)
             self._last_compression_status = "sanitized"
             self._last_compression_noop_reason = ""
+            self._note_fresh_tail_pressure_relieved()
             self._write_generated_ignored_placeholder_hash_counts(
                 self._generated_placeholder_digest_budget_for_active_replay(
                     sanitized_messages
@@ -676,6 +774,16 @@ class CompactionMixin:
             )
             filter_exclusion_proofs: Dict[int, Any] = {}
             if fresh_tail_start <= leading_anchor_count:
+                # Also reached with threshold_full_sweep_active: a sweep whose
+                # "drained" raw prefix is really a tail covering the whole
+                # session must yield like any other blocked pass, or the sweep
+                # condenses nothing and the deadlock survives in sweep mode.
+                if self._maybe_engage_fresh_tail_pressure_yield(
+                    pressure_messages,
+                    observed_prompt_tokens,
+                    eligible_tokens=0,
+                ):
+                    continue
                 noop_reason = "no eligible raw backlog outside fresh tail"
                 if threshold_full_sweep_active:
                     sweep_raw_drained = True
@@ -819,6 +927,12 @@ class CompactionMixin:
 
             candidate_raw = working_messages[leading_anchor_count:fresh_tail_start]
             if not candidate_raw:
+                if self._maybe_engage_fresh_tail_pressure_yield(
+                    pressure_messages,
+                    observed_prompt_tokens,
+                    eligible_tokens=0,
+                ):
+                    continue
                 noop_reason = "no eligible raw backlog outside fresh tail"
                 if threshold_full_sweep_active:
                     sweep_raw_drained = True
@@ -837,8 +951,21 @@ class CompactionMixin:
                 )
             elif self._config.dynamic_leaf_chunk_enabled:
                 working_leaf_chunk_tokens = self._working_leaf_chunk_tokens(raw_tokens_outside_tail)
-                if raw_tokens_outside_tail < working_leaf_chunk_tokens and not force_overflow:
+                # An armed pressure yield waives the leaf-chunk minimum: the
+                # whole point of the yield is progress, and the freed backlog
+                # can legitimately be smaller than one configured chunk.
+                if (
+                    raw_tokens_outside_tail < working_leaf_chunk_tokens
+                    and not force_overflow
+                    and self._pressure_yield_tail_token_limit <= 0
+                ):
                     if not (deferred_maintenance_active and critical_budget_pressure):
+                        if self._maybe_engage_fresh_tail_pressure_yield(
+                            pressure_messages,
+                            observed_prompt_tokens,
+                            eligible_tokens=raw_tokens_outside_tail,
+                        ):
+                            continue
                         noop_reason = (
                             "raw backlog outside fresh tail is below leaf chunk threshold"
                         )
@@ -848,13 +975,31 @@ class CompactionMixin:
                 else:
                     to_compact = self._select_oldest_leaf_chunk(candidate_raw, working_leaf_chunk_tokens)
             else:
-                if raw_tokens_outside_tail < self._config.leaf_chunk_tokens and not force_overflow:
+                if (
+                    raw_tokens_outside_tail < self._config.leaf_chunk_tokens
+                    and not force_overflow
+                    and self._pressure_yield_tail_token_limit <= 0
+                ):
                     if not (deferred_maintenance_active and critical_budget_pressure):
+                        if self._maybe_engage_fresh_tail_pressure_yield(
+                            pressure_messages,
+                            observed_prompt_tokens,
+                            eligible_tokens=raw_tokens_outside_tail,
+                        ):
+                            continue
                         noop_reason = (
                             "raw backlog outside fresh tail is below leaf chunk threshold"
                         )
                         break
-                to_compact = candidate_raw
+                if force_overflow:
+                    to_compact = candidate_raw
+                elif self._pressure_yield_tail_token_limit > 0:
+                    to_compact = self._select_oldest_leaf_chunk(
+                        candidate_raw,
+                        max(1, int(self._config.leaf_chunk_tokens)),
+                    )
+                else:
+                    to_compact = candidate_raw
 
             if not to_compact:
                 noop_reason = "no eligible leaf chunk selected"
@@ -1155,6 +1300,7 @@ class CompactionMixin:
                 self._ingest_cursor = len(sanitized_messages)
                 self._last_compression_status = "sanitized"
                 self._last_compression_noop_reason = ""
+                self._note_fresh_tail_pressure_relieved()
             else:
                 if dropped_replayed_scaffold_messages:
                     # The active context changed even though no new leaf node was
@@ -1248,6 +1394,7 @@ class CompactionMixin:
         )
         self._last_compression_status = "compacted"
         self._last_compression_noop_reason = ""
+        self._note_fresh_tail_pressure_relieved()
         if recovery_assembly_cap is None:
             self._last_overflow_recovery_failed = False
         else:
