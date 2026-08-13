@@ -253,8 +253,10 @@ class SummaryDAG:
     ) -> int:
         """Insert a summary node and return its node_id.
 
-        ``before_commit`` may stage related writes on this connection.  The
+        ``before_commit`` may stage related writes on this connection. The
         callback and node insert then commit or roll back as one transaction.
+        A stale-snapshot retry can invoke the callback again with a new
+        ``node_id``, so callbacks must be idempotent.
         """
         with self._db_lock:
             conn = self._conn

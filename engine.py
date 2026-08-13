@@ -5771,13 +5771,13 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         leaf_compacted_this_turn: bool = False,
         force_overflow: bool = False,
         critical_budget_pressure: bool = False,
-    ) -> None:
+    ) -> int:
         """Check if any depth level has enough nodes for condensation."""
         self._last_condensation_suppressed_reason = ""
 
         max_depth = self._config.incremental_max_depth
         if max_depth == 0:
-            return  # condensation disabled
+            return 0  # condensation disabled
 
         # When max_depth is -1 (unlimited), derive the upper bound from
         # the deepest existing node + 1, so condensation can always
@@ -5788,7 +5788,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         else:
             upper = max_depth
 
-        condensed_any = False
+        condensation_passes = 0
         suppression_reason = ""
         fanin = max(1, self._config.condensation_fanin)
 
@@ -5811,11 +5811,20 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
 
             # Take the first fanin nodes and condense
             to_condense = uncondensed[:fanin]
-            source_tokens, summary_tokens, level = self._condense_summary_nodes(
-                to_condense,
-                focus_topic=focus_topic,
-            )
-            condensed_any = True
+            try:
+                source_tokens, summary_tokens, level = self._condense_summary_nodes(
+                    to_condense,
+                    focus_topic=focus_topic,
+                )
+            except Exception as exc:
+                if _is_sqlite_locked_error(exc):
+                    setattr(
+                        exc,
+                        "lcm_completed_condensation_passes",
+                        condensation_passes,
+                    )
+                raise
+            condensation_passes += 1
 
             logger.info(
                 "LCM condensation: d%d × %d → d%d (L%d, %d→%d tokens)",
@@ -5826,8 +5835,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             if leaf_compacted_this_turn and self._config.cache_friendly_condensation_enabled:
                 break
 
-        if not condensed_any and leaf_compacted_this_turn and self._config.cache_friendly_condensation_enabled:
+        if not condensation_passes and leaf_compacted_this_turn and self._config.cache_friendly_condensation_enabled:
             self._last_condensation_suppressed_reason = suppression_reason
+        return condensation_passes
 
     def _condense_summary_nodes(
         self,
