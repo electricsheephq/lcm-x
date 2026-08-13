@@ -25,6 +25,10 @@ class LifecycleBindingChangedError(RuntimeError):
     """Raised when publication loses its active session binding."""
 
 
+class LifecyclePublicationConflictError(RuntimeError):
+    """Raised when compaction publication cannot prove its source frontier."""
+
+
 def _synchronized(method):
     """Serialize a read-modify-write method on the store's reentrant lock.
 
@@ -925,3 +929,134 @@ class LifecycleStateStore:
         raise LifecycleBindingChangedError(
             "Lifecycle session binding changed during summary publication"
         )
+
+    def stage_compaction_publication(
+        self,
+        conn: sqlite3.Connection,
+        conversation_id: str,
+        session_id: str,
+        publication_node_id: int,
+        expected_frontier_store_id: int,
+        covered_store_ids: list[int],
+        excluded_store_ids: list[int] | None = None,
+        filter_exclusion_proofs: dict[int, Any] | None = None,
+    ) -> int:
+        """Validate and stage one contiguous compaction-frontier advance.
+
+        The caller owns the node/frontier transaction. The expected frontier is
+        its optimistic publication generation.
+        """
+        expected_frontier = max(0, int(expected_frontier_store_id or 0))
+        all_covered_ids = sorted(
+            {int(store_id) for store_id in covered_store_ids if int(store_id) > 0}
+        )
+        if not all_covered_ids:
+            raise LifecyclePublicationConflictError(
+                "Compaction publication has no durable source coverage"
+            )
+        covered_end = max(expected_frontier, all_covered_ids[-1])
+        covered_ids = [
+            store_id
+            for store_id in all_covered_ids
+            if store_id > expected_frontier
+        ]
+        excluded_ids = sorted(
+            {
+                int(store_id)
+                for store_id in (excluded_store_ids or [])
+                if expected_frontier < int(store_id) <= covered_end
+            }
+        )
+        if set(covered_ids) & set(excluded_ids):
+            raise LifecyclePublicationConflictError(
+                "Compaction publication coverage overlaps an explicit exclusion"
+            )
+        exclusion_proofs = filter_exclusion_proofs or {}
+        snapshot_ids = sorted(
+            set(all_covered_ids + excluded_ids + list(exclusion_proofs))
+        )
+        snapshot_rows = conn.execute(
+            """
+            SELECT m.store_id, m.conversation_id, m.content
+            FROM json_each(?) AS source
+            CROSS JOIN messages AS m
+            WHERE m.store_id = source.value AND m.session_id = ?
+            ORDER BY m.store_id
+            """,
+            (str(snapshot_ids), session_id),
+        ).fetchall()
+        if [int(row[0]) for row in snapshot_rows] != snapshot_ids:
+            raise LifecyclePublicationConflictError(
+                "Compaction publication source ownership changed"
+            )
+        if any(str(row[1] or "").strip() not in {"", conversation_id} for row in snapshot_rows):
+            raise LifecyclePublicationConflictError(
+                "Compaction publication source ownership changed"
+            )
+        snapshot_by_id = {int(row[0]): row for row in snapshot_rows}
+        if any(
+            snapshot_by_id[store_id][2] != proof
+            for store_id, proof in exclusion_proofs.items()
+        ):
+            raise LifecyclePublicationConflictError(
+                "Compaction publication filter exclusion changed"
+            )
+        rows = conn.execute(
+            """
+            SELECT store_id, conversation_id, content
+            FROM messages
+            WHERE session_id = ? AND store_id > ? AND store_id <= ?
+            ORDER BY store_id
+            """,
+            (session_id, expected_frontier, covered_end),
+        ).fetchall()
+        authoritative_ids = [int(row[0]) for row in rows]
+        proven_ids = sorted(covered_ids + excluded_ids)
+        if authoritative_ids != proven_ids:
+            raise LifecyclePublicationConflictError(
+                "Compaction publication source coverage is not contiguous "
+                f"(expected_frontier={expected_frontier}, "
+                f"authoritative={authoritative_ids}, covered={covered_ids}, "
+                f"excluded={excluded_ids})"
+            )
+        if conn.execute(
+            """
+            SELECT 1
+            FROM summary_nodes AS node, json_each(node.source_ids) AS source
+            WHERE node.session_id = ? AND node.source_type = 'messages'
+              AND node.node_id != ?
+              AND source.value IN (SELECT value FROM json_each(?))
+            LIMIT 1
+            """,
+            (session_id, publication_node_id, str(all_covered_ids)),
+        ).fetchone():
+            raise LifecyclePublicationConflictError(
+                "Compaction publication source lineage is already claimed"
+            )
+        row = conn.execute(
+            """
+            SELECT current_session_id, current_frontier_store_id
+            FROM lcm_lifecycle_state
+            WHERE conversation_id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("Cannot publish summary without lifecycle state")
+        if str(row[0] or "") != session_id:
+            raise LifecycleBindingChangedError(
+                "Lifecycle session binding changed during summary publication"
+            )
+        actual_frontier = int(row[1] or 0)
+        if actual_frontier != expected_frontier:
+            raise LifecyclePublicationConflictError(
+                "Compaction publication frontier generation changed "
+                f"(expected={expected_frontier}, actual={actual_frontier})"
+            )
+        self.stage_frontier_advance(
+            conn,
+            conversation_id,
+            session_id,
+            covered_end,
+        )
+        return covered_end
