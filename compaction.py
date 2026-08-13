@@ -873,7 +873,7 @@ class CompactionMixin:
                     compress_started=_compress_started,
                     threshold_full_sweep_active=threshold_full_sweep_active,
                     recovery_assembly_cap=recovery_assembly_cap,
-                    leaf_passes=leaf_passes,
+                    leaf_passes=leaf_passes + int(node.node_id > 0),
                 )
 
             pressure_remaining_messages = pressure_messages[leading_anchor_count + selected_raw_len:]

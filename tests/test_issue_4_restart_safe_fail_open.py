@@ -138,6 +138,8 @@ def test_post_commit_gc_lock_returns_raw_context_without_restart_reingest(
     identity = "issue-4-post-commit-lock"
     messages = _messages()
     engine = _engine(database_path, identity)
+    engine._config.threshold_full_sweep_enabled = True
+    engine.threshold_tokens = 1
     monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _summary)
     monkeypatch.setattr(
         engine,
@@ -148,10 +150,11 @@ def test_post_commit_gc_lock_returns_raw_context_without_restart_reingest(
     )
 
     try:
-        result = engine.compress(messages)
+        result = engine.compress(messages, current_tokens=100)
         state = engine._lifecycle.get_by_conversation(identity)
         nodes = engine._dag.get_session_nodes(identity)
         stored_before_restart = engine._store.get_session_count(identity)
+        telemetry = engine.get_status()["threshold_full_sweep"]
     finally:
         engine.shutdown()
 
@@ -159,6 +162,8 @@ def test_post_commit_gc_lock_returns_raw_context_without_restart_reingest(
     assert len(nodes) == 1
     assert state is not None
     assert state.current_frontier_store_id == max(nodes[0].source_ids)
+    assert telemetry["leaf_passes"] == 1
+    assert telemetry["total_passes"] == 1
 
     restarted = _engine(database_path, identity)
     try:
