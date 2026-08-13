@@ -5950,6 +5950,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     deadline=deadline,
                 )
             except Exception as exc:
+                if _is_sqlite_locked_error(exc):
+                    raise
                 logger.warning(
                     "LCM threshold full sweep condensation stopped after %d pass(es): %s",
                     passes,

@@ -12,6 +12,7 @@ from hermes_lcm.dag import SummaryDAG, SummaryNode
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.sqlite_util import _run_sqlite_write_with_snapshot_retry
 from hermes_lcm.store import MessageStore
+from hermes_lcm.tokens import count_messages_tokens
 
 
 def _messages() -> list[dict]:
@@ -95,7 +96,7 @@ def test_locked_dag_publication_returns_precompression_context(
     assert "preserving pre-compression context" in caplog.text
 
 
-def test_locked_frontier_preserves_context_and_restores_runtime_frontier(
+def test_locked_frontier_preserves_committed_progress_and_cleans_transactions(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -115,6 +116,8 @@ def test_locked_frontier_preserves_context_and_restores_runtime_frontier(
     monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _summary)
 
     def locked_frontier() -> None:
+        engine._lifecycle.connection.execute("BEGIN")
+        engine._store.connection.execute("BEGIN")
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(engine, "_persist_frontier_marker", locked_frontier)
@@ -124,15 +127,23 @@ def test_locked_frontier_preserves_context_and_restores_runtime_frontier(
         state = engine._lifecycle.get_by_conversation(engine._conversation_id)
         nodes = engine._dag.get_session_nodes(engine._session_id)
         runtime_frontier = engine._last_compacted_store_id
+        lifecycle_in_transaction = engine._lifecycle.connection.in_transaction
+        store_in_transaction = engine._store.connection.in_transaction
+        dag_in_transaction = engine._dag.connection.in_transaction
     finally:
         engine.shutdown()
 
-    assert result == messages
+    result_text = "\n".join(str(message.get("content") or "") for message in result)
+    assert "Earlier conversation" in result_text
+    assert "fresh user turn" in result_text
     assert len(nodes) == 1
     assert state is not None
     assert state.current_frontier_store_id == 0
-    assert runtime_frontier == 0
+    assert runtime_frontier == max(nodes[0].source_ids)
     assert engine.last_compression_status == "error"
+    assert lifecycle_in_transaction is False
+    assert store_in_transaction is False
+    assert dag_in_transaction is False
 
 
 def test_non_lock_publication_failure_still_raises(
@@ -196,9 +207,128 @@ def test_locked_condensation_publication_returns_precompression_context(
     finally:
         engine.shutdown()
 
-    assert result == messages
+    result_text = "\n".join(str(message.get("content") or "") for message in result)
+    assert "Earlier conversation" in result_text
+    assert "fresh user turn" in result_text
     assert len(nodes) == 1
     assert engine.last_compression_status == "error"
+
+
+def test_later_leaf_lock_retains_already_committed_progress(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = LCMConfig(
+        database_path=str(tmp_path / "issue-4-later-leaf-lock.db"),
+        fresh_tail_count=1,
+        leaf_chunk_tokens=1,
+        threshold_full_sweep_enabled=True,
+    )
+    engine = LCMEngine(config=config)
+    engine.on_session_start(
+        "issue-4-later-leaf-lock",
+        platform="cli",
+        conversation_id="issue-4-later-leaf-lock",
+        context_length=200_000,
+    )
+    engine.threshold_tokens = 1
+    messages = _messages()
+    original_add_node = engine._dag.add_node
+    publication_calls = 0
+
+    def lock_second_publication(node) -> int:
+        nonlocal publication_calls
+        publication_calls += 1
+        if publication_calls == 2:
+            raise sqlite3.OperationalError("database is locked")
+        return original_add_node(node)
+
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _summary)
+    monkeypatch.setattr(engine._dag, "add_node", lock_second_publication)
+
+    try:
+        result = engine.compress(
+            messages,
+            current_tokens=count_messages_tokens(messages),
+        )
+        nodes_after_lock = engine._dag.get_session_nodes(engine._session_id)
+        retry_messages = result + [{"role": "assistant", "content": "next turn"}]
+        retry_result = engine.compress(
+            retry_messages,
+            current_tokens=count_messages_tokens(retry_messages),
+        )
+        nodes_after_retry = engine._dag.get_session_nodes(engine._session_id)
+    finally:
+        engine.shutdown()
+
+    result_text = "\n".join(str(message.get("content") or "") for message in result)
+    retry_text = "\n".join(
+        str(message.get("content") or "") for message in retry_result
+    )
+    assert publication_calls >= 3
+    assert len(nodes_after_lock) == 1
+    assert "Earlier conversation" in result_text
+    assert "old user turn" not in result_text
+    assert "fresh user turn" in result_text
+    assert "next turn" in retry_text
+    assert all(node.source_ids for node in nodes_after_retry)
+
+
+def test_threshold_condensation_lock_reaches_fail_open_handler(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = LCMConfig(
+        database_path=str(tmp_path / "issue-4-sweep-condensation-lock.db"),
+        fresh_tail_count=1,
+        leaf_chunk_tokens=1,
+        threshold_full_sweep_enabled=True,
+        summary_prefix_target_tokens=1,
+        condensation_fanin=2,
+    )
+    engine = LCMEngine(config=config)
+    engine.on_session_start(
+        "issue-4-sweep-condensation-lock",
+        platform="cli",
+        conversation_id="issue-4-sweep-condensation-lock",
+        context_length=200_000,
+    )
+    engine.threshold_tokens = 1
+    for index in range(2):
+        engine._dag.add_node(
+            SummaryNode(
+                session_id=engine._session_id,
+                depth=1,
+                summary=f"existing summary {index}",
+                token_count=100,
+                source_token_count=200,
+                source_ids=[index + 1],
+                source_type="messages",
+            )
+        )
+    messages = _messages()
+
+    def locked_condensation(*_args, **_kwargs) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _summary)
+    monkeypatch.setattr(engine, "_condense_summary_nodes", locked_condensation)
+
+    try:
+        result = engine.compress(
+            messages,
+            current_tokens=count_messages_tokens(messages),
+        )
+        telemetry = engine.get_status()["threshold_full_sweep"]
+    finally:
+        engine.shutdown()
+
+    result_text = "\n".join(str(message.get("content") or "") for message in result)
+    assert "Earlier conversation" in result_text
+    assert "fresh user turn" in result_text
+    assert engine.last_compression_status == "error"
+    assert telemetry["status"] == "error"
+    assert telemetry["stop_reason"] == "sqlite_publication_locked"
 
 
 def test_dag_write_retries_one_stale_snapshot(tmp_path) -> None:
