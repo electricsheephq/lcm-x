@@ -697,16 +697,19 @@ class ReconcileMixin:
                 if allow_session_end_replay_proof
                 else ""
             )
+            has_engine_compacted_snapshot_replay = bool(
+                engine_snapshot_digest
+                and engine_snapshot_digest in engine_snapshot_digests
+            )
+            has_session_end_snapshot_replay = bool(
+                session_end_snapshot_digest
+                and session_end_snapshot_digest in session_end_snapshot_digests
+                and (matches_sanitized_tail or matches_raw_tail)
+            )
             has_durable_compacted_snapshot_replay = (
-                (
-                    bool(engine_snapshot_digest)
-                    and engine_snapshot_digest in engine_snapshot_digests
-                )
-                or (
-                    bool(session_end_snapshot_digest)
-                    and session_end_snapshot_digest in session_end_snapshot_digests
-                )
-            ) and (matches_sanitized_tail or matches_raw_tail)
+                has_engine_compacted_snapshot_replay
+                or has_session_end_snapshot_replay
+            )
             matches_visible_sanitized_tail = (
                 filtered_candidate_placeholders
                 and bool(candidate_visible_prefix)
@@ -773,6 +776,7 @@ class ReconcileMixin:
                 and not matches_raw_tail
                 and not matches_inline_generation_cleanup_tail
                 and not matches_durable_persisted_output_full_replay
+                and not has_engine_compacted_snapshot_replay
             ):
                 continue
 

@@ -20914,7 +20914,7 @@ class TestDeferredMaintenanceDebt:
         monkeypatch.setattr(
             engine,
             "_assemble_context",
-            lambda system_msg, tail_messages, assembly_cap_override=None, include_lcm_note=True: [system_msg, *tail_messages],
+            lambda system_msg, tail_messages, **_kwargs: [system_msg, *tail_messages],
         )
 
         compressed = engine.compress(self._make_backlog_messages())
@@ -20941,7 +20941,7 @@ class TestDeferredMaintenanceDebt:
         monkeypatch.setattr(
             engine,
             "_assemble_context",
-            lambda system_msg, tail_messages, assembly_cap_override=None, include_lcm_note=True: [system_msg, *tail_messages],
+            lambda system_msg, tail_messages, **_kwargs: [system_msg, *tail_messages],
         )
 
         first = engine.compress(self._make_backlog_messages())
@@ -20976,7 +20976,7 @@ class TestDeferredMaintenanceDebt:
         monkeypatch.setattr(
             engine,
             "_assemble_context",
-            lambda system_msg, tail_messages, assembly_cap_override=None, include_lcm_note=True: [system_msg, *tail_messages],
+            lambda system_msg, tail_messages, **_kwargs: [system_msg, *tail_messages],
         )
 
         engine.compress(self._make_backlog_messages())
@@ -21008,7 +21008,7 @@ class TestDeferredMaintenanceDebt:
         monkeypatch.setattr(
             engine,
             "_assemble_context",
-            lambda system_msg, tail_messages, assembly_cap_override=None, include_lcm_note=True: [system_msg, *tail_messages],
+            lambda system_msg, tail_messages, **_kwargs: [system_msg, *tail_messages],
         )
 
         compressed = engine.compress(messages, current_tokens=90)
@@ -21043,7 +21043,7 @@ class TestDeferredMaintenanceDebt:
         monkeypatch.setattr(
             engine,
             "_assemble_context",
-            lambda system_msg, tail_messages, assembly_cap_override=None, include_lcm_note=True: [system_msg, *tail_messages],
+            lambda system_msg, tail_messages, **_kwargs: [system_msg, *tail_messages],
         )
 
         engine.compress(messages, current_tokens=90)
@@ -21441,7 +21441,7 @@ class TestAssemblyGuardrails:
 
         result = instance.compress(messages, current_tokens=90)
 
-        assert result == [messages[0], messages[-1]]
+        assert result == messages[:2]
         assert instance.compression_count == 1
         assert instance._ingest_cursor == len(result)
         assert not instance.get_status()["overflow_recovery_failed"]
@@ -21478,7 +21478,7 @@ class TestAssemblyGuardrails:
 
         result = instance.compress(messages, current_tokens=100)
 
-        assert result == [messages[0], messages[-1]]
+        assert result == messages[:2]
         assert lcm_engine_module.count_messages_tokens(result) < 70
 
     def test_forced_overflow_recovery_does_not_duplicate_existing_summary_message(self, tmp_path, monkeypatch):
