@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hermes_lcm.engine as lcm_engine
+import pytest
 
 from hermes_lcm.config import LCMConfig
+from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.lifecycle_state import LifecyclePublicationConflictError
 
@@ -329,17 +331,21 @@ def test_filter_exclusion_content_is_revalidated_in_publication_snapshot(
         conversation_id=identity,
     )
     engine._ingest_cursor = len(active)
-    original_add_node = engine._dag.add_node
+    original_scan = engine._stored_publication_filter_exclusions
 
-    def rewrite_then_add(node, *, before_commit=None):
+    def rewrite_then_scan(*args, **kwargs):
         engine._store.connection.execute(
             "UPDATE messages SET content = ? WHERE store_id = ?",
             ("no longer filtered", durable_ids[0]),
         )
         engine._store.connection.commit()
-        return original_add_node(node, before_commit=before_commit)
+        return original_scan(*args, **kwargs)
 
-    monkeypatch.setattr(engine._dag, "add_node", rewrite_then_add)
+    monkeypatch.setattr(
+        engine,
+        "_stored_publication_filter_exclusions",
+        rewrite_then_scan,
+    )
 
     try:
         engine.compress(active)
@@ -352,3 +358,80 @@ def test_filter_exclusion_content_is_revalidated_in_publication_snapshot(
     assert state is not None
     assert state.current_frontier_store_id == 0
     assert engine.last_compression_status == "error"
+
+
+def test_filter_exclusion_scan_pages_to_the_covered_end(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    engine = _engine(tmp_path / "issue-5-filter-pages.db", "issue-5-filter-pages")
+    engine._compiled_ignore_message_patterns = [_ContainsPattern()]
+    first_page = [
+        {"store_id": store_id, "content": "keep"}
+        for store_id in range(1, 10_001)
+    ]
+    last_page = [{"store_id": 10_001, "content": "DROP_ME"}]
+    calls = []
+
+    def paged_rows(_session_id, after_store_id=0, limit=10_000):
+        calls.append((after_store_id, limit))
+        return first_page if after_store_id == 0 else last_page
+
+    monkeypatch.setattr(engine._store, "get_session_messages_after", paged_rows)
+    try:
+        proofs = engine._stored_publication_filter_exclusions(
+            0,
+            10_001,
+            [],
+            {},
+        )
+    finally:
+        engine.shutdown()
+
+    assert calls == [(0, 10_000), (10_000, 10_000)]
+    assert proofs == {10_001: "DROP_ME"}
+
+
+def test_below_frontier_source_lineage_is_claimed_once(tmp_path) -> None:
+    identity = "issue-5-below-frontier-claim"
+    engine = _engine(tmp_path / "issue-5-below-frontier-claim.db", identity)
+    source_id = engine._store.append(
+        identity,
+        {"role": "assistant", "content": "covered before rotate"},
+        conversation_id=identity,
+    )
+    engine._lifecycle.advance_frontier(identity, identity, source_id)
+
+    def publish() -> None:
+        node = SummaryNode(
+            session_id=identity,
+            summary="claimed once",
+            token_count=1,
+            source_token_count=1,
+            source_ids=[source_id],
+        )
+
+        def stage(conn, node_id) -> None:
+            engine._lifecycle.stage_compaction_publication(
+                conn,
+                identity,
+                identity,
+                node_id,
+                source_id,
+                [source_id],
+            )
+
+        engine._dag.add_node(node, before_commit=stage)
+
+    try:
+        publish()
+        with pytest.raises(
+            LifecyclePublicationConflictError,
+            match="already claimed",
+        ):
+            publish()
+        nodes = engine._dag.get_session_nodes(identity)
+    finally:
+        engine.shutdown()
+
+    assert len(nodes) == 1

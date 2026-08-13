@@ -26,6 +26,8 @@ from .sanitize import _contains_sensitive_redaction
 from .sqlite_util import _is_sqlite_locked_error
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 
+_UNPROVEN_FILTER_EXCLUSION = object()
+
 logger = logging.getLogger(__name__)
 
 _THRESHOLD_FULL_SWEEP_MAX_PASSES = 12
@@ -469,19 +471,30 @@ class CompactionMixin:
         expected_frontier: int,
         covered_end: int,
         already_proven_store_ids: List[int],
-    ) -> Dict[int, str | None]:
+        initial_proofs: Dict[int, Any],
+    ) -> Dict[int, Any]:
         proven = {int(store_id) for store_id in already_proven_store_ids}
-        rows = self._store.get_session_messages_after(
-            self._session_id,
-            after_store_id=expected_frontier,
-        )
-        return {
-            store_id: row.get("content")
-            for row in rows
-            if (store_id := int(row.get("store_id") or 0)) <= covered_end
-            and store_id not in proven
-            and self._matches_ignore_message_patterns(row, stored_row=True)
-        }
+        proofs = dict(initial_proofs)
+        after_store_id = expected_frontier
+        while after_store_id < covered_end:
+            rows = self._store.get_session_messages_after(
+                self._session_id,
+                after_store_id=after_store_id,
+            )
+            if not rows:
+                break
+            for row in rows:
+                store_id = int(row.get("store_id") or 0)
+                if store_id > covered_end:
+                    break
+                if (
+                    store_id not in proven
+                    and store_id not in proofs
+                    and self._matches_ignore_message_patterns(row, stored_row=True)
+                ):
+                    proofs[store_id] = row.get("content")
+            after_store_id = int(rows[-1].get("store_id") or after_store_id)
+        return proofs
 
     def _compress_impl(self, messages: List[Dict[str, Any]],
                        current_tokens: int = None,
@@ -661,6 +674,7 @@ class CompactionMixin:
             publication_excluded_store_ids = self._get_store_ids_for_messages(
                 working_messages[:leading_anchor_count]
             )
+            filter_exclusion_proofs: Dict[int, Any] = {}
             if fresh_tail_start <= leading_anchor_count:
                 noop_reason = "no eligible raw backlog outside fresh tail"
                 if threshold_full_sweep_active:
@@ -716,10 +730,13 @@ class CompactionMixin:
                         and volatile_digest is not None
                         and volatile_digest in self._load_generated_ignored_placeholder_hashes()
                     )
-                    if (
+                    configured_filter_match = (
                         self._matches_ignore_message_patterns(working_msg)
                         or self._matches_ignore_message_patterns(pressure_msg)
                         or self._mapped_stored_row_matches_ignore_message_patterns(working_msg)
+                    )
+                    if (
+                        configured_filter_match
                         or self._is_ignored_active_replay_placeholder(working_msg, content_text)
                         or generated_volatile_placeholder
                     ):
@@ -729,9 +746,19 @@ class CompactionMixin:
                             )
                         )
                         if mapped_store_id is not None:
-                            publication_excluded_store_ids.append(
-                                int(mapped_store_id)
-                            )
+                            store_id = int(mapped_store_id)
+                            publication_excluded_store_ids.append(store_id)
+                            stored = self._store.get(store_id)
+                            if configured_filter_match:
+                                filter_exclusion_proofs[store_id] = (
+                                    stored.get("content")
+                                    if stored is not None
+                                    and self._matches_ignore_message_patterns(
+                                        stored,
+                                        stored_row=True,
+                                    )
+                                    else _UNPROVEN_FILTER_EXCLUSION
+                                )
                         dropped_ignored_backlog = True
                         if role in {"user", "system", "tool", "assistant"}:
                             drop_dependent_reply = True
@@ -943,6 +970,7 @@ class CompactionMixin:
                 expected_frontier,
                 published_frontier,
                 consumed_store_ids,
+                filter_exclusion_proofs,
             )
             publication_excluded_store_ids.extend(filter_exclusion_proofs)
             # The frontier consumes every durable row removed from the active
@@ -953,11 +981,12 @@ class CompactionMixin:
                 if self._session_id and self._conversation_id:
                     publication_session_id = self._session_id
                     publication_conversation_id = self._conversation_id
-                    def stage_frontier(conn, _node_id) -> None:
+                    def stage_frontier(conn, node_id) -> None:
                         self._lifecycle.stage_compaction_publication(
                             conn,
                             publication_conversation_id,
                             publication_session_id,
+                            node_id,
                             expected_frontier,
                             consumed_store_ids,
                             publication_excluded_store_ids,

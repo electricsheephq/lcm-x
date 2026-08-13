@@ -935,10 +935,11 @@ class LifecycleStateStore:
         conn: sqlite3.Connection,
         conversation_id: str,
         session_id: str,
+        publication_node_id: int,
         expected_frontier_store_id: int,
         covered_store_ids: list[int],
         excluded_store_ids: list[int] | None = None,
-        filter_exclusion_proofs: dict[int, str | None] | None = None,
+        filter_exclusion_proofs: dict[int, Any] | None = None,
     ) -> int:
         """Validate and stage one contiguous compaction-frontier advance.
 
@@ -970,43 +971,42 @@ class LifecycleStateStore:
             raise LifecyclePublicationConflictError(
                 "Compaction publication coverage overlaps an explicit exclusion"
             )
-        covered_rows = conn.execute(
+        owned_rows = conn.execute(
             """
-            SELECT store_id, conversation_id, content
-            FROM messages
-            WHERE session_id = ? AND store_id >= ? AND store_id <= ?
-            ORDER BY store_id
+            SELECT m.store_id, m.conversation_id
+            FROM messages AS m
+            JOIN json_each(?) AS source ON m.store_id = source.value
+            WHERE m.session_id = ?
+            ORDER BY m.store_id
             """,
-            (
-                session_id,
-                min(expected_frontier + 1, all_covered_ids[0]),
-                covered_end,
-            ),
+            (str(all_covered_ids), session_id),
         ).fetchall()
-        covered_id_set = set(all_covered_ids)
-        owned_rows = [
-            row for row in covered_rows if int(row[0]) in covered_id_set
-        ]
         if [int(row[0]) for row in owned_rows] != all_covered_ids:
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )
-        if any(str(row[1] or "").strip() not in {"", conversation_id} for row in covered_rows):
+        if any(str(row[1] or "").strip() not in {"", conversation_id} for row in owned_rows):
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )
+        rows = conn.execute(
+            """
+            SELECT store_id, conversation_id, content
+            FROM messages
+            WHERE session_id = ? AND store_id > ? AND store_id <= ?
+            ORDER BY store_id
+            """,
+            (session_id, expected_frontier, covered_end),
+        ).fetchall()
         exclusion_proofs = filter_exclusion_proofs or {}
         if any(
             row[2] != exclusion_proofs[int(row[0])]
-            for row in covered_rows
+            for row in rows
             if int(row[0]) in exclusion_proofs
         ):
             raise LifecyclePublicationConflictError(
                 "Compaction publication filter exclusion changed"
             )
-        rows = [
-            row for row in covered_rows if int(row[0]) > expected_frontier
-        ]
         authoritative_ids = [int(row[0]) for row in rows]
         proven_ids = sorted(covered_ids + excluded_ids)
         if authoritative_ids != proven_ids:
@@ -1015,6 +1015,20 @@ class LifecycleStateStore:
                 f"(expected_frontier={expected_frontier}, "
                 f"authoritative={authoritative_ids}, covered={covered_ids}, "
                 f"excluded={excluded_ids})"
+            )
+        if conn.execute(
+            """
+            SELECT 1
+            FROM summary_nodes AS node, json_each(node.source_ids) AS source
+            WHERE node.session_id = ? AND node.source_type = 'messages'
+              AND node.node_id != ?
+              AND source.value IN (SELECT value FROM json_each(?))
+            LIMIT 1
+            """,
+            (session_id, publication_node_id, str(all_covered_ids)),
+        ).fetchone():
+            raise LifecyclePublicationConflictError(
+                "Compaction publication source lineage is already claimed"
             )
         row = conn.execute(
             """
