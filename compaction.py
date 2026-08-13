@@ -411,7 +411,11 @@ class CompactionMixin:
                 working_messages[leading_anchor_count:],
                 assembly_cap_override=recovery_assembly_cap,
                 include_lcm_note=include_lcm_note,
-                persist_replay_state=persist_replay_state,
+                **(
+                    {"persist_replay_state": False}
+                    if not persist_replay_state
+                    else {}
+                ),
                 **(
                     {"retained_user_message": working_messages[1]}
                     if leading_anchor_count == 2
