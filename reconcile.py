@@ -255,6 +255,34 @@ class ReconcileMixin:
             tool_calls_identity,
         )
 
+    def _generated_context_tail_message(
+        self,
+        message: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Recover a durable tail occurrence folded into generated context."""
+        content = message.get("content")
+        generated_context: Any = None
+        tail_content: Any = None
+        if isinstance(content, str):
+            generated_context, separator, tail_content = content.rpartition(
+                "\n\n---\n\n"
+            )
+            if not separator or not tail_content:
+                return None
+        elif isinstance(content, list) and len(content) > 1:
+            generated_context = content[:1]
+            tail_content = content[1:]
+        else:
+            return None
+
+        scaffold_probe = message.copy()
+        scaffold_probe["content"] = generated_context
+        if not self._is_replayed_context_scaffold_message(scaffold_probe):
+            return None
+        unfolded = message.copy()
+        unfolded["content"] = tail_content
+        return unfolded
+
     def _replay_snapshot_digest(
         self,
         messages: List[Dict[str, Any]],
@@ -1184,8 +1212,17 @@ class ReconcileMixin:
             candidates.extend(page)
             next_candidate_after = page[-1]["store_id"]
         active_identity_counts: dict[tuple[Any, ...], int] = {}
+
+        def active_lineage_identity(
+            message: Dict[str, Any],
+        ) -> tuple[str, str, str, str]:
+            unfolded = self._generated_context_tail_message(message)
+            return self._message_replay_identity(
+                unfolded if unfolded is not None else message
+            )
+
         for msg in messages:
-            identity = self._message_replay_identity(msg)
+            identity = active_lineage_identity(msg)
             active_identity_counts[identity] = active_identity_counts.get(identity, 0) + 1
         stored_identity_counts: dict[tuple[Any, ...], int] = {}
         stored_cleanup_identity_counts: dict[tuple[Any, ...], int] = {}
@@ -1243,7 +1280,7 @@ class ReconcileMixin:
                         break
                     if id(msg) not in generated_placeholder_message_ids:
                         continue
-                    if self._message_replay_identity(msg) != identity:
+                    if active_lineage_identity(msg) != identity:
                         continue
                     generated_surplus_skip_message_ids.add(id(msg))
                     surplus_count -= 1
@@ -1279,14 +1316,33 @@ class ReconcileMixin:
 
             message_identity = self._message_replay_identity(msg)
             wanted_cleanup_identity = self._active_cleanup_replay_identity(message_identity)
+            unfolded_message = self._generated_context_tail_message(msg)
+            unfolded_identity = (
+                self._message_replay_identity(unfolded_message)
+                if unfolded_message is not None
+                else None
+            )
+            unfolded_cleanup_identity = (
+                self._active_cleanup_replay_identity(unfolded_identity)
+                if unfolded_identity is not None
+                else None
+            )
             probe_idx = start_idx
             while probe_idx < len(candidates):
                 stored_identity = stored_identities[probe_idx]
                 if stored_identity == message_identity:
                     return probe_idx
+                if unfolded_identity is not None and stored_identity == unfolded_identity:
+                    return probe_idx
                 if (
                     wanted_cleanup_identity is not None
                     and stored_cleanup_identities[probe_idx] == wanted_cleanup_identity
+                ):
+                    return probe_idx
+                if (
+                    unfolded_cleanup_identity is not None
+                    and stored_cleanup_identities[probe_idx]
+                    == unfolded_cleanup_identity
                 ):
                     return probe_idx
                 probe_idx += 1
@@ -1312,7 +1368,7 @@ class ReconcileMixin:
                         matched_message_ids.add(id(remaining_msg))
                         probe_idx = raw_match_idx + 1
                         continue
-                message_identity = self._message_replay_identity(remaining_msg)
+                message_identity = active_lineage_identity(remaining_msg)
                 if id(remaining_msg) in generated_surplus_skip_message_ids:
                     continue
                 surplus = local_surplus_skips.get(message_identity, 0)
@@ -1367,7 +1423,7 @@ class ReconcileMixin:
                         probe_idx -= 1
                 if id(msg) in ids_by_message_id:
                     continue
-            message_identity = self._message_replay_identity(msg)
+            message_identity = active_lineage_identity(msg)
             if id(msg) in generated_surplus_skip_message_ids:
                 continue
             surplus = active_surplus_skips.get(message_identity, 0)

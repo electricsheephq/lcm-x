@@ -4474,7 +4474,15 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             )
         if content.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
             return True
-        return self._looks_like_active_summary_blob(content)
+        if self._looks_like_active_summary_blob(content):
+            return True
+        without_injected_context = strip_injected_context_blocks(content)
+        if without_injected_context == content:
+            return False
+        without_injected_context = without_injected_context.lstrip()
+        if without_injected_context.startswith("---"):
+            without_injected_context = without_injected_context[3:].lstrip()
+        return self._looks_like_active_summary_blob(without_injected_context)
 
     def _restore_ingest_payload_placeholders_in_value(self, value: Any, *, session_id: str) -> Any:
         if isinstance(value, dict):

@@ -430,6 +430,88 @@ def test_structured_assistant_tail_keeps_tool_pair_and_is_not_pure_scaffold(
     _assert_provider_sequence(result)
 
 
+def test_systemless_summary_merge_preserves_assistant_tool_lineage(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = LCMConfig(
+        fresh_tail_count=2,
+        leaf_chunk_tokens=1,
+        database_path=str(tmp_path / "issue-3-systemless-lineage.db"),
+    )
+    engine = LCMEngine(config=config)
+    engine.on_session_start(
+        "issue-3-systemless-lineage",
+        platform="cli",
+        context_length=200_000,
+    )
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _summary)
+    first_user = {"role": "user", "content": "the only gateway request"}
+    tool_chain = _tool_chain(count=1)
+
+    try:
+        active_context = engine.compress([first_user, *tool_chain])
+        stored_rows = engine._store.get_session_messages(engine._session_id)
+        assistant_store_id = next(
+            row["store_id"]
+            for row in stored_rows
+            if row["role"] == "assistant"
+            and row.get("tool_calls") == tool_chain[0]["tool_calls"]
+        )
+        tool_store_id = next(
+            row["store_id"]
+            for row in stored_rows
+            if row["role"] == "tool"
+            and row.get("tool_call_id") == tool_chain[1]["tool_call_id"]
+        )
+
+        engine.compress(
+            [
+                *active_context,
+                {"role": "user", "content": "a later gateway request"},
+                {"role": "assistant", "content": "a later answer"},
+            ]
+        )
+        nodes = engine._dag.get_session_nodes(engine._session_id)
+    finally:
+        engine.shutdown()
+
+    assert any(
+        assistant_store_id in node.source_ids
+        and tool_store_id in node.source_ids
+        for node in nodes
+    )
+
+
+def test_summary_prefixed_by_proactive_memory_remains_scaffolding(
+    tmp_path,
+) -> None:
+    config = LCMConfig(database_path=str(tmp_path / "issue-3-memory-summary.db"))
+    engine = LCMEngine(config=config)
+    engine.on_session_start(
+        "issue-3-memory-summary",
+        platform="cli",
+        context_length=200_000,
+    )
+    message = {
+        "role": "user",
+        "content": (
+            "<relevant-memories>\n"
+            "prior recalled context\n"
+            "</relevant-memories>\n\n"
+            "---\n\n"
+            "[Recent Summary (d0, node 1)]\n"
+            "Earlier work\n"
+            "[Expand for details: earlier work]"
+        ),
+    }
+
+    try:
+        assert engine._is_replayed_context_scaffold_message(message)
+    finally:
+        engine.shutdown()
+
+
 def test_orphan_tool_is_dropped_before_summary_role_selection(tmp_path) -> None:
     config = LCMConfig(database_path=str(tmp_path / "issue-3-orphan.db"))
     engine = LCMEngine(config=config)

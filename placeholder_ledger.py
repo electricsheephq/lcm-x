@@ -450,25 +450,18 @@ class PlaceholderLedgerMixin:
         msg: Dict[str, Any],
     ) -> Optional[str]:
         """Fingerprint the original tail folded into a generated summary."""
-        content = msg.get("content")
-        generated_context = ""
-        tail_text = ""
-        if isinstance(content, str):
-            generated_context, separator, tail_text = content.rpartition(
-                "\n\n---\n\n"
-            )
-            if not separator:
-                return None
-        elif isinstance(content, list) and len(content) > 1:
-            generated_context = text_content_for_pattern_matching(content[:1]) or ""
-            tail_text = text_content_for_pattern_matching(content[1:]) or ""
-        scaffold_probe = msg.copy()
-        scaffold_probe["content"] = generated_context
-        if not self._is_replayed_context_scaffold_message(scaffold_probe):
+        tail_message = self._generated_context_tail_message(msg)
+        if tail_message is None:
             return None
+        tail_text = text_content_for_pattern_matching(
+            tail_message.get("content")
+        ) or ""
         if not tail_text:
             return None
-        return self._ignored_dependent_reply_content_fingerprint(msg, tail_text)
+        return self._ignored_dependent_reply_content_fingerprint(
+            tail_message,
+            tail_text,
+        )
 
     def _load_generated_ignored_dependent_reply_records(
         self,
@@ -649,6 +642,7 @@ class PlaceholderLedgerMixin:
                 ):
                     break
                 if self._merged_generated_context_tail_fingerprint(msg):
+                    tail_message = self._generated_context_tail_message(msg)
                     cleaned = msg.copy()
                     content = msg.get("content")
                     if isinstance(content, str):
@@ -656,8 +650,9 @@ class PlaceholderLedgerMixin:
                             "\n\n---\n\n"
                         )
                         cleaned["content"] = generated_context
-                    elif isinstance(content, list):
-                        cleaned["content"] = content[:1]
+                    elif isinstance(content, list) and tail_message is not None:
+                        tail_count = len(tail_message.get("content") or [])
+                        cleaned["content"] = content[:-tail_count]
                     return [*messages[:idx], cleaned]
                 drop_from = idx
                 idx -= 1
