@@ -9,6 +9,7 @@ recoverable through the LCM inspection and expansion tools.
 from __future__ import annotations
 
 import codecs
+import glob
 import hashlib
 import json
 import logging
@@ -1007,7 +1008,14 @@ def find_externalized_tool_result_content_for_call(
     storage_dir = get_large_output_storage_dir(config, hermes_home=hermes_home, create=False)
     if not storage_dir.exists() or not storage_dir.is_dir():
         return None
-    for path in sorted(storage_dir.glob("*.json")):
+    # Tool-result sidecars are written with the bounded tool-call stub in the
+    # filename.  Looking up that stub keeps restart reconciliation proportional
+    # to the number of retries for one call instead of the size of the entire
+    # externalized-output archive.  Escape the stub because provider-generated
+    # call IDs are opaque and may contain glob metacharacters.
+    tool_call_stub = glob.escape(_tool_call_stub(tool_call_id))
+    candidates = sorted(storage_dir.glob(f"*_{tool_call_stub}_*.json"))
+    for path in candidates:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):

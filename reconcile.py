@@ -446,6 +446,17 @@ class ReconcileMixin:
                 })
         effective_fresh_tail_count = self._fresh_tail_boundary(boundary_messages).count
         empty_prefix_cursor: int | None = None
+        identity_cache: dict[int, tuple[str, str, str, str]] = {}
+
+        def replay_identity(msg: Dict[str, Any]) -> tuple[str, str, str, str]:
+            """Compute each incoming message identity at most once per pass."""
+            key = id(msg)
+            identity = identity_cache.get(key)
+            if identity is None:
+                identity = self._message_replay_identity(msg)
+                identity_cache[key] = identity
+            return identity
+
         for cursor in range(len(messages), -1, -1):
             candidate_messages = messages[:cursor]
             candidate_visible_messages = [
@@ -468,7 +479,7 @@ class ReconcileMixin:
                 and not (
                     self._compiled_ignore_message_patterns
                     and self._is_quarantined_assistant_replay_identity(
-                        self._message_replay_identity(msg)
+                        replay_identity(msg)
                     )
                     and self._matches_ignore_message_patterns(msg, stored_row=True)
                 )
@@ -478,7 +489,7 @@ class ReconcileMixin:
                 self._is_replayed_context_scaffold_message(msg) for msg in candidate_messages
             )
             candidate_has_quarantined_replay_evidence = any(
-                self._is_quarantined_assistant_replay_identity(self._message_replay_identity(msg))
+                self._is_quarantined_assistant_replay_identity(replay_identity(msg))
                 for msg in candidate_messages
             )
             candidate_identity_messages = (
@@ -487,11 +498,11 @@ class ReconcileMixin:
                 else candidate_visible_messages
             )
             candidate_visible_prefix = [
-                self._message_replay_identity(msg)
+                replay_identity(msg)
                 for msg in candidate_visible_messages
             ]
             candidate_prefix = [
-                self._message_replay_identity(msg)
+                replay_identity(msg)
                 for msg in candidate_identity_messages
             ]
             if not candidate_prefix:
@@ -601,7 +612,7 @@ class ReconcileMixin:
                 or (
                     self._compiled_ignore_message_patterns
                     and self._is_quarantined_assistant_replay_identity(
-                        self._message_replay_identity(msg)
+                        replay_identity(msg)
                     )
                     and self._matches_ignore_message_patterns(msg, stored_row=True)
                 )
@@ -966,10 +977,17 @@ class ReconcileMixin:
         candidates: list[Dict[str, Any]] = []
         next_candidate_after = self._last_compacted_store_id
         while True:
-            page = self._store.get_session_messages_after(
-                self._session_id,
-                after_store_id=next_candidate_after,
-            )
+            if self._conversation_id:
+                page = self._store.get_conversation_messages_after(
+                    self._conversation_id,
+                    after_store_id=next_candidate_after,
+                    current_session_id=self._session_id,
+                )
+            else:
+                page = self._store.get_session_messages_after(
+                    self._session_id,
+                    after_store_id=next_candidate_after,
+                )
             if not page:
                 break
             candidates.extend(page)
