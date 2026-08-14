@@ -127,3 +127,31 @@ class TestRuntimeContextThreshold:
         engine.model = "big-model"
         threshold, _, _ = engine._runtime_context_threshold()
         assert threshold == 0.85
+
+    def test_update_model_recomputes_live_threshold(self, tmp_path):
+        from hermes_lcm.engine import LCMEngine
+
+        engine = LCMEngine(
+            config=LCMConfig(
+                database_path=str(tmp_path / "model-threshold.db"),
+                model_thresholds={"small-model": 0.2, "large-model": 0.8},
+            )
+        )
+        try:
+            engine.update_model(
+                model="small-model",
+                provider="test",
+                context_length=100_000,
+            )
+            assert engine.threshold_tokens == 20_000
+            assert engine._context_threshold_source == "model_thresholds:small-model"
+
+            engine.update_model(
+                model="large-model",
+                provider="test",
+                context_length=100_000,
+            )
+            assert engine.threshold_tokens == 80_000
+            assert engine._context_threshold_source == "model_thresholds:large-model"
+        finally:
+            engine.shutdown()
