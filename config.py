@@ -246,11 +246,24 @@ def _load_model_thresholds_from_yaml() -> dict[str, float]:
             return {}
         result: dict[str, float] = {}
         for key, val in raw.items():
-            if isinstance(val, (int, float)) and not isinstance(val, bool):
-                result[str(key)] = float(val)
+            normalized_key = str(key).strip()
+            if not normalized_key or isinstance(val, bool):
+                continue
+            if isinstance(val, (int, float)):
+                threshold = float(val)
+                if _is_valid_context_threshold(threshold):
+                    result[normalized_key] = threshold
         return result
     except Exception:
         return {}
+
+
+def _is_valid_context_threshold(value: float) -> bool:
+    return (
+        value == value
+        and value not in (float("inf"), float("-inf"))
+        and 0.0 < value <= 1.0
+    )
 
 
 def _parse_model_thresholds_env(raw: str) -> dict[str, float]:
@@ -268,9 +281,11 @@ def _parse_model_thresholds_env(raw: str) -> dict[str, float]:
         if not key:
             continue
         try:
-            result[key] = float(val.strip())
+            threshold = float(val.strip())
         except ValueError:
             continue
+        if _is_valid_context_threshold(threshold):
+            result[key] = threshold
     return result
 
 

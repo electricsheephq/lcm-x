@@ -19,6 +19,12 @@ class TestParseModelThresholdsEnv:
         result = _parse_model_thresholds_env("glm-5.2:0.70,bad:abc")
         assert result == {"glm-5.2": 0.70}
 
+    def test_out_of_range_and_non_finite_values_are_skipped(self):
+        result = _parse_model_thresholds_env(
+            "zero:0,negative:-0.1,too-high:1.01,nan:nan,inf:inf,valid:1.0"
+        )
+        assert result == {"valid": 1.0}
+
     def test_whitespace_stripped(self):
         result = _parse_model_thresholds_env(" glm-5.2 : 0.70 , glm-5.2-1M : 0.25 ")
         assert result == {"glm-5.2": 0.70, "glm-5.2-1M": 0.25}
@@ -39,6 +45,25 @@ class TestLCMConfigModelThresholds:
         monkeypatch.delenv("LCM_MODEL_THRESHOLDS", raising=False)
         c = LCMConfig.from_env()
         assert c.model_thresholds == {}
+
+    def test_yaml_skips_invalid_keys_and_values(self, monkeypatch, tmp_path):
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text(
+            "lcm:\n"
+            "  model_thresholds:\n"
+            "    valid: 0.4\n"
+            "    \"\": 0.5\n"
+            "    zero: 0\n"
+            "    too_high: 1.1\n"
+            "    boolean: true\n"
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("LCM_MODEL_THRESHOLDS", raising=False)
+
+        c = LCMConfig.from_env()
+
+        assert c.model_thresholds == {"valid": 0.4}
 
 
 class TestRuntimeContextThreshold:
