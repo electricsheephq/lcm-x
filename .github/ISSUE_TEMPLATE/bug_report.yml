@@ -44,7 +44,7 @@ body:
     attributes:
       label: Affected commit SHA
       description: Exact LCM-X commit that exhibits the bug. Add a branch or release tag only as context.
-      placeholder: 0123456789abcdef... (main or v0.21.0-rc2)
+      placeholder: Exact commit SHA for v0.21.0-rc2 or main, for example 0123456789abcdef...
     validations:
       required: true
 
