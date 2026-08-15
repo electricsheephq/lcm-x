@@ -11,45 +11,27 @@ body:
   - type: textarea
     id: problem
     attributes:
-      label: Problem
-      description: What operator, maintainer, or user problem should this solve?
-      placeholder: LCM currently exposes seven tools in every session, which can exceed tool-count-sensitive backend limits.
-    validations:
-      required: true
-
-  - type: textarea
-    id: impact
-    attributes:
-      label: User or operator impact
-      description: Who is affected and how bad is it?
-      placeholder: Claude proxy sessions fail when total tool count crosses the backend limit, even though the LCM engine itself can keep running.
+      label: Problem and impact
+      description: What operator, maintainer, or user problem should this solve, who is affected, and how severe is it?
+      placeholder: LCM exposes seven tools in every session; tool-count-sensitive backends can fail even though the engine keeps running.
     validations:
       required: true
 
   - type: textarea
     id: direction
     attributes:
-      label: Proposed direction
-      description: Describe the preferred implementation or behavior change.
-      placeholder: Add an lcm.tool_mode config with individual, dispatcher, minimal, and none modes.
-    validations:
-      required: true
-
-  - type: textarea
-    id: alternatives
-    attributes:
-      label: Alternatives and tradeoffs
-      description: List other approaches considered and why they are less preferred.
-      placeholder: A per-tool exposed_tools list is simpler, but it does not reduce schema count as much as dispatcher mode.
+      label: Proposed direction, alternatives, and tradeoffs
+      description: Describe the preferred behavior, alternatives considered, and why this direction is preferred.
+      placeholder: Add lcm.tool_mode modes; a per-tool list is simpler but reduces schema count less than dispatcher mode.
     validations:
       required: true
 
   - type: textarea
     id: compatibility
     attributes:
-      label: Backward compatibility
-      description: Explain defaults, migrations, and compatibility risks.
-      placeholder: Default to current behavior so existing users keep all seven tools unless they opt in.
+      label: Backward compatibility, documentation, and configuration
+      description: Explain defaults, migrations, compatibility risks, and required loader, reference, example, and user-documentation changes.
+      placeholder: Default to current behavior; update the loader, configuration reference, example, and operator guide together.
     validations:
       required: true
 
@@ -97,18 +79,10 @@ body:
       required: true
 
   - type: textarea
-    id: docs-config
-    attributes:
-      label: Documentation and configuration consequences
-      description: List required loader, reference, example, migration, and user-documentation changes, or state "none" with a reason.
-    validations:
-      required: true
-
-  - type: textarea
     id: validation
     attributes:
-      label: Validation or evidence
-      description: Include prototype notes, tests, logs, measurements, screenshots, or links that justify the change.
+      label: Validation, evidence, and notes
+      description: Include prototype notes, tests, logs, measurements, screenshots, links, and anything maintainers should know.
       placeholder: |
         - Prototype branch: ...
         - Tool count before: 26
@@ -130,11 +104,3 @@ body:
         - PR already opened
     validations:
       required: true
-
-  - type: textarea
-    id: notes
-    attributes:
-      label: Additional notes
-      description: Anything maintainers should know before deciding direction.
-    validations:
-      required: false

@@ -42,6 +42,16 @@ def test_release_candidate_identity_surfaces_are_synchronized():
     assert f"Exact commit SHA for v{RELEASE_VERSION} or main" in bug_report
 
 
+def test_issue_forms_stay_within_github_element_limit():
+    issue_forms = (REPO_ROOT / ".github" / "ISSUE_TEMPLATE").glob("*.yml")
+    form_bodies = [path.read_text(encoding="utf-8") for path in issue_forms]
+
+    assert form_bodies
+    for body in form_bodies:
+        if "\nbody:\n" in body:
+            assert body.count("\n  - type: ") <= 10
+
+
 def test_upgrade_guide_requires_sqlite_safe_backup_semantics():
     operator_guide = " ".join(
         (REPO_ROOT / "docs" / "operator-guide.md")
