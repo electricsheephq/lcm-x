@@ -91,6 +91,17 @@ git diff --check
 
 Run `actionlint` when workflows change. Record exact commands and results in the PR.
 
+## Automation Boundary
+
+- Treat AI and bot output as proposal and evidence by default.
+- Deterministic tooling must re-fetch the live issue, PR head, checks, reviews, threads, and
+  authorization immediately before an authorized write.
+- Model output alone cannot close, label, assign, push, approve, or merge.
+- Automated repair is opt-in and limited to the exact accepted issue and current gate.
+- Security and data-integrity work retains non-author human code-owner approval.
+- Use `.agents/skills/triage-backlog/SKILL.md` read-only unless a maintainer explicitly
+  authorizes one exact mutation; never use it for an automatic backlog sweep.
+
 ## Review And Merge
 
 - Use `.agents/skills/land-pr/SKILL.md` when deciding readiness or landing a PR.

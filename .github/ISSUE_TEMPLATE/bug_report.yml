@@ -58,6 +58,20 @@ body:
       required: false
 
   - type: textarea
+    id: impact_regression
+    attributes:
+      label: Impact, regression range, and data symptoms
+      description: Keep this to one independently reproducible problem.
+      placeholder: |
+        User/operator impact and frequency:
+        Last known good commit:
+        First known bad commit:
+        Workaround:
+        Is context missing, duplicated, reordered, misattributed, or visible across sessions/profiles?
+    validations:
+      required: true
+
+  - type: textarea
     id: config
     attributes:
       label: Relevant config
