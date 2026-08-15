@@ -54,10 +54,10 @@ Require success on the pinned head for:
 - `Analyze (javascript-typescript)`
 - `Analyze (python)`
 
-Treat pending, skipped, missing, stale-head, or failing required checks as blocking. Socket or
-other advisory checks may add evidence but do not replace the required GitHub checks.
-If the PR changes a required workflow definition, do not let that workflow self-certify: require
-an exact-head code-owner review that explicitly covers the workflow diff and check identities.
+Treat pending, skipped, missing, stale-head, or failing required checks as blocking. Require one
+result per required name; resolve each Actions run and bind its `head_sha` to `$head` and its
+`workflow_id` to protected `CI` or `CodeQL`. Reject name-only, duplicate, or mixed identities.
+If a required workflow changes, require exact-head code-owner review of its diff and identities.
 
 ## 4. Verify Review Coverage
 
@@ -70,7 +70,7 @@ gh api graphql --paginate \
 query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
-      headRefOid
+      headRefOid reviewDecision
       author { login }
       reviews(first: 100, after: $endCursor, states: [APPROVED, CHANGES_REQUESTED, DISMISSED]) {
         nodes { author { login } commit { oid } state submittedAt }
@@ -95,8 +95,8 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
 }'
 ```
 
-- Require the returned `headRefOid` to equal the recorded `$head`, then group reviews by author
-  and use only each author's latest opinionated review by `submittedAt`. Reject any latest
+- Require `reviewDecision: APPROVED` and `headRefOid` equal to `$head`, then group by author and
+  use only each author's latest opinionated review by `submittedAt`. Reject any latest
   review with `state: CHANGES_REQUESTED`. Require at least one latest `APPROVED` review whose
   `commit.oid` equals `headRefOid`, whose author differs from the PR author, and whose author is
   listed for changed paths in the protected base revision's `.github/CODEOWNERS`.
