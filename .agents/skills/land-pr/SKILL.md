@@ -16,6 +16,7 @@ Verify the repository and inspect the real PR:
 git remote get-url origin
 gh pr view <PR> --repo electricsheephq/lcm-x \
   --json number,title,state,isDraft,baseRefName,headRefName,headRefOid,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,author,files,closingIssuesReferences,url
+head="$(gh pr view <PR> --repo electricsheephq/lcm-x --json headRefOid --jq .headRefOid)"
 ```
 
 Record `headRefOid` as the merge pin. Stop on the wrong repository, a non-`main` base, a closed
@@ -130,7 +131,8 @@ uncertain, comment or report the relationship; do not close the issue.
 Immediately before merging:
 
 ```bash
-head="$(gh pr view <PR> --repo electricsheephq/lcm-x --json headRefOid --jq .headRefOid)"
+current_head="$(gh pr view <PR> --repo electricsheephq/lcm-x --json headRefOid --jq .headRefOid)"
+test "$current_head" = "$head"
 gh pr view <PR> --repo electricsheephq/lcm-x \
   --json state,isDraft,headRefOid,mergeable,mergeStateStatus,reviewDecision
 gh pr checks <PR> --repo electricsheephq/lcm-x
