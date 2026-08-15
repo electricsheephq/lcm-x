@@ -1,5 +1,5 @@
 name: Bug or regression report
-description: Report broken, incorrect, or regressed hermes-lcm behavior.
+description: Report broken, incorrect, or regressed LCM-X behavior on Hermes.
 title: "fix: "
 labels: ["bug"]
 body:
@@ -43,7 +43,7 @@ body:
     id: version
     attributes:
       label: Version and branch
-      description: hermes-lcm version, branch, commit, or release tag.
+      description: LCM-X version, branch, commit, or release tag.
       placeholder: v0.21.0-rc2, main, or commit SHA
     validations:
       required: true
@@ -61,7 +61,7 @@ body:
     id: config
     attributes:
       label: Relevant config
-      description: Include only the relevant hermes-lcm or Hermes config. Redact secrets.
+      description: Include only the relevant LCM-X or Hermes config. Redact secrets.
       render: yaml
       placeholder: |
         context:

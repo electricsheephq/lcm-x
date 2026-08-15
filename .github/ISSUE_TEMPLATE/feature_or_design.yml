@@ -1,12 +1,12 @@
 name: Feature or design proposal
-description: Propose new behavior, configuration, architecture, or follow-up work.
+description: Propose new LCM-X behavior, configuration, Hermes integration, architecture, or follow-up work.
 title: "feat: "
 labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
       value: |
-        Use this for feature requests, design proposals, and architectural follow-up. Be explicit about the problem and tradeoffs.
+        Use this for feature requests, design proposals, and architectural follow-up. Implementation starts only after a maintainer accepts the problem, compatibility boundary, and acceptance criteria.
 
   - type: textarea
     id: problem
@@ -50,6 +50,49 @@ body:
       label: Backward compatibility
       description: Explain defaults, migrations, and compatibility risks.
       placeholder: Default to current behavior so existing users keep all seven tools unless they opt in.
+    validations:
+      required: true
+
+  - type: textarea
+    id: hermes-contract
+    attributes:
+      label: Hermes compatibility and host contract
+      description: Identify any plugin API, ContextEngine, lifecycle, profile/session identity, tool, config, or model-routing contract involved. State "none" when no host contract changes.
+      placeholder: |
+        Contract: ContextEngine preflight/compress agreement
+        Minimum Hermes capability: existing supported contract
+        Fallback: preserve current behavior when the capability is unavailable
+    validations:
+      required: true
+
+  - type: textarea
+    id: lossless-impact
+    attributes:
+      label: Lossless-data and history impact
+      description: Explain effects on durable context, identity, chronology, provenance, source coverage, tool grouping, real user turns, and the fresh tail.
+      placeholder: No persisted rows are deleted or made unreachable; existing message identity and source coverage remain unchanged.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: State observable conditions that prove the feature works and preserves existing supported behavior.
+      placeholder: |
+        - Default behavior remains unchanged.
+        - Opt-in mode reduces exposed tool schemas to the configured set.
+        - Existing profiles and sessions retain isolated state.
+        - Focused and full CI pass.
+    validations:
+      required: true
+
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: Non-goals
+      description: Name adjacent behavior, migrations, releases, or runtime work that this proposal does not authorize.
+      placeholder: No schema migration, release, customer-runtime mutation, or upstream write.
     validations:
       required: true
 
