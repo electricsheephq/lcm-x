@@ -25,8 +25,8 @@ or draft PR, an unknown/conflicting merge state, or head drift.
 ## 2. Verify The Accepted Work
 
 - Read every linked issue and the complete PR body/diff.
-- For a bug, require a current-main reproduction or a named mandatory-invariant violation and
-  a regression that fails on the base and passes on the PR.
+- For a bug, require a maintainer-accepted issue (including combined-scope authorization when
+  applicable), plus current-main reproduction or a named invariant violation and a regression.
 - For a feature/design change, require a maintainer-accepted issue with problem, impact,
   alternatives, acceptance criteria, non-goals, backward-compatible defaults, Hermes
   compatibility, and documentation/config consequences.
@@ -153,12 +153,12 @@ or a ruleset bypass.
 Verify the result:
 
 ```bash
-gh pr view <PR> --repo electricsheephq/lcm-x \
-  --json state,mergeCommit,mergedAt,mergedBy,closingIssuesReferences,url
-gh api repos/electricsheephq/lcm-x/commits/main --jq .sha
+merge_commit="$(gh pr view <PR> --repo electricsheephq/lcm-x \
+  --json state,mergeCommit --jq 'select(.state == "MERGED") | .mergeCommit.oid')"; test -n "$merge_commit" && \
+test "$(gh api repos/electricsheephq/lcm-x/commits/main --jq .sha)" = "$merge_commit" && \
+required="$(gh api repos/electricsheephq/lcm-x/rulesets/20888757 --jq '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context]')" && gh api "repos/electricsheephq/lcm-x/commits/$merge_commit/check-runs?per_page=100" | jq -e --argjson required "$required" '([.check_runs[] | select(.status == "completed" and .conclusion == "success") | .name]) as $passed | ($required - $passed | length == 0)'
 ```
-
-- Confirm the PR is merged and capture the merge commit.
+- Confirm the PR is merged and every Section 3 required check on the merge commit completed successfully.
 - Confirm verified closing issues are closed as completed.
 - Thank external contributors and link the landed PR.
 - Leave ambiguous issues open with a precise relationship note.
