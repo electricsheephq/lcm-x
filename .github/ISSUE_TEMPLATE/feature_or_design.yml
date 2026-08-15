@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Use this for feature requests, design proposals, and architectural follow-up. Implementation starts only after a maintainer accepts the problem, compatibility boundary, and acceptance criteria.
+        Use this for feature requests, design proposals, and architectural follow-up. A PR becomes ready for review or merge only after a maintainer accepts the problem, compatibility boundary, and acceptance criteria.
 
   - type: textarea
     id: problem

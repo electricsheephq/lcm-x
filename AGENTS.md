@@ -47,7 +47,7 @@ an authority for writes or automatic merges.
 
 ## Features And Design Changes
 
-- Require an accepted feature/design issue before implementation.
+- Require an accepted feature/design issue before its PR becomes ready for review or can merge.
 - The issue must state the problem, user/operator impact, proposed behavior, alternatives,
   acceptance criteria, non-goals, backward-compatible defaults, and documentation/config
   consequences.
