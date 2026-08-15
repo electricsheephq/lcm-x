@@ -30,6 +30,7 @@
 - [ ] Bug regression fails on the recorded base and passes on this head, or the violated mandatory invariant is named.
 - [ ] Feature/design issue is maintainer-accepted and its acceptance criteria are covered.
 - [ ] Default validation:
+  - [ ] `ruff check .`
   - [ ] `pytest tests/test_lcm_core.py tests/test_lcm_engine.py tests/test_packaging_install.py -q`
   - [ ] `pytest -q`
   - [ ] `bash -lc 'ulimit -n 1024 && python -m pytest tests/ -q'`
