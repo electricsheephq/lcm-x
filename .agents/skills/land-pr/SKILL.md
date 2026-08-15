@@ -56,6 +56,8 @@ Require success on the pinned head for:
 
 Treat pending, skipped, missing, stale-head, or failing required checks as blocking. Socket or
 other advisory checks may add evidence but do not replace the required GitHub checks.
+If the PR changes a required workflow definition, do not let that workflow self-certify: require
+an exact-head code-owner review that explicitly covers the workflow diff and check identities.
 
 ## 4. Verify Review Coverage
 
