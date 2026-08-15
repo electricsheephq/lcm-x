@@ -1,6 +1,6 @@
-import json
-import subprocess
 from pathlib import Path
+
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -8,23 +8,7 @@ ISSUE_TEMPLATE_ROOT = REPO_ROOT / ".github" / "ISSUE_TEMPLATE"
 
 
 def parse_yaml(path: Path):
-    result = subprocess.run(
-        [
-            "ruby",
-            "-ryaml",
-            "-rjson",
-            "-e",
-            (
-                "puts JSON.generate(YAML.safe_load(File.read(ARGV.fetch(0)), "
-                "permitted_classes: [], permitted_symbols: [], aliases: false))"
-            ),
-            str(path),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return json.loads(result.stdout)
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
 def test_contributor_guide_uses_the_lcm_x_governance_path():
@@ -56,8 +40,10 @@ def test_bug_form_captures_impact_regression_and_lossless_symptoms():
     bug_form = (ISSUE_TEMPLATE_ROOT / "bug_report.yml").read_text(encoding="utf-8")
 
     assert "id: impact_regression" in bug_form
-    assert "Last known good commit:" in bug_form
-    assert "First known bad commit:" in bug_form
+    assert "Last known good commit (or N/A):" in bug_form
+    assert "First known bad commit (or N/A):" in bug_form
+    assert "Current-main reproduction or named mandatory invariant:" in bug_form
+    assert "(or N/A)" in bug_form
     assert "missing, duplicated, reordered, misattributed" in bug_form
     assert "one independently reproducible problem" in bug_form
 
@@ -73,7 +59,8 @@ def test_pull_request_template_separates_behavior_and_release_evidence():
     assert "Artifact or redacted trace:" in template
     assert "Proof boundary—what this does not prove:" in template
     assert "## Release-note impact" in template
-    assert "deterministically re-fetched before any write" in template
+    assert "accepted issue, PR head, checks, reviews, threads, and authorization" in template
+    assert "immediately before any authorized GitHub write" in template
 
 
 def test_triage_skill_is_bounded_and_read_only_by_default():
@@ -89,12 +76,17 @@ def test_triage_skill_is_bounded_and_read_only_by_default():
     assert "Remain read-only by default" in skill
     assert "Never process the whole backlog" in skill
     assert "Deterministic live-state checks must guard every authorized" in skill
+    assert "## Minimum Capability" in skill
+    assert "repository, current refs, issues, pull requests" in skill
+    assert "corresponding GitHub" in skill
+    assert "current non-author human code-owner" in skill
 
     authorized_write_steps = [
         "If a maintainer explicitly authorizes one of those mutations",
         "name the exact item and requested change",
         "re-fetch current item, repository, and authorization state",
-        "stop on drift or ambiguity",
+        "require and record current non-author human code-owner",
+        "stop on any other drift or ambiguity",
         "perform only the named write",
         "read back the result",
     ]
@@ -109,3 +101,14 @@ def test_repository_policy_states_the_automation_boundary():
     assert "Model output alone cannot close, label, assign, push, approve, or merge." in policy
     assert "Automated repair is opt-in" in policy
     assert "Security and data-integrity work retains non-author human code-owner approval." in policy
+
+
+def test_triage_prompt_and_contributor_automation_scope_are_bounded():
+    prompt = (
+        REPO_ROOT / ".agents" / "skills" / "triage-backlog" / "agents" / "openai.yaml"
+    ).read_text(encoding="utf-8")
+    guide = (REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+
+    assert "issue, pull request, or duplicate cluster" in prompt
+    assert "without writing to GitHub" in prompt
+    assert "limited to the exact accepted issue and current gate" in guide

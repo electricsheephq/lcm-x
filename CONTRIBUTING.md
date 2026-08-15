@@ -84,7 +84,8 @@ commit lists or model output do not replace those notes.
 AI and bot output is proposal and evidence by default. Models may triage, reproduce, implement,
 test, and review, but deterministic tooling must re-fetch live state before any authorized write.
 Model output alone cannot close, label, assign, push, approve, or merge. Automated repair is
-opt-in, and security or data-integrity work retains the repository's human approval gate.
+opt-in and limited to the exact accepted issue and current gate. Security or data-integrity work
+retains the repository's human approval gate.
 
-Use the read-only `.agents/skills/triage-backlog/SKILL.md` for one issue or duplicate cluster at a
-time. It does not authorize backlog sweeps or GitHub writes.
+Use the read-only `.agents/skills/triage-backlog/SKILL.md` for one issue, pull request, or duplicate
+cluster at a time. It does not authorize backlog sweeps or GitHub writes.

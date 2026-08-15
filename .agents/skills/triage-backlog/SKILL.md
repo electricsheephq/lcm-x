@@ -8,6 +8,13 @@ description: Read-only LCM-X issue and pull-request triage for one report or dup
 Triage one issue, PR, or duplicate cluster into a bounded evidence packet. Treat GitHub as the
 live source and make no writes unless a maintainer separately authorizes an exact mutation.
 
+## Minimum Capability
+
+Read-only triage requires live access to the repository, current refs, issues, pull requests,
+linked commits, and authorization state. Stop if any required read is unavailable. A
+maintainer-authorized mutation and its read-back additionally require the corresponding GitHub
+write capability.
+
 ## 1. Establish Identity
 
 Record:
@@ -109,9 +116,11 @@ If a maintainer explicitly authorizes one of those mutations:
 
 1. name the exact item and requested change;
 2. re-fetch current item, repository, and authorization state;
-3. stop on drift or ambiguity;
-4. perform only the named write;
-5. read back the result.
+3. for a security or data-integrity item, require and record current non-author human code-owner
+   approval, and stop if it is missing, stale, or ambiguous;
+4. stop on any other drift or ambiguity;
+5. perform only the named write;
+6. read back the result.
 
 AI output is proposal and evidence. Deterministic live-state checks must guard every authorized
 write. Never process the whole backlog, manufacture issues from hypotheses, or post one comment

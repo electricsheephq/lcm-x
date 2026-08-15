@@ -837,7 +837,7 @@ tests/           standalone pytest coverage
 Run tests:
 
 ```bash
-pip install pytest
+pip install pytest PyYAML
 python -m pytest tests/ -v
 ```
 

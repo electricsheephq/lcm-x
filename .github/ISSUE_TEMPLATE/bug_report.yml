@@ -61,11 +61,12 @@ body:
     id: impact_regression
     attributes:
       label: Impact, regression range, and data symptoms
-      description: Keep this to one independently reproducible problem.
+      description: Keep this to one independently reproducible problem. Use N/A when no regression range is known.
       placeholder: |
         User/operator impact and frequency:
-        Last known good commit:
-        First known bad commit:
+        Last known good commit (or N/A):
+        First known bad commit (or N/A):
+        Current-main reproduction or named mandatory invariant:
         Workaround:
         Is context missing, duplicated, reordered, misattributed, or visible across sessions/profiles?
     validations:

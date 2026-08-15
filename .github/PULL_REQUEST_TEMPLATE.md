@@ -69,7 +69,7 @@
 - [ ] One non-author code owner approved the current head.
 - [ ] Data-integrity/security/migration/compaction/persistence/profile-session identity/lifecycle/Hermes-contract risk has independent semantic review when applicable.
 - [ ] All actionable review threads have terminal dispositions and are resolved.
-- [ ] Live issue, review, check, and head state was deterministically re-fetched before any write.
+- [ ] The accepted issue, PR head, checks, reviews, threads, and authorization were deterministically re-fetched immediately before any authorized GitHub write.
 - [ ] Merge method is merge commit; do not squash or rebase.
 
 ## Non-goals and notes
