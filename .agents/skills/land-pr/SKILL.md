@@ -131,7 +131,8 @@ uncertain, comment or report the relationship; do not close the issue.
 
 ## 7. Merge Deterministically
 
-Immediately before merging:
+Immediately before merging, repeat both paginated GraphQL queries from Section 4, reapply every
+Section 4 gate, and require `reviewDecision: APPROVED`. Only after those checks pass, run:
 
 ```bash
 current_head="$(gh pr view <PR> --repo electricsheephq/lcm-x --json headRefOid --jq .headRefOid)"
@@ -142,8 +143,7 @@ gh pr checks <PR> --repo electricsheephq/lcm-x
 gh pr merge <PR> --repo electricsheephq/lcm-x --merge --match-head-commit "$head"
 ```
 
-Repeat both paginated GraphQL queries from Section 4 immediately before the merge command and
-reapply every Section 4 gate. Require `reviewDecision: APPROVED`.
+Treat `gh pr merge` as the last command; do not run it before the repeated review queries and assertions.
 
 Never use auto-merge, squash, rebase merge, direct `main` pushes, force pushes, branch deletion,
 or a ruleset bypass.
