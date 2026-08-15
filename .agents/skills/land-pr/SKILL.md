@@ -139,7 +139,7 @@ current_head="$(gh pr view <PR> --repo electricsheephq/lcm-x --json headRefOid -
 test "$current_head" = "$head"
 gh pr view <PR> --repo electricsheephq/lcm-x \
   --json state,isDraft,headRefOid,mergeable,mergeStateStatus,reviewDecision
-gh pr checks <PR> --repo electricsheephq/lcm-x
+gh pr checks <PR> --repo electricsheephq/lcm-x && \
 gh pr merge <PR> --repo electricsheephq/lcm-x --merge --match-head-commit "$head"
 ```
 
