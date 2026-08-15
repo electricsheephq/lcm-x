@@ -1,9 +1,30 @@
-import re
+import json
+import subprocess
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ISSUE_TEMPLATE_ROOT = REPO_ROOT / ".github" / "ISSUE_TEMPLATE"
+
+
+def parse_yaml(path: Path):
+    result = subprocess.run(
+        [
+            "ruby",
+            "-ryaml",
+            "-rjson",
+            "-e",
+            (
+                "puts JSON.generate(YAML.safe_load(File.read(ARGV.fetch(0)), "
+                "permitted_classes: [], permitted_symbols: [], aliases: false))"
+            ),
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(result.stdout)
 
 
 def test_contributor_guide_uses_the_lcm_x_governance_path():
@@ -22,12 +43,13 @@ def test_issue_forms_have_unique_ids_and_stay_within_the_platform_limit():
 
     assert issue_forms
     for path in issue_forms:
-        body = path.read_text(encoding="utf-8")
-        if "\nbody:\n" not in body:
+        form = parse_yaml(path)
+        body = form.get("body")
+        if body is None:
             continue
-        ids = re.findall(r"^    id: ([a-zA-Z0-9_-]+)$", body, flags=re.MULTILINE)
+        ids = [element["id"] for element in body if "id" in element]
         assert len(ids) == len(set(ids)), path
-        assert body.count("\n  - type: ") <= 10, path
+        assert len(body) <= 10, path
 
 
 def test_bug_form_captures_impact_regression_and_lossless_symptoms():
@@ -66,6 +88,11 @@ def test_triage_skill_is_bounded_and_read_only_by_default():
     assert "Remain read-only by default" in skill
     assert "Never process the whole backlog" in skill
     assert "Deterministic live-state checks must guard every authorized" in skill
+    assert "name the exact item and requested change" in skill
+    assert "re-fetch current item, repository, and authorization state" in skill
+    assert "stop on drift or ambiguity" in skill
+    assert "perform only the named write" in skill
+    assert "read back the result" in skill
 
 
 def test_repository_policy_states_the_automation_boundary():
