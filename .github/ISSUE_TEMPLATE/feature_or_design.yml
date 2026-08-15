@@ -97,6 +97,14 @@ body:
       required: true
 
   - type: textarea
+    id: docs-config
+    attributes:
+      label: Documentation and configuration consequences
+      description: List required loader, reference, example, migration, and user-documentation changes, or state "none" with a reason.
+    validations:
+      required: true
+
+  - type: textarea
     id: validation
     attributes:
       label: Validation or evidence

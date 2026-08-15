@@ -4,9 +4,11 @@
 
 ## Linked work and change class
 
-- Closes/Refs #
+- Accepted issue: Closes/Refs # (required for bugs, features, design changes, and concrete follow-ups; use N/A only for other change classes)
+- Combined scope: authorized by the linked issue / N/A
 - Change class: bug fix / feature / design / docs / test / maintenance
 - Base SHA:
+- Head SHA (`headRefOid`):
 
 ## Why
 
@@ -15,8 +17,11 @@
 ## Hermes compatibility and lossless-data impact
 
 - Hermes host contract changed: none / plugin API / ContextEngine / lifecycle / profile-session identity / tools / config / model routing
+- Minimum Hermes capability:
 - Backward-compatible default and fallback:
-- Durable context, identity, chronology, provenance, tool grouping, and fresh-tail impact:
+- Profile/session ownership and isolation:
+- Durable context, identity, chronology, provenance, source coverage, tool grouping, real user turns, and fresh-tail impact:
+- Documentation and configuration consequences:
 - Upstream links and contributor attribution:
 
 ## Validation
@@ -27,7 +32,7 @@
 - [ ] Default validation:
   - [ ] `pytest tests/test_lcm_core.py tests/test_lcm_engine.py tests/test_packaging_install.py -q`
   - [ ] `pytest -q`
-  - [ ] `bash -lc 'ulimit -n 1024 && pytest -q'`
+  - [ ] `bash -lc 'ulimit -n 1024 && python -m pytest tests/ -q'`
   - [ ] `python -m compileall -q .`
   - [ ] `python -m py_compile scripts/import_lossless_claw.py`
   - [ ] `bash -n scripts/install.sh scripts/update.sh`
@@ -39,7 +44,7 @@
 - [ ] Current `headRefOid` is recorded.
 - [ ] Required exact-head CI is green.
 - [ ] One non-author code owner approved the current head.
-- [ ] Data-integrity/security/migration/compaction/lifecycle/Hermes-contract risk has independent semantic review when applicable.
+- [ ] Data-integrity/security/migration/compaction/persistence/profile-session identity/lifecycle/Hermes-contract risk has independent semantic review when applicable.
 - [ ] All actionable review threads have terminal dispositions and are resolved.
 - [ ] Merge method is merge commit; do not squash or rebase.
 

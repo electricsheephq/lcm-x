@@ -42,9 +42,9 @@ body:
   - type: input
     id: version
     attributes:
-      label: Version and branch
-      description: LCM-X version, branch, commit, or release tag.
-      placeholder: v0.21.0-rc2, main, or commit SHA
+      label: Affected commit SHA
+      description: Exact LCM-X commit that exhibits the bug. Add a branch or release tag only as context.
+      placeholder: 0123456789abcdef... (main or v0.21.0-rc2)
     validations:
       required: true
 
