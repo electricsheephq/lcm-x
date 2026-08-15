@@ -93,10 +93,11 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
 }'
 ```
 
-- Group reviews by author and use only each author's latest opinionated review by `submittedAt`.
-  Require at least one latest review with `state: APPROVED` whose `commit.oid` equals
-  `headRefOid`, whose author differs from the PR author, and whose author is listed for the
-  changed paths in `.github/CODEOWNERS`.
+- Require the returned `headRefOid` to equal the recorded `$head`, then group reviews by author
+  and use only each author's latest opinionated review by `submittedAt`. Require at least one
+  latest review with `state: APPROVED` whose `commit.oid` equals `headRefOid`, whose author
+  differs from the PR author, and whose author is listed for the changed paths in
+  `.github/CODEOWNERS`.
 - Require every returned review thread to have `isResolved: true`; list and stop on any
   unresolved thread.
 - For data-integrity, security, migration, compaction, persistence, lifecycle/session identity,
