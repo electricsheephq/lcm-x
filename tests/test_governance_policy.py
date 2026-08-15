@@ -76,13 +76,16 @@ def test_triage_skill_is_bounded_and_read_only_by_default():
     assert "Remain read-only by default" in skill
     assert "Never process the whole backlog" in skill
     assert "Deterministic live-state checks must guard every authorized" in skill
+    assert "Approval, push, and merge are never authorized by this skill" in skill
+    assert "Use `land-pr` for every landing" in skill
+    assert "decision, approval, push, and merge" in skill
     assert "## Minimum Capability" in skill
     assert "repository, current refs, issues, pull requests" in skill
     assert "corresponding GitHub" in skill
     assert "current non-author human code-owner" in skill
 
     authorized_write_steps = [
-        "If a maintainer explicitly authorizes one of those mutations",
+        "If a maintainer explicitly authorizes one of the remaining GitHub metadata mutations",
         "name the exact item and requested change",
         "re-fetch current item, repository, and authorization state",
         "require and record current non-author human code-owner",

@@ -112,7 +112,10 @@ whether a failure is reproduced, inferred, or still hypothetical.
 Remain read-only by default. Do not comment, label, assign, close, reopen, create issues, edit
 milestones, approve, push, or merge.
 
-If a maintainer explicitly authorizes one of those mutations:
+Approval, push, and merge are never authorized by this skill. Use `land-pr` for every landing
+decision, approval, push, and merge.
+
+If a maintainer explicitly authorizes one of the remaining GitHub metadata mutations:
 
 1. name the exact item and requested change;
 2. re-fetch current item, repository, and authorization state;
