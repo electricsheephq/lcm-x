@@ -80,6 +80,7 @@ def test_triage_skill_is_bounded_and_read_only_by_default():
     skill = (
         REPO_ROOT / ".agents" / "skills" / "triage-backlog" / "SKILL.md"
     ).read_text(encoding="utf-8")
+    write_boundary = skill.split("## Write Boundary", maxsplit=1)[1]
 
     assert "TODO" not in skill
     assert "exact current `main` SHA" in skill
@@ -88,11 +89,17 @@ def test_triage_skill_is_bounded_and_read_only_by_default():
     assert "Remain read-only by default" in skill
     assert "Never process the whole backlog" in skill
     assert "Deterministic live-state checks must guard every authorized" in skill
-    assert "name the exact item and requested change" in skill
-    assert "re-fetch current item, repository, and authorization state" in skill
-    assert "stop on drift or ambiguity" in skill
-    assert "perform only the named write" in skill
-    assert "read back the result" in skill
+
+    authorized_write_steps = [
+        "If a maintainer explicitly authorizes one of those mutations",
+        "name the exact item and requested change",
+        "re-fetch current item, repository, and authorization state",
+        "stop on drift or ambiguity",
+        "perform only the named write",
+        "read back the result",
+    ]
+    step_positions = [write_boundary.index(step) for step in authorized_write_steps]
+    assert step_positions == sorted(step_positions)
 
 
 def test_repository_policy_states_the_automation_boundary():
