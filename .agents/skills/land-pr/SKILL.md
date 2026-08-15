@@ -69,8 +69,8 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
     pullRequest(number: $number) {
       headRefOid
       author { login }
-      reviews(first: 100, after: $endCursor, states: APPROVED) {
-        nodes { author { login } commit { oid } state }
+      reviews(first: 100, after: $endCursor, states: [APPROVED, CHANGES_REQUESTED, DISMISSED]) {
+        nodes { author { login } commit { oid } state submittedAt }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -92,9 +92,10 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
 }'
 ```
 
-- Require at least one `APPROVED` review whose `commit.oid` equals `headRefOid`, whose author
-  differs from the PR author, and whose author is listed for the changed paths in
-  `.github/CODEOWNERS`.
+- Group reviews by author and use only each author's latest opinionated review by `submittedAt`.
+  Require at least one latest review with `state: APPROVED` whose `commit.oid` equals
+  `headRefOid`, whose author differs from the PR author, and whose author is listed for the
+  changed paths in `.github/CODEOWNERS`.
 - Require every returned review thread to have `isResolved: true`; list and stop on any
   unresolved thread.
 - For data-integrity, security, migration, compaction, persistence, lifecycle/session identity,
@@ -135,6 +136,9 @@ gh pr view <PR> --repo electricsheephq/lcm-x \
 gh pr checks <PR> --repo electricsheephq/lcm-x
 gh pr merge <PR> --repo electricsheephq/lcm-x --merge --match-head-commit "$head"
 ```
+
+Repeat both paginated GraphQL queries from Section 4 immediately before the merge command and
+reapply every Section 4 gate. Require `reviewDecision: APPROVED`.
 
 Never use auto-merge, squash, rebase merge, direct `main` pushes, force pushes, branch deletion,
 or a ruleset bypass.
