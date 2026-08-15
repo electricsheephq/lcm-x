@@ -58,8 +58,45 @@ other advisory checks may add evidence but do not replace the required GitHub ch
 
 ## 4. Verify Review Coverage
 
-- Require one non-author code-owner approval on the current head.
-- Require every review thread to be resolved.
+Read approvals and review threads directly; aggregate `reviewDecision` is not exact-head proof:
+
+```bash
+gh api graphql --paginate \
+  -F owner=electricsheephq -F name=lcm-x -F number=<PR> \
+  -f query='
+query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      headRefOid
+      author { login }
+      reviews(first: 100, after: $endCursor, states: APPROVED) {
+        nodes { author { login } commit { oid } state }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}'
+
+gh api graphql --paginate \
+  -F owner=electricsheephq -F name=lcm-x -F number=<PR> \
+  -f query='
+query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $endCursor) {
+        nodes { isResolved comments(first: 1) { nodes { url } } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}'
+```
+
+- Require at least one `APPROVED` review whose `commit.oid` equals `headRefOid`, whose author
+  differs from the PR author, and whose author is listed for the changed paths in
+  `.github/CODEOWNERS`.
+- Require every returned review thread to have `isResolved: true`; list and stop on any
+  unresolved thread.
 - For data-integrity, security, migration, compaction, persistence, lifecycle/session identity,
   or Hermes host-contract changes, require one independent semantic review covering the named
   risk lane.
