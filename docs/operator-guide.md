@@ -1,6 +1,8 @@
 # Operator guide
 
-This page holds the detailed install, activation, configuration, diagnostics, and slash-command reference that used to live in the top-level README. The README stays focused on first-run adoption; this file is the operator reference.
+This page holds the detailed install, activation, configuration, diagnostics,
+and slash-command reference for LCM-X. The README stays focused on first-run
+adoption; this file is the operator reference.
 
 ## Requirements
 
@@ -10,17 +12,18 @@ This page holds the detailed install, activation, configuration, diagnostics, an
 
 ## Install
 
-Canonical install path: clone `hermes-lcm` as a general user plugin.
+Canonical install path: clone LCM-X into the compatibility plugin directory
+`hermes-lcm`.
 
 ```bash
-git clone https://github.com/stephenschoettler/hermes-lcm \
+git clone https://github.com/electricsheephq/lcm-x \
   ~/.hermes/plugins/hermes-lcm
 ```
 
 For a profile-specific install:
 
 ```bash
-git clone https://github.com/stephenschoettler/hermes-lcm \
+git clone https://github.com/electricsheephq/lcm-x \
   ~/.hermes/profiles/myprofile/plugins/hermes-lcm
 ```
 
@@ -1033,7 +1036,7 @@ precondition that makes the final unlink safe.
 ### OpenClaw/lossless-claw history
 
 `scripts/import_lossless_claw.py` is the local, dry-run-by-default operator path
-for moving OpenClaw history into a Hermes-LCM `lcm.db`. It supports two source
+for moving OpenClaw history into an LCM-X `lcm.db`. It supports two source
 families:
 
 - `--source-db <path>`: import from an existing lossless-claw/OpenClaw SQLite

@@ -1,11 +1,14 @@
 # Judged QA harness — replication
 
-This directory vendors the hermes-lcm-specific pieces of the judged-QA
+This directory vendors the LCM-X-specific pieces of the judged-QA
 benchmark harness so the exact code that ran a reported number lives next to
 this repo, not only on a branch of a separate fork. **The vendored copies
 below are the source of truth for what actually ran; the fork branch is the
 runnable form** (it needs the rest of the harness — orchestrator, benchmark
 loaders, UI — that doesn't belong in this repo).
+
+The harness provider, branch, environment variables, and filesystem paths keep
+the compatibility identifier `hermes-lcm`.
 
 ## Harness identity
 
@@ -48,17 +51,17 @@ bun install
 
 ## Environment
 
-hermes-lcm's embedding path needs `fastembed` in a dedicated venv (the plugin
+LCM-X's embedding path needs `fastembed` in a dedicated venv (the plugin
 itself has no pip deps — it's imported via `sys.path`, never installed):
 
 ```bash
-uv venv --python 3.13 /path/to/hermes-lcm/.venv-fastembed
-uv pip install --python /path/to/hermes-lcm/.venv-fastembed/bin/python fastembed numpy
+uv venv --python 3.13 /path/to/lcm-x/.venv-fastembed
+uv pip install --python /path/to/lcm-x/.venv-fastembed/bin/python fastembed numpy
 ```
 
 | Var | Required | Purpose |
 |---|---|---|
-| `HERMES_LCM_REPO` | yes | Path to the hermes-lcm checkout being benchmarked. |
+| `HERMES_LCM_REPO` | yes | Path to the LCM-X checkout being benchmarked. |
 | `HERMES_LCM_PYTHON` | yes | Interpreter with `fastembed` installed (the venv above). |
 | `HERMES_MB_WORKDIR` | yes | Base dir for per-container `lcm.db` files. **Use a fresh/empty dir per run** — this is the harness's isolation boundary between containers. |
 | `HERMES_MB_PROVIDER` | no (default `fastembed`) | `fastembed` or `voyage`. |
@@ -70,12 +73,12 @@ uv pip install --python /path/to/hermes-lcm/.venv-fastembed/bin/python fastembed
 | `HERMES_MB_CODEX_EFFORT` | no (default `low`) | `model_reasoning_effort` passed to `codex exec`. |
 | `HERMES_MB_CLAUDE_MODEL` | no (default `claude-sonnet-5`) | Model passed to `claude -p`. |
 | `HERMES_MB_CLI_TIMEOUT_MS` | no (default `180000`) | Per-call timeout for the CLI transport. |
-| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` | only if **not** using `HERMES_MB_LLM_CLI` | Harness-level answerer/judge key (hermes-lcm itself needs no provider key — retrieval is fully local). |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` | only if **not** using `HERMES_MB_LLM_CLI` | Harness-level answerer/judge key (LCM-X itself needs no provider key — retrieval is fully local). |
 
 ## Run
 
 ```bash
-export HERMES_LCM_REPO=/path/to/hermes-lcm
+export HERMES_LCM_REPO=/path/to/lcm-x
 export HERMES_LCM_PYTHON=$HERMES_LCM_REPO/.venv-fastembed/bin/python
 export HERMES_MB_WORKDIR=/fresh/empty/workdir
 export HERMES_MB_PROVIDER=fastembed
@@ -118,7 +121,7 @@ The `adapter/hermes-lcm` branch adds three things on top of upstream
 `supermemoryai/memorybench`, none of which touch how any other provider is
 scored:
 
-- **`hermes-lcm` provider + Python bridge.** hermes-lcm is Python/SQLite
+- **`hermes-lcm` provider + Python bridge.** LCM-X is Python/SQLite
   native and the harness is TypeScript/Bun, so the provider spawns a
   long-lived Python bridge process and speaks newline-delimited JSON over
   stdin/stdout — the same "persistent backend handle" shape the harness's Zep

@@ -1,8 +1,12 @@
-# Contributing to hermes-lcm
+# Contributing to LCM-X
 
 Thanks for contributing.
 
 This project is small, review-driven, and correctness-first. Keep changes scoped, tested, and easy to reason about.
+
+LCM-X is the project name. The installed plugin, skill, and directory remain
+`hermes-lcm`, and the runtime context engine remains `lcm`; preserve those
+compatibility identifiers unless a separately approved migration changes them.
 
 ## Workflow
 
@@ -126,7 +130,7 @@ Packaging or install-flow changes should also verify the standalone user-plugin 
 ```bash
 export HERMES_HOME=/tmp/hermes-lcm-smoke
 mkdir -p "$HERMES_HOME/plugins"
-git clone https://github.com/stephenschoettler/hermes-lcm "$HERMES_HOME/plugins/hermes-lcm"
+git clone https://github.com/electricsheephq/lcm-x "$HERMES_HOME/plugins/hermes-lcm"
 # then enable `hermes-lcm` in plugins.enabled and set context.engine: lcm
 hermes plugins
 ```
