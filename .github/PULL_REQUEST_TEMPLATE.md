@@ -14,6 +14,14 @@
 
 -
 
+## Root cause and best-fix assessment
+
+- Root cause:
+- Mandatory invariant and owning component:
+- Caller, callee, and sibling paths checked:
+- Alternative fix location considered:
+- Assessment: best fix / acceptable mitigation / wrong layer
+
 ## Hermes compatibility and lossless-data impact
 
 - Hermes host contract changed: none / plugin API / ContextEngine / lifecycle / profile-session identity / tools / config / model routing
@@ -23,6 +31,15 @@
 - Durable context, identity, chronology, provenance, source coverage, tool grouping, real user turns, and fresh-tail impact:
 - Documentation and configuration consequences:
 - Upstream links and contributor attribution:
+
+## Real-behavior proof
+
+- Claim being proved:
+- Hermes/LCM surface and supported scenario or fixture:
+- Exact command and environment:
+- Observed result:
+- Artifact or redacted trace:
+- Proof boundary—what this does not prove:
 
 ## Validation
 
@@ -40,6 +57,11 @@
   - [ ] `git diff --check`
 - [ ] Workflow validation, if workflows changed: `actionlint`
 
+## Release-note impact
+
+- User-facing release note required: yes / no
+- Suggested curated note or reason none is needed:
+
 ## Review and merge gate
 
 - [ ] Current `headRefOid` is recorded.
@@ -47,6 +69,7 @@
 - [ ] One non-author code owner approved the current head.
 - [ ] Data-integrity/security/migration/compaction/persistence/profile-session identity/lifecycle/Hermes-contract risk has independent semantic review when applicable.
 - [ ] All actionable review threads have terminal dispositions and are resolved.
+- [ ] The accepted issue, PR head, checks, reviews, threads, and authorization were deterministically re-fetched immediately before any authorized GitHub write.
 - [ ] Merge method is merge commit; do not squash or rebase.
 
 ## Non-goals and notes

@@ -837,7 +837,7 @@ tests/           standalone pytest coverage
 Run tests:
 
 ```bash
-pip install pytest
+pip install pytest numpy
 python -m pytest tests/ -v
 ```
 
