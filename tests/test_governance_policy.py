@@ -27,6 +27,7 @@ def test_contributor_guide_uses_the_lcm_x_governance_path():
     assert guide.startswith("# Contributing to LCM-X")
     assert "https://github.com/electricsheephq/lcm-x.git" in guide
     assert "accepted issue" in guide.lower()
+    assert ".agents/skills/review-pr/SKILL.md" in guide
     assert ".agents/skills/land-pr/SKILL.md" in guide
     assert ".agents/skills/triage-backlog/SKILL.md" in guide
     assert "curate user-facing release notes" in guide
@@ -145,10 +146,62 @@ def test_repository_policy_states_the_automation_boundary():
     assert "Model output alone cannot close, label, assign, push, approve, or merge." in policy
     assert "Automated repair is opt-in" in policy
     assert (
-        "Security and data-integrity code changes and public disclosure retain non-author "
-        "human code-owner approval." in normalized_policy
+        "Security and data-integrity code changes retain non-author human code-owner approval "
+        "on the normal path." in normalized_policy
     )
-    assert "Classification alone does not elevate routine reversible issue metadata" in policy
+    assert "Public disclosure retains the stronger `triage-backlog` owner gate." in policy
+    assert "it never authorizes disclosure" in policy
+    assert (
+        "Classification alone does not elevate routine reversible issue metadata"
+        in normalized_policy
+    )
+
+
+def test_readiness_and_landing_have_distinct_authority_contracts():
+    review_skill = (
+        REPO_ROOT / ".agents" / "skills" / "review-pr" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    land_skill = (
+        REPO_ROOT / ".agents" / "skills" / "land-pr" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    review_prompt = (
+        REPO_ROOT / ".agents" / "skills" / "review-pr" / "agents" / "openai.yaml"
+    ).read_text(encoding="utf-8")
+    land_prompt = (
+        REPO_ROOT / ".agents" / "skills" / "land-pr" / "agents" / "openai.yaml"
+    ).read_text(encoding="utf-8")
+
+    assert "Remain read-only" in review_skill
+    assert "never approve, resolve, comment, label, assign, push, close, or merge" in review_skill
+    for decision in (
+        "READY_FOR_AUTHORIZED_LANDING",
+        "NOT_READY",
+        "NOT_DIRECTLY_LANDABLE",
+        "OWNER_GATE",
+        "STATE_DRIFT",
+    ):
+        assert decision in review_skill
+    assert "without writing to GitHub" in review_prompt
+
+    assert "sole trigger is explicit current authority to merge PR N at exact head H" in land_skill
+    assert "The only permitted GitHub mutation" in " ".join(land_skill.split())
+    assert "--merge --match-head-commit <HEAD_SHA>" in land_skill
+    assert "merge LCM-X PR N at exact head H" in land_prompt
+    assert "ready to merge" not in land_prompt
+
+
+def test_pr_only_admin_exception_is_exact_head_and_high_confidence():
+    policy = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    land_skill = (
+        REPO_ROOT / ".agents" / "skills" / "land-pr" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert "user-specific PR-only bypass" in policy
+    assert "acceptance and adversarial `PASS` receipts scoring at least 95" in policy
+    assert "direct push, broad/role/always bypass" in policy
+    assert "bypass_mode: pull_request" in land_skill
+    assert "score at least 95" in land_skill
+    assert "This exception replaces only the missing non-author approval" in land_skill
 
 
 def test_triage_prompt_and_contributor_automation_scope_are_bounded():
