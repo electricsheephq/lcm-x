@@ -91,7 +91,7 @@ def ready_payload(mode: str = "readiness") -> dict[str, object]:
 
 
 def exact_authorization(use_admin_bypass: bool = False) -> dict[str, object]:
-    return {
+    authorization = {
         "repository": "electricsheephq/lcm-x",
         "pr_number": 218,
         "head_sha": HEAD,
@@ -100,6 +100,9 @@ def exact_authorization(use_admin_bypass: bool = False) -> dict[str, object]:
         "actor_id": 239388517,
         "use_admin_bypass": use_admin_bypass,
     }
+    if use_admin_bypass:
+        authorization["accept_admin_residual_risk"] = True
+    return authorization
 
 
 def blind_receipts() -> list[dict[str, object]]:
@@ -284,6 +287,20 @@ def test_same_named_wrong_app_check_is_rejected():
     ]
 
 
+def test_integration_id_requires_an_exact_integer_type():
+    for malformed in ("15368", 15368.9, True):
+        payload = ready_payload()
+        for check in payload["checks"]:
+            check["integration_id"] = malformed
+
+        receipt = evaluate(payload)
+
+        assert receipt["decision"] == "NOT_READY"
+        assert "TRUSTED_CHECK_UNSATISFIED:workflow-lint:15368" in receipt[
+            "blocker_codes"
+        ]
+
+
 def test_duplicate_trusted_check_is_rejected_even_when_one_passes():
     payload = ready_payload()
     payload["checks"].append(
@@ -459,6 +476,16 @@ def test_pr_only_admin_bypass_can_qualify_without_author_approval():
     assert receipt["authority_granted"] is False
 
 
+def test_pr_only_admin_bypass_requires_explicit_residual_risk_acceptance():
+    payload = admin_payload()
+    payload["merge_authorization"].pop("accept_admin_residual_risk")
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "NOT_READY"
+    assert "ADMIN_BYPASS_RESIDUAL_RISK_NOT_ACCEPTED" in receipt["blocker_codes"]
+
+
 def test_pr_only_admin_bypass_does_not_waive_changes_requested():
     payload = admin_payload()
     payload["latest_reviews"] = [
@@ -500,6 +527,47 @@ def test_equal_timestamp_changes_requested_fails_closed():
 
     assert receipt["decision"] == "NOT_READY"
     assert "LATEST_CHANGES_REQUESTED" in receipt["blocker_codes"]
+
+
+def test_equal_timestamp_reviews_are_ambiguous_even_when_one_is_current():
+    payload = ready_payload()
+    payload["latest_reviews"].append(
+        {
+            "author": "Tosko4",
+            "state": "APPROVED",
+            "commit_sha": "9" * 40,
+            "submitted_at": "2026-08-16T10:00:00Z",
+            "codeowner": True,
+        }
+    )
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "NOT_READY"
+    assert "LATEST_REVIEW_AMBIGUOUS" in receipt["blocker_codes"]
+
+
+def test_malformed_pr_and_review_identities_fail_closed():
+    malformed_payloads = []
+    for author in ([], 123):
+        payload = ready_payload()
+        payload["pr"]["author"] = author
+        malformed_payloads.append(payload)
+    for author in ([], 123):
+        payload = ready_payload()
+        payload["latest_reviews"][0]["author"] = author
+        malformed_payloads.append(payload)
+    payload = ready_payload()
+    payload["latest_reviews"][0].pop("submitted_at")
+    malformed_payloads.append(payload)
+
+    for payload in malformed_payloads:
+        receipt = evaluate(payload)
+        assert receipt["decision"] != "READY_FOR_AUTHORIZED_LANDING"
+        assert any(
+            blocker in {"PR_IDENTITY_INVALID", "REVIEW_EVIDENCE_INVALID"}
+            for blocker in receipt["blocker_codes"]
+        )
 
 
 def test_pr_only_admin_bypass_rejects_any_extra_or_broad_actor():

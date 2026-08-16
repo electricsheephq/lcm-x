@@ -191,6 +191,17 @@ def test_readiness_and_landing_have_distinct_authority_contracts():
     assert "ready to merge" not in land_prompt
 
 
+def test_triage_routes_readiness_to_review_and_only_merges_to_landing():
+    triage_skill = (
+        REPO_ROOT / ".agents" / "skills" / "triage-backlog" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert "Hand readiness to `review-pr`" in triage_skill
+    assert "explicitly authorized\nmerge decision to `land-pr`" in triage_skill
+    assert "Use `review-pr` for readiness." in triage_skill
+    assert "Use `land-pr` only for a separately requested" in triage_skill
+
+
 def test_pr_only_admin_exception_is_exact_head_and_high_confidence():
     policy = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
     land_skill = (

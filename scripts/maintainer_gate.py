@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime
 from typing import Any
 
 
@@ -48,19 +49,51 @@ def _is_object_id(value: Any) -> bool:
     )
 
 
-def _pair(value: dict[str, Any]) -> tuple[str, int]:
-    return str(value.get("context", "")), int(value.get("integration_id", 0))
+def _pair(value: dict[str, Any]) -> tuple[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    context = value.get("context")
+    integration_id = value.get("integration_id")
+    if (
+        not isinstance(context, str)
+        or not context
+        or type(integration_id) is not int
+        or integration_id <= 0
+    ):
+        return None
+    return context, integration_id
+
+
+def _is_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        return False
+    try:
+        datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
+    except ValueError:
+        return False
+    return True
+
+
+def _review_evidence_is_valid(reviews: Any) -> bool:
+    return type(reviews) is list and all(
+        isinstance(review, dict)
+        and isinstance(review.get("author"), str)
+        and bool(review["author"])
+        and review.get("state") in {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
+        and _is_object_id(review.get("commit_sha"))
+        and _is_timestamp(review.get("submitted_at"))
+        and type(review.get("codeowner")) is bool
+        for review in reviews
+    )
 
 
 def _latest_reviews(reviews: list[dict[str, Any]]) -> list[dict[str, Any]]:
     latest: dict[str, list[dict[str, Any]]] = {}
     for review in reviews:
-        author = str(review.get("author", ""))
-        if not author:
-            continue
+        author = review["author"]
         current = latest.get(author, [])
-        submitted_at = str(review.get("submitted_at", ""))
-        current_time = str(current[0].get("submitted_at", "")) if current else ""
+        submitted_at = review["submitted_at"]
+        current_time = current[0]["submitted_at"] if current else ""
         if not current or submitted_at > current_time:
             latest[author] = [review]
         elif submitted_at == current_time:
@@ -99,9 +132,15 @@ def _trusted_checks(
 
 def _review_gate(data: dict[str, Any], head_sha: str) -> list[str]:
     pr = data.get("pr", {})
-    author = str(pr.get("author", ""))
-    latest = _latest_reviews(data.get("latest_reviews", []))
+    author = pr.get("author")
+    reviews = data.get("latest_reviews", [])
     blockers: list[str] = []
+
+    if not _review_evidence_is_valid(reviews):
+        return ["REVIEW_EVIDENCE_INVALID"]
+    latest = _latest_reviews(reviews)
+    if len(latest) != len({review["author"] for review in latest}):
+        blockers.append("LATEST_REVIEW_AMBIGUOUS")
 
     if any(review.get("state") == "CHANGES_REQUESTED" for review in latest):
         blockers.append("LATEST_CHANGES_REQUESTED")
@@ -187,6 +226,11 @@ def _bypass_gate(
         blockers.append("PR_ONLY_ADMIN_BYPASS_NOT_CONFIGURED_FOR_ACTOR")
     if len(bypass_actor) != 1 or len(bypass_actors) != 1:
         blockers.append("BROAD_OR_UNSAFE_BYPASS_ACTOR_PRESENT")
+    if (
+        actor_receipt.get("action") == "merge"
+        and actor_receipt.get("accept_admin_residual_risk") is not True
+    ):
+        blockers.append("ADMIN_BYPASS_RESIDUAL_RISK_NOT_ACCEPTED")
     blockers.extend(_blind_review_gate(data, head_sha))
     return blockers
 
@@ -250,6 +294,8 @@ def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str,
     ):
         blockers.append("PROTECTED_POLICY_UNTRUSTED")
     if type(pr.get("number")) is not int or pr["number"] <= 0:
+        blockers.append("PR_IDENTITY_INVALID")
+    if not isinstance(pr.get("author"), str) or not pr["author"]:
         blockers.append("PR_IDENTITY_INVALID")
     if not all(
         _is_object_id(value)

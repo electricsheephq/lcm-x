@@ -55,8 +55,8 @@ or an unmerged PR are leads—not proof.
 
 For a linked PR, inspect its complete diff, exact head/base, tests, checks, review history, issue
 coverage, dependencies, overlap with other PRs, and any behavior it introduces. Do not call it
-merge-ready. Hand readiness or an explicitly authorized merge decision to `land-pr`; that
-handoff grants neither approval nor source-push authority.
+merge-ready. Hand readiness to `review-pr`; hand only a separately and explicitly authorized
+merge decision to `land-pr`. Neither handoff grants approval nor source-push authority.
 
 ## 4. Classify And Prioritize
 
@@ -123,9 +123,8 @@ Remain read-only by default. Do not comment, label, assign, close, reopen, creat
 milestones, approve, push, or merge.
 
 Invoking this skill never authorizes a mutation. Approval and source pushes are outside this
-skill and require separately authorized workflows. Use `land-pr` only for a separately requested
-readiness or explicitly authorized merge decision; neither invocation nor handoff creates
-approval, source-push, or merge authority.
+skill and require separately authorized workflows. Use `review-pr` for readiness. Use `land-pr` only for a separately requested
+and explicitly authorized merge decision; neither invocation nor handoff creates approval, source-push, or merge authority.
 
 Routine reversible metadata means labels, assignees, and milestones. One exact current
 maintainer authorization plus the live-state checks and read-back below is sufficient; a routine
