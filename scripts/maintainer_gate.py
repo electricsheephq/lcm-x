@@ -70,7 +70,9 @@ def _trusted_checks(
             if check.get("status") == "completed"
             and check.get("conclusion") == "success"
         ]
-        if len(passing) != 1:
+        if len(exact) > 1:
+            blockers.append(f"TRUSTED_CHECK_DUPLICATE:{context}:{integration_id}")
+        elif len(passing) != 1:
             blockers.append(f"TRUSTED_CHECK_UNSATISFIED:{context}:{integration_id}")
         else:
             matched.append(
@@ -140,9 +142,10 @@ def _bypass_gate(
     policy = data.get("protected_policy", {})
     actor_id = actor_receipt.get("actor_id")
     actor_login = actor_receipt.get("actor")
+    bypass_actors = policy.get("bypass_actors", [])
     bypass_actor = [
         actor
-        for actor in policy.get("bypass_actors", [])
+        for actor in bypass_actors
         if actor.get("actor_type") == "User"
         and actor.get("actor_id") == actor_id
         and actor.get("bypass_mode") == "pull_request"
@@ -150,7 +153,27 @@ def _bypass_gate(
     blockers: list[str] = []
     if not actor_login or not bypass_actor:
         blockers.append("PR_ONLY_ADMIN_BYPASS_NOT_CONFIGURED_FOR_ACTOR")
+    if len(bypass_actor) != 1 or len(bypass_actors) != 1:
+        blockers.append("BROAD_OR_UNSAFE_BYPASS_ACTOR_PRESENT")
     blockers.extend(_blind_review_gate(data, head_sha))
+    return blockers
+
+
+def _bypass_qualification_gate(
+    data: dict[str, Any], head_sha: str, qualification: dict[str, Any]
+) -> list[str]:
+    expected = {
+        "repository": data.get("repository"),
+        "pr_number": data.get("pr", {}).get("number"),
+        "head_sha": head_sha,
+        "action": "qualify_admin_pr_only",
+    }
+    blockers = [
+        f"ADMIN_BYPASS_QUALIFICATION_{key.upper()}_MISMATCH"
+        for key, value in expected.items()
+        if qualification.get(key) != value
+    ]
+    blockers.extend(_bypass_gate(data, head_sha, qualification))
     return blockers
 
 
@@ -234,6 +257,7 @@ def _decision_for(blockers: list[str], mode: str) -> str:
             "BASE_POLICY_SHA_MISMATCH",
         }
         or blocker.startswith("MERGE_AUTHORIZATION_")
+        or blocker.startswith("ADMIN_BYPASS_QUALIFICATION_")
         for blocker in blockers
     ):
         return "STATE_DRIFT"
@@ -268,7 +292,13 @@ def evaluate(data: dict[str, Any]) -> dict[str, Any]:
     qualification = data.get("admin_bypass_qualification", {})
     use_bypass = authorization.get("use_admin_bypass") is True
     qualify_bypass = mode == "readiness" and bool(qualification)
-    if review_blockers and not (use_bypass or qualify_bypass):
+    if use_bypass or qualify_bypass:
+        blockers.extend(
+            blocker
+            for blocker in review_blockers
+            if blocker != "NON_AUTHOR_CODEOWNER_APPROVAL_MISSING"
+        )
+    else:
         blockers.extend(review_blockers)
     if mode == "landing":
         blockers.extend(_landing_authorization_gate(data, head_sha))
@@ -279,7 +309,7 @@ def evaluate(data: dict[str, Any]) -> dict[str, Any]:
     elif authorization:
         blockers.append("READINESS_INPUT_CONTAINS_MERGE_AUTHORIZATION")
     elif qualify_bypass:
-        blockers.extend(_bypass_gate(data, head_sha, qualification))
+        blockers.extend(_bypass_qualification_gate(data, head_sha, qualification))
 
     decision = _decision_for(blockers, mode)
     if use_bypass:

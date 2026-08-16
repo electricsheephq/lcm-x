@@ -235,6 +235,23 @@ def test_same_named_wrong_app_check_is_rejected():
     ]
 
 
+def test_duplicate_trusted_check_is_rejected_even_when_one_passes():
+    payload = ready_payload()
+    payload["checks"].append(
+        {
+            **REQUIRED[0],
+            "head_sha": HEAD,
+            "status": "completed",
+            "conclusion": "failure",
+        }
+    )
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "NOT_READY"
+    assert "TRUSTED_CHECK_DUPLICATE:workflow-lint:15368" in receipt["blocker_codes"]
+
+
 def test_verified_merge_blocker_requires_a_closing_disposition():
     payload = ready_payload()
     payload["findings"] = [
@@ -280,10 +297,44 @@ def test_pr_only_admin_bypass_can_qualify_without_author_approval():
     assert receipt["authority_granted"] is False
 
 
+def test_pr_only_admin_bypass_does_not_waive_changes_requested():
+    payload = admin_payload()
+    payload["latest_reviews"] = [
+        {
+            "author": "Tosko4",
+            "state": "CHANGES_REQUESTED",
+            "commit_sha": HEAD,
+            "submitted_at": "2026-08-16T11:00:00Z",
+            "codeowner": True,
+        }
+    ]
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "NOT_READY"
+    assert "LATEST_CHANGES_REQUESTED" in receipt["blocker_codes"]
+
+
+def test_pr_only_admin_bypass_rejects_any_extra_or_broad_actor():
+    payload = admin_payload()
+    payload["protected_policy"]["bypass_actors"].append(
+        {"actor_id": 1, "actor_type": "Team", "bypass_mode": "always"}
+    )
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "NOT_READY"
+    assert "BROAD_OR_UNSAFE_BYPASS_ACTOR_PRESENT" in receipt["blocker_codes"]
+
+
 def test_readiness_can_report_a_non_authoritative_admin_qualification():
     payload = admin_payload()
     payload["mode"] = "readiness"
     payload["admin_bypass_qualification"] = {
+        "repository": "electricsheephq/lcm-x",
+        "pr_number": 218,
+        "head_sha": HEAD,
+        "action": "qualify_admin_pr_only",
         "actor": "100yenadmin",
         "actor_id": 239388517,
     }
@@ -294,6 +345,27 @@ def test_readiness_can_report_a_non_authoritative_admin_qualification():
     assert receipt["decision"] == "READY_FOR_AUTHORIZED_LANDING"
     assert receipt["evaluated"]["path"] == "admin-pr-only-qualified"
     assert receipt["authority_granted"] is False
+
+
+def test_admin_readiness_qualification_is_bound_to_exact_head():
+    payload = admin_payload()
+    payload["mode"] = "readiness"
+    payload["admin_bypass_qualification"] = {
+        "repository": "electricsheephq/lcm-x",
+        "pr_number": 218,
+        "head_sha": "9" * 40,
+        "action": "qualify_admin_pr_only",
+        "actor": "100yenadmin",
+        "actor_id": 239388517,
+    }
+    del payload["merge_authorization"]
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "STATE_DRIFT"
+    assert (
+        "ADMIN_BYPASS_QUALIFICATION_HEAD_SHA_MISMATCH" in receipt["blocker_codes"]
+    )
 
 
 def test_post_merge_verifies_exact_merge_commit():

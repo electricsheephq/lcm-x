@@ -41,7 +41,8 @@ Build JSON for `scripts/maintainer_gate.py` with:
 
 Do not include merge authorization. When assessing the exceptional administrator path, include
 only a non-authoritative `admin_bypass_qualification` for the exact configured user plus the live
-PR-only bypass record and both exact-head blind review receipts. PR readiness is not authority.
+repository, PR number, head SHA, `qualify_admin_pr_only` action, PR-only bypass record, and both
+exact-head blind review receipts. PR readiness is not authority.
 Run the evaluator with JSON on stdin and retain its JSON stdout as an advisory receipt. It is
 network-free and cannot replace the live reads or semantic review.
 
