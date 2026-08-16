@@ -549,11 +549,11 @@ def test_equal_timestamp_reviews_are_ambiguous_even_when_one_is_current():
 
 def test_malformed_pr_and_review_identities_fail_closed():
     malformed_payloads = []
-    for author in ([], 123):
+    for author in ([], 123, " ", " Tosko4", "Tosko4 ", "Tosko\x00"):
         payload = ready_payload()
         payload["pr"]["author"] = author
         malformed_payloads.append(payload)
-    for author in ([], 123):
+    for author in ([], 123, " ", " Tosko4", "Tosko4 ", "Tosko\x00"):
         payload = ready_payload()
         payload["latest_reviews"][0]["author"] = author
         malformed_payloads.append(payload)
@@ -580,6 +580,32 @@ def test_pr_only_admin_bypass_rejects_any_extra_or_broad_actor():
 
     assert receipt["decision"] == "NOT_READY"
     assert "BROAD_OR_UNSAFE_BYPASS_ACTOR_PRESENT" in receipt["blocker_codes"]
+
+
+def test_pr_only_admin_bypass_rejects_malformed_actor_identities():
+    malformed_payloads = []
+    for actor in ([123], 123, " ", "100yenadmin\x00"):
+        payload = admin_payload()
+        payload["merge_authorization"]["actor"] = actor
+        malformed_payloads.append(payload)
+    for actor_id in (239388517.0, True, "239388517"):
+        payload = admin_payload()
+        payload["merge_authorization"]["actor_id"] = actor_id
+        malformed_payloads.append(payload)
+    payload = admin_payload()
+    payload["protected_policy"]["bypass_actors"][0]["actor_id"] = 239388517.0
+    malformed_payloads.append(payload)
+    payload = admin_payload()
+    payload["protected_policy"]["bypass_actors"] = {"actor_id": 239388517}
+    malformed_payloads.append(payload)
+
+    for payload in malformed_payloads:
+        receipt = evaluate(payload)
+        assert receipt["decision"] != "READY_FOR_AUTHORIZED_LANDING"
+        assert (
+            "PR_ONLY_ADMIN_BYPASS_NOT_CONFIGURED_FOR_ACTOR"
+            in receipt["blocker_codes"]
+        )
 
 
 def test_readiness_can_report_a_non_authoritative_admin_qualification():

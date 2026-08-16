@@ -49,6 +49,16 @@ def _is_object_id(value: Any) -> bool:
     )
 
 
+def _is_actor_name(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value == value.strip()
+        and value.isprintable()
+        and not any(character.isspace() for character in value)
+    )
+
+
 def _pair(value: dict[str, Any]) -> tuple[str, int] | None:
     if not isinstance(value, dict):
         return None
@@ -77,8 +87,7 @@ def _is_timestamp(value: Any) -> bool:
 def _review_evidence_is_valid(reviews: Any) -> bool:
     return type(reviews) is list and all(
         isinstance(review, dict)
-        and isinstance(review.get("author"), str)
-        and bool(review["author"])
+        and _is_actor_name(review.get("author"))
         and review.get("state") in {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
         and _is_object_id(review.get("commit_sha"))
         and _is_timestamp(review.get("submitted_at"))
@@ -214,15 +223,25 @@ def _bypass_gate(
     actor_id = actor_receipt.get("actor_id")
     actor_login = actor_receipt.get("actor")
     bypass_actors = policy.get("bypass_actors", [])
+    blockers: list[str] = []
+    if type(bypass_actors) is not list:
+        blockers.append("BROAD_OR_UNSAFE_BYPASS_ACTOR_PRESENT")
+        bypass_actors = []
     bypass_actor = [
         actor
         for actor in bypass_actors
-        if actor.get("actor_type") == "User"
+        if isinstance(actor, dict)
+        and actor.get("actor_type") == "User"
+        and type(actor.get("actor_id")) is int
         and actor.get("actor_id") == actor_id
         and actor.get("bypass_mode") == "pull_request"
     ]
-    blockers: list[str] = []
-    if not actor_login or not bypass_actor:
+    if (
+        type(actor_id) is not int
+        or actor_id <= 0
+        or not _is_actor_name(actor_login)
+        or not bypass_actor
+    ):
         blockers.append("PR_ONLY_ADMIN_BYPASS_NOT_CONFIGURED_FOR_ACTOR")
     if len(bypass_actor) != 1 or len(bypass_actors) != 1:
         blockers.append("BROAD_OR_UNSAFE_BYPASS_ACTOR_PRESENT")
@@ -295,7 +314,7 @@ def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str,
         blockers.append("PROTECTED_POLICY_UNTRUSTED")
     if type(pr.get("number")) is not int or pr["number"] <= 0:
         blockers.append("PR_IDENTITY_INVALID")
-    if not isinstance(pr.get("author"), str) or not pr["author"]:
+    if not _is_actor_name(pr.get("author")):
         blockers.append("PR_IDENTITY_INVALID")
     if not all(
         _is_object_id(value)
@@ -348,7 +367,7 @@ def _landing_authorization_gate(data: dict[str, Any], head_sha: str) -> list[str
     for key, value in expected.items():
         if auth.get(key) != value:
             blockers.append(f"MERGE_AUTHORIZATION_{key.upper()}_MISMATCH")
-    if not auth.get("actor"):
+    if not _is_actor_name(auth.get("actor")):
         blockers.append("MERGE_AUTHORIZATION_ACTOR_MISSING")
     return blockers
 
