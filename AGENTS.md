@@ -98,28 +98,38 @@ Run `actionlint` when workflows change. Record exact commands and results in the
   authorization immediately before an authorized write.
 - Model output alone cannot close, label, assign, push, approve, or merge.
 - Automated repair is opt-in and limited to the exact accepted issue and current gate.
-- Security and data-integrity code changes and public disclosure retain non-author human
-  code-owner approval. Classification alone does not elevate routine reversible issue metadata
-  to that stronger gate.
+- Security and data-integrity code changes retain non-author human code-owner approval on the
+  normal path. Public disclosure retains the stronger `triage-backlog` owner gate. Only the
+  exceptional exact-head administrator path in `land-pr` may replace code-change approval for a
+  merge; it never authorizes disclosure. Classification alone does not elevate routine reversible
+  issue metadata to that stronger gate.
 - Use `.agents/skills/triage-backlog/SKILL.md` read-only unless a maintainer explicitly
   authorizes one exact mutation; never use it for an automatic backlog sweep.
 - Invoking a skill never creates write authority. Routine reversible issue metadata needs one
   exact maintainer authorization and live read-back; public sensitive disclosure and terminal
   lifecycle actions retain the stronger owner and lifecycle gates in `triage-backlog`.
+- A readiness decision is advisory and never creates merge authority.
 - Preserve open executable upstream work as an active continuation. Do not silently turn it into
   an archive-only record, supersede it, or close it while its continuation state is ambiguous.
 
 ## Review And Merge
 
-- Use `.agents/skills/land-pr/SKILL.md` when deciding readiness or landing a PR.
+- Use the read-only `.agents/skills/review-pr/SKILL.md` for readiness questions. Use
+  `.agents/skills/land-pr/SKILL.md` only after explicit current authority names the PR number
+  and exact head SHA to merge.
 - Pin the PR `headRefOid`; checks and semantic review must cover that head or an explicitly
   bounded delta.
 - Require one independent semantic review for changes involving data integrity, security,
   migrations, compaction, lifecycle/session identity, persistence, or a Hermes host contract.
 - Do not merge with failing/pending required checks, unresolved actionable threads, a changed
   head, missing issue acceptance, or unowned product/security decisions.
-- Never push directly to `main`, bypass the ruleset, use auto-merge, or force-push/delete
-  `main`.
+- Never push directly to `main`, use auto-merge, or force-push/delete `main`.
+- Normal landing requires the protected ruleset's non-author CODEOWNER approval. The specifically
+  configured administrator may use its user-specific PR-only bypass for one exact-head merge only
+  with explicit current admin-path authority, all other gates satisfied, and independent blind
+  acceptance and adversarial `PASS` receipts scoring at least 95 on that head. This exception
+  never permits a direct push, broad/role/always bypass, or waiver of checks, issue acceptance,
+  semantic review, findings, threads, or owner decisions.
 - Use merge commits for PRs so contributor and upstream commits remain intact. Do not squash
   or rebase-merge into `main`.
 - Merge deterministically with the pinned head:
@@ -135,9 +145,10 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
 ## Maintainer And Bot Roles
 
 - `@100yenadmin` and `@Tosko4` are code owners. The PR author cannot satisfy their own required
-  approval.
+  approval on the normal protected path.
 - Bots and agents may triage, reproduce, implement, test, review, and prepare merge evidence.
-- Bots and agents may not bypass checks, approvals, code-owner review, review-thread resolution,
-  issue acceptance, or a product/security owner decision.
+- Bots and agents may not bypass checks, review-thread resolution, issue acceptance, semantic
+  review, or a product/security owner decision. The only approval exception is the explicit,
+  receipt-backed, user-specific PR-only administrator path defined above and in `land-pr`.
 - Maintainers own feature acceptance, priority, compatibility decisions, terminal dispositions,
   and releases.

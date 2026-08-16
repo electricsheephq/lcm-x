@@ -65,15 +65,20 @@ why in the PR.
 
 ## Review And Landing
 
-Maintainers use the protected-main `.agents/skills/land-pr/SKILL.md`:
+Maintainers use the protected-main `.agents/skills/review-pr/SKILL.md` for read-only readiness.
+Only an explicit instruction to merge PR N at exact head H triggers
+`.agents/skills/land-pr/SKILL.md`:
 
 - required checks must pass on the pinned `headRefOid` with trusted workflow identities;
-- one non-author code owner must approve the current head;
+- the normal path requires one non-author code owner to approve the current head;
 - every actionable review thread needs a terminal disposition and resolution;
 - data-integrity, security, migration, compaction, persistence, profile/session, lifecycle, and
   Hermes-contract changes need independent semantic review;
 - accepted issues, exact-head state, and product/security decisions are re-fetched before merge;
-- merges use merge commits only—never squash, rebase, direct-main push, auto-merge, or bypass.
+- merges use merge commits only—never squash, rebase, direct-main push, or auto-merge;
+- the configured administrator's exceptional PR-only path requires explicit exact-head admin
+  authority, all other gates, and independent blind acceptance and adversarial `PASS` receipts
+  scoring at least 95. It cannot enable direct pushes or broad/role/always bypass.
 
 After merging, maintainers verify the merge commit is current `main`, linked issue disposition,
 and the required checks on the exact merge commit. Maintainers curate user-facing release notes;
@@ -83,10 +88,13 @@ commit lists or model output do not replace those notes.
 
 AI and bot output is proposal and evidence by default. Models may triage, reproduce, implement,
 test, and review, but deterministic tooling must re-fetch live state before any authorized write.
-Model output alone cannot close, label, assign, push, approve, or merge. Automated repair is
+Model output alone cannot close, label, assign, push, approve, or merge. Readiness is advisory
+and never supplies merge authority. Automated repair is
 opt-in and limited to the exact accepted issue and current gate. Security or data-integrity code
-changes and public disclosure retain the repository's human approval gate; classification alone
-does not elevate routine reversible issue metadata to that stronger gate.
+changes retain the repository's human approval gate on the normal path, and public disclosure
+retains the stronger triage owner gate. Only the exceptional exact-head administrator landing
+contract may replace code-change approval for a merge; it never authorizes disclosure.
+Classification alone does not elevate routine reversible issue metadata to that stronger gate.
 
 Use the read-only `.agents/skills/triage-backlog/SKILL.md` for one issue, pull request, or duplicate
 cluster at a time. Invoking it does not authorize backlog sweeps or GitHub writes. Routine labels,
