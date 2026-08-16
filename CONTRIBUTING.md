@@ -88,4 +88,8 @@ opt-in and limited to the exact accepted issue and current gate. Security or dat
 retains the repository's human approval gate.
 
 Use the read-only `.agents/skills/triage-backlog/SKILL.md` for one issue, pull request, or duplicate
-cluster at a time. It does not authorize backlog sweeps or GitHub writes.
+cluster at a time. Invoking it does not authorize backlog sweeps or GitHub writes. Routine labels,
+assignees, and milestones still need one exact maintainer authorization and live read-back;
+public sensitive disclosure and close/reopen actions retain stronger owner and lifecycle gates.
+Open executable upstream work remains an active continuation instead of silently becoming an
+archive-only or closed record.

@@ -101,6 +101,11 @@ Run `actionlint` when workflows change. Record exact commands and results in the
 - Security and data-integrity work retains non-author human code-owner approval.
 - Use `.agents/skills/triage-backlog/SKILL.md` read-only unless a maintainer explicitly
   authorizes one exact mutation; never use it for an automatic backlog sweep.
+- Invoking a skill never creates write authority. Routine reversible issue metadata needs one
+  exact maintainer authorization and live read-back; public sensitive disclosure and terminal
+  lifecycle actions retain the stronger owner and lifecycle gates in `triage-backlog`.
+- Preserve open executable upstream work as an active continuation. Do not silently turn it into
+  an archive-only record, supersede it, or close it while its continuation state is ambiguous.
 
 ## Review And Merge
 

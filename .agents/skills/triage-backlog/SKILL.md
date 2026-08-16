@@ -55,7 +55,8 @@ or an unmerged PR are leads—not proof.
 
 For a linked PR, inspect its complete diff, exact head/base, tests, checks, review history, issue
 coverage, dependencies, overlap with other PRs, and any behavior it introduces. Do not call it
-merge-ready; use `land-pr` for a separately authorized landing decision.
+merge-ready. Hand readiness or an explicitly authorized merge decision to `land-pr`; that
+handoff grants neither approval nor source-push authority.
 
 ## 4. Classify And Prioritize
 
@@ -76,12 +77,19 @@ Also record:
 
 - confidence: `verified-current`, `likely`, `needs-repro`, `not-a-bug`, or `superseded`;
 - LCM-X/Electric Sheep impact: `direct`, `possible`, or `none`;
+- source lifecycle: `active-continuation`, `archive-record`, `local-only`, or `unknown`;
+- continuation target: the live LCM-X or upstream issue/PR URL, or `none`;
 - disposition: `migrate`, `reference-only`, `needs-repro`, `duplicate`, `superseded`,
   `defer`, or `do-not-migrate`;
 - accountable owner and the next evidence or decision gate.
 
 Nits default to P4. Best-practice work remains P3/P4 unless current evidence proves a violated
 mandatory invariant.
+
+Treat an open executable upstream item or continuing upstream discussion as an
+`active-continuation`. Do not silently turn it into an archive-only record, mark it superseded,
+recommend `do-not-migrate`, or recommend closing it. If current source state or its continuation
+target is ambiguous, return `OWNER_GATE` and preserve the item unchanged.
 
 ## 5. Return One Bounded Packet
 
@@ -98,6 +106,8 @@ Evidence:
 Canonical duplicate / related work:
 Linked PR assessment:
 Electric Sheep impact:
+Source lifecycle:
+Continuation target:
 Owner:
 Recommended disposition:
 Exact next gate:
@@ -112,15 +122,27 @@ whether a failure is reproduced, inferred, or still hypothetical.
 Remain read-only by default. Do not comment, label, assign, close, reopen, create issues, edit
 milestones, approve, push, or merge.
 
-Approval, push, and merge are never authorized by this skill. Use `land-pr` for every landing
-decision, approval, push, and merge.
+Invoking this skill never authorizes a mutation. Approval and source pushes are outside this
+skill and require separately authorized workflows. Use `land-pr` only for a separately requested
+readiness or explicitly authorized merge decision; neither invocation nor handoff creates
+approval, source-push, or merge authority.
+
+Routine reversible metadata means labels, assignees, and milestones. One exact current
+maintainer authorization plus the live-state checks and read-back below is sufficient; a routine
+metadata change does not require a second code-owner approval solely because the item is
+classified as security or data-integrity work.
+
+Public security or data-integrity disclosure and every close or reopen are sensitive or terminal
+actions. Require current non-author human code-owner approval, confirm the exact public content or
+lifecycle transition, and stop if an active continuation would be archived or closed. Route
+private vulnerability handling outside this public triage workflow.
 
 If a maintainer explicitly authorizes one of the remaining GitHub metadata mutations:
 
 1. name the exact item and requested change;
 2. re-fetch current item, repository, and authorization state;
-3. for a security or data-integrity item, require and record current non-author human code-owner
-   approval, and stop if it is missing, stale, or ambiguous;
+3. apply the routine-metadata or sensitive/terminal gate above and record any required
+   non-author human code-owner approval;
 4. stop on any other drift or ambiguity;
 5. perform only the named write;
 6. read back the result.

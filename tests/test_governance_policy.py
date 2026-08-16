@@ -76,9 +76,8 @@ def test_triage_skill_is_bounded_and_read_only_by_default():
     assert "Remain read-only by default" in skill
     assert "Never process the whole backlog" in skill
     assert "Deterministic live-state checks must guard every authorized" in skill
-    assert "Approval, push, and merge are never authorized by this skill" in skill
-    assert "Use `land-pr` for every landing" in skill
-    assert "decision, approval, push, and merge" in skill
+    assert "Approval and source pushes are outside this" in skill
+    assert "Use `land-pr` only for a separately requested" in skill
     assert "## Minimum Capability" in skill
     assert "repository, current refs, issues, pull requests" in skill
     assert "corresponding GitHub" in skill
@@ -88,13 +87,46 @@ def test_triage_skill_is_bounded_and_read_only_by_default():
         "If a maintainer explicitly authorizes one of the remaining GitHub metadata mutations",
         "name the exact item and requested change",
         "re-fetch current item, repository, and authorization state",
-        "require and record current non-author human code-owner",
+        "apply the routine-metadata or sensitive/terminal gate above",
         "stop on any other drift or ambiguity",
         "perform only the named write",
         "read back the result",
     ]
     step_positions = [write_boundary.index(step) for step in authorized_write_steps]
     assert step_positions == sorted(step_positions)
+
+
+def test_triage_invocation_never_grants_mutation_authority():
+    skill = (
+        REPO_ROOT / ".agents" / "skills" / "triage-backlog" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert "Invoking this skill never authorizes a mutation." in skill
+    assert "Approval and source pushes are outside this" in skill
+    assert "neither invocation nor handoff creates" in skill
+    assert "approval, source-push, or merge authority" in skill
+
+
+def test_triage_preserves_active_upstream_continuations():
+    skill = (
+        REPO_ROOT / ".agents" / "skills" / "triage-backlog" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert "source lifecycle: `active-continuation`" in skill
+    assert "continuation target:" in skill
+    assert "Do not silently turn it into an archive-only record" in skill
+    assert "return `OWNER_GATE` and preserve the item unchanged" in skill
+
+
+def test_triage_separates_routine_metadata_from_sensitive_terminal_actions():
+    skill = (
+        REPO_ROOT / ".agents" / "skills" / "triage-backlog" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert "Routine reversible metadata means labels, assignees, and milestones." in skill
+    assert "does not require a second code-owner approval solely because" in skill
+    assert "Public security or data-integrity disclosure and every close or reopen" in skill
+    assert "private vulnerability handling outside this public triage workflow." in skill
 
 
 def test_repository_policy_states_the_automation_boundary():
