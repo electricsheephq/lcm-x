@@ -103,6 +103,7 @@ def blind_receipts() -> list[dict[str, object]]:
             "score": 97,
             "head_sha": HEAD,
             "independent": True,
+            "unresolved_findings": 0,
             "reviewer_id": "checker-acceptance",
             "receipt_id": "receipt-acceptance-001",
         },
@@ -112,6 +113,7 @@ def blind_receipts() -> list[dict[str, object]]:
             "score": 96,
             "head_sha": HEAD,
             "independent": True,
+            "unresolved_findings": 0,
             "reviewer_id": "checker-adversarial",
             "receipt_id": "receipt-adversarial-001",
         },
@@ -217,6 +219,24 @@ def test_pr_authored_policy_cannot_weaken_protected_main_policy():
     ]
 
 
+def test_caller_cannot_weaken_the_exact_protected_required_check_set():
+    payload = ready_payload()
+    payload["protected_policy"]["required_checks"] = [
+        {"context": item["context"], "integration_id": 999} for item in REQUIRED
+    ]
+    payload["checks"] = [
+        {**check, "integration_id": 999} for check in payload["checks"]
+    ]
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "OWNER_GATE"
+    assert "PROTECTED_POLICY_UNTRUSTED" in receipt["blocker_codes"]
+    assert "TRUSTED_CHECK_UNSATISFIED:workflow-lint:15368" in receipt[
+        "blocker_codes"
+    ]
+
+
 def test_non_main_base_is_not_directly_landable():
     payload = ready_payload()
     payload["pr"]["base_ref"] = "release-candidate"
@@ -287,6 +307,22 @@ def test_verified_merge_blocker_requires_a_closing_disposition():
     assert "ACTIVE_MERGE_BLOCKING_FINDING" in receipt["blocker_codes"]
 
 
+def test_verified_finding_with_unknown_gate_class_fails_closed():
+    payload = ready_payload()
+    payload["findings"] = [
+        {
+            "verified": True,
+            "gate_class": "MERGE_BLOCKNG",
+            "disposition": "ACCEPTED_FOLLOW_UP",
+        }
+    ]
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "NOT_READY"
+    assert "VERIFIED_FINDING_GATE_CLASS_INVALID" in receipt["blocker_codes"]
+
+
 def test_missing_accepted_work_is_an_owner_gate():
     payload = ready_payload()
     payload["accepted_issue"] = {"number": 218, "accepted": False}
@@ -318,6 +354,18 @@ def test_normal_exact_authorization_is_ready_for_landing():
     assert receipt["authority_granted"] is False
 
 
+def test_landing_requires_a_positive_exact_pr_number():
+    payload = ready_payload("landing")
+    payload["pr"].pop("number")
+    payload["merge_authorization"] = exact_authorization()
+    payload["merge_authorization"].pop("pr_number")
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "STATE_DRIFT"
+    assert "PR_IDENTITY_INVALID" in receipt["blocker_codes"]
+
+
 def test_pr_only_admin_bypass_requires_both_blind_scores_at_95():
     payload = admin_payload()
     payload["blind_review_receipts"][1]["score"] = 94
@@ -326,6 +374,16 @@ def test_pr_only_admin_bypass_requires_both_blind_scores_at_95():
 
     assert receipt["decision"] == "NOT_READY"
     assert "BLIND_ADVERSARIAL_REVIEW_MISSING" in receipt["blocker_codes"]
+
+
+def test_pr_only_admin_bypass_requires_explicit_zero_unresolved_findings():
+    payload = admin_payload()
+    payload["blind_review_receipts"][0].pop("unresolved_findings")
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "NOT_READY"
+    assert "BLIND_ACCEPTANCE_REVIEW_MISSING" in receipt["blocker_codes"]
 
 
 def test_pr_only_admin_bypass_requires_distinct_reviewer_identities():
@@ -366,6 +424,31 @@ def test_pr_only_admin_bypass_does_not_waive_changes_requested():
             "submitted_at": "2026-08-16T11:00:00Z",
             "codeowner": True,
         }
+    ]
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "NOT_READY"
+    assert "LATEST_CHANGES_REQUESTED" in receipt["blocker_codes"]
+
+
+def test_equal_timestamp_changes_requested_fails_closed():
+    payload = admin_payload()
+    payload["latest_reviews"] = [
+        {
+            "author": "Tosko4",
+            "state": "APPROVED",
+            "commit_sha": HEAD,
+            "submitted_at": "2026-08-16T11:00:00Z",
+            "codeowner": True,
+        },
+        {
+            "author": "Tosko4",
+            "state": "CHANGES_REQUESTED",
+            "commit_sha": HEAD,
+            "submitted_at": "2026-08-16T11:00:00Z",
+            "codeowner": True,
+        },
     ]
 
     receipt = evaluate(payload)
@@ -451,8 +534,33 @@ def test_post_merge_rejects_the_wrong_ruleset_id():
     assert "PROTECTED_POLICY_UNTRUSTED" in receipt["blocker_codes"]
 
 
+def test_post_merge_revalidates_the_pr_base():
+    payload = post_merge_payload()
+    payload["pr"]["base_ref"] = "release-candidate"
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "STATE_DRIFT"
+    assert "POST_MERGE_BASE_MISMATCH" in receipt["blocker_codes"]
+
+
 def test_concurrent_later_main_is_valid_when_merge_commit_is_ancestor():
     receipt = evaluate(post_merge_payload(LATER_MAIN))
 
     assert receipt["decision"] == "POST_MERGE_VERIFIED"
     assert "MERGE_COMMIT_NOT_ANCESTOR_OF_LIVE_MAIN" not in receipt["blocker_codes"]
+
+
+def test_malformed_nested_json_fails_closed_with_a_receipt():
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT)],
+        input=json.dumps({"schema_version": "1", "mode": "readiness", "pr": []}),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    receipt = json.loads(result.stdout)
+    assert receipt["decision"] == "OWNER_GATE"
+    assert receipt["blocker_codes"] == ["INPUT_INVALID"]
+    assert receipt["authority_granted"] is False

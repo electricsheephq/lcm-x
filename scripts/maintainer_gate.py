@@ -11,6 +11,18 @@ from typing import Any
 SCHEMA_VERSION = "1"
 REPOSITORY = "electricsheephq/lcm-x"
 RULESET_ID = 20888757
+REQUIRED_CHECK_PAIRS = (
+    ("workflow-lint", 15368),
+    ("lint", 15368),
+    ("test (3.11)", 15368),
+    ("test (3.12)", 15368),
+    ("test (3.13)", 15368),
+    ("test (3.14)", 15368),
+    ("Analyze (actions)", 15368),
+    ("Analyze (javascript-typescript)", 15368),
+    ("Analyze (python)", 15368),
+)
+FINDING_GATE_CLASSES = {"MERGE_BLOCKING", "RELEASE_BLOCKING", "NON_BLOCKING"}
 TERMINAL_FINDING_DISPOSITIONS = {
     "FIXED_NOW",
     "FALSE_OR_NOT_APPLICABLE",
@@ -33,32 +45,29 @@ def _pair(value: dict[str, Any]) -> tuple[str, int]:
 
 
 def _latest_reviews(reviews: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    latest: dict[str, dict[str, Any]] = {}
+    latest: dict[str, list[dict[str, Any]]] = {}
     for review in reviews:
         author = str(review.get("author", ""))
         if not author:
             continue
-        current = latest.get(author)
-        if current is None or str(review.get("submitted_at", "")) > str(
-            current.get("submitted_at", "")
-        ):
-            latest[author] = review
-    return list(latest.values())
+        current = latest.get(author, [])
+        submitted_at = str(review.get("submitted_at", ""))
+        current_time = str(current[0].get("submitted_at", "")) if current else ""
+        if not current or submitted_at > current_time:
+            latest[author] = [review]
+        elif submitted_at == current_time:
+            current.append(review)
+    return [review for reviews_at_latest_time in latest.values() for review in reviews_at_latest_time]
 
 
 def _trusted_checks(
-    required: list[dict[str, Any]],
     checks: list[dict[str, Any]],
     target_sha: str,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     matched: list[dict[str, Any]] = []
     blockers: list[str] = []
-    required_pairs = [_pair(item) for item in required]
-    if not required_pairs or len(required_pairs) != len(set(required_pairs)):
-        blockers.append("REQUIRED_CHECK_POLICY_INVALID")
-        return matched, blockers
 
-    for context, integration_id in required_pairs:
+    for context, integration_id in REQUIRED_CHECK_PAIRS:
         exact = [
             check
             for check in checks
@@ -129,7 +138,8 @@ def _blind_review_gate(data: dict[str, Any], head_sha: str) -> list[str]:
             and receipt["score"] >= 95
             and receipt.get("head_sha") == head_sha
             and receipt.get("independent") is True
-            and receipt.get("unresolved_findings", 0) == 0
+            and type(receipt.get("unresolved_findings")) is int
+            and receipt["unresolved_findings"] == 0
             and isinstance(receipt.get("reviewer_id"), str)
             and bool(receipt["reviewer_id"])
             and isinstance(receipt.get("receipt_id"), str)
@@ -206,8 +216,12 @@ def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str,
         or policy.get("base_ref") != "main"
         or not policy.get("base_sha")
         or policy.get("ruleset_id") != RULESET_ID
+        or [_pair(item) for item in policy.get("required_checks", [])]
+        != list(REQUIRED_CHECK_PAIRS)
     ):
         blockers.append("PROTECTED_POLICY_UNTRUSTED")
+    if type(pr.get("number")) is not int or pr["number"] <= 0:
+        blockers.append("PR_IDENTITY_INVALID")
     if not head_sha or pr.get("state") != "OPEN" or pr.get("draft") is not False:
         blockers.append("PR_STATE_DRIFT")
     if pr.get("base_ref") != "main":
@@ -215,9 +229,7 @@ def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str,
     if pr.get("base_sha") != policy.get("base_sha"):
         blockers.append("BASE_POLICY_SHA_MISMATCH")
 
-    matched, check_blockers = _trusted_checks(
-        policy.get("required_checks", []), data.get("checks", []), head_sha
-    )
+    matched, check_blockers = _trusted_checks(data.get("checks", []), head_sha)
     blockers.extend(check_blockers)
 
     if any(thread.get("is_resolved") is not True for thread in data.get("threads", [])):
@@ -225,11 +237,14 @@ def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str,
     for finding in data.get("findings", []):
         if finding.get("verified") is not True:
             continue
+        gate_class = finding.get("gate_class")
         disposition = finding.get("disposition")
+        if gate_class not in FINDING_GATE_CLASSES:
+            blockers.append("VERIFIED_FINDING_GATE_CLASS_INVALID")
         if disposition not in TERMINAL_FINDING_DISPOSITIONS:
             blockers.append("VERIFIED_FINDING_UNDISPOSITIONED")
         elif (
-            finding.get("gate_class") == "MERGE_BLOCKING"
+            gate_class == "MERGE_BLOCKING"
             and disposition not in {"FIXED_NOW", "FALSE_OR_NOT_APPLICABLE"}
         ):
             blockers.append("ACTIVE_MERGE_BLOCKING_FINDING")
@@ -268,11 +283,13 @@ def _decision_for(blockers: list[str], mode: str) -> str:
             "SCHEMA_VERSION_UNSUPPORTED",
             "REPOSITORY_MISMATCH",
             "PR_STATE_DRIFT",
+            "PR_IDENTITY_INVALID",
             "BASE_POLICY_SHA_MISMATCH",
             "PR_NOT_MERGED",
             "MERGE_COMMIT_PR_MISMATCH",
             "PR_HEAD_NOT_IN_MERGE_PARENTS",
             "MERGE_COMMIT_NOT_ANCESTOR_OF_LIVE_MAIN",
+            "POST_MERGE_BASE_MISMATCH",
         }
         or blocker.startswith("MERGE_AUTHORIZATION_")
         or blocker.startswith("ADMIN_BYPASS_QUALIFICATION_")
@@ -297,6 +314,15 @@ def _decision_for(blockers: list[str], mode: str) -> str:
 
 
 def evaluate(data: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return _evaluate(data)
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        return _invalid_receipt(exc)
+
+
+def _evaluate(data: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise ValueError("input must be a JSON object")
     mode = data.get("mode")
     if mode not in {"readiness", "landing", "post_merge"}:
         return _receipt(data, "OWNER_GATE", ["MODE_UNSUPPORTED"], [], "unknown")
@@ -352,9 +378,17 @@ def _evaluate_post_merge(data: dict[str, Any]) -> dict[str, Any]:
         blockers.append("REPOSITORY_MISMATCH")
     if (
         policy.get("source") != "protected-main"
+        or policy.get("base_ref") != "main"
+        or not policy.get("base_sha")
         or policy.get("ruleset_id") != RULESET_ID
+        or [_pair(item) for item in policy.get("required_checks", [])]
+        != list(REQUIRED_CHECK_PAIRS)
     ):
         blockers.append("PROTECTED_POLICY_UNTRUSTED")
+    if type(pr.get("number")) is not int or pr["number"] <= 0:
+        blockers.append("PR_IDENTITY_INVALID")
+    if pr.get("base_ref") != "main" or pr.get("base_sha") != policy.get("base_sha"):
+        blockers.append("POST_MERGE_BASE_MISMATCH")
     if pr.get("state") != "MERGED":
         blockers.append("PR_NOT_MERGED")
     if not merge_commit or pr.get("merge_commit_sha") != merge_commit:
@@ -368,9 +402,7 @@ def _evaluate_post_merge(data: dict[str, Any]) -> dict[str, Any]:
     if issue.get("state") != "CLOSED" or issue.get("state_reason") != "COMPLETED":
         blockers.append("ISSUE_DISPOSITION_UNVERIFIED")
 
-    matched, check_blockers = _trusted_checks(
-        policy.get("required_checks", []), data.get("checks", []), merge_commit
-    )
+    matched, check_blockers = _trusted_checks(data.get("checks", []), merge_commit)
     blockers.extend(check_blockers)
     decision = _decision_for(blockers, "post_merge")
     return _receipt(data, decision, blockers, matched, "post-merge")
@@ -411,24 +443,26 @@ def _receipt(
     }
 
 
+def _invalid_receipt(exc: Exception) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "mode": None,
+        "decision": "OWNER_GATE",
+        "authority_granted": False,
+        "evaluated": {},
+        "matched_trusted_checks": [],
+        "blocker_codes": ["INPUT_INVALID"],
+        "proof_boundary": "Advisory evaluation only; invalid input grants no authority.",
+        "error": str(exc),
+    }
+
+
 def main() -> int:
     try:
         payload = json.load(sys.stdin)
-        if not isinstance(payload, dict):
-            raise ValueError("input must be a JSON object")
         result = evaluate(payload)
-    except (ValueError, TypeError, json.JSONDecodeError) as exc:
-        result = {
-            "schema_version": SCHEMA_VERSION,
-            "mode": None,
-            "decision": "OWNER_GATE",
-            "authority_granted": False,
-            "evaluated": {},
-            "matched_trusted_checks": [],
-            "blocker_codes": ["INPUT_INVALID"],
-            "proof_boundary": "Advisory evaluation only; invalid input grants no authority.",
-            "error": str(exc),
-        }
+    except json.JSONDecodeError as exc:
+        result = _invalid_receipt(exc)
     json.dump(result, sys.stdout, sort_keys=True)
     sys.stdout.write("\n")
     return 0
