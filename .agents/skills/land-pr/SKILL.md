@@ -40,7 +40,8 @@ CI, the PR author, this skill, and flat bot comments do not satisfy semantic rev
 ## 3. Constrain The Exceptional Administrator Path
 
 Normal protected landing is the default. The specifically configured administrator may use the
-ruleset's PR-only bypass only when all of the following are true:
+ruleset's PR-only bypass only when all of the following are true. GitHub's `--admin` flag is a
+broad, non-atomic administrative bypass, not an approval-only server primitive:
 
 - explicit current authority requests the admin path for PR N at exact head H;
 - live ruleset `20888757` lists that exact user actor with `bypass_mode: pull_request`;
@@ -50,11 +51,14 @@ ruleset's PR-only bypass only when all of the following are true:
   each report `PASS`, score at least 95, cover the exact head, and explicitly report zero
   unresolved findings;
 - no tied or latest `CHANGES_REQUESTED` review exists; and
-- the bypass use and evidence are recorded in an auditable receipt.
+- the authorizing maintainer explicitly accepts the residual risk that a rule or check could
+  change between the final live read and the administrative merge; and
+- the bypass use, accepted risk, and evidence are recorded in an auditable receipt.
 
-This exception replaces only the missing non-author approval for that one merge. It cannot waive
-trusted checks, accepted work, exact-head binding, semantic review, findings, threads,
-product/security owner decisions, or any other rule.
+The policy intent is to replace only the missing non-author approval for that one merge. The
+GitHub flag cannot technically enforce that narrow limit. Do not intentionally waive trusted
+checks, accepted work, exact-head binding, semantic review, findings, threads, or owner decisions,
+and do not describe those gates as atomically server-enforced on this path.
 
 ## 4. Evaluate, Then Re-fetch Live State
 

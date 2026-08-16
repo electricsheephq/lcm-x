@@ -40,6 +40,14 @@ DECISIONS = {
 }
 
 
+def _is_object_id(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 40
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 def _pair(value: dict[str, Any]) -> tuple[str, int]:
     return str(value.get("context", "")), int(value.get("integration_id", 0))
 
@@ -201,6 +209,26 @@ def _bypass_qualification_gate(
     return blockers
 
 
+def _accepted_issue_gate(data: dict[str, Any], require_closed: bool = False) -> list[str]:
+    issue = data.get("accepted_issue", {})
+    pr_number = data.get("pr", {}).get("number")
+    valid = (
+        issue.get("accepted") is True
+        and type(issue.get("number")) is int
+        and issue["number"] > 0
+        and issue.get("repository") == REPOSITORY
+        and issue.get("pr_number") == pr_number
+        and issue.get("scope_matches") is True
+    )
+    if not valid:
+        return ["ACCEPTED_ISSUE_MISSING"]
+    if require_closed and (
+        issue.get("state") != "CLOSED" or issue.get("state_reason") != "COMPLETED"
+    ):
+        return ["ISSUE_DISPOSITION_UNVERIFIED"]
+    return []
+
+
 def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str, Any]]]:
     blockers: list[str] = []
     policy = data.get("protected_policy", {})
@@ -222,6 +250,11 @@ def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str,
         blockers.append("PROTECTED_POLICY_UNTRUSTED")
     if type(pr.get("number")) is not int or pr["number"] <= 0:
         blockers.append("PR_IDENTITY_INVALID")
+    if not all(
+        _is_object_id(value)
+        for value in (policy.get("base_sha"), pr.get("base_sha"), head_sha)
+    ):
+        blockers.append("OBJECT_ID_INVALID")
     if not head_sha or pr.get("state") != "OPEN" or pr.get("draft") is not False:
         blockers.append("PR_STATE_DRIFT")
     if pr.get("base_ref") != "main":
@@ -248,9 +281,7 @@ def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str,
             and disposition not in {"FIXED_NOW", "FALSE_OR_NOT_APPLICABLE"}
         ):
             blockers.append("ACTIVE_MERGE_BLOCKING_FINDING")
-    issue = data.get("accepted_issue", {})
-    if issue.get("accepted") is not True or not issue.get("number"):
-        blockers.append("ACCEPTED_ISSUE_MISSING")
+    blockers.extend(_accepted_issue_gate(data))
     blockers.extend(_semantic_review_gate(data, head_sha))
     return blockers, head_sha, matched
 
@@ -284,6 +315,7 @@ def _decision_for(blockers: list[str], mode: str) -> str:
             "REPOSITORY_MISMATCH",
             "PR_STATE_DRIFT",
             "PR_IDENTITY_INVALID",
+            "OBJECT_ID_INVALID",
             "BASE_POLICY_SHA_MISMATCH",
             "PR_NOT_MERGED",
             "MERGE_COMMIT_PR_MISMATCH",
@@ -391,6 +423,17 @@ def _evaluate_post_merge(data: dict[str, Any]) -> dict[str, Any]:
         blockers.append("POST_MERGE_BASE_MISMATCH")
     if pr.get("state") != "MERGED":
         blockers.append("PR_NOT_MERGED")
+    object_ids = [
+        policy.get("base_sha"),
+        pr.get("base_sha"),
+        pr.get("head_sha"),
+        merge_commit,
+        facts.get("live_main_sha"),
+        *facts.get("merge_parents", []),
+        *facts.get("live_main_ancestors", []),
+    ]
+    if not object_ids or not all(_is_object_id(value) for value in object_ids):
+        blockers.append("OBJECT_ID_INVALID")
     if not merge_commit or pr.get("merge_commit_sha") != merge_commit:
         blockers.append("MERGE_COMMIT_PR_MISMATCH")
     if not merge_commit or pr.get("head_sha") not in facts.get("merge_parents", []):
@@ -398,9 +441,7 @@ def _evaluate_post_merge(data: dict[str, Any]) -> dict[str, Any]:
     live_main = facts.get("live_main_sha")
     if merge_commit != live_main and merge_commit not in facts.get("live_main_ancestors", []):
         blockers.append("MERGE_COMMIT_NOT_ANCESTOR_OF_LIVE_MAIN")
-    issue = data.get("accepted_issue", {})
-    if issue.get("state") != "CLOSED" or issue.get("state_reason") != "COMPLETED":
-        blockers.append("ISSUE_DISPOSITION_UNVERIFIED")
+    blockers.extend(_accepted_issue_gate(data, require_closed=True))
 
     matched, check_blockers = _trusted_checks(data.get("checks", []), merge_commit)
     blockers.extend(check_blockers)

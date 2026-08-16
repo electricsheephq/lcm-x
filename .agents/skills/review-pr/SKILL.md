@@ -59,6 +59,11 @@ Run the evaluator with JSON on stdin and retain its JSON stdout as an advisory r
 network-free and cannot prove the provenance of caller-supplied facts, replace the live reads, or
 replace semantic review.
 
+When reporting a qualified administrator path, state that GitHub's `--admin` flag is a broad,
+non-atomic administrative bypass rather than an approval-only server primitive. Readiness may
+show the owner's policy conditions are satisfied; it cannot eliminate the residual race or grant
+authority to accept it.
+
 ## 4. Apply Semantic Review
 
 Verify lossless-data, provenance, Hermes compatibility, backward-compatible defaults, tests,

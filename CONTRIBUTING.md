@@ -78,7 +78,9 @@ Only an explicit instruction to merge PR N at exact head H triggers
 - merges use merge commits only—never squash, rebase, direct-main push, or auto-merge;
 - the configured administrator's exceptional PR-only path requires explicit exact-head admin
   authority, all other gates, and independent blind acceptance and adversarial `PASS` receipts
-  scoring at least 95. It cannot enable direct pushes or broad/role/always bypass.
+  scoring at least 95. GitHub's `--admin` flag is technically broad and non-atomic, so the
+  authorizing maintainer must accept that residual risk after the final live barrier. The path
+  cannot enable direct pushes or a configured broad/role/always bypass.
 
 After merging, maintainers verify the merge commit is current `main`, linked issue disposition,
 and the required checks on the exact merge commit. Maintainers curate user-facing release notes;

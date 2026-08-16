@@ -74,7 +74,14 @@ def ready_payload(mode: str = "readiness") -> dict[str, object]:
         ],
         "threads": [{"is_resolved": True}],
         "findings": [],
-        "accepted_issue": {"number": 218, "accepted": True, "state": "OPEN"},
+        "accepted_issue": {
+            "number": 218,
+            "accepted": True,
+            "repository": "electricsheephq/lcm-x",
+            "pr_number": 218,
+            "scope_matches": True,
+            "state": "OPEN",
+        },
         "semantic_review_receipt": {
             "status": "PASS",
             "head_sha": HEAD,
@@ -154,6 +161,9 @@ def post_merge_payload(live_main: str = MERGE) -> dict[str, object]:
     payload["accepted_issue"] = {
         "number": 218,
         "accepted": True,
+        "repository": "electricsheephq/lcm-x",
+        "pr_number": 218,
+        "scope_matches": True,
         "state": "CLOSED",
         "state_reason": "COMPLETED",
     }
@@ -331,6 +341,31 @@ def test_missing_accepted_work_is_an_owner_gate():
 
     assert receipt["decision"] == "OWNER_GATE"
     assert "ACCEPTED_ISSUE_MISSING" in receipt["blocker_codes"]
+
+
+def test_unrelated_or_unbound_accepted_issue_is_an_owner_gate():
+    payload = ready_payload()
+    payload["accepted_issue"]["repository"] = "unrelated/repo"
+    payload["accepted_issue"]["pr_number"] = 999
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "OWNER_GATE"
+    assert "ACCEPTED_ISSUE_MISSING" in receipt["blocker_codes"]
+
+
+def test_exact_identities_require_github_object_ids():
+    payload = ready_payload()
+    malformed = "not-a-40-char-lowercase-git-object-id"
+    payload["pr"]["head_sha"] = malformed
+    for check in payload["checks"]:
+        check["head_sha"] = malformed
+    payload["latest_reviews"][0]["commit_sha"] = malformed
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "STATE_DRIFT"
+    assert "OBJECT_ID_INVALID" in receipt["blocker_codes"]
 
 
 def test_wrong_ruleset_id_is_an_owner_gate():

@@ -199,12 +199,15 @@ def test_pr_only_admin_exception_is_exact_head_and_high_confidence():
 
     assert "user-specific PR-only bypass" in policy
     assert "acceptance and adversarial `PASS` receipts scoring at least 95" in policy
-    assert "direct push, broad/role/always bypass" in policy
+    assert "never permits a direct push or a configured" in policy
+    assert "broad/role/always bypass" in policy
     assert "bypass_mode: pull_request" in land_skill
     assert "distinct reviewer and receipt IDs" in land_skill
     assert "score at least 95" in land_skill
     assert "explicitly report zero" in land_skill
-    assert "This exception replaces only the missing non-author approval" in land_skill
+    assert "policy intent is to replace only the missing non-author approval" in land_skill
+    assert "broad, non-atomic administrative bypass" in land_skill
+    assert "explicitly accepts the residual risk" in land_skill
     assert "tied or latest `CHANGES_REQUESTED`" in land_skill
 
 
@@ -219,6 +222,7 @@ def test_review_pr_binds_live_issue_scope_and_git_object_ids():
     assert "Reject an unrelated accepted issue" in review_skill
     assert "cannot prove the provenance of caller-supplied facts" in review_skill
     assert "live ruleset's required pairs" in review_skill
+    assert "broad,\nnon-atomic administrative bypass" in review_skill
 
 
 def test_repository_routes_readiness_and_explicit_merge_separately():
@@ -230,6 +234,7 @@ def test_repository_routes_readiness_and_explicit_merge_separately():
     assert "explicit current authority names the PR number" in policy
     assert "Readiness is advisory" in guide
     assert "explicit instruction to merge PR N at exact head H" in guide
+    assert "technically broad and non-atomic" in guide
 
 
 def test_triage_prompt_and_contributor_automation_scope_are_bounded():

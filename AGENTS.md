@@ -127,9 +127,11 @@ Run `actionlint` when workflows change. Record exact commands and results in the
 - Normal landing requires the protected ruleset's non-author CODEOWNER approval. The specifically
   configured administrator may use its user-specific PR-only bypass for one exact-head merge only
   with explicit current admin-path authority, all other gates satisfied, and independent blind
-  acceptance and adversarial `PASS` receipts scoring at least 95 on that head. This exception
-  never permits a direct push, broad/role/always bypass, or waiver of checks, issue acceptance,
-  semantic review, findings, threads, or owner decisions.
+  acceptance and adversarial `PASS` receipts scoring at least 95 on that head. GitHub's `--admin`
+  flag is a broad, non-atomic bypass rather than an approval-only server primitive, so authority
+  must explicitly accept that residual risk and all gates must be re-fetched immediately before
+  and verified after merge. This exception never permits a direct push or a configured
+  broad/role/always bypass, and maintainers must not intentionally waive any non-approval gate.
 - Use merge commits for PRs so contributor and upstream commits remain intact. Do not squash
   or rebase-merge into `main`.
 - Merge deterministically with the pinned head:
@@ -148,7 +150,8 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   approval on the normal protected path.
 - Bots and agents may triage, reproduce, implement, test, review, and prepare merge evidence.
 - Bots and agents may not bypass checks, review-thread resolution, issue acceptance, semantic
-  review, or a product/security owner decision. The only approval exception is the explicit,
-  receipt-backed, user-specific PR-only administrator path defined above and in `land-pr`.
+  review, or a product/security owner decision. The only approved exception is the explicit,
+  receipt-backed, user-specific PR-only administrator path defined above and in `land-pr`, with
+  its broader technical bypass behavior and residual race disclosed to the authorizing owner.
 - Maintainers own feature acceptance, priority, compatibility decisions, terminal dispositions,
   and releases.
