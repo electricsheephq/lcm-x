@@ -1,14 +1,24 @@
+import re
 from pathlib import Path
-
-import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ISSUE_TEMPLATE_ROOT = REPO_ROOT / ".github" / "ISSUE_TEMPLATE"
 
 
-def parse_yaml(path: Path):
-    return yaml.safe_load(path.read_text(encoding="utf-8"))
+def issue_form_body_shape(path: Path) -> tuple[int, list[str]]:
+    text = path.read_text(encoding="utf-8")
+    marker = "\nbody:\n"
+    if marker not in text:
+        return 0, []
+
+    body = text.split(marker, maxsplit=1)[1]
+    element_count = len(re.findall(r"(?m)^  -\s+", body))
+    ids = [
+        value.strip().strip("'\"")
+        for value in re.findall(r"(?m)^    id:\s*(\S.*?)\s*$", body)
+    ]
+    return element_count, ids
 
 
 def test_contributor_guide_uses_the_lcm_x_governance_path():
@@ -27,13 +37,11 @@ def test_issue_forms_have_unique_ids_and_stay_within_the_platform_limit():
 
     assert issue_forms
     for path in issue_forms:
-        form = parse_yaml(path)
-        body = form.get("body")
-        if body is None:
+        element_count, ids = issue_form_body_shape(path)
+        if element_count == 0:
             continue
-        ids = [element["id"] for element in body if "id" in element]
         assert len(ids) == len(set(ids)), path
-        assert len(body) <= 10, path
+        assert element_count <= 10, path
 
 
 def test_bug_form_captures_impact_regression_and_lossless_symptoms():
@@ -131,11 +139,16 @@ def test_triage_separates_routine_metadata_from_sensitive_terminal_actions():
 
 def test_repository_policy_states_the_automation_boundary():
     policy = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    normalized_policy = " ".join(policy.split())
 
     assert "## Automation Boundary" in policy
     assert "Model output alone cannot close, label, assign, push, approve, or merge." in policy
     assert "Automated repair is opt-in" in policy
-    assert "Security and data-integrity work retains non-author human code-owner approval." in policy
+    assert (
+        "Security and data-integrity code changes and public disclosure retain non-author "
+        "human code-owner approval." in normalized_policy
+    )
+    assert "Classification alone does not elevate routine reversible issue metadata" in policy
 
 
 def test_triage_prompt_and_contributor_automation_scope_are_bounded():

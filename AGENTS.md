@@ -98,7 +98,9 @@ Run `actionlint` when workflows change. Record exact commands and results in the
   authorization immediately before an authorized write.
 - Model output alone cannot close, label, assign, push, approve, or merge.
 - Automated repair is opt-in and limited to the exact accepted issue and current gate.
-- Security and data-integrity work retains non-author human code-owner approval.
+- Security and data-integrity code changes and public disclosure retain non-author human
+  code-owner approval. Classification alone does not elevate routine reversible issue metadata
+  to that stronger gate.
 - Use `.agents/skills/triage-backlog/SKILL.md` read-only unless a maintainer explicitly
   authorizes one exact mutation; never use it for an automatic backlog sweep.
 - Invoking a skill never creates write authority. Routine reversible issue metadata needs one
