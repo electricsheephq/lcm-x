@@ -233,7 +233,8 @@ def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str,
     blockers: list[str] = []
     policy = data.get("protected_policy", {})
     pr = data.get("pr", {})
-    head_sha = str(pr.get("head_sha", ""))
+    head_value = pr.get("head_sha")
+    head_sha = head_value if isinstance(head_value, str) else ""
 
     if data.get("schema_version") != SCHEMA_VERSION:
         blockers.append("SCHEMA_VERSION_UNSUPPORTED")

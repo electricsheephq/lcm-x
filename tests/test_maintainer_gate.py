@@ -368,6 +368,16 @@ def test_exact_identities_require_github_object_ids():
     assert "OBJECT_ID_INVALID" in receipt["blocker_codes"]
 
 
+def test_integer_head_identity_cannot_be_stringified_into_an_object_id():
+    payload = ready_payload()
+    payload["pr"]["head_sha"] = int(HEAD)
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "STATE_DRIFT"
+    assert "OBJECT_ID_INVALID" in receipt["blocker_codes"]
+
+
 def test_wrong_ruleset_id_is_an_owner_gate():
     payload = ready_payload()
     payload["protected_policy"]["ruleset_id"] = 1
