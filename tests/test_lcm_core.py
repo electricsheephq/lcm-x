@@ -6849,9 +6849,8 @@ class TestExtraction:
         """Regression: assistant messages with tool_calls=None must not crash.
 
         Reproduces TypeError: 'NoneType' object is not iterable in
-        LCMEngine._serialize_messages when an assistant message arrives
-        with tool_calls explicitly set to None (e.g. reconstructed from
-        a stored row that serialized an empty value as null).
+        LCMEngine._serialize_messages when an in-memory host message arrives
+        with tool_calls explicitly set to None for shape uniformity.
         """
         from hermes_lcm.config import LCMConfig
         from hermes_lcm.engine import LCMEngine
