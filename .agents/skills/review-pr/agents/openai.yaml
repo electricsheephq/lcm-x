@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review LCM-X PR"
+  short_description: "Assess LCM-X PR readiness without writes"
+  default_prompt: "Use $review-pr to assess whether this LCM-X pull request is ready for an explicitly authorized landing without writing to GitHub."
