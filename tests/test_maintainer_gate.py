@@ -571,6 +571,37 @@ def test_post_merge_rejects_mapping_shaped_live_main_ancestors():
     assert "POST_MERGE_ANCESTRY_INVALID" in receipt["blocker_codes"]
 
 
+def test_post_merge_rejects_invalid_merge_parent_object_ids():
+    payload = post_merge_payload()
+    payload["post_merge"]["merge_parents"] = [HEAD, {}]
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "STATE_DRIFT"
+    assert "OBJECT_ID_INVALID" in receipt["blocker_codes"]
+
+
+def test_post_merge_rejects_invalid_live_main_ancestor_object_ids():
+    payload = post_merge_payload(LATER_MAIN)
+    payload["post_merge"]["live_main_ancestors"] = [MERGE, {}]
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "STATE_DRIFT"
+    assert "OBJECT_ID_INVALID" in receipt["blocker_codes"]
+
+
+def test_post_merge_rejects_non_string_merge_commit_object_id():
+    payload = post_merge_payload()
+    payload["post_merge"]["merge_commit"] = int("3" * 40)
+    payload["pr"]["merge_commit_sha"] = int("3" * 40)
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "STATE_DRIFT"
+    assert "OBJECT_ID_INVALID" in receipt["blocker_codes"]
+
+
 def test_post_merge_rejects_a_single_parent_commit():
     payload = post_merge_payload()
     payload["post_merge"]["merge_parents"] = [HEAD]

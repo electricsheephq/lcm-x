@@ -40,6 +40,14 @@ DECISIONS = {
 }
 
 
+def _is_object_id(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 40
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 def _pair(value: dict[str, Any]) -> tuple[str, int]:
     return str(value.get("context", "")), int(value.get("integration_id", 0))
 
@@ -284,6 +292,7 @@ def _decision_for(blockers: list[str], mode: str) -> str:
             "REPOSITORY_MISMATCH",
             "PR_STATE_DRIFT",
             "PR_IDENTITY_INVALID",
+            "OBJECT_ID_INVALID",
             "BASE_POLICY_SHA_MISMATCH",
             "PR_NOT_MERGED",
             "MERGE_COMMIT_PR_MISMATCH",
@@ -371,7 +380,8 @@ def _evaluate_post_merge(data: dict[str, Any]) -> dict[str, Any]:
     policy = data.get("protected_policy", {})
     pr = data.get("pr", {})
     facts = data.get("post_merge", {})
-    merge_commit = str(facts.get("merge_commit", ""))
+    merge_commit_value = facts.get("merge_commit")
+    merge_commit = merge_commit_value if isinstance(merge_commit_value, str) else ""
     merge_parents = facts.get("merge_parents")
     live_main_ancestors = facts.get("live_main_ancestors")
     blockers: list[str] = []
@@ -406,6 +416,17 @@ def _evaluate_post_merge(data: dict[str, Any]) -> dict[str, Any]:
         blockers.append("POST_MERGE_BASE_MISMATCH")
     if pr.get("state") != "MERGED":
         blockers.append("PR_NOT_MERGED")
+    object_ids = [
+        policy.get("base_sha"),
+        pr.get("base_sha"),
+        pr.get("head_sha"),
+        merge_commit_value,
+        facts.get("live_main_sha"),
+        *merge_parents,
+        *live_main_ancestors,
+    ]
+    if not all(_is_object_id(value) for value in object_ids):
+        blockers.append("OBJECT_ID_INVALID")
     if not merge_commit or pr.get("merge_commit_sha") != merge_commit:
         blockers.append("MERGE_COMMIT_PR_MISMATCH")
     if not merge_commit or pr.get("head_sha") not in merge_parents:
