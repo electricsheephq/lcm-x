@@ -551,6 +551,77 @@ def test_concurrent_later_main_is_valid_when_merge_commit_is_ancestor():
     assert "MERGE_COMMIT_NOT_ANCESTOR_OF_LIVE_MAIN" not in receipt["blocker_codes"]
 
 
+def test_post_merge_rejects_mapping_shaped_merge_parents():
+    payload = post_merge_payload()
+    payload["post_merge"]["merge_parents"] = {BASE: True, HEAD: True}
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "STATE_DRIFT"
+    assert "POST_MERGE_PARENTS_INVALID" in receipt["blocker_codes"]
+
+
+def test_post_merge_rejects_mapping_shaped_live_main_ancestors():
+    payload = post_merge_payload(LATER_MAIN)
+    payload["post_merge"]["live_main_ancestors"] = {MERGE: True}
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "STATE_DRIFT"
+    assert "POST_MERGE_ANCESTRY_INVALID" in receipt["blocker_codes"]
+
+
+def test_post_merge_rejects_invalid_merge_parent_object_ids():
+    payload = post_merge_payload()
+    payload["post_merge"]["merge_parents"] = [HEAD, {}]
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "STATE_DRIFT"
+    assert "OBJECT_ID_INVALID" in receipt["blocker_codes"]
+
+
+def test_post_merge_rejects_invalid_live_main_ancestor_object_ids():
+    payload = post_merge_payload(LATER_MAIN)
+    payload["post_merge"]["live_main_ancestors"] = [MERGE, {}]
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "STATE_DRIFT"
+    assert "OBJECT_ID_INVALID" in receipt["blocker_codes"]
+
+
+def test_post_merge_rejects_non_string_merge_commit_object_id():
+    payload = post_merge_payload()
+    payload["post_merge"]["merge_commit"] = int("3" * 40)
+    payload["pr"]["merge_commit_sha"] = int("3" * 40)
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "STATE_DRIFT"
+    assert "OBJECT_ID_INVALID" in receipt["blocker_codes"]
+
+
+def test_post_merge_rejects_a_single_parent_commit():
+    payload = post_merge_payload()
+    payload["post_merge"]["merge_parents"] = [HEAD]
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "STATE_DRIFT"
+    assert "POST_MERGE_PARENTS_INVALID" in receipt["blocker_codes"]
+
+
+def test_post_merge_rejects_duplicate_merge_parents():
+    payload = post_merge_payload()
+    payload["post_merge"]["merge_parents"] = [HEAD, HEAD]
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "STATE_DRIFT"
+    assert "POST_MERGE_PARENTS_INVALID" in receipt["blocker_codes"]
+
+
 def test_malformed_nested_json_fails_closed_with_a_receipt():
     result = subprocess.run(
         [sys.executable, str(SCRIPT)],
