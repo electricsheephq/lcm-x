@@ -91,6 +91,24 @@ git diff --check
 
 Run `actionlint` when workflows change. Record exact commands and results in the PR.
 
+## Automation Boundary
+
+- Treat AI and bot output as proposal and evidence by default.
+- Deterministic tooling must re-fetch the live issue, PR head, checks, reviews, threads, and
+  authorization immediately before an authorized write.
+- Model output alone cannot close, label, assign, push, approve, or merge.
+- Automated repair is opt-in and limited to the exact accepted issue and current gate.
+- Security and data-integrity code changes and public disclosure retain non-author human
+  code-owner approval. Classification alone does not elevate routine reversible issue metadata
+  to that stronger gate.
+- Use `.agents/skills/triage-backlog/SKILL.md` read-only unless a maintainer explicitly
+  authorizes one exact mutation; never use it for an automatic backlog sweep.
+- Invoking a skill never creates write authority. Routine reversible issue metadata needs one
+  exact maintainer authorization and live read-back; public sensitive disclosure and terminal
+  lifecycle actions retain the stronger owner and lifecycle gates in `triage-backlog`.
+- Preserve open executable upstream work as an active continuation. Do not silently turn it into
+  an archive-only record, supersede it, or close it while its continuation state is ambiguous.
+
 ## Review And Merge
 
 - Use `.agents/skills/land-pr/SKILL.md` when deciding readiness or landing a PR.

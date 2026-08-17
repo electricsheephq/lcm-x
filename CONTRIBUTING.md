@@ -1,114 +1,67 @@
 # Contributing to LCM-X
 
-Thanks for contributing.
+Thanks for contributing to LCM-X, Electric Sheep's independent Lossless Context Memory extension
+for Hermes. The project preserves its MIT license, original commit authorship, and links to
+`stephenschoettler/hermes-lcm` as upstream evidence and attribution.
 
-This project is small, review-driven, and correctness-first. Keep changes scoped, tested, and easy to reason about.
+Read [AGENTS.md](AGENTS.md) before opening work. It defines the lossless-data, Hermes
+compatibility, validation, review, and merge invariants for contributors, maintainers, and bots.
 
 LCM-X is the project name. The installed plugin, skill, and directory remain
 `hermes-lcm`, and the runtime context engine remains `lcm`; preserve those
 compatibility identifiers unless a separately approved migration changes them.
 
 ## Workflow
+## Start With An Accepted Issue
 
-Preferred flow:
+Use the GitHub issue forms in `electricsheephq/lcm-x`:
 
-1. Open or reference an issue when the change affects behavior, architecture, or public tooling.
-2. Create a focused branch from `main`.
-3. Add or update tests with the change.
-4. Run local validation before opening the PR.
-5. Open a PR with a clear summary, rationale, and validation section.
+- bugs and regressions need current-`main` reproduction or a named mandatory-invariant
+  violation, supported-path impact, and an affected commit SHA;
+- features and design changes need maintainer acceptance before a PR becomes ready for review;
+- concrete follow-ups need an issue instead of being buried in review comments.
 
-Typical branch names:
+Keep one independently reproducible problem per issue. Search open and closed issues and PRs
+before filing, and retain upstream links and contributor credit. A label, bot assessment,
+unmerged upstream PR, or reviewer severity is evidence—not proof.
 
-- `fix/...`
-- `feat/...`
-- `docs/...`
-- `refactor/...`
-- `test/...`
+## Branch And Commit
 
-## Issues
+Create a focused branch from current `main` in your clone of
+`https://github.com/electricsheephq/lcm-x.git`. Common branch prefixes are `fix/`, `feat/`,
+`docs/`, `test/`, and `chore/`.
 
-Use the GitHub issue forms for:
-
-- bugs
-- behavior regressions
-- architectural direction
-- follow-up work that should not be buried in PR comments
-
-Choose the bug/regression form for broken behavior, and the feature/design form for new behavior or architecture proposals.
-
-When filing a bug, include:
-
-- expected behavior
-- actual behavior
-- minimal repro steps
-- relevant logs, stack traces, or failing tests
-- version / branch context when relevant
-
-If a report is speculative, say so. If it is directional rather than a concrete bug, label it clearly in the issue body.
-
-## Commits
-
-Prefer clear, conventional-style subjects:
-
-- `fix: ...`
-- `feat: ...`
-- `docs: ...`
-- `refactor: ...`
-- `test: ...`
-
-Keep commits focused. Avoid mixing unrelated cleanup into the same change.
+Use focused commits with clear subjects such as `fix: ...`, `docs: ...`, or `test: ...`. Do not
+mix unrelated cleanup, generated secrets, customer data, live Hermes configuration, or local
+authentication state into a change.
 
 ## Pull Requests
 
-Open small PRs when possible. Large PRs are harder to review and easier to get wrong.
+Use `.github/PULL_REQUEST_TEMPLATE.md` and link the accepted issue. Record:
 
-PR titles should be descriptive and usually follow the same style as commit subjects.
+- exact base and head SHAs;
+- scope, non-goals, root cause, invariant owner, and why the change is at the correct layer;
+- Hermes host-contract and lossless-data impact;
+- real-behavior evidence separately from tests and CI;
+- focused and default validation with exact commands and results;
+- release-note impact and preserved upstream attribution.
 
-PR bodies should use this template. It is mirrored in `.github/PULL_REQUEST_TEMPLATE.md` so GitHub pre-fills new PRs.
-
-```md
-## Summary
--
-
-## Why
--
-
-## Validation
-- [ ] Focused validation: `<command>` -> `<result>`
-- [ ] Default validation:
-  - [ ] `pytest tests/test_lcm_core.py tests/test_lcm_engine.py tests/test_packaging_install.py -q`
-  - [ ] `pytest -q`
-  - [ ] `scripts/validate_release.sh --full --keep-going --output /tmp/hermes-lcm-release-validation-<topic>`
-  - [ ] `git diff --check origin/main...HEAD && git diff --check && git diff --cached --check`
-- [ ] Workflow validation, if workflows changed: `actionlint`
-
-## Notes
--
-
-Refs #
-```
-
-If you skip any validation item, leave it unchecked and explain why in Notes.
-
-Good PRs are:
-
-- accurate about what is actually implemented
-- honest about scope
-- explicit about tradeoffs
-- backed by tests
-
-Do **not** claim behavior that is only partially implemented. If a filter, feature, or fix only applies to one path, say that clearly.
+Bug regressions should fail on the recorded base and pass on the candidate. Features must retain
+backward-compatible defaults unless their accepted issue approves a breaking change and migration.
 
 ## Validation
 
-Default validation for code changes:
+Run the narrowest focused regression first. GitHub Actions is authoritative for the full Python
+matrix. The repository defaults are:
 
 ```bash
-scripts/validate_release.sh --full --keep-going --output /tmp/hermes-lcm-release-validation-<topic>
 pytest tests/test_lcm_core.py tests/test_lcm_engine.py tests/test_packaging_install.py -q
 pytest -q
-git diff --check origin/main...HEAD
+bash -lc 'ulimit -n 1024 && python -m pytest tests/ -q'
+ruff check .
+python -m compileall -q .
+python -m py_compile scripts/import_lossless_claw.py
+bash -n scripts/install.sh scripts/update.sh
 git diff --check
 git diff --cached --check
 ```
@@ -135,55 +88,37 @@ git clone https://github.com/electricsheephq/lcm-x "$HERMES_HOME/plugins/hermes-
 hermes plugins
 ```
 
-If you skip part of the default validation, explain why in the PR body.
+Run `actionlint` when workflows change. If a check does not apply, leave it unchecked and explain
+why in the PR.
 
-## Testing expectations
+## Review And Landing
 
-- behavior changes should come with tests
-- bug fixes should include a regression test when practical
-- command/output changes should verify the rendered text, not just internal helpers
-- keep tests readable; avoid clever fixtures when simple setup is enough
+Maintainers use the protected-main `.agents/skills/land-pr/SKILL.md`:
 
-## Review expectations
+- required checks must pass on the pinned `headRefOid` with trusted workflow identities;
+- one non-author code owner must approve the current head;
+- every actionable review thread needs a terminal disposition and resolution;
+- data-integrity, security, migration, compaction, persistence, profile/session, lifecycle, and
+  Hermes-contract changes need independent semantic review;
+- accepted issues, exact-head state, and product/security decisions are re-fetched before merge;
+- merges use merge commits only—never squash, rebase, direct-main push, auto-merge, or bypass.
 
-Before requesting review:
+After merging, maintainers verify the merge commit is current `main`, linked issue disposition,
+and the required checks on the exact merge commit. Maintainers curate user-facing release notes;
+commit lists or model output do not replace those notes.
 
-- rebase or merge `main` so the branch is current
-- resolve conflicts locally
-- make sure the PR description matches the branch exactly
-- ensure CI is expected to pass from the current head
+## Automation Boundary
 
-Reviewers will check:
+AI and bot output is proposal and evidence by default. Models may triage, reproduce, implement,
+test, and review, but deterministic tooling must re-fetch live state before any authorized write.
+Model output alone cannot close, label, assign, push, approve, or merge. Automated repair is
+opt-in and limited to the exact accepted issue and current gate. Security or data-integrity code
+changes and public disclosure retain the repository's human approval gate; classification alone
+does not elevate routine reversible issue metadata to that stronger gate.
 
-- correctness
-- edge cases
-- test coverage
-- whether the implementation matches the claimed behavior
-- whether the change is appropriately scoped
-
-## Scope guidelines
-
-Priority order:
-
-1. correctness
-2. regressions
-3. operator safety
-4. maintainability
-5. new features
-
-Backwards-compatible, well-tested changes are preferred. Destructive or risky workflows should be backup-first and clearly labeled.
-
-## Documentation
-
-Update docs when you change:
-
-- user-facing commands
-- tool schemas
-- configuration flags
-- expected operator workflows
-
-If a new feature needs explanation for contributors or operators, document it in the same PR.
-
-## Questions
-
-If you are unsure whether something should be an issue first, open the issue. It is cheaper than reviewing the wrong PR.
+Use the read-only `.agents/skills/triage-backlog/SKILL.md` for one issue, pull request, or duplicate
+cluster at a time. Invoking it does not authorize backlog sweeps or GitHub writes. Routine labels,
+assignees, and milestones still need one exact maintainer authorization and live read-back;
+public sensitive disclosure and close/reopen actions retain stronger owner and lifecycle gates.
+Open executable upstream work remains an active continuation instead of silently becoming an
+archive-only or closed record.
