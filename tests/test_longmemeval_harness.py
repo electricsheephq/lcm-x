@@ -292,6 +292,37 @@ def test_cli_rejects_unknown_provider():
         cli._parse_args(["run", "--dataset", "x", "--output", "o", "--provider", "nope"])
 
 
+def test_cli_parses_dump_candidates_path():
+    cli = _load_cli()
+    args = cli._parse_args(
+        [
+            "run",
+            "--dataset",
+            "x.json",
+            "--output",
+            "out",
+            "--dump-candidates",
+            "evidence/candidates.jsonl",
+        ]
+    )
+    assert args.dump_candidates == "evidence/candidates.jsonl"
+
+
+def test_cli_parses_recall_rerank_flag():
+    cli = _load_cli()
+    args = cli._parse_args(
+        [
+            "run",
+            "--dataset",
+            "x.json",
+            "--output",
+            "out",
+            "--recall-rerank",
+        ]
+    )
+    assert args.recall_rerank is True
+
+
 def test_load_questions_limit_validation(tmp_path):
     dataset = tmp_path / "d.json"
     dataset.write_text(json.dumps([]), encoding="utf-8")
@@ -577,6 +608,268 @@ def test_stub_run_end_to_end_produces_report_and_fts_recovers_evidence(tmp_path)
     assert "per_question_ms" in report["ingest"]
 
 
+def test_dump_candidates_off_leaves_checkpoint_byte_identical(tmp_path, monkeypatch):
+    """The sidecar is opt-in and must not alter the checkpoint serialization."""
+    import benchmarking.longmemeval as lme
+
+    def _fixed_evaluate(question, _embedder, **kwargs):
+        scored = {"ingest_ms": 1.25}
+        for arm in ARMS:
+            scored[arm] = {
+                "recall@1": 0.0,
+                "recall@5": 0.5,
+                "recall@10": 1.0,
+                "ndcg@10": 0.75,
+                "latency_ms": 2.5,
+                "turn": {
+                    "recall@1": 0.0,
+                    "recall@5": 0.5,
+                    "recall@10": 1.0,
+                    "ndcg@10": 0.75,
+                    "session_granularity": arm != "fts",
+                },
+            }
+        scored["hybrid_rerank"]["rerank_mode"] = RERANK_MODE_PLACEHOLDER
+        if kwargs.get("include_rankings"):
+            scored["_candidate_rankings"] = {
+                arm: {
+                    "sessions": [question.haystack_session_ids[-1]],
+                    "turns": [(question.haystack_session_ids[-1], None)],
+                }
+                for arm in ARMS
+            }
+        return scored
+
+    monkeypatch.setattr(lme, "evaluate_question", _fixed_evaluate)
+    questions = _synthetic_dataset()[:1]
+    off_checkpoint = tmp_path / "off" / "per_question_checkpoint.jsonl"
+    on_checkpoint = tmp_path / "on" / "per_question_checkpoint.jsonl"
+    dump_path = tmp_path / "on" / "candidates.jsonl"
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "off" / "tmp",
+        embeddings_enabled=False,
+        checkpoint_path=off_checkpoint,
+    )
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "on" / "tmp",
+        embeddings_enabled=False,
+        checkpoint_path=on_checkpoint,
+        dump_candidates_path=dump_path,
+    )
+    assert off_checkpoint.read_bytes() == on_checkpoint.read_bytes()
+    assert dump_path.is_file()
+    assert "_candidate_rankings" not in on_checkpoint.read_text(encoding="utf-8")
+
+
+def test_recall_rerank_off_leaves_checkpoint_byte_identical(tmp_path, monkeypatch):
+    """The default and explicit-off flag paths serialize the same checkpoint."""
+    import benchmarking.longmemeval as lme
+
+    def _fixed_evaluate(question, _embedder, **kwargs):
+        scored = {"ingest_ms": 1.25}
+        for arm in ARMS:
+            scored[arm] = {
+                "recall@1": 0.0,
+                "recall@5": 0.5,
+                "recall@10": 1.0,
+                "ndcg@10": 0.75,
+                "latency_ms": 2.5,
+                "turn": {
+                    "recall@1": 0.0,
+                    "recall@5": 0.5,
+                    "recall@10": 1.0,
+                    "ndcg@10": 0.75,
+                    "session_granularity": arm != "fts",
+                },
+            }
+        scored["hybrid_rerank"]["rerank_mode"] = RERANK_MODE_PLACEHOLDER
+        if kwargs.get("recall_rerank"):
+            scored["lcm_recall"]["recall_rerank_status"] = "skipped: test provider"
+        return scored
+
+    monkeypatch.setattr(lme, "evaluate_question", _fixed_evaluate)
+    question = _synthetic_dataset()[:1]
+    default_checkpoint = tmp_path / "default" / "per_question_checkpoint.jsonl"
+    explicit_off_checkpoint = tmp_path / "explicit-off" / "per_question_checkpoint.jsonl"
+    default_report = run_harness(
+        question,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "default" / "tmp",
+        embeddings_enabled=False,
+        checkpoint_path=default_checkpoint,
+    )
+    explicit_off_report = run_harness(
+        question,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "explicit-off" / "tmp",
+        embeddings_enabled=False,
+        recall_rerank=False,
+        checkpoint_path=explicit_off_checkpoint,
+    )
+    assert default_checkpoint.read_bytes() == explicit_off_checkpoint.read_bytes()
+    assert "recall_rerank_modes" not in default_report
+    assert "recall_rerank_modes" not in explicit_off_report
+    row = json.loads(default_checkpoint.read_text(encoding="utf-8").splitlines()[1])
+    assert "recall_rerank_status" not in row["arms"]["lcm_recall"]
+
+
+def test_recall_rerank_on_records_status_and_mode_counts(tmp_path):
+    questions = _synthetic_dataset()
+    checkpoint_path = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    report = run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "tmp",
+        embeddings_enabled=True,
+        recall_rerank=True,
+        checkpoint_path=checkpoint_path,
+    )
+
+    expected_status = "skipped: rerank requires the voyage provider"
+    assert report["recall_rerank_modes"] == {expected_status: len(questions)}
+    rows = checkpoint_path.read_text(encoding="utf-8").splitlines()
+    header = json.loads(rows[0])
+    assert header["__checkpoint_header__"]["recall_rerank"] is True
+    for row in map(json.loads, rows[1:]):
+        assert row["arms"]["lcm_recall"]["recall_rerank_status"] == expected_status
+
+
+def test_recall_rerank_resume_rejects_flag_off_checkpoint(tmp_path):
+    questions = _synthetic_dataset()[:1]
+    checkpoint_path = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "off-tmp",
+        embeddings_enabled=True,
+        checkpoint_path=checkpoint_path,
+        recall_rerank=False,
+    )
+    with pytest.raises(ValueError, match="recall_rerank"):
+        run_harness(
+            questions,
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / "on-tmp",
+            embeddings_enabled=True,
+            checkpoint_path=checkpoint_path,
+            recall_rerank=True,
+            resume=True,
+        )
+
+
+def test_dump_candidates_stub_has_header_rows_gold_and_null_markers(tmp_path):
+    questions = _synthetic_dataset()
+    questions.append(
+        parse_question(
+            _make_raw(
+                "q_abs",
+                "single-session-user",
+                sessions={"q-abs-s": [{"role": "user", "content": "hello"}]},
+                answer_session_ids=[],
+            )
+        )
+    )
+    dump_path = tmp_path / "nested" / "candidates.jsonl"
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "run",
+        checkpoint_path=tmp_path / "run" / "per_question_checkpoint.jsonl",
+        dump_candidates_path=dump_path,
+    )
+
+    lines = dump_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == len(questions) + 1
+    assert "ZEBRA" not in dump_path.read_text(encoding="utf-8")
+    header = json.loads(lines[0])
+    assert header == {
+        "__dump_header__": {
+            "provider": "stub",
+            "model": "",
+            "dataset_label": "s",
+            "source_sha256": None,
+            "manifest_sha256": None,
+            "embeddings_enabled": True,
+            "rerank": False,
+            "recall_rerank": False,
+            "top_k": 10,
+        }
+    }
+
+    rows = {row["question_id"]: row for row in map(json.loads, lines[1:])}
+    assert set(rows) == {question.question_id for question in questions}
+    found_null_marker = False
+    for question in questions:
+        row = rows[question.question_id]
+        assert row["category"] == question.category
+        assert row["abstention"] is question.is_abstention
+        assert row["gold_sessions"] == sorted(evidence_sessions(question))
+        assert row["gold_turns"] == [
+            list(turn_key)
+            for turn_key in sorted(evidence_turns(question))
+        ]
+        assert set(row["arms"]) == (set() if question.is_abstention else set(ARMS))
+        for arm in row["arms"]:
+            payload = row["arms"][arm]
+            assert set(payload) == {"sessions_top10", "turns_top10"}
+            if payload["sessions_top10"] or payload["turns_top10"]:
+                assert payload["sessions_top10"]
+                assert payload["turns_top10"]
+            if payload["sessions_top10"]:
+                assert len(payload["sessions_top10"]) <= 10
+            if payload["turns_top10"]:
+                assert len(payload["turns_top10"]) <= 10
+                found_null_marker |= any(turn_key[1] is None for turn_key in payload["turns_top10"])
+    assert found_null_marker
+
+
+def test_dump_candidates_recall_matches_checkpoint_input(tmp_path):
+    questions = _synthetic_dataset()
+    checkpoint_path = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    dump_path = tmp_path / "run" / "candidates.jsonl"
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "tmp",
+        checkpoint_path=checkpoint_path,
+        dump_candidates_path=dump_path,
+    )
+    checkpoint_rows = {
+        row["question_id"]: row
+        for row in map(json.loads, checkpoint_path.read_text(encoding="utf-8").splitlines())
+        if "question_id" in row
+    }
+    dump_rows = {
+        row["question_id"]: row
+        for row in map(json.loads, dump_path.read_text(encoding="utf-8").splitlines()[1:])
+    }
+    for question_id, dump_row in dump_rows.items():
+        if dump_row["abstention"]:
+            continue
+        checkpoint_row = checkpoint_rows[question_id]
+        gold_sessions = set(dump_row["gold_sessions"])
+        for arm in ARMS:
+            dumped_recall = recall_at_k(
+                dump_row["arms"][arm]["sessions_top10"], gold_sessions, 10
+            )
+            assert dumped_recall == pytest.approx(
+                checkpoint_row["arms"][arm]["recall@10"]
+            )
+
+
 def test_db_template_reuse_matches_from_scratch_bootstrap(tmp_path):
     # Cloning a pre-migrated template must not change any scored output vs a
     # from-scratch bootstrap per question (F7 is a speed optimization only).
@@ -726,3 +1019,132 @@ def test_deterministic_summary_of_empty_session_is_non_empty():
 
     assert deterministic_session_summary([]) == "(empty session)"
     assert deterministic_session_summary([{"role": "user", "content": "  "}]).strip()
+
+
+def test_dump_candidates_header_binds_direct_source_sha(tmp_path):
+    questions = _synthetic_dataset()
+    dump_path = tmp_path / "candidates.jsonl"
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "run-a",
+        embeddings_enabled=True,
+        direct_source_sha256="a" * 64,
+        dump_candidates_path=dump_path,
+    )
+    header = json.loads(dump_path.read_text(encoding="utf-8").splitlines()[0])
+    assert header["__dump_header__"]["source_sha256"] == "a" * 64
+
+    # A dump produced from a different direct corpus must be rejected, not
+    # silently appended to.
+    with pytest.raises(ValueError, match="configuration mismatch"):
+        run_harness(
+            questions,
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / "run-b",
+            embeddings_enabled=True,
+            direct_source_sha256="b" * 64,
+            dump_candidates_path=dump_path,
+        )
+
+
+def test_dump_candidates_truncates_torn_tail_and_appends(tmp_path):
+    questions = _synthetic_dataset()
+    dump_path = tmp_path / "candidates.jsonl"
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "run-a",
+        embeddings_enabled=True,
+        dump_candidates_path=dump_path,
+    )
+    complete_lines = dump_path.read_text(encoding="utf-8").splitlines()
+    with dump_path.open("a", encoding="utf-8") as handle:
+        handle.write('{"question_id": "torn-row-never-fini')
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "run-b",
+        embeddings_enabled=True,
+        dump_candidates_path=dump_path,
+    )
+    lines = dump_path.read_text(encoding="utf-8").splitlines()
+    # Torn tail gone, every line parses, and the second run's rows appended.
+    assert len(lines) == 2 * len(complete_lines) - 1  # header written once
+    for line in lines:
+        json.loads(line)
+    assert not any("torn-row-never-fini" in line for line in lines)
+
+
+def test_dump_candidates_record_rejects_incomplete_rankings():
+    from benchmarking.longmemeval import _candidate_dump_record
+
+    question = _synthetic_dataset()[0]
+    complete = {arm: {"sessions": [], "turns": []} for arm in ARMS}
+    record = _candidate_dump_record(question, complete)
+    assert set(record["arms"]) == set(ARMS)
+
+    missing_arm = dict(complete)
+    missing_arm.pop(ARMS[0])
+    with pytest.raises(RuntimeError, match="incomplete"):
+        _candidate_dump_record(question, missing_arm)
+
+    malformed = {arm: dict(entry) for arm, entry in complete.items()}
+    malformed[ARMS[0]] = {"sessions": []}
+    with pytest.raises(RuntimeError, match="malformed"):
+        _candidate_dump_record(question, malformed)
+
+
+def test_dump_candidates_refuses_to_mutate_foreign_file(tmp_path):
+    questions = _synthetic_dataset()
+    # Three foreign shapes, all rejected byte-intact: (a) full JSON with no
+    # trailing newline, (b) a torn prefix like '{"' that also prefixes our own
+    # header serialization (uncertain ownership fails closed), (c) a
+    # newline-terminated file with a wrong header.
+    cases = [
+        ("no-newline.json", '{"some": "corpus file without trailing newline"}'),
+        ("torn-prefix.json", '{"'),
+        ("wrong-header.jsonl", '{"not_our_header": true}\n{"row": 1}\n'),
+    ]
+    for index, (name, content) in enumerate(cases):
+        foreign = tmp_path / name
+        foreign.write_text(content, encoding="utf-8")
+        before = foreign.read_bytes()
+        with pytest.raises(
+            ValueError,
+            match="configuration mismatch|invalid candidate dump header|cannot prove ownership",
+        ):
+            run_harness(
+                questions,
+                provider_name="stub",
+                model="",
+                tmp_dir=tmp_path / f"run-{index}",
+                embeddings_enabled=True,
+                dump_candidates_path=foreign,
+            )
+        assert foreign.read_bytes() == before, name
+
+
+def test_cli_rejects_dump_candidates_aliasing_run_files(tmp_path):
+    cli = _load_cli()
+    output_dir = tmp_path / "out"
+    dataset = tmp_path / "corpus.json"
+    for alias in (
+        output_dir / "per_question_checkpoint.jsonl",
+        output_dir / "longmemeval_metrics.json",
+        output_dir / "longmemeval_metrics.md",
+        dataset,
+    ):
+        with pytest.raises(ValueError, match="must not alias"):
+            cli._validated_dump_candidates_path(
+                str(alias), output_dir=output_dir, dataset=str(dataset)
+            )
+    ok = cli._validated_dump_candidates_path(
+        str(output_dir / "candidates.jsonl"), output_dir=output_dir, dataset=str(dataset)
+    )
+    assert ok == (output_dir / "candidates.jsonl").resolve()
+    assert cli._validated_dump_candidates_path(None, output_dir=output_dir, dataset=None) is None

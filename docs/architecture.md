@@ -1,6 +1,9 @@
 # Architecture notes
 
-This page keeps the implementation model and product-positioning nuance outside the quickstart README while preserving the details new operators and reviewers need.
+This page keeps the LCM-X implementation model and product-positioning nuance
+outside the quickstart README while preserving the details new operators and
+reviewers need. Runtime compatibility identifiers remain `hermes-lcm` for the
+plugin and `lcm` for the context engine.
 
 ## What It Does
 
@@ -22,7 +25,7 @@ built-in compression rewrites the active prompt. Built-in compression can still
 be lossy in the active context, but previous content may be recoverable later
 through host-level history tools such as `session_search`.
 
-`hermes-lcm` is different because recall is part of the active context engine:
+LCM-X is different because recall is part of the active context engine:
 
 - plugin-local store and DAG built specifically for drill-down
 - current-session retrieval through LCM tools, not an auxiliary cross-session search step
