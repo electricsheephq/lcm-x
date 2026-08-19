@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
+from .sqlite_util import _sqlite_savepoint
+
 
 @dataclass(frozen=True)
 class CoverageNode:
@@ -31,6 +33,21 @@ class CanonicalFrontierOverlapError(RuntimeError):
 
 
 def load_source_lineage(
+    connection: Any,
+    root_node_ids: Sequence[int],
+    *,
+    limit: int,
+) -> dict[int, tuple[int, ...]]:
+    """Load lineage without leaking the TEMP-staging transaction to callers."""
+    with _sqlite_savepoint(connection):
+        return _load_source_lineage_staged(
+            connection,
+            root_node_ids,
+            limit=limit,
+        )
+
+
+def _load_source_lineage_staged(
     connection: Any,
     root_node_ids: Sequence[int],
     *,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -684,3 +685,74 @@ def test_recent_fallback_candidate_work_is_sql_bounded(recent_parts, monkeypatch
     assert result["mode"] == "leaf_summary_fallback"
     assert result["sections"] == []
     assert frontier_calls == []
+
+
+def test_recent_fallback_releases_snapshot_before_later_dag_write(recent_parts):
+    engine, _store = recent_parts
+    scope = engine.current_session_id
+    day = date(2026, 7, 15)
+    first_id = _add_leaf(engine._dag, scope, day, "recent staged source")
+    connection = engine._dag.connection
+    assert connection is not None
+    window = parse_recent_period("date:2026-07-15", now=NOW)
+
+    sections = tools_module._recent_leaf_sections(
+        engine, window, "conversation", 10
+    )
+
+    assert [section["node_id"] for section in sections] == [first_id]
+    assert connection.in_transaction is False
+    with sqlite3.connect(engine._dag.db_path) as independent:
+        independent.execute(
+            "INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
+            ("recent-independent", "committed"),
+        )
+
+    # A leaked read snapshot fails here with SQLITE_BUSY_SNAPSHOT.
+    assert _add_leaf(engine._dag, scope, day, "recent write after staging") > first_id
+
+
+def test_recent_fallback_preserves_outer_transaction(recent_parts):
+    engine, _store = recent_parts
+    scope = engine.current_session_id
+    day = date(2026, 7, 15)
+    _add_leaf(engine._dag, scope, day, "recent outer source")
+    connection = engine._dag.connection
+    assert connection is not None
+    window = parse_recent_period("date:2026-07-15", now=NOW)
+
+    connection.execute("BEGIN")
+    connection.execute(
+        "INSERT INTO metadata(key, value) VALUES('recent-caller-write', 'active')"
+    )
+    tools_module._recent_leaf_sections(engine, window, "conversation", 10)
+
+    assert connection.in_transaction is True
+    assert connection.execute(
+        "SELECT value FROM metadata WHERE key='recent-caller-write'"
+    ).fetchone()[0] == "active"
+    connection.rollback()
+    assert connection.execute(
+        "SELECT value FROM metadata WHERE key='recent-caller-write'"
+    ).fetchone() is None
+
+
+def test_recent_fallback_releases_transaction_on_lineage_exception(
+    recent_parts,
+    monkeypatch,
+):
+    engine, _store = recent_parts
+    day = date(2026, 7, 15)
+    _add_leaf(engine._dag, engine.current_session_id, day, "recent exception source")
+    connection = engine._dag.connection
+    assert connection is not None
+    window = parse_recent_period("date:2026-07-15", now=NOW)
+
+    def fail_lineage(*_args, **_kwargs):
+        raise RuntimeError("forced recent lineage failure")
+
+    monkeypatch.setattr(tools_module, "load_source_lineage", fail_lineage)
+    assert tools_module._recent_leaf_sections(
+        engine, window, "conversation", 10
+    ) == []
+    assert connection.in_transaction is False

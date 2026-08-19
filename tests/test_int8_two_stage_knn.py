@@ -11,6 +11,7 @@ from __future__ import annotations
 import sqlite3
 
 import numpy as np
+import hermes_lcm.vector_store as vector_store_module
 
 from hermes_lcm.vector_store import (
     EmbeddingIdentity,
@@ -23,6 +24,12 @@ from hermes_lcm.vector_store import (
 
 MODEL = "voyage-context-4"
 PROVIDER = "voyage"
+
+
+def _expire_after_first_prescreen_batch(deadline, scanned_rows):
+    """Position-keyed deadline stub: expire once the first prescreen batch
+    has completed (scanned_rows >= 1), regardless of clock call patterns."""
+    return deadline is not None and scanned_rows >= 1
 
 
 def _seed_messages(db_path, count, *, session="s", source="hist", ts0=0.0):
@@ -140,6 +147,117 @@ def test_two_stage_reports_full_coverage(tmp_path):
         # Full corpus reached despite bounded_scan_rows=1 -> the two-stage path fired.
         assert result.coverage == "full_approx"
         assert result[0][0] == "0:0"
+    finally:
+        vs.close()
+
+
+def test_in_memory_two_stage_query_with_deadline_uses_current_connection():
+    vs = VectorStore(":memory:", bounded_scan_rows=1)
+    try:
+        vs.connection.execute(
+            """
+            CREATE TABLE messages (
+                store_id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                source TEXT DEFAULT '',
+                role TEXT NOT NULL,
+                content TEXT,
+                timestamp REAL NOT NULL
+            )
+            """
+        )
+        vs.connection.executemany(
+            "INSERT INTO messages("
+            "store_id, session_id, source, role, content, timestamp"
+            ") VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (0, "s", "hist", "user", "m", 0.0),
+                (1, "s", "hist", "user", "m", 1.0),
+            ],
+        )
+        i8 = _int8_identity(4)
+        vs.register_profile(MODEL, PROVIDER, 4, dtype="int8", task="chunk")
+        for idx, vec in enumerate(
+            ([1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0])
+        ):
+            vs.record_chunk_embedding(
+                f"{idx}:0",
+                MODEL,
+                vec,
+                store_id=idx,
+                chunk_index=0,
+                char_start=0,
+                char_end=1,
+                token_estimate=1,
+                identity=i8,
+            )
+
+        result = vs.knn_chunks(
+            [1.0, 0.0, 0.0, 0.0],
+            k=1,
+            model=MODEL,
+            provider=PROVIDER,
+            deadline=vector_store_module._monotonic() + 5.0,
+        )
+
+        assert result.coverage == "full_approx"
+        assert result[0][0] == "0:0"
+    finally:
+        vs.close()
+
+
+def test_chunk_deadline_bounds_a_synced_binary_prescreen(tmp_path, monkeypatch):
+    db_path = tmp_path / "lcm.db"
+    _seed_messages(db_path, 2)
+    vs = VectorStore(db_path, bounded_scan_rows=1)
+    try:
+        i8 = _int8_identity(4)
+        vs.register_profile(MODEL, PROVIDER, 4, dtype="int8", task="chunk")
+        for idx, vec in enumerate(
+            ([1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0])
+        ):
+            vs.record_chunk_embedding(
+                f"{idx}:0",
+                MODEL,
+                vec,
+                store_id=idx,
+                chunk_index=0,
+                char_start=0,
+                char_end=1,
+                token_estimate=1,
+                identity=i8,
+            )
+
+        unbounded = vs.knn_chunks(
+            [1.0, 0.0, 0.0, 0.0], k=1, model=MODEL, provider=PROVIDER
+        )
+        monkeypatch.setattr(
+            vector_store_module,
+            "_prescreen_deadline_expired",
+            _expire_after_first_prescreen_batch,
+        )
+        monkeypatch.setattr(
+            vs,
+            "_count_embedded_vectors",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("deadline expiry must not start COUNT(*)")
+            ),
+        )
+        expired = vs.knn_chunks(
+            [1.0, 0.0, 0.0, 0.0],
+            k=1,
+            model=MODEL,
+            provider=PROVIDER,
+            full_scan=True,
+            # Genuinely-future deadline: only the patched position-keyed seam
+            # trips; the real clock never expires the load path.
+            deadline=vector_store_module._monotonic() + 60.0,
+        )
+
+        assert unbounded.coverage == "full_approx"
+        assert expired.coverage == "bounded"
+        assert expired.scanned == 1
+        assert expired.total == 2
     finally:
         vs.close()
 

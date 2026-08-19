@@ -15,6 +15,7 @@ from .dag import SummaryDAG
 from .escalation import _deterministic_truncate, summarize_with_escalation
 from .rollup_periods import CoverageNode, canonical_frontier, load_source_lineage
 from .rollup_store import RollupBuildToken, RollupStore
+from .sqlite_util import _sqlite_savepoint
 from .tokens import count_tokens
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,18 @@ def _stable_hash(value: object) -> str:
 
 
 def _scope_frontier(dag: SummaryDAG, scope: str) -> list[dict[str, object]]:
+    """Load a scope frontier without retaining its TEMP-staging snapshot."""
+    with dag._db_lock:
+        connection = dag.connection
+        if connection is None:
+            return []
+        with _sqlite_savepoint(connection):
+            return _scope_frontier_staged(dag, scope)
+
+
+def _scope_frontier_staged(
+    dag: SummaryDAG, scope: str
+) -> list[dict[str, object]]:
     """The scope's canonical frontier nodes with normalized interval bounds.
 
     Loads every summary node for ``scope`` and applies the shared interval-aware
@@ -449,6 +462,18 @@ def _rollup_source_ids(store: RollupStore, rollup_ids: Sequence[int]) -> list[in
 
 
 def _canonical_aggregate_sources(
+    dag: SummaryDAG, source_ids: Sequence[int]
+) -> list[dict[str, object]]:
+    """Resolve aggregate sources without retaining a TEMP-staging snapshot."""
+    with dag._db_lock:
+        connection = dag.connection
+        if connection is None:
+            return []
+        with _sqlite_savepoint(connection):
+            return _canonical_aggregate_sources_staged(dag, source_ids)
+
+
+def _canonical_aggregate_sources_staged(
     dag: SummaryDAG, source_ids: Sequence[int]
 ) -> list[dict[str, object]]:
     """Resolve one bounded canonical node frontier for aggregate publication."""

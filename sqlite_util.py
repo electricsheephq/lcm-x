@@ -1,17 +1,22 @@
 """SQLite lock-contention helpers shared by the LCM engine.
 
-Isolated from ``engine.py`` (WS5 seam): detecting SQLite lock-contention error
-chains and temporarily bounding ``busy_timeout`` on gateway-critical paths are a
-cohesive, pure SQLite concern with no engine state. ``engine.py`` imports the
-two entry points it calls; the busy-timeout probe travels with them. Callers
-keep their own policy constants (for example the session-end timeout budget).
+Isolated from ``engine.py`` (WS5 seam): lock-contention detection, bounded
+``busy_timeout`` changes, and transaction-preserving savepoints are pure SQLite
+concerns with no engine state. Callers keep their own policy constants (for
+example the session-end timeout budget).
 """
 
 from __future__ import annotations
 
+import logging
 import sqlite3
+import uuid
 from contextlib import contextmanager
-from typing import Iterator, List
+from typing import Callable, Iterator, List, TypeVar
+
+
+_T = TypeVar("_T")
+logger = logging.getLogger(__name__)
 
 
 def _is_sqlite_locked_error(exc: BaseException) -> bool:
@@ -27,9 +32,78 @@ def _is_sqlite_locked_error(exc: BaseException) -> bool:
     return False
 
 
+def _is_sqlite_busy_snapshot_error(exc: BaseException) -> bool:
+    """Return True only for SQLite's stale read-snapshot write-upgrade error."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if (
+            isinstance(current, sqlite3.Error)
+            and getattr(current, "sqlite_errorcode", None)
+            == sqlite3.SQLITE_BUSY_SNAPSHOT
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _run_sqlite_write_with_snapshot_retry(
+    conn: sqlite3.Connection,
+    operation: Callable[[], _T],
+    *,
+    operation_name: str,
+) -> _T:
+    """Run one write transaction, retrying one stale-snapshot upgrade.
+
+    ``SQLITE_BUSY_SNAPSHOT`` cannot be fixed by waiting: the connection must
+    roll back its old read snapshot and begin the write from current state.
+    Ordinary ``SQLITE_BUSY`` already receives SQLite's configured busy timeout
+    and is not multiplied here.
+    """
+    for attempt in range(2):
+        try:
+            with conn:
+                return operation()
+        except sqlite3.Error as exc:
+            if conn.in_transaction:
+                conn.rollback()
+            if attempt == 0 and _is_sqlite_busy_snapshot_error(exc):
+                continue
+            if _is_sqlite_locked_error(exc):
+                logger.warning(
+                    "SQLite write lock recovery exhausted "
+                    "(operation=%s, code=%s, name=%s)",
+                    operation_name,
+                    getattr(exc, "sqlite_errorcode", None),
+                    getattr(exc, "sqlite_errorname", None),
+                )
+            raise
+    raise AssertionError("unreachable SQLite write retry state")
+
+
 def _sqlite_busy_timeout_ms(conn: sqlite3.Connection) -> int:
     row = conn.execute("PRAGMA busy_timeout").fetchone()
     return int(row[0]) if row and row[0] is not None else 0
+
+
+@contextmanager
+def _sqlite_savepoint(conn: sqlite3.Connection) -> Iterator[None]:
+    """Isolate helper writes without taking ownership of a caller transaction."""
+    # UUID hex contains only identifier-safe characters and keeps every nested
+    # helper's SAVEPOINT name unique with a fixed upper bound on name length.
+    name = f"lcm_{uuid.uuid4().hex}"
+    conn.execute(f"SAVEPOINT {name}")
+    try:
+        yield
+    except BaseException:
+        try:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {name}")
+        finally:
+            conn.execute(f"RELEASE SAVEPOINT {name}")
+        raise
+    else:
+        conn.execute(f"RELEASE SAVEPOINT {name}")
 
 
 @contextmanager

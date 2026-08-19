@@ -49,6 +49,8 @@ from .presets import (
     unsupported_runtime_fields_text,
 )
 from .maintenance import backup_database, rotate_backup_database
+from .assertion_rebuild import rebuild_assertions
+from .assertion_store import AssertionSchemaUnavailableError, AssertionStore
 from . import rollup_builder
 from .rollup_store import RollupStore
 from .session_patterns import build_session_match_keys, matches_session_pattern
@@ -112,6 +114,29 @@ def _embedding_backfill_budget_s() -> float:
     # Operation-wide wall-clock budget (0 = unlimited). When exceeded the run
     # stops between batches and reports partial rather than running unbounded.
     return _env_float("LCM_EMBEDDING_BACKFILL_BUDGET_S", 0.0)
+
+
+def _embedding_backfill_batch_size(max_batch_items: int | None = None) -> int:
+    # Outer batch size for backfill slicing (documents claimed per batch).
+    # Capped at the EFFECTIVE provider request-item ceiling (the configured
+    # embedding_max_batch_items when the caller has config in scope, else the
+    # hard Voyage ceiling): above it the provider splits one outer batch into
+    # several real requests, silently diverging from the dry-run estimate.
+    # Normalization mirrors VoyageProvider exactly (max(1, min(value, 1000)))
+    # so a non-positive configured cap means 1, not "ignore".
+    cap = _VOYAGE_MAX_BATCH_ITEMS
+    if isinstance(max_batch_items, int):
+        cap = max(1, min(max_batch_items, _VOYAGE_MAX_BATCH_ITEMS))
+    raw = os.environ.get("LCM_EMBEDDING_BACKFILL_BATCH_SIZE")
+    if raw is None:
+        return min(_EMBEDDING_BACKFILL_BATCH_SIZE, cap)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return min(_EMBEDDING_BACKFILL_BATCH_SIZE, cap)
+    if value <= 0:
+        return min(_EMBEDDING_BACKFILL_BATCH_SIZE, cap)
+    return min(value, cap)
 
 
 def _ensure_inflight_table(conn: sqlite3.Connection) -> None:
@@ -460,6 +485,7 @@ def _help_text(error: str | None = None) -> str:
         "- /lcm rotate apply: backup-first rotate that advances the lifecycle frontier past pre-tail raw messages",
         "- /lcm rollups: show temporal-rollup status for the current session",
         "- /lcm rollups rebuild <day|week|month|all> [date]: synchronously rebuild a bounded UTC target set",
+        "- /lcm assertions rebuild [--apply] [--limit N]: preview or run one bounded exact-row assertion batch",
         "- /lcm preset show [name]: inspect shipped preset metadata and benchmark provenance",
         "- /lcm preset suggest: preview the best shipped preset for the current engine state",
         "- /lcm preset apply <name> --dry-run: preview env-var changes without mutating live config",
@@ -2413,9 +2439,18 @@ def _rollups_rebuild_text(tokens: list[str], engine) -> str:
     scope = engine.current_session_id
     targets = _rollup_period_targets(kind, target_date)
     limit = max(0, int(engine._config.rollup_builds_per_pass))
-    store = RollupStore(engine._dag.db_path)
+    lease_key = engine.try_acquire_rollup_operator_lease(scope)
+    if lease_key is None:
+        return "\n".join([
+            "LCM temporal rollup rebuild",
+            "status: busy",
+            "error: background temporal rollup maintenance is active for this session",
+            "note: retry after the current maintenance pass completes",
+        ])
+    store = None
     outcomes: list[_RollupRebuildResult] = []
     try:
+        store = RollupStore(engine._dag.db_path)
         if store.connection is None:  # pragma: no cover - RollupStore initialization contract
             raise RuntimeError("temporal rollup store is unavailable")
         # Durably seed a stale row for EVERY requested target BEFORE applying the
@@ -2479,7 +2514,11 @@ def _rollups_rebuild_text(tokens: list[str], engine) -> str:
             f"error: {type(exc).__name__}: {exc}",
         ])
     finally:
-        store.close()
+        try:
+            if store is not None:
+                store.close()
+        finally:
+            engine.release_rollup_operator_lease(lease_key)
 
     # ``complete`` is reserved for attempted targets that all reached ready.
     # Explicitly bounded, unattempted queued debt may coexist with complete.
@@ -2516,6 +2555,137 @@ def _rollups_text(tokens: list[str], engine) -> str:
     else:
         result = _help_text("`/lcm rollups` accepts only `rebuild <day|week|month|all> [date]`.")
     return _bounded_rollups_text(result)
+
+
+def _parse_assertion_rebuild_args(tokens: list[str]) -> tuple[bool, int] | str:
+    apply = False
+    limit = 100
+    saw_limit = False
+    index = 0
+    while index < len(tokens):
+        token = tokens[index].lower()
+        if token in {"apply", "--apply"}:
+            if apply:
+                return "assertion rebuild apply mode was specified more than once"
+            apply = True
+            index += 1
+            continue
+        if token == "--limit":
+            if saw_limit or index + 1 >= len(tokens):
+                return "`--limit` requires one integer value and may appear once"
+            value = tokens[index + 1]
+            index += 2
+        elif token.startswith("--limit="):
+            if saw_limit:
+                return "`--limit` may appear once"
+            value = token.split("=", 1)[1]
+            index += 1
+        else:
+            return f"unsupported assertion rebuild argument: {tokens[index]}"
+        saw_limit = True
+        try:
+            limit = int(value)
+        except ValueError:
+            return "assertion rebuild limit must be an integer"
+        if not 1 <= limit <= 500:
+            return "assertion rebuild limit must be between 1 and 500"
+    return apply, limit
+
+
+def _assertions_rebuild_text(tokens: list[str], engine) -> str:
+    if not bool(getattr(engine._config, "assertions_enabled", False)):
+        return "\n".join([
+            "LCM assertion rebuild",
+            "status: disabled",
+            "error: V4 assertions are disabled",
+            "note: set LCM_ASSERTIONS_ENABLED=true and restart Hermes before planning a rebuild",
+        ])
+    parsed = _parse_assertion_rebuild_args(tokens)
+    if isinstance(parsed, str):
+        return _help_text(parsed)
+    apply, limit = parsed
+
+    assertions = getattr(engine, "_assertions", None)
+    if assertions is None:
+        return "\n".join([
+            "LCM assertion rebuild",
+            "status: unavailable",
+            "error: the enabled assertion store is not bound",
+        ])
+    extractor = getattr(engine, "_assertion_extractor", None)
+    if apply and not callable(extractor):
+        return "\n".join([
+            "LCM assertion rebuild",
+            "status: refused",
+            "mode: apply",
+            "error: no structured assertion extractor is configured",
+            "note: no provider call or database write was attempted",
+        ])
+
+    reader: AssertionStore | None = None
+    try:
+        target = assertions
+        if not apply:
+            reader = AssertionStore(engine._store.db_path, read_only=True)
+            target = reader
+        result = rebuild_assertions(
+            target,
+            apply=apply,
+            extractor=extractor if apply else None,
+            limit=limit,
+        )
+    except AssertionSchemaUnavailableError as exc:
+        return "\n".join([
+            "LCM assertion rebuild",
+            "status: unavailable",
+            f"error: {exc}",
+        ])
+    except Exception as exc:  # pragma: no cover - defensive operator surface
+        return "\n".join([
+            "LCM assertion rebuild",
+            "status: error",
+            f"error: {type(exc).__name__}: {exc}",
+        ])
+    finally:
+        if reader is not None:
+            reader.close()
+
+    status = "complete" if result.failed_count == 0 and result.stale_or_missing_count == 0 else "partial"
+    lines = [
+        "LCM assertion rebuild",
+        f"status: {status}",
+        f"mode: {result.mode}",
+        f"extraction_version: {result.extraction_version}",
+        f"limit: {limit}",
+        f"pending: {result.pending_count}",
+        f"selected: {result.selected_count}",
+        f"processed: {result.processed_count}",
+        f"already_current: {result.already_current_count}",
+        f"stale_or_missing: {result.stale_or_missing_count}",
+        f"failed: {result.failed_count}",
+        f"assertions_written: {result.assertions_written}",
+        f"relations_written: {result.relations_written}",
+        f"remaining: {result.remaining_count}",
+        f"plan_digest: {result.plan_digest}",
+        f"receipt_digest: {result.receipt_digest}",
+    ]
+    for failure in result.failures[:5]:
+        lines.append(f"failure[{failure.source_store_id}]: {failure.error}")
+    if len(result.failures) > 5:
+        lines.append(f"failures_omitted: {len(result.failures) - 5}")
+    if not apply:
+        lines.append("note: read-only dry-run; extractor was not invoked")
+    return "\n".join(lines)
+
+
+def _assertions_text(tokens: list[str], engine) -> str:
+    if tokens and tokens[0].lower() == "rebuild":
+        return _assertions_rebuild_text(tokens[1:], engine)
+    return _help_text(
+        "`/lcm assertions` requires `rebuild [--apply] [--limit N]`"
+    )
+
+
 def _resolve_storage_dtype(config, override: str | None = None) -> str:
     """Resolve the vector storage dtype: an explicit --dtype flag, else config.
 
@@ -2679,6 +2849,16 @@ def _embedding_current_profile(conn: sqlite3.Connection) -> sqlite3.Row | None:
         raise
 
 
+def _register_summary_has_text(conn: sqlite3.Connection) -> None:
+    """Expose Python's Unicode whitespace semantics to summary discovery SQL."""
+    conn.create_function(
+        "lcm_summary_has_text",
+        1,
+        lambda value: int(isinstance(value, str) and bool(value.strip())),
+        deterministic=True,
+    )
+
+
 def _embedding_pending_rows(
     conn: sqlite3.Connection,
     identity_hash: str,
@@ -2688,6 +2868,7 @@ def _embedding_pending_rows(
     # A dispatched/uncertain row may already have been accepted remotely, so it
     # must never be silently resent; only explicit --retry-uncertain operator
     # authorization can return it to discovery.
+    _register_summary_has_text(conn)
     inflight_exists = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' "
         "AND name='lcm_embedding_backfill_inflight'"
@@ -2705,6 +2886,7 @@ def _embedding_pending_rows(
     )
     where = """
         n.depth = 0
+        AND lcm_summary_has_text(n.summary) = 1
         AND NOT EXISTS (
             SELECT 1
             FROM lcm_embedding_meta AS m
@@ -2739,10 +2921,12 @@ def _embedding_authorized_uncertain_rows(
     limit: int,
 ) -> tuple[int, list[sqlite3.Row]]:
     """Select exact uncertain rows without consuming their durable markers."""
+    _register_summary_has_text(conn)
     where = """
         f.identity_hash = ?
         AND f.state = 'uncertain'
         AND n.depth = 0
+        AND lcm_summary_has_text(n.summary) = 1
         AND NOT EXISTS (
             SELECT 1
             FROM lcm_embedding_meta AS m
@@ -2771,15 +2955,18 @@ def _embedding_authorized_uncertain_rows(
     return total, rows
 
 
-def _embedding_batch_estimate(provider: str, token_counts: list[int]) -> int:
+def _embedding_batch_estimate(
+    provider: str, token_counts: list[int], max_batch_items: int | None = None
+) -> int:
     if not token_counts:
         return 0
+    batch_size = _embedding_backfill_batch_size(max_batch_items)
     if provider.lower() != "voyage":
-        return int(math.ceil(len(token_counts) / _EMBEDDING_BACKFILL_BATCH_SIZE))
+        return int(math.ceil(len(token_counts) / batch_size))
     estimated = 0
-    for offset in range(0, len(token_counts), _EMBEDDING_BACKFILL_BATCH_SIZE):
+    for offset in range(0, len(token_counts), batch_size):
         batch_tokens = 0
-        for tokens in token_counts[offset:offset + _EMBEDDING_BACKFILL_BATCH_SIZE]:
+        for tokens in token_counts[offset:offset + batch_size]:
             if tokens > _VOYAGE_MAX_DOCUMENT_TOKENS:
                 continue
             if batch_tokens and batch_tokens + tokens > _VOYAGE_MAX_BATCH_TOKENS:
@@ -2792,12 +2979,12 @@ def _embedding_batch_estimate(provider: str, token_counts: list[int]) -> int:
 
 
 def _chunk_context_estimates(
-    documents: list[tuple[str, str, int]]
+    documents: list[tuple[str, str, int]], max_batch_items: int | None = None
 ) -> tuple[int, int, int]:
     """Estimate tokens/billable-tokens/requests for the contextualized chunk path.
 
     The dry-run estimate must match what the grouped apply path actually sends
-    (FIX 4). Apply slices the selected documents into ``_EMBEDDING_BACKFILL_BATCH_SIZE``
+    (FIX 4). Apply slices the selected documents into batch-size
     batches, groups each batch's chunks per source message
     (``group_by_store_id``), drops any single chunk over the per-chunk context cap
     (``_VOYAGE_CONTEXT_MAX_CHUNK_TOKENS`` = 32K, NOT the flat 27K per-document cap),
@@ -2809,8 +2996,9 @@ def _chunk_context_estimates(
     total_tokens = sum(int(document[2]) for document in documents)
     billable_tokens = 0
     total_requests = 0
-    for offset in range(0, len(documents), _EMBEDDING_BACKFILL_BATCH_SIZE):
-        batch = documents[offset:offset + _EMBEDDING_BACKFILL_BATCH_SIZE]
+    batch_size = _embedding_backfill_batch_size(max_batch_items)
+    for offset in range(0, len(documents), batch_size):
+        batch = documents[offset:offset + batch_size]
         store_ids = [str(item[0]).split(":", 1)[0] for item in batch]
         per_document_tokens: list[list[int]] = []
         for group_indexes in group_by_store_id(store_ids):
@@ -3685,7 +3873,9 @@ def _embedding_backfill_summary_text(
             or document[2] <= _VOYAGE_MAX_DOCUMENT_TOKENS
         )
         est_batches = _embedding_batch_estimate(
-            provider_name, [document[2] for document in documents]
+            provider_name,
+            [document[2] for document in documents],
+            getattr(engine._config, "embedding_max_batch_items", None),
         )
         return est_tokens, est_cost_tokens, est_batches
 
@@ -3786,7 +3976,10 @@ def _embedding_backfill_summary_text(
         ):
             error = "configured provider does not match the current profile; run `/lcm embed warmup`"
         else:
-            for offset in range(0, len(documents), _EMBEDDING_BACKFILL_BATCH_SIZE):
+            batch_size = _embedding_backfill_batch_size(
+                getattr(engine._config, "embedding_max_batch_items", None)
+            )
+            for offset in range(0, len(documents), batch_size):
                 # Renew the heartbeat lease; if it was stolen (TTL lapsed and a
                 # second owner took over), stop rather than write under a lease
                 # we no longer hold.
@@ -3798,7 +3991,7 @@ def _embedding_backfill_summary_text(
                     budget_exhausted = True
                     stop_reason = "op_budget_exhausted"
                     break
-                batch = documents[offset:offset + _EMBEDDING_BACKFILL_BATCH_SIZE]
+                batch = documents[offset:offset + batch_size]
                 # Claim the bounded outer batch. The provider invokes the
                 # callback immediately before EACH real sub-request, and only
                 # those exact indexes become dispatched under that request's
@@ -4435,7 +4628,9 @@ def _chunk_backfill_text(
             provider_name.strip().lower() in {"voyage", "voyageai"}
             and _is_voyage_context_model(model)
         ):
-            return _chunk_context_estimates(documents)
+            return _chunk_context_estimates(
+                documents, getattr(engine._config, "embedding_max_batch_items", None)
+            )
         est_tokens = sum(document[2] for document in documents)
         est_cost_tokens = sum(
             document[2]
@@ -4444,7 +4639,9 @@ def _chunk_backfill_text(
             or document[2] <= _VOYAGE_MAX_DOCUMENT_TOKENS
         )
         est_batches = _embedding_batch_estimate(
-            provider_name, [document[2] for document in documents]
+            provider_name,
+            [document[2] for document in documents],
+            getattr(engine._config, "embedding_max_batch_items", None),
         )
         return est_tokens, est_cost_tokens, est_batches
 
@@ -4565,7 +4762,10 @@ def _chunk_backfill_text(
         ):
             error = "configured provider does not match the chunk profile; run `/lcm embed warmup`"
         else:
-            for offset in range(0, len(documents), _EMBEDDING_BACKFILL_BATCH_SIZE):
+            batch_size = _embedding_backfill_batch_size(
+                getattr(engine._config, "embedding_max_batch_items", None)
+            )
+            for offset in range(0, len(documents), batch_size):
                 if not lease.renew():
                     lease_lost = True
                     stop_reason = "lease_lost"
@@ -4574,7 +4774,7 @@ def _chunk_backfill_text(
                     budget_exhausted = True
                     stop_reason = "op_budget_exhausted"
                     break
-                batch = documents[offset:offset + _EMBEDDING_BACKFILL_BATCH_SIZE]
+                batch = documents[offset:offset + batch_size]
                 batch_authorized_ids = {
                     item[0] for item in batch if item[0] in authorized_uncertain_ids
                 }
@@ -4901,6 +5101,9 @@ def handle_lcm_command(raw_args: str | None, engine) -> str:
 
     if head == "rollups":
         return _rollups_text(rest, engine)
+
+    if head == "assertions":
+        return _assertions_text(rest, engine)
 
     if head == "preset":
         return _preset_text(rest, engine)
