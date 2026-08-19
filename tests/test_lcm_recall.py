@@ -422,6 +422,58 @@ def test_rerank_applies_and_reorders_with_voyage_provider(recall_engine, monkeyp
     assert payload["hits"][0]["node_id"] == b
 
 
+def test_rerank_window_limit_clamps_provider_documents(recall_engine, monkeypatch):
+    class CountingRerankProvider(MockProvider):
+        provider_id = "voyage"
+
+        def __init__(self):
+            super().__init__()
+            self.document_counts = []
+
+        def rerank(self, query, documents, *, top_k=None, timeout, model="rerank-2.5-lite"):
+            self.document_counts.append(len(documents))
+            return [(index, float(len(documents) - index)) for index in range(len(documents))]
+
+    provider = CountingRerankProvider()
+    recall_engine._config.embeddings_enabled = True
+    recall_engine._config.rerank_enabled = True
+    recall_engine._config.embedding_provider = "voyage"
+    recall_engine._config.embedding_model = "voyage-3"
+    hits = [
+        {
+            "kind": "summary",
+            "node_id": index,
+            "session_id": f"session-{index}",
+            "timestamp": 5.0,
+            "snippet": f"kanban dashboard sprint {index}",
+        }
+        for index in range(60)
+    ]
+    monkeypatch.setattr(
+        lcm_tools,
+        "_resolve_recall_provider",
+        lambda *_args, **_kwargs: provider,
+    )
+    monkeypatch.setattr(
+        lcm_tools,
+        "_lcm_recall_summary_arm",
+        lambda *_args, **_kwargs: (list(hits), "full", len(hits), len(hits), []),
+    )
+
+    lcm_tools.lcm_recall(
+        {"query": "kanban dashboard sprint", "include": "summaries", "limit": 25},
+        engine=recall_engine,
+    )
+    assert provider.document_counts == [50]
+
+    recall_engine._config.rerank_window_limit = 10
+    lcm_tools.lcm_recall(
+        {"query": "kanban dashboard sprint", "include": "summaries", "limit": 25},
+        engine=recall_engine,
+    )
+    assert provider.document_counts == [50, 10]
+
+
 def test_rerank_failure_falls_back_to_rrf_order(recall_engine, monkeypatch):
     recall_engine._config.rerank_enabled = True
     a = _add_summary(recall_engine, "kanban gamma", session_id="session-a", created_at=5.0)
@@ -1099,6 +1151,12 @@ def test_recall_query_timeout_has_its_own_budget(monkeypatch, tmp_path):
     cfg = LCMConfig.from_env()
     assert cfg.recall_query_timeout_s == 12.5
     assert cfg.embedding_query_timeout_s == 3.0  # grep's deadline untouched
+
+
+def test_rerank_window_limit_defaults_to_zero_and_reads_env(monkeypatch, tmp_path):
+    assert LCMConfig(database_path=str(tmp_path / "default.db")).rerank_window_limit == 0
+    monkeypatch.setenv("LCM_RERANK_WINDOW_LIMIT", "10")
+    assert LCMConfig.from_env().rerank_window_limit == 10
 
 
 def test_summary_source_expansion_refuses_an_expired_deadline(recall_engine):

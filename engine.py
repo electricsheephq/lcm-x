@@ -1034,6 +1034,16 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         """
         return self._last_compression_status
 
+    @last_compression_status.setter
+    def last_compression_status(self, value: str) -> None:
+        """Allow host to reset status before each compress() pass.
+
+        Without a setter, ``setattr(engine, "last_compression_status", "")``
+        in ``conversation_compression.py`` raises ``AttributeError: property
+        has no setter``, crashing context compression.
+        """
+        self._last_compression_status = value
+
     @property
     def last_compression_noop_reason(self) -> str:
         """Human-readable reason for the latest no-op compression decision."""
@@ -5646,7 +5656,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             content = sanitize_pre_compaction_content(content)
 
             if role == "assistant":
-                tool_calls = msg.get("tool_calls", [])
+                # The host's in-memory chat history may set tool_calls to None for
+                # shape uniformity; stored rows never can (MessageStore.to_openai_msg
+                # drops the key when the value is falsy). Treat any falsy value as
+                # "no tool calls" rather than iterating it.
+                tool_calls = msg.get("tool_calls") or []
                 matched_tool_calls = [
                     tc for tc in tool_calls
                     if not _tool_call_id(tc) or _tool_call_id(tc) in matched_tool_ids
