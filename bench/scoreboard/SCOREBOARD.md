@@ -2,7 +2,7 @@
 
 Every number ships with its full run config, variance, fail-close accounting, and known dataset defects — rows that cannot meet the standard do not render.
 
-Generated from `results.jsonl` (sha256: `cb1983d74d0c6a149f43a64c894e0257499bcc65eea8d32c11f430401369df4f`, rows: 9)
+Generated from `results.jsonl` (sha256: `8b73abf73543264e0d1efa2707aaecffb0e118b12e60c5b5bddff25b8f6f664b`, rows: 10)
 
 ## Summary
 
@@ -14,6 +14,7 @@ Generated from `results.jsonl` (sha256: `cb1983d74d0c6a149f43a64c894e0257499bcc6
 | ~~LoCoMo (locomo10, 1,986q)~~ | ~~accuracy~~ | ~~47.0% (MemScore)~~ | ~~F~~ | ~~2026-07-30~~ | ~~[details](#locomo10-1986-arm-a-2026-07-30)~~ → [successor](#locomo10-1986-declared-2026-08-02) |
 | LongMemEval-V1 (S, 500q) | accuracy | 455/500 (91.0%) | P | 2026-07-29 | [details](#longmemeval-v1-s500-accuracy-2026-07-29) |
 | LongMemEval-V1 (S, 500q) | latency_delta_s_per_q | −56.3 s/question vs vanilla (22% faster) | P | 2026-07-29 | [details](#longmemeval-v1-s500-latency-2026-07-29) |
+| LongMemEval-V1 MEDIUM (500q, retrieval row) | lcm_recall (primary arm): recall@10 / ndcg@10 / recall@1, fail-closed | recall@10 95.6% \| ndcg@10 0.861 \| recall@1 50.0% (470 scored + 30 abstention-excluded; 0 instrument failures) | P | 2026-08-19 | [details](#longmemeval-v1-m500-retrieval-2026-08-19) |
 | LongMemEval-V2 (451q, agentic) | accuracy | 298/451 (66.1%) | P | 2026-07-27 | [details](#longmemeval-v2-451-agentic-2026-07-27) |
 | LongMemEval-V2 (451q, static) | accuracy | 123/451 (27.3%) — official static protocol, fixed weak reader | P | 2026-07-31 | [details](#longmemeval-v2-451-static-2026-07-31) |
 | LongMemEval-V2 static (451q) | judged accuracy, full set | 143/451 = 31.7% (web 97/240 = 40.4%, enterprise 46/211 = 21.8%) | F | 2026-08-03 | [details](#v2-static-451-sota-luna-2026-08-03) |
@@ -200,6 +201,66 @@ pre-registered A/A′ pair on fresh stores: 69/1,986 discordant (3.47%), aggrega
 - +7.6 vs the superseded row is NOT pure retrieval: the judge rubric and adversarial gold changed between configs (both disclosed); corrupted gold unchanged (ceiling ≈95%)
 - initial publication claimed a single-hop regression from a label-scramble — corrected within hours (F48 §3-CORRECTION); the REAL new finding: the FTS arm is near-inert in delivery on this dataset in BOTH configs (3/49,650 vs 2/49,650) despite prose mode — under investigation
 - adversarial 32.7 is the measured-honest number against canonical abstention gold with the known B3 product weakness unfixed; Tier-F config; Voyage variant queues separately
+
+### <a id="longmemeval-v1-m500-retrieval-2026-08-19"></a>longmemeval-v1-m500-retrieval-2026-08-19
+
+**id:**
+longmemeval-v1-m500-retrieval-2026-08-19
+
+**benchmark:**
+LongMemEval-V1 MEDIUM (500q, retrieval row)
+
+**metric:**
+lcm_recall (primary arm): recall@10 / ndcg@10 / recall@1, fail-closed
+
+**value:**
+0.9559
+
+**display:**
+recall@10 95.6% \| ndcg@10 0.861 \| recall@1 50.0% (470 scored + 30 abstention-excluded; 0 instrument failures)
+
+**tier:**
+P
+
+**date:**
+2026-08-19
+
+**system_commit:**
+lcm-x v0.22.0 (92fd69b7) — includes ported #198 instrument + #199 checkpoint/embed-cache
+
+**harness_commit:**
+in-repo instrument (benchmarking/longmemeval.py @ v0.22.0)
+
+**judge:**
+deterministic retrieval metrics (no LLM)
+
+**reader:**
+NONE — pure retrieval row (the QA/reader row is a separate future registration)
+
+**retrieval_config:**
+voyage-context-3 embeddings, 6 shards, warm content-hash cache (505,695 entries; determinism probe 20/20 bitwise); FTS prose flag unset (disclosed, F49-class)
+
+**dataset_exposure:**
+longmemeval_m sha fb5413e3, HF revision 2ec2a557, prepared manifest 300cf936 (LEXAR-recovered, re-verified); no tuning on it
+
+**breakdown:**
+arms: lcm_recall r@1 .500/r@10 .956/ndcg .861 \| hybrid_rerank .365/.779/.668 \| summary_vectors .363/.779/.667 \| chunk_vectors .301/.424/.427 \| hybrid_rrf .143/.697/.456 \| fts .007/.046/.026
+
+**variance:**
+A/A' 100q fixed-seed subset (seed 20260802): 95/95 scored questions per-question IDENTICAL, aggregate spread 0.00pt — fully deterministic instrument
+
+**failclose:**
+0/500 instrument failures; 30 abstention questions excluded by instrument design and counted
+
+**evidence:**
+- bench/FINDING-F53-V1M-FLAGSHIP-FIRST-ROW.md
+- bench/specs/RUN-SHEET-V1M-REGISTERED.md
+- session-notes 2026-08-19 v1m-launch2 artifacts + lme-runs/m-full2-shard-*
+
+**caveats:**
+- The 25q smoke's r@1 0.96 was a first-N sampling artifact (full-500 r@1 = 0.50); first-N smokes retired, seeded-random only
+- Delivery (r@10 95.6%) clears the 90% line; top-slot ranking (r@1 50%) is the declared next lever
+- FTS arm dark (prose flag unset) — disclosed; V1-M FTS-ON variant decided after LoCoMo C1
 
 ### <a id="longmemeval-v1-s500-accuracy-2026-07-29"></a>longmemeval-v1-s500-accuracy-2026-07-29
 
