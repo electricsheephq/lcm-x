@@ -1,6 +1,8 @@
 # Operator guide
 
-This page holds the detailed install, activation, configuration, diagnostics, and slash-command reference that used to live in the top-level README. The README stays focused on first-run adoption; this file is the operator reference.
+This page holds the detailed install, activation, configuration, diagnostics,
+and slash-command reference for LCM-X. The README stays focused on first-run
+adoption; this file is the operator reference.
 
 ## Requirements
 
@@ -10,17 +12,18 @@ This page holds the detailed install, activation, configuration, diagnostics, an
 
 ## Install
 
-Canonical install path: clone `hermes-lcm` as a general user plugin.
+Canonical install path: clone LCM-X into the compatibility plugin directory
+`hermes-lcm`.
 
 ```bash
-git clone https://github.com/stephenschoettler/hermes-lcm \
+git clone https://github.com/electricsheephq/lcm-x \
   ~/.hermes/plugins/hermes-lcm
 ```
 
 For a profile-specific install:
 
 ```bash
-git clone https://github.com/stephenschoettler/hermes-lcm \
+git clone https://github.com/electricsheephq/lcm-x \
   ~/.hermes/profiles/myprofile/plugins/hermes-lcm
 ```
 
@@ -79,7 +82,7 @@ If you installed a symlink from a separate checkout:
 
 Restart Hermes after updating.
 
-## Upgrade from v0.20.0 to v0.21.0-rc1
+## Upgrade from v0.20.0 to v0.22.0
 
 1. While the old runtime is running, run `/lcm backup`. If Hermes or any other
    SQLite writer may still be running, this is the only supported online backup
@@ -91,7 +94,7 @@ Restart Hermes after updating.
    live.
 3. Update the plugin checkout to the RC and restart Hermes.
 4. Send one normal message, then confirm `lcm_status` reports plugin version
-   `0.21.0-rc1` and the expected database path.
+   `0.22.0` and the expected database path.
 5. For a migration-shape audit, query that database with
    `SELECT value FROM metadata WHERE key = 'schema_version';`; the expected
    result is `5`.
@@ -135,7 +138,7 @@ Typical output:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm v0.21.0-rc1 (15 tools)
+  ✓ hermes-lcm v0.22.0 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm
@@ -146,10 +149,12 @@ For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
 best-effort git identity:
 `plugin_git_commit`, `plugin_git_branch`, and `plugin_git_dirty`.
 
-The product-owned recall policy is injected through the host's ephemeral
-`pre_llm_call` user-context seam only after an LCM engine is bound to the
-session. It does not modify the system prompt or activate when another context
-engine is serving the turn. Its canonical file and digest source is
+The product-owned recall policy is distributed through the bundled
+`hermes-lcm` skill. It is deliberately not injected through the host's
+`pre_llm_call` user-context seam because current Hermes persists that context
+as user `api_content` and replays it on later turns. Bounded pre-answer
+evidence may still use the hook when explicitly enabled, but the hook never
+prepends the policy. The canonical file and digest source is
 `skills/hermes-lcm/references/recall-policy.md`.
 
 ## Troubleshooting
@@ -189,6 +194,8 @@ environment variables:
 | `LCM_CONTEXT_THRESHOLD` | `0.35` | Fraction of the context window that triggers LCM compaction |
 | `LCM_FRESH_TAIL_COUNT` | `32` | Recent messages protected from compaction |
 | `LCM_FRESH_TAIL_MAX_TOKENS` | `0` | Optional token cap for the protected fresh tail (`0` disables it); always retains the newest message and complete assistant/tool-result groups |
+| `LCM_FRESH_TAIL_PRESSURE_YIELD_ENABLED` | `true` | Default-on: when compaction is deadlocked because the count-protected tail covers the whole over-threshold session (#441), the tail yields to a derived token bound so compaction can progress; `false` restores the strict count tail (rollback switch) |
+| `LCM_FRESH_TAIL_PRESSURE_YIELD_MIN_OBSERVATIONS` | `3` | Consecutive tail-blocked compaction attempts under host-observed pressure before the yield engages; any attempt not blocked by the tail resets the count; `1` yields on first observation |
 | `LCM_INCREMENTAL_MAX_DEPTH` | `3` | Max DAG condensation depth (`-1` = unlimited, `0` = leaf only); enables hierarchical summarization |
 | `LCM_LEAF_CHUNK_TOKENS` | `20000` | Raw-backlog floor before leaf compaction; with dynamic chunking enabled, the base chunk target |
 | `LCM_DYNAMIC_LEAF_CHUNK_ENABLED` | `false` | Enable chunk-sized leaf compaction passes instead of compacting the whole non-tail raw backlog per pass |
@@ -224,12 +231,14 @@ environment variables:
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `24` | Minimum hours between startup FTS5 deep integrity-checks (O(index size)). `0` checks every startup (previous behavior); a negative value never checks on startup. Structural checks always run regardless. |
 | `LCM_ENABLE_SLASH_COMMAND` | `false` | Enable the optional `/lcm` operator command surface |
 | `LCM_EMBEDDINGS_ENABLED` | `false` | Opt in to embedding warmup, backfill, and semantic retrieval storage |
+| `LCM_RERANK_WINDOW_LIMIT` | `0` | Optional positive cap on the `lcm_recall` rerank delivery window; `0` keeps the historical window unchanged, while a bound can stabilize the delivery set at `k ≤ limit` |
 | `LCM_EMBEDDING_PROVIDER` | empty | Embedding provider: `voyage`, `ollama`, or `fastembed` |
 | `LCM_EMBEDDING_MODEL` | empty | Provider model identifier registered by `/lcm embed warmup` |
 | `LCM_EMBEDDING_STORAGE_DTYPE` | `float32` | Vector storage dtype for newly-registered embedding profiles: `float32` (byte-identical legacy path) or `int8` (per-vector quantization plus a sign-bit prescreen, a distinct profile identity). See [Vector storage scale options (v3)](#vector-storage-scale-options-v3) |
 | `LCM_EMBEDDING_STORE_DIM` | `0` | Optional Matryoshka truncation dimension for newly-registered profiles (`0` = full profile dim); truncated vectors are renormalized and are also a distinct profile identity |
 | `LCM_EMBEDDING_BINARY_PRESCREEN` | `false` | Write the sign-bit prescreen for float32 identities too (int8 identities always write it), unlocking the full-corpus two-stage KNN; flipping it on an already-populated identity mints a new, distinct identity rather than mutating the existing one |
 | `LCM_KNN_PRESCREEN_MULTIPLIER` | `4` | Stage-1 prescreen breadth for two-stage KNN: `M = multiplier × k` lowest-Hamming-distance survivors are exact-rescored |
+| `LCM_EMBEDDING_BACKFILL_BATCH_SIZE` | `32` | Documents claimed per backfill batch (`/lcm embed backfill` and state/chunk backfill). Non-positive or non-integer values fall back to the default. The effective value also clamps to the provider request-item ceiling — the lower of `LCM_EMBEDDING_MAX_BATCH_ITEMS` (normalized like the provider: non-positive means 1) and 1000 — so the dry-run estimate always matches real request splits |
 | `LCM_PROACTIVE_RECALL_ENABLED` | `false` | Opt in to proactive memory injection: at assembly, embed the newest user message and inject one budget-capped "relevant memories" block (needs `LCM_EMBEDDINGS_ENABLED`). Default-off keeps assembly byte-identical |
 | `LCM_PROACTIVE_RECALL_MIN_SCORE` | `0.01` | Relevance floor for an injected memory. RRF-scale by default (a top-of-arm hit is ~0.016); with `LCM_RERANK_ENABLED` the score is a `[0,1]` cross-encoder relevance, so raise this (e.g. `0.3`) for a strict semantic gate |
 | `LCM_PROACTIVE_RECALL_BUDGET_TOKENS` | `500` | Hard token budget for the single injected block (1-3 items) |
@@ -1029,7 +1038,7 @@ precondition that makes the final unlink safe.
 ### OpenClaw/lossless-claw history
 
 `scripts/import_lossless_claw.py` is the local, dry-run-by-default operator path
-for moving OpenClaw history into a Hermes-LCM `lcm.db`. It supports two source
+for moving OpenClaw history into an LCM-X `lcm.db`. It supports two source
 families:
 
 - `--source-db <path>`: import from an existing lossless-claw/OpenClaw SQLite

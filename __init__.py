@@ -162,8 +162,14 @@ def _effective_preanswer_mode(config) -> str:
     return raw if raw in {"off", "legacy_selective", "requirements_v1"} else "off"
 
 
-def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
-    """Keep ordinary baseline bytes, or add one bounded product-owned delta."""
+def _pre_llm_context(active_engine, payload: dict) -> dict | None:
+    """Return bounded evidence only when it is materially available.
+
+    Hermes persists ``pre_llm_call`` context in the current user's
+    ``api_content`` and replays that sidecar on later provider requests.
+    Product policy must therefore stay in the bundled skill instead of this
+    user-attributed hook seam.
+    """
     enabled_toolsets = payload.get("enabled_toolsets")
     context_engine_enabled = not (
         isinstance(enabled_toolsets, (list, tuple, set, frozenset))
@@ -172,11 +178,11 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
     config = getattr(active_engine, "_config", None)
     mode = _effective_preanswer_mode(config)
     if mode == "off" or not context_engine_enabled:
-        return {"context": recall_policy}
+        return None
     try:
         question = str(payload.get("user_message") or "").strip()
         if not question:
-            return {"context": recall_policy}
+            return None
         question_date = _hook_question_date(payload)
 
         if mode == "requirements_v1":
@@ -185,7 +191,7 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
 
             contract = compile_answer_contract(question, question_date)
             if contract.status != "planned":
-                return {"context": recall_policy}
+                return None
             baseline_was_internal = not isinstance(
                 payload.get("baseline_refs"), (list, tuple)
             )
@@ -207,8 +213,8 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
                 pass
             context = result.get("context") if isinstance(result, dict) else None
             if not isinstance(context, str) or not context:
-                return {"context": recall_policy}
-            return {"context": f"{recall_policy}\n\n{context}"}
+                return None
+            return {"context": context}
 
         from .selective_recall import (
             build_selective_session_bundle,
@@ -217,9 +223,10 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
 
         route = route_selective_recall(question, question_date)
         if route["route"] == "ordinary":
-            # This branch deliberately performs no recall, session load, or
-            # auxiliary-model call.  The ordinary policy bytes stay identical.
-            return {"context": recall_policy}
+            # This branch deliberately performs no recall, session load,
+            # auxiliary-model call, or user-attributed product-policy
+            # injection.
+            return None
 
         # Official Hermes hook payloads do not currently include answer-ready
         # refs.  Create that bounded baseline in product code when absent; the
@@ -284,7 +291,7 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
                 logger.warning("LCM selective compiler failed open: %s", exc)
     except Exception as exc:  # pragma: no cover - outer host safety net
         logger.warning("LCM pre-answer evidence failed open: %s", exc)
-        return {"context": recall_policy}
+        return None
     try:
         active_engine._last_preanswer_evidence_trace = (
             {
@@ -306,14 +313,20 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
         if isinstance(value, str) and value:
             augmentations.append(value)
     if not augmentations:
-        return {"context": recall_policy}
-    return {"context": f"{recall_policy}\n\n" + "\n\n".join(augmentations)}
+        return None
+    return {"context": "\n\n".join(augmentations)}
 
 
 def register(ctx):
     """Plugin entry point — register the LCM context engine and tools."""
     from .config import LCMConfig
-    from .engine import LCMEngine, resolve_active_lcm_engine
+    from .engine import LCMEngine
+    from .engine_registry import (
+        ActiveEngineUseStatus,
+        use_active_lcm_engine,
+        use_cold_lcm_engine,
+        use_lcm_engine,
+    )
     from .schemas import (
         LCM_GREP,
         LCM_RECALL,
@@ -339,8 +352,8 @@ def register(ctx):
     try:
         from hermes_cli.config import get_hermes_home
         hermes_home = str(get_hermes_home())
-    except Exception:
-        import os
+    except Exception as exc:
+        logger.warning("hermes-lcm: could not import get_hermes_home (%s); falling back to env", exc)
         hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
 
     engine = LCMEngine(config=config, hermes_home=hermes_home)
@@ -392,11 +405,10 @@ def register(ctx):
         # Hermes invokes this hook after the context engine has received
         # on_session_start(). Resolve through LCM's own registry so merely
         # loading the plugin cannot inject guidance when another context
-        # engine is serving the turn. Capture one validated policy value for
-        # deterministic, byte-stable injection across eligible turns.
+        # engine is serving the turn. The hook may add bounded evidence, but
+        # product policy remains in the bundled skill because current Hermes
+        # persists hook context as user-attributed ``api_content``.
         try:
-            recall_policy = get_recall_policy()
-
             def _on_pre_llm_call(**payload):
                 session_id = str(payload.get("session_id") or "")
                 conversation_id = str(
@@ -404,13 +416,17 @@ def register(ctx):
                     or payload.get("gateway_session_key")
                     or ""
                 )
-                active_engine = resolve_active_lcm_engine(
+                result = use_active_lcm_engine(
+                    lambda active_engine: _pre_llm_context(
+                        active_engine,
+                        payload,
+                    ),
                     session_id=session_id,
                     conversation_id=conversation_id,
                 )
-                if active_engine is None or getattr(active_engine, "name", None) != "lcm":
+                if not result.used:
                     return None
-                return _pre_llm_context(active_engine, recall_policy, payload)
+                return result.value
 
             register_hook("pre_llm_call", _on_pre_llm_call)
         except Exception as exc:
@@ -509,13 +525,9 @@ def register(ctx):
             history = kwargs.get("conversation_history")
             if not history:
                 return
-            active_engine = kwargs.get("context_compressor")
-            if not (
-                active_engine is not None
-                and getattr(active_engine, "name", None) == "lcm"
-                and hasattr(active_engine, "ingest")
-            ):
-                active_engine = None
+            host_engine = kwargs.get("context_compressor")
+            if getattr(host_engine, "name", None) != "lcm":
+                host_engine = None
 
             session_id = str(kwargs.get("session_id") or "")
             conversation_id = str(
@@ -525,24 +537,46 @@ def register(ctx):
             )
             platform = str(kwargs.get("platform") or "")
 
-            if active_engine is None:
-                active_engine = resolve_active_lcm_engine(
-                    session_id=session_id,
-                    conversation_id=conversation_id,
-                ) or engine
+            def _bind_and_ingest(active_engine):
+                # The host-supplied engine or genuinely cold plugin prototype
+                # may establish its first binding while the same engine lease
+                # excludes concurrent rebind/shutdown.
+                if session_id and _engine_bound_session_id(active_engine) != session_id:
+                    active_engine._on_session_start_unlocked(
+                        session_id,
+                        platform=platform,
+                        conversation_id=conversation_id or None,
+                    )
+                active_engine.ingest(history)
 
             try:
-                # Session identity is authoritative for rebinding. Older hosts
-                # can deliver stale lane metadata alongside the correct active
-                # session id; rebinding a clone on conversation_id mismatch
-                # alone would move it away from the runtime it is serving.
-                _ensure_engine_bound_to_session(
-                    active_engine,
-                    session_id,
-                    platform=platform,
-                    conversation_id=conversation_id,
-                )
-                active_engine.ingest(history)
+                if host_engine is not None:
+                    result = use_lcm_engine(
+                        host_engine,
+                        _bind_and_ingest,
+                        timeout=None,
+                    )
+                else:
+                    result = use_active_lcm_engine(
+                        lambda active_engine: active_engine.ingest(history),
+                        session_id=session_id,
+                        conversation_id=conversation_id,
+                        timeout=None,
+                    )
+                    if (
+                        result.status is ActiveEngineUseStatus.ENGINE_NOT_RESIDENT
+                    ):
+                        result = use_cold_lcm_engine(
+                            engine,
+                            _bind_and_ingest,
+                            timeout=None,
+                        )
+
+                if not result.used:
+                    logger.warning(
+                        "LCM post_llm_call skipped ingest: stable engine use ended with %s",
+                        result.status.value,
+                    )
             except Exception as exc:
                 logger.debug("LCM post_llm_call ingest error: %s", exc)
 
