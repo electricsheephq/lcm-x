@@ -4,7 +4,7 @@ Use this page when you need the exact LCM tool contract or archive-migration not
 
 ## Agent Tools
 
-Hermes-LCM's bundled skill and recall-policy reference route current-session,
+LCM-X's bundled `hermes-lcm` skill and recall-policy reference route current-session,
 cross-conversation, and time-bounded questions through these tools. Use
 `session_search` for Hermes-tracked history that is not present in `lcm.db`.
 
@@ -300,7 +300,8 @@ directly with `lcm_expand`.
 
 ### lossless-claw/OpenClaw import utility
 
-`hermes-lcm` includes an opt-in operator script for backfilling raw message rows from a lossless-claw/OpenClaw LCM SQLite database into the local hermes-lcm SQLite store:
+LCM-X includes an opt-in operator script for backfilling raw message rows from
+a lossless-claw/OpenClaw LCM SQLite database into the local LCM-X SQLite store:
 
 ```bash
 python scripts/import_lossless_claw.py \

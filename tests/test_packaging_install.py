@@ -378,7 +378,7 @@ def test_plugin_entrypoint_registers_lcm_context_engine():
     identity = engine.get_status()["runtime_identity"]
     repo_root = Path(__file__).resolve().parent.parent
     assert identity["plugin_name"] == "hermes-lcm"
-    assert identity["plugin_version"] == "0.21.0-rc2"
+    assert identity["plugin_version"] == "0.22.0"
     assert Path(identity["plugin_path"]) == repo_root
     assert identity["database_path_source"] in {"config.database_path", "hermes_home", "default_home"}
     assert identity["plugin_git_commit"]
@@ -545,7 +545,7 @@ def test_plugin_entrypoint_registers_bundled_skill_and_keeps_recall_policy_out_o
     second = policy_hook(session_id="active-session")
     assert first == second
     assert first is None
-    assert "Hermes-LCM Recall Policy" in module.get_recall_policy()
+    assert "LCM-X recall policy" in module.get_recall_policy()
     ctx.engine.shutdown()
 
 
