@@ -17,15 +17,19 @@ one item, so the per-question max is 1/n_gold → aggregate ceiling **0.6552**. 
 delivered in top-10 but not at rank 1, and 9 hard failures (nothing gold delivered; 6 of the 9
 are temporal).
 
-## 3. Where the misses live (pool share of category)
-| category | pool/scored | gold@1 signal |
-|---|---|---|
-| single-session-preference | **17/30 (57%)** | worst by far — preference statements not surfacing first |
-| temporal | 29/127 (23%) | + 6 of 9 hard failures |
-| multi-session | 25/121 (21%) | |
-| single-session-user | 16/64 (25%) | |
-| knowledge-update | 7/72 (10%) | |
-| single-session-assistant | 3/56 (5%) | essentially solved (94.6% r@1 rate) |
+## 3. Where the misses live (full 106-question pool = delivered-not-first + hard failures)
+| category | miss pool/scored | delivered + hard | signal |
+|---|---|---|---|
+| single-session-preference | **18/30 (60%)** | 17 + 1 | worst by far — preference statements not surfacing first |
+| temporal | **35/127 (28%)** | 29 + 6 | biggest absolute pool; owns 6 of the 9 hard failures |
+| multi-session | 26/121 (21%) | 25 + 1 | |
+| single-session-user | 17/64 (27%) | 16 + 1 | |
+| knowledge-update | 7/72 (10%) | 7 + 0 | |
+| single-session-assistant | 3/56 (5%) | 3 + 0 | essentially solved (94.6% r@1 rate) |
+
+Numerators sum to the full 106-question pool of §2; the split shows delivered-but-not-first
+(rescuable by ranking) vs hard failures (nothing gold delivered — a retrieval gap, not a
+ranking one).
 
 ## 4. Cross-arm rescue: half the pool is already ranked correctly by SOME arm
 On 52/97 delivered misses another arm puts gold at #1 (hybrid_rerank 25, chunk_vectors 24,
