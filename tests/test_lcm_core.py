@@ -6875,9 +6875,9 @@ class TestExtraction:
         Note: with tool_calls=None on the assistant, _matched_tool_call_ids
         returns an empty set (the assistant never declared any tool_call ids),
         so the matched-tool_calls branch is intentionally NOT exercised here.
-        The unconditional tool-result branch at engine.py:5074-5078 emits the
-        tool result independently. A separate test would be needed to cover
-        the matched-tool-calls code path with a non-None tool_calls list.
+        The `role == "tool"` branch of _serialize_messages emits the tool
+        result independently. A separate test would be needed to cover the
+        matched-tool-calls code path with a non-None tool_calls list.
         """
         from hermes_lcm.config import LCMConfig
         from hermes_lcm.engine import LCMEngine
