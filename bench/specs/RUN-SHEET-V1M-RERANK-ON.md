@@ -93,3 +93,10 @@ gain lives inside the top-10; the 11-50 range contributes only damage.
 **Order:** A/A′ first (re-measure determinism under the bounded window; expected 0.00pt by
 the pointwise argument, but measured, not assumed) → full 500 → paired verdict per §4
 (unchanged bands; the demotion gate resolves at n=500) → F56.
+
+## Amendment 2 — 2026-08-20: invariant clause corrected (see FINDING-F56 §3)
+The §4/Amendment-1 claim that window ≤ 10 leaves recall@10 unchanged BY CONSTRUCTION was
+mis-derived (item-window reorder vs deduped-session scoring). Measured full-500 effect: 3
+questions, all mechanically confirmed as dedup-boundary cases. Verdict recorded in F56:
+GRAY → NOT ADOPTED; declared config remains F53 (rerank off). Next iteration (margin-gated
+override) requires its own amendment before running.
