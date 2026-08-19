@@ -1,7 +1,7 @@
 # Benchmark methodology
 
-This is the methodology reference for the two memory-quality layers hermes-lcm
-benchmarks. It documents what each harness measures, the fairness rules both
+This is the methodology reference for the two memory-quality layers that
+LCM-X's benchmarks measure. It documents what each harness measures, the fairness rules both
 must honor, the configurations they run under, and how to reproduce a run.
 Scores land separately as runs complete (see [Results index](#results-index));
 this file describes the method, not a verdict.
@@ -53,7 +53,8 @@ judge → report pipeline, run by the org's forked benchmarking harness,
 (a fork of [supermemoryai/memorybench](https://github.com/supermemoryai/memorybench)),
 branch `adapter/hermes-lcm`.
 
-- The `hermes-lcm` Provider drives a long-lived Python bridge process
+- The `hermes-lcm` provider compatibility ID drives a long-lived Python bridge
+  process
   (`bridge/hermes_lcm_bridge.py`) over newline-delimited JSON on stdin/stdout.
   `ingest` accumulates each harness session into a **fresh, per-container
   `lcm.db`** (one SQLite store per question-container — the same
@@ -62,7 +63,7 @@ branch `adapter/hermes-lcm`.
   **production `tools.lcm_recall`** tool through the bridge, never a
   harness-reimplemented stand-in.
 - The judge grades each answer with LongMemEval's own per-question-type judge
-  prompts (`getJudgePromptForType`) — hermes-lcm ships no bespoke prompt (see
+  prompts (`getJudgePromptForType`) — LCM-X ships no bespoke prompt (see
   `benchmarks/qa-harness/src/providers/hermes-lcm/prompts.ts`), so its answers
   are graded on the same rubric as every other provider.
 - Full reproduction workflow, exact env vars, and the vendored adapter source
@@ -153,7 +154,7 @@ source are in [`qa-harness/REPLICATION.md`](qa-harness/REPLICATION.md). In
 short, from a checkout of the `adapter/hermes-lcm` branch:
 
 ```bash
-export HERMES_LCM_REPO=/path/to/hermes-lcm
+export HERMES_LCM_REPO=/path/to/lcm-x
 export HERMES_LCM_PYTHON=$HERMES_LCM_REPO/.venv-fastembed/bin/python
 export HERMES_MB_WORKDIR=/fresh/empty/workdir
 export HERMES_MB_PROVIDER=fastembed
@@ -173,7 +174,7 @@ resumes from the last completed phase instead of restarting.
 
 - **MemDelta config-exactness.** Every number in a results file describes
   *that exact configuration* — dataset revision, provider/model, rerank
-  on/off, harness version. It is never a universal verdict on hermes-lcm's
+  on/off, harness version. It is never a universal verdict on LCM-X's
   retrieval quality; a different embedding model, chunk policy, or dataset
   slice is a different measurement, not a contradiction.
 - **Retrieval recall ≠ leaderboard QA accuracy.** The two layers measure
