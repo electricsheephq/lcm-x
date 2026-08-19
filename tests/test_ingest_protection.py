@@ -510,7 +510,6 @@ def test_fsync_directory_noop_when_directory_handles_unsupported(tmp_path, monke
     """
     if os.name != "nt":
         pytest.skip("Issue #408 is Windows-specific; directory handles work elsewhere")
-    real_open = os.open
 
     def fail_open(*args, **kwargs):
         raise AssertionError("os.open must not be called on Windows")
