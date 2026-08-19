@@ -66,3 +66,30 @@ RUN-LOG entry; scoreboard row only on ADOPT (GRAY/FAIL publish as findings, not 
 Program session (release-manager lane) owns launch + verdict. Finding number on completion:
 next free (F56 expected). C1's LoCoMo verdict (N1) is independent and takes precedence on
 wake.
+
+## Amendment 1 — 2026-08-20: window-10 sub-variant (registered before its run)
+**Window-50 A/A′ outcome (the §3 step-1 subset, 95 scored):** V3 clean (95/95 `applied`,
+both arms), **A/A′ spread 0.00pt (0/95 discordant — the voyage reranker is deterministic on
+identical inputs)**, r@1 +5.93pt (0.4639→0.5232) — but recall@10 **−1.84pt** and r@5 −1.00pt:
+the effective window is `min(50, limit×4)` = **50** in the instrument's call path
+(tools.py rerank_window; the instrument fetches 50), so the reorder crosses the top-10
+boundary and trades delivery for precision. With a 0.00pt noise floor, any delivery loss
+violates the §4 ADOPT guard → **the full 500 was NOT run on window-50** (band discipline).
+Demotion gate at n=95: promotions 11, demotions 4 (needs ≤2.75) — unresolved at subset n,
+binds at the full run.
+
+**Zero-spend synthetic window-10** (exact for a pointwise reranker: relative order of any
+candidate subset is window-invariant; computed from the rerank-run dumps + the baseline
+dumps, artifacts/synthetic-window10.txt): r@1 **+5.93pt with r@10 +0.00pt** — the entire
+gain lives inside the top-10; the 11-50 range contributes only damage.
+
+**Registered sub-variant:** identical to §1 plus a bounded rerank window:
+- product change (landed before the run): configurable `rerank_window_limit`
+  (LCMConfig field + `LCM_RERANK_WINDOW_LIMIT` env spec; 0 = existing `min(50, limit×4)`
+  behavior, byte-identical default) clamping the window in the lcm_recall rerank stage;
+- instrument threading: `--recall-rerank-window N` recorded in both config-binding headers;
+- this run uses window **10**, making the §4 invariant (r@10 unchanged BY CONSTRUCTION)
+  active — any r@10 delta is an instrument/product bug, stop and investigate.
+**Order:** A/A′ first (re-measure determinism under the bounded window; expected 0.00pt by
+the pointwise argument, but measured, not assumed) → full 500 → paired verdict per §4
+(unchanged bands; the demotion gate resolves at n=500) → F56.
