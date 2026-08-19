@@ -203,6 +203,33 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _validated_dump_candidates_path(
+    raw: str | None, *, output_dir: Path, dataset: str | None
+) -> Path | None:
+    """Reject --dump-candidates targets other run files would clobber or read.
+
+    The metrics json/md are written unconditionally after the run (a dump
+    aliasing them would be silently overwritten AFTER an expensive run), the
+    checkpoint file is interleaved with dump writes, and the source dataset
+    must never double as a write target.
+    """
+    if not raw:
+        return None
+    dump_path = Path(raw).resolve()
+    reserved = {
+        (output_dir / PER_QUESTION_CHECKPOINT_FILENAME).resolve(),
+        (output_dir / "longmemeval_metrics.json").resolve(),
+        (output_dir / "longmemeval_metrics.md").resolve(),
+    }
+    if dataset:
+        reserved.add(Path(dataset).resolve())
+    if dump_path in reserved:
+        raise ValueError(
+            f"--dump-candidates must not alias a run input/output file: {dump_path}"
+        )
+    return dump_path
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     if args.provider != "stub" and not args.model:
         raise SystemExit(f"--model is required for --provider {args.provider}")
@@ -285,8 +312,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 direct_source_sha256=direct_source_sha256,
                 manifest_sha256=manifest_sha256,
                 checkpoint_path=output_dir / PER_QUESTION_CHECKPOINT_FILENAME,
-                dump_candidates_path=(
-                    Path(args.dump_candidates) if args.dump_candidates else None
+                dump_candidates_path=_validated_dump_candidates_path(
+                    args.dump_candidates, output_dir=output_dir, dataset=args.dataset
                 ),
                 resume=args.resume,
                 selected_question_ids=selected_question_ids,

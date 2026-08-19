@@ -984,17 +984,50 @@ def test_dump_candidates_record_rejects_incomplete_rankings():
 
 def test_dump_candidates_refuses_to_mutate_foreign_file(tmp_path):
     questions = _synthetic_dataset()
-    foreign = tmp_path / "not-a-dump.json"
-    foreign.write_text('{"some": "corpus file without trailing newline"}', encoding="utf-8")
-    before = foreign.read_bytes()
-    with pytest.raises(ValueError, match="configuration mismatch|invalid candidate dump header"):
-        run_harness(
-            questions,
-            provider_name="stub",
-            model="",
-            tmp_dir=tmp_path / "run",
-            embeddings_enabled=True,
-            dump_candidates_path=foreign,
-        )
-    # The foreign file must be byte-identical -- rejected before any repair.
-    assert foreign.read_bytes() == before
+    # Three foreign shapes, all rejected byte-intact: (a) full JSON with no
+    # trailing newline, (b) a torn prefix like '{"' that also prefixes our own
+    # header serialization (uncertain ownership fails closed), (c) a
+    # newline-terminated file with a wrong header.
+    cases = [
+        ("no-newline.json", '{"some": "corpus file without trailing newline"}'),
+        ("torn-prefix.json", '{"'),
+        ("wrong-header.jsonl", '{"not_our_header": true}\n{"row": 1}\n'),
+    ]
+    for index, (name, content) in enumerate(cases):
+        foreign = tmp_path / name
+        foreign.write_text(content, encoding="utf-8")
+        before = foreign.read_bytes()
+        with pytest.raises(
+            ValueError,
+            match="configuration mismatch|invalid candidate dump header|cannot prove ownership",
+        ):
+            run_harness(
+                questions,
+                provider_name="stub",
+                model="",
+                tmp_dir=tmp_path / f"run-{index}",
+                embeddings_enabled=True,
+                dump_candidates_path=foreign,
+            )
+        assert foreign.read_bytes() == before, name
+
+
+def test_cli_rejects_dump_candidates_aliasing_run_files(tmp_path):
+    cli = _load_cli()
+    output_dir = tmp_path / "out"
+    dataset = tmp_path / "corpus.json"
+    for alias in (
+        output_dir / "per_question_checkpoint.jsonl",
+        output_dir / "longmemeval_metrics.json",
+        output_dir / "longmemeval_metrics.md",
+        dataset,
+    ):
+        with pytest.raises(ValueError, match="must not alias"):
+            cli._validated_dump_candidates_path(
+                str(alias), output_dir=output_dir, dataset=str(dataset)
+            )
+    ok = cli._validated_dump_candidates_path(
+        str(output_dir / "candidates.jsonl"), output_dir=output_dir, dataset=str(dataset)
+    )
+    assert ok == (output_dir / "candidates.jsonl").resolve()
+    assert cli._validated_dump_candidates_path(None, output_dir=output_dir, dataset=None) is None

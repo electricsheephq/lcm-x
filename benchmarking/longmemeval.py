@@ -2537,18 +2537,20 @@ def run_harness(
         raw_dump = (
             dump_candidates_path.read_bytes() if dump_candidates_path.exists() else b""
         )
-        # Validate BEFORE any mutation: an existing file must prove it is OUR
-        # dump (matching header) before the torn-tail repair may touch it, or a
-        # mistyped --dump-candidates aliasing some other file would destroy it.
-        expected_header_bytes = json.dumps(
-            expected_dump_header, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-        torn_header_only = (
-            b"\n" not in raw_dump
-            and bool(raw_dump)
-            and expected_header_bytes.startswith(raw_dump)
-        )
-        if raw_dump and not torn_header_only:
+        # Validate BEFORE any mutation, and FAIL CLOSED on uncertain ownership:
+        # only a file whose first newline-terminated line parses as OUR header
+        # (matching this run's config binding) may be repaired or appended to.
+        # A nonempty file with no complete first line cannot prove ownership --
+        # even a prefix of our own torn header write is indistinguishable from
+        # a torn foreign JSON -- so it is rejected byte-intact; the operator
+        # deletes it deliberately (dump rows always precede their checkpoint
+        # records, so nothing checkpointed is lost by starting fresh).
+        if raw_dump and b"\n" not in raw_dump:
+            raise ValueError(
+                "candidate dump target exists without a complete header line "
+                f"(cannot prove ownership, refusing to touch it): {dump_candidates_path}"
+            )
+        if raw_dump:
             raw_header = raw_dump.split(b"\n", 1)[0]
             try:
                 dump_header = json.loads(raw_header)
@@ -2560,10 +2562,10 @@ def run_harness(
                 dump_header, expected_header=expected_dump_header, path=dump_candidates_path
             )
         if raw_dump and not raw_dump.endswith(b"\n"):
-            # Now provably our own dump (or our own torn header write). A torn
-            # final row always precedes its checkpoint record -- that question
-            # re-evaluates on resume -- so truncating back to the last complete
-            # row loses nothing and keeps every remaining line parseable.
+            # Now provably our own dump. A torn final row always precedes its
+            # checkpoint record -- that question re-evaluates on resume -- so
+            # truncating back to the last complete row loses nothing and keeps
+            # every remaining line parseable.
             keep = raw_dump.rfind(b"\n") + 1
             with dump_candidates_path.open("r+b") as existing_dump:
                 existing_dump.truncate(keep)
