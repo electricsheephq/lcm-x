@@ -132,6 +132,7 @@ from .reconcile import ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from .compaction import CompactionMixin
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
+from .bypass_lineage import BypassLineageMixin
 from .lifecycle_state import LifecycleStateStore
 from .message_content import (
     normalize_content_value,
@@ -365,7 +366,16 @@ _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across co
 _LCM_MESSAGE_PREFIX_FINGERPRINT_LIMIT = 8
 
 
-class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessionMixin, PlaceholderLedgerMixin, BypassMixin, ContextEngine):
+class LCMEngine(
+    CompactionMixin,
+    ResetStateMixin,
+    BypassLineageMixin,
+    ReconcileMixin,
+    AuxiliarySessionMixin,
+    PlaceholderLedgerMixin,
+    BypassMixin,
+    ContextEngine,
+):
     """Lossless Context Management engine.
 
     Automatic LCM compaction is routine background maintenance. Hosts that
@@ -1862,67 +1872,6 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             self._conversation_id,
             self._session_id,
             self._last_compacted_store_id,
-        )
-
-    def _has_lcm_bypass_lineage_session(self, session_id: str, *, platform: Optional[str] = None) -> bool:
-        with self._auxiliary_session_lock:
-            if session_id not in self._lcm_bypass_lineage_session_ids:
-                return False
-            if platform is None:
-                return True
-            platforms = self._lcm_bypass_lineage_platforms.get(session_id) or set()
-            return not platforms or platform in platforms
-
-    def _mark_lcm_bypass_lineage_session(self, session_id: str, *, platform: Optional[str] = None) -> None:
-        if not session_id:
-            return
-        platform = self._session_platform if platform is None else str(platform or "")
-        with self._auxiliary_session_lock:
-            self._lcm_bypass_lineage_session_ids.add(session_id)
-            self._lcm_bypass_lineage_platforms.setdefault(session_id, set()).add(platform)
-            self._lcm_session_last_platform[session_id] = platform
-            self._lcm_session_last_bypassed[session_id] = True
-
-    def _unmark_lcm_bypass_lineage_session(self, session_id: str) -> None:
-        if not session_id:
-            return
-        with self._auxiliary_session_lock:
-            self._lcm_bypass_lineage_session_ids.discard(session_id)
-            self._lcm_bypass_lineage_platforms.pop(session_id, None)
-
-    def _handoff_lcm_bypass_lineage(
-        self,
-        old_session_id: str,
-        new_session_id: str,
-        *,
-        new_platform: str = "",
-    ) -> None:
-        with self._auxiliary_session_lock:
-            if old_session_id:
-                self._lcm_bypass_lineage_session_ids.add(old_session_id)
-            if new_session_id:
-                new_platform = str(new_platform or "")
-                self._lcm_bypass_lineage_session_ids.add(new_session_id)
-                self._lcm_bypass_lineage_platforms.setdefault(new_session_id, set()).add(new_platform)
-                self._lcm_session_last_platform[new_session_id] = new_platform
-                self._lcm_session_last_bypassed[new_session_id] = True
-
-    def _compression_boundary_from_lcm_bypassed_session(self, old_session_id: str) -> bool:
-        if not old_session_id:
-            return False
-        if old_session_id in self._lcm_session_last_bypassed:
-            return bool(self._lcm_session_last_bypassed.get(old_session_id))
-        if old_session_id == self._session_id:
-            return bool(
-                self._bypasses_lcm_context_management()
-                or self._session_id_matches_lcm_bypass_filters(
-                    old_session_id,
-                    platform=self._session_platform,
-                )
-            )
-        return bool(
-            self._has_lcm_bypass_lineage_session(old_session_id)
-            or self._session_id_matches_lcm_bypass_filters(old_session_id)
         )
 
     def _get_allowed_hermes_base(self) -> Path | None:
