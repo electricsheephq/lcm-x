@@ -529,6 +529,63 @@ def test_equal_timestamp_changes_requested_fails_closed():
     assert "LATEST_CHANGES_REQUESTED" in receipt["blocker_codes"]
 
 
+def test_fractional_second_changes_requested_outranks_an_earlier_approval():
+    """A later CHANGES_REQUESTED must win even when its timestamp has fractions.
+
+    ISO timestamps do not sort chronologically as text: '...:00.5Z' sorts BEFORE
+    '...:00Z' because '.' precedes 'Z'. Ordering the raw strings would treat the
+    earlier APPROVED as the latest review and emit a READY receipt for a PR whose
+    most recent review requests changes.
+    """
+    payload = admin_payload()
+    payload["latest_reviews"] = [
+        {
+            "author": "Tosko4",
+            "state": "APPROVED",
+            "commit_sha": HEAD,
+            "submitted_at": "2026-08-16T11:00:00Z",
+            "codeowner": True,
+        },
+        {
+            "author": "Tosko4",
+            "state": "CHANGES_REQUESTED",
+            "commit_sha": HEAD,
+            "submitted_at": "2026-08-16T11:00:00.5Z",
+            "codeowner": True,
+        },
+    ]
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "NOT_READY"
+    assert "LATEST_CHANGES_REQUESTED" in receipt["blocker_codes"]
+
+
+def test_fractional_second_approval_outranks_an_earlier_changes_requested():
+    """The mirror case, so the fix is not just 'always prefer CHANGES_REQUESTED'."""
+    payload = admin_payload()
+    payload["latest_reviews"] = [
+        {
+            "author": "Tosko4",
+            "state": "CHANGES_REQUESTED",
+            "commit_sha": HEAD,
+            "submitted_at": "2026-08-16T11:00:00Z",
+            "codeowner": True,
+        },
+        {
+            "author": "Tosko4",
+            "state": "APPROVED",
+            "commit_sha": HEAD,
+            "submitted_at": "2026-08-16T11:00:00.5Z",
+            "codeowner": True,
+        },
+    ]
+
+    receipt = evaluate(payload)
+
+    assert "LATEST_CHANGES_REQUESTED" not in receipt["blocker_codes"]
+
+
 def test_equal_timestamp_reviews_are_ambiguous_even_when_one_is_current():
     payload = ready_payload()
     payload["latest_reviews"].append(

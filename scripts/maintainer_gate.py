@@ -96,14 +96,27 @@ def _review_evidence_is_valid(reviews: Any) -> bool:
     )
 
 
+def _parse_timestamp(value: str) -> datetime:
+    """Parse a validated ``_is_timestamp`` string to an aware UTC datetime.
+
+    Ordering must not be done on the raw strings. ``_is_timestamp`` accepts ISO
+    values with or without fractional seconds, and those do not sort
+    chronologically as text: ``...:00.5Z`` sorts BEFORE ``...:00Z`` because
+    ``.`` precedes ``Z``. Comparing strings would therefore let an earlier
+    APPROVED outrank a later CHANGES_REQUESTED and emit a false readiness
+    receipt.
+    """
+    return datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
+
+
 def _latest_reviews(reviews: list[dict[str, Any]]) -> list[dict[str, Any]]:
     latest: dict[str, list[dict[str, Any]]] = {}
     for review in reviews:
         author = review["author"]
         current = latest.get(author, [])
-        submitted_at = review["submitted_at"]
-        current_time = current[0]["submitted_at"] if current else ""
-        if not current or submitted_at > current_time:
+        submitted_at = _parse_timestamp(review["submitted_at"])
+        current_time = _parse_timestamp(current[0]["submitted_at"]) if current else None
+        if current_time is None or submitted_at > current_time:
             latest[author] = [review]
         elif submitted_at == current_time:
             current.append(review)
