@@ -1,16 +1,25 @@
+from datetime import datetime, timezone
 from pathlib import Path
+import importlib
 import importlib.util
+import json
 import logging
 import os
 import shutil
 import subprocess
 import sys
+import threading
 import types
 
 
 EXPECTED_LCM_TOOLS = {
     "lcm_grep",
     "lcm_recall",
+    "lcm_query_state",
+    "lcm_compute",
+    "lcm_compile_evidence",
+    "lcm_evidence_pack",
+    "lcm_retrieve",
     "lcm_recent",
     "lcm_load_session",
     "lcm_describe",
@@ -35,6 +44,29 @@ def _load_plugin_entrypoint_module(module_name: str):
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _ensure_agent_context_engine_importable(monkeypatch):
+    """Install the smallest host stub needed for isolated plugin tests."""
+    agent_module = sys.modules.get("agent")
+    if agent_module is None:
+        agent_module = types.ModuleType("agent")
+        agent_module.__path__ = []
+        monkeypatch.setitem(sys.modules, "agent", agent_module)
+    context_engine_module = types.ModuleType("agent.context_engine")
+
+    class ContextEngine:
+        def on_session_reset(self):
+            return None
+
+    context_engine_module.ContextEngine = ContextEngine
+    monkeypatch.setitem(sys.modules, "agent.context_engine", context_engine_module)
+    monkeypatch.setattr(
+        agent_module,
+        "context_engine",
+        context_engine_module,
+        raising=False,
+    )
 
 
 def _register_plugin_engine(module_name: str):
@@ -198,12 +230,96 @@ def test_install_script_creates_profile_aware_symlink_and_prints_activation_step
     )
 
     target = hermes_home / "profiles" / "sandbox" / "plugins" / "hermes-lcm"
+    skill_target = hermes_home / "profiles" / "sandbox" / "skills" / "hermes-lcm"
     assert target.is_symlink()
     assert target.resolve() == repo_root.resolve()
+    assert skill_target.is_symlink()
+    assert skill_target.resolve() == (repo_root / "skills" / "hermes-lcm").resolve()
     assert "plugins:" in result.stdout
     assert "- hermes-lcm" in result.stdout
     assert "context:" in result.stdout
     assert "engine: lcm" in result.stdout
+    assert "Discoverable skill:" in result.stdout
+    assert str(skill_target) in result.stdout
+
+
+def test_install_script_is_idempotent_for_plugin_and_skill_links(tmp_path):
+    repo_root = Path(__file__).resolve().parent.parent
+    hermes_home = tmp_path / "hermes-home"
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "HERMES_HOME": str(hermes_home),
+    }
+
+    for _ in range(2):
+        subprocess.run(
+            ["bash", str(repo_root / "scripts" / "install.sh")],
+            cwd=repo_root,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    assert (hermes_home / "plugins" / "hermes-lcm").resolve() == repo_root.resolve()
+    assert (hermes_home / "skills" / "hermes-lcm").resolve() == (
+        repo_root / "skills" / "hermes-lcm"
+    ).resolve()
+
+
+def test_install_script_preflights_skill_conflict_before_creating_plugin_link(tmp_path):
+    repo_root = Path(__file__).resolve().parent.parent
+    hermes_home = tmp_path / "hermes-home"
+    skill_target = hermes_home / "skills" / "hermes-lcm"
+    skill_target.mkdir(parents=True)
+    (skill_target / "SKILL.md").write_text("existing skill\n", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "install.sh")],
+        cwd=repo_root,
+        env={
+            "HOME": str(tmp_path / "home"),
+            "HERMES_HOME": str(hermes_home),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "Refusing to replace existing skill path" in result.stderr
+    assert not (hermes_home / "plugins" / "hermes-lcm").exists()
+
+
+def test_install_script_accepts_checkout_already_in_canonical_plugin_path(tmp_path):
+    repo_root = Path(__file__).resolve().parent.parent
+    hermes_home = tmp_path / "hermes-home"
+    checkout = hermes_home / "plugins" / "hermes-lcm"
+    (checkout / "scripts").mkdir(parents=True)
+    (checkout / "skills" / "hermes-lcm").mkdir(parents=True)
+    shutil.copy2(repo_root / "scripts" / "install.sh", checkout / "scripts" / "install.sh")
+    (checkout / "skills" / "hermes-lcm" / "SKILL.md").write_text(
+        "---\nname: hermes-lcm\ndescription: test\n---\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        ["bash", str(checkout / "scripts" / "install.sh")],
+        cwd=checkout,
+        env={
+            "HOME": str(tmp_path / "home"),
+            "HERMES_HOME": str(hermes_home),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert checkout.is_dir()
+    skill_target = hermes_home / "skills" / "hermes-lcm"
+    assert skill_target.is_symlink()
+    assert skill_target.resolve() == (checkout / "skills" / "hermes-lcm").resolve()
 
 
 def test_install_script_refuses_to_replace_existing_non_symlink_path(tmp_path):
@@ -262,7 +378,7 @@ def test_plugin_entrypoint_registers_lcm_context_engine():
     identity = engine.get_status()["runtime_identity"]
     repo_root = Path(__file__).resolve().parent.parent
     assert identity["plugin_name"] == "hermes-lcm"
-    assert identity["plugin_version"] == "0.19.0"
+    assert identity["plugin_version"] == "0.22.0"
     assert Path(identity["plugin_path"]) == repo_root
     assert identity["database_path_source"] in {"config.database_path", "hermes_home", "default_home"}
     assert identity["plugin_git_commit"]
@@ -387,6 +503,530 @@ def test_register_gracefully_degrades_when_host_lacks_register_tool():
 
     assert ctx.engine is not None
     assert ctx.engine.name == "lcm"
+
+
+def test_plugin_entrypoint_registers_bundled_skill_and_keeps_recall_policy_out_of_user_context(
+    tmp_path, monkeypatch
+):
+    module = _load_plugin_entrypoint_module("hermes_lcm_packaging_skill_and_policy")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    registered_skills = []
+    hooks = {}
+
+    class _Ctx:
+        def __init__(self):
+            self.engine = None
+
+        def register_context_engine(self, engine):
+            self.engine = engine
+
+        def register_skill(self, name, path, description=""):
+            registered_skills.append((name, Path(path), description))
+
+        def register_hook(self, name, callback):
+            hooks.setdefault(name, []).append(callback)
+
+    ctx = _Ctx()
+    module.register(ctx)
+
+    assert len(registered_skills) == 1
+    name, path, description = registered_skills[0]
+    assert name == "hermes-lcm"
+    assert path == Path(module.__file__).resolve().parent / "skills" / "hermes-lcm"
+    assert (path / "SKILL.md").is_file()
+    assert "recall" in description.lower()
+    assert len(hooks["pre_llm_call"]) == 1
+
+    policy_hook = hooks["pre_llm_call"][0]
+    assert policy_hook(session_id="not-bound") is None
+
+    ctx.engine.on_session_start("active-session", platform="cli")
+    first = policy_hook(session_id="active-session")
+    second = policy_hook(session_id="active-session")
+    assert first == second
+    assert first is None
+    assert "LCM-X recall policy" in module.get_recall_policy()
+    ctx.engine.shutdown()
+
+
+def test_pre_llm_hook_disabled_toolset_is_identical_and_routed_adds_exact_session_evidence(
+    tmp_path, monkeypatch
+):
+    module = _load_plugin_entrypoint_module("hermes_lcm_packaging_preanswer_hook")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    monkeypatch.setenv("LCM_PREANSWER_EVIDENCE_ENABLED", "true")
+    monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "false")
+    hooks = {}
+
+    class _Ctx:
+        def __init__(self):
+            self.engine = None
+
+        def register_context_engine(self, engine):
+            self.engine = engine
+
+        def register_hook(self, name, callback):
+            hooks.setdefault(name, []).append(callback)
+
+    ctx = _Ctx()
+    module.register(ctx)
+    hook = hooks["pre_llm_call"][0]
+    ctx.engine.on_session_start("active-session", platform="cli")
+    source_text = "I was preparing to move away from Austin."
+    source_id = ctx.engine._store.append(
+        "prior-session",
+        {
+            "role": "user",
+            "content": source_text,
+            "timestamp": 1_712_275_200,
+        },
+    )
+    current_text = "I moved to Denver and live there now."
+    current_id = ctx.engine._store.append(
+        "prior-session",
+        {"role": "user", "content": current_text, "timestamp": 1_712_275_260},
+    )
+
+    disabled = hook(
+        session_id="active-session",
+        user_message="Where do I live now?",
+        enabled_toolsets=[],
+    )
+    active = hook(
+        session_id="active-session",
+        user_message="Where do I live now?",
+        baseline_refs=[
+            {
+                "exact_ref": f"lcm:{source_id}:0-{len(source_text)}",
+                "quote": source_text,
+            }
+        ],
+        conversation_history=[
+            {
+                "role": "user",
+                "content": "Where do I live now?",
+                "timestamp": 1_712_361_600,
+            }
+        ],
+    )
+
+    assert disabled is None
+    assert active["context"].startswith(
+        "[Hermes-LCM selective session evidence"
+    ), ctx.engine._last_preanswer_evidence_trace
+    assert "Denver" in active["context"]
+    assert f"lcm:{current_id}:0-{len(current_text)}" in active["context"]
+    trace = ctx.engine._last_preanswer_evidence_trace
+    assert trace["status"] == "augmented"
+    assert trace["provenance"]["selector_calls"] == 0
+    assert trace["provenance"]["provider_calls"] == 0
+    ctx.engine.shutdown()
+
+
+def test_pre_llm_hook_ordinary_path_makes_no_recall_or_selector_call(
+    tmp_path, monkeypatch
+):
+    module = _load_plugin_entrypoint_module("hermes_lcm_packaging_host_envelope")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    monkeypatch.setenv("LCM_PREANSWER_EVIDENCE_ENABLED", "true")
+    monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "false")
+    hooks = {}
+
+    class _Ctx:
+        def __init__(self):
+            self.engine = None
+
+        def register_context_engine(self, engine):
+            self.engine = engine
+
+        def register_hook(self, name, callback):
+            hooks.setdefault(name, []).append(callback)
+
+    ctx = _Ctx()
+    module.register(ctx)
+    recall_calls = []
+
+    def handle(tool, args, **_kwargs):
+        recall_calls.append((tool, args))
+        raise AssertionError("ordinary path must make no product call")
+
+    monkeypatch.setattr(ctx.engine, "handle_tool_call", handle)
+    ctx.engine.on_session_start("active-session", platform="cli")
+    response = hooks["pre_llm_call"][0](
+        session_id="active-session",
+        user_message="Who owns the Atlas rollout?",
+        question_date="2026-07-20",
+        enabled_toolsets=["context_engine"],
+    )
+
+    assert recall_calls == []
+    assert response is None
+    assert not hasattr(ctx.engine, "_last_preanswer_evidence_trace")
+    ctx.engine.shutdown()
+
+
+def test_pre_llm_hook_routed_path_creates_one_answer_ready_baseline(tmp_path, monkeypatch):
+    module = _load_plugin_entrypoint_module("hermes_lcm_packaging_selective_baseline")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    monkeypatch.setenv("LCM_PREANSWER_EVIDENCE_ENABLED", "true")
+    monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "false")
+    hooks = {}
+
+    class _Ctx:
+        def __init__(self):
+            self.engine = None
+
+        def register_context_engine(self, engine):
+            self.engine = engine
+
+        def register_hook(self, name, callback):
+            hooks.setdefault(name, []).append(callback)
+
+    ctx = _Ctx()
+    module.register(ctx)
+    lead = "I was preparing the Atlas ownership handoff."
+    lead_id = ctx.engine._store.append(
+        "prior-session", {"role": "user", "content": lead}
+    )
+    fact = "Maya took ownership of Atlas on July 15."
+    fact_id = ctx.engine._store.append(
+        "prior-session", {"role": "user", "content": fact}
+    )
+    calls = []
+
+    def handle(tool, args, **_kwargs):
+        calls.append((tool, args))
+        assert tool == "lcm_recall"
+        return json.dumps(
+            {
+                "hits": [
+                    {
+                        "store_id": lead_id,
+                        "content_offset": 0,
+                        "content": lead,
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(ctx.engine, "handle_tool_call", handle)
+    ctx.engine.on_session_start("active-session", platform="cli")
+    response = hooks["pre_llm_call"][0](
+        session_id="active-session",
+        user_message="When did Maya take ownership of Atlas?",
+        question_date="2026-07-20",
+        enabled_toolsets=["context_engine"],
+    )
+
+    assert len(calls) == 1
+    assert calls[0][1]["detail"] == "answer_ready"
+    assert f"lcm:{fact_id}:0-{len(fact)}" in response["context"]
+    assert ctx.engine._last_preanswer_evidence_trace["status"] == "augmented"
+    ctx.engine.shutdown()
+
+
+def test_pre_llm_hook_selective_compiler_uses_existing_auxiliary_seam_and_fails_open(
+    tmp_path, monkeypatch
+):
+    module = _load_plugin_entrypoint_module("hermes_lcm_packaging_selective_compiler")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    monkeypatch.setenv("LCM_PREANSWER_EVIDENCE_ENABLED", "true")
+    monkeypatch.setenv("LCM_SELECTIVE_COMPILER_ENABLED", "true")
+    monkeypatch.setenv("LCM_SELECTIVE_COMPILER_MODEL", "selector-test-model")
+    monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "false")
+    hooks = {}
+
+    class _Ctx:
+        def __init__(self):
+            self.engine = None
+
+        def register_context_engine(self, engine):
+            self.engine = engine
+
+        def register_hook(self, name, callback):
+            hooks.setdefault(name, []).append(callback)
+
+    ctx = _Ctx()
+    module.register(ctx)
+    first = "The first of the two purchases cost $20."
+    second = "The second purchase cost $30."
+    # Pin the observation time before the pinned question_date ("2026-07-20"):
+    # an unpinned append is observed "now", which crosses the as_of boundary
+    # once the wall clock passes the pinned date, so grounding rejects the
+    # operands and the hook fails open without the selective-evidence block.
+    observed_at = datetime(2026, 7, 19, 9, tzinfo=timezone.utc).timestamp()
+    first_id = ctx.engine._store.append(
+        "purchase-a", {"role": "user", "content": first, "timestamp": observed_at}
+    )
+    second_id = ctx.engine._store.append(
+        "purchase-b", {"role": "user", "content": second, "timestamp": observed_at}
+    )
+    refs = [
+        {"exact_ref": f"lcm:{first_id}:0-{len(first)}", "quote": first},
+        {"exact_ref": f"lcm:{second_id}:0-{len(second)}", "quote": second},
+    ]
+    selective = importlib.import_module(f"{module.__name__}.selective_compiler")
+    calls = []
+
+    def select(prepared, *, model, timeout_seconds):
+        calls.append((prepared["request"], model, timeout_seconds))
+        return (
+            {
+                "version": "selective-evidence-selector-v1",
+                "selections": [
+                    {
+                        "handle": "e01",
+                        "quote": "$20",
+                        "facet": "operand",
+                        "value": 20,
+                        "unit": "usd",
+                    },
+                    {
+                        "handle": "e02",
+                        "quote": "$30",
+                        "facet": "operand",
+                        "value": 30,
+                        "unit": "usd",
+                    },
+                ],
+            },
+            {"provider": "test", "model": model, "calls": 1},
+        )
+
+    monkeypatch.setattr(selective, "call_selective_auxiliary_selector", select)
+    hook = hooks["pre_llm_call"][0]
+    ctx.engine.on_session_start("active-session", platform="cli")
+    compiled = hook(
+        session_id="active-session",
+        user_message="What was the total cost of the two purchases?",
+        question_date="2026-07-20",
+        enabled_toolsets=["context_engine"],
+        baseline_refs=refs,
+    )
+
+    assert len(calls) == 1, (
+        ctx.engine._config.selective_compiler_enabled,
+        compiled,
+        getattr(ctx.engine, "_last_preanswer_evidence_trace", None),
+    )
+    assert calls[0][0]["operation"] == "sum"
+    assert calls[0][1:] == ("selector-test-model", 8.0)
+    assert "lcm-selective-evidence" in compiled["context"]
+    assert ctx.engine._last_preanswer_evidence_trace["computation"]["result_value"] == 50
+
+    def fail(*_args, **_kwargs):
+        raise TimeoutError("selector deadline")
+
+    monkeypatch.setattr(selective, "call_selective_auxiliary_selector", fail)
+    fallback = hook(
+        session_id="active-session",
+        user_message="What was the total cost of the two purchases?",
+        question_date="2026-07-20",
+        enabled_toolsets=["context_engine"],
+        baseline_refs=refs,
+    )
+    assert fallback is None
+    ctx.engine.shutdown()
+
+
+def test_pre_llm_hook_requirements_mode_uses_compiler_without_selector(
+    tmp_path, monkeypatch
+):
+    _ensure_agent_context_engine_importable(monkeypatch)
+    module = _load_plugin_entrypoint_module("hermes_lcm_packaging_requirements_v1")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    monkeypatch.setenv("LCM_PREANSWER_EVIDENCE_ENABLED", "true")
+    monkeypatch.setenv("LCM_PREANSWER_EVIDENCE_MODE", "requirements_v1")
+    monkeypatch.setenv("LCM_SELECTIVE_COMPILER_ENABLED", "true")
+    monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "false")
+    hooks = {}
+
+    class _Ctx:
+        def __init__(self):
+            self.engine = None
+
+        def register_context_engine(self, engine):
+            self.engine = engine
+
+        def register_hook(self, name, callback):
+            hooks.setdefault(name, []).append(callback)
+
+    ctx = _Ctx()
+    module.register(ctx)
+    prompt = "How long is your commute?"
+    answer = "My commute is 35 minutes."
+    observed_before_question = datetime(
+        2026, 7, 19, tzinfo=timezone.utc
+    ).timestamp()
+    prompt_id = ctx.engine._store.append(
+        "prior-session",
+        {
+            "role": "user",
+            "content": prompt,
+            "timestamp": observed_before_question,
+        },
+    )
+    answer_id = ctx.engine._store.append(
+        "prior-session",
+        {
+            "role": "assistant",
+            "content": answer,
+            "timestamp": observed_before_question,
+        },
+    )
+    baseline = [{"exact_ref": f"lcm:{prompt_id}:0-{len(prompt)}", "quote": prompt}]
+    product_calls = []
+
+    def handle(tool, args, **_kwargs):
+        product_calls.append((tool, args))
+        raise AssertionError("adjacent exact closure must not call retrieval")
+
+    monkeypatch.setattr(ctx.engine, "handle_tool_call", handle)
+    ctx.engine.on_session_start("active-session", platform="cli")
+    response = hooks["pre_llm_call"][0](
+        session_id="active-session",
+        user_message="How long is my commute?",
+        question_date="2026-07-20",
+        enabled_toolsets=["context_engine"],
+        baseline_refs=baseline,
+    )
+
+    assert product_calls == []
+    assert "lcm-answer-brief" in response["context"]
+    assert "35 minutes" in response["context"]
+    assert f"lcm:{answer_id}:" in response["context"]
+    trace = ctx.engine._last_preanswer_evidence_trace
+    assert trace["state"] == "answer_sufficient"
+    assert trace["provenance"]["selector_calls"] == 0
+    ctx.engine.shutdown()
+
+
+def test_pre_llm_hook_renders_internally_recalled_answer_sufficient_fact(
+    tmp_path, monkeypatch
+):
+    _ensure_agent_context_engine_importable(monkeypatch)
+    module = _load_plugin_entrypoint_module(
+        "hermes_lcm_packaging_requirements_internal_baseline"
+    )
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    monkeypatch.setenv("LCM_PREANSWER_EVIDENCE_ENABLED", "true")
+    monkeypatch.setenv("LCM_PREANSWER_EVIDENCE_MODE", "requirements_v1")
+    monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "false")
+    hooks = {}
+
+    class _Ctx:
+        def __init__(self):
+            self.engine = None
+
+        def register_context_engine(self, engine):
+            self.engine = engine
+
+        def register_hook(self, name, callback):
+            hooks.setdefault(name, []).append(callback)
+
+    ctx = _Ctx()
+    module.register(ctx)
+    assert ctx.engine is not None
+    fact = "You need 15 points to redeem the reward."
+    fact_id = ctx.engine._store.append(
+        "prior-session", {"role": "user", "content": fact, "timestamp": 100.0}
+    )
+
+    def handle(tool, args, **_kwargs):
+        assert tool == "lcm_recall"
+        return json.dumps(
+            {
+                "hits": [
+                    {
+                        "exact_ref": f"lcm:{fact_id}:0-{len(fact)}",
+                        "content": fact,
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(ctx.engine, "handle_tool_call", handle)
+    ctx.engine.on_session_start("active-session", platform="cli")
+    response = hooks["pre_llm_call"][0](
+        session_id="active-session",
+        user_message="How many points do I need to redeem the reward?",
+        enabled_toolsets=["context_engine"],
+    )
+
+    assert "lcm-answer-brief" in response["context"]
+    assert "15 point" in response["context"]
+    assert f"lcm:{fact_id}:9-18" in response["context"]
+    trace = ctx.engine._last_preanswer_evidence_trace
+    assert trace["state"] == "answer_sufficient"
+    assert trace["reason_code"] == "baseline_already_answer_sufficient"
+    ctx.engine.shutdown()
+
+
+def test_pre_llm_hook_requirements_ordinary_and_disabled_toolset_are_byte_identical(
+    tmp_path, monkeypatch
+):
+    _ensure_agent_context_engine_importable(monkeypatch)
+    module = _load_plugin_entrypoint_module("hermes_lcm_packaging_requirements_noop")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    monkeypatch.setenv("LCM_PREANSWER_EVIDENCE_ENABLED", "true")
+    monkeypatch.setenv("LCM_PREANSWER_EVIDENCE_MODE", "requirements_v1")
+    monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "false")
+    hooks = {}
+
+    class _Ctx:
+        def __init__(self):
+            self.engine = None
+
+        def register_context_engine(self, engine):
+            self.engine = engine
+
+        def register_hook(self, name, callback):
+            hooks.setdefault(name, []).append(callback)
+
+    ctx = _Ctx()
+    module.register(ctx)
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("no product retrieval is allowed")
+
+    monkeypatch.setattr(ctx.engine, "handle_tool_call", fail)
+    ctx.engine.on_session_start("active-session", platform="cli")
+    hook = hooks["pre_llm_call"][0]
+    ordinary = hook(
+        session_id="active-session",
+        user_message="Tell me about the Atlas project",
+        enabled_toolsets=["context_engine"],
+    )
+    disabled = hook(
+        session_id="active-session",
+        user_message="How long is my commute?",
+        enabled_toolsets=[],
+    )
+
+    assert ordinary is None
+    assert disabled is None
+    ctx.engine.shutdown()
+
+
+def test_plugin_entrypoint_gracefully_degrades_without_skill_or_hook_registration(
+    tmp_path, monkeypatch
+):
+    module = _load_plugin_entrypoint_module("hermes_lcm_packaging_legacy_guidance_host")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+
+    class _LegacyCtx:
+        def __init__(self):
+            self.engine = None
+
+        def register_context_engine(self, engine):
+            self.engine = engine
+
+    ctx = _LegacyCtx()
+    module.register(ctx)
+
+    assert ctx.engine is not None
+    assert ctx.engine.name == "lcm"
+    ctx.engine.shutdown()
 
 
 def test_register_gracefully_degrades_when_register_tool_hook_raises():
@@ -669,6 +1309,96 @@ def test_post_llm_hook_resolves_registered_active_clone_without_host_context_com
     ctx.engine.shutdown()
 
 
+def test_post_llm_hook_keeps_ingest_binding_stable_during_concurrent_rebind(
+    monkeypatch,
+    tmp_path,
+):
+    module = _load_plugin_entrypoint_module("hermes_lcm_post_hook_stable_rebind")
+    manager = types.SimpleNamespace(_hooks={})
+    fake_plugins = types.SimpleNamespace(get_plugin_manager=lambda: manager)
+    fake_hermes_cli = types.SimpleNamespace(plugins=fake_plugins)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", fake_plugins)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
+
+    class _CtxNoTool:
+        def register_context_engine(self, engine):
+            self.engine = engine
+
+    ctx = _CtxNoTool()
+    module.register(ctx)
+    active_clone = ctx.engine.clone_for_agent()
+    active_clone.on_session_start(
+        "session-a",
+        platform="discord",
+        conversation_id="conversation-a",
+    )
+    original_ingest = active_clone.ingest
+    ingest_started = threading.Event()
+    release_ingest = threading.Event()
+    rebind_finished = threading.Event()
+    thread_errors = []
+
+    def paused_ingest(messages):
+        ingest_started.set()
+        assert release_ingest.wait(timeout=2)
+        original_ingest(messages)
+
+    def call_hook():
+        try:
+            manager._hooks["post_llm_call"][-1](
+                session_id="session-a",
+                conversation_id="conversation-a",
+                platform="discord",
+                conversation_history=[
+                    {"role": "user", "content": "payload owned by session A"}
+                ],
+            )
+        except Exception as exc:
+            thread_errors.append(exc)
+
+    def rebind():
+        try:
+            active_clone.on_session_start(
+                "session-b",
+                platform="discord",
+                conversation_id="conversation-b",
+            )
+            rebind_finished.set()
+        except Exception as exc:
+            thread_errors.append(exc)
+
+    hook_thread = threading.Thread(target=call_hook)
+    rebind_thread = threading.Thread(target=rebind)
+    try:
+        monkeypatch.setattr(active_clone, "ingest", paused_ingest)
+        hook_thread.start()
+        assert ingest_started.wait(timeout=2)
+        rebind_thread.start()
+        assert not rebind_finished.wait(timeout=0.05)
+        release_ingest.set()
+        hook_thread.join(timeout=2)
+        rebind_thread.join(timeout=2)
+        assert not hook_thread.is_alive()
+        assert not rebind_thread.is_alive()
+        assert thread_errors == []
+
+        rows_a = active_clone._store.get_range(
+            "session-a",
+            conversation_id="conversation-a",
+        )
+        rows_b = active_clone._store.get_range(
+            "session-b",
+            conversation_id="conversation-b",
+        )
+        assert [row["content"] for row in rows_a] == ["payload owned by session A"]
+        assert rows_b == []
+    finally:
+        release_ingest.set()
+        active_clone.shutdown()
+        ctx.engine.shutdown()
+
+
 def test_post_llm_hook_ignores_stale_registered_clone_after_rebind(monkeypatch, tmp_path):
     for lookup_mode in ("session", "conversation", "mismatched_conversation"):
         module = _load_plugin_entrypoint_module(f"hermes_lcm_post_hook_stale_{lookup_mode}")
@@ -723,7 +1453,7 @@ def test_post_llm_hook_ignores_stale_registered_clone_after_rebind(monkeypatch, 
             assert singleton_ingests == []
         else:
             assert clone_ingests == []
-            assert singleton_ingests == [history]
+            assert singleton_ingests == []
         assert active_clone.current_session_id == "session-b"
         assert active_clone.current_conversation_id == "agent:main:discord:thread:b:b"
 
@@ -767,11 +1497,27 @@ def test_post_llm_hook_prefers_active_lcm_clone(monkeypatch, tmp_path):
             self.current_conversation_id = ""
             self.starts = []
             self.ingested = []
+            self.stable_timeouts = []
 
         def on_session_start(self, session_id, **kwargs):
             self.current_session_id = session_id
             self.current_conversation_id = kwargs.get("conversation_id") or session_id
             self.starts.append((session_id, kwargs))
+
+        def _on_session_start_unlocked(self, session_id, **kwargs):
+            self.on_session_start(session_id, **kwargs)
+
+        def _run_stably(self, operation, **_kwargs):
+            from hermes_lcm.engine_registry import (
+                ActiveEngineUseResult,
+                ActiveEngineUseStatus,
+            )
+
+            self.stable_timeouts.append(_kwargs.get("timeout"))
+            return ActiveEngineUseResult(
+                ActiveEngineUseStatus.USED,
+                operation(self),
+            )
 
         def ingest(self, history):
             self.ingested.append(list(history))
@@ -798,11 +1544,12 @@ def test_post_llm_hook_prefers_active_lcm_clone(monkeypatch, tmp_path):
         )
     ]
     assert active.ingested == [history]
+    assert active.stable_timeouts == [None]
     assert ctx.engine.current_session_id == ""
     ctx.engine.shutdown()
 
 
-def test_post_llm_hook_rebinds_legacy_singleton_between_gateway_lanes(monkeypatch, tmp_path):
+def test_post_llm_hook_does_not_rebind_live_singleton_on_exact_alias_miss(monkeypatch, tmp_path):
     module = _load_plugin_entrypoint_module("hermes_lcm_post_hook_singleton_rebind")
     manager = types.SimpleNamespace(_hooks={})
     fake_plugins = types.SimpleNamespace(get_plugin_manager=lambda: manager)
@@ -856,11 +1603,7 @@ def test_post_llm_hook_rebinds_legacy_singleton_between_gateway_lanes(monkeypatc
             "discord",
             [{"role": "user", "content": "topic a"}],
         ),
-        (
-            "telegram-dm",
-            "agent:main:telegram:private:1782862480",
-            "telegram",
-            [{"role": "user", "content": "telegram dm"}],
-        ),
     ]
+    assert ctx.engine.current_session_id == "discord-topic-a"
+    assert ctx.engine.current_conversation_id == "agent:main:discord:thread:a:a"
     ctx.engine.shutdown()

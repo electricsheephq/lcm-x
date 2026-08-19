@@ -15,7 +15,14 @@ from hermes_lcm.config import LCMConfig
 
 def _import_lcm_engine():
     try:
-        return getattr(importlib.import_module("hermes_lcm.engine"), "LCMEngine")
+        module = importlib.import_module("hermes_lcm.engine")
+        engine = getattr(module, "LCMEngine", None)
+        if engine is not None:
+            return engine
+        # tests/conftest.py deliberately tolerates optional host imports and may
+        # leave a partially initialized engine module behind when `agent` is not
+        # installed. Re-enter the same host-stub fallback used below.
+        raise ModuleNotFoundError("agent", name="agent")
     except ModuleNotFoundError as exc:
         if exc.name not in {"agent", "agent.context_engine"}:
             raise

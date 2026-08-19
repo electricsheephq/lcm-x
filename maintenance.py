@@ -27,6 +27,15 @@ def flush_engine_connections(engine) -> None:
     lifecycle_conn = getattr(getattr(engine, "_lifecycle", None), "_conn", None)
     if lifecycle_conn is not None:
         lifecycle_conn.commit()
+    assertion_store = getattr(engine, "_assertions", None)
+    if assertion_store is not None:
+        # AssertionStore owns a multi-statement publication transaction. Its
+        # lock-taking API must serialize this flush with publish_source() so a
+        # backup cannot commit a half-written receipt behind the publisher.
+        assertion_store.commit()
+    query_views = getattr(engine, "_query_views", None)
+    if query_views is not None:
+        query_views.commit()
 
 
 def backup_database(engine) -> dict[str, Any]:

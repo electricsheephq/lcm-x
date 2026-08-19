@@ -140,7 +140,9 @@ LCM_RECALL = {
         "expand a cross-session summary). Not for retrieving exact/verbatim text within a known time range — "
         "use lcm_grep(mode='full_text') for that. Not for full transcripts — after locating the right "
         "conversation, use lcm_load_session(session_id). Recency and current-conversation preference are soft "
-        "ranking boosts, not filters; for hard time bounds use lcm_grep time_from/time_to."
+        "ranking boosts, not filters; for hard time bounds use lcm_grep time_from/time_to. "
+        "Set detail='answer_ready' to apply bounded per-session diversity and hydrate exact "
+        "refs into answer-ready evidence windows without running another search."
     ),
     "parameters": {
         "type": "object",
@@ -176,8 +178,707 @@ LCM_RECALL = {
                 ),
                 "default": "all",
             },
+            "detail": {
+                "type": "string",
+                "enum": ["snippets", "answer_ready"],
+                "description": (
+                    "Response detail. 'snippets' (default) preserves the existing compact "
+                    "hit response byte-for-byte. 'answer_ready' keeps at most five hits per "
+                    "session and hydrates the first eight selected exact refs into bounded "
+                    "windows of at most 2400 characters each; the complete response remains "
+                    "capped at 64000 characters."
+                ),
+                "default": "snippets",
+            },
+            "seen_refs": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 100,
+                "description": (
+                    "Optional stateless answer-ready delta cursor. When supplied with "
+                    "detail='answer_ready', only evidence whose exact ref is not in this "
+                    "list is returned. Omitting it preserves the baseline response bytes."
+                ),
+            },
+            "include_occurrence_time": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "Opt in to source-backed occurrence-time fields on exact message "
+                    "evidence. Unknown remains valid and observation time is never "
+                    "silently used as event time."
+                ),
+            },
         },
         "required": ["query"],
+    },
+}
+
+LCM_QUERY_STATE = {
+    "name": "lcm_query_state",
+    "description": (
+        "Query the opt-in V4 assertion sidecar for bounded, typed, source-cited state. "
+        "Use this when a question needs attributable current or historical facts, preferences, "
+        "recommendations, commitments, actions, or status. Every returned assertion includes an "
+        "exact message store_id, character span, and quote. Conflicting state is preserved rather "
+        "than resolved by recency. Returns status=disabled when assertions are not enabled."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "subject_key": {
+                "type": "string",
+                "description": (
+                    "Required canonical assertion subject, for example user:self, "
+                    "assistant:self, person:alex, or project:apollo."
+                ),
+            },
+            "predicate_key": {
+                "type": "string",
+                "description": "Optional canonical lowercase dotted predicate filter.",
+            },
+            "kinds": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": [
+                        "fact",
+                        "event",
+                        "preference",
+                        "recommendation",
+                        "commitment",
+                        "action",
+                        "status",
+                        "quotation",
+                    ],
+                },
+                "maxItems": 8,
+                "description": "Optional assertion-kind filter.",
+            },
+            "scope_key": {
+                "type": "string",
+                "description": "Optional exact canonical scope filter; empty means unscoped.",
+            },
+            "speaker_role": {
+                "type": "string",
+                "enum": ["system", "user", "assistant", "tool", "unknown"],
+                "description": "Optional exact source-message role filter.",
+            },
+            "as_of": {
+                "anyOf": [{"type": "number"}, {"type": "string"}],
+                "description": (
+                    "Optional historical knowledge/validity boundary as Unix seconds or a "
+                    "timezone-aware ISO 8601 timestamp."
+                ),
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum assertion rows (default 25, hard upper bound 50).",
+                "default": 25,
+            },
+        },
+        "required": ["subject_key"],
+    },
+}
+
+LCM_COMPUTE = {
+    "name": "lcm_compute",
+    "description": (
+        "Execute a supported date, count, compatible-unit sum, directed/absolute "
+        "difference, ordering, or latest-state operation over exact cited LCM evidence. "
+        "The operation is inferred from the question; this tool never calls a model. "
+        "Supply only exact message spans (or assertion IDs) whose values, units, labels, "
+        "keys, and dates are explicit in the cited evidence. Unsupported, incomplete, "
+        "mixed-unit, conflicting, or unverifiable inputs fail closed to the ordinary "
+        "evidence-only answer path."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "question": {
+                "type": "string",
+                "description": "The user's question, unchanged.",
+            },
+            "question_date": {
+                "type": "string",
+                "description": (
+                    "Optional ISO date anchoring relative-time and historical questions."
+                ),
+            },
+            "evidence_complete": {
+                "type": "boolean",
+                "description": (
+                    "Set true only after the current retrieval turn has closed all "
+                    "evidence slots for open-cardinality operations."
+                ),
+                "default": False,
+            },
+            "operands": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 50,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "assertion_id": {
+                            "type": "string",
+                            "description": "Optional exact V4 assertion SHA-256 ID.",
+                        },
+                        "store_id": {"type": "integer"},
+                        "span_start": {"type": "integer"},
+                        "span_end": {"type": "integer"},
+                        "quote": {"type": "string"},
+                        "value": {
+                            "anyOf": [
+                                {"type": "number"},
+                                {"type": "string"},
+                                {"type": "null"},
+                            ],
+                            "description": "Explicit numeric or string operand value.",
+                        },
+                        "unit": {"type": "string"},
+                        "key": {
+                            "type": "string",
+                            "description": (
+                                "Canonical distinct-event/entity key whose tokens occur "
+                                "in the exact quote."
+                            ),
+                        },
+                        "label": {
+                            "type": "string",
+                            "description": (
+                                "Exact source-grounded label. Directed differences must "
+                                "supply labels in question mention order."
+                            ),
+                        },
+                        "date": {
+                            "type": "string",
+                            "description": (
+                                "Optional evidence date supported by source metadata or "
+                                "the exact quote."
+                            ),
+                        },
+                        "occurrence_time": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "observed_at": {"type": "number"},
+                                "stored_at": {"type": "number"},
+                                "event_at": {
+                                    "anyOf": [{"type": "number"}, {"type": "null"}]
+                                },
+                                "event_date": {"type": "string"},
+                                "event_time_source": {
+                                    "type": "string",
+                                    "enum": [
+                                        "explicit",
+                                        "relative_to_session",
+                                        "derived_assertion",
+                                        "unknown",
+                                    ],
+                                },
+                                "session_date": {"type": "string"},
+                                "precision": {"type": "string"},
+                                "policy_version": {"type": "string"},
+                                "reason": {"type": "string"},
+                                "support": {"type": "object"},
+                            },
+                            "required": ["event_time_source"],
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            "candidate_answer": {
+                "type": "string",
+                "description": (
+                    "Optional narrative answer to verify against the immutable trace. "
+                    "A failed verification is discarded in favor of canonical output."
+                ),
+            },
+        },
+        "required": ["question", "operands"],
+        "additionalProperties": False,
+    },
+}
+
+LCM_EVIDENCE_PACK = {
+    "name": "lcm_evidence_pack",
+    "description": (
+        "Build a bounded, same-database evidence packet from baseline exact LCM refs. "
+        "It returns no prose answer: the tool normalizes the question-date anchor, "
+        "hydrates exact source spans, validates proposed facets, keeps occurrence time "
+        "distinct from observation time, deduplicates refs, and emits a canonical "
+        "lcm_compute trace only when product-verified grounding and cardinality close. "
+        "A quote may narrow a declared ref only when it occurs exactly once inside it; "
+        "open cardinality never closes from a caller assertion alone."
+    ),
+    "parameters": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "question": {"type": "string"},
+            "question_date": {
+                "type": "string",
+                "description": (
+                    "Optional calendar-date anchor. A local ISO timestamp is reduced "
+                    "to its validated date component."
+                ),
+            },
+            "baseline_refs": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 50,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "exact_ref": {"type": "string"},
+                        "store_id": {"type": "integer"},
+                        "span_start": {"type": "integer"},
+                        "span_end": {"type": "integer"},
+                        "quote": {"type": "string"},
+                        "value": {
+                            "anyOf": [
+                                {"type": "number"},
+                                {"type": "string"},
+                                {"type": "null"},
+                            ],
+                        },
+                        "unit": {"type": "string"},
+                        "key": {"type": "string"},
+                        "label": {"type": "string"},
+                    },
+                },
+            },
+            "budgets": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "max_refs": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "default": 25,
+                    },
+                    "max_quote_chars": {
+                        "type": "integer",
+                        "minimum": 64,
+                        "maximum": 2400,
+                        "default": 2400,
+                    },
+                    "max_retrieval_calls": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1,
+                        "default": 0,
+                        "description": (
+                            "Optional single product recall probe for novel exact refs. "
+                            "It never turns no-novel into open-world completeness."
+                        ),
+                    },
+                    "max_novel_refs": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 8,
+                        "default": 4,
+                    },
+                    "max_per_session": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 5,
+                        "default": 5,
+                    },
+                    "max_per_date": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 8,
+                        "default": 5,
+                    },
+                },
+            },
+        },
+        "required": ["question", "baseline_refs"],
+    },
+}
+
+LCM_COMPILE_EVIDENCE = {
+    "name": "lcm_compile_evidence",
+    "description": (
+        "Compile a bounded, source-grounded evidence brief from baseline exact LCM "
+        "refs. Proposal mode validates one provider-neutral semantic proposal; "
+        "auto mode deterministically compiles answer requirements and may retrieve "
+        "only for named missing slots. Product code validates "
+        "every quote, span, entity, date, value, unit, distinct key, role, and source "
+        "against immutable stored evidence. The result distinguishes partial, "
+        "answer-sufficient, finite-coverage, computation-sufficient, conflicted, and "
+        "unknown states and never returns final prose. Finite coverage cannot be "
+        "asserted by the proposal or inferred from linguistic singularity."
+    ),
+    "parameters": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "mode": {
+                "type": "string",
+                "enum": ["proposal", "auto"],
+                "default": "proposal",
+                "description": (
+                    "Default proposal mode preserves the legacy wire contract. "
+                    "Auto mode uses the provider-free requirements compiler."
+                ),
+            },
+            "question": {"type": "string", "minLength": 1, "maxLength": 4000},
+            "question_date": {
+                "type": "string",
+                "description": "Optional explicit calendar-date/as-of anchor.",
+            },
+            "baseline_refs": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 50,
+                "items": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {
+                            "type": "object",
+                            "additionalProperties": True,
+                            "required": ["exact_ref"],
+                            "properties": {
+                                "exact_ref": {"type": "string"},
+                                "quote": {"type": "string"},
+                            },
+                        },
+                    ]
+                },
+            },
+            "proposal": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "version",
+                    "selections",
+                    "missing_facets",
+                ],
+                "properties": {
+                    "version": {"type": "string", "enum": ["evidence-selector-v1"]},
+                    "requested_facets": {
+                        "type": "array",
+                        "maxItems": 12,
+                        "description": (
+                            "Optional generic named facets required by the question. "
+                            "Product code keeps deterministic facets, replaces only the "
+                            "catch-all answer facet, and requires exact evidence for each "
+                            "facet before answer_sufficient."
+                        ),
+                        "items": {"type": "string"},
+                    },
+                    "selections": {
+                        "type": "array",
+                        "maxItems": 50,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "claim_id",
+                                "facet",
+                                "exact_ref",
+                                "quote",
+                            ],
+                            "properties": {
+                                "claim_id": {"type": "string"},
+                                "facet": {"type": "string"},
+                                "exact_ref": {"type": "string"},
+                                "quote": {"type": "string"},
+                                "entity": {"type": "string"},
+                                "date": {"type": "string"},
+                                "value": {
+                                    "anyOf": [
+                                        {"type": "number"},
+                                        {"type": "string"},
+                                        {"type": "null"},
+                                    ]
+                                },
+                                "unit": {"type": "string"},
+                                "distinct_key": {"type": "string"},
+                                "label": {"type": "string"},
+                                "role": {"type": "string"},
+                                "source": {"type": "string"},
+                            },
+                        },
+                    },
+                    "missing_facets": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "usage": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "provider": {"type": "string"},
+                            "model": {"type": "string"},
+                            "effort": {"type": "string"},
+                            "calls": {"type": "integer", "minimum": 0},
+                            "input_tokens": {"type": "integer", "minimum": 0},
+                            "output_tokens": {"type": "integer", "minimum": 0},
+                            "latency_ms": {"type": "number", "minimum": 0},
+                            "cost_usd": {"type": "number", "minimum": 0},
+                        },
+                    },
+                },
+            },
+            "persist_view": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "Default-off. Persist only validated high-value operational evidence "
+                    "as an exact-dependency query view in the same lcm.db."
+                ),
+            },
+            "budgets": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "max_input_refs": {"type": "integer", "minimum": 1, "maximum": 50},
+                    "max_selections": {"type": "integer", "minimum": 1, "maximum": 50},
+                    "max_selector_chars": {
+                        "type": "integer",
+                        "minimum": 1024,
+                        "maximum": 64000,
+                    },
+                    "max_quote_chars": {
+                        "type": "integer",
+                        "minimum": 64,
+                        "maximum": 2400,
+                    },
+                    "max_retrieval_calls": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 2,
+                    },
+                    "max_novel_refs": {"type": "integer", "minimum": 1, "maximum": 8},
+                    "max_candidates": {"type": "integer", "minimum": 1, "maximum": 48},
+                    "max_hydrated_candidates": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 12,
+                    },
+                    "max_added_context_tokens": {
+                        "type": "integer",
+                        "minimum": 64,
+                        "maximum": 850,
+                    },
+                    "max_scan_rows": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 4096,
+                        "description": (
+                            "Auto mode only. Whole-corpus finite-coverage scan bound; "
+                            "truncation always falls back."
+                        ),
+                    },
+                    "response_char_cap": {
+                        "type": "integer",
+                        "minimum": 4096,
+                        "maximum": 64000,
+                    },
+                },
+            },
+        },
+        "required": ["question", "baseline_refs"],
+        "allOf": [
+            {
+                "if": {
+                    "properties": {"mode": {"const": "proposal"}},
+                },
+                "then": {"required": ["proposal"]},
+            }
+        ],
+    },
+}
+
+LCM_RETRIEVE = {
+    "name": "lcm_retrieve",
+    "description": (
+        "Coordinate a bounded evidence-retrieval episode inside the current "
+        "answerer's existing tool turn. Start with a typed intent and named "
+        "evidence requirements, make at most three targeted calls to existing "
+        "LCM retrieval tools, then finish with exact selected refs and an optional "
+        "provider-neutral lcm_compute trace. The controller contains no model "
+        "client; dispatched retrieval tools retain their own provider behavior "
+        "and provenance. It never accepts benchmark metadata or persists final prose. It is "
+        "available only when LCM_ADAPTIVE_RETRIEVAL_ENABLED is true."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["start", "search", "finish", "status", "abandon"],
+            },
+            "retrieval_id": {
+                "type": "string",
+                "description": "Controller ID returned by the start action.",
+            },
+            "question": {
+                "type": "string",
+                "description": "The user's question, unchanged.",
+            },
+            "question_date": {
+                "type": "string",
+                "description": "Optional ISO date anchoring relative-time intent.",
+            },
+            "identity": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "intent_type": {"type": "string"},
+                    "operation": {
+                        "type": "string",
+                        "enum": [
+                            "evidence_only",
+                            "date_interval",
+                            "date_filter",
+                            "count_distinct",
+                            "sum",
+                            "difference",
+                            "order",
+                            "latest_fact",
+                        ],
+                    },
+                    "subject_key": {"type": "string"},
+                    "predicate_key": {"type": "string"},
+                    "role_key": {"type": "string"},
+                    "scope_key": {"type": "string"},
+                    "conversation_id": {"type": "string"},
+                    "unit": {"type": "string"},
+                    "distinct_policy": {"type": "string"},
+                    "time_mode": {
+                        "type": "string",
+                        "enum": ["none", "absolute", "relative"],
+                    },
+                    "question_anchor": {"type": "string"},
+                    "window_start": {"type": "string"},
+                    "window_end": {"type": "string"},
+                    "policy_version": {"type": "string"},
+                },
+                "required": ["intent_type"],
+            },
+            "requirements": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 12,
+                "description": (
+                    "Required only for action=start. Use this exact top-level key; "
+                    "each item names one evidence slot and its exact-reference cardinality."
+                ),
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "slot_id": {"type": "string"},
+                        "description": {"type": "string"},
+                        "minimum_refs": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 40,
+                            "default": 1,
+                        },
+                    },
+                    "required": ["slot_id", "description"],
+                },
+            },
+            "missing_slot": {"type": "string"},
+            "tool": {
+                "type": "string",
+                "enum": [
+                    "lcm_recall",
+                    "lcm_recent",
+                    "lcm_query_state",
+                    "lcm_load_session",
+                    "lcm_expand",
+                ],
+            },
+            "tool_args": {"type": "object"},
+            "resolved_slots": {
+                "type": "array",
+                "maxItems": 12,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "slot_id": {"type": "string"},
+                        "evidence_refs": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 40,
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "required": ["slot_id", "evidence_refs"],
+                },
+            },
+            "selected_refs": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 40,
+                "items": {"type": "string"},
+            },
+            "computation": {
+                "type": "object",
+                "additionalProperties": False,
+                "description": (
+                    "Optional only for action=finish. Every operand must copy the exact "
+                    "quote and either its assertion_id or its raw store_id/span offsets "
+                    "from evidence returned by this retrieval episode."
+                ),
+                "properties": {
+                    "operands": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 50,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "assertion_id": {"type": "string"},
+                                "store_id": {"type": "integer"},
+                                "span_start": {"type": "integer"},
+                                "span_end": {"type": "integer"},
+                                "quote": {"type": "string"},
+                                "value": {
+                                    "anyOf": [
+                                        {"type": "number"},
+                                        {"type": "string"},
+                                        {"type": "null"},
+                                    ],
+                                },
+                                "unit": {"type": "string"},
+                                "key": {"type": "string"},
+                                "label": {"type": "string"},
+                                "date": {"type": "string"},
+                                "occurrence_time": {"type": "object"},
+                            },
+                            "required": ["quote"],
+                            "anyOf": [
+                                {"required": ["assertion_id"]},
+                                {
+                                    "required": [
+                                        "store_id",
+                                        "span_start",
+                                        "span_end",
+                                    ]
+                                },
+                            ],
+                        },
+                    },
+                    "candidate_answer": {"type": "string"},
+                },
+                "required": ["operands"],
+            },
+        },
+        "required": ["action"],
+        "additionalProperties": False,
     },
 }
 
@@ -271,6 +972,14 @@ LCM_LOAD_SESSION = {
                 "type": "number",
                 "description": "Optional inclusive maximum message timestamp (Unix seconds).",
             },
+            "include_exact_ref": {
+                "type": "boolean",
+                "description": (
+                    "Opt in to an exact_ref for each returned content slice. "
+                    "Omitting it preserves the legacy response bytes."
+                ),
+                "default": False,
+            },
         },
         "required": ["session_id"],
     },
@@ -359,6 +1068,14 @@ LCM_EXPAND = {
                 "type": "integer",
                 "description": "Character offset used to continue an oversized raw message, externalized payload, or store_id-mode message. Use next_content_offset from the previous response.",
                 "default": 0,
+            },
+            "include_exact_ref": {
+                "type": "boolean",
+                "description": (
+                    "In store_id mode, opt in to an exact_ref for the returned content slice. "
+                    "Omitting it preserves the legacy response bytes."
+                ),
+                "default": False,
             },
         },
         "required": [],
