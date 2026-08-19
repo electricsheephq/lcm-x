@@ -5646,7 +5646,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             content = sanitize_pre_compaction_content(content)
 
             if role == "assistant":
-                tool_calls = msg.get("tool_calls", [])
+                # The host's in-memory chat history may set tool_calls to None for
+                # shape uniformity; stored rows never can (MessageStore.to_openai_msg
+                # drops the key when the value is falsy). Treat any falsy value as
+                # "no tool calls" rather than iterating it.
+                tool_calls = msg.get("tool_calls") or []
                 matched_tool_calls = [
                     tc for tc in tool_calls
                     if not _tool_call_id(tc) or _tool_call_id(tc) in matched_tool_ids
