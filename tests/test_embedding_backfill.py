@@ -1482,6 +1482,16 @@ def test_backfill_batch_size_env_override(monkeypatch):
         == command_mod._VOYAGE_MAX_BATCH_ITEMS
     )
 
+    # A configured embedding_max_batch_items below the hard ceiling is the
+    # effective cap (resolve_provider passes it to the provider, which splits
+    # requests at it).
+    monkeypatch.setenv("LCM_EMBEDDING_BACKFILL_BATCH_SIZE", "100")
+    assert command_mod._embedding_backfill_batch_size(50) == 50
+    assert command_mod._embedding_batch_estimate("ollama", [10] * 100, 50) == 2
+    # An unset/invalid configured cap falls back to the hard ceiling.
+    assert command_mod._embedding_backfill_batch_size(None) == 100
+    assert command_mod._embedding_backfill_batch_size(0) == 100
+
 
 def test_backfill_apply_honors_env_batch_size(monkeypatch, tmp_path):
     # Five documents with batch size 2 must slice into provider calls of 2/2/1.
