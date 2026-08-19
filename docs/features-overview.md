@@ -1,10 +1,13 @@
 # Feature overview — memory, retrieval, and context-budget features
 
-This page is the human-readable map of the `hermes-lcm` feature surface: what
+This page is the human-readable map of the LCM-X feature surface: what
 each feature family does, why it exists, and which switch turns it on. For
 exact install/config detail see the [Operator guide](operator-guide.md); for
 tool contracts see the [Retrieval tools reference](retrieval-tools.md); for
 embedding provider setup see [Embeddings setup](embeddings-setup.md).
+
+The installed plugin and skill still use the compatibility identifier
+`hermes-lcm`; the runtime engine remains `lcm`.
 
 **Every feature below ships default-off.** A stock install behaves exactly
 like the previous release until an operator opts in with an environment
@@ -170,8 +173,8 @@ Ready-made env profiles per agent type live in
 
 ## Where these features came from
 
-The feature families landed as reviewed PR trains with anchor issues
-describing the design space: temporal memory
+The feature families landed as reviewed upstream Hermes-LCM PR trains with
+anchor issues describing the design space: temporal memory
 ([#385](https://github.com/stephenschoettler/hermes-lcm/issues/385), PRs
 [#387](https://github.com/stephenschoettler/hermes-lcm/pull/387)–[#391](https://github.com/stephenschoettler/hermes-lcm/pull/391))
 and embeddings

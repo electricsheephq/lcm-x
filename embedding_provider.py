@@ -549,8 +549,8 @@ class VoyageProvider(_ResilientProvider):
         # Context models are dispatched through the contextualized endpoint; the
         # flat _request payload path is guarded against them (see _request).
         self._is_context = _is_voyage_context_model(self._model_id)
-        # Populated from the contextualized response's usage.total_tokens so a
-        # caller (e.g. a live micro-proof) can report provider-billed tokens.
+        # Populated from every successful response's usage.total_tokens so a
+        # caller can report provider-billed document and query tokens.
         self.last_usage_tokens = 0
         self._transport = transport or _default_http_transport
         self.timeout = float(timeout)
@@ -717,6 +717,12 @@ class VoyageProvider(_ResilientProvider):
                         raise EmbeddingProviderError(
                             "Voyage returned a different number of embeddings than requested"
                         )
+                    usage = data.get("usage")
+                    if isinstance(usage, dict):
+                        try:
+                            self.last_usage_tokens = int(usage.get("total_tokens", 0))
+                        except (TypeError, ValueError):
+                            pass
                     return parsed
 
                 runner = (
@@ -1682,6 +1688,16 @@ def resolve_provider(
     nor a normal document batch/local model load should be governed by the
     latency-sensitive query policy. The backfill worker retains its own
     operation budget and renewable lease.
+
+    The query path (``for_backfill=False``) gets an explicit, configurable
+    sliding-window guard from ``embedding_query_spend_{max_calls,window_seconds,
+    backoff_seconds}`` (env ``LCM_EMBEDDING_QUERY_SPEND_*``), defaulting to a
+    generous ceiling. The historical implicit default here was the strict
+    ``EmbeddingSpendGuard()`` (60/60s/60s) -- a backfill-economy control that
+    silently gutted retrieval when a tight query loop crossed 60 calls/window
+    and every further call was rejected pre-network with ``ProviderRateLimited``
+    (451 query embeds ≈ 9k tokens ≈ negligible spend). ``max_calls=0`` disables
+    the guard entirely; the circuit breaker still trips on real failures.
     """
     provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
     model = str(getattr(config, "embedding_model", "") or "").strip()
@@ -1693,7 +1709,18 @@ def resolve_provider(
         )
     # max_calls=0 disables the sliding-window guard (allows() always True,
     # record_call() a no-op); the circuit breaker still trips on failures.
-    spend_guard = EmbeddingSpendGuard(max_calls=0) if for_backfill else None
+    if for_backfill:
+        spend_guard = EmbeddingSpendGuard(max_calls=0)
+    else:
+        spend_guard = EmbeddingSpendGuard(
+            max_calls=int(getattr(config, "embedding_query_spend_max_calls", 600)),
+            window_seconds=float(
+                getattr(config, "embedding_query_spend_window_seconds", 60.0)
+            ),
+            backoff_seconds=float(
+                getattr(config, "embedding_query_spend_backoff_seconds", 60.0)
+            ),
+        )
     timeout_field = (
         "embedding_backfill_timeout_s"
         if for_backfill

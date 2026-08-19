@@ -2,10 +2,12 @@
 
 ## Current decision
 
-`hermes-lcm` intentionally remains a clone-or-symlink Hermes user plugin for now. The supported install path is:
+LCM-X intentionally remains a clone-or-symlink Hermes user plugin for now. The
+compatibility plugin name and install directory remain `hermes-lcm`. The
+supported install path is:
 
 ```bash
-git clone https://github.com/stephenschoettler/hermes-lcm \
+git clone https://github.com/electricsheephq/lcm-x \
   ~/.hermes/plugins/hermes-lcm
 ```
 
@@ -30,7 +32,7 @@ Make packaging a separate implementation lane only when one of these is true:
 2. Users need version-pinned installs without direct git checkouts.
 3. Release automation needs packaged artifacts beyond GitHub tags/releases.
 
-The narrow next step would be packaging metadata plus tests that prove a packaged install still exposes `hermes-lcm`, context engine `lcm`, and all ten LCM tools through `hermes plugins`. Until then, clone/symlink remains the documented path.
+The narrow next step would be packaging metadata plus tests that prove a packaged install still exposes `hermes-lcm`, context engine `lcm`, and all 15 LCM tools through `hermes plugins`. Until then, clone/symlink remains the documented path.
 
 ## Current install and update references
 
