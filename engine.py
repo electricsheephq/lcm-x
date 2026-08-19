@@ -1991,8 +1991,36 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             return []
         return messages[leading_anchor_count:fresh_tail_start]
 
+    def _effective_fresh_tail_max_tokens(self) -> int:
+        """Return the active fresh-tail token cap.
+
+        When the user has not set LCM_FRESH_TAIL_MAX_TOKENS explicitly
+        (config value is 0) and the context is large enough to matter
+        (> 50K), derive a context-proportional default so the fresh tail
+        cannot consume the entire model window on small context models.
+        50% of context_length leaves room for leaf chunks to accumulate
+        and trigger compression.  Below 50K the count-based limit is
+        sufficient and clamping would break small-context test fixtures.
+        When fresh_tail_count is 0 the user explicitly wants no fresh
+        tail, so the implicit token cap must not override that.
+        """
+        explicit = self._config.fresh_tail_max_tokens
+        if explicit > 0:
+            return explicit
+        if not self._config.fresh_tail_count:
+            return 0
+        ctx = self.context_length or 0
+        if ctx < 50_000:
+            return 0
+        return max(1, int(ctx * 0.5))
+
     def _fresh_tail_boundary(self, messages: List[Dict[str, Any]]) -> FreshTailBoundary:
-        max_tokens = self._config.fresh_tail_max_tokens
+        # Start from the context-aware effective cap, not the raw config value:
+        # it resolves an explicit setting, the fresh_tail_count=0 opt-out, and
+        # the context-proportional default. The pressure-yield limit then
+        # clamps that further, so the two mechanisms compose rather than one
+        # discarding the other.
+        max_tokens = self._effective_fresh_tail_max_tokens()
         if self._pressure_yield_tail_token_limit > 0:
             max_tokens = (
                 min(max_tokens, self._pressure_yield_tail_token_limit)
@@ -2207,13 +2235,14 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         """Load and resolve a stored tail, expanding backward for tool pairing."""
         total_count = int(self._store.get_session_count(session_id))
         configured_count = max(minimum_count, int(self._config.fresh_tail_count or 0))
-        if self._config.fresh_tail_max_tokens > 0:
+        effective_max_tokens = self._effective_fresh_tail_max_tokens()
+        if effective_max_tokens > 0:
             configured_count = max(1, configured_count)
         if total_count <= 0 or configured_count <= 0:
             return [], resolve_fresh_tail_boundary(
                 [],
                 fresh_tail_count=configured_count,
-                fresh_tail_max_tokens=self._config.fresh_tail_max_tokens,
+                fresh_tail_max_tokens=effective_max_tokens,
             )
 
         load_limit = min(total_count, configured_count)
@@ -2222,7 +2251,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             boundary = resolve_fresh_tail_boundary(
                 rows,
                 fresh_tail_count=configured_count,
-                fresh_tail_max_tokens=self._config.fresh_tail_max_tokens,
+                fresh_tail_max_tokens=effective_max_tokens,
             )
             selected = rows[boundary.start:]
             unresolved_tool_boundary = bool(
@@ -4766,6 +4795,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             )
         if content.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
             return True
+        if content.lstrip().startswith(_PRESERVED_TODO_CONTEXT_PREFIX):
+            return True
         if "[Expand for details:" not in content:
             return False
         return bool(
@@ -5317,6 +5348,15 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             protected_messages,
         ):
             if self._protected_message_uses_raw_payload_active_stub(protected_msg):
+                # Assistant messages must keep their original content in the
+                # active replay: the host renders active_replay_messages to the
+                # user and feeds it back to the model.  Replacing an assistant
+                # response with a placeholder makes the agent's own reasoning
+                # invisible to both.  The store still holds the externalized
+                # version for durable recovery via lcm_expand.
+                _orig_role = str(active_replay_messages[absolute_idx].get("role") or "")
+                if _orig_role == "assistant":
+                    continue
                 if active_replay_messages is replay_messages:
                     active_replay_messages = self._copy_active_replay_messages_preserving_generated_ids(
                         replay_messages
