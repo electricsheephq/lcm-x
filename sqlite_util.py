@@ -58,17 +58,14 @@ def _run_sqlite_write_with_snapshot_retry(
 
     ``SQLITE_BUSY_SNAPSHOT`` cannot be fixed by waiting: the connection must
     roll back its old read snapshot and begin the write from current state.
-    Retrying the complete transaction once is safe for bounded deterministic
-    LCM writes. Ordinary ``SQLITE_BUSY`` already receives SQLite's configured
-    busy timeout and is not multiplied here.
+    Ordinary ``SQLITE_BUSY`` already receives SQLite's configured busy timeout
+    and is not multiplied here.
     """
     for attempt in range(2):
         try:
             with conn:
                 return operation()
         except sqlite3.Error as exc:
-            # ``Connection.__exit__`` normally rolled back already. Keep this
-            # explicit so every error path leaves a reusable clean connection.
             if conn.in_transaction:
                 conn.rollback()
             if attempt == 0 and _is_sqlite_busy_snapshot_error(exc):

@@ -1,6 +1,8 @@
 """Tests for host capability detection before registering lcm_* tools."""
 
+import builtins
 import importlib.util
+import logging
 import sys
 from pathlib import Path
 
@@ -8,6 +10,11 @@ from pathlib import Path
 EXPECTED_LCM_TOOLS = {
     "lcm_grep",
     "lcm_recall",
+    "lcm_query_state",
+    "lcm_compute",
+    "lcm_compile_evidence",
+    "lcm_evidence_pack",
+    "lcm_retrieve",
     "lcm_recent",
     "lcm_load_session",
     "lcm_describe",
@@ -139,6 +146,41 @@ class TestRegistrationGating:
         module.register(ctx)
         assert ctx.engine is not None
         assert ctx.engine.name == "lcm"
+
+    def test_logs_hermes_home_import_failure_and_uses_env_fallback(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        module = _load_plugin_module("hermes_lcm_home_import_failure")
+        fallback_home = tmp_path / "hermes-home"
+        monkeypatch.setenv("HERMES_HOME", str(fallback_home))
+        original_import = builtins.__import__
+
+        def _fail_hermes_cli_config(name, *args, **kwargs):
+            if name == "hermes_cli.config":
+                raise ImportError("simulated hermes_cli.config failure")
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _fail_hermes_cli_config)
+
+        class _Ctx:
+            def __init__(self):
+                self.engine = None
+
+            def register_context_engine(self, engine):
+                self.engine = engine
+
+        with caplog.at_level(logging.WARNING, logger=module.logger.name):
+            ctx = _Ctx()
+            module.register(ctx)
+
+        assert ctx.engine is not None
+        assert ctx.engine._hermes_home == str(fallback_home)
+        assert any(
+            record.levelno == logging.WARNING
+            and "could not import get_hermes_home" in record.message
+            and "simulated hermes_cli.config failure" in record.message
+            for record in caplog.records
+        )
 
 
 class TestHermesAgentRegression:

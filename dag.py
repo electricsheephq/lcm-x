@@ -46,6 +46,7 @@ from .search_query import (
     normalize_search_sort,
     requires_like_fallback,
     sanitize_fts5_query,
+    sanitize_like_query,
     should_apply_directness_rank_adjustment,
 )
 from .store import _normalize_source_value, _UNKNOWN_SOURCE, _legacy_blank_source_clause
@@ -244,8 +245,19 @@ class SummaryDAG:
 
     # -- Write --------------------------------------------------------------
 
-    def add_node(self, node: SummaryNode) -> int:
-        """Insert a summary node and return its node_id."""
+    def add_node(
+        self,
+        node: SummaryNode,
+        *,
+        before_commit: Callable[[sqlite3.Connection, int], None] | None = None,
+    ) -> int:
+        """Insert a summary node and return its node_id.
+
+        ``before_commit`` may stage related writes on this connection. The
+        callback and node insert then commit or roll back as one transaction.
+        A stale-snapshot retry can invoke the callback again with a new
+        ``node_id``, so callbacks must be idempotent.
+        """
         with self._db_lock:
             conn = self._conn
             if conn is None:
@@ -273,7 +285,10 @@ class SummaryDAG:
                 )
                 if cur.lastrowid is None:
                     raise RuntimeError("SQLite did not return a summary node id")
-                return int(cur.lastrowid)
+                node_id = int(cur.lastrowid)
+                if before_commit is not None:
+                    before_commit(conn, node_id)
+                return node_id
 
             node.node_id = _run_sqlite_write_with_snapshot_retry(
                 conn,
@@ -577,7 +592,11 @@ class SummaryDAG:
         safe_query = sanitize_fts5_query(query)
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
-        if requires_like_fallback(query):
+        # LIKE is the fallback for text sanitization LOSES (CJK/emoji) and for a
+        # query with no term left after it. A raw natural-language question is
+        # NOT one of those: it sanitizes to a term form the index answers, so it
+        # stays on the FTS path (F31 §3).
+        if requires_like_fallback(query, safe_query):
             return self._search_like(query, session_id=session_id, limit=limit, sort=sort, source=source)
 
         order_by = _build_search_order_by(sort, "COALESCE(n.latest_at, n.created_at)")
@@ -651,7 +670,9 @@ class SummaryDAG:
     def _search_like(self, query: str, session_id: str | None = None,
                      limit: int = 20, sort: str | None = None,
                      source: str | None = None) -> List[SummaryNode]:
-        safe_query = sanitize_fts5_query(query)
+        # LIKE keeps every character the index cannot spell (emoji, punctuation)
+        # because substring matching is the only way to find those rows.
+        safe_query = sanitize_like_query(query)
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
         if not terms:
@@ -723,6 +744,49 @@ class SummaryDAG:
             node.source_ids,
         ).fetchall()
         return [self._row_to_node(r) for r in rows]
+
+    def source_message_ids(self, node_id: int, *, limit: int) -> List[int]:
+        """Resolve a node to the store_ids of the messages underneath it.
+
+        Walks ``source_ids`` down through nested nodes to the ``messages`` leaves,
+        so a derived (depth > 0) node resolves to real rows rather than to the
+        child nodes it was built from. Ordered by store_id and bounded by
+        ``limit`` so a node summarizing a long session cannot flood a caller.
+
+        A node's own summary text is generated prose and is never a citation for
+        these rows; this is the lineage link, used to let the source MESSAGES be
+        retrieved and cited in their own right.
+        """
+        if limit <= 0:
+            return []
+        with self._db_lock:
+            rows = self._conn.execute(
+                """
+                WITH RECURSIVE source_walk(source_type, source_id) AS (
+                    SELECT n.source_type, CAST(j.value AS INTEGER)
+                    FROM summary_nodes n, json_each(n.source_ids) j
+                    WHERE n.node_id = ?
+
+                    UNION
+
+                    SELECT child.source_type, CAST(j.value AS INTEGER)
+                    FROM summary_nodes child
+                    JOIN source_walk walk
+                      ON walk.source_type = 'nodes'
+                     AND child.node_id = walk.source_id
+                    JOIN json_each(child.source_ids) j
+                )
+                SELECT DISTINCT m.store_id
+                FROM source_walk walk
+                JOIN messages m
+                  ON walk.source_type = 'messages'
+                 AND m.store_id = walk.source_id
+                ORDER BY m.store_id
+                LIMIT ?
+                """,
+                (node_id, limit),
+            ).fetchall()
+        return [int(row[0]) for row in rows]
 
     def _node_matches_source(
         self,

@@ -26,8 +26,10 @@ from hermes_lcm.db_bootstrap import (
     remediate_interim_schema_stamp,
 )
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.query_view_store import QueryViewStore
 from hermes_lcm.rollup_store import RollupStore
 from hermes_lcm.store import MessageStore
+from hermes_lcm.trajectory_store import CorpusIdentity, TrajectoryStore
 from hermes_lcm.vector_store import VectorStore
 
 
@@ -119,6 +121,26 @@ def _add_early_chunk_tables(path: Path) -> None:
         conn.close()
 
 
+def _add_current_query_and_trajectory_tables(path: Path, asset_root: Path) -> None:
+    query_views = QueryViewStore(path)
+    query_views.close()
+    trajectories = TrajectoryStore(
+        path,
+        CorpusIdentity(
+            dataset_name="schema-test",
+            dataset_revision="v1",
+            harness_commit="test",
+            tier="small",
+            domain="web",
+            ingest_config_digest="schema-test-v1",
+        ),
+        asset_root=asset_root,
+    )
+    trajectories._ensure_semantic_schema()
+    trajectories._ensure_state_semantic_schema()
+    trajectories.close()
+
+
 def _table_names(path: Path) -> set[str]:
     conn = sqlite3.connect(path)
     try:
@@ -175,6 +197,164 @@ def test_classify_interim_stamp_with_feature_marker_tables(tmp_path):
         assert classify_version_mismatch(conn) == db_bootstrap.VERSION_MISMATCH_INTERIM_STAMP
     finally:
         conn.close()
+
+
+def test_classify_genuinely_newer_with_partial_query_and_trajectory_tables(tmp_path):
+    """Preserved families cannot be re-stamped from unverified marker tables."""
+    db_path = tmp_path / "lcm.db"
+    _build_v5_db(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE lcm_query_views (view_id TEXT PRIMARY KEY);
+            CREATE TABLE lcm_trajectory_corpora (corpus_id TEXT PRIMARY KEY);
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _stamp(db_path, db_bootstrap.SCHEMA_VERSION + 1)
+    conn = sqlite3.connect(db_path)
+    try:
+        assert (
+            classify_version_mismatch(conn)
+            == db_bootstrap.VERSION_MISMATCH_GENUINELY_NEWER
+        )
+        result = remediate_interim_schema_stamp(conn, apply=True)
+    finally:
+        conn.close()
+    assert result["status"] == "refused"
+    assert result["dropped_tables"] == []
+    assert _stored_version(db_path) == db_bootstrap.SCHEMA_VERSION + 1
+    assert {
+        "lcm_query_views",
+        "lcm_trajectory_corpora",
+    } <= _table_names(db_path)
+
+
+def test_classify_interim_stamp_with_current_query_and_trajectory_tables(tmp_path):
+    db_path = tmp_path / "lcm.db"
+    _build_v5_db(db_path)
+    asset_root = tmp_path / "assets"
+    asset_root.mkdir()
+    _add_current_query_and_trajectory_tables(db_path, asset_root)
+    _stamp(db_path, db_bootstrap.SCHEMA_VERSION + 1)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        assert (
+            classify_version_mismatch(conn)
+            == db_bootstrap.VERSION_MISMATCH_INTERIM_STAMP
+        )
+        result = remediate_interim_schema_stamp(conn, apply=True)
+    finally:
+        conn.close()
+
+    assert result["status"] == "ok"
+    assert result["dropped_tables"] == []
+    assert _stored_version(db_path) == db_bootstrap.SCHEMA_VERSION
+
+
+@pytest.mark.parametrize(
+    "ddl",
+    (
+        """
+        CREATE TRIGGER lcm_query_future_trigger
+        AFTER INSERT ON lcm_query_views
+        BEGIN
+            SELECT 1;
+        END;
+        """,
+        """
+        CREATE INDEX idx_lcm_query_future
+        ON lcm_query_views(view_id);
+        """,
+    ),
+)
+def test_classify_genuinely_newer_on_unknown_query_schema_object(
+    tmp_path, ddl
+):
+    db_path = tmp_path / "lcm.db"
+    _build_v5_db(db_path)
+    asset_root = tmp_path / "assets"
+    asset_root.mkdir()
+    _add_current_query_and_trajectory_tables(db_path, asset_root)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(ddl)
+        conn.commit()
+    finally:
+        conn.close()
+    _stamp(db_path, db_bootstrap.SCHEMA_VERSION + 1)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        assert (
+            classify_version_mismatch(conn)
+            == db_bootstrap.VERSION_MISMATCH_GENUINELY_NEWER
+        )
+        result = remediate_interim_schema_stamp(conn, apply=True)
+    finally:
+        conn.close()
+
+    assert result["status"] == "refused"
+    assert _stored_version(db_path) == db_bootstrap.SCHEMA_VERSION + 1
+
+
+@pytest.mark.parametrize(
+    ("table", "column"),
+    (
+        ("lcm_query_views", "future_query_column"),
+        ("lcm_trajectory_corpora", "future_trajectory_column"),
+    ),
+)
+def test_classify_genuinely_newer_on_unverified_feature_column(
+    tmp_path, table, column
+):
+    db_path = tmp_path / "lcm.db"
+    _build_v5_db(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(f"CREATE TABLE {table} (id TEXT, {column} TEXT)")
+        conn.commit()
+    finally:
+        conn.close()
+    _stamp(db_path, db_bootstrap.SCHEMA_VERSION + 1)
+    conn = sqlite3.connect(db_path)
+    try:
+        assert (
+            classify_version_mismatch(conn)
+            == db_bootstrap.VERSION_MISMATCH_GENUINELY_NEWER
+        )
+        result = remediate_interim_schema_stamp(conn, apply=True)
+    finally:
+        conn.close()
+    assert result["status"] == "refused"
+    assert _stored_version(db_path) == db_bootstrap.SCHEMA_VERSION + 1
+
+
+def test_classify_genuinely_newer_on_unknown_query_family_table(tmp_path):
+    db_path = tmp_path / "lcm.db"
+    _build_v5_db(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("CREATE TABLE lcm_querycache (id TEXT)")
+        conn.commit()
+    finally:
+        conn.close()
+    _stamp(db_path, db_bootstrap.SCHEMA_VERSION + 1)
+    conn = sqlite3.connect(db_path)
+    try:
+        assert (
+            classify_version_mismatch(conn)
+            == db_bootstrap.VERSION_MISMATCH_GENUINELY_NEWER
+        )
+        result = remediate_interim_schema_stamp(conn, apply=True)
+    finally:
+        conn.close()
+    assert result["status"] == "refused"
+    assert _stored_version(db_path) == db_bootstrap.SCHEMA_VERSION + 1
 
 
 def test_classify_genuinely_newer_on_unknown_table(tmp_path):

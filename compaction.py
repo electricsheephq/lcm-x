@@ -20,9 +20,13 @@ import time
 from typing import Any, Dict, List, Optional
 
 from .dag import SummaryNode
+from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
 from .message_content import text_content_for_pattern_matching
 from .sanitize import _contains_sensitive_redaction
+from .sqlite_util import _is_sqlite_locked_error
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
+
+_UNPROVEN_FILTER_EXCLUSION = object()
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +72,16 @@ class CompactionMixin:
 
     def should_compress_preflight(self, messages):
         """Pre-flight check — also ingests messages into the store."""
+        with self._fresh_tail_pressure_yield_invocation():
+            return self._should_compress_preflight_impl(messages)
+
+    def _should_compress_preflight_impl(self, messages):
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         if self._bypasses_lcm_context_management():
+            # Bypassed traffic observes nothing about the pressured session's
+            # tail: it must neither extend nor reset the blocked streak.
+            self._pressure_yield_invocation_verdict = "neutral"
             self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
             rough = count_messages_tokens(messages)
             if self._compression_boundary_cooldown_active():
@@ -79,8 +90,11 @@ class CompactionMixin:
                 return True
             return self.threshold_tokens > 0 and rough >= self.threshold_tokens
         rough = count_messages_tokens(messages)
+        if self.threshold_tokens > 0 and rough < self.threshold_tokens:
+            self._note_fresh_tail_pressure_relieved()
         pre_ingest_placeholder_ambiguous_noop = False
         pre_ingest_noop_reason = ""
+        pre_ingest_placeholder_cleanup_requested = False
         if (
             self.threshold_tokens > 0
             and rough >= self.threshold_tokens
@@ -93,9 +107,17 @@ class CompactionMixin:
                 for msg in messages
             )
         ):
+            # Yield-aware (observed_tokens): a persisted-placeholder session
+            # whose only blocker is the fresh tail must not park in the
+            # ambiguous-noop state while compress() would engage the pressure
+            # yield and make progress.
             eligible, reason = self._leaf_compaction_candidate_status(
                 messages,
                 allow_partial_leaf=self._config.threshold_full_sweep_enabled,
+                observed_tokens=rough,
+            )
+            pre_ingest_placeholder_cleanup_requested = bool(
+                not eligible and self._pressure_yield_tail_token_limit > 0
             )
             pre_ingest_placeholder_ambiguous_noop = not eligible
             pre_ingest_noop_reason = reason
@@ -103,6 +125,7 @@ class CompactionMixin:
         if self._session_id and messages:
             try:
                 replay_messages = self._ingest_messages(messages)
+                self._prepare_retained_user_anchor(replay_messages)
                 self._record_ingest_success()
             except Exception as e:
                 # Fail closed for NORMAL threshold compaction: the store did not
@@ -144,6 +167,10 @@ class CompactionMixin:
             # summarizer spend.
             if self._compression_boundary_cooldown_active():
                 return False
+            if pre_ingest_placeholder_cleanup_requested:
+                return self._mark_preflight_compression_requested(
+                    depends_on_pressure_yield=True,
+                )
             if pre_ingest_placeholder_ambiguous_noop:
                 self._last_compression_status = "noop"
                 self._last_compression_noop_reason = pre_ingest_noop_reason
@@ -156,9 +183,12 @@ class CompactionMixin:
                     and self.threshold_tokens > 0
                     and replay_rough >= self.threshold_tokens
                 ),
+                observed_tokens=replay_rough,
             )
             if eligible:
-                return self._mark_preflight_compression_requested()
+                return self._mark_preflight_compression_requested(
+                    depends_on_pressure_yield=self._pressure_yield_preflight_candidate,
+                )
             if self._has_ignored_backlog_outside_fresh_tail(replay_messages):
                 return self._mark_preflight_compression_requested()
             if self.threshold_tokens > 0 and replay_rough >= self.threshold_tokens:
@@ -177,6 +207,10 @@ class CompactionMixin:
         if self._should_force_overflow_recovery(observed_tokens=rough):
             return self._mark_preflight_compression_requested()
         if self.threshold_tokens > 0 and rough >= self.threshold_tokens:
+            if pre_ingest_placeholder_cleanup_requested:
+                return self._mark_preflight_compression_requested(
+                    depends_on_pressure_yield=True,
+                )
             if pre_ingest_placeholder_ambiguous_noop:
                 self._last_compression_status = "noop"
                 self._last_compression_noop_reason = pre_ingest_noop_reason
@@ -185,9 +219,12 @@ class CompactionMixin:
             eligible, reason = self._leaf_compaction_candidate_status(
                 messages,
                 allow_partial_leaf=self._config.threshold_full_sweep_enabled,
+                observed_tokens=rough,
             )
             if eligible:
-                return self._mark_preflight_compression_requested()
+                return self._mark_preflight_compression_requested(
+                    depends_on_pressure_yield=self._pressure_yield_preflight_candidate,
+                )
             if self._has_ignored_backlog_outside_fresh_tail(messages):
                 return self._mark_preflight_compression_requested()
             if self._should_run_deferred_maintenance(messages, observed_tokens=rough):
@@ -260,6 +297,7 @@ class CompactionMixin:
         *,
         force_overflow: bool = False,
         allow_partial_leaf: bool = False,
+        observed_tokens: Optional[int] = None,
     ) -> tuple[bool, str]:
         """Return whether a normal leaf compaction pass can actually run.
 
@@ -269,17 +307,62 @@ class CompactionMixin:
         backlog outside that tail is still smaller than the configured leaf
         chunk. In that case ``compress()`` would immediately no-op, so preflight
         should not advertise a compaction attempt yet.
+
+        When ``observed_tokens`` reports host-observed over-threshold pressure
+        and the protected tail itself is why no pass can run, the fresh-tail
+        pressure yield re-resolves the tail with a derived token bound and the
+        check runs once more (see ``_maybe_engage_fresh_tail_pressure_yield``;
+        the yield arms only once that pressure is sustained).
+        """
+        eligible, reason, filtered_eligible_tokens = self._leaf_compaction_candidate_status_once(
+            messages,
+            force_overflow=force_overflow,
+            allow_partial_leaf=allow_partial_leaf,
+        )
+        if eligible:
+            return eligible, reason
+        if reason in (
+            "no eligible raw backlog outside fresh tail",
+            "raw backlog outside fresh tail is below leaf chunk threshold",
+        ) and self._maybe_engage_fresh_tail_pressure_yield(
+            messages,
+            observed_tokens,
+            eligible_tokens=filtered_eligible_tokens,
+        ):
+            eligible, reason, _ = self._leaf_compaction_candidate_status_once(
+                messages,
+                force_overflow=force_overflow,
+                allow_partial_leaf=allow_partial_leaf,
+            )
+            if eligible:
+                self._pressure_yield_preflight_candidate = True
+        return eligible, reason
+
+    def _leaf_compaction_candidate_status_once(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        force_overflow: bool = False,
+        allow_partial_leaf: bool = False,
+    ) -> tuple[bool, str, int]:
+        """Single candidate-status pass.
+
+        Returns ``(eligible, reason, eligible_tokens)`` where
+        ``eligible_tokens`` is the token count of the FILTERED raw backlog
+        outside the resolved tail — the same view ``compress()`` operates on —
+        so the pressure-yield gate judges tail blockage from the numbers the
+        compaction pass would actually see.
         """
         if not messages:
-            return False, "empty message list"
+            return False, "empty message list", 0
         fresh_tail_start = self._fresh_tail_start(messages)
         leading_anchor_count = self._leading_anchor_count(messages)
         if fresh_tail_start <= leading_anchor_count:
-            return False, "no eligible raw backlog outside fresh tail"
+            return False, "no eligible raw backlog outside fresh tail", 0
 
         candidate_raw = messages[leading_anchor_count:fresh_tail_start]
         if not candidate_raw:
-            return False, "no eligible raw backlog outside fresh tail"
+            return False, "no eligible raw backlog outside fresh tail", 0
         generated_placeholder_hashes = self._load_generated_ignored_placeholder_hashes()
         if self._compiled_ignore_message_patterns or generated_placeholder_hashes:
             previous_store_id_map = self._current_compress_store_ids_by_message_id
@@ -306,21 +389,28 @@ class CompactionMixin:
                 self._current_compress_store_ids_by_message_id = previous_store_id_map
             candidate_raw = filtered_candidate_raw
             if not candidate_raw:
-                return False, "no eligible raw backlog outside fresh tail"
+                return False, "no eligible raw backlog outside fresh tail", 0
 
         if force_overflow:
-            return True, "forced overflow recovery"
+            return True, "forced overflow recovery", 0
 
         raw_tokens_outside_tail = count_messages_tokens(candidate_raw)
         if allow_partial_leaf:
-            return True, "eligible partial threshold-sweep leaf"
+            return True, "eligible partial threshold-sweep leaf", raw_tokens_outside_tail
         if self._config.dynamic_leaf_chunk_enabled:
             working_leaf_chunk_tokens = self._working_leaf_chunk_tokens(raw_tokens_outside_tail)
         else:
             working_leaf_chunk_tokens = self._config.leaf_chunk_tokens
-        if raw_tokens_outside_tail < working_leaf_chunk_tokens:
-            return False, "raw backlog outside fresh tail is below leaf chunk threshold"
-        return True, "eligible raw backlog outside fresh tail"
+        if (
+            raw_tokens_outside_tail < working_leaf_chunk_tokens
+            and self._pressure_yield_tail_token_limit <= 0
+        ):
+            return (
+                False,
+                "raw backlog outside fresh tail is below leaf chunk threshold",
+                raw_tokens_outside_tail,
+            )
+        return True, "eligible raw backlog outside fresh tail", raw_tokens_outside_tail
 
     def _working_leaf_chunk_tokens(self, raw_tokens_outside_tail: int) -> int:
         base = max(1, self._config.leaf_chunk_tokens)
@@ -353,16 +443,144 @@ class CompactionMixin:
                  force: bool = False) -> List[Dict[str, Any]]:
         """Run compaction and leave a terminal public status on every failure."""
         try:
-            return self._compress_impl(
-                messages,
-                current_tokens=current_tokens,
-                focus_topic=focus_topic,
-                force=force,
-            )
+            with self._fresh_tail_pressure_yield_invocation():
+                return self._compress_impl(
+                    messages,
+                    current_tokens=current_tokens,
+                    focus_topic=focus_topic,
+                    force=force,
+                )
         except BaseException:
             self._last_compression_status = "error"
             self._last_compression_noop_reason = ""
             raise
+
+    def _fail_open_after_publication_failure(
+        self,
+        active_context: List[Dict[str, Any]],
+        exc: BaseException,
+        *,
+        compress_started: float,
+        threshold_full_sweep_active: bool,
+        recovery_assembly_cap: int | None,
+        leaf_passes: int,
+        condensation_passes: int = 0,
+        context_is_assembled: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Return a replay-safe active view after publication cannot finish."""
+        self._store.rollback_pending_write()
+        fallback = active_context
+        if recovery_assembly_cap is not None and not context_is_assembled:
+            leading_anchor_count = self._leading_anchor_count(active_context)
+            fallback = self._assemble_overflow_recovery_context(
+                active_context[0] if leading_anchor_count else None,
+                active_context[leading_anchor_count:],
+                assembly_cap_override=recovery_assembly_cap,
+                **(
+                    {"retained_user_message": active_context[1]}
+                    if leading_anchor_count == 2
+                    else {}
+                ),
+            )
+        self._last_compression_status = "error"
+        binding_changed = isinstance(exc, LifecycleBindingChangedError)
+        if binding_changed:
+            failure_reason, noop_reason = (
+                "lifecycle_binding_changed",
+                "summary publication lost its lifecycle binding"
+            )
+        elif isinstance(exc, LifecyclePublicationConflictError):
+            failure_reason, noop_reason = (
+                "publication_invariant_conflict",
+                "summary publication could not prove contiguous source coverage"
+            )
+        else:
+            failure_reason, noop_reason = (
+                "sqlite_publication_locked",
+                "summary publication blocked by SQLite lock"
+            )
+        self._last_compression_noop_reason = noop_reason
+        self._ingest_cursor = len(fallback)
+        self._ingest_cursor_needs_reconcile = False
+        self._last_compaction_duration_ms = (
+            time.perf_counter() - compress_started
+        ) * 1000.0
+        if recovery_assembly_cap is not None:
+            self._last_overflow_recovery_failed = (
+                count_messages_tokens(fallback) > recovery_assembly_cap
+            )
+        if threshold_full_sweep_active:
+            self._last_threshold_full_sweep = {
+                **self._last_threshold_full_sweep,
+                "status": "error",
+                "leaf_passes": leaf_passes,
+                "condensation_passes": condensation_passes,
+                "total_passes": leaf_passes + condensation_passes,
+                "duration_ms": round(self._last_compaction_duration_ms, 3),
+                "stop_reason": failure_reason,
+            }
+        logger.warning(
+            "LCM summary publication could not finish; preserving replay-safe "
+            "context (reason=%s, code=%s, name=%s)",
+            failure_reason,
+            getattr(exc, "sqlite_errorcode", None),
+            getattr(exc, "sqlite_errorname", None),
+        )
+        return fallback
+
+    def _assemble_committed_compaction_context(
+        self,
+        working_messages: List[Dict[str, Any]],
+        anchor_source_messages: List[Dict[str, Any]],
+        recovery_assembly_cap: int | None,
+    ) -> List[Dict[str, Any]]:
+        """Assemble and register replay proof for every committed leaf."""
+        leading_anchor_count = self._leading_anchor_count(working_messages)
+        anchor_leading_count = self._leading_anchor_count(anchor_source_messages)
+        self._pending_context_anchor_messages = anchor_source_messages[anchor_leading_count:]
+        try:
+            return self._assemble_context(
+                working_messages[0] if leading_anchor_count else None,
+                working_messages[leading_anchor_count:],
+                assembly_cap_override=recovery_assembly_cap,
+                **(
+                    {"retained_user_message": working_messages[1]}
+                    if leading_anchor_count == 2
+                    else {}
+                ),
+            )
+        finally:
+            self._pending_context_anchor_messages = None
+
+    def _stored_publication_filter_exclusions(
+        self,
+        expected_frontier: int,
+        covered_end: int,
+        already_proven_store_ids: List[int],
+        initial_proofs: Dict[int, Any],
+    ) -> Dict[int, Any]:
+        proven = {int(store_id) for store_id in already_proven_store_ids}
+        proofs = dict(initial_proofs)
+        after_store_id = expected_frontier
+        while after_store_id < covered_end:
+            rows = self._store.get_session_messages_after(
+                self._session_id,
+                after_store_id=after_store_id,
+            )
+            if not rows:
+                break
+            for row in rows:
+                store_id = int(row.get("store_id") or 0)
+                if store_id > covered_end:
+                    break
+                if (
+                    store_id not in proven
+                    and store_id not in proofs
+                    and self._matches_ignore_message_patterns(row, stored_row=True)
+                ):
+                    proofs[store_id] = row.get("content")
+            after_store_id = int(rows[-1].get("store_id") or after_store_id)
+        return proofs
 
     def _compress_impl(self, messages: List[Dict[str, Any]],
                        current_tokens: int = None,
@@ -387,6 +605,9 @@ class CompactionMixin:
 
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         if self._bypasses_lcm_context_management():
+            # Bypassed traffic observes nothing about the pressured session's
+            # tail: it must neither extend nor reset the blocked streak.
+            self._pressure_yield_invocation_verdict = "neutral"
             bypass_current_tokens = current_tokens
             if bypass_current_tokens is None or bypass_current_tokens <= 0:
                 auxiliary_session_id = self._thread_context_session_id()
@@ -403,7 +624,15 @@ class CompactionMixin:
                 force=force,
             )
 
-        observed_prompt_tokens = current_tokens if current_tokens is not None else None
+        # ``current_tokens`` is optional in the ContextEngine contract. After a
+        # yield-aware preflight, use the current active messages as the
+        # pressure observation when the host calls ``compress(messages)`` so
+        # the follow-up invocation can re-arm the advertised bounded yield.
+        observed_prompt_tokens = (
+            current_tokens
+            if current_tokens is not None
+            else count_messages_tokens(messages)
+        )
         force_overflow = self._should_force_overflow_recovery(
             observed_tokens=observed_prompt_tokens,
             messages=messages,
@@ -427,6 +656,7 @@ class CompactionMixin:
         # replay-safe view so quarantined assistant loops do not enter summaries
         # or provider context after the durable row has been written.
         working_messages = self._ingest_messages(messages)
+        self._prepare_retained_user_anchor(working_messages)
         ingest_cleanup_changed_active_context = working_messages != messages
         cleanup_only_due_to_boundary_cooldown = bool(
             self._preflight_cleanup_only_due_to_boundary_cooldown
@@ -445,6 +675,7 @@ class CompactionMixin:
             self._ingest_cursor = len(sanitized_messages)
             self._last_compression_status = "sanitized"
             self._last_compression_noop_reason = ""
+            self._note_fresh_tail_pressure_relieved()
             self._write_generated_ignored_placeholder_hash_counts(
                 self._generated_placeholder_digest_budget_for_active_replay(
                     sanitized_messages
@@ -538,7 +769,21 @@ class CompactionMixin:
             # turn; that must remain eligible for compaction instead of being
             # replayed forever as fresh-looking intent.
             leading_anchor_count = self._leading_anchor_count(working_messages)
+            publication_excluded_store_ids = self._get_store_ids_for_messages(
+                working_messages[:leading_anchor_count]
+            )
+            filter_exclusion_proofs: Dict[int, Any] = {}
             if fresh_tail_start <= leading_anchor_count:
+                # Also reached with threshold_full_sweep_active: a sweep whose
+                # "drained" raw prefix is really a tail covering the whole
+                # session must yield like any other blocked pass, or the sweep
+                # condenses nothing and the deadlock survives in sweep mode.
+                if self._maybe_engage_fresh_tail_pressure_yield(
+                    pressure_messages,
+                    observed_prompt_tokens,
+                    eligible_tokens=0,
+                ):
+                    continue
                 noop_reason = "no eligible raw backlog outside fresh tail"
                 if threshold_full_sweep_active:
                     sweep_raw_drained = True
@@ -552,6 +797,11 @@ class CompactionMixin:
             ):
                 candidate_start += 1
             if candidate_start > leading_anchor_count:
+                publication_excluded_store_ids.extend(
+                    self._get_store_ids_for_messages(
+                        working_messages[leading_anchor_count:candidate_start]
+                    )
+                )
                 dropped_replayed_scaffold_messages = True
                 working_messages = working_messages[:leading_anchor_count] + working_messages[candidate_start:]
                 pressure_messages = pressure_messages[:leading_anchor_count] + pressure_messages[candidate_start:]
@@ -588,13 +838,35 @@ class CompactionMixin:
                         and volatile_digest is not None
                         and volatile_digest in self._load_generated_ignored_placeholder_hashes()
                     )
-                    if (
+                    configured_filter_match = (
                         self._matches_ignore_message_patterns(working_msg)
                         or self._matches_ignore_message_patterns(pressure_msg)
                         or self._mapped_stored_row_matches_ignore_message_patterns(working_msg)
+                    )
+                    if (
+                        configured_filter_match
                         or self._is_ignored_active_replay_placeholder(working_msg, content_text)
                         or generated_volatile_placeholder
                     ):
+                        mapped_store_id = (
+                            self._current_compress_store_ids_by_message_id.get(
+                                id(working_msg)
+                            )
+                        )
+                        if mapped_store_id is not None:
+                            store_id = int(mapped_store_id)
+                            publication_excluded_store_ids.append(store_id)
+                            stored = self._store.get(store_id)
+                            if configured_filter_match:
+                                filter_exclusion_proofs[store_id] = (
+                                    stored.get("content")
+                                    if stored is not None
+                                    and self._matches_ignore_message_patterns(
+                                        stored,
+                                        stored_row=True,
+                                    )
+                                    else _UNPROVEN_FILTER_EXCLUSION
+                                )
                         dropped_ignored_backlog = True
                         if role in {"user", "system", "tool", "assistant"}:
                             drop_dependent_reply = True
@@ -655,6 +927,12 @@ class CompactionMixin:
 
             candidate_raw = working_messages[leading_anchor_count:fresh_tail_start]
             if not candidate_raw:
+                if self._maybe_engage_fresh_tail_pressure_yield(
+                    pressure_messages,
+                    observed_prompt_tokens,
+                    eligible_tokens=0,
+                ):
+                    continue
                 noop_reason = "no eligible raw backlog outside fresh tail"
                 if threshold_full_sweep_active:
                     sweep_raw_drained = True
@@ -673,8 +951,21 @@ class CompactionMixin:
                 )
             elif self._config.dynamic_leaf_chunk_enabled:
                 working_leaf_chunk_tokens = self._working_leaf_chunk_tokens(raw_tokens_outside_tail)
-                if raw_tokens_outside_tail < working_leaf_chunk_tokens and not force_overflow:
+                # An armed pressure yield waives the leaf-chunk minimum: the
+                # whole point of the yield is progress, and the freed backlog
+                # can legitimately be smaller than one configured chunk.
+                if (
+                    raw_tokens_outside_tail < working_leaf_chunk_tokens
+                    and not force_overflow
+                    and self._pressure_yield_tail_token_limit <= 0
+                ):
                     if not (deferred_maintenance_active and critical_budget_pressure):
+                        if self._maybe_engage_fresh_tail_pressure_yield(
+                            pressure_messages,
+                            observed_prompt_tokens,
+                            eligible_tokens=raw_tokens_outside_tail,
+                        ):
+                            continue
                         noop_reason = (
                             "raw backlog outside fresh tail is below leaf chunk threshold"
                         )
@@ -684,13 +975,31 @@ class CompactionMixin:
                 else:
                     to_compact = self._select_oldest_leaf_chunk(candidate_raw, working_leaf_chunk_tokens)
             else:
-                if raw_tokens_outside_tail < self._config.leaf_chunk_tokens and not force_overflow:
+                if (
+                    raw_tokens_outside_tail < self._config.leaf_chunk_tokens
+                    and not force_overflow
+                    and self._pressure_yield_tail_token_limit <= 0
+                ):
                     if not (deferred_maintenance_active and critical_budget_pressure):
+                        if self._maybe_engage_fresh_tail_pressure_yield(
+                            pressure_messages,
+                            observed_prompt_tokens,
+                            eligible_tokens=raw_tokens_outside_tail,
+                        ):
+                            continue
                         noop_reason = (
                             "raw backlog outside fresh tail is below leaf chunk threshold"
                         )
                         break
-                to_compact = candidate_raw
+                if force_overflow:
+                    to_compact = candidate_raw
+                elif self._pressure_yield_tail_token_limit > 0:
+                    to_compact = self._select_oldest_leaf_chunk(
+                        candidate_raw,
+                        max(1, int(self._config.leaf_chunk_tokens)),
+                    )
+                else:
+                    to_compact = candidate_raw
 
             if not to_compact:
                 noop_reason = "no eligible leaf chunk selected"
@@ -721,6 +1030,14 @@ class CompactionMixin:
                         summary_input_chunk,
                         timeout_seconds=extraction_timeout,
                     )
+                if bool(
+                    getattr(
+                        self._config,
+                        "assertion_extraction_enabled",
+                        False,
+                    )
+                ):
+                    self._schedule_pre_compaction_assertions(summary_input_chunk)
 
                 try:
                     summary_kwargs: dict[str, Any] = {"focus_topic": focus_topic}
@@ -785,11 +1102,70 @@ class CompactionMixin:
                 latest_at=latest_at,
                 expand_hint=self._extract_expand_hint(summary_text),
             )
-            self._dag.add_node(node)
+            published_frontier = (
+                max(consumed_store_ids) if consumed_store_ids else 0
+            )
+            publication_state = self._lifecycle.get_by_conversation(
+                self._conversation_id
+            )
+            expected_frontier = int(
+                getattr(publication_state, "current_frontier_store_id", 0)
+            )
+            filter_exclusion_proofs = self._stored_publication_filter_exclusions(
+                expected_frontier,
+                published_frontier,
+                consumed_store_ids,
+                filter_exclusion_proofs,
+            )
+            publication_excluded_store_ids.extend(filter_exclusion_proofs)
+            # The frontier consumes every durable row removed from the active
+            # prefix, including trailing dependent replies. Summary lineage
+            # excludes those replies; their durable ledger drives replay cleanup.
+            try:
+                before_commit = None
+                if self._session_id and self._conversation_id:
+                    publication_session_id = self._session_id
+                    publication_conversation_id = self._conversation_id
+                    def stage_frontier(conn, node_id) -> None:
+                        self._lifecycle.stage_compaction_publication(
+                            conn,
+                            publication_conversation_id,
+                            publication_session_id,
+                            node_id,
+                            expected_frontier,
+                            consumed_store_ids,
+                            publication_excluded_store_ids,
+                            filter_exclusion_proofs,
+                        )
+                    before_commit = stage_frontier
+                self._dag.add_node(node, before_commit=before_commit)
+            except Exception as exc:
+                if (
+                    not _is_sqlite_locked_error(exc)
+                    and not isinstance(exc, LifecycleBindingChangedError)
+                    and not isinstance(exc, LifecyclePublicationConflictError)
+                ):
+                    raise
+                fallback = working_messages
+                context_is_assembled = False
+                if leaf_passes or dropped_replayed_scaffold_messages:
+                    fallback = self._assemble_committed_compaction_context(
+                        working_messages,
+                        anchor_source_messages,
+                        recovery_assembly_cap,
+                    )
+                    context_is_assembled = True
+                return self._fail_open_after_publication_failure(
+                    fallback,
+                    exc,
+                    compress_started=_compress_started,
+                    threshold_full_sweep_active=threshold_full_sweep_active,
+                    recovery_assembly_cap=recovery_assembly_cap,
+                    leaf_passes=leaf_passes,
+                    context_is_assembled=context_is_assembled,
+                )
+            self._last_compacted_store_id = published_frontier
             self._invalidate_rollups_for_published_node(node)
-            self._maybe_gc_compacted_tool_results(compacted_chunk, source_store_ids)
-            self._last_compacted_store_id = max(consumed_store_ids) if consumed_store_ids else 0
-            self._persist_frontier_marker()
 
             pressure_remaining_messages = pressure_messages[leading_anchor_count + selected_raw_len:]
             working_messages = working_messages[:leading_anchor_count] + remaining_messages
@@ -797,6 +1173,32 @@ class CompactionMixin:
             leaf_compacted_this_turn = True
             leaf_passes += 1
             estimated_active_tokens = max(0, estimated_active_tokens - source_tokens + summary_tokens)
+            if (
+                getattr(self._config, "large_output_transcript_gc_enabled", False)
+                and source_store_ids
+            ):
+                committed_context = self._assemble_committed_compaction_context(
+                    working_messages,
+                    anchor_source_messages,
+                    recovery_assembly_cap,
+                )
+                try:
+                    self._maybe_gc_compacted_tool_results(
+                        compacted_chunk,
+                        source_store_ids,
+                    )
+                except Exception as exc:
+                    if not _is_sqlite_locked_error(exc):
+                        raise
+                    return self._fail_open_after_publication_failure(
+                        committed_context,
+                        exc,
+                        compress_started=_compress_started,
+                        threshold_full_sweep_active=threshold_full_sweep_active,
+                        recovery_assembly_cap=recovery_assembly_cap,
+                        leaf_passes=leaf_passes,
+                        context_is_assembled=True,
+                    )
 
             if threshold_full_sweep_active:
                 leading_anchor_count = self._leading_anchor_count(working_messages)
@@ -851,6 +1253,11 @@ class CompactionMixin:
                     working_messages[0] if leading_anchor_count else None,
                     working_messages[leading_anchor_count:],
                     assembly_cap_override=recovery_assembly_cap,
+                    **(
+                        {"retained_user_message": working_messages[1]}
+                        if leading_anchor_count == 2
+                        else {}
+                    ),
                 )
                 return self._finalize_forced_overflow_result(
                     working_messages,
@@ -871,6 +1278,11 @@ class CompactionMixin:
                         active_context_messages[0] if leading_anchor_count else None,
                         active_context_messages[leading_anchor_count:],
                         assembly_cap_override=recovery_assembly_cap,
+                        **(
+                            {"retained_user_message": active_context_messages[1]}
+                            if leading_anchor_count == 2
+                            else {}
+                        ),
                     )
                 finally:
                     self._pending_context_anchor_messages = None
@@ -888,6 +1300,7 @@ class CompactionMixin:
                 self._ingest_cursor = len(sanitized_messages)
                 self._last_compression_status = "sanitized"
                 self._last_compression_noop_reason = ""
+                self._note_fresh_tail_pressure_relieved()
             else:
                 if dropped_replayed_scaffold_messages:
                     # The active context changed even though no new leaf node was
@@ -918,27 +1331,48 @@ class CompactionMixin:
         # Step 6: Check if condensation is needed. A threshold full sweep only
         # condenses after the eligible raw prefix has been drained, and shares
         # the same total pass/deadline budget as its leaf work.
+        pre_condensation_context = self._assemble_committed_compaction_context(
+            working_messages,
+            anchor_source_messages,
+            recovery_assembly_cap,
+        )
         condensation_passes = 0
-        if threshold_full_sweep_active:
-            if sweep_raw_drained:
-                remaining_passes = max(
-                    0,
-                    _THRESHOLD_FULL_SWEEP_MAX_PASSES - leaf_passes,
-                )
-                condensation_passes, sweep_stop_reason = (
-                    self._run_threshold_sweep_condensation(
-                        target_tokens=sweep_target_tokens,
-                        pass_budget=remaining_passes,
-                        deadline=sweep_deadline,
-                        focus_topic=focus_topic,
+        try:
+            if threshold_full_sweep_active:
+                if sweep_raw_drained:
+                    remaining_passes = max(
+                        0,
+                        _THRESHOLD_FULL_SWEEP_MAX_PASSES - leaf_passes,
                     )
+                    condensation_passes, sweep_stop_reason = (
+                        self._run_threshold_sweep_condensation(
+                            target_tokens=sweep_target_tokens,
+                            pass_budget=remaining_passes,
+                            deadline=sweep_deadline,
+                            focus_topic=focus_topic,
+                        )
+                    )
+            else:
+                condensation_passes = self._maybe_condense(
+                    focus_topic=focus_topic,
+                    leaf_compacted_this_turn=True,
+                    force_overflow=force_overflow,
+                    critical_budget_pressure=critical_budget_pressure,
                 )
-        else:
-            self._maybe_condense(
-                focus_topic=focus_topic,
-                leaf_compacted_this_turn=True,
-                force_overflow=force_overflow,
-                critical_budget_pressure=critical_budget_pressure,
+        except Exception as exc:
+            if not _is_sqlite_locked_error(exc):
+                raise
+            return self._fail_open_after_publication_failure(
+                pre_condensation_context,
+                exc,
+                compress_started=_compress_started,
+                threshold_full_sweep_active=threshold_full_sweep_active,
+                recovery_assembly_cap=recovery_assembly_cap,
+                leaf_passes=leaf_passes,
+                condensation_passes=int(
+                    getattr(exc, "lcm_completed_condensation_passes", 0)
+                ),
+                context_is_assembled=True,
             )
 
         # Step 7: Assemble new active context
@@ -946,17 +1380,13 @@ class CompactionMixin:
             working_messages,
             observed_tokens=observed_prompt_tokens,
         )
-        leading_anchor_count = self._leading_anchor_count(working_messages)
-        anchor_leading_count = self._leading_anchor_count(anchor_source_messages)
-        self._pending_context_anchor_messages = anchor_source_messages[anchor_leading_count:]
-        try:
-            compressed = self._assemble_context(
-                working_messages[0] if leading_anchor_count else None,
-                working_messages[leading_anchor_count:],
-                assembly_cap_override=recovery_assembly_cap,
+        compressed = pre_condensation_context
+        if condensation_passes:
+            compressed = self._assemble_committed_compaction_context(
+                working_messages,
+                anchor_source_messages,
+                recovery_assembly_cap,
             )
-        finally:
-            self._pending_context_anchor_messages = None
         self.compression_count += 1
         self._last_compaction_duration_ms = (time.perf_counter() - _compress_started) * 1000.0
         logger.info(
@@ -964,6 +1394,7 @@ class CompactionMixin:
         )
         self._last_compression_status = "compacted"
         self._last_compression_noop_reason = ""
+        self._note_fresh_tail_pressure_relieved()
         if recovery_assembly_cap is None:
             self._last_overflow_recovery_failed = False
         else:
