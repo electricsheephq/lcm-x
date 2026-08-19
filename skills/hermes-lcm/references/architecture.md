@@ -1,6 +1,6 @@
 # Architecture
 
-Hermes-LCM keeps raw messages in profile-local SQLite and builds a summary DAG to keep active context bounded.
+LCM-X keeps raw messages in profile-local SQLite and builds a summary DAG to keep active context bounded.
 
 ## Core flow
 

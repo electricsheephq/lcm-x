@@ -1,7 +1,7 @@
 # LCM-X Repository Instructions
 
 These instructions govern maintainers, contributor agents, and review bots working in
-`electricsheephq/lcm-x`. LCM-X is the independent Lossless Context Memory extension for
+`electricsheephq/lcm-x`. LCM-X is the independent Lossless Context Memory eXtension for
 Hermes. Upstream `stephenschoettler/hermes-lcm` is an evidence and attribution source, not
 an authority for writes or automatic merges.
 

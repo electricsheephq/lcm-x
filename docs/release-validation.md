@@ -1,6 +1,10 @@
 # Release validation
 
-Use `scripts/validate_release.sh` as the local release-confidence lane before tagging or publishing hermes-lcm. The script is offline by default: it does not call model providers, does not mutate live Hermes config, routes Python bytecode/cache artifacts under the validation output directory, and writes validation artifacts under a fresh output directory.
+Use `scripts/validate_release.sh` as the local release-confidence lane before
+tagging or publishing LCM-X. The script is offline by default: it does not call
+model providers, does not mutate live Hermes config, routes Python bytecode/cache
+artifacts under the validation output directory, and writes validation artifacts
+under a fresh output directory.
 
 ## Command
 
