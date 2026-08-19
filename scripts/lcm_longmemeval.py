@@ -105,6 +105,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "record the binding in the checkpoint header.",
     )
     run.add_argument(
+        "--recall-rerank-window",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Bound the production lcm_recall rerank window (default: 0, historical behavior); "
+        "requires --recall-rerank.",
+    )
+    run.add_argument(
         "--no-db-template",
         dest="reuse_db_template",
         action="store_false",
@@ -160,7 +168,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     probe.add_argument("--sample-size", type=int, default=20)
     probe.add_argument("--seed", type=int, default=0)
     probe.add_argument("--timeout", type=float, default=300.0)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    args._recall_rerank_window_given = any(
+        token == "--recall-rerank-window"
+        or token.startswith("--recall-rerank-window=")
+        for token in argv
+    )
+    return args
 
 
 def _validate_output_path(path: Path, *, allow_external: bool) -> Path:
@@ -239,6 +253,11 @@ def _validated_dump_candidates_path(
 def _cmd_run(args: argparse.Namespace) -> int:
     if args.provider != "stub" and not args.model:
         raise SystemExit(f"--model is required for --provider {args.provider}")
+    if (
+        getattr(args, "_recall_rerank_window_given", False)
+        or args.recall_rerank_window != 0
+    ) and not args.recall_rerank:
+        raise SystemExit("--recall-rerank-window requires --recall-rerank")
     if args.limit is not None and args.limit <= 0:
         raise SystemExit("--limit must be a positive integer")
     output_dir = _validate_output_path(Path(args.output), allow_external=args.allow_external_output)
@@ -312,6 +331,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 tmp_dir=tmp_dir,
                 use_rerank=args.rerank,
                 recall_rerank=args.recall_rerank,
+                recall_rerank_window=args.recall_rerank_window,
                 reuse_db_template=args.reuse_db_template,
                 question_count=question_count,
                 dataset_label=args.dataset_label,
