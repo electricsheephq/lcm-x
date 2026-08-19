@@ -1,6 +1,5 @@
 """Absolute compaction threshold override tests."""
 
-import pytest
 
 from hermes_lcm.config import LCMConfig
 
