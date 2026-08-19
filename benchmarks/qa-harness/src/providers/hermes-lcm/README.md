@@ -1,13 +1,13 @@
-# hermes-lcm provider
+# LCM-X provider (`hermes-lcm` compatibility ID)
 
-Scores [hermes-lcm](https://github.com/) — a Python/SQLite lossless
-context-management memory plugin — on this harness's full
+Scores [LCM-X](https://github.com/electricsheephq/lcm-x) — a Python/SQLite
+lossless context-memory extension — on this harness's full
 ingest → search → answer → judge → report pipeline, for leaderboard-comparable
 LongMemEval_S QA accuracy.
 
 ## How it works
 
-hermes-lcm is Python-native, so the provider (`index.ts`) drives a long-lived
+LCM-X is Python-native, so the `hermes-lcm` provider (`index.ts`) drives a long-lived
 Python bridge (`bridge/hermes_lcm_bridge.py`) over newline-delimited JSON on
 stdin/stdout — the same "persistent backend handle" shape as the Zep provider's
 SDK client. Requests are serialized (one line in flight at a time) and the
@@ -22,7 +22,7 @@ later call throws.
 | `search` | Calls the **production** `tools.lcm_recall` over the container store through a `SimpleNamespace` engine with a fresh, dataset-disjoint `current_session_id`, then maps each hit → `{content, metadata}` and returns the top-k the harness asks for. |
 | `clear` | Deletes the container's db + date sidecar. |
 
-The hermes-lcm plugin repo is **never modified**: it is made importable via the
+The LCM-X plugin repo is **never modified**: it is made importable via the
 same `sys.path` + package-spec bootstrap the repo's own harness uses.
 
 **Fairness:** the adapter only ever sees what the harness gives every provider
@@ -38,19 +38,19 @@ temporal questions.
 
 ## Prerequisites
 
-hermes-lcm's embedding path needs `fastembed` (optional dep). Create a dedicated
+LCM-X's embedding path needs `fastembed` (optional dep). Create a dedicated
 venv once (the plugin itself has no pip deps — it is imported via `sys.path`):
 
 ```bash
-uv venv --python 3.13 /path/to/hermes-lcm/.venv-fastembed
-uv pip install --python /path/to/hermes-lcm/.venv-fastembed/bin/python fastembed numpy
+uv venv --python 3.13 /path/to/lcm-x/.venv-fastembed
+uv pip install --python /path/to/lcm-x/.venv-fastembed/bin/python fastembed numpy
 ```
 
 ## Environment variables
 
 | Var | Default | Purpose |
 |---|---|---|
-| `HERMES_LCM_REPO` | `/Volumes/LEXAR/hermes-work/hermes-lcm` | Path to the hermes-lcm checkout. |
+| `HERMES_LCM_REPO` | `/path/to/lcm-x` | Path to the LCM-X checkout. |
 | `HERMES_LCM_PYTHON` | `$HERMES_LCM_REPO/.venv-fastembed/bin/python` | Python interpreter that has `fastembed`. |
 | `HERMES_MB_WORKDIR` | `$TMPDIR/hermes-lcm-mb` | Base dir for per-container LCM dbs. |
 | `HERMES_MB_PROVIDER` | `fastembed` | Embedding provider: `fastembed` or `voyage`. |
@@ -59,16 +59,16 @@ uv pip install --python /path/to/hermes-lcm/.venv-fastembed/bin/python fastembed
 | `VOYAGE_API_KEY` | — | Required only when `HERMES_MB_PROVIDER=voyage`. |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` | — | Answerer + judge key (harness-level, not provider-level). |
 
-hermes-lcm needs **no provider API key** — retrieval is fully local.
+LCM-X needs **no provider API key** — retrieval is fully local.
 
 ## Run
 
 ```bash
-export HERMES_LCM_REPO=/Volumes/LEXAR/hermes-work/hermes-lcm
+export HERMES_LCM_REPO=/path/to/lcm-x
 export HERMES_LCM_PYTHON=$HERMES_LCM_REPO/.venv-fastembed/bin/python
-export HERMES_MB_WORKDIR=/Volumes/LEXAR/hermes-work/mb-workdir
+export HERMES_MB_WORKDIR=/path/to/empty/mb-workdir
 export HERMES_MB_PROVIDER=fastembed
-export LCM_LONGMEMEVAL_FASTEMBED_CACHE=/Volumes/LEXAR/hermes-work/fastembed-cache
+export LCM_LONGMEMEVAL_FASTEMBED_CACHE=/path/to/fastembed-cache
 export OPENAI_API_KEY=sk-...            # answerer + judge
 
 # 5-question smoke
@@ -83,7 +83,7 @@ gemini-2.5-flash` (Google) to change the judge/answerer.
 
 ## ⚠ Result-comparability disclosures
 
-Bake these into any numbers reported from a hermes-lcm run:
+Bake these into any numbers reported from an LCM-X run:
 
 - **Judge/answerer = `gemini-2.5-flash`** in the runs produced so far (no funded
   OpenAI/Anthropic key was available: the OpenAI key was `insufficient_quota` and
@@ -92,4 +92,4 @@ Bake these into any numbers reported from a hermes-lcm run:
   judge-parity rerun** with `-j gpt-4o -m gpt-4o`.
 - **Retrieval = production `tools.lcm_recall` single-shot snippets** (≤25 hits,
   300 chars each). The adapter does not agentically re-expand hits, so this scores
-  hermes-lcm's one-shot recall payload — not a multi-hop recall→expand agent loop.
+  LCM-X's one-shot recall payload — not a multi-hop recall→expand agent loop.
