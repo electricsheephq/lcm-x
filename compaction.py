@@ -186,9 +186,22 @@ class CompactionMixin:
                 observed_tokens=replay_rough,
             )
             if eligible:
-                return self._mark_preflight_compression_requested(
-                    depends_on_pressure_yield=self._pressure_yield_preflight_candidate,
+                if self.threshold_tokens > 0 and replay_rough >= self.threshold_tokens:
+                    return self._mark_preflight_compression_requested(
+                        depends_on_pressure_yield=self._pressure_yield_preflight_candidate,
+                    )
+                self._refresh_raw_backlog_debt(
+                    replay_messages,
+                    observed_tokens=replay_rough,
                 )
+                if self._critical_budget_pressure_reached(
+                    observed_tokens=replay_rough,
+                    messages=replay_messages,
+                ):
+                    return self._mark_preflight_compression_requested(
+                        depends_on_pressure_yield=self._pressure_yield_preflight_candidate,
+                    )
+                return False
             if self._has_ignored_backlog_outside_fresh_tail(replay_messages):
                 return self._mark_preflight_compression_requested()
             if self.threshold_tokens > 0 and replay_rough >= self.threshold_tokens:
@@ -199,7 +212,16 @@ class CompactionMixin:
                 logger.info("LCM preflight compression no-op: %s", reason)
                 return False
             self._refresh_raw_backlog_debt(replay_messages, observed_tokens=replay_rough)
-            if self._should_run_deferred_maintenance(replay_messages, observed_tokens=replay_rough):
+            # A disabled critical-pressure ratio intentionally leaves this debt
+            # deferred until threshold, overflow, cleanup, ignored-backlog, or
+            # another explicit required trigger makes preflight synchronous.
+            if self._critical_budget_pressure_reached(
+                observed_tokens=replay_rough,
+                messages=replay_messages,
+            ) and self._should_run_deferred_maintenance(
+                replay_messages,
+                observed_tokens=replay_rough,
+            ):
                 return self._mark_preflight_compression_requested()
             return False
         if self._compression_boundary_cooldown_active():
@@ -234,7 +256,15 @@ class CompactionMixin:
             logger.info("LCM preflight compression no-op: %s", reason)
             return False
         self._refresh_raw_backlog_debt(messages, observed_tokens=rough)
-        if self._should_run_deferred_maintenance(messages, observed_tokens=rough):
+        # With critical pressure disabled, routine debt remains recorded until
+        # another required preflight trigger is reached.
+        if self._critical_budget_pressure_reached(
+            observed_tokens=rough,
+            messages=messages,
+        ) and self._should_run_deferred_maintenance(
+            messages,
+            observed_tokens=rough,
+        ):
             return self._mark_preflight_compression_requested()
         return False
 
