@@ -2996,13 +2996,27 @@ def repair_external_content_fts(
 
     triggers_were_missing = _fts_missing_triggers(conn, spec)
     triggers_were_stale = _fts_stale_triggers(conn, spec)
-    if triggers_were_stale:
-        # A stale trigger exists by name with a drifted body, so the spec's bare
-        # `CREATE TRIGGER IF NOT EXISTS` would no-op and leave the broken trigger
-        # in place. Drop first so the body is guaranteed to be recreated fresh.
-        _drop_fts_triggers(conn, spec.trigger_sqls)
-    for trigger_sql in spec.trigger_sqls:
-        conn.execute(trigger_sql)
+    # Swap the triggers under one SAVEPOINT. sqlite3 opens no implicit
+    # transaction for DDL, and on the stale-but-not-rebuilt path nothing above
+    # has opened one, so an unguarded DROP/CREATE pair leaves a window in which
+    # a concurrent writer's row is persisted with no FTS entry -- invisible to
+    # lexical search from then on, with no error raised. SAVEPOINT is correct
+    # whether or not a transaction is already active.
+    conn.execute("SAVEPOINT lcm_fts_trigger_swap")
+    try:
+        if triggers_were_stale:
+            # A stale trigger exists by name with a drifted body, so the spec's
+            # bare `CREATE TRIGGER IF NOT EXISTS` would no-op and leave the
+            # broken trigger in place. Drop first so the body is guaranteed to
+            # be recreated fresh.
+            _drop_fts_triggers(conn, spec.trigger_sqls)
+        for trigger_sql in spec.trigger_sqls:
+            conn.execute(trigger_sql)
+    except Exception:
+        conn.execute("ROLLBACK TO lcm_fts_trigger_swap")
+        conn.execute("RELEASE lcm_fts_trigger_swap")
+        raise
+    conn.execute("RELEASE lcm_fts_trigger_swap")
     if rebuilt:
         # A freshly rebuilt index is known-consistent; record the marker so the
         # next startup can skip the deep integrity-check within the interval.
