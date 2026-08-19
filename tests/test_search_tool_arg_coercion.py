@@ -84,3 +84,24 @@ def test_lcm_grep_non_string_query_is_coerced_not_raised(engine):
 
     assert "error" not in payload or payload["error"] != "No query provided"
     assert payload.get("query") == "42"
+
+
+@pytest.mark.parametrize("zero_query", [0, 0.0])
+def test_lcm_grep_zero_query_is_searched_not_rejected(engine, zero_query):
+    """Zero is falsy but is still a query.
+
+    Only ``None`` means "no query". Coercing with ``value or ""`` would drop a
+    numeric ``0`` and answer "No query provided", which contradicts the
+    coercion contract the ``42`` case above establishes.
+    """
+    payload = json.loads(lcm_tools.lcm_grep({"query": zero_query}, engine=engine))
+
+    assert payload.get("error") != "No query provided"
+    assert payload.get("query") == str(zero_query)
+
+
+@pytest.mark.parametrize("zero_query", [0, 0.0])
+def test_lcm_recall_zero_query_is_searched_not_rejected(engine, zero_query):
+    payload = json.loads(lcm_tools.lcm_recall({"query": zero_query}, engine=engine))
+
+    assert payload.get("error") != "No query provided"
