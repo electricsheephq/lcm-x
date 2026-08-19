@@ -50,6 +50,7 @@ from .search_query import (
     should_apply_directness_rank_adjustment,
 )
 from .store import _normalize_source_value, _UNKNOWN_SOURCE, _legacy_blank_source_clause
+from .sqlite_util import _run_sqlite_write_with_snapshot_retry
 
 
 logger = logging.getLogger(__name__)
@@ -244,30 +245,56 @@ class SummaryDAG:
 
     # -- Write --------------------------------------------------------------
 
-    def add_node(self, node: SummaryNode) -> int:
-        """Insert a summary node and return its node_id."""
+    def add_node(
+        self,
+        node: SummaryNode,
+        *,
+        before_commit: Callable[[sqlite3.Connection, int], None] | None = None,
+    ) -> int:
+        """Insert a summary node and return its node_id.
+
+        ``before_commit`` may stage related writes on this connection. The
+        callback and node insert then commit or roll back as one transaction.
+        A stale-snapshot retry can invoke the callback again with a new
+        ``node_id``, so callbacks must be idempotent.
+        """
         with self._db_lock:
-            cur = self._conn.execute(
-                """INSERT INTO summary_nodes
-                   (session_id, depth, summary, token_count, source_token_count,
-                    source_ids, source_type, created_at, earliest_at, latest_at, expand_hint)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    node.session_id,
-                    node.depth,
-                    node.summary,
-                    node.token_count,
-                    node.source_token_count,
-                    json.dumps(node.source_ids),
-                    node.source_type,
-                    node.created_at or time.time(),
-                    node.earliest_at,
-                    node.latest_at,
-                    node.expand_hint,
-                ),
+            conn = self._conn
+            if conn is None:
+                raise RuntimeError("SummaryDAG connection is closed")
+
+            def insert_node() -> int:
+                cur = conn.execute(
+                    """INSERT INTO summary_nodes
+                       (session_id, depth, summary, token_count, source_token_count,
+                        source_ids, source_type, created_at, earliest_at, latest_at, expand_hint)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        node.session_id,
+                        node.depth,
+                        node.summary,
+                        node.token_count,
+                        node.source_token_count,
+                        json.dumps(node.source_ids),
+                        node.source_type,
+                        node.created_at or time.time(),
+                        node.earliest_at,
+                        node.latest_at,
+                        node.expand_hint,
+                    ),
+                )
+                if cur.lastrowid is None:
+                    raise RuntimeError("SQLite did not return a summary node id")
+                node_id = int(cur.lastrowid)
+                if before_commit is not None:
+                    before_commit(conn, node_id)
+                return node_id
+
+            node.node_id = _run_sqlite_write_with_snapshot_retry(
+                conn,
+                insert_node,
+                operation_name="summary_dag.add_node",
             )
-            self._conn.commit()
-            node.node_id = cur.lastrowid
             return node.node_id
 
     @staticmethod
