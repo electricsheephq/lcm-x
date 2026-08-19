@@ -113,6 +113,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "if it belongs to a different question selection.",
     )
     run.add_argument(
+        "--dump-candidates",
+        metavar="PATH",
+        help="Append per-question ranked retrieval candidates as JSONL to PATH; "
+        "questions skipped by --resume are not dumped.",
+    )
+    run.add_argument(
         "--allow-external-output",
         action="store_true",
         help="Allow --output outside this repository.",
@@ -279,6 +285,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 direct_source_sha256=direct_source_sha256,
                 manifest_sha256=manifest_sha256,
                 checkpoint_path=output_dir / PER_QUESTION_CHECKPOINT_FILENAME,
+                dump_candidates_path=(
+                    Path(args.dump_candidates) if args.dump_candidates else None
+                ),
                 resume=args.resume,
                 selected_question_ids=selected_question_ids,
             )

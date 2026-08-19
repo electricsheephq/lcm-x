@@ -15,8 +15,9 @@ tier (``longmemeval_m``) share one pinned revision (see :data:`DATASET_COORDS`).
 The dataset is downloaded once by an explicit operator command and never during
 a run.
 
-Export hygiene mirrors ``scripts/lcm_benchmark.py``: output is aggregate-only.
-It contains no transcript content, session ids, or local paths.
+Export hygiene mirrors ``scripts/lcm_benchmark.py``: the default output is
+aggregate-only and contains no transcript content, session ids, or local paths.
+The opt-in ``--dump-candidates`` sidecar contains ranked session/turn ids only.
 """
 
 from __future__ import annotations
@@ -79,6 +80,8 @@ DATASET_COORDS = {
 PREPARED_MANIFEST_SCHEMA_VERSION = 1
 PER_QUESTION_CHECKPOINT_FILENAME = "per_question_checkpoint.jsonl"
 _CHECKPOINT_HEADER_KEY = "__checkpoint_header__"
+_DUMP_HEADER_KEY = "__dump_header__"
+_CANDIDATE_DUMP_TOP_K = 10
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _IJSON_MIN_VERSION = (3, 2)
 
@@ -1671,6 +1674,7 @@ def evaluate_question(
     use_rerank: bool = False,
     db_template: Path | None = None,
     embedding_batch_size: int | None = None,
+    include_rankings: bool = False,
 ) -> dict[str, Any]:
     """Ingest one question into a fresh store and score every retrieval arm.
 
@@ -1902,6 +1906,15 @@ def evaluate_question(
                 },
             }
         scored["hybrid_rerank"]["rerank_mode"] = rerank_mode
+        if include_rankings:
+            scored["_candidate_rankings"] = {
+                arm: {
+                    "sessions": list(dict.fromkeys(ranked))[:_CANDIDATE_DUMP_TOP_K],
+                    "turns": list(dict.fromkeys(turn_keys))[:_CANDIDATE_DUMP_TOP_K],
+                }
+                for arm, (ranked, _elapsed_ms, turn_keys, _session_granularity)
+                in ranked_by_arm.items()
+            }
         return scored
     finally:
         vector_store.close()
@@ -2029,6 +2042,72 @@ def _checkpoint_header(
     if manifest_sha256 is not None:
         bindings["manifest_sha256"] = manifest_sha256
     return {_CHECKPOINT_HEADER_KEY: bindings}
+
+
+def _candidate_dump_header(
+    *,
+    provider: str,
+    model: str,
+    rerank: bool,
+    embeddings_enabled: bool,
+    dataset_label: str,
+    manifest_sha256: str | None,
+    top_k: int = _CANDIDATE_DUMP_TOP_K,
+) -> dict[str, Any]:
+    return {
+        _DUMP_HEADER_KEY: {
+            "provider": provider,
+            "model": model,
+            "dataset_label": dataset_label,
+            "manifest_sha256": manifest_sha256,
+            "embeddings_enabled": embeddings_enabled,
+            "rerank": rerank,
+            "top_k": top_k,
+        }
+    }
+
+
+def _validate_candidate_dump_header(
+    record: Any, *, expected_header: dict[str, Any], path: Path
+) -> None:
+    if record != expected_header:
+        raise ValueError(f"candidate dump configuration mismatch for {path}")
+
+
+def _candidate_dump_record(
+    question: Question, rankings: dict[str, Any] | None
+) -> dict[str, Any]:
+    def _turn_sort_key(turn_key: TurnKey) -> tuple[str, int]:
+        return (str(turn_key[0]), -1 if turn_key[1] is None else int(turn_key[1]))
+
+    arms: dict[str, Any] = {}
+    if not question.is_abstention:
+        for arm in ARMS:
+            ranking = (rankings or {}).get(arm, {})
+            session_ids = list(dict.fromkeys(ranking.get("sessions", [])))[:_CANDIDATE_DUMP_TOP_K]
+            turn_keys = list(dict.fromkeys(ranking.get("turns", [])))[:_CANDIDATE_DUMP_TOP_K]
+            arms[arm] = {
+                "sessions_top10": session_ids,
+                "turns_top10": [list(turn_key) for turn_key in turn_keys],
+            }
+
+    return {
+        "question_id": question.question_id,
+        "category": question.category,
+        "abstention": question.is_abstention,
+        "gold_sessions": sorted(evidence_sessions(question)),
+        "gold_turns": [
+            list(turn_key)
+            for turn_key in sorted(evidence_turns(question), key=_turn_sort_key)
+        ],
+        "arms": arms,
+    }
+
+
+def _write_candidate_dump_record(dump_file, record: dict[str, Any]) -> None:
+    dump_file.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+    dump_file.flush()
+    os.fsync(dump_file.fileno())
 
 
 def _validate_checkpoint_header(
@@ -2206,6 +2285,7 @@ def _question_checkpoint_record(
             "arms": {},
         }
     checkpoint_scored = copy.deepcopy(scored)
+    checkpoint_scored.pop("_candidate_rankings", None)
     ingest_ms = checkpoint_scored.pop("ingest_ms", 0.0)
     rerank_mode = checkpoint_scored["hybrid_rerank"].pop(
         "rerank_mode", RERANK_MODE_PLACEHOLDER
@@ -2291,6 +2371,7 @@ def run_harness(
     direct_source_sha256: str | None = None,
     manifest_sha256: str | None = None,
     checkpoint_path: Path | None = None,
+    dump_candidates_path: Path | None = None,
     resume: bool = False,
     selected_question_ids: Iterable[str] | None = None,
 ) -> dict[str, Any]:
@@ -2335,6 +2416,14 @@ def run_harness(
         manifest_sha256=manifest_sha256,
         reuse_db_template=reuse_db_template,
         embedding_batch_size=effective_embedding_batch_size,
+    )
+    expected_dump_header = _candidate_dump_header(
+        provider=provider_name,
+        model=model,
+        rerank=use_rerank,
+        embeddings_enabled=embeddings_enabled,
+        dataset_label=dataset_label,
+        manifest_sha256=manifest_sha256,
     )
 
     if resume and checkpoint_path is None:
@@ -2419,6 +2508,33 @@ def run_harness(
             # survive a crash that predates the dirent reaching disk.
             _fsync_parent_directory(checkpoint_path)
 
+    candidate_dump_file = None
+    if dump_candidates_path is not None and not fully_completed_resume:
+        dump_candidates_path = Path(dump_candidates_path)
+        dump_candidates_path.parent.mkdir(parents=True, exist_ok=True)
+        dump_exists = dump_candidates_path.exists()
+        dump_nonempty = dump_exists and dump_candidates_path.stat().st_size > 0
+        if dump_nonempty:
+            with dump_candidates_path.open("rb") as existing_dump:
+                raw_header = existing_dump.readline()
+            try:
+                dump_header = json.loads(raw_header)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"invalid candidate dump header: {dump_candidates_path}"
+                ) from exc
+            _validate_candidate_dump_header(
+                dump_header, expected_header=expected_dump_header, path=dump_candidates_path
+            )
+        candidate_dump_file = dump_candidates_path.open("a", encoding="utf-8")
+        if not dump_nonempty:
+            _write_candidate_dump_record(candidate_dump_file, expected_dump_header)
+            _fsync_parent_directory(dump_candidates_path)
+        elif not dump_candidates_path.read_bytes().endswith(b"\n"):
+            candidate_dump_file.write("\n")
+            candidate_dump_file.flush()
+            os.fsync(candidate_dump_file.fileno())
+
     observed_question_ids: set[str] = set()
     if fully_completed_resume:
         observed_question_ids.update(selected_ids)
@@ -2445,7 +2561,15 @@ def run_harness(
                         use_rerank=use_rerank,
                         db_template=db_template,
                         embedding_batch_size=effective_embedding_batch_size,
+                        include_rankings=dump_candidates_path is not None,
                     )
+                candidate_rankings = None
+                if dump_candidates_path is not None and scored is not None:
+                    candidate_rankings = scored.pop("_candidate_rankings", None)
+                    if candidate_rankings is None:
+                        raise RuntimeError(
+                            "candidate dump rankings were not returned for a scored question"
+                        )
                 record = _question_checkpoint_record(question, scored)
                 scored_delta, abstention_delta = _accumulate_question_checkpoint(
                     record,
@@ -2458,11 +2582,18 @@ def run_harness(
                 abstention_count += abstention_delta
                 if checkpoint_file is not None:
                     _write_checkpoint_record(checkpoint_file, record)
+                if candidate_dump_file is not None:
+                    _write_candidate_dump_record(
+                        candidate_dump_file,
+                        _candidate_dump_record(question, candidate_rankings),
+                    )
             finally:
                 _cleanup_question_db(tmp_dir, question.question_id)
     finally:
         if checkpoint_file is not None:
             checkpoint_file.close()
+        if candidate_dump_file is not None:
+            candidate_dump_file.close()
 
     if resume and observed_question_ids != selected_ids:
         missing = sorted(selected_ids - observed_question_ids)

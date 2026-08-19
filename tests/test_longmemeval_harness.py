@@ -292,6 +292,22 @@ def test_cli_rejects_unknown_provider():
         cli._parse_args(["run", "--dataset", "x", "--output", "o", "--provider", "nope"])
 
 
+def test_cli_parses_dump_candidates_path():
+    cli = _load_cli()
+    args = cli._parse_args(
+        [
+            "run",
+            "--dataset",
+            "x.json",
+            "--output",
+            "out",
+            "--dump-candidates",
+            "evidence/candidates.jsonl",
+        ]
+    )
+    assert args.dump_candidates == "evidence/candidates.jsonl"
+
+
 def test_load_questions_limit_validation(tmp_path):
     dataset = tmp_path / "d.json"
     dataset.write_text(json.dumps([]), encoding="utf-8")
@@ -575,6 +591,165 @@ def test_stub_run_end_to_end_produces_report_and_fts_recovers_evidence(tmp_path)
     assert report["rerank"]["mode"] == RERANK_MODE_PLACEHOLDER
     assert report["ingest"]["reuse_db_template"] is True
     assert "per_question_ms" in report["ingest"]
+
+
+def test_dump_candidates_off_leaves_checkpoint_byte_identical(tmp_path, monkeypatch):
+    """The sidecar is opt-in and must not alter the checkpoint serialization."""
+    import benchmarking.longmemeval as lme
+
+    def _fixed_evaluate(question, _embedder, **kwargs):
+        scored = {"ingest_ms": 1.25}
+        for arm in ARMS:
+            scored[arm] = {
+                "recall@1": 0.0,
+                "recall@5": 0.5,
+                "recall@10": 1.0,
+                "ndcg@10": 0.75,
+                "latency_ms": 2.5,
+                "turn": {
+                    "recall@1": 0.0,
+                    "recall@5": 0.5,
+                    "recall@10": 1.0,
+                    "ndcg@10": 0.75,
+                    "session_granularity": arm != "fts",
+                },
+            }
+        scored["hybrid_rerank"]["rerank_mode"] = RERANK_MODE_PLACEHOLDER
+        if kwargs.get("include_rankings"):
+            scored["_candidate_rankings"] = {
+                arm: {
+                    "sessions": [question.haystack_session_ids[-1]],
+                    "turns": [(question.haystack_session_ids[-1], None)],
+                }
+                for arm in ARMS
+            }
+        return scored
+
+    monkeypatch.setattr(lme, "evaluate_question", _fixed_evaluate)
+    questions = _synthetic_dataset()[:1]
+    off_checkpoint = tmp_path / "off" / "per_question_checkpoint.jsonl"
+    on_checkpoint = tmp_path / "on" / "per_question_checkpoint.jsonl"
+    dump_path = tmp_path / "on" / "candidates.jsonl"
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "off" / "tmp",
+        embeddings_enabled=False,
+        checkpoint_path=off_checkpoint,
+    )
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "on" / "tmp",
+        embeddings_enabled=False,
+        checkpoint_path=on_checkpoint,
+        dump_candidates_path=dump_path,
+    )
+    assert off_checkpoint.read_bytes() == on_checkpoint.read_bytes()
+    assert dump_path.is_file()
+    assert "_candidate_rankings" not in on_checkpoint.read_text(encoding="utf-8")
+
+
+def test_dump_candidates_stub_has_header_rows_gold_and_null_markers(tmp_path):
+    questions = _synthetic_dataset()
+    questions.append(
+        parse_question(
+            _make_raw(
+                "q_abs",
+                "single-session-user",
+                sessions={"q-abs-s": [{"role": "user", "content": "hello"}]},
+                answer_session_ids=[],
+            )
+        )
+    )
+    dump_path = tmp_path / "nested" / "candidates.jsonl"
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "run",
+        checkpoint_path=tmp_path / "run" / "per_question_checkpoint.jsonl",
+        dump_candidates_path=dump_path,
+    )
+
+    lines = dump_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == len(questions) + 1
+    assert "ZEBRA" not in dump_path.read_text(encoding="utf-8")
+    header = json.loads(lines[0])
+    assert header == {
+        "__dump_header__": {
+            "provider": "stub",
+            "model": "",
+            "dataset_label": "s",
+            "manifest_sha256": None,
+            "embeddings_enabled": True,
+            "rerank": False,
+            "top_k": 10,
+        }
+    }
+
+    rows = {row["question_id"]: row for row in map(json.loads, lines[1:])}
+    assert set(rows) == {question.question_id for question in questions}
+    found_null_marker = False
+    for question in questions:
+        row = rows[question.question_id]
+        assert row["category"] == question.category
+        assert row["abstention"] is question.is_abstention
+        assert row["gold_sessions"] == sorted(evidence_sessions(question))
+        assert row["gold_turns"] == [
+            list(turn_key)
+            for turn_key in sorted(evidence_turns(question))
+        ]
+        assert set(row["arms"]) == (set() if question.is_abstention else set(ARMS))
+        for arm in row["arms"]:
+            payload = row["arms"][arm]
+            assert set(payload) == {"sessions_top10", "turns_top10"}
+            if payload["sessions_top10"] or payload["turns_top10"]:
+                assert payload["sessions_top10"]
+                assert payload["turns_top10"]
+            if payload["sessions_top10"]:
+                assert len(payload["sessions_top10"]) <= 10
+            if payload["turns_top10"]:
+                assert len(payload["turns_top10"]) <= 10
+                found_null_marker |= any(turn_key[1] is None for turn_key in payload["turns_top10"])
+    assert found_null_marker
+
+
+def test_dump_candidates_recall_matches_checkpoint_input(tmp_path):
+    questions = _synthetic_dataset()
+    checkpoint_path = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    dump_path = tmp_path / "run" / "candidates.jsonl"
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "tmp",
+        checkpoint_path=checkpoint_path,
+        dump_candidates_path=dump_path,
+    )
+    checkpoint_rows = {
+        row["question_id"]: row
+        for row in map(json.loads, checkpoint_path.read_text(encoding="utf-8").splitlines())
+        if "question_id" in row
+    }
+    dump_rows = {
+        row["question_id"]: row
+        for row in map(json.loads, dump_path.read_text(encoding="utf-8").splitlines()[1:])
+    }
+    for question_id, dump_row in dump_rows.items():
+        if dump_row["abstention"]:
+            continue
+        checkpoint_row = checkpoint_rows[question_id]
+        gold_sessions = set(dump_row["gold_sessions"])
+        for arm in ARMS:
+            dumped_recall = recall_at_k(
+                dump_row["arms"][arm]["sessions_top10"], gold_sessions, 10
+            )
+            assert dumped_recall == pytest.approx(
+                checkpoint_row["arms"][arm]["recall@10"]
+            )
 
 
 def test_db_template_reuse_matches_from_scratch_bootstrap(tmp_path):
