@@ -2537,18 +2537,18 @@ def run_harness(
         raw_dump = (
             dump_candidates_path.read_bytes() if dump_candidates_path.exists() else b""
         )
-        if raw_dump and not raw_dump.endswith(b"\n"):
-            # A torn final row (crash mid-write) always precedes its checkpoint
-            # record -- that question re-evaluates on resume -- so truncating
-            # back to the last complete row loses nothing and keeps every
-            # remaining line parseable.
-            keep = raw_dump.rfind(b"\n") + 1
-            with dump_candidates_path.open("r+b") as existing_dump:
-                existing_dump.truncate(keep)
-                existing_dump.flush()
-                os.fsync(existing_dump.fileno())
-            raw_dump = raw_dump[:keep]
-        if raw_dump:
+        # Validate BEFORE any mutation: an existing file must prove it is OUR
+        # dump (matching header) before the torn-tail repair may touch it, or a
+        # mistyped --dump-candidates aliasing some other file would destroy it.
+        expected_header_bytes = json.dumps(
+            expected_dump_header, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        torn_header_only = (
+            b"\n" not in raw_dump
+            and bool(raw_dump)
+            and expected_header_bytes.startswith(raw_dump)
+        )
+        if raw_dump and not torn_header_only:
             raw_header = raw_dump.split(b"\n", 1)[0]
             try:
                 dump_header = json.loads(raw_header)
@@ -2559,6 +2559,17 @@ def run_harness(
             _validate_candidate_dump_header(
                 dump_header, expected_header=expected_dump_header, path=dump_candidates_path
             )
+        if raw_dump and not raw_dump.endswith(b"\n"):
+            # Now provably our own dump (or our own torn header write). A torn
+            # final row always precedes its checkpoint record -- that question
+            # re-evaluates on resume -- so truncating back to the last complete
+            # row loses nothing and keeps every remaining line parseable.
+            keep = raw_dump.rfind(b"\n") + 1
+            with dump_candidates_path.open("r+b") as existing_dump:
+                existing_dump.truncate(keep)
+                existing_dump.flush()
+                os.fsync(existing_dump.fileno())
+            raw_dump = raw_dump[:keep]
         candidate_dump_file = dump_candidates_path.open("a", encoding="utf-8")
         if not raw_dump:
             _write_candidate_dump_record(candidate_dump_file, expected_dump_header)

@@ -980,3 +980,21 @@ def test_dump_candidates_record_rejects_incomplete_rankings():
     malformed[ARMS[0]] = {"sessions": []}
     with pytest.raises(RuntimeError, match="malformed"):
         _candidate_dump_record(question, malformed)
+
+
+def test_dump_candidates_refuses_to_mutate_foreign_file(tmp_path):
+    questions = _synthetic_dataset()
+    foreign = tmp_path / "not-a-dump.json"
+    foreign.write_text('{"some": "corpus file without trailing newline"}', encoding="utf-8")
+    before = foreign.read_bytes()
+    with pytest.raises(ValueError, match="configuration mismatch|invalid candidate dump header"):
+        run_harness(
+            questions,
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / "run",
+            embeddings_enabled=True,
+            dump_candidates_path=foreign,
+        )
+    # The foreign file must be byte-identical -- rejected before any repair.
+    assert foreign.read_bytes() == before
