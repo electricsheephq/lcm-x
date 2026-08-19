@@ -111,7 +111,7 @@ copy-paste setups per agent type.
 
 ## Project status
 
-The current baseline is `v0.21.0-rc2`. It includes the opt-in evidence and
+The current baseline is `v0.22.0`. It includes the opt-in evidence and
 adaptive-retrieval tools, the deterministic LongMemEval retrieval harness, and
 committed configuration-specific retrieval results. The judged end-to-end QA
 run and the recommended Voyage retrieval run are still pending; retrieval
@@ -240,7 +240,7 @@ Typical output:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm v0.21.0-rc2 (15 tools)
+  ✓ hermes-lcm v0.22.0 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm
@@ -279,7 +279,7 @@ If you installed a symlink from a separate checkout:
 
 Restart Hermes after updating.
 
-For the `v0.21.0-rc2` line, take a normal backup of `lcm.db` before updating,
+For the `v0.22.0` line, take a normal backup of `lcm.db` before updating,
 then update the checkout and restart Hermes. No manual core migration or
 backfill is required: the core schema remains version 5. New assertion,
 query-view, and adaptive-retrieval state is additive, created only after the
@@ -893,7 +893,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [tags page](https://github.com/electricsheephq/lcm-x/tags) and
 [CHANGELOG](CHANGELOG.md) for version history. LCM-X does not currently publish
-a GitHub Release object or packaged artifact for `v0.21.0-rc2`.
+a GitHub Release object or packaged artifact for `v0.22.0`.
 
 ## License
 

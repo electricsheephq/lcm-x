@@ -103,4 +103,3 @@ def test_compare_names_share_drift_without_arm_death(tmp_path):
 
     assert result["ok"] is False
     assert "arm-share:fts" in result["failures"]
-

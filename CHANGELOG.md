@@ -5,6 +5,10 @@ version tags but does not have a destination GitHub Release object for RC2.
 
 ## Unreleased
 
+(nothing yet)
+
+## v0.22.0 - 2026-08-19
+
 - Rename the project-facing documentation to **LCM-X — Lossless Context Memory
   eXtension** while preserving the compatibility identifiers `hermes-lcm`
   (plugin/skill/install path) and `lcm` (runtime engine).
