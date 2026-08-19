@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 import hermes_lcm.tools as lcm_tools
+import hermes_lcm.vector_store as vector_store_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, SummaryNode
 from hermes_lcm.store import MessageStore
@@ -125,6 +126,17 @@ def _seed_chunk_vectors(engine, rows):
             )
     finally:
         store.close()
+
+
+def _freeze_vector_store_clock(monkeypatch, clock):
+    """Put the vector store on the same synthetic clock as the tool.
+
+    The recall budget is one absolute deadline read by both ``tools`` and the
+    store's full-corpus scan. Freezing only the tool's clock leaves the store on
+    real time, so it sees the synthetic deadline as already expired and reports
+    ``coverage='bounded'`` before scoring a single batch.
+    """
+    monkeypatch.setattr(vector_store_module, "_monotonic", lambda: clock[0])
 
 
 def _recall(engine, monkeypatch, provider=None, **args):
@@ -1209,9 +1221,11 @@ def test_slow_fts_arm_cannot_starve_semantic_recall_and_rerank(recall_engine, mo
             "full",
             1,
             1,
+            [],
         )
 
     monkeypatch.setattr(lcm_tools.time, "monotonic", lambda: clock[0])
+    _freeze_vector_store_clock(monkeypatch, clock)
     monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: provider)
     monkeypatch.setattr(lcm_tools, "_resolve_recall_chunk_provider", lambda *_a, **_k: provider)
     monkeypatch.setattr(lcm_tools, "_lcm_recall_fts_arm", slow_fts)
@@ -1274,6 +1288,7 @@ def test_provider_alias_uses_existing_vector_corpus_for_fts_fairness(
         return [], None
 
     monkeypatch.setattr(lcm_tools.time, "monotonic", lambda: clock[0])
+    _freeze_vector_store_clock(monkeypatch, clock)
     monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: provider)
     monkeypatch.setattr(lcm_tools, "_lcm_recall_fts_arm", fts_arm)
 
