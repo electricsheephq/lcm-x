@@ -99,6 +99,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "placeholder cosine reranker is used and labeled as such.",
     )
     run.add_argument(
+        "--recall-rerank",
+        action="store_true",
+        help="Enable the production lcm_recall rerank stage (voyage provider required); "
+        "record the binding in the checkpoint header.",
+    )
+    run.add_argument(
         "--no-db-template",
         dest="reuse_db_template",
         action="store_false",
@@ -305,6 +311,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 model=args.model,
                 tmp_dir=tmp_dir,
                 use_rerank=args.rerank,
+                recall_rerank=args.recall_rerank,
                 reuse_db_template=args.reuse_db_template,
                 question_count=question_count,
                 dataset_label=args.dataset_label,
