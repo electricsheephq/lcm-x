@@ -4649,6 +4649,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
 
     candidate_limit = min(_LCM_GREP_HYBRID_CANDIDATE_CAP, max(50, limit * 4))
     rerank_window = min(50, max(1, limit * 4))
+    rerank_window_limit = int(getattr(engine._config, "rerank_window_limit", 0))
+    if rerank_window_limit > 0:
+        rerank_window = min(rerank_window, rerank_window_limit)
 
     embeddings_enabled = bool(getattr(engine._config, "embeddings_enabled", False))
     # FTS runs for verbatim/all normally, but ALSO whenever embeddings are
