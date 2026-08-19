@@ -1,11 +1,13 @@
 ---
 name: hermes-lcm
-description: Use, configure, diagnose, and retrieve exact evidence with the Hermes-LCM lossless context plugin.
+description: Use, configure, diagnose, and retrieve exact evidence with LCM-X, whose compatibility plugin name is hermes-lcm.
 ---
 
-# Hermes-LCM
+# LCM-X
 
-Use this skill when a task concerns Hermes-LCM setup, operation, compaction, diagnostics, session behavior, or recall from compacted and cross-conversation history.
+Use this skill when a task concerns LCM-X setup, operation, compaction,
+diagnostics, session behavior, or recall from compacted and cross-conversation
+history. The skill and plugin compatibility name remains `hermes-lcm`.
 
 Start here:
 
