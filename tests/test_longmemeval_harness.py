@@ -308,6 +308,21 @@ def test_cli_parses_dump_candidates_path():
     assert args.dump_candidates == "evidence/candidates.jsonl"
 
 
+def test_cli_parses_recall_rerank_flag():
+    cli = _load_cli()
+    args = cli._parse_args(
+        [
+            "run",
+            "--dataset",
+            "x.json",
+            "--output",
+            "out",
+            "--recall-rerank",
+        ]
+    )
+    assert args.recall_rerank is True
+
+
 def test_load_questions_limit_validation(tmp_path):
     dataset = tmp_path / "d.json"
     dataset.write_text(json.dumps([]), encoding="utf-8")
@@ -652,6 +667,107 @@ def test_dump_candidates_off_leaves_checkpoint_byte_identical(tmp_path, monkeypa
     assert "_candidate_rankings" not in on_checkpoint.read_text(encoding="utf-8")
 
 
+def test_recall_rerank_off_leaves_checkpoint_byte_identical(tmp_path, monkeypatch):
+    """The default and explicit-off flag paths serialize the same checkpoint."""
+    import benchmarking.longmemeval as lme
+
+    def _fixed_evaluate(question, _embedder, **kwargs):
+        scored = {"ingest_ms": 1.25}
+        for arm in ARMS:
+            scored[arm] = {
+                "recall@1": 0.0,
+                "recall@5": 0.5,
+                "recall@10": 1.0,
+                "ndcg@10": 0.75,
+                "latency_ms": 2.5,
+                "turn": {
+                    "recall@1": 0.0,
+                    "recall@5": 0.5,
+                    "recall@10": 1.0,
+                    "ndcg@10": 0.75,
+                    "session_granularity": arm != "fts",
+                },
+            }
+        scored["hybrid_rerank"]["rerank_mode"] = RERANK_MODE_PLACEHOLDER
+        if kwargs.get("recall_rerank"):
+            scored["lcm_recall"]["recall_rerank_status"] = "skipped: test provider"
+        return scored
+
+    monkeypatch.setattr(lme, "evaluate_question", _fixed_evaluate)
+    question = _synthetic_dataset()[:1]
+    default_checkpoint = tmp_path / "default" / "per_question_checkpoint.jsonl"
+    explicit_off_checkpoint = tmp_path / "explicit-off" / "per_question_checkpoint.jsonl"
+    default_report = run_harness(
+        question,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "default" / "tmp",
+        embeddings_enabled=False,
+        checkpoint_path=default_checkpoint,
+    )
+    explicit_off_report = run_harness(
+        question,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "explicit-off" / "tmp",
+        embeddings_enabled=False,
+        recall_rerank=False,
+        checkpoint_path=explicit_off_checkpoint,
+    )
+    assert default_checkpoint.read_bytes() == explicit_off_checkpoint.read_bytes()
+    assert "recall_rerank_modes" not in default_report
+    assert "recall_rerank_modes" not in explicit_off_report
+    row = json.loads(default_checkpoint.read_text(encoding="utf-8").splitlines()[1])
+    assert "recall_rerank_status" not in row["arms"]["lcm_recall"]
+
+
+def test_recall_rerank_on_records_status_and_mode_counts(tmp_path):
+    questions = _synthetic_dataset()
+    checkpoint_path = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    report = run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "tmp",
+        embeddings_enabled=True,
+        recall_rerank=True,
+        checkpoint_path=checkpoint_path,
+    )
+
+    expected_status = "skipped: rerank requires the voyage provider"
+    assert report["recall_rerank_modes"] == {expected_status: len(questions)}
+    rows = checkpoint_path.read_text(encoding="utf-8").splitlines()
+    header = json.loads(rows[0])
+    assert header["__checkpoint_header__"]["recall_rerank"] is True
+    for row in map(json.loads, rows[1:]):
+        assert row["arms"]["lcm_recall"]["recall_rerank_status"] == expected_status
+
+
+def test_recall_rerank_resume_rejects_flag_off_checkpoint(tmp_path):
+    questions = _synthetic_dataset()[:1]
+    checkpoint_path = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "off-tmp",
+        embeddings_enabled=True,
+        checkpoint_path=checkpoint_path,
+        recall_rerank=False,
+    )
+    with pytest.raises(ValueError, match="recall_rerank"):
+        run_harness(
+            questions,
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / "on-tmp",
+            embeddings_enabled=True,
+            checkpoint_path=checkpoint_path,
+            recall_rerank=True,
+            resume=True,
+        )
+
+
 def test_dump_candidates_stub_has_header_rows_gold_and_null_markers(tmp_path):
     questions = _synthetic_dataset()
     questions.append(
@@ -687,6 +803,7 @@ def test_dump_candidates_stub_has_header_rows_gold_and_null_markers(tmp_path):
             "manifest_sha256": None,
             "embeddings_enabled": True,
             "rerank": False,
+            "recall_rerank": False,
             "top_k": 10,
         }
     }

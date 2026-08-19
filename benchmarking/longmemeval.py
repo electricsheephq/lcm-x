@@ -1493,7 +1493,8 @@ def production_recall_hits(
     tmp_dir: Path,
     embeddings_enabled: bool,
     limit: int,
-) -> list[dict[str, Any]]:
+    return_status: bool = False,
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], str]:
     """Invoke the REAL ``tools.lcm_recall`` against this question's temp store.
 
     This is the tool users call: weighted RRF over the FTS + summary + chunk arms
@@ -1524,7 +1525,13 @@ def production_recall_hits(
     payload = json.loads(
         lcm_tools.lcm_recall({"query": question.question, "limit": limit}, engine=engine)
     )
-    return list(payload.get("hits", []))
+    hits = list(payload.get("hits", []))
+    if not return_status:
+        return hits
+    status = payload.get("provenance", {}).get("rerank")
+    if not isinstance(status, str) or not status:
+        raise ValueError("lcm_recall response is missing provenance.rerank status")
+    return hits, status
 
 
 def _fuse_tiebreak(item):
@@ -1672,6 +1679,7 @@ def evaluate_question(
     embeddings_enabled: bool,
     top_k: int = 10,
     use_rerank: bool = False,
+    recall_rerank: bool = False,
     db_template: Path | None = None,
     embedding_batch_size: int | None = None,
     include_rankings: bool = False,
@@ -1704,6 +1712,7 @@ def evaluate_question(
         embeddings_enabled=embeddings_enabled,
         embedding_provider=provider_name,
         embedding_model=model,
+        rerank_enabled=recall_rerank,
     )
     ingest_start = time.perf_counter()
     # F7: clone a pre-migrated template instead of re-running schema bootstrap.
@@ -1869,13 +1878,18 @@ def evaluate_question(
         # 25-hit ceiling). Its hits carry session_id directly (session ranking) and
         # store_id/node_id for turn projection. Its turn keys mix precise verbatim
         # keys with (session, None) summary markers, so it carries the asterisk.
-        recall_raw, recall_ms = _timed(
+        recall_result, recall_ms = _timed(
             lambda: production_recall_hits(
                 question, config, store, dag, provider_embedder,
                 provider_name=provider_name, tmp_dir=tmp_dir,
                 embeddings_enabled=embeddings_enabled, limit=fetch,
+                return_status=recall_rerank,
             )
         )
+        if recall_rerank:
+            recall_raw, recall_rerank_status = recall_result
+        else:
+            recall_raw = recall_result
         recall_ranked = recall_hit_sessions(recall_raw)
         recall_turns = recall_hit_turn_keys(recall_raw, store_id_to_turn)
 
@@ -1906,6 +1920,8 @@ def evaluate_question(
                 },
             }
         scored["hybrid_rerank"]["rerank_mode"] = rerank_mode
+        if recall_rerank:
+            scored["lcm_recall"]["recall_rerank_status"] = recall_rerank_status
         if include_rankings:
             scored["_candidate_rankings"] = {
                 arm: {
@@ -2021,6 +2037,7 @@ def _checkpoint_header(
     provider: str,
     model: str,
     rerank: bool,
+    recall_rerank: bool = False,
     embeddings_enabled: bool,
     dataset_label: str,
     direct_source_sha256: str | None,
@@ -2032,6 +2049,7 @@ def _checkpoint_header(
         "provider": provider,
         "model": model,
         "rerank": rerank,
+        "recall_rerank": recall_rerank,
         "embeddings_enabled": embeddings_enabled,
         "dataset_label": dataset_label,
         "reuse_db_template": reuse_db_template,
@@ -2049,6 +2067,7 @@ def _candidate_dump_header(
     provider: str,
     model: str,
     rerank: bool,
+    recall_rerank: bool = False,
     embeddings_enabled: bool,
     dataset_label: str,
     direct_source_sha256: str | None,
@@ -2067,6 +2086,7 @@ def _candidate_dump_header(
         "manifest_sha256": manifest_sha256,
         "embeddings_enabled": embeddings_enabled,
         "rerank": rerank,
+        "recall_rerank": recall_rerank,
         "top_k": top_k,
     }
     return {_DUMP_HEADER_KEY: bindings}
@@ -2165,6 +2185,7 @@ def _load_question_checkpoint(
 ) -> list[dict[str, Any]]:
     """Load a checkpoint, truncating only a malformed final crash-torn line."""
     payload = path.read_bytes()
+    recall_rerank = bool(expected_header[_CHECKPOINT_HEADER_KEY].get("recall_rerank", False))
     lines = payload.splitlines(keepends=True)
     records: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -2207,7 +2228,9 @@ def _load_question_checkpoint(
             )
         if question_id in seen:
             raise ValueError(f"duplicate checkpoint question_id {question_id!r}: {path}")
-        _validate_restored_checkpoint_metrics(record, line_number=index + 1, path=path)
+        _validate_restored_checkpoint_metrics(
+            record, line_number=index + 1, path=path, recall_rerank=recall_rerank
+        )
         seen.add(question_id)
         records.append(record)
         offset += len(raw_line)
@@ -2249,7 +2272,7 @@ def _fsync_parent_directory(path: Path) -> None:
 
 
 def _validate_restored_checkpoint_metrics(
-    record: dict[str, Any], *, line_number: int, path: Path
+    record: dict[str, Any], *, line_number: int, path: Path, recall_rerank: bool = False
 ) -> None:
     """Validate every aggregate input restored from a scored checkpoint row."""
     if record.get("abstention") is True:
@@ -2291,6 +2314,18 @@ def _validate_restored_checkpoint_metrics(
                 f"checkpoint line {line_number} field {turn_field}.session_granularity "
                 f"must be a boolean: {path}"
             )
+    if recall_rerank:
+        recall_metrics = arms.get("lcm_recall")
+        status = (
+            recall_metrics.get("recall_rerank_status")
+            if isinstance(recall_metrics, dict)
+            else None
+        )
+        if not isinstance(status, str) or not status:
+            raise ValueError(
+                f"checkpoint line {line_number} field arms.lcm_recall.recall_rerank_status "
+                f"must be a non-empty string: {path}"
+            )
 
 
 def _question_checkpoint_record(
@@ -2328,6 +2363,7 @@ def _accumulate_question_checkpoint(
     overall: dict[str, ArmSamples],
     ingest_samples: list[float],
     rerank_mode_counts: dict[str, int],
+    recall_rerank_status_counts: dict[str, int] | None = None,
 ) -> tuple[int, int]:
     """Seed aggregate state from one live or resumed per-question record."""
     if record.get("abstention") is True:
@@ -2351,6 +2387,16 @@ def _accumulate_question_checkpoint(
 
     ingest_samples.append(float(ingest_ms))
     rerank_mode_counts[rerank_mode] = rerank_mode_counts.get(rerank_mode, 0) + 1
+    if recall_rerank_status_counts is not None:
+        recall_rerank_status = arms.get("lcm_recall", {}).get("recall_rerank_status")
+        if not isinstance(recall_rerank_status, str) or not recall_rerank_status:
+            raise ValueError(
+                f"checkpoint question {record.get('question_id')!r} has invalid "
+                "recall_rerank_status"
+            )
+        recall_rerank_status_counts[recall_rerank_status] = (
+            recall_rerank_status_counts.get(recall_rerank_status, 0) + 1
+        )
     bucket = by_category.setdefault(category, _new_arm_samples())
     try:
         for arm in ARMS:
@@ -2385,6 +2431,7 @@ def run_harness(
     tmp_dir: Path,
     embeddings_enabled: bool | None = None,
     use_rerank: bool = False,
+    recall_rerank: bool = False,
     reuse_db_template: bool = True,
     question_count: int | None = None,
     dataset_label: str = "s",
@@ -2431,6 +2478,7 @@ def run_harness(
         provider=provider_name,
         model=model,
         rerank=use_rerank,
+        recall_rerank=recall_rerank,
         embeddings_enabled=embeddings_enabled,
         dataset_label=dataset_label,
         direct_source_sha256=direct_source_sha256,
@@ -2442,6 +2490,7 @@ def run_harness(
         provider=provider_name,
         model=model,
         rerank=use_rerank,
+        recall_rerank=recall_rerank,
         embeddings_enabled=embeddings_enabled,
         dataset_label=dataset_label,
         direct_source_sha256=direct_source_sha256,
@@ -2481,6 +2530,9 @@ def run_harness(
     # Track per-question rerank modes so the run-level label is an aggregate, not
     # whatever the final question happened to use (FIX-2).
     rerank_mode_counts: dict[str, int] = {}
+    recall_rerank_status_counts: dict[str, int] | None = (
+        {} if recall_rerank else None
+    )
     consumed_count = 0
 
     completed_question_ids = {
@@ -2493,6 +2545,7 @@ def run_harness(
             overall=overall,
             ingest_samples=ingest_samples,
             rerank_mode_counts=rerank_mode_counts,
+            recall_rerank_status_counts=recall_rerank_status_counts,
         )
         scored_count += scored_delta
         abstention_count += abstention_delta
@@ -2601,6 +2654,7 @@ def run_harness(
                         tmp_dir=tmp_dir,
                         embeddings_enabled=embeddings_enabled,
                         use_rerank=use_rerank,
+                        recall_rerank=recall_rerank,
                         db_template=db_template,
                         embedding_batch_size=effective_embedding_batch_size,
                         include_rankings=dump_candidates_path is not None,
@@ -2619,6 +2673,7 @@ def run_harness(
                     overall=overall,
                     ingest_samples=ingest_samples,
                     rerank_mode_counts=rerank_mode_counts,
+                    recall_rerank_status_counts=recall_rerank_status_counts,
                 )
                 scored_count += scored_delta
                 abstention_count += abstention_delta
@@ -2668,7 +2723,7 @@ def run_harness(
             "misses": int(getattr(embedder, "misses", 0)),
         }
 
-    return {
+    report = {
         "schema_version": SCHEMA_VERSION,
         "benchmark_version": BENCHMARK_VERSION,
         "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -2694,6 +2749,9 @@ def run_harness(
             for category, samples in sorted(by_category.items())
         },
     }
+    if recall_rerank:
+        report["recall_rerank_modes"] = dict(recall_rerank_status_counts or {})
+    return report
 
 
 def _arm_report(samples: ArmSamples) -> dict[str, Any]:
