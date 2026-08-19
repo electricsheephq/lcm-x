@@ -49,6 +49,7 @@ from .search_query import (
     should_apply_directness_rank_adjustment,
 )
 from .message_content import normalize_content_value as _normalize_content_value
+from .sqlite_util import _run_sqlite_write_with_snapshot_retry
 from .tokens import count_message_tokens
 
 logger = logging.getLogger(__name__)
@@ -452,7 +453,16 @@ class MessageStore:
                                 messages: List[Dict[str, Any]],
                                 token_estimates: List[int] | None = None,
                                 source: str = "",
-                                conversation_id: str = "") -> List[int]:
+                                conversation_id: str = "",
+                                metadata_factory: Optional[
+                                    Callable[
+                                        [Dict[str, Any], int],
+                                        List[tuple[str, str]],
+                                    ]
+                                ] = None,
+                                metadata_messages: Optional[
+                                    List[Dict[str, Any]]
+                                ] = None) -> List[int]:
         """Persist messages that already passed ingest protection.
 
         This is an internal fast path for callers that need the protected form
@@ -462,15 +472,23 @@ class MessageStore:
         """
         if token_estimates is None:
             token_estimates = [0] * len(messages)
+        if metadata_messages is not None and len(metadata_messages) != len(messages):
+            raise ValueError(
+                "metadata_messages must align one-to-one with protected messages"
+            )
 
-        ids = []
-        with self._write_lock, self._conn:
-            for msg, est in zip(messages, token_estimates):
+        conn = self._conn
+        if conn is None:
+            raise RuntimeError("MessageStore connection is closed")
+
+        def insert_messages() -> List[int]:
+            ids: List[int] = []
+            for index, (msg, est) in enumerate(zip(messages, token_estimates)):
                 tc = msg.get("tool_calls")
                 tc_json = json.dumps(tc) if tc else None
                 ts = time.time()
                 observed_at = _normalize_observed_at(msg.get("timestamp"))
-                cur = self._conn.execute(
+                cur = conn.execute(
                     """INSERT INTO messages
                        (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
                         tool_name, timestamp, token_estimate, pinned, ingested_at,
@@ -493,8 +511,33 @@ class MessageStore:
                         "host_message_timestamp" if observed_at is not None else None,
                     ),
                 )
-                ids.append(cur.lastrowid)
-        return ids
+                if cur.lastrowid is None:
+                    raise RuntimeError("SQLite did not return a message id")
+                store_id = int(cur.lastrowid)
+                ids.append(store_id)
+                if metadata_factory is not None:
+                    metadata_message = (
+                        metadata_messages[index]
+                        if metadata_messages is not None
+                        else msg
+                    )
+                    for key, value in metadata_factory(metadata_message, store_id):
+                        conn.execute(
+                            """
+                            INSERT INTO metadata(key, value)
+                            VALUES(?, ?)
+                            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                            """,
+                            (key, value),
+                        )
+            return ids
+
+        with self._write_lock:
+            return _run_sqlite_write_with_snapshot_retry(
+                conn,
+                insert_messages,
+                operation_name="message_store.append_protected_batch",
+            )
 
     def reassign_session_messages(self, old_session_id: str, new_session_id: str) -> int:
         """Move all persisted messages from one session_id to another."""
@@ -1522,6 +1565,12 @@ class MessageStore:
         store's own methods so the ``_write_lock`` contract stays in one place.
         """
         return self._conn
+
+    def rollback_pending_write(self) -> None:
+        """Roll back this store's transaction under its connection-owner lock."""
+        with self._write_lock:
+            if self._conn is not None and self._conn.in_transaction:
+                self._conn.rollback()
 
     def commit(self) -> None:
         """Commit pending writes on the store connection.

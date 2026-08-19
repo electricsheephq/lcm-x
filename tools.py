@@ -185,6 +185,16 @@ def _truncate_text_to_token_budget(text: str, max_tokens: int) -> tuple[str, boo
     return best, True
 
 
+def _coerce_query_arg(value: Any) -> str:
+    """Coerce a tool ``query`` argument to a stripped string.
+
+    A model can emit ``{"query": null}`` or a bare number. Only ``None`` means
+    "no query" -- a falsy number such as ``0`` is a legitimate search term, so
+    this cannot collapse to ``value or ""``.
+    """
+    return "" if value is None else str(value).strip()
+
+
 def _parse_int_value(value: Any, default: int) -> int:
     try:
         return int(value)
@@ -2397,7 +2407,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     if engine is None:
         return json.dumps({"error": "LCM engine not initialized"})
 
-    query = args.get("query", "").strip()
+    query = _coerce_query_arg(args.get("query"))
     if not query:
         return json.dumps({"error": "No query provided"})
 
@@ -3086,7 +3096,7 @@ def _lcm_grep_semantic(
     mode = str(args.get("mode") or "semantic").lower()
     if time.monotonic() >= deadline:
         return _lcm_grep_deadline_error(mode, "semantic_entry")
-    query = str(args.get("query", "")).strip()
+    query = _coerce_query_arg(args.get("query"))
     if not query:
         return {"error": "No query provided"}
 
@@ -4617,7 +4627,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     if engine is None:
         return json.dumps({"error": "LCM engine not initialized"})
 
-    query = str(args.get("query", "")).strip()
+    query = _coerce_query_arg(args.get("query"))
     if not query:
         return json.dumps({"error": "No query provided"})
 
@@ -5562,7 +5572,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps({"error": max_results_error})
     max_results = max(1, int(max_results or 5))
 
-    query = str(args.get("query") or "").strip()
+    query = _coerce_query_arg(args.get("query"))
     raw_node_ids = args.get("node_ids") or []
 
     nodes = []
