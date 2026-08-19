@@ -1474,6 +1474,14 @@ def test_backfill_batch_size_env_override(monkeypatch):
             == command_mod._EMBEDDING_BACKFILL_BATCH_SIZE
         )
 
+    # Values above the provider request-item ceiling clamp to it, so the
+    # dry-run request estimate never diverges from the provider's real splits.
+    monkeypatch.setenv("LCM_EMBEDDING_BACKFILL_BATCH_SIZE", "2000")
+    assert (
+        command_mod._embedding_backfill_batch_size()
+        == command_mod._VOYAGE_MAX_BATCH_ITEMS
+    )
+
 
 def test_backfill_apply_honors_env_batch_size(monkeypatch, tmp_path):
     # Five documents with batch size 2 must slice into provider calls of 2/2/1.

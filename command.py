@@ -118,6 +118,9 @@ def _embedding_backfill_budget_s() -> float:
 
 def _embedding_backfill_batch_size() -> int:
     # Outer batch size for backfill slicing (documents claimed per batch).
+    # Capped at the provider request-item ceiling: above it the provider splits
+    # one outer batch into several real requests, which would silently diverge
+    # from the request estimate the dry-run reports.
     raw = os.environ.get("LCM_EMBEDDING_BACKFILL_BATCH_SIZE")
     if raw is None:
         return _EMBEDDING_BACKFILL_BATCH_SIZE
@@ -125,7 +128,9 @@ def _embedding_backfill_batch_size() -> int:
         value = int(raw)
     except (TypeError, ValueError):
         return _EMBEDDING_BACKFILL_BATCH_SIZE
-    return value if value > 0 else _EMBEDDING_BACKFILL_BATCH_SIZE
+    if value <= 0:
+        return _EMBEDDING_BACKFILL_BATCH_SIZE
+    return min(value, _VOYAGE_MAX_BATCH_ITEMS)
 
 
 def _ensure_inflight_table(conn: sqlite3.Connection) -> None:
