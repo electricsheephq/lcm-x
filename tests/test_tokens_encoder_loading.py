@@ -24,6 +24,15 @@ def _reset_encoder_state(monkeypatch):
     monkeypatch.setattr(tokens_mod, "_encoder_generation", 0)
     tokens_mod._count_tokens_cached.cache_clear()
     yield
+    # A loader thread started by the test under test outlives the test body.
+    # _encoder_loader() sets _encoder_ready = True even when _load_encoder()
+    # raises (deliberate: a failed load must not be retried on every call), so
+    # a thread that wakes AFTER the next test's reset re-marks the encoder as
+    # ready and _get_encoder() then returns without ever spawning a loader --
+    # the next test's patched loader never runs. Join before yielding control.
+    thread = tokens_mod._encoder_thread
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=10.0)
     tokens_mod._count_tokens_cached.cache_clear()
 
 
