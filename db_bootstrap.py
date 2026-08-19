@@ -2799,6 +2799,9 @@ _FTS_CORRUPTION_SIGNATURES = (
     "checksum mismatch",
 )
 
+# A single-quoted SQL string literal, with '' as the escaped quote.
+_SQL_STRING_LITERAL_RE = re.compile(r"'(?:[^']|'')*'")
+
 
 def _is_fts_corruption_error(detail: str) -> bool:
     lowered = detail.lower()
@@ -2916,10 +2919,29 @@ def _normalize_trigger_sql(sql: str) -> str:
     whitespace, strip the terminator, casefold) so that the only differences
     which survive are real ones — e.g. a body that still references a column
     that has since been renamed.
+
+    Quoted string literals are held out of every one of those steps. SQLite
+    string values are not case-insensitive, and these triggers carry literals
+    that are FTS5 commands (``VALUES('delete', ...)``), so lowercasing or
+    reflowing inside quotes would make a genuinely drifted body compare equal
+    and leave the broken trigger installed — the exact failure this detection
+    exists to catch.
     """
-    text = re.sub(r"(?i)\bIF\s+NOT\s+EXISTS\s+", "", sql or "")
-    text = re.sub(r"\s+", " ", text).strip()
-    return text.rstrip(";").strip().lower()
+    chunks: list[str] = []
+    cursor = 0
+    source = sql or ""
+    for literal in _SQL_STRING_LITERAL_RE.finditer(source):
+        chunks.append(_normalize_trigger_sql_syntax(source[cursor:literal.start()]))
+        chunks.append(literal.group(0))
+        cursor = literal.end()
+    chunks.append(_normalize_trigger_sql_syntax(source[cursor:]))
+    return "".join(chunks).strip().rstrip(";").strip()
+
+
+def _normalize_trigger_sql_syntax(text: str) -> str:
+    """Normalize one non-literal span of a trigger statement."""
+    text = re.sub(r"(?i)\bIF\s+NOT\s+EXISTS\s+", "", text)
+    return re.sub(r"\s+", " ", text).lower()
 
 
 def _fts_stale_triggers(conn: sqlite3.Connection, spec: ExternalContentFtsSpec) -> bool:

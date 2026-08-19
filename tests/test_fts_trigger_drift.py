@@ -193,3 +193,45 @@ def test_normalization_still_detects_real_body_differences():
     b = "CREATE TRIGGER t AFTER INSERT ON m BEGIN INSERT INTO f VALUES (new.body_text); END"
 
     assert db_bootstrap._normalize_trigger_sql(a) != db_bootstrap._normalize_trigger_sql(b)
+
+
+@pytest.mark.parametrize(
+    "a, b",
+    [
+        # FTS5 command literals are case-sensitive to SQLite; 'delete' and
+        # 'DELETE' are different values, so this is real drift, not keyword case.
+        (
+            "CREATE TRIGGER t AFTER DELETE ON m BEGIN INSERT INTO f(f, rowid) VALUES ('delete', old.rowid); END",
+            "CREATE TRIGGER t AFTER DELETE ON m BEGIN INSERT INTO f(f, rowid) VALUES ('DELETE', old.rowid); END",
+        ),
+        # Whitespace inside a literal is part of the value.
+        (
+            "CREATE TRIGGER t AFTER INSERT ON m BEGIN INSERT INTO f VALUES ('a b'); END",
+            "CREATE TRIGGER t AFTER INSERT ON m BEGIN INSERT INTO f VALUES ('a  b'); END",
+        ),
+        # A literal that merely contains the phrase must not be rewritten by the
+        # IF NOT EXISTS strip.
+        (
+            "CREATE TRIGGER t AFTER INSERT ON m BEGIN INSERT INTO f VALUES ('if not exists x'); END",
+            "CREATE TRIGGER t AFTER INSERT ON m BEGIN INSERT INTO f VALUES ('x'); END",
+        ),
+    ],
+)
+def test_normalization_does_not_reach_inside_string_literals(a, b):
+    """Drift confined to a quoted literal must stay visible.
+
+    Normalizing the whole statement (lowercase + whitespace collapse + the
+    IF NOT EXISTS strip) would make these pairs compare equal, reporting a
+    genuinely drifted trigger as healthy and skipping its repair.
+    """
+    assert db_bootstrap._normalize_trigger_sql(a) != db_bootstrap._normalize_trigger_sql(b)
+
+
+def test_normalization_preserves_literal_case_while_folding_keywords():
+    stored = "create trigger t after delete on m begin insert into f(f, rowid) values ('delete', old.rowid); end"
+    spec_sql = "CREATE TRIGGER IF NOT EXISTS t AFTER DELETE ON m BEGIN INSERT INTO f(f, rowid) VALUES ('delete', old.rowid); END;"
+
+    normalized = db_bootstrap._normalize_trigger_sql(spec_sql)
+
+    assert db_bootstrap._normalize_trigger_sql(stored) == normalized
+    assert "'delete'" in normalized
