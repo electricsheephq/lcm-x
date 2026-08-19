@@ -30,6 +30,46 @@ class TestParseModelThresholdsEnv:
         assert result == {"glm-5.2": 0.70, "glm-5.2-1M": 0.25}
 
 
+class TestYamlFallbackParser:
+    """Cover the hand-rolled parser used when PyYAML is unavailable.
+
+    This path is what CI runs, and nothing exercised it: with PyYAML installed
+    the tests take ``yaml.safe_load`` and pass, so a fallback-only defect stayed
+    invisible locally and failed only in CI.
+    """
+
+    def test_quoted_keys_are_unquoted_like_pyyaml(self, tmp_path, monkeypatch):
+        import hermes_lcm.config as config_module
+
+        monkeypatch.setattr(config_module, "yaml", None)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text(
+            'lcm:\n'
+            '  model_thresholds:\n'
+            '    valid: 0.4\n'
+            '    "": 0.5\n'
+        )
+
+        loaded = config_module._load_hermes_config_yaml()
+        keys = set(loaded["lcm"]["model_thresholds"])
+
+        # PyYAML resolves `"": 0.5` to an empty-string key, which callers reject.
+        # The fallback must agree; keeping the literal `""` lets the entry survive.
+        assert '""' not in keys
+        assert keys == {"valid", ""}
+
+    def test_quoted_values_still_parse(self, tmp_path, monkeypatch):
+        import hermes_lcm.config as config_module
+
+        monkeypatch.setattr(config_module, "yaml", None)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        (tmp_path / "config.yaml").write_text('lcm:\n  context_threshold: "0.35"\n')
+
+        loaded = config_module._load_hermes_config_yaml()
+
+        assert loaded["lcm"]["context_threshold"] == 0.35
+
+
 class TestLCMConfigModelThresholds:
     def test_default_empty(self):
         c = LCMConfig()

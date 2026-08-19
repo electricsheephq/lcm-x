@@ -175,6 +175,12 @@ def _load_hermes_config_yaml() -> dict[str, Any]:
             continue
         indent = len(line) - len(line.lstrip(" \t"))
         key, raw_value = line.strip().split(":", 1)
+        # Unquote the key as well as the value below. PyYAML resolves `"": 0.5`
+        # to an empty-string key, which callers reject; without this the
+        # fallback keeps the literal two-character key `""` and the entry
+        # survives. That divergence only appears where PyYAML is absent, so it
+        # passes locally and fails in CI.
+        key = key.strip().strip("'\"")
         while stack and indent <= stack[-1][0]:
             stack.pop()
         parent = stack[-1][1] if stack else root
