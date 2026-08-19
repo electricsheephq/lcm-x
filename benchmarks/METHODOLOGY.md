@@ -1,7 +1,7 @@
 # Benchmark methodology
 
-This is the methodology reference for the two memory-quality layers LCM-X
-benchmarks. It documents what each harness measures, the fairness rules both
+This is the methodology reference for the two memory-quality layers that
+LCM-X's benchmarks measure. It documents what each harness measures, the fairness rules both
 must honor, the configurations they run under, and how to reproduce a run.
 Scores land separately as runs complete (see [Results index](#results-index));
 this file describes the method, not a verdict.

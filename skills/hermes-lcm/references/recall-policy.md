@@ -1,4 +1,4 @@
-## LCM-X recall policy
+# LCM-X recall policy
 
 LCM-X is active for this session. Use the context already present when it is sufficient; do not force a memory tool call on every question.
 

@@ -73,7 +73,7 @@ uv pip install --python /path/to/lcm-x/.venv-fastembed/bin/python fastembed nump
 | `HERMES_MB_CODEX_EFFORT` | no (default `low`) | `model_reasoning_effort` passed to `codex exec`. |
 | `HERMES_MB_CLAUDE_MODEL` | no (default `claude-sonnet-5`) | Model passed to `claude -p`. |
 | `HERMES_MB_CLI_TIMEOUT_MS` | no (default `180000`) | Per-call timeout for the CLI transport. |
-| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` | only if **not** using `HERMES_MB_LLM_CLI` | Harness-level answerer/judge key (LCM-X itself needs no provider key — retrieval is fully local). |
+| `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` | only if **not** using `HERMES_MB_LLM_CLI` | Harness-level answerer/judge key (with the default FastEmbed provider, LCM-X itself needs no provider key — retrieval runs fully locally; the optional Voyage embedding provider requires `VOYAGE_API_KEY`). |
 
 ## Run
 
