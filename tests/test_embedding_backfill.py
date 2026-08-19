@@ -1458,6 +1458,9 @@ def test_disabled_and_missing_profile_refuse_cleanly(tmp_path):
 
 
 def test_backfill_batch_size_env_override(monkeypatch):
+    # Guard against ambient config: the default assertion must not read a
+    # value the host environment happens to export.
+    monkeypatch.delenv("LCM_EMBEDDING_BACKFILL_BATCH_SIZE", raising=False)
     # Default: 100 non-voyage documents fit one 32-doc-per-request estimate of 4.
     token_counts = [10] * 100
     assert command_mod._embedding_batch_estimate("ollama", token_counts) == 4
@@ -1488,9 +1491,11 @@ def test_backfill_batch_size_env_override(monkeypatch):
     monkeypatch.setenv("LCM_EMBEDDING_BACKFILL_BATCH_SIZE", "100")
     assert command_mod._embedding_backfill_batch_size(50) == 50
     assert command_mod._embedding_batch_estimate("ollama", [10] * 100, 50) == 2
-    # An unset/invalid configured cap falls back to the hard ceiling.
+    # An unset configured cap falls back to the hard ceiling; a non-positive
+    # configured cap normalizes to 1, exactly as VoyageProvider does.
     assert command_mod._embedding_backfill_batch_size(None) == 100
-    assert command_mod._embedding_backfill_batch_size(0) == 100
+    assert command_mod._embedding_backfill_batch_size(0) == 1
+    assert command_mod._embedding_backfill_batch_size(-5) == 1
 
 
 def test_backfill_apply_honors_env_batch_size(monkeypatch, tmp_path):

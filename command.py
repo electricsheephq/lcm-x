@@ -122,9 +122,11 @@ def _embedding_backfill_batch_size(max_batch_items: int | None = None) -> int:
     # embedding_max_batch_items when the caller has config in scope, else the
     # hard Voyage ceiling): above it the provider splits one outer batch into
     # several real requests, silently diverging from the dry-run estimate.
+    # Normalization mirrors VoyageProvider exactly (max(1, min(value, 1000)))
+    # so a non-positive configured cap means 1, not "ignore".
     cap = _VOYAGE_MAX_BATCH_ITEMS
-    if isinstance(max_batch_items, int) and 0 < max_batch_items < cap:
-        cap = max_batch_items
+    if isinstance(max_batch_items, int):
+        cap = max(1, min(max_batch_items, _VOYAGE_MAX_BATCH_ITEMS))
     raw = os.environ.get("LCM_EMBEDDING_BACKFILL_BATCH_SIZE")
     if raw is None:
         return min(_EMBEDDING_BACKFILL_BATCH_SIZE, cap)
