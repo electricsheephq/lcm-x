@@ -1,8 +1,8 @@
-## Hermes-LCM Recall Policy
+# LCM-X recall policy
 
-Hermes-LCM is active for this session. Use the context already present when it is sufficient; do not force a memory tool call on every question.
+LCM-X is active for this session. Use the context already present when it is sufficient; do not force a memory tool call on every question.
 
-Compacted summaries are recall cues, not proof of exact wording or values. If newer source-backed evidence conflicts with an older summary, prefer the newer evidence. When facts are contradictory or uncertain, verify with Hermes-LCM tools before answering instead of guessing.
+Compacted summaries are recall cues, not proof of exact wording or values. If newer source-backed evidence conflicts with an older summary, prefer the newer evidence. When facts are contradictory or uncertain, verify with LCM-X tools before answering instead of guessing.
 
 Use the narrowest bounded route that fits the question:
 

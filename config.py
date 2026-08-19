@@ -311,6 +311,12 @@ class _EnvFieldSpec:
 ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("fresh_tail_count", "LCM_FRESH_TAIL_COUNT", int),
     _EnvFieldSpec("fresh_tail_max_tokens", "LCM_FRESH_TAIL_MAX_TOKENS", int),
+    _EnvFieldSpec("fresh_tail_pressure_yield_enabled", "LCM_FRESH_TAIL_PRESSURE_YIELD_ENABLED", bool),
+    _EnvFieldSpec(
+        "fresh_tail_pressure_yield_min_observations",
+        "LCM_FRESH_TAIL_PRESSURE_YIELD_MIN_OBSERVATIONS",
+        int,
+    ),
     _EnvFieldSpec("leaf_chunk_tokens", "LCM_LEAF_CHUNK_TOKENS", int),
     _EnvFieldSpec("context_threshold", "LCM_CONTEXT_THRESHOLD", float),
     _EnvFieldSpec("incremental_max_depth", "LCM_INCREMENTAL_MAX_DEPTH", int),
@@ -371,6 +377,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("database_path", "LCM_DATABASE_PATH", str),
     _EnvFieldSpec("embeddings_enabled", "LCM_EMBEDDINGS_ENABLED", bool),
     _EnvFieldSpec("rerank_enabled", "LCM_RERANK_ENABLED", bool),
+    _EnvFieldSpec("rerank_window_limit", "LCM_RERANK_WINDOW_LIMIT", int),
     _EnvFieldSpec("recall_scan_rows", "LCM_RECALL_SCAN_ROWS", int),
     _EnvFieldSpec("recall_scan_max_rows", "LCM_RECALL_SCAN_MAX_ROWS", int),
     _EnvFieldSpec("recall_scan_budget_s", "LCM_RECALL_SCAN_BUDGET_S", float),
@@ -392,6 +399,12 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("embedding_model", "LCM_EMBEDDING_MODEL", str),
     _EnvFieldSpec("embedding_content_policy", "LCM_EMBED_CONTENT_POLICY", str),
     _EnvFieldSpec("ollama_base_url", "LCM_OLLAMA_BASE_URL", str),
+    _EnvFieldSpec(
+        "embedding_base_url", "LCM_EMBEDDING_BASE_URL", str
+    ),
+    _EnvFieldSpec(
+        "embedding_api_key_env", "LCM_EMBEDDING_API_KEY_ENV", str
+    ),
     _EnvFieldSpec("embedding_query_timeout_s", "LCM_EMBEDDING_QUERY_TIMEOUT_S", float),
     _EnvFieldSpec("recall_query_timeout_s", "LCM_RECALL_QUERY_TIMEOUT_S", float),
     _EnvFieldSpec("embedding_backfill_timeout_s", "LCM_EMBEDDING_BACKFILL_TIMEOUT_S", float),
@@ -449,6 +462,18 @@ class LCMConfig:
     fresh_tail_count: int = 32
     # Optional token cap for the protected suffix (0 = disabled)
     fresh_tail_max_tokens: int = 0
+    # Let the count-protected tail yield to a derived token bound when the
+    # host reports sustained over-threshold pressure and the tail is the only
+    # reason compaction cannot make progress. Fires only in a state that
+    # otherwise ends at the provider hard limit (see #441).
+    fresh_tail_pressure_yield_enabled: bool = True
+    # How many consecutive blocked entry-point invocations (preflight or
+    # compress observing over-threshold pressure with the tail as the only
+    # blocker) it takes before the yield arms. This is what "sustained" means:
+    # below this count fresh_tail_count stays a hard suffix. 1 yields on the
+    # first blocked observation; the evidence streak resets whenever pressure
+    # drops below threshold, a compaction pass succeeds, or the session resets.
+    fresh_tail_pressure_yield_min_observations: int = 3
 
     # -- Compaction thresholds ---
     # Max source tokens in a leaf chunk before summarization triggers
@@ -609,6 +634,9 @@ class LCMConfig:
     # fused candidates). Default-off: recall ships value on RRF order alone, and
     # rerank is one extra billable API call the operator opts into.
     rerank_enabled: bool = False
+    # Optional product clamp for the lcm_recall rerank window. Zero preserves
+    # the historical ``min(50, max(1, limit * 4))`` window byte-for-byte.
+    rerank_window_limit: int = 0
     embedding_bounded_scan_rows: int = 2_000
     # Vector storage dtype for NEWLY-registered embedding profiles: float32
     # (default; a stock install keeps summary vectors byte-identical) or int8
@@ -710,6 +738,8 @@ class LCMConfig:
     # default in the chunker's normalize_content_policy.
     embedding_content_policy: str = "conversational"
     ollama_base_url: str = "http://localhost:11434"
+    embedding_base_url: str = ""
+    embedding_api_key_env: str = "LCM_EMBEDDING_API_KEY"
     embedding_query_timeout_s: float = 3.0
     # Dedicated deadline for lcm_recall. It fans out three sequential arms (FTS +
     # summary KNN + chunk KNN) plus fusion, hydration, and an optional rerank, so

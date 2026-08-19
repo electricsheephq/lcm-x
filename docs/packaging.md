@@ -2,10 +2,12 @@
 
 ## Current decision
 
-`hermes-lcm` intentionally remains a clone-or-symlink Hermes user plugin for now. The supported install path is:
+LCM-X intentionally remains a clone-or-symlink Hermes user plugin for now. The
+compatibility plugin name and install directory remain `hermes-lcm`. The
+supported install path is:
 
 ```bash
-git clone https://github.com/stephenschoettler/hermes-lcm \
+git clone https://github.com/electricsheephq/lcm-x \
   ~/.hermes/plugins/hermes-lcm
 ```
 
