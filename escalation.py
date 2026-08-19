@@ -276,11 +276,18 @@ def _unwrap_summary_contract(content: str, nonce: str, max_tokens: int) -> str:
     opening_tag = f'<lcm-summary nonce="{nonce}">'
     closing_tag = "</lcm-summary>"
     stripped = content.strip()
+    # No count check on the closing tag. The body is extracted by slicing from
+    # both ends, so an interior `</lcm-summary>` cannot affect what is extracted
+    # -- it only ever caused a valid summary to be discarded. And unlike the
+    # opening tag, the closing tag carries no nonce, so ANY prior summary quoted
+    # in the transcript contains it verbatim: a session that has discussed the
+    # envelope contract could never be summarized again. The opening-tag count
+    # is kept because it is nonce-bearing, so a second occurrence is genuinely
+    # anomalous rather than ordinary transcript content.
     if (
         not stripped.startswith(opening_tag)
         or not stripped.endswith(closing_tag)
         or stripped.count(opening_tag) != 1
-        or stripped.count(closing_tag) != 1
     ):
         return ""
     body = stripped[len(opening_tag) : -len(closing_tag)].strip()
