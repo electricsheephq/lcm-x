@@ -392,6 +392,335 @@ def test_bounded_scan_uses_source_recency_after_newest_first_backfill(
 
 
 
+def _seed_scan_corpus(dag, store, size, *, gold_vector, filler_vector):
+    """Seed ``size`` summaries whose OLDEST carries ``gold_vector``."""
+    store.register_profile("scan", "local", 3)
+    gold = _add_summary(dag, created_at=1.0)
+    _record_embedding(store, gold, "summary", "scan", gold_vector)
+    for index in range(1, size):
+        node = _add_summary(dag, created_at=1.0 + index)
+        _record_embedding(store, node, "summary", "scan", filler_vector)
+    return gold
+
+
+def test_full_scan_batches_the_whole_corpus_and_reaches_the_oldest(tmp_path):
+    """F31 §2: with full_scan the bound is a BATCH SIZE, not a recency window.
+
+    The gold vector is the OLDEST of a corpus more than 2x the batch size —
+    the exact shape that made 86% of a 185k-vector store invisible and drove
+    all-gold recall to 0.000 as content aged out.
+    """
+    db_path = tmp_path / "full-scan.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(db_path, bounded_scan_rows=3)  # 3-row batches, 7 vectors
+    try:
+        gold = _seed_scan_corpus(
+            dag, store, 7, gold_vector=[1.0, 0.0, 0.0], filler_vector=[0.0, 1.0, 0.0]
+        )
+
+        windowed = store.knn([1.0, 0.0, 0.0], k=1, model="scan")
+        assert windowed.coverage == "bounded"
+        assert [row[0] for row in windowed] != [str(gold)]  # aged out of the window
+
+        result = store.knn([1.0, 0.0, 0.0], k=1, model="scan", full_scan=True)
+
+        assert result.coverage == "full"
+        assert result.reason is None
+        assert [row[0] for row in result] == [str(gold)]
+    finally:
+        store.close()
+        dag.close()
+
+
+def test_full_scan_without_numpy_also_reaches_the_oldest(tmp_path, monkeypatch):
+    """The pure-Python scoring path batches identically (no numpy install)."""
+    db_path = tmp_path / "full-scan-nonumpy.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(db_path, bounded_scan_rows=2)
+    try:
+        gold = _seed_scan_corpus(
+            dag, store, 5, gold_vector=[1.0, 0.0, 0.0], filler_vector=[0.0, 1.0, 0.0]
+        )
+
+        def unavailable():
+            raise ImportError("numpy not installed")
+
+        monkeypatch.setattr(vector_store_module, "_load_numpy", unavailable)
+        result = store.knn([1.0, 0.0, 0.0], k=1, model="scan", full_scan=True)
+
+        assert result.coverage == "full"
+        assert [row[0] for row in result] == [str(gold)]
+    finally:
+        store.close()
+        dag.close()
+
+
+def test_multi_batch_scan_does_not_populate_or_thrash_the_matrix_cache(tmp_path):
+    """Review finding 2: a sweep needing more batches than the 4-entry LRU
+    evicts each entry before the next sweep reaches it — zero hits, while
+    retaining 4 float32 matrices and breaking the one-batch memory bound.
+    Multi-batch sweeps therefore stream past the cache entirely."""
+    db_path = tmp_path / "cache-thrash.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(db_path, bounded_scan_rows=2)  # 2-row batches, 12 vectors
+    try:
+        _seed_scan_corpus(
+            dag, store, 12, gold_vector=[1.0, 0.0, 0.0], filler_vector=[0.0, 1.0, 0.0]
+        )
+        assert len(store._matrix_cache) == 0
+
+        for _ in range(3):  # repeat: the old code re-loaded all 6 batches each time
+            store.knn([1.0, 0.0, 0.0], k=1, model="scan", full_scan=True)
+
+        assert len(store._matrix_cache) == 0
+    finally:
+        store.close()
+        dag.close()
+
+
+def test_multi_batch_scan_releases_matrices_warmed_before_it(tmp_path, monkeypatch):
+    """Delta-review residual on finding 2: cache=False keeps NEW batches out of
+    the LRU but leaves matrices warmed by EARLIER calls resident for the pooled
+    store's whole lifetime — the reviewer's probe measured cache_before=4 /
+    cache_after=4 across a two-batch scan, i.e. ~192MB coexisting with the
+    streamed batch. The invariant: at first-batch allocation, nothing is left.
+    """
+    numpy = pytest.importorskip("numpy")
+    db_path = tmp_path / "cache-release.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(db_path, bounded_scan_rows=2)  # 2-row batches, 8 vectors
+    try:
+        _seed_scan_corpus(
+            dag, store, 8, gold_vector=[1.0, 0.0, 0.0], filler_vector=[0.0, 1.0, 0.0]
+        )
+        identity = str(store._current_profile()["identity_hash"])
+        ids = store._bounded_candidate_ids(
+            identity,
+            since=None,
+            until=None,
+            conversation_ids=None,
+            source=None,
+            limit=vector_store_module._SCAN_ALL_ROWS,
+        )
+        # Warm the summary LRU to capacity the way earlier bounded calls would,
+        # and plant sentinels in the sibling caches that are additive to it.
+        for index in range(store._MATRIX_CACHE_MAX_ENTRIES):
+            store._numpy_rows(numpy, identity, 3, ids[index:index + 2])
+        store._chunk_matrix_cache[("sentinel", 0, ())] = ([], [], [], None)
+        store._binary_matrix_cache[("sentinel", 0)] = ([], None)
+        store._chunk_binary_matrix_cache[("sentinel", 0)] = ([], None)
+        cache_before = len(store._matrix_cache)
+        assert cache_before == store._MATRIX_CACHE_MAX_ENTRIES
+
+        observed: list[tuple[int, int]] = []
+        original = store._load_matrix
+
+        def probe(np, identity_hash, dim, embedded_ids, dtype):
+            observed.append((len(store._matrix_cache), len(store._chunk_matrix_cache)))
+            return original(np, identity_hash, dim, embedded_ids, dtype)
+
+        monkeypatch.setattr(store, "_load_matrix", probe)
+        result = store.knn([1.0, 0.0, 0.0], k=1, model="scan", full_scan=True)
+
+        assert result.coverage == "full"
+        assert len(observed) == 4  # 8 vectors, 2 per batch
+        # Released BEFORE the first batch is allocated, and never repopulated.
+        assert observed[0] == (0, 0)
+        assert all(sizes == (0, 0) for sizes in observed)
+        assert len(store._matrix_cache) == 0
+        assert len(store._chunk_matrix_cache) == 0
+        assert len(store._binary_matrix_cache) == 0
+        assert len(store._chunk_binary_matrix_cache) == 0
+    finally:
+        store.close()
+        dag.close()
+
+
+def test_single_batch_scan_still_caches_its_matrix(tmp_path):
+    """The warm pooled-store path is unchanged when one batch covers the corpus."""
+    db_path = tmp_path / "cache-single.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(db_path, bounded_scan_rows=50)  # one batch covers all 5
+    try:
+        _seed_scan_corpus(
+            dag, store, 5, gold_vector=[1.0, 0.0, 0.0], filler_vector=[0.0, 1.0, 0.0]
+        )
+
+        store.knn([1.0, 0.0, 0.0], k=1, model="scan", full_scan=True)
+
+        assert len(store._matrix_cache) == 1
+    finally:
+        store.close()
+        dag.close()
+
+
+def test_full_scan_max_rows_caps_the_scan_and_discloses_it(tmp_path):
+    """scan_max_rows is the pathological-corpus escape hatch, and it discloses."""
+    db_path = tmp_path / "full-scan-capped.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(db_path, bounded_scan_rows=2)
+    try:
+        gold = _seed_scan_corpus(
+            dag, store, 6, gold_vector=[1.0, 0.0, 0.0], filler_vector=[0.0, 1.0, 0.0]
+        )
+
+        result = store.knn(
+            [1.0, 0.0, 0.0], k=1, model="scan", full_scan=True, scan_max_rows=2
+        )
+
+        assert result.coverage == "bounded"
+        assert result.scanned == 2
+        assert result.total == 6
+        assert [row[0] for row in result] != [str(gold)]
+    finally:
+        store.close()
+        dag.close()
+
+
+def test_full_scan_budget_stops_early_and_reports_bounded(tmp_path, monkeypatch):
+    """An exhausted latency budget is the only thing that truncates a default
+    scan, and it degrades to the same disclosed 'bounded' coverage."""
+    db_path = tmp_path / "full-scan-budget.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(db_path, bounded_scan_rows=2)
+    try:
+        gold = _seed_scan_corpus(
+            dag, store, 6, gold_vector=[1.0, 0.0, 0.0], filler_vector=[0.0, 1.0, 0.0]
+        )
+        # Spend the budget while loading the first batch, so the scan stops with
+        # 4 of 6 vectors unscored. Candidate enumeration itself stays at t=0;
+        # its separate regression below proves that it shares this budget.
+        with monkeypatch.context() as clock_patch:
+            now = [0.0]
+            original_load = VectorStore._load_vectors_for_ids
+
+            def count_after_deadline(*args, **kwargs):
+                raise AssertionError("deadline expiry must not start COUNT(*)")
+
+            def timed_load(self, *args, **kwargs):
+                loaded = original_load(self, *args, **kwargs)
+                now[0] = 1.0
+                return loaded
+
+            clock_patch.setattr(
+                vector_store_module, "_monotonic", lambda: now[0]
+            )
+            clock_patch.setattr(VectorStore, "_load_vectors_for_ids", timed_load)
+            clock_patch.setattr(
+                store, "_count_embedded_vectors", count_after_deadline
+            )
+            result = store.knn(
+                [1.0, 0.0, 0.0],
+                k=1,
+                model="scan",
+                full_scan=True,
+                scan_budget_s=0.5,
+            )
+
+        assert result.coverage == "bounded"
+        assert result.scanned == 2
+        assert result.total is None
+        assert [row[0] for row in result] != [str(gold)]
+    finally:
+        store.close()
+        dag.close()
+
+
+def test_full_scan_budget_includes_candidate_enumeration(tmp_path, monkeypatch):
+    db_path = tmp_path / "full-scan-enumeration-budget.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(db_path, bounded_scan_rows=2)
+    try:
+        _seed_scan_corpus(
+            dag,
+            store,
+            6,
+            gold_vector=[1.0, 0.0, 0.0],
+            filler_vector=[0.0, 1.0, 0.0],
+        )
+        now = [0.0]
+        original = VectorStore._bounded_candidate_ids
+
+        def slow_enumeration(self, *args, **kwargs):
+            candidate_ids = original(self, *args, **kwargs)
+            now[0] = 1.0
+            return candidate_ids
+
+        def count_after_deadline(*args, **kwargs):
+            raise AssertionError("deadline expiry must not start COUNT(*)")
+
+        monkeypatch.setattr(vector_store_module, "_monotonic", lambda: now[0])
+        monkeypatch.setattr(
+            VectorStore, "_bounded_candidate_ids", slow_enumeration
+        )
+        monkeypatch.setattr(
+            store, "_count_embedded_vectors", count_after_deadline
+        )
+
+        result = store.knn(
+            [1.0, 0.0, 0.0],
+            k=1,
+            model="scan",
+            full_scan=True,
+            scan_budget_s=0.5,
+        )
+
+        assert result.coverage == "bounded"
+        assert result.scanned == 0
+        assert result.total is None
+        assert result == []
+    finally:
+        store.close()
+        dag.close()
+
+
+def test_full_scan_absolute_deadline_stops_between_batches(tmp_path, monkeypatch):
+    """The operation deadline remains a hard stop when the relative scan budget
+    is disabled (zero), so recall cannot start another full batch after expiry."""
+    db_path = tmp_path / "full-scan-deadline.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(db_path, bounded_scan_rows=2)
+    try:
+        gold = _seed_scan_corpus(
+            dag, store, 6, gold_vector=[1.0, 0.0, 0.0], filler_vector=[0.0, 1.0, 0.0]
+        )
+        with monkeypatch.context() as clock_patch:
+            now = [0.0]
+            original_load = VectorStore._load_vectors_for_ids
+
+            def count_after_deadline(*args, **kwargs):
+                raise AssertionError("deadline expiry must not start COUNT(*)")
+
+            def timed_load(self, *args, **kwargs):
+                loaded = original_load(self, *args, **kwargs)
+                now[0] = 2.0
+                return loaded
+
+            clock_patch.setattr(
+                vector_store_module, "_monotonic", lambda: now[0]
+            )
+            clock_patch.setattr(VectorStore, "_load_vectors_for_ids", timed_load)
+            clock_patch.setattr(
+                store, "_count_embedded_vectors", count_after_deadline
+            )
+            result = store.knn(
+                [1.0, 0.0, 0.0],
+                k=1,
+                model="scan",
+                full_scan=True,
+                scan_budget_s=0.0,
+                deadline=1.0,
+            )
+
+        assert result.coverage == "bounded"
+        assert result.scanned == 2
+        assert result.total is None
+        assert [row[0] for row in result] != [str(gold)]
+    finally:
+        store.close()
+        dag.close()
+
+
 def test_bounded_scan_keeps_null_latest_at_legacy_rows_by_created_at(
     tmp_path, monkeypatch
 ):
@@ -1320,9 +1649,9 @@ def test_numpy_candidate_load_is_sql_bounded(tmp_path, monkeypatch):
         loaded: list[int] = []
         original = store._numpy_rows
 
-        def counted(np, identity_hash, dim, ids, dtype="float32"):
+        def counted(np, identity_hash, dim, ids, dtype="float32", cache=True):
             loaded.append(len(ids))
-            return original(np, identity_hash, dim, ids, dtype)
+            return original(np, identity_hash, dim, ids, dtype, cache=cache)
 
         monkeypatch.setattr(store, "_numpy_rows", counted)
         result = store.knn([1.0, 0.0], k=1, model="m")
