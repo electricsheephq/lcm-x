@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "worktrees": {
+    "harness": {
+      "path": "/path/to/wt-v1l1",
+      "git_sha": "2c20cee",
+      "clean": true
+    },
+    "product": {
+      "path": "/path/to/hermes-lcm",
+      "git_sha": "2edb8fc",
+      "clean": true
+    }
+  },
+  "binaries": {
+    "codex_cli_0_144_6": {
+      "name": "codex",
+      "sha256": "80a3933d11a9d13ef806aa24f7bb8afc9169cfe4e9b09d6da6a92922cbde9cff"
+    }
+  },
+  "files": {
+    "longmemeval_v1_dataset": {
+      "path": "/path/to/longmemeval-v1.json",
+      "sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
+    },
+    "full500_qids": {
+      "path": "/path/to/full500-qids.json",
+      "sha256": "42903357eb3c866f0bba2331dccd8d321a6c7ab57099eb2979c172c1d4f2bc6f"
+    }
+  },
+  "env": {
+    "HERMES_MB_LLM_CLI": "codex",
+    "HERMES_MB_CODEX_MODEL": "gpt-5.6-sol",
+    "HERMES_MB_CODEX_EFFORT": "medium",
+    "HERMES_MB_ANSWER_PRESENTATION": "evidence_cards_v1",
+    "HERMES_MB_JUDGE_EFFORT": "low"
+  }
+}
