@@ -2,9 +2,11 @@
 
 import json
 from pathlib import Path
+import sys
 
 import pytest
 
+import benchmarking.h3_composition_replay as h3_composition_replay
 import hermes_lcm.engine as lcm_engine
 
 from benchmarking.fixtures import make_synthetic_fixture
@@ -43,6 +45,34 @@ def test_replay_below_threshold_does_not_compress(tmp_path):
     assert metrics.compression_count == 0
     assert metrics.prompt_tokens_before == metrics.prompt_tokens_after
     assert Path(metrics.database_path).is_relative_to(tmp_path)
+
+
+def test_h3_composition_replay_aborts_when_golden_gate_fails(
+    tmp_path, monkeypatch, capsys
+):
+    output = tmp_path / "invalid-sweep.json"
+    monkeypatch.setattr(
+        h3_composition_replay, "ReplayContext", lambda *args, **kwargs: object()
+    )
+    monkeypatch.setattr(
+        h3_composition_replay,
+        "golden_gate",
+        lambda _ctx: {"passed": 0, "total": 1, "failures": ["q1"]},
+    )
+    monkeypatch.setattr(
+        h3_composition_replay,
+        "load_ground_truth",
+        lambda _ctx: pytest.fail("sweep continued after failed golden gate"),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["h3_composition_replay.py", "--out", str(output)],
+    )
+
+    assert h3_composition_replay.main() == 1
+    assert "GOLDEN GATE FAILED -- aborting before sweep" in capsys.readouterr().out
+    assert not output.exists()
 
 
 def test_replay_defaults_partial_summary_profile_failure_mode_to_none(tmp_path):
