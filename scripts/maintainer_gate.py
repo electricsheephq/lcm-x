@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime
 from typing import Any
 
 
@@ -48,20 +49,74 @@ def _is_object_id(value: Any) -> bool:
     )
 
 
-def _pair(value: dict[str, Any]) -> tuple[str, int]:
-    return str(value.get("context", "")), int(value.get("integration_id", 0))
+def _is_actor_name(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value == value.strip()
+        and value.isprintable()
+        and not any(character.isspace() for character in value)
+    )
+
+
+def _pair(value: dict[str, Any]) -> tuple[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    context = value.get("context")
+    integration_id = value.get("integration_id")
+    if (
+        not isinstance(context, str)
+        or not context
+        or type(integration_id) is not int
+        or integration_id <= 0
+    ):
+        return None
+    return context, integration_id
+
+
+def _is_timestamp(value: Any) -> bool:
+    if not isinstance(value, str) or not value.endswith("Z"):
+        return False
+    try:
+        datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
+    except ValueError:
+        return False
+    return True
+
+
+def _review_evidence_is_valid(reviews: Any) -> bool:
+    return type(reviews) is list and all(
+        isinstance(review, dict)
+        and _is_actor_name(review.get("author"))
+        and review.get("state") in {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
+        and _is_object_id(review.get("commit_sha"))
+        and _is_timestamp(review.get("submitted_at"))
+        and type(review.get("codeowner")) is bool
+        for review in reviews
+    )
+
+
+def _parse_timestamp(value: str) -> datetime:
+    """Parse a validated ``_is_timestamp`` string to an aware UTC datetime.
+
+    Ordering must not be done on the raw strings. ``_is_timestamp`` accepts ISO
+    values with or without fractional seconds, and those do not sort
+    chronologically as text: ``...:00.5Z`` sorts BEFORE ``...:00Z`` because
+    ``.`` precedes ``Z``. Comparing strings would therefore let an earlier
+    APPROVED outrank a later CHANGES_REQUESTED and emit a false readiness
+    receipt.
+    """
+    return datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
 
 
 def _latest_reviews(reviews: list[dict[str, Any]]) -> list[dict[str, Any]]:
     latest: dict[str, list[dict[str, Any]]] = {}
     for review in reviews:
-        author = str(review.get("author", ""))
-        if not author:
-            continue
+        author = review["author"]
         current = latest.get(author, [])
-        submitted_at = str(review.get("submitted_at", ""))
-        current_time = str(current[0].get("submitted_at", "")) if current else ""
-        if not current or submitted_at > current_time:
+        submitted_at = _parse_timestamp(review["submitted_at"])
+        current_time = _parse_timestamp(current[0]["submitted_at"]) if current else None
+        if current_time is None or submitted_at > current_time:
             latest[author] = [review]
         elif submitted_at == current_time:
             current.append(review)
@@ -99,9 +154,15 @@ def _trusted_checks(
 
 def _review_gate(data: dict[str, Any], head_sha: str) -> list[str]:
     pr = data.get("pr", {})
-    author = str(pr.get("author", ""))
-    latest = _latest_reviews(data.get("latest_reviews", []))
+    author = pr.get("author")
+    reviews = data.get("latest_reviews", [])
     blockers: list[str] = []
+
+    if not _review_evidence_is_valid(reviews):
+        return ["REVIEW_EVIDENCE_INVALID"]
+    latest = _latest_reviews(reviews)
+    if len(latest) != len({review["author"] for review in latest}):
+        blockers.append("LATEST_REVIEW_AMBIGUOUS")
 
     if any(review.get("state") == "CHANGES_REQUESTED" for review in latest):
         blockers.append("LATEST_CHANGES_REQUESTED")
@@ -175,18 +236,33 @@ def _bypass_gate(
     actor_id = actor_receipt.get("actor_id")
     actor_login = actor_receipt.get("actor")
     bypass_actors = policy.get("bypass_actors", [])
+    blockers: list[str] = []
+    if type(bypass_actors) is not list:
+        blockers.append("BROAD_OR_UNSAFE_BYPASS_ACTOR_PRESENT")
+        bypass_actors = []
     bypass_actor = [
         actor
         for actor in bypass_actors
-        if actor.get("actor_type") == "User"
+        if isinstance(actor, dict)
+        and actor.get("actor_type") == "User"
+        and type(actor.get("actor_id")) is int
         and actor.get("actor_id") == actor_id
         and actor.get("bypass_mode") == "pull_request"
     ]
-    blockers: list[str] = []
-    if not actor_login or not bypass_actor:
+    if (
+        type(actor_id) is not int
+        or actor_id <= 0
+        or not _is_actor_name(actor_login)
+        or not bypass_actor
+    ):
         blockers.append("PR_ONLY_ADMIN_BYPASS_NOT_CONFIGURED_FOR_ACTOR")
     if len(bypass_actor) != 1 or len(bypass_actors) != 1:
         blockers.append("BROAD_OR_UNSAFE_BYPASS_ACTOR_PRESENT")
+    if (
+        actor_receipt.get("action") == "merge"
+        and actor_receipt.get("accept_admin_residual_risk") is not True
+    ):
+        blockers.append("ADMIN_BYPASS_RESIDUAL_RISK_NOT_ACCEPTED")
     blockers.extend(_blind_review_gate(data, head_sha))
     return blockers
 
@@ -209,11 +285,32 @@ def _bypass_qualification_gate(
     return blockers
 
 
+def _accepted_issue_gate(data: dict[str, Any], require_closed: bool = False) -> list[str]:
+    issue = data.get("accepted_issue", {})
+    pr_number = data.get("pr", {}).get("number")
+    valid = (
+        issue.get("accepted") is True
+        and type(issue.get("number")) is int
+        and issue["number"] > 0
+        and issue.get("repository") == REPOSITORY
+        and issue.get("pr_number") == pr_number
+        and issue.get("scope_matches") is True
+    )
+    if not valid:
+        return ["ACCEPTED_ISSUE_MISSING"]
+    if require_closed and (
+        issue.get("state") != "CLOSED" or issue.get("state_reason") != "COMPLETED"
+    ):
+        return ["ISSUE_DISPOSITION_UNVERIFIED"]
+    return []
+
+
 def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str, Any]]]:
     blockers: list[str] = []
     policy = data.get("protected_policy", {})
     pr = data.get("pr", {})
-    head_sha = str(pr.get("head_sha", ""))
+    head_value = pr.get("head_sha")
+    head_sha = head_value if isinstance(head_value, str) else ""
 
     if data.get("schema_version") != SCHEMA_VERSION:
         blockers.append("SCHEMA_VERSION_UNSUPPORTED")
@@ -230,6 +327,13 @@ def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str,
         blockers.append("PROTECTED_POLICY_UNTRUSTED")
     if type(pr.get("number")) is not int or pr["number"] <= 0:
         blockers.append("PR_IDENTITY_INVALID")
+    if not _is_actor_name(pr.get("author")):
+        blockers.append("PR_IDENTITY_INVALID")
+    if not all(
+        _is_object_id(value)
+        for value in (policy.get("base_sha"), pr.get("base_sha"), head_sha)
+    ):
+        blockers.append("OBJECT_ID_INVALID")
     if not head_sha or pr.get("state") != "OPEN" or pr.get("draft") is not False:
         blockers.append("PR_STATE_DRIFT")
     if pr.get("base_ref") != "main":
@@ -256,9 +360,7 @@ def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str,
             and disposition not in {"FIXED_NOW", "FALSE_OR_NOT_APPLICABLE"}
         ):
             blockers.append("ACTIVE_MERGE_BLOCKING_FINDING")
-    issue = data.get("accepted_issue", {})
-    if issue.get("accepted") is not True or not issue.get("number"):
-        blockers.append("ACCEPTED_ISSUE_MISSING")
+    blockers.extend(_accepted_issue_gate(data))
     blockers.extend(_semantic_review_gate(data, head_sha))
     return blockers, head_sha, matched
 
@@ -278,7 +380,7 @@ def _landing_authorization_gate(data: dict[str, Any], head_sha: str) -> list[str
     for key, value in expected.items():
         if auth.get(key) != value:
             blockers.append(f"MERGE_AUTHORIZATION_{key.upper()}_MISMATCH")
-    if not auth.get("actor"):
+    if not _is_actor_name(auth.get("actor")):
         blockers.append("MERGE_AUTHORIZATION_ACTOR_MISSING")
     return blockers
 
@@ -434,9 +536,7 @@ def _evaluate_post_merge(data: dict[str, Any]) -> dict[str, Any]:
     live_main = facts.get("live_main_sha")
     if merge_commit != live_main and merge_commit not in live_main_ancestors:
         blockers.append("MERGE_COMMIT_NOT_ANCESTOR_OF_LIVE_MAIN")
-    issue = data.get("accepted_issue", {})
-    if issue.get("state") != "CLOSED" or issue.get("state_reason") != "COMPLETED":
-        blockers.append("ISSUE_DISPOSITION_UNVERIFIED")
+    blockers.extend(_accepted_issue_gate(data, require_closed=True))
 
     matched, check_blockers = _trusted_checks(data.get("checks", []), merge_commit)
     blockers.extend(check_blockers)

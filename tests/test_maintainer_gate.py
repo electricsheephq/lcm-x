@@ -74,7 +74,14 @@ def ready_payload(mode: str = "readiness") -> dict[str, object]:
         ],
         "threads": [{"is_resolved": True}],
         "findings": [],
-        "accepted_issue": {"number": 218, "accepted": True, "state": "OPEN"},
+        "accepted_issue": {
+            "number": 218,
+            "accepted": True,
+            "repository": "electricsheephq/lcm-x",
+            "pr_number": 218,
+            "scope_matches": True,
+            "state": "OPEN",
+        },
         "semantic_review_receipt": {
             "status": "PASS",
             "head_sha": HEAD,
@@ -84,7 +91,7 @@ def ready_payload(mode: str = "readiness") -> dict[str, object]:
 
 
 def exact_authorization(use_admin_bypass: bool = False) -> dict[str, object]:
-    return {
+    authorization = {
         "repository": "electricsheephq/lcm-x",
         "pr_number": 218,
         "head_sha": HEAD,
@@ -93,6 +100,9 @@ def exact_authorization(use_admin_bypass: bool = False) -> dict[str, object]:
         "actor_id": 239388517,
         "use_admin_bypass": use_admin_bypass,
     }
+    if use_admin_bypass:
+        authorization["accept_admin_residual_risk"] = True
+    return authorization
 
 
 def blind_receipts() -> list[dict[str, object]]:
@@ -154,6 +164,9 @@ def post_merge_payload(live_main: str = MERGE) -> dict[str, object]:
     payload["accepted_issue"] = {
         "number": 218,
         "accepted": True,
+        "repository": "electricsheephq/lcm-x",
+        "pr_number": 218,
+        "scope_matches": True,
         "state": "CLOSED",
         "state_reason": "COMPLETED",
     }
@@ -274,6 +287,20 @@ def test_same_named_wrong_app_check_is_rejected():
     ]
 
 
+def test_integration_id_requires_an_exact_integer_type():
+    for malformed in ("15368", 15368.9, True):
+        payload = ready_payload()
+        for check in payload["checks"]:
+            check["integration_id"] = malformed
+
+        receipt = evaluate(payload)
+
+        assert receipt["decision"] == "NOT_READY"
+        assert "TRUSTED_CHECK_UNSATISFIED:workflow-lint:15368" in receipt[
+            "blocker_codes"
+        ]
+
+
 def test_duplicate_trusted_check_is_rejected_even_when_one_passes():
     payload = ready_payload()
     payload["checks"].append(
@@ -331,6 +358,41 @@ def test_missing_accepted_work_is_an_owner_gate():
 
     assert receipt["decision"] == "OWNER_GATE"
     assert "ACCEPTED_ISSUE_MISSING" in receipt["blocker_codes"]
+
+
+def test_unrelated_or_unbound_accepted_issue_is_an_owner_gate():
+    payload = ready_payload()
+    payload["accepted_issue"]["repository"] = "unrelated/repo"
+    payload["accepted_issue"]["pr_number"] = 999
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "OWNER_GATE"
+    assert "ACCEPTED_ISSUE_MISSING" in receipt["blocker_codes"]
+
+
+def test_exact_identities_require_github_object_ids():
+    payload = ready_payload()
+    malformed = "not-a-40-char-lowercase-git-object-id"
+    payload["pr"]["head_sha"] = malformed
+    for check in payload["checks"]:
+        check["head_sha"] = malformed
+    payload["latest_reviews"][0]["commit_sha"] = malformed
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "STATE_DRIFT"
+    assert "OBJECT_ID_INVALID" in receipt["blocker_codes"]
+
+
+def test_integer_head_identity_cannot_be_stringified_into_an_object_id():
+    payload = ready_payload()
+    payload["pr"]["head_sha"] = int(HEAD)
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "STATE_DRIFT"
+    assert "OBJECT_ID_INVALID" in receipt["blocker_codes"]
 
 
 def test_wrong_ruleset_id_is_an_owner_gate():
@@ -414,6 +476,16 @@ def test_pr_only_admin_bypass_can_qualify_without_author_approval():
     assert receipt["authority_granted"] is False
 
 
+def test_pr_only_admin_bypass_requires_explicit_residual_risk_acceptance():
+    payload = admin_payload()
+    payload["merge_authorization"].pop("accept_admin_residual_risk")
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "NOT_READY"
+    assert "ADMIN_BYPASS_RESIDUAL_RISK_NOT_ACCEPTED" in receipt["blocker_codes"]
+
+
 def test_pr_only_admin_bypass_does_not_waive_changes_requested():
     payload = admin_payload()
     payload["latest_reviews"] = [
@@ -457,6 +529,104 @@ def test_equal_timestamp_changes_requested_fails_closed():
     assert "LATEST_CHANGES_REQUESTED" in receipt["blocker_codes"]
 
 
+def test_fractional_second_changes_requested_outranks_an_earlier_approval():
+    """A later CHANGES_REQUESTED must win even when its timestamp has fractions.
+
+    ISO timestamps do not sort chronologically as text: '...:00.5Z' sorts BEFORE
+    '...:00Z' because '.' precedes 'Z'. Ordering the raw strings would treat the
+    earlier APPROVED as the latest review and emit a READY receipt for a PR whose
+    most recent review requests changes.
+    """
+    payload = admin_payload()
+    payload["latest_reviews"] = [
+        {
+            "author": "Tosko4",
+            "state": "APPROVED",
+            "commit_sha": HEAD,
+            "submitted_at": "2026-08-16T11:00:00Z",
+            "codeowner": True,
+        },
+        {
+            "author": "Tosko4",
+            "state": "CHANGES_REQUESTED",
+            "commit_sha": HEAD,
+            "submitted_at": "2026-08-16T11:00:00.5Z",
+            "codeowner": True,
+        },
+    ]
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "NOT_READY"
+    assert "LATEST_CHANGES_REQUESTED" in receipt["blocker_codes"]
+
+
+def test_fractional_second_approval_outranks_an_earlier_changes_requested():
+    """The mirror case, so the fix is not just 'always prefer CHANGES_REQUESTED'."""
+    payload = admin_payload()
+    payload["latest_reviews"] = [
+        {
+            "author": "Tosko4",
+            "state": "CHANGES_REQUESTED",
+            "commit_sha": HEAD,
+            "submitted_at": "2026-08-16T11:00:00Z",
+            "codeowner": True,
+        },
+        {
+            "author": "Tosko4",
+            "state": "APPROVED",
+            "commit_sha": HEAD,
+            "submitted_at": "2026-08-16T11:00:00.5Z",
+            "codeowner": True,
+        },
+    ]
+
+    receipt = evaluate(payload)
+
+    assert "LATEST_CHANGES_REQUESTED" not in receipt["blocker_codes"]
+
+
+def test_equal_timestamp_reviews_are_ambiguous_even_when_one_is_current():
+    payload = ready_payload()
+    payload["latest_reviews"].append(
+        {
+            "author": "Tosko4",
+            "state": "APPROVED",
+            "commit_sha": "9" * 40,
+            "submitted_at": "2026-08-16T10:00:00Z",
+            "codeowner": True,
+        }
+    )
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "NOT_READY"
+    assert "LATEST_REVIEW_AMBIGUOUS" in receipt["blocker_codes"]
+
+
+def test_malformed_pr_and_review_identities_fail_closed():
+    malformed_payloads = []
+    for author in ([], 123, " ", " Tosko4", "Tosko4 ", "Tosko\x00"):
+        payload = ready_payload()
+        payload["pr"]["author"] = author
+        malformed_payloads.append(payload)
+    for author in ([], 123, " ", " Tosko4", "Tosko4 ", "Tosko\x00"):
+        payload = ready_payload()
+        payload["latest_reviews"][0]["author"] = author
+        malformed_payloads.append(payload)
+    payload = ready_payload()
+    payload["latest_reviews"][0].pop("submitted_at")
+    malformed_payloads.append(payload)
+
+    for payload in malformed_payloads:
+        receipt = evaluate(payload)
+        assert receipt["decision"] != "READY_FOR_AUTHORIZED_LANDING"
+        assert any(
+            blocker in {"PR_IDENTITY_INVALID", "REVIEW_EVIDENCE_INVALID"}
+            for blocker in receipt["blocker_codes"]
+        )
+
+
 def test_pr_only_admin_bypass_rejects_any_extra_or_broad_actor():
     payload = admin_payload()
     payload["protected_policy"]["bypass_actors"].append(
@@ -467,6 +637,32 @@ def test_pr_only_admin_bypass_rejects_any_extra_or_broad_actor():
 
     assert receipt["decision"] == "NOT_READY"
     assert "BROAD_OR_UNSAFE_BYPASS_ACTOR_PRESENT" in receipt["blocker_codes"]
+
+
+def test_pr_only_admin_bypass_rejects_malformed_actor_identities():
+    malformed_payloads = []
+    for actor in ([123], 123, " ", "100yenadmin\x00"):
+        payload = admin_payload()
+        payload["merge_authorization"]["actor"] = actor
+        malformed_payloads.append(payload)
+    for actor_id in (239388517.0, True, "239388517"):
+        payload = admin_payload()
+        payload["merge_authorization"]["actor_id"] = actor_id
+        malformed_payloads.append(payload)
+    payload = admin_payload()
+    payload["protected_policy"]["bypass_actors"][0]["actor_id"] = 239388517.0
+    malformed_payloads.append(payload)
+    payload = admin_payload()
+    payload["protected_policy"]["bypass_actors"] = {"actor_id": 239388517}
+    malformed_payloads.append(payload)
+
+    for payload in malformed_payloads:
+        receipt = evaluate(payload)
+        assert receipt["decision"] != "READY_FOR_AUTHORIZED_LANDING"
+        assert (
+            "PR_ONLY_ADMIN_BYPASS_NOT_CONFIGURED_FOR_ACTOR"
+            in receipt["blocker_codes"]
+        )
 
 
 def test_readiness_can_report_a_non_authoritative_admin_qualification():
