@@ -2051,20 +2051,25 @@ def _candidate_dump_header(
     rerank: bool,
     embeddings_enabled: bool,
     dataset_label: str,
+    direct_source_sha256: str | None,
     manifest_sha256: str | None,
     top_k: int = _CANDIDATE_DUMP_TOP_K,
 ) -> dict[str, Any]:
-    return {
-        _DUMP_HEADER_KEY: {
-            "provider": provider,
-            "model": model,
-            "dataset_label": dataset_label,
-            "manifest_sha256": manifest_sha256,
-            "embeddings_enabled": embeddings_enabled,
-            "rerank": rerank,
-            "top_k": top_k,
-        }
+    # Bind BOTH corpus digests, mirroring the checkpoint header: a direct
+    # --dataset run records source_sha256 (manifest is None) and a prepared-dir
+    # run records manifest_sha256, so an existing dump from a different corpus
+    # under the same label fails validation instead of being appended to.
+    bindings: dict[str, Any] = {
+        "provider": provider,
+        "model": model,
+        "dataset_label": dataset_label,
+        "source_sha256": direct_source_sha256,
+        "manifest_sha256": manifest_sha256,
+        "embeddings_enabled": embeddings_enabled,
+        "rerank": rerank,
+        "top_k": top_k,
     }
+    return {_DUMP_HEADER_KEY: bindings}
 
 
 def _validate_candidate_dump_header(
@@ -2082,10 +2087,26 @@ def _candidate_dump_record(
 
     arms: dict[str, Any] = {}
     if not question.is_abstention:
+        # Fail loud on incomplete rankings: a missing arm or a malformed arm
+        # entry must never degrade into a valid-looking row with empty lists.
+        # (Genuinely empty rankings are legal — an arm may return no candidates.)
+        provided = rankings or {}
+        if set(provided) != set(ARMS):
+            raise RuntimeError(
+                "candidate dump rankings are incomplete for question "
+                f"{question.question_id!r}: expected arms {sorted(ARMS)}, "
+                f"got {sorted(provided)}"
+            )
         for arm in ARMS:
-            ranking = (rankings or {}).get(arm, {})
-            session_ids = list(dict.fromkeys(ranking.get("sessions", [])))[:_CANDIDATE_DUMP_TOP_K]
-            turn_keys = list(dict.fromkeys(ranking.get("turns", [])))[:_CANDIDATE_DUMP_TOP_K]
+            ranking = provided[arm]
+            if "sessions" not in ranking or "turns" not in ranking:
+                raise RuntimeError(
+                    "candidate dump rankings are malformed for question "
+                    f"{question.question_id!r} arm {arm!r}: missing "
+                    "sessions/turns"
+                )
+            session_ids = list(dict.fromkeys(ranking["sessions"]))[:_CANDIDATE_DUMP_TOP_K]
+            turn_keys = list(dict.fromkeys(ranking["turns"]))[:_CANDIDATE_DUMP_TOP_K]
             arms[arm] = {
                 "sessions_top10": session_ids,
                 "turns_top10": [list(turn_key) for turn_key in turn_keys],
@@ -2423,6 +2444,7 @@ def run_harness(
         rerank=use_rerank,
         embeddings_enabled=embeddings_enabled,
         dataset_label=dataset_label,
+        direct_source_sha256=direct_source_sha256,
         manifest_sha256=manifest_sha256,
     )
 
@@ -2512,11 +2534,22 @@ def run_harness(
     if dump_candidates_path is not None and not fully_completed_resume:
         dump_candidates_path = Path(dump_candidates_path)
         dump_candidates_path.parent.mkdir(parents=True, exist_ok=True)
-        dump_exists = dump_candidates_path.exists()
-        dump_nonempty = dump_exists and dump_candidates_path.stat().st_size > 0
-        if dump_nonempty:
-            with dump_candidates_path.open("rb") as existing_dump:
-                raw_header = existing_dump.readline()
+        raw_dump = (
+            dump_candidates_path.read_bytes() if dump_candidates_path.exists() else b""
+        )
+        if raw_dump and not raw_dump.endswith(b"\n"):
+            # A torn final row (crash mid-write) always precedes its checkpoint
+            # record -- that question re-evaluates on resume -- so truncating
+            # back to the last complete row loses nothing and keeps every
+            # remaining line parseable.
+            keep = raw_dump.rfind(b"\n") + 1
+            with dump_candidates_path.open("r+b") as existing_dump:
+                existing_dump.truncate(keep)
+                existing_dump.flush()
+                os.fsync(existing_dump.fileno())
+            raw_dump = raw_dump[:keep]
+        if raw_dump:
+            raw_header = raw_dump.split(b"\n", 1)[0]
             try:
                 dump_header = json.loads(raw_header)
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -2527,13 +2560,9 @@ def run_harness(
                 dump_header, expected_header=expected_dump_header, path=dump_candidates_path
             )
         candidate_dump_file = dump_candidates_path.open("a", encoding="utf-8")
-        if not dump_nonempty:
+        if not raw_dump:
             _write_candidate_dump_record(candidate_dump_file, expected_dump_header)
             _fsync_parent_directory(dump_candidates_path)
-        elif not dump_candidates_path.read_bytes().endswith(b"\n"):
-            candidate_dump_file.write("\n")
-            candidate_dump_file.flush()
-            os.fsync(candidate_dump_file.fileno())
 
     observed_question_ids: set[str] = set()
     if fully_completed_resume:
@@ -2580,13 +2609,19 @@ def run_harness(
                 )
                 scored_count += scored_delta
                 abstention_count += abstention_delta
-                if checkpoint_file is not None:
-                    _write_checkpoint_record(checkpoint_file, record)
+                # Sidecar row FIRST, checkpoint second: a crash between the two
+                # re-evaluates the question on resume (its checkpoint record
+                # never landed) and appends a fresh sidecar row. The worst case
+                # is a duplicate sidecar row for one question -- consumers
+                # dedupe by question_id keeping the last -- never a checkpointed
+                # question with a silently missing sidecar row.
                 if candidate_dump_file is not None:
                     _write_candidate_dump_record(
                         candidate_dump_file,
                         _candidate_dump_record(question, candidate_rankings),
                     )
+                if checkpoint_file is not None:
+                    _write_checkpoint_record(checkpoint_file, record)
             finally:
                 _cleanup_question_db(tmp_dir, question.question_id)
     finally:

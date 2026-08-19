@@ -683,6 +683,7 @@ def test_dump_candidates_stub_has_header_rows_gold_and_null_markers(tmp_path):
             "provider": "stub",
             "model": "",
             "dataset_label": "s",
+            "source_sha256": None,
             "manifest_sha256": None,
             "embeddings_enabled": True,
             "rerank": False,
@@ -901,3 +902,81 @@ def test_deterministic_summary_of_empty_session_is_non_empty():
 
     assert deterministic_session_summary([]) == "(empty session)"
     assert deterministic_session_summary([{"role": "user", "content": "  "}]).strip()
+
+
+def test_dump_candidates_header_binds_direct_source_sha(tmp_path):
+    questions = _synthetic_dataset()
+    dump_path = tmp_path / "candidates.jsonl"
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "run-a",
+        embeddings_enabled=True,
+        direct_source_sha256="a" * 64,
+        dump_candidates_path=dump_path,
+    )
+    header = json.loads(dump_path.read_text(encoding="utf-8").splitlines()[0])
+    assert header["__dump_header__"]["source_sha256"] == "a" * 64
+
+    # A dump produced from a different direct corpus must be rejected, not
+    # silently appended to.
+    with pytest.raises(ValueError, match="configuration mismatch"):
+        run_harness(
+            questions,
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / "run-b",
+            embeddings_enabled=True,
+            direct_source_sha256="b" * 64,
+            dump_candidates_path=dump_path,
+        )
+
+
+def test_dump_candidates_truncates_torn_tail_and_appends(tmp_path):
+    questions = _synthetic_dataset()
+    dump_path = tmp_path / "candidates.jsonl"
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "run-a",
+        embeddings_enabled=True,
+        dump_candidates_path=dump_path,
+    )
+    complete_lines = dump_path.read_text(encoding="utf-8").splitlines()
+    with dump_path.open("a", encoding="utf-8") as handle:
+        handle.write('{"question_id": "torn-row-never-fini')
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "run-b",
+        embeddings_enabled=True,
+        dump_candidates_path=dump_path,
+    )
+    lines = dump_path.read_text(encoding="utf-8").splitlines()
+    # Torn tail gone, every line parses, and the second run's rows appended.
+    assert len(lines) == 2 * len(complete_lines) - 1  # header written once
+    for line in lines:
+        json.loads(line)
+    assert not any("torn-row-never-fini" in line for line in lines)
+
+
+def test_dump_candidates_record_rejects_incomplete_rankings():
+    from benchmarking.longmemeval import _candidate_dump_record
+
+    question = _synthetic_dataset()[0]
+    complete = {arm: {"sessions": [], "turns": []} for arm in ARMS}
+    record = _candidate_dump_record(question, complete)
+    assert set(record["arms"]) == set(ARMS)
+
+    missing_arm = dict(complete)
+    missing_arm.pop(ARMS[0])
+    with pytest.raises(RuntimeError, match="incomplete"):
+        _candidate_dump_record(question, missing_arm)
+
+    malformed = {arm: dict(entry) for arm, entry in complete.items()}
+    malformed[ARMS[0]] = {"sessions": []}
+    with pytest.raises(RuntimeError, match="malformed"):
+        _candidate_dump_record(question, malformed)
