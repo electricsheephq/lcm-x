@@ -1,8 +1,79 @@
 # Changelog
 
-This repo also publishes GitHub Releases. This file is the repo-root release surface for operators who want the recent release arc without leaving the checkout.
+This file is the repository-root version history. LCM-X currently publishes
+version tags but does not have a destination GitHub Release object for RC2.
 
 ## Unreleased
+
+(nothing yet)
+
+## v0.22.0 - 2026-08-19
+
+- Rename the project-facing documentation to **LCM-X — Lossless Context Memory
+  eXtension** while preserving the compatibility identifiers `hermes-lcm`
+  (plugin/skill/install path) and `lcm` (runtime engine).
+- Point current install, CI, contribution, and tag links at
+  `electricsheephq/lcm-x`; retain upstream links only as labeled provenance.
+- Document the RC2 memory-evaluation evidence separately from the unmerged LCM
+  Teams, RC2 reconciliation, and Codex/whitepaper candidates.
+
+## v0.21.0-rc2 - 2026-08-05
+
+### Changed
+
+- #492 corrects the optional `tiktoken` trajectory-state chunking path to
+  preserve UTF-8 character boundaries while keeping each decoded chunk within
+  its token budget. If the budget cannot contain one complete Unicode
+  character, the path fails explicitly instead of emitting replacement
+  characters.
+
+### Evaluation baseline included in RC2
+
+- RC2 contains the deterministic LongMemEval retrieval harness, the committed
+  500-question FastEmbed result, and the vendored judged-QA adapter described
+  in [`benchmarks/METHODOLOGY.md`](benchmarks/METHODOLOGY.md). These evaluation
+  surfaces landed before RC2; RC2 includes them rather than introducing all of
+  them in the RC2-only delta.
+- The full judged-QA result and recommended Voyage retrieval run remain pending.
+  Retrieval metrics are configuration-specific evidence, not a release,
+  runtime-safety, or customer-readiness claim.
+
+## v0.21.0-rc1 - 2026-08-03
+
+### Highlights
+
+- Add the trajectory/experience-memory subsystem and the opt-in assertion,
+  evidence, query-view, and adaptive-retrieval surfaces delivered by the
+  consolidated wave-1 merge (#436).
+- Keep the core SQLite schema at version 5. New feature stores use additive,
+  named migrations in the same profile database, while disabled/default-off
+  installs do not create optional assertion, query-view, or embedding tables.
+- Improve large-store and startup behavior with bounded vector/metadata work,
+  lock-contention retry during WAL conversion, and deferred temporal-rollup
+  maintenance (#361, #440, #446, #447).
+
+### Changed
+
+- #436 adds the consolidated trajectory/experience-memory, retrieval,
+  exact-evidence, citable-delivery, privacy, scale, and release-validation wave.
+  Its committed benchmark results are directional evidence for the documented
+  harness and corpus, not universal provider or workload guarantees.
+- #361 retries WAL conversion when connection setup meets lock contention.
+- #440 moves temporal-rollup maintenance off the session-start critical path;
+  bounded background work is eventual and `lcm_recent` retains its fallback.
+- #446 and #447 batch large fixture setup for embedding/vector metadata release
+  coverage without changing runtime behavior.
+
+### Upgrade notes
+
+- Back up `lcm.db`, update the plugin checkout, restart Hermes, send one normal
+  message, then verify `plugin_version: 0.21.0-rc1` and the expected database
+  path with `lcm_status`. The core schema remains version 5.
+- No manual core migration or embedding backfill is required from v0.20.0.
+- Query/evidence tool schemas are exposed after upgrade, but assertion
+  extraction, assertion storage, query-view storage, pre-answer evidence, and
+  adaptive retrieval remain opt-in. Review provider/privacy boundaries before
+  enabling model- or embedding-backed paths.
 
 ## v0.20.0 - 2026-07-23
 
@@ -66,6 +137,6 @@ Release focus: engine isolation, WAL durability, database-path clarity, and star
 
 ## Links
 
-- GitHub Releases: https://github.com/stephenschoettler/hermes-lcm/releases
+- Version tags: https://github.com/electricsheephq/lcm-x/tags
 - Release workflow: [`.github/workflows/release.yml`](.github/workflows/release.yml)
 - Validation expectations: [`CONTRIBUTING.md`](CONTRIBUTING.md)

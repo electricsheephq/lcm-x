@@ -60,3 +60,4 @@ benchmarks/runs/
 # Internal documentation
 internal docs/
 docs/plans/
+__pycache__/

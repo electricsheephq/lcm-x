@@ -81,6 +81,29 @@ def test_voyage_batch_bin_packing_boundary(monkeypatch):
     assert all(call["payload"]["truncation"] is False for call in transport.calls)
 
 
+def test_voyage_flat_embeddings_record_provider_billed_tokens(monkeypatch):
+    monkeypatch.setattr(provider_mod, "count_tokens", lambda _text: 1)
+    monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+    document_response = _voyage_success(1)
+    document_payload = json.loads(document_response.body)
+    document_payload["usage"] = {"total_tokens": 17}
+    query_response = _voyage_success(1)
+    query_payload = json.loads(query_response.body)
+    query_payload["usage"] = {"total_tokens": 5}
+    provider = VoyageProvider(
+        "voyage-test",
+        transport=FakeTransport(
+            _response(200, document_payload),
+            _response(200, query_payload),
+        ),
+    )
+
+    provider.embed_documents(["document"])
+    assert provider.last_usage_tokens == 17
+    provider.embed_query("query")
+    assert provider.last_usage_tokens == 5
+
+
 def test_voyage_batch_splits_on_item_count_cap(monkeypatch):
     # Many tiny documents stay well under the token budget but exceed Voyage's
     # 1000-item per-request cap, so the batch must split.
@@ -770,6 +793,87 @@ def test_spend_guard_rate_limits_provider_calls():
     assert provider.embed_query("one") == [1.0, 2.0]
     with pytest.raises(ProviderRateLimited):
         provider.embed_query("two")
+    assert len(transport.calls) == 1
+
+
+def test_resolve_provider_query_path_guard_is_generous_and_unthrottled():
+    # Regression for #123: the query path (for_backfill=False) must NOT inherit
+    # the strict 60/60s default that gutted retrieval; it gets the generous
+    # configurable guard and survives a tight loop of 100+ back-to-back embeds.
+    config = LCMConfig(embedding_provider="voyage", embedding_model="voyage-4")
+    provider = resolve_provider(config, for_backfill=False)
+    guard = provider.spend_guard
+    assert guard.max_calls == 600
+    assert guard.window_seconds == 60.0
+    assert guard.backoff_seconds == 60.0
+
+    now = 0.0
+    for _ in range(120):
+        assert guard.allows(now=now) is True
+        guard.record_call(now=now)
+        now += 0.001  # 120 calls inside one 60s window, as the benchmark does
+    assert guard.allows(now=now) is True
+
+
+def test_resolve_provider_query_guard_is_configurable():
+    # Constructor-arg surface: the LCMConfig fields thread straight into the
+    # query-path guard so a benchmark harness can widen or disable it.
+    config = LCMConfig(
+        embedding_provider="voyage",
+        embedding_model="voyage-4",
+        embedding_query_spend_max_calls=5,
+        embedding_query_spend_window_seconds=30.0,
+        embedding_query_spend_backoff_seconds=15.0,
+    )
+    provider = resolve_provider(config, for_backfill=False)
+    assert provider.spend_guard.max_calls == 5
+    assert provider.spend_guard.window_seconds == 30.0
+    assert provider.spend_guard.backoff_seconds == 15.0
+
+
+def test_query_guard_env_override(monkeypatch):
+    # Env surface: LCM_EMBEDDING_QUERY_SPEND_* overrides the defaults.
+    monkeypatch.setenv("LCM_EMBEDDING_PROVIDER", "voyage")
+    monkeypatch.setenv("LCM_EMBEDDING_MODEL", "voyage-4")
+    monkeypatch.setenv("LCM_EMBEDDING_QUERY_SPEND_MAX_CALLS", "1200")
+    monkeypatch.setenv("LCM_EMBEDDING_QUERY_SPEND_WINDOW_SECONDS", "90")
+    monkeypatch.setenv("LCM_EMBEDDING_QUERY_SPEND_BACKOFF_SECONDS", "45")
+    config = LCMConfig.from_env()
+    assert config.embedding_query_spend_max_calls == 1200
+    assert config.embedding_query_spend_window_seconds == 90.0
+    assert config.embedding_query_spend_backoff_seconds == 45.0
+    provider = resolve_provider(config, for_backfill=False)
+    assert provider.spend_guard.max_calls == 1200
+
+
+def test_resolve_provider_backfill_path_stays_exempt():
+    # Backfill's bulk contract is unchanged: max_calls=0 => allows() always
+    # True, record_call() a no-op, even after many calls.
+    config = LCMConfig(embedding_provider="voyage", embedding_model="voyage-4")
+    provider = resolve_provider(config, for_backfill=True)
+    guard = provider.spend_guard
+    assert guard.max_calls == 0
+    for _ in range(100):
+        guard.record_call()
+    assert guard.allows() is True
+
+
+def test_query_path_rate_limit_surfaces_typed_reason(monkeypatch):
+    # Zero-discard: when the guard does trip, the caller receives the TYPED
+    # ProviderRateLimited with the exact operator-readable message the live
+    # probe recorded -- never a bare swallowed counter bump. The rejection is
+    # pre-network (no transport call is made for the throttled attempt).
+    monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+    guard = EmbeddingSpendGuard(max_calls=1, window_seconds=100, backoff_seconds=50)
+    transport = FakeTransport(_voyage_success(1))
+    provider = VoyageProvider("voyage", transport=transport, spend_guard=guard)
+
+    assert provider.embed_query("first")
+    with pytest.raises(
+        ProviderRateLimited,
+        match="voyage embedding call-rate guard is cooling down",
+    ):
+        provider.embed_query("second")
     assert len(transport.calls) == 1
 
 

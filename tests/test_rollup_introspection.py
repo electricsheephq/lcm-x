@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from datetime import datetime, timezone
 
 import pytest
 
+import hermes_lcm.command as command_module
+import hermes_lcm.engine as engine_module
 import hermes_lcm.rollup_builder as builder_module
 from hermes_lcm import tools as lcm_tools
 from hermes_lcm.command import handle_lcm_command
@@ -25,6 +28,7 @@ def engine(tmp_path):
     )
     instance = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
     instance.on_session_start("rollup-session", conversation_id="rollup-conversation")
+    assert instance.drain_rollup_maintenance(timeout=5.0)
     try:
         yield instance
     finally:
@@ -167,6 +171,84 @@ def test_rollups_rebuild_marks_all_targets_stale_and_builds_bounded(engine, monk
         assert "- month 2026-07-01: stale (bounded; not attempted)" in result
     finally:
         store.close()
+
+
+def test_rollups_rebuild_refuses_while_background_maintenance_is_active(
+    engine,
+    monkeypatch,
+):
+    scope = engine.current_session_id
+    key = engine._rollup_maintenance_key(scope)
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_maintenance():
+        started.set()
+        if not release.wait(timeout=5):
+            raise AssertionError("test did not release background maintenance")
+
+    assert engine_module._ROLLUP_MAINTENANCE_SCHEDULER.schedule(
+        key,
+        blocking_maintenance,
+    )
+    assert started.wait(timeout=2)
+    try:
+        monkeypatch.setattr(
+            command_module,
+            "RollupStore",
+            lambda *_args, **_kwargs: pytest.fail(
+                "busy operator rebuild touched SQLite before acquiring its lease"
+            ),
+        )
+        result = handle_lcm_command("rollups rebuild day 2026-07-15", engine)
+
+        assert "status: busy" in result
+        assert "background temporal rollup maintenance is active" in result
+        assert "retry" in result.lower()
+    finally:
+        release.set()
+        assert engine_module._ROLLUP_MAINTENANCE_SCHEDULER.drain({key}, timeout=5)
+
+
+def test_rollups_rebuild_releases_operator_lease_when_store_open_fails(
+    engine,
+    monkeypatch,
+):
+    scope = engine.current_session_id
+    key = engine._rollup_maintenance_key(scope)
+
+    def fail_store_open(*_args, **_kwargs):
+        raise RuntimeError("forced store-open failure")
+
+    monkeypatch.setattr(command_module, "RollupStore", fail_store_open)
+
+    result = handle_lcm_command("rollups rebuild day 2026-07-15", engine)
+
+    assert "status: error" in result
+    assert "forced store-open failure" in result
+    assert engine_module._ROLLUP_MAINTENANCE_SCHEDULER.try_acquire_exclusive(key)
+    engine_module._ROLLUP_MAINTENANCE_SCHEDULER.release_exclusive(key)
+
+
+def test_rollups_rebuild_releases_operator_lease_when_store_close_fails(
+    engine,
+    monkeypatch,
+):
+    scope = engine.current_session_id
+    key = engine._rollup_maintenance_key(scope)
+
+    class CloseFailRollupStore(RollupStore):
+        def close(self):
+            super().close()
+            raise RuntimeError("forced store-close failure")
+
+    monkeypatch.setattr(command_module, "RollupStore", CloseFailRollupStore)
+
+    with pytest.raises(RuntimeError, match="forced store-close failure"):
+        handle_lcm_command("rollups rebuild day 2026-07-15", engine)
+
+    assert engine_module._ROLLUP_MAINTENANCE_SCHEDULER.try_acquire_exclusive(key)
+    engine_module._ROLLUP_MAINTENANCE_SCHEDULER.release_exclusive(key)
 
 
 def test_rollups_rebuild_all_durably_seeds_unattempted_targets(engine, monkeypatch):

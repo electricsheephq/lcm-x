@@ -63,6 +63,22 @@ def _assert_path_under(path_value: str, root: Path) -> None:
     assert Path(path_value).resolve().is_relative_to(root.resolve())
 
 
+def test_lcm_grep_result_rows_collects_every_supported_container():
+    from benchmarking import stress
+
+    payload = {
+        "results": [{"store_id": 1}],
+        "matches": [{"store_id": 2}],
+        "data": [{"store_id": 3}],
+    }
+
+    assert stress._lcm_grep_result_rows(payload) == [
+        {"store_id": 1},
+        {"store_id": 2},
+        {"store_id": 3},
+    ]
+
+
 def test_stress_cli_query_fuzz_runs_without_hermes_agent_importable(tmp_path, monkeypatch):
     cli = _load_stress_cli()
     _block_agent_imports(monkeypatch)
