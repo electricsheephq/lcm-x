@@ -1455,3 +1455,36 @@ def test_disabled_and_missing_profile_refuse_cleanly(tmp_path):
     assert "status: refused" in result
     assert "no current embedding profile" in result
     assert "/lcm embed warmup" in result
+
+
+def test_backfill_batch_size_env_override(monkeypatch):
+    # Default: 100 non-voyage documents fit one 32-doc-per-request estimate of 4.
+    token_counts = [10] * 100
+    assert command_mod._embedding_batch_estimate("ollama", token_counts) == 4
+
+    monkeypatch.setenv("LCM_EMBEDDING_BACKFILL_BATCH_SIZE", "10")
+    assert command_mod._embedding_backfill_batch_size() == 10
+    assert command_mod._embedding_batch_estimate("ollama", token_counts) == 10
+
+    # Invalid and non-positive values fall back to the default.
+    for bad in ("0", "-3", "abc", "1.5"):
+        monkeypatch.setenv("LCM_EMBEDDING_BACKFILL_BATCH_SIZE", bad)
+        assert (
+            command_mod._embedding_backfill_batch_size()
+            == command_mod._EMBEDDING_BACKFILL_BATCH_SIZE
+        )
+
+
+def test_backfill_apply_honors_env_batch_size(monkeypatch, tmp_path):
+    # Five documents with batch size 2 must slice into provider calls of 2/2/1.
+    monkeypatch.setenv("LCM_EMBEDDING_BACKFILL_BATCH_SIZE", "2")
+    engine = _engine(tmp_path)
+    _seed(engine, 5)
+    provider = FakeProvider()
+    monkeypatch.setattr(command_mod, "resolve_provider", lambda _config, **_kw: provider)
+
+    result = handle_lcm_command("embed backfill --apply", engine)
+
+    assert "embedded: 5" in result
+    assert "remaining: 0" in result
+    assert [len(batch) for batch in provider.calls] == [2, 2, 1]

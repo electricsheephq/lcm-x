@@ -116,6 +116,18 @@ def _embedding_backfill_budget_s() -> float:
     return _env_float("LCM_EMBEDDING_BACKFILL_BUDGET_S", 0.0)
 
 
+def _embedding_backfill_batch_size() -> int:
+    # Outer batch size for backfill slicing (documents claimed per batch).
+    raw = os.environ.get("LCM_EMBEDDING_BACKFILL_BATCH_SIZE")
+    if raw is None:
+        return _EMBEDDING_BACKFILL_BATCH_SIZE
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return _EMBEDDING_BACKFILL_BATCH_SIZE
+    return value if value > 0 else _EMBEDDING_BACKFILL_BATCH_SIZE
+
+
 def _ensure_inflight_table(conn: sqlite3.Connection) -> None:
     expected_columns = (
         ("embedded_id", "TEXT", 0, None, 1),
@@ -2921,12 +2933,13 @@ def _embedding_authorized_uncertain_rows(
 def _embedding_batch_estimate(provider: str, token_counts: list[int]) -> int:
     if not token_counts:
         return 0
+    batch_size = _embedding_backfill_batch_size()
     if provider.lower() != "voyage":
-        return int(math.ceil(len(token_counts) / _EMBEDDING_BACKFILL_BATCH_SIZE))
+        return int(math.ceil(len(token_counts) / batch_size))
     estimated = 0
-    for offset in range(0, len(token_counts), _EMBEDDING_BACKFILL_BATCH_SIZE):
+    for offset in range(0, len(token_counts), batch_size):
         batch_tokens = 0
-        for tokens in token_counts[offset:offset + _EMBEDDING_BACKFILL_BATCH_SIZE]:
+        for tokens in token_counts[offset:offset + batch_size]:
             if tokens > _VOYAGE_MAX_DOCUMENT_TOKENS:
                 continue
             if batch_tokens and batch_tokens + tokens > _VOYAGE_MAX_BATCH_TOKENS:
@@ -2944,7 +2957,7 @@ def _chunk_context_estimates(
     """Estimate tokens/billable-tokens/requests for the contextualized chunk path.
 
     The dry-run estimate must match what the grouped apply path actually sends
-    (FIX 4). Apply slices the selected documents into ``_EMBEDDING_BACKFILL_BATCH_SIZE``
+    (FIX 4). Apply slices the selected documents into batch-size
     batches, groups each batch's chunks per source message
     (``group_by_store_id``), drops any single chunk over the per-chunk context cap
     (``_VOYAGE_CONTEXT_MAX_CHUNK_TOKENS`` = 32K, NOT the flat 27K per-document cap),
@@ -2956,8 +2969,9 @@ def _chunk_context_estimates(
     total_tokens = sum(int(document[2]) for document in documents)
     billable_tokens = 0
     total_requests = 0
-    for offset in range(0, len(documents), _EMBEDDING_BACKFILL_BATCH_SIZE):
-        batch = documents[offset:offset + _EMBEDDING_BACKFILL_BATCH_SIZE]
+    batch_size = _embedding_backfill_batch_size()
+    for offset in range(0, len(documents), batch_size):
+        batch = documents[offset:offset + batch_size]
         store_ids = [str(item[0]).split(":", 1)[0] for item in batch]
         per_document_tokens: list[list[int]] = []
         for group_indexes in group_by_store_id(store_ids):
@@ -3933,7 +3947,8 @@ def _embedding_backfill_summary_text(
         ):
             error = "configured provider does not match the current profile; run `/lcm embed warmup`"
         else:
-            for offset in range(0, len(documents), _EMBEDDING_BACKFILL_BATCH_SIZE):
+            batch_size = _embedding_backfill_batch_size()
+            for offset in range(0, len(documents), batch_size):
                 # Renew the heartbeat lease; if it was stolen (TTL lapsed and a
                 # second owner took over), stop rather than write under a lease
                 # we no longer hold.
@@ -3945,7 +3960,7 @@ def _embedding_backfill_summary_text(
                     budget_exhausted = True
                     stop_reason = "op_budget_exhausted"
                     break
-                batch = documents[offset:offset + _EMBEDDING_BACKFILL_BATCH_SIZE]
+                batch = documents[offset:offset + batch_size]
                 # Claim the bounded outer batch. The provider invokes the
                 # callback immediately before EACH real sub-request, and only
                 # those exact indexes become dispatched under that request's
@@ -4712,7 +4727,8 @@ def _chunk_backfill_text(
         ):
             error = "configured provider does not match the chunk profile; run `/lcm embed warmup`"
         else:
-            for offset in range(0, len(documents), _EMBEDDING_BACKFILL_BATCH_SIZE):
+            batch_size = _embedding_backfill_batch_size()
+            for offset in range(0, len(documents), batch_size):
                 if not lease.renew():
                     lease_lost = True
                     stop_reason = "lease_lost"
@@ -4721,7 +4737,7 @@ def _chunk_backfill_text(
                     budget_exhausted = True
                     stop_reason = "op_budget_exhausted"
                     break
-                batch = documents[offset:offset + _EMBEDDING_BACKFILL_BATCH_SIZE]
+                batch = documents[offset:offset + batch_size]
                 batch_authorized_ids = {
                     item[0] for item in batch if item[0] in authorized_uncertain_ids
                 }
