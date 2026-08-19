@@ -1,19 +1,24 @@
-<p align="center">
-  <img src="docs/banner.png" alt="HERMES-LCM" width="800">
-</p>
+<h1 align="center">LCM-X</h1>
+<p align="center"><strong>Lossless Context Memory eXtension</strong></p>
 
-[![CI](https://github.com/stephenschoettler/hermes-lcm/actions/workflows/ci.yml/badge.svg)](https://github.com/stephenschoettler/hermes-lcm/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/stephenschoettler/hermes-lcm)](https://github.com/stephenschoettler/hermes-lcm/releases)
-[![Python 3.11-3.14](https://img.shields.io/badge/Python-3.11--3.14-3776AB?logo=python&logoColor=white)](https://github.com/stephenschoettler/hermes-lcm/actions/workflows/ci.yml)
+[![CI](https://github.com/electricsheephq/lcm-x/actions/workflows/ci.yml/badge.svg)](https://github.com/electricsheephq/lcm-x/actions/workflows/ci.yml)
+[![Latest tag](https://img.shields.io/github/v/tag/electricsheephq/lcm-x?include_prereleases&sort=semver&label=tag)](https://github.com/electricsheephq/lcm-x/tags)
+[![Python 3.11-3.14](https://img.shields.io/badge/Python-3.11--3.14-3776AB?logo=python&logoColor=white)](https://github.com/electricsheephq/lcm-x/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Lossless Context Management plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent).**
+**Lossless context memory for [Hermes Agent](https://github.com/NousResearch/hermes-agent).**
 
 > Bounded context, unbounded memory. Nothing is ever lost.
 
-`hermes-lcm` replaces one-shot active-context compression with a SQLite-backed,
+LCM-X replaces one-shot active-context compression with a SQLite-backed,
 DAG-based context engine. It keeps the live prompt bounded, preserves raw
 messages, and gives the agent tools to recover exact detail after compaction.
+
+The project name is **LCM-X**. Compatibility identifiers intentionally remain
+unchanged: the install directory, plugin manifest, and bundled skill are named
+`hermes-lcm`, while the runtime context engine is named `lcm`. Renaming those
+identifiers would be a separate compatibility migration; this documentation
+update does not do that.
 
 Based on the [LCM paper](https://papers.voltropy.com/LCM) by Ehrlich & Blackman
 (Voltropy PBC, Feb 2026). Inspired by
@@ -24,6 +29,7 @@ OpenClaw. For an interactive visualization of the LCM idea, see
 ## Table of contents
 
 - [What it does](#what-it-does)
+- [Project status](#project-status)
 - [LCM vs built-in compression](#lcm-vs-built-in-compression)
 - [Quick start](#quick-start)
 - [Commands and tools](#commands-and-tools)
@@ -50,7 +56,7 @@ host tools such as `session_search`, but the model's active context no longer
 contains the compacted turns verbatim or a structured drill-down path back to
 them.
 
-`hermes-lcm` instead:
+LCM-X instead:
 
 1. **Persists messages** in a plugin-local SQLite store with FTS metadata.
 2. **Compacts older context** into depth-aware summary nodes.
@@ -103,6 +109,34 @@ fully-local providers). See the
 why, and [Agent configuration profiles](docs/agent-config-profiles.md) for
 copy-paste setups per agent type.
 
+## Project status
+
+The current baseline is `v0.22.0`. It includes the opt-in evidence and
+adaptive-retrieval tools, the deterministic LongMemEval retrieval harness, and
+committed configuration-specific retrieval results. The judged end-to-end QA
+run and the recommended Voyage retrieval run are still pending; retrieval
+scores do not prove answer quality, merge readiness, runtime safety, or customer
+readiness.
+
+Large follow-on changes are being reviewed separately:
+
+- [LCM Teams v1 (#200)](https://github.com/electricsheephq/lcm-x/pull/200)
+  is an opt-in, multi-principal isolation candidate. It is not part of RC2 or
+  current `main`, and the canonical [Teams roadmap
+  (#75)](https://github.com/electricsheephq/lcm-x/issues/75) still requires the
+  host carrier, completed policy/connector work, and a witnessed two-principal
+  acceptance pilot.
+- [RC2 reconciliation (#214)](https://github.com/electricsheephq/lcm-x/pull/214)
+  is a CI-only candidate for post-RC2 runtime fixes; it is not a release.
+- [Codex continuity and whitepaper control flow
+  (#215)](https://github.com/electricsheephq/lcm-x/pull/215) is an unmerged
+  candidate for provider-native continuity, compaction, concurrent storage,
+  and persistent map operators.
+
+See [Current project state](docs/project-status.md) for the exact evidence,
+known gaps, and proof boundaries, and [Benchmark methodology](benchmarks/METHODOLOGY.md)
+for reproducible evaluation details.
+
 ## LCM vs built-in compression
 
 Hermes core may persist original conversation history in `state.db` before
@@ -110,7 +144,7 @@ built-in compression rewrites the active prompt. Built-in compression can still
 be lossy in the active context, but previous content may be recoverable later
 through host-level history tools such as `session_search`.
 
-`hermes-lcm` is different because recall is part of the active context engine:
+LCM-X is different because recall is part of the active context engine:
 
 - plugin-local store and DAG built specifically for drill-down
 - current-session retrieval through LCM tools, not an auxiliary cross-session
@@ -135,17 +169,18 @@ rather than running unbounded stdlib `re` matches.
 
 ### Install the plugin
 
-Canonical install path: clone `hermes-lcm` as a general user plugin.
+Canonical install path: clone LCM-X as a general user plugin into the
+compatibility directory `hermes-lcm`.
 
 ```bash
-git clone https://github.com/stephenschoettler/hermes-lcm \
+git clone https://github.com/electricsheephq/lcm-x \
   ~/.hermes/plugins/hermes-lcm
 ```
 
 For a profile-specific install:
 
 ```bash
-git clone https://github.com/stephenschoettler/hermes-lcm \
+git clone https://github.com/electricsheephq/lcm-x \
   ~/.hermes/profiles/myprofile/plugins/hermes-lcm
 ```
 
@@ -205,7 +240,7 @@ Typical output:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm v0.21.0-rc2 (15 tools)
+  ✓ hermes-lcm v0.22.0 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm
@@ -244,7 +279,7 @@ If you installed a symlink from a separate checkout:
 
 Restart Hermes after updating.
 
-For the `v0.21.0-rc2` line, take a normal backup of `lcm.db` before updating,
+For the `v0.22.0` line, take a normal backup of `lcm.db` before updating,
 then update the checkout and restart Hermes. No manual core migration or
 backfill is required: the core schema remains version 5. New assertion,
 query-view, and adaptive-retrieval state is additive, created only after the
@@ -283,16 +318,17 @@ outside the LCM database.
 
 ## Recall skill and policy
 
-Hermes-LCM ships `skills/hermes-lcm/SKILL.md` plus progressive-disclosure
+LCM-X ships `skills/hermes-lcm/SKILL.md` plus progressive-disclosure
 references for configuration, architecture, diagnostics, recall routing, and
 session lifecycle. The installer links that directory into the active Hermes
 profile so it appears in ordinary skill discovery. On hosts with plugin skill
 registration, it is also available explicitly as `hermes-lcm:hermes-lcm`.
 
-When LCM is the active context engine for a bound session, the plugin registers
-one deterministic `pre_llm_call` hook. Hermes injects the canonical policy into
-the current user-message context, not the system prompt, preserving the stable
-system-prompt cache prefix. The policy:
+The canonical policy is distributed through that bundled skill. It is not
+injected through `pre_llm_call`: current Hermes persists hook context in the
+current user's `api_content` and replays it as user-authored history. Keeping
+policy out of that seam prevents attribution errors and one-copy-per-user-turn
+replay growth while preserving clean transcript and LCM ingest. The policy:
 
 - treats summaries as recall cues rather than exact proof;
 - prefers newer source-backed evidence and verifies contradictions;
@@ -302,9 +338,11 @@ system-prompt cache prefix. The policy:
 - does not force a tool call when the current context is already sufficient.
 
 The canonical bytes live in
-`skills/hermes-lcm/references/recall-policy.md`. Merely loading the plugin does
-not inject them when another context engine is serving the session. Older hosts
-without skill or hook registration keep their existing schema-driven behavior.
+`skills/hermes-lcm/references/recall-policy.md`. The active-LCM
+`pre_llm_call` hook remains available for bounded pre-answer evidence when that
+feature is explicitly enabled, but it never prepends the recall policy. Older
+hosts without skill or hook registration keep their existing schema-driven
+behavior.
 
 ### Slash commands
 
@@ -379,6 +417,8 @@ Most installs only need `plugins.enabled` and `context.engine: lcm`.
 | `LCM_MODEL_THRESHOLDS` | empty | Per-model threshold overrides. Format: `"glm-5.2:0.70,glm-5.2-1M:0.25"`. Keys matched as substrings (longest wins). Also settable as `lcm.model_thresholds` in config.yaml. |
 | `LCM_FRESH_TAIL_COUNT` | `32` | Recent messages protected from compaction |
 | `LCM_FRESH_TAIL_MAX_TOKENS` | `0` | Optional token cap for the protected fresh tail (`0` disables it); always retains the newest message and complete assistant/tool-result groups |
+| `LCM_FRESH_TAIL_PRESSURE_YIELD_ENABLED` | `true` | Default-on: when compaction is deadlocked because the count-protected tail covers the whole over-threshold session (#441), the tail yields to a derived token bound so compaction can progress; `false` restores the strict count tail (rollback switch) |
+| `LCM_FRESH_TAIL_PRESSURE_YIELD_MIN_OBSERVATIONS` | `3` | Consecutive tail-blocked compaction attempts under host-observed pressure before the yield engages; any attempt not blocked by the tail resets the count; `1` yields on first observation |
 | `LCM_INCREMENTAL_MAX_DEPTH` | `3` | Max DAG condensation depth (`-1` = unlimited, `0` = leaf only); enables hierarchical summarization |
 | `LCM_LEAF_CHUNK_TOKENS` | `20000` | Raw-backlog floor before leaf compaction; with dynamic chunking enabled, the base chunk target |
 | `LCM_DYNAMIC_LEAF_CHUNK_ENABLED` | `false` | Enable chunk-sized leaf compaction passes instead of compacting the whole non-tail raw backlog per pass |
@@ -606,7 +646,7 @@ policy to older tool results before budgeting, while respecting the protected
 fresh tail. Tool-call ids and compatible structured text block types/keys are
 retained; raw SQLite rows and DAG lineage are not rewritten by the historical
 pass. Structured image/media results remain inline, preserving the provider
-replay contract established by Hermes-LCM PR #226. If durable externalization
+replay contract established by upstream Hermes-LCM PR #226. If durable externalization
 cannot be confirmed, replay keeps the original payload inline. Results from
 `lcm_describe` and `lcm_expand` also remain inline so recovery does not
 recursively produce another ref.
@@ -679,8 +719,8 @@ when those sources still belong to a previous session.
 
 ## OpenClaw/lossless-claw import
 
-`hermes-lcm` includes an opt-in operator script for backfilling OpenClaw history
-into the local hermes-lcm SQLite store. It supports two source shapes:
+LCM-X includes an opt-in operator script for backfilling OpenClaw history into
+the local LCM-X SQLite store. It supports two source shapes:
 
 1. **SQLite LCM database** (`--source-db`) for migrations from an existing
    lossless-claw/OpenClaw `lcm.db`.
@@ -778,7 +818,7 @@ store. It records raw messages, compacts old material into a summary DAG, and
 exposes retrieval tools that can drill back into exact stored sources.
 
 <p align="center">
-  <img src="docs/architecture.png" alt="hermes-lcm architecture" width="700">
+  <img src="docs/architecture.png" alt="LCM-X architecture" width="700">
 </p>
 
 ## How it works
@@ -802,6 +842,10 @@ exposes retrieval tools that can drill back into exact stored sources.
 - [Operator guide](docs/operator-guide.md) — install, activation, full
   configuration reference, diagnostics
 - [Retrieval tools reference](docs/retrieval-tools.md) — exact tool contracts
+- [Current project state](docs/project-status.md) — RC2 baseline, active
+  candidate PRs, missing gates, and proof boundaries
+- [Benchmark methodology and results](benchmarks/METHODOLOGY.md) — retrieval
+  and judged-QA evaluation contracts, reproduction, and landed result index
 - [Embeddings setup](docs/embeddings-setup.md) — free-tier and local embedding
   providers, warmup, backfill
 - [LCM paper](https://papers.voltropy.com/LCM)
@@ -811,7 +855,7 @@ exposes retrieval tools that can drill back into exact stored sources.
 - [Contributing guide](CONTRIBUTING.md)
 - [Code of conduct](CODE_OF_CONDUCT.md)
 - [Security policy](SECURITY.md)
-- [Releases](https://github.com/stephenschoettler/hermes-lcm/releases)
+- [Tags](https://github.com/electricsheephq/lcm-x/tags)
 
 ## Development
 
@@ -833,7 +877,7 @@ tests/           standalone pytest coverage
 Run tests:
 
 ```bash
-pip install pytest
+pip install pytest numpy
 python -m pytest tests/ -v
 ```
 
@@ -848,8 +892,9 @@ priority. New features should be scoped, backwards-compatible, and tested.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for branch, validation, and PR guidance.
 See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
-See the [releases page](https://github.com/stephenschoettler/hermes-lcm/releases)
-for changelogs.
+See the [tags page](https://github.com/electricsheephq/lcm-x/tags) and
+[CHANGELOG](CHANGELOG.md) for version history. LCM-X does not currently publish
+a GitHub Release object or packaged artifact for `v0.22.0`.
 
 ## License
 
@@ -857,10 +902,10 @@ for changelogs.
 
 ## Star history
 
-<a href="https://www.star-history.com/?repos=stephenschoettler%2Fhermes-lcm&type=timeline&legend=top-left">
+<a href="https://www.star-history.com/?repos=electricsheephq%2Flcm-x&type=timeline&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=stephenschoettler/hermes-lcm&type=timeline&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=stephenschoettler/hermes-lcm&type=timeline&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=stephenschoettler/hermes-lcm&type=timeline&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=electricsheephq/lcm-x&type=timeline&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=electricsheephq/lcm-x&type=timeline&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=electricsheephq/lcm-x&type=timeline&legend=top-left" />
  </picture>
 </a>
