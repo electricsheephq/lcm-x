@@ -545,7 +545,7 @@ def test_plugin_entrypoint_registers_bundled_skill_and_keeps_recall_policy_out_o
     second = policy_hook(session_id="active-session")
     assert first == second
     assert first is None
-    assert "Hermes-LCM Recall Policy" in module.get_recall_policy()
+    assert "LCM-X recall policy" in module.get_recall_policy()
     ctx.engine.shutdown()
 
 

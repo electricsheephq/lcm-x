@@ -7,7 +7,12 @@ for Hermes. The project preserves its MIT license, original commit authorship, a
 Read [AGENTS.md](AGENTS.md) before opening work. It defines the lossless-data, Hermes
 compatibility, validation, review, and merge invariants for contributors, maintainers, and bots.
 
-## Start With An Accepted Issue
+LCM-X is the project name. The installed plugin, skill, and directory remain
+`hermes-lcm`, and the runtime context engine remains `lcm`; preserve those
+compatibility identifiers unless a separately approved migration changes them.
+
+## Workflow
+### Start With An Accepted Issue
 
 Use the GitHub issue forms in `electricsheephq/lcm-x`:
 
@@ -20,7 +25,7 @@ Keep one independently reproducible problem per issue. Search open and closed is
 before filing, and retain upstream links and contributor credit. A label, bot assessment,
 unmerged upstream PR, or reviewer severity is evidence—not proof.
 
-## Branch And Commit
+### Branch And Commit
 
 Create a focused branch from current `main` in your clone of
 `https://github.com/electricsheephq/lcm-x.git`. Common branch prefixes are `fix/`, `feat/`,
@@ -30,7 +35,7 @@ Use focused commits with clear subjects such as `fix: ...`, `docs: ...`, or `tes
 mix unrelated cleanup, generated secrets, customer data, live Hermes configuration, or local
 authentication state into a change.
 
-## Pull Requests
+### Pull Requests
 
 Use `.github/PULL_REQUEST_TEMPLATE.md` and link the accepted issue. Record:
 
@@ -44,7 +49,7 @@ Use `.github/PULL_REQUEST_TEMPLATE.md` and link the accepted issue. Record:
 Bug regressions should fail on the recorded base and pass on the candidate. Features must retain
 backward-compatible defaults unless their accepted issue approves a breaking change and migration.
 
-## Validation
+### Validation
 
 Run the narrowest focused regression first. GitHub Actions is authoritative for the full Python
 matrix. The repository defaults are:
@@ -58,12 +63,35 @@ python -m compileall -q .
 python -m py_compile scripts/import_lossless_claw.py
 bash -n scripts/install.sh scripts/update.sh
 git diff --check
+git diff --cached --check
+```
+
+Workflow changes should also run:
+
+```bash
+actionlint
+```
+
+If your PR only touches a narrow surface area, include the focused command too. Example:
+
+```bash
+pytest tests/test_lcm_command.py -q
+```
+
+Packaging or install-flow changes should also verify the standalone user-plugin path:
+
+```bash
+export HERMES_HOME=/tmp/hermes-lcm-smoke
+mkdir -p "$HERMES_HOME/plugins"
+git clone https://github.com/electricsheephq/lcm-x "$HERMES_HOME/plugins/hermes-lcm"
+# then enable `hermes-lcm` in plugins.enabled and set context.engine: lcm
+hermes plugins
 ```
 
 Run `actionlint` when workflows change. If a check does not apply, leave it unchecked and explain
 why in the PR.
 
-## Review And Landing
+### Review And Landing
 
 Maintainers use the protected-main `.agents/skills/land-pr/SKILL.md`:
 
