@@ -99,4 +99,3 @@ def test_verify_detects_post_registration_edit(tmp_path):
 
     assert result["ok"] is False
     assert result["status"] == "FAIL"
-
