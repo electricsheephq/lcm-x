@@ -4,15 +4,23 @@ Status: REGISTERED (this document is the registration; lands on main before any 
 Basis: FINDING-F54 (structural decomposition) + FINDING-F55 (rank-1 forensics: 51/97
 delivered misses have gold at rank 2; 82/97 within ranks 2–5).
 
-## 1. The variant (config-only — no code change)
+## 1. The variant (one explicit instrument flag; NOT env-only — verified)
 Identical to the banked F53 configuration (RUN-SHEET-V1M-REGISTERED + amendments; lcm-x
 main instrument, Voyage voyage-context-3, prepared-m corpus manifest 300cf936…, embed cache,
-6-shard layout) with exactly ONE env delta:
-- `LCM_RERANK_ENABLED=1` — enables `_lcm_recall_rerank` (tools.py): a fail-open, single
-  voyage-rerank API call that reorders the fused top-window INSIDE the production
-  `lcm_recall` path. All other arms untouched by design.
-The full `_EnvFieldSpec` inventory is captured per shard as always; the diff vs the F53
-run-env captures must show ONLY this key (verification step V1).
+6-shard layout) with exactly ONE binding delta: the `lcm_recall` arm runs with the product's
+`_lcm_recall_rerank` stage enabled (tools.py — fail-open, single voyage-rerank call,
+intra-window reorder). All other arms untouched by design.
+⚠ VERIFIED 2026-08-20 before registration: `LCM_RERANK_ENABLED=1` alone does NOT reach the
+instrument — `evaluate_question` constructs `LCMConfig(...)` explicitly, which does not
+apply env specs (only `LCMConfig.from_env()` does). An env-only "variant" would silently
+run rerank-OFF while the env inventory said ON — the F49 silent-mixed-mode class. The
+variant therefore requires a small instrument change, landed BEFORE launch:
+- runner flag `--recall-rerank` threading `rerank_enabled=True` into the per-question
+  `LCMConfig`;
+- the binding recorded in the checkpoint header AND the dump-candidates header (config-
+  binding fields, so resume/append validation fails closed across mismatched variants);
+- per-question `lcm_recall` rerank status telemetry (applied / skipped:<reason>), aggregated
+  like the hybrid arm's `rerank_mode`, so a silent fallback is visible and countable (V3).
 
 ## 2. Spend (ladder rung: measured-basis estimate, then cap)
 Embeddings: cache-served (F55's re-run was zero-spend; identical corpus/queries).
@@ -46,7 +54,8 @@ full 500 (bill read from the Voyage dashboard, not assumed).
   instrument bug, stop and investigate before reading results.
 
 ## 5. Verification (per program discipline)
-V1: run-env diff vs F53 captures shows only LCM_RERANK_ENABLED. V2: aggregates recomputed
+V1: checkpoint + dump headers record the recall-rerank binding; run-env diff vs F53
+captures shows no other delta. V2: aggregates recomputed
 from per-question checkpoints, never read from the run's own summary alone. V3: rerank-mode
 telemetry confirms the REAL reranker ran (no silent placeholder fallback — the F49/F53
 mixed-mode class; the per-question `rerank_mode`-style status must be voyage for scored
