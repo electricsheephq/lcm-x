@@ -1,0 +1,13 @@
+# scale389 instrument manifest
+- `phase1a.py`: promoted ingest/query producer.
+- `build_corpus.py`: corpus ladder with persisted `has_answer` turns.
+- `metrics.py`: session and content-joined answer-turn metrics.
+- `run_scale.py`: deduplicated sequential ingest/query driver.
+- `archive_regression.py`: read-only F34 reproduction acceptance.
+- `tests/`: focused offline tests.
+- `README.md`: operator contract and proof boundary.
+- Product files changed: none.
+- Archived stores/results written: none.
+- Default u-arm population: 50.
+- Canonical session metric: `session_gold_all`.
+- Turn metric: `answer_turn_delivered_complete`.

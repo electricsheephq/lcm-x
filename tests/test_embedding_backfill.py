@@ -200,6 +200,97 @@ def test_dry_run_reports_counts_tokens_and_cost_without_calls_or_writes(
     assert provider.calls == []
 
 
+def test_empty_leaf_summaries_are_not_pending_or_sent_to_provider(monkeypatch, tmp_path):
+    engine = _engine(tmp_path)
+    dag = SummaryDAG(engine._store.db_path)
+    try:
+        dag.add_node(SummaryNode(
+            session_id="session-a",
+            depth=0,
+            summary="",
+            created_at=3.0,
+            latest_at=3.0,
+        ))
+        dag.add_node(SummaryNode(
+            session_id="session-a",
+            depth=0,
+            summary="   \n\t",
+            created_at=2.0,
+            latest_at=2.0,
+        ))
+        dag.add_node(SummaryNode(
+            session_id="session-a",
+            depth=0,
+            summary="\v\f",
+            created_at=1.5,
+            latest_at=1.5,
+        ))
+        valid_id = dag.add_node(SummaryNode(
+            session_id="session-a",
+            depth=0,
+            summary="useful summary",
+            created_at=1.0,
+            latest_at=1.0,
+        ))
+    finally:
+        dag.close()
+    store = VectorStore(engine._store.db_path, config=engine._config)
+    try:
+        store.register_profile("model-a", "ollama", 2)
+    finally:
+        store.close()
+    provider = FakeProvider()
+    monkeypatch.setattr(command_mod, "resolve_provider", lambda _config, **_kw: provider)
+
+    preview = handle_lcm_command("embed backfill", engine)
+    applied = handle_lcm_command("embed backfill --apply", engine)
+
+    assert "pending: 1" in preview
+    assert "selected: 1" in preview
+    assert "embedded: 1" in applied
+    assert "remaining: 0" in applied
+    assert provider.calls == [["useful summary"]]
+    assert _meta_ids(engine) == [str(valid_id)]
+
+
+def test_retry_uncertain_does_not_resend_empty_summary(monkeypatch, tmp_path):
+    engine = _engine(tmp_path)
+    dag = SummaryDAG(engine._store.db_path)
+    try:
+        blank_id = dag.add_node(SummaryNode(
+            session_id="session-a",
+            depth=0,
+            summary="\t\n",
+            created_at=2.0,
+            latest_at=2.0,
+        ))
+        valid_id = dag.add_node(SummaryNode(
+            session_id="session-a",
+            depth=0,
+            summary="retry this summary",
+            created_at=1.0,
+            latest_at=1.0,
+        ))
+    finally:
+        dag.close()
+    store = VectorStore(engine._store.db_path, config=engine._config)
+    try:
+        store.register_profile("model-a", "ollama", 2)
+    finally:
+        store.close()
+    _mark_uncertain(engine, [blank_id, valid_id])
+    provider = FakeProvider()
+    monkeypatch.setattr(command_mod, "resolve_provider", lambda _config, **_kw: provider)
+
+    result = handle_lcm_command("embed backfill --apply --retry-uncertain", engine)
+
+    assert "selected: 1" in result
+    assert "embedded: 1" in result
+    assert provider.calls == [["retry this summary"]]
+    assert _meta_ids(engine) == [str(valid_id)]
+    assert _inflight_rows(engine) == [(str(blank_id), "uncertain")]
+
+
 def test_apply_batches_records_correct_meta_and_is_idempotent(monkeypatch, tmp_path):
     engine = _engine(tmp_path)
     node_ids = _seed(engine, 35)
@@ -1455,3 +1546,59 @@ def test_disabled_and_missing_profile_refuse_cleanly(tmp_path):
     assert "status: refused" in result
     assert "no current embedding profile" in result
     assert "/lcm embed warmup" in result
+
+
+def test_backfill_batch_size_env_override(monkeypatch):
+    # Guard against ambient config: the default assertion must not read a
+    # value the host environment happens to export.
+    monkeypatch.delenv("LCM_EMBEDDING_BACKFILL_BATCH_SIZE", raising=False)
+    # Default: 100 non-voyage documents fit one 32-doc-per-request estimate of 4.
+    token_counts = [10] * 100
+    assert command_mod._embedding_batch_estimate("ollama", token_counts) == 4
+
+    monkeypatch.setenv("LCM_EMBEDDING_BACKFILL_BATCH_SIZE", "10")
+    assert command_mod._embedding_backfill_batch_size() == 10
+    assert command_mod._embedding_batch_estimate("ollama", token_counts) == 10
+
+    # Invalid and non-positive values fall back to the default.
+    for bad in ("0", "-3", "abc", "1.5"):
+        monkeypatch.setenv("LCM_EMBEDDING_BACKFILL_BATCH_SIZE", bad)
+        assert (
+            command_mod._embedding_backfill_batch_size()
+            == command_mod._EMBEDDING_BACKFILL_BATCH_SIZE
+        )
+
+    # Values above the provider request-item ceiling clamp to it, so the
+    # dry-run request estimate never diverges from the provider's real splits.
+    monkeypatch.setenv("LCM_EMBEDDING_BACKFILL_BATCH_SIZE", "2000")
+    assert (
+        command_mod._embedding_backfill_batch_size()
+        == command_mod._VOYAGE_MAX_BATCH_ITEMS
+    )
+
+    # A configured embedding_max_batch_items below the hard ceiling is the
+    # effective cap (resolve_provider passes it to the provider, which splits
+    # requests at it).
+    monkeypatch.setenv("LCM_EMBEDDING_BACKFILL_BATCH_SIZE", "100")
+    assert command_mod._embedding_backfill_batch_size(50) == 50
+    assert command_mod._embedding_batch_estimate("ollama", [10] * 100, 50) == 2
+    # An unset configured cap falls back to the hard ceiling; a non-positive
+    # configured cap normalizes to 1, exactly as VoyageProvider does.
+    assert command_mod._embedding_backfill_batch_size(None) == 100
+    assert command_mod._embedding_backfill_batch_size(0) == 1
+    assert command_mod._embedding_backfill_batch_size(-5) == 1
+
+
+def test_backfill_apply_honors_env_batch_size(monkeypatch, tmp_path):
+    # Five documents with batch size 2 must slice into provider calls of 2/2/1.
+    monkeypatch.setenv("LCM_EMBEDDING_BACKFILL_BATCH_SIZE", "2")
+    engine = _engine(tmp_path)
+    _seed(engine, 5)
+    provider = FakeProvider()
+    monkeypatch.setattr(command_mod, "resolve_provider", lambda _config, **_kw: provider)
+
+    result = handle_lcm_command("embed backfill --apply", engine)
+
+    assert "embedded: 5" in result
+    assert "remaining: 0" in result
+    assert [len(batch) for batch in provider.calls] == [2, 2, 1]
