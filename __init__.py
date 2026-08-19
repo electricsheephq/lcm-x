@@ -29,6 +29,14 @@ def _env_flag_enabled(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _disabled_tool_names() -> set[str]:
+    """Tools disabled via LCM_DISABLED_TOOLS (comma-separated lcm_* names)."""
+    raw = os.environ.get("LCM_DISABLED_TOOLS", "")
+    if not raw:
+        return set()
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
 def _make_wrapped_handler(tool_name: str, engine):
     """Route a registered lcm_* tool through the engine dispatch path."""
     def _wrapped(args: dict, **kwargs) -> str:
@@ -88,6 +96,53 @@ def _ensure_engine_bound_to_session(
         )
 
 
+def _session_context_value(name: str) -> str:
+    """Read task-local host session metadata with legacy env compatibility."""
+    try:
+        from gateway.session_context import get_session_env
+    except ImportError:
+        return str(os.environ.get(name, "") or "")
+    try:
+        return str(get_session_env(name, "") or "")
+    except Exception:
+        # Once a concurrent host exposes task-local session context, never fall
+        # back to process-global env after a read failure: it may name another
+        # lane. Unbound is safer than cross-session command dispatch.
+        logger.debug("LCM plugin command could not read %s", name, exc_info=True)
+        return ""
+
+
+def _command_engine_for_current_session(engine, resolve_active_lcm_engine):
+    """Resolve the runtime serving the current plugin-command invocation.
+
+    Gateway hosts bind task-local session/lane metadata before dispatching a
+    plugin slash command. Prefer the already-active AIAgent clone registered for
+    that lane. If no clone exists yet, keep the process-wide prototype's genuine
+    ``(unbound)`` cold-start status rather than mutating shared runtime state.
+    """
+    session_id = _session_context_value("HERMES_SESSION_ID")
+    conversation_id = _session_context_value("HERMES_SESSION_KEY")
+    if session_id or conversation_id:
+        active_engine = resolve_active_lcm_engine(
+            session_id=session_id,
+            conversation_id=conversation_id,
+        )
+        if active_engine is not None:
+            return active_engine
+    return engine
+
+
+def _make_command_handler(handle_lcm_command, engine, resolve_active_lcm_engine):
+    def _handler(raw_args: str):
+        return handle_lcm_command(
+            raw_args,
+            _command_engine_for_current_session(
+                engine,
+                resolve_active_lcm_engine,
+            ),
+        )
+
+    return _handler
 def _hook_question_date(payload: dict) -> object:
     """Return an explicit turn anchor without inventing event time."""
     explicit = payload.get("question_date") or payload.get("question_as_of")
@@ -323,6 +378,7 @@ def register(ctx):
     from .engine import LCMEngine
     from .engine_registry import (
         ActiveEngineUseStatus,
+        resolve_active_lcm_engine,
         use_active_lcm_engine,
         use_cold_lcm_engine,
         use_lcm_engine,
@@ -460,6 +516,12 @@ def register(ctx):
         ("lcm_inspect", LCM_INSPECT, "🧭"),
         ("lcm_doctor", LCM_DOCTOR, "🏥"),
     ]
+    # LCM_DISABLED_TOOLS (comma-separated lcm_* names) removes tools from the
+    # plugin-registry registration too, mirroring engine.get_tool_schemas() so
+    # disabled tools cost zero tokens on every host path.
+    _disabled = _disabled_tool_names()
+    if _disabled:
+        _TOOLS = [t for t in _TOOLS if t[0] not in _disabled]
     register_tool = getattr(ctx, "register_tool", None)
     if callable(register_tool) and _host_forwards_registered_tool_messages(ctx):
         for name, schema, emoji in _TOOLS:
@@ -500,7 +562,11 @@ def register(ctx):
 
         register_command(
             "lcm",
-            lambda raw_args: handle_lcm_command(raw_args, engine),
+            _make_command_handler(
+                handle_lcm_command,
+                engine,
+                resolve_active_lcm_engine,
+            ),
             description="LCM status and diagnostics",
         )
     elif callable(register_command):
