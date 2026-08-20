@@ -100,3 +100,40 @@ mis-derived (item-window reorder vs deduped-session scoring). Measured full-500 
 questions, all mechanically confirmed as dedup-boundary cases. Verdict recorded in F56:
 GRAY → NOT ADOPTED; declared config remains F53 (rerank off). Next iteration (margin-gated
 override) requires its own amendment before running.
+
+## Amendment 3 — 2026-08-20: margin-gated override sub-variant (registered before its runs)
+
+Basis: F56 §4. The unconditional window-10 reorder gains +4.24pt r@1 but demotes 16
+previously-correct rank-1s (46:16 vs the 4:1 gate). The reranker's per-candidate relevance
+scores are currently discarded after reordering; a margin gate uses them to protect the
+incumbent.
+
+**Product change** (`_lcm_recall_rerank`): new config `rerank_margin: float = 0.0`
+(`LCM_RERANK_MARGIN` env spec; 0.0 = today's unconditional reorder, byte-identical). When
+> 0: the incoming rank-1 entry (the incumbent) keeps position 1 unless the reranker's top
+candidate outscores the incumbent's own rerank relevance by ≥ margin. The held output is a
+PERMUTATION by definition: [incumbent] followed by the rerank order with the incumbent
+removed (never a literal splice, which could duplicate the incumbent and drop a candidate).
+Status telemetry distinguishes `applied` vs `applied: rank1-held`.
+
+**Score telemetry** (instrument): with `--recall-rerank`, the candidates sidecar row gains
+`lcm_recall_rerank_scores` — the window's (session_id, relevance) pairs — so margin selection
+and audits read scores from artifacts, never from memory. Config-binding unchanged (scores
+are outputs, not bindings); flag-off rows byte-identical.
+
+**Margin selection rule (pre-registered, BEFORE seeing full-500 score data):** run the 100q
+A/A′ subset once with scores logged (margin 0). Since the gate fires at gap ≥ M, "smallest
+value holding all demotions" is ill-defined over real scores; the mechanical rule is:
+**M = the smallest logged PROMOTION gap that is strictly greater than every logged DEMOTION
+gap** (M is then an observed promotion gap, so gap ≥ M retains that promotion and every
+larger one, and holds every demotion, whose gaps are all < M). Validity conditions: such an
+M exists AND promotions retained at gap ≥ M are ≥ 80% of subset promotions; otherwise the
+lever is rejected without a full run (publish the gap distributions). M is then FROZEN and the
+full 500 (margin = M) is the evaluation — the 405 non-subset questions are held out by
+construction. If no margin satisfies both conditions on the subset, the lever is rejected
+without a full run (report the gap distribution).
+
+**Bands:** §4 unchanged (ADOPT needs r@1 ≥ +3pt, delivery guard vs the variant's own
+measured spread, demotions ≤ promotions/4 — now expected to pass by design; if the margin
+holds demotions but r@1 falls below +3pt, the trade is REJECTED and both data points
+publish). A/A′ (determinism) re-measured at margin = M before the full run.
