@@ -275,7 +275,20 @@ class PtySession:
     def send(self, text: str, timeout: float, quiet_seconds: float) -> tuple[str, bool]:
         self.current = bytearray()
         self.prompt_seen = False
-        os.write(self.fd, text.encode("utf-8") + b"\r")
+        # Large multi-line turns MUST go through bracketed paste in CHUNKED
+        # writes: a single os.write into a pty silently drops bytes beyond the
+        # input buffer, and bare newlines submit partial lines as separate
+        # messages. Measured failure: 61K-char turns arrived <8K without this.
+        payload = b"\x1b[200~" + text.encode("utf-8") + b"\x1b[201~"
+        for i in range(0, len(payload), 1024):
+            chunk = payload[i:i + 1024]
+            written = 0
+            while written < len(chunk):
+                written += os.write(self.fd, chunk[written:])
+            # Let the child drain its input between chunks.
+            self.pump(0.02)
+        time.sleep(0.2)
+        os.write(self.fd, b"\r")
         completed = self.wait_idle(timeout, quiet_seconds)
         return clean_output(bytes(self.current)), completed
 
