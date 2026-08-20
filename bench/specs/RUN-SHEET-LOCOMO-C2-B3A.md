@@ -15,10 +15,10 @@ pins amendments 1-4 inherited as the baseline environment). Spend lane: the esta
 paid A/A′ category (C1-class magnitude).
 
 ## 2. Pre-declared verdict bands (aggregate + category; no post-hoc bands)
-- **PASS (adopt B3-A):** adversarial ≥ +4.0pt over F48 §3-CORRECTION's 28.7 (i.e. ≥32.7 — wait:
-  28.7 is the FLOOR value; the F48 banked adversarial accuracy is 32.7) — PRECISELY: adversarial
-  ≥ 36.7 (= 32.7 + 4.0, clearing the C1-era churn class with margin) AND aggregate ≥ 54.6 − 0.76
-  (no net loss beyond noise) AND no other category −4.0pt below its F48 §3-CORRECTION value.
+- **PASS (adopt B3-A):** adversarial ≥ 36.7 — that is, ≥ +4.0pt over F48's banked adversarial
+  accuracy of 32.7 (28.7 in earlier sheets is the CATEGORY FLOOR, not the banked value — stated
+  here to prevent the two being conflated) — AND aggregate ≥ 53.84 (54.6 − 0.76, no net loss
+  beyond noise) AND no other category −4.0pt below its F48 §3-CORRECTION value.
 - **GRAY:** adversarial +0.76..+4.0pt → disposition in writing; default ADOPT only if the E+R−
   pool (the 85.3% mechanism rows) shows the gains concentrated there (mechanism-consistent).
 - **FAIL:** adversarial inside noise (<+0.76) or any category collapse >4.0pt.
