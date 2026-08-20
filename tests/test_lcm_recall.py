@@ -19,6 +19,7 @@ import hermes_lcm.tools as lcm_tools
 import hermes_lcm.vector_store as vector_store_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, SummaryNode
+from hermes_lcm.embedding_provider import resolve_provider as real_resolve_provider
 from hermes_lcm.store import MessageStore
 from hermes_lcm.vector_store import EmbeddingIdentity, VectorStore
 
@@ -1553,10 +1554,38 @@ def test_uncapped_fts_timeout_still_reports_request_timeout(
     assert "full-text arm unavailable" in payload["degraded_reason"]
 
 
-@pytest.mark.parametrize(
-    ("configured_provider", "canonical_provider"),
-    [("voyageai", "voyage"), ("fast-embed", "fastembed")],
-)
+# Every non-canonical spelling ``resolve_provider`` accepts, paired with the
+# ``provider_id`` warmup registers its profiles under. ``ollama`` has no alias.
+_PROVIDER_ALIAS_PAIRS = [
+    ("voyageai", "voyage"),
+    ("fast-embed", "fastembed"),
+    ("openai", "openai-compatible"),
+    ("siliconflow", "openai-compatible"),
+]
+
+
+@pytest.mark.parametrize(("configured_provider", "canonical_provider"), _PROVIDER_ALIAS_PAIRS)
+def test_provider_alias_resolves_to_its_canonical_provider_id(
+    tmp_path, configured_provider, canonical_provider
+):
+    """The alias table above is what ``resolve_provider`` actually does.
+
+    The recall preflight maps config spellings to canonical IDs by hand, so this
+    pins the pairing to the resolver rather than to a remembered constant: an
+    alias whose provider_id changes upstream fails here instead of silently
+    disabling the FTS cap for that provider.
+    """
+    config = LCMConfig(
+        database_path=str(tmp_path / "alias.db"),
+        embeddings_enabled=True,
+        embedding_provider=configured_provider,
+        embedding_model="alias-model",
+        embedding_base_url="http://localhost:8080/v1",
+    )
+    assert real_resolve_provider(config).provider_id == canonical_provider
+
+
+@pytest.mark.parametrize(("configured_provider", "canonical_provider"), _PROVIDER_ALIAS_PAIRS)
 def test_provider_alias_uses_existing_vector_corpus_for_fts_fairness(
     recall_engine,
     monkeypatch,

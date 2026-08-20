@@ -4704,9 +4704,20 @@ def _lcm_recall_has_usable_vector_corpus(
     or partial optional schema fails closed without materializing feature tables.
     """
     provider_name = str(provider_name or "").strip().lower()
+    # Profiles are registered under ``provider.provider_id`` (command.py warmup),
+    # never under the operator's config spelling, so EVERY alias
+    # ``resolve_provider`` accepts must collapse to the same canonical ID here.
+    # An alias left unmapped makes the preflight miss a real corpus, the cap
+    # never engages, and a slow FTS scan can still starve the valid vector arm --
+    # the exact starvation this preflight exists to prevent. The authority for
+    # these sets is embedding_provider.py:1965-1985 (voyage/voyageai,
+    # fastembed/fast-embed, openai-compatible/openai/siliconflow); ollama has no
+    # alias. Adding an alias there requires adding it here.
     provider_name = {
         "voyageai": "voyage",
         "fast-embed": "fastembed",
+        "openai": "openai-compatible",
+        "siliconflow": "openai-compatible",
     }.get(provider_name, provider_name)
     model_name = str(model_name or "").strip()
     if not provider_name or not model_name or time.monotonic() >= deadline:
