@@ -193,16 +193,39 @@ class TeamsConnector:
 
     # -- idempotency ------------------------------------------------------
 
-    def _prior(self, request: ConnectorRequest) -> tuple[str, str | None] | None:
+    def _identity(self, request: ConnectorRequest) -> tuple[str, str, str, str]:
+        """Everything that has to match for a request to BE the same request.
+
+        The digest covers the payload alone, so an id reused with the same body
+        but a different capability, tenant or acting principal read as a valid
+        replay: the connector skipped the second handler, reported the
+        DIFFERENT capability as successful, and answered from the first
+        request's cached result -- across tenants, that is one tenant reading
+        another's result_json.
+        """
+
+        return (
+            request.digest(),
+            request.capability.value,
+            str(request.tenant_id or ""),
+            str(request.acting_principal_id or ""),
+        )
+
+    def _prior(
+        self, request: ConnectorRequest
+    ) -> tuple[tuple[str, str, str, str], str | None] | None:
         try:
             row = self._conn.execute(
-                "SELECT payload_digest, result_json FROM lcm_teams_requests"
-                " WHERE request_id = ?",
-                (str(request.request_id),),
+                "SELECT payload_digest, capability, tenant_id, principal_id,"
+                " result_json FROM lcm_teams_requests"
+                " WHERE tenant_id = ? AND request_id = ?",
+                (str(request.tenant_id or ""), str(request.request_id)),
             ).fetchone()
         except sqlite3.Error:
             return None
-        return (str(row[0]), row[1]) if row is not None else None
+        if row is None:
+            return None
+        return (str(row[0]), str(row[1]), str(row[2]), str(row[3])), row[4]
 
     def _remember(self, request: ConnectorRequest, data: Mapping[str, Any]) -> None:
         try:
@@ -224,6 +247,26 @@ class TeamsConnector:
         except sqlite3.Error:
             # The effect already happened. Losing the ledger row costs a replay
             # its cached answer; it must not cost the caller the operation.
+            return
+
+    # -- failure cleanup ---------------------------------------------------
+
+    def _discard_partial_handler_writes(self) -> None:
+        """Roll the connection back before auditing a failed handler.
+
+        A handler that executed some statements and then raised leaves them in
+        an open implicit transaction on the SHARED connection. The caller is
+        told the request failed and no ledger row is written, so a retry
+        re-applies the remainder on top -- but the half-effect is still there,
+        and any later commit on that connection makes it durable. Discarding it
+        first is also what lets the audit row commit on its own: with the
+        transaction closed, `record_audit_event` has nothing of the caller's to
+        promote.
+        """
+
+        try:
+            self._conn.rollback()
+        except sqlite3.Error:
             return
 
     # -- audit ------------------------------------------------------------
@@ -274,15 +317,15 @@ class TeamsConnector:
 
         prior = self._prior(request)
         if prior is not None:
-            stored_digest, stored_result = prior
-            if stored_digest != request.digest():
-                # Same id, different body. Rejecting is the point: applying it
-                # would silently overwrite the first effect, and applying it as
-                # a second effect would break the idempotency guarantee.
+            stored_identity, stored_result = prior
+            if stored_identity != self._identity(request):
+                # Same id, different request. Rejecting is the point: applying
+                # it would silently overwrite the first effect, and applying it
+                # as a second effect would break the idempotency guarantee.
                 self._audit(request, allowed=False, failure=FailureClass.CONFLICT)
                 raise ConnectorError(
                     FailureClass.CONFLICT,
-                    "request_id was already used with a different payload",
+                    "request_id was already used with a different request",
                 )
             self._audit(request, allowed=True, failure=None)
             return ConnectorResult(
@@ -307,11 +350,25 @@ class TeamsConnector:
         try:
             data = handler(self._conn, request)
         except ConnectorError as exc:
+            self._discard_partial_handler_writes()
             self._audit(request, allowed=False, failure=exc.failure)
             raise
-        except sqlite3.Error as exc:
+        except Exception as exc:  # noqa: BLE001 - normalized below, never leaked
+            # A handler that raised anything else -- ValueError, TypeError, a
+            # provider runtime error -- used to escape this entry point
+            # directly: the caller got an implementation exception instead of
+            # the typed taxonomy, and the failed management attempt left NO
+            # audit row at all. sqlite3.Error is still called out because
+            # "store unavailable" is the honest message for it; everything else
+            # is an unavailable capability rather than a granted one.
+            self._discard_partial_handler_writes()
             self._audit(request, allowed=False, failure=FailureClass.UNAVAILABLE)
-            raise ConnectorError(FailureClass.UNAVAILABLE, "store unavailable") from exc
+            message = (
+                "store unavailable"
+                if isinstance(exc, sqlite3.Error)
+                else "handler failed"
+            )
+            raise ConnectorError(FailureClass.UNAVAILABLE, message) from exc
 
         self._remember(request, data)
         self._audit(request, allowed=True, failure=None)

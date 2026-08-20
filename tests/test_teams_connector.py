@@ -132,6 +132,54 @@ def test_the_same_id_with_a_different_payload_is_a_conflict(conn) -> None:
     assert excinfo.value.failure is FailureClass.CONFLICT
 
 
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("capability", Capability.TEAMS_ENABLE),
+        ("acting_principal_id", "someone-else"),
+    ],
+)
+def test_the_same_id_and_payload_with_a_different_identity_is_a_conflict(
+    conn, field, value
+) -> None:
+    """The digest covers the PAYLOAD, and nothing else was compared.
+
+    So an id reused with the same body but a different capability or acting
+    principal read as a valid replay: the handler was skipped, the DIFFERENT
+    capability was reported as successful, and the first request's cached
+    answer was returned.
+    """
+    connector = TeamsConnector(
+        conn,
+        credential_check=lambda c: True,
+        handlers={c: _ok_handler for c in Capability},
+    )
+    connector.execute(_request())
+
+    with pytest.raises(ConnectorError) as excinfo:
+        connector.execute(_request(**{field: value}))
+    assert excinfo.value.failure is FailureClass.CONFLICT
+
+
+def test_another_tenant_cannot_read_a_replayed_result(conn) -> None:
+    """The ledger was keyed by request_id alone, so the second tenant's
+    request matched the first tenant's row and was answered from it."""
+
+    def tenant_echo(_conn, request):
+        return {"tenant": request.tenant_id}
+
+    connector = TeamsConnector(
+        conn, credential_check=lambda c: True,
+        handlers={Capability.TEAMS_STATUS: tenant_echo},
+    )
+    first = connector.execute(_request(tenant_id="tenant-a"))
+    second = connector.execute(_request(tenant_id="tenant-b"))
+
+    assert first.data == {"tenant": "tenant-a"}
+    assert second.replayed is False, "one tenant answered from another's ledger row"
+    assert second.data == {"tenant": "tenant-b"}
+
+
 def test_key_order_is_not_a_conflict(conn) -> None:
     """Two identical bodies differing only in key order are the same request."""
     connector = TeamsConnector(conn, credential_check=lambda c: True,
@@ -162,6 +210,63 @@ def test_an_unbuilt_family_refuses_rather_than_appearing_to_succeed(conn) -> Non
     with pytest.raises(ConnectorError) as excinfo:
         connector.execute(_request(Capability.MEMBERSHIPS_GRANT))
     assert excinfo.value.failure is FailureClass.NOT_IMPLEMENTED
+
+
+@pytest.mark.parametrize(
+    "error", [ValueError("bad input"), TypeError("wrong shape"), RuntimeError("boom")]
+)
+def test_an_unexpected_handler_failure_is_typed_and_audited(conn, error) -> None:
+    """Only ConnectorError and sqlite3.Error were caught.
+
+    Anything else escaped this entry point directly: the control plane got an
+    implementation exception instead of the typed taxonomy, and the failed
+    management attempt left no audit row at all -- it disappeared.
+    """
+
+    def exploding(_conn, _request):
+        raise error
+
+    connector = TeamsConnector(
+        conn, credential_check=lambda c: True,
+        handlers={Capability.TEAMS_STATUS: exploding},
+    )
+
+    with pytest.raises(ConnectorError) as excinfo:
+        connector.execute(_request())
+
+    assert excinfo.value.failure is FailureClass.UNAVAILABLE
+    rows = list(conn.execute(
+        "SELECT operation, allowed FROM lcm_teams_audit"
+    ))
+    assert rows == [("teams.status", 0)]
+
+
+def test_a_failed_handlers_partial_write_does_not_survive(conn) -> None:
+    """`record_audit_event` committed the CALLER's connection, so a handler
+    that wrote a row and then failed had that row promoted to durable state
+    while the control plane was told the request failed."""
+
+    def half_applied(connection, _request):
+        connection.execute(
+            "INSERT INTO lcm_teams_collections(collection_id, tenant_id, kind,"
+            " created_at) VALUES('ghost', 'tenant-a', 'own', 1.0)"
+        )
+        raise sqlite3.OperationalError("store went away")
+
+    connector = TeamsConnector(
+        conn, credential_check=lambda c: True,
+        handlers={Capability.TEAMS_STATUS: half_applied},
+    )
+
+    with pytest.raises(ConnectorError):
+        connector.execute(_request())
+
+    survived = conn.execute(
+        "SELECT COUNT(*) FROM lcm_teams_collections WHERE collection_id='ghost'"
+    ).fetchone()[0]
+    assert survived == 0, "a failed handler's partial write was made durable"
+    # The denial is still evidence, and evidence must persist.
+    assert len(catalog.read_audit_events(conn)) == 1
 
 
 def test_there_is_no_destructive_principal_delete() -> None:

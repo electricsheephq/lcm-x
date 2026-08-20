@@ -94,16 +94,72 @@ CREATE INDEX IF NOT EXISTS idx_lcm_teams_audit_time
 -- answered from the ledger instead of re-running the effect. That is the whole
 -- point: idempotency by replaying the ANSWER, not by re-doing the work and
 -- hoping it is harmless.
+--
+-- Keyed by (tenant_id, request_id), not by the id alone: an idempotency key is
+-- the CONTROL PLANE's, and two tenants choosing the same one are two requests.
+-- With a global key the second tenant's request collided with the first's row,
+-- which is either a spurious conflict or -- before the identity check in
+-- `_prior` -- the first tenant's cached answer.
 CREATE TABLE IF NOT EXISTS lcm_teams_requests (
-    request_id     TEXT PRIMARY KEY,
+    request_id     TEXT NOT NULL,
     payload_digest TEXT NOT NULL,
     capability     TEXT NOT NULL,
-    tenant_id      TEXT,
+    tenant_id      TEXT NOT NULL DEFAULT '',
     principal_id   TEXT,
     recorded_at    REAL NOT NULL,
-    result_json    TEXT
+    result_json    TEXT,
+    PRIMARY KEY (tenant_id, request_id)
 );
 """
+
+
+# What each catalog table must actually carry. A table can exist with the wrong
+# shape -- an older build, a partial restore, a hand-edited store -- and
+# `CREATE TABLE IF NOT EXISTS` cannot repair it, so verifying the NAME alone
+# hands an operator a clean structural result for a store on which every policy
+# lookup fails.
+_REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
+    "lcm_teams_tenants": ("tenant_id", "created_at"),
+    "lcm_teams_principals": (
+        "principal_id",
+        "tenant_id",
+        "status",
+        "created_at",
+        "updated_at",
+    ),
+    "lcm_teams_collections": ("collection_id", "tenant_id", "kind", "created_at"),
+    "lcm_teams_memberships": (
+        "principal_id",
+        "collection_id",
+        "grants",
+        "created_at",
+    ),
+    "lcm_teams_revisions": (
+        "tenant_id",
+        "policy_revision",
+        "membership_revision",
+        "revocation_epoch",
+    ),
+    "lcm_teams_audit": (
+        "event_id",
+        "occurred_at",
+        "tenant_id",
+        "principal_id",
+        "operation",
+        "allowed",
+        "denial_reason",
+        "detail",
+    ),
+    "lcm_teams_requests": (
+        "request_id",
+        "payload_digest",
+        "capability",
+        "tenant_id",
+        "principal_id",
+        "recorded_at",
+        "result_json",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -153,7 +209,13 @@ def ensure_teams_catalog(conn: sqlite3.Connection) -> tuple[str, ...]:
 
 
 def verify_teams_catalog(conn: sqlite3.Connection) -> list[str]:
-    """Return structural defects, without mutating anything."""
+    """Return structural defects, without mutating anything.
+
+    Checks COLUMNS as well as table names. A table that exists with a missing
+    or renamed column is exactly the store `ensure_teams_catalog` cannot repair
+    -- every statement there is CREATE ... IF NOT EXISTS -- so reporting it
+    clean is reporting the one defect an operator most needs to see.
+    """
 
     errors: list[str] = []
     for table in TEAMS_TABLES:
@@ -162,6 +224,13 @@ def verify_teams_catalog(conn: sqlite3.Connection) -> list[str]:
         ).fetchone()
         if row is None:
             errors.append(f"missing table:{table}")
+            continue
+        present = {
+            str(column[1]) for column in conn.execute(f'PRAGMA table_info("{table}")')
+        }
+        for column in _REQUIRED_COLUMNS.get(table, ()):
+            if column not in present:
+                errors.append(f"missing column:{table}.{column}")
     return sorted(errors)
 
 
@@ -210,9 +279,19 @@ def record_audit_event(
     Best-effort by construction: auditing must never be the reason an
     authorized operation fails. A store whose audit table is missing or locked
     still serves its principals.
+
+    Transaction ownership stays with the CALLER. ``sqlite3.Connection.commit()``
+    is connection-wide -- it does not commit "only" the audit insert -- so an
+    unconditional commit here promoted every pending write on that connection
+    to durable state, including a failed handler's partial ones. The caller was
+    told the request failed while the store kept half the effect. When the
+    connection is already inside a transaction the row is left for the caller
+    to commit or roll back; only an otherwise-idle connection is committed
+    here, which is the case for every audit-only writer.
     """
 
     try:
+        in_caller_transaction = bool(getattr(conn, "in_transaction", False))
         conn.execute(
             "INSERT INTO lcm_teams_audit("
             "occurred_at, tenant_id, principal_id, operation, allowed, "
@@ -227,7 +306,8 @@ def record_audit_event(
                 str(detail) if detail is not None else None,
             ),
         )
-        conn.commit()
+        if not in_caller_transaction:
+            conn.commit()
     except sqlite3.Error:
         return
 
@@ -268,12 +348,44 @@ def read_audit_events(
 def set_revisions(
     conn: sqlite3.Connection, tenant_id: str, revisions: CatalogRevisions
 ) -> None:
-    """Write a tenant's revisions outright.
+    """Write a tenant's revisions outright, never backwards.
 
-    Provisioning needs this: a tenant is created at whatever revisions its
-    control plane already issued contexts against, which is not necessarily
-    zero. Bumping from zero would only reach those numbers by accident.
+    Provisioning needs the outright write: a tenant is created at whatever
+    revisions its control plane already issued contexts against, which is not
+    necessarily zero. Bumping from zero would only reach those numbers by
+    accident.
+
+    But a counter that can DECREASE un-revokes. Every context invalidated by a
+    prior policy, membership or revocation bump matches the rolled-back value
+    again, so stale control-plane state replayed onto an existing tenant hands
+    back access that was deliberately withdrawn. Arbitrary counters are
+    therefore accepted only on initial creation, and a decrease for an existing
+    tenant is refused rather than silently clamped -- a control plane sending
+    one is out of step with the store and needs to know.
     """
+
+    current = conn.execute(
+        "SELECT policy_revision, membership_revision, revocation_epoch "
+        "FROM lcm_teams_revisions WHERE tenant_id = ?",
+        (str(tenant_id),),
+    ).fetchone()
+    if current is not None:
+        requested = (
+            int(revisions.policy_revision),
+            int(revisions.membership_revision),
+            int(revisions.revocation_epoch),
+        )
+        names = ("policy_revision", "membership_revision", "revocation_epoch")
+        regressions = [
+            f"{name}: {int(stored or 0)} -> {new}"
+            for name, stored, new in zip(names, current, requested)
+            if new < int(stored or 0)
+        ]
+        if regressions:
+            raise ValueError(
+                f"revisions may not move backwards for tenant {tenant_id!r}: "
+                + ", ".join(regressions)
+            )
 
     conn.execute(
         "INSERT INTO lcm_teams_revisions("
@@ -301,19 +413,34 @@ def bump_revision(conn: sqlite3.Connection, tenant_id: str, field: str) -> int:
     known set rather than interpolated blindly.
     """
 
+    _bump_revision_uncommitted(conn, tenant_id, field)
+    conn.commit()
+    return getattr(read_revisions(conn, tenant_id), field)
+
+
+def _bump_revision_uncommitted(
+    conn: sqlite3.Connection, tenant_id: str, field: str
+) -> None:
+    """The statements of :func:`bump_revision`, without the commit.
+
+    Exists so a mutation and the bump that invalidates the contexts depending
+    on it can share ONE transaction. Committing the mutation first left a
+    window in which the membership was gone and the old counters were still
+    current, so every already-issued context kept validating -- which is
+    precisely the next-operation revocation guarantee #498 requires.
+    """
+
     if field not in {"policy_revision", "membership_revision", "revocation_epoch"}:
         raise ValueError(f"unknown revision field: {field}")
     conn.execute(
         "INSERT INTO lcm_teams_revisions(tenant_id) VALUES(?) "
         "ON CONFLICT(tenant_id) DO NOTHING",
-        (tenant_id,),
+        (str(tenant_id),),
     )
     conn.execute(
         f"UPDATE lcm_teams_revisions SET {field} = {field} + 1 WHERE tenant_id = ?",
-        (tenant_id,),
+        (str(tenant_id),),
     )
-    conn.commit()
-    return getattr(read_revisions(conn, tenant_id), field)
 
 
 # ---------------------------------------------------------------------------
@@ -362,10 +489,24 @@ def provision_principal(
     now: float,
     status: str = "active",
 ) -> Principal:
-    """Create or re-activate a principal. Idempotent by primary key."""
+    """Create or re-activate a principal. Idempotent by primary key.
+
+    ``principal_id`` is the primary key, so the upsert cannot move a principal
+    between tenants -- and it did not try to, which is the problem: it left the
+    stored tenant alone, bumped the SUPPLIED tenant's revision, and returned a
+    Principal naming a tenant the row does not have. One tenant re-provisioning
+    another's principal id therefore reactivated it while reporting success in
+    its own name. A cross-tenant collision is refused instead.
+    """
 
     if status not in PRINCIPAL_STATUSES:
         raise ValueError(f"status must be one of {PRINCIPAL_STATUSES}")
+    existing = read_principal(conn, principal_id)
+    if existing is not None and existing.tenant_id != str(tenant_id):
+        raise LookupError(
+            f"principal {principal_id!r} belongs to tenant {existing.tenant_id!r}, "
+            f"not {tenant_id!r}"
+        )
     conn.execute(
         "INSERT INTO lcm_teams_principals(principal_id, tenant_id, status,"
         " created_at, updated_at) VALUES(?,?,?,?,?)"
@@ -373,8 +514,8 @@ def provision_principal(
         " updated_at=excluded.updated_at",
         (str(principal_id), str(tenant_id), status, float(now), float(now)),
     )
+    _bump_revision_uncommitted(conn, str(tenant_id), "membership_revision")
     conn.commit()
-    bump_revision(conn, str(tenant_id), "membership_revision")
     return Principal(str(principal_id), str(tenant_id), status)
 
 
@@ -388,15 +529,27 @@ def suspend_principal(
     answer depend on. Suspension also bumps the revocation epoch, so contexts
     already issued to this principal stop validating rather than running to
     their natural expiry.
+
+    The tenant is a PREDICATE, not bookkeeping. It arrived as an argument, drove
+    the epoch bump, and was then dropped before the UPDATE, so one tenant could
+    suspend another tenant's principal while invalidating its own contexts. A
+    principal that does not belong to the named tenant is not found.
     """
 
-    conn.execute(
+    cursor = conn.execute(
         "UPDATE lcm_teams_principals SET status='suspended', updated_at=?"
-        " WHERE principal_id=?",
-        (float(now), str(principal_id)),
+        " WHERE principal_id=? AND tenant_id=?",
+        (float(now), str(principal_id), str(tenant_id)),
     )
+    if cursor.rowcount < 1:
+        conn.rollback()
+        raise LookupError(
+            f"no principal {principal_id!r} in tenant {tenant_id!r}"
+        )
+    # One transaction with the suspension: a committed suspension whose epoch
+    # bump then failed leaves the principal's already-issued contexts valid.
+    _bump_revision_uncommitted(conn, str(tenant_id), "revocation_epoch")
     conn.commit()
-    bump_revision(conn, str(tenant_id), "revocation_epoch")
     return Principal(str(principal_id), str(tenant_id), "suspended")
 
 
@@ -437,38 +590,92 @@ def grant_membership(
     tenant_id: str,
     now: float,
 ) -> Membership:
-    """Grant a principal access to a collection. Idempotent."""
+    """Grant a principal access to a collection, within ONE tenant. Idempotent.
+
+    Both sides are verified against the requested tenant. Neither the schema
+    nor this accessor used to check either: the membership row names only a
+    principal and a collection, so a grant across two tenants inserted
+    cleanly and ``authorized_collections()`` then returned the foreign
+    collection. The supplied tenant only chose which revision to bump, so the
+    call could invalidate one tenant's contexts while leaving a cross-tenant
+    grant live in another.
+
+    The bump is CONDITIONAL. An unchanged grant is a logical no-op, but the
+    unconditional bump advanced ``membership_revision`` anyway, so every
+    context already issued for the tenant failed revision validation. A
+    periodic desired-state reconciler replaying its grants therefore locked out
+    principals nothing had changed.
+    """
 
     normalized = tuple(sorted({str(g).strip() for g in grants if str(g).strip()}))
+
+    principal = read_principal(conn, principal_id)
+    if principal is None or principal.tenant_id != str(tenant_id):
+        raise LookupError(
+            f"no principal {principal_id!r} in tenant {tenant_id!r}"
+        )
+    collection_tenant = conn.execute(
+        "SELECT tenant_id FROM lcm_teams_collections WHERE collection_id = ?",
+        (str(collection_id),),
+    ).fetchone()
+    if collection_tenant is None or str(collection_tenant[0]) != str(tenant_id):
+        raise LookupError(
+            f"no collection {collection_id!r} in tenant {tenant_id!r}"
+        )
+
+    existing = conn.execute(
+        "SELECT grants FROM lcm_teams_memberships"
+        " WHERE principal_id=? AND collection_id=?",
+        (str(principal_id), str(collection_id)),
+    ).fetchone()
+    unchanged = existing is not None and str(existing[0]) == ",".join(normalized)
+    if unchanged:
+        return Membership(str(principal_id), str(collection_id), normalized)
+
     conn.execute(
         "INSERT INTO lcm_teams_memberships(principal_id, collection_id, grants,"
         " created_at) VALUES(?,?,?,?)"
         " ON CONFLICT(principal_id, collection_id) DO UPDATE SET grants=excluded.grants",
         (str(principal_id), str(collection_id), ",".join(normalized), float(now)),
     )
+    _bump_revision_uncommitted(conn, str(tenant_id), "membership_revision")
     conn.commit()
-    bump_revision(conn, str(tenant_id), "membership_revision")
     return Membership(str(principal_id), str(collection_id), normalized)
 
 
 def revoke_membership(
     conn: sqlite3.Connection, *, principal_id: str, collection_id: str, tenant_id: str
 ) -> bool:
-    """Remove a grant and bump the revocation epoch.
+    """Remove a grant and bump the revocation epoch, ATOMICALLY.
 
     #498 requires revocation to block the NEXT operation, not eventually. The
     epoch bump is what does that: a context issued before it stops validating
     immediately, rather than remaining good until its lease expires.
+
+    All three statements are therefore one transaction. Committing the deletion
+    first left a window -- however short -- in which the membership was gone
+    and both counters were still current, so every already-issued context kept
+    validating; and a bump that then failed left that state permanently. The
+    guarantee is that no observer sees the deletion without the invalidation.
+
+    The tenant is a predicate here too: a membership whose collection belongs
+    to another tenant is not this tenant's to revoke, and revoking it while
+    bumping the caller's counters is the cross-tenant write the grant path now
+    refuses to create.
     """
 
     cursor = conn.execute(
-        "DELETE FROM lcm_teams_memberships WHERE principal_id=? AND collection_id=?",
-        (str(principal_id), str(collection_id)),
+        "DELETE FROM lcm_teams_memberships WHERE principal_id=? AND collection_id=?"
+        " AND collection_id IN ("
+        "  SELECT collection_id FROM lcm_teams_collections WHERE tenant_id=?"
+        " )",
+        (str(principal_id), str(collection_id), str(tenant_id)),
     )
+    removed = cursor.rowcount > 0
+    _bump_revision_uncommitted(conn, str(tenant_id), "revocation_epoch")
+    _bump_revision_uncommitted(conn, str(tenant_id), "membership_revision")
     conn.commit()
-    bump_revision(conn, str(tenant_id), "revocation_epoch")
-    bump_revision(conn, str(tenant_id), "membership_revision")
-    return cursor.rowcount > 0
+    return removed
 
 
 def read_memberships(
