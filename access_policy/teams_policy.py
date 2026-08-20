@@ -52,6 +52,24 @@ _STORE_WIDE_KINDS = frozenset(
 _ADMIN_REQUIRED_SCOPES = frozenset({"admin"})
 
 
+# The operation vocabulary a context's `operation_allowlist` is expressed in.
+#
+# Deliberately NOT every string that reaches `operation`/`required_scope`.
+# `owner_only` and `admin` are AUTHORITY words a gate site asks for, not
+# operations a host grants -- enforcing the allowlist against them is the exact
+# conflation recorded above, which once denied principal A its own session load.
+# `admin` is already denied outright by `_ADMIN_REQUIRED_SCOPES`, and
+# `owner_only` is decided by kind and by target ownership.
+#
+# An EMPTY allowlist means the carrier declared no operation restriction at all
+# (a context with no grants), not "deny everything": construction already
+# rejects a narrowing that names operations outside the grants
+# (`ungranted_operations`), so a genuinely narrowed context always carries a
+# non-empty allowlist. Turning empty into deny-all is a call-site-slice
+# decision about what hosts must populate, not a policy fix.
+_ALLOWLISTED_OPERATIONS = frozenset({"read", "write"})
+
+
 def principal_of(context: AccessContextV1 | None) -> str:
     """The owner scope a row would be stamped with for this context.
 
@@ -101,6 +119,41 @@ class TeamsPolicy:
             return self._OWNER_LOOKUP_FAILED
         return str(owner) if owner else None
 
+    # -- context binding --------------------------------------------------
+
+    #: Sentinel: the caller supplied a context this policy was not built for.
+    #: Distinct from None, which means "use the bound context".
+    _CONTEXT_NOT_BOUND = object()
+
+    def _effective_context(self, context: AccessContextV1 | None) -> object:
+        """The context a decision is made against, or ``_CONTEXT_NOT_BOUND``.
+
+        The protocol passes a context to every method, but ``resolve_policy``
+        has ALREADY validated exactly one context -- expiry, revisions,
+        principal, delegation -- and built this policy for it. Letting a
+        caller-supplied context replace it would authorize against something
+        nothing validated: a stale or differently scoped context could
+        determine the principal and pass through a policy created for another
+        request.
+
+        So a supplied context is accepted only when it EQUALS the bound one
+        (value equality: AccessContextV1 is a frozen dataclass, so a faithful
+        reconstruction is the same authority). Anything else fails closed, and
+        an unbound policy accepts nothing but ``None``.
+        """
+
+        if context is None:
+            return self._context
+        if self._context is not None and context == self._context:
+            return context
+        return self._CONTEXT_NOT_BOUND
+
+    def _collection_allowlist(self, context: object) -> frozenset[str]:
+        """The context's effective collection restriction, empty when none."""
+
+        allowed = getattr(context, "collection_allowlist", None)
+        return frozenset(str(item) for item in allowed) if allowed else frozenset()
+
     # -- authorization ----------------------------------------------------
 
     def authorize_operation(
@@ -109,10 +162,26 @@ class TeamsPolicy:
         operation: str,
         expected_scope: TargetScope,
     ) -> Decision:
-        effective = context if context is not None else self._context
+        effective = self._effective_context(context)
+        if effective is self._CONTEXT_NOT_BOUND:
+            return Decision.deny(DenialReason.CONTEXT_INVALID)
         principal = principal_of(effective)
         if not principal:
             return Decision.deny(DenialReason.CONTEXT_INVALID)
+
+        # The narrowing the VALIDATED context carries, enforced rather than
+        # recorded. Without this a context narrowed to `operation:read` still
+        # reached allow() for `operation="write"`: the argument was never
+        # compared against anything, and `resolve_policy` validates without a
+        # requested operation, so nothing earlier enforced it either.
+        allowlist = getattr(effective, "operation_allowlist", None) or frozenset()
+        if allowlist:
+            requested = {
+                str(operation),
+                str(expected_scope.get("required_scope") or ""),
+            } & _ALLOWLISTED_OPERATIONS
+            if requested - frozenset(str(item) for item in allowlist):
+                return Decision.deny(DenialReason.SCOPE_FORBIDDEN)
 
         # Store-WIDE operations are not a principal's to perform. `backup_database`
         # copies the entire file, every principal's memory included, so under
@@ -176,6 +245,16 @@ class TeamsPolicy:
             if str(owner) != principal:
                 return Decision.deny(DenialReason.SCOPE_FORBIDDEN)
 
+        # A delegated context narrowed to one collection may not act on another,
+        # even one its principal owns. Same rule as the owner predicate below in
+        # resolve_authorized_targets, applied to the operation that names a
+        # collection outright.
+        collections = self._collection_allowlist(effective)
+        if collections:
+            named = expected_scope.get("collection_id")
+            if named is not None and str(named) not in collections:
+                return Decision.deny(DenialReason.SCOPE_FORBIDDEN)
+
         return Decision.allow()
 
     def resolve_authorized_targets(
@@ -191,8 +270,15 @@ class TeamsPolicy:
         the caller's value -- which is the leak, not the fix.
         """
 
-        effective = context if context is not None else self._context
+        effective = self._effective_context(context)
         narrowed = dict(requested_narrowing)
+        if effective is self._CONTEXT_NOT_BOUND:
+            # A context this policy never validated resolves to NOTHING, set
+            # explicitly. Returning the caller's narrowing unchanged is the
+            # omission that `access_scope` below exists to avoid.
+            narrowed["access_scope"] = ""
+            narrowed["collection_allowlist"] = ()
+            return narrowed
         principal = principal_of(effective)
         if not principal:
             return narrowed
@@ -212,6 +298,23 @@ class TeamsPolicy:
         # same value the write path stamps, so read and write agree by
         # construction.
         narrowed["access_scope"] = principal
+
+        # The collection dimension of the SAME rule. A context narrowed to one
+        # collection previously kept whatever the caller asked for -- an
+        # omitted or broad narrowing survived intact, so a restricted context
+        # could still reach every collection its principal owns.
+        #
+        # SET rather than omitted, for the reason above: a consumer reading
+        # this with ``.get(key, caller_value)`` keeps the caller's value when
+        # the key is absent, which is the leak rather than the fix. An empty
+        # intersection is therefore written as ``()`` -- deny-all -- not
+        # dropped.
+        allowed = self._collection_allowlist(effective)
+        if allowed:
+            requested = requested_narrowing.get("collection_allowlist")
+            if requested:
+                allowed = allowed & frozenset(str(item) for item in requested)
+            narrowed["collection_allowlist"] = tuple(sorted(allowed))
         return narrowed
 
     def authorize_stored_scope(
@@ -220,7 +323,9 @@ class TeamsPolicy:
         operation: str,
         stored_scope: TargetScope,
     ) -> Decision:
-        effective = context if context is not None else self._context
+        effective = self._effective_context(context)
+        if effective is self._CONTEXT_NOT_BOUND:
+            return Decision.deny(DenialReason.CONTEXT_INVALID)
         principal = principal_of(effective)
         if not principal:
             return Decision.deny(DenialReason.CONTEXT_INVALID)
@@ -259,15 +364,24 @@ class TeamsPolicy:
         allowed = bool(getattr(public_result, "allowed", False))
         if allowed and str(operation) == "read":
             return None
-        effective = context if context is not None else self._context
+        effective = self._effective_context(context)
+        if effective is self._CONTEXT_NOT_BOUND:
+            effective = self._context
         reason = getattr(public_result, "denial_reason", None)
-        self._audit_sink(
-            tenant_id=str(getattr(effective, "tenant_id", "") or ""),
-            principal_id=principal_of(effective),
-            operation=str(operation),
-            allowed=allowed,
-            denial_reason=getattr(reason, "value", None) if reason else None,
-        )
+        try:
+            self._audit_sink(
+                tenant_id=str(getattr(effective, "tenant_id", "") or ""),
+                principal_id=principal_of(effective),
+                operation=str(operation),
+                allowed=allowed,
+                denial_reason=getattr(reason, "value", None) if reason else None,
+            )
+        except Exception:  # noqa: BLE001 - auditing is best effort
+            # The sink is an arbitrary host callable. `record_audit_event`
+            # handles sqlite3.Error, but a custom sink can raise anything, and
+            # an exception escaping here would fail the very operation being
+            # audited -- auditing must never be the reason work fails.
+            return None
         return None
 
     # -- disclosure primitives (no production call sites; protocol only) ---

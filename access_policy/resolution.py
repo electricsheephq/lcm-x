@@ -31,7 +31,9 @@ def policy_access_context(engine: object) -> AccessContextV1 | None:
     return accessor() if callable(accessor) else None
 
 
-def policy_for_engine(engine: object) -> "TrustedOwnerPolicy | FailClosedPolicy":
+def policy_for_engine(
+    engine: object,
+) -> "TeamsPolicy | TrustedOwnerPolicy | FailClosedPolicy":
     """Resolve the policy for an engine through one documented seam.
 
     Every hook site calls this rather than reading the engine itself, so there
@@ -59,6 +61,11 @@ def policy_for_engine(engine: object) -> "TrustedOwnerPolicy | FailClosedPolicy"
         # either: zero is a real revision value, so a context minted at zero
         # would validate against a catalog nobody could read.
         return FailClosedPolicy(DenialReason.CONTEXT_INVALID)
+
+    principal_denial = _catalog_principal_denial(engine, context)
+    if principal_denial is not None:
+        return FailClosedPolicy(principal_denial)
+
     return resolve_policy(
         context,
         teams_enabled,
@@ -66,6 +73,56 @@ def policy_for_engine(engine: object) -> "TrustedOwnerPolicy | FailClosedPolicy"
         audit_sink=_audit_sink_for_engine(engine),
         session_owner=_session_owner_for_engine(engine),
     )
+
+
+def _catalog_principal_denial(
+    engine: object, context: AccessContextV1
+) -> DenialReason | None:
+    """Refuse a context whose principal the catalog does not stand behind.
+
+    The revision counters are per-TENANT, so they say nothing about the
+    principal. A principal suspended after its context was minted is caught by
+    the revocation-epoch bump, but a context minted AFTER that bump carries the
+    current epoch and validated cleanly -- restoring access to a suspended
+    principal even though ``authorized_collections()`` correctly returns
+    nothing for it.
+
+    A catalog that exists is authoritative about its principals, the same way
+    ``_catalog_revisions`` treats an existing-but-unreadable catalog as
+    inconsistent rather than absent. So an absent principal, a suspended one,
+    and one belonging to another tenant all fail closed here.
+    """
+
+    from ..teams.catalog import read_principal
+
+    store = getattr(engine, "_store", None)
+    connection = getattr(store, "connection", None)
+    if connection is None:
+        return None
+    try:
+        principal = read_principal(connection, context.principal_id)
+    except Exception:
+        return DenialReason.CONTEXT_INVALID
+    if principal is None:
+        return DenialReason.CONTEXT_INVALID
+    if principal.tenant_id != str(context.tenant_id):
+        return DenialReason.CONTEXT_INVALID
+    if principal.status != "active":
+        return DenialReason.CONTEXT_REVOKED
+    return None
+
+
+class OwnerLookupError(RuntimeError):
+    """The stamped owner of a session could not be determined.
+
+    Raised rather than returned, because ``None`` on this seam means "nothing
+    claims this session" and the policy DELIBERATELY allows an unclaimed
+    target. Collapsing a failed lookup into that answer applies
+    unclaimed-target behaviour after an ownership check that never ran.
+    ``TeamsPolicy._target_owner`` turns any exception here into
+    ``_OWNER_LOOKUP_FAILED`` -> ``CONTEXT_INVALID``, which is the fail-closed
+    direction #68 records for callback failures.
+    """
 
 
 def _session_owner_for_engine(engine: object):
@@ -85,18 +142,34 @@ def _session_owner_for_engine(engine: object):
         return None
 
     def resolve(session_id: str) -> str | None:
+        owners: set[str] = set()
+        readable = 0
         for table in ("messages", "summary_nodes"):
             try:
-                row = connection.execute(
-                    f'SELECT access_scope FROM "{table}" '
-                    "WHERE session_id = ? AND access_scope IS NOT NULL LIMIT 1",
+                rows = connection.execute(
+                    f'SELECT DISTINCT access_scope FROM "{table}" '
+                    "WHERE session_id = ? AND access_scope IS NOT NULL",
                     (session_id,),
-                ).fetchone()
+                ).fetchall()
             except sqlite3.OperationalError:
+                # Table or column absent on this store. Counted, not ignored:
+                # if NEITHER table could be read the answer is unknown, not
+                # "unclaimed".
                 continue
-            if row is not None and row[0] is not None:
-                return str(row[0])
-        return None
+            readable += 1
+            owners.update(str(row[0]) for row in rows if row[0] is not None)
+        if not readable:
+            raise OwnerLookupError(f"no owner table could be read for {session_id!r}")
+        if len(owners) > 1:
+            # Rows for one session carrying more than one owner stamp is an
+            # inconsistent store, and `LIMIT 1` used to pick one arbitrarily
+            # and report it as authoritative -- enough to pass a session-level
+            # reset, compaction or lifecycle gate over another principal's
+            # rows. A conflict is not an answer.
+            raise OwnerLookupError(
+                f"session {session_id!r} carries {len(owners)} conflicting owner stamps"
+            )
+        return next(iter(owners)) if owners else None
 
     return resolve
 
@@ -169,7 +242,7 @@ def resolve_policy(
     current_revisions: object | None = None,
     audit_sink: object | None = None,
     session_owner: object | None = None,
-) -> TrustedOwnerPolicy | FailClosedPolicy:
+) -> TeamsPolicy | TrustedOwnerPolicy | FailClosedPolicy:
     """Resolve the policy from the explicit Teams flag and carrier context.
 
     Teams-off is deliberately resolved before context validation: carrying a

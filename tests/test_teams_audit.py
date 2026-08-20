@@ -144,6 +144,26 @@ def test_auditing_never_breaks_the_operation_it_audits(
     policy.audit_decision(None, "write", denied.denial_reason, denied.public())  # no raise
 
 
+def test_a_sink_that_raises_does_not_fail_the_audited_operation(
+    store: sqlite3.Connection,
+) -> None:
+    """The sink is an arbitrary HOST callable, not only `record_audit_event`.
+
+    `record_audit_event` swallows `sqlite3.Error`, so the store-backed sink was
+    covered. A custom sink can raise anything, and the exception escaped
+    `audit_decision` into the operation being audited -- auditing becoming the
+    reason authorized work fails.
+    """
+
+    def explode(**_fields):
+        raise RuntimeError("host audit sink is misconfigured")
+
+    policy = TeamsPolicy(_context(), audit_sink=explode)
+    denied = Decision.deny(DenialReason.SCOPE_FORBIDDEN)
+
+    policy.audit_decision(None, "write", denied.denial_reason, denied.public())
+
+
 def test_no_sink_is_not_an_error(store: sqlite3.Connection) -> None:
     """A context carrier with no store resolves a policy with no sink."""
     TeamsPolicy(_context()).audit_decision(

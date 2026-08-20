@@ -54,6 +54,37 @@ def _context(**overrides) -> AccessContextV1:
     return AccessContextV1.from_host(**fields)
 
 
+def _provisioned(
+    store: sqlite3.Connection,
+    *,
+    principal_id: str = "principal-a",
+    tenant_id: str = "tenant-1",
+    **overrides,
+) -> AccessContextV1:
+    """Provision the principal, then mint a context at the catalog's revisions.
+
+    A catalog that exists is authoritative about its principals, so a context
+    for a principal it has never heard of fails closed. Provisioning itself
+    bumps ``membership_revision``, hence reading the counters back rather than
+    minting at zero.
+    """
+
+    catalog.provision_principal(
+        store, principal_id=principal_id, tenant_id=tenant_id, now=0.0
+    )
+    current = catalog.read_revisions(store, tenant_id)
+    fields = dict(
+        principal_id=principal_id,
+        session_owner_principal_id=principal_id,
+        tenant_id=tenant_id,
+        policy_revision=current.policy_revision,
+        membership_revision=current.membership_revision,
+        revocation_epoch=current.revocation_epoch,
+    )
+    fields.update(overrides)
+    return _context(**fields)
+
+
 class _Store:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self.connection = connection
@@ -127,7 +158,7 @@ def test_bumping_the_epoch_invalidates_an_already_issued_context(
 ) -> None:
     """The operation an operator actually performs to revoke someone."""
     catalog.ensure_teams_catalog(store)
-    issued = _context()
+    issued = _provisioned(store)
     assert isinstance(policy_for_engine(_Engine(store, issued)), TeamsPolicy)
 
     catalog.bump_revision(store, "tenant-1", "revocation_epoch")
@@ -143,7 +174,7 @@ def test_a_context_minted_after_the_bump_is_accepted(
     catalog.ensure_teams_catalog(store)
     catalog.bump_revision(store, "tenant-1", "revocation_epoch")
 
-    policy = policy_for_engine(_Engine(store, _context(revocation_epoch=1)))
+    policy = policy_for_engine(_Engine(store, _provisioned(store)))
 
     assert isinstance(policy, TeamsPolicy)
 
@@ -170,12 +201,88 @@ def test_teams_off_never_consults_the_catalog(store: sqlite3.Connection) -> None
 def test_each_counter_is_checked_independently(store: sqlite3.Connection) -> None:
     """A membership change must not be waved through by a matching epoch."""
     catalog.ensure_teams_catalog(store)
+    issued = _provisioned(store)
     catalog.bump_revision(store, "tenant-1", "membership_revision")
 
     # Epoch still matches; only membership moved.
-    policy = policy_for_engine(_Engine(store, _context(revocation_epoch=0)))
+    policy = policy_for_engine(_Engine(store, issued))
 
     assert isinstance(policy, FailClosedPolicy)
+    assert policy.denial_reason is DenialReason.CONTEXT_REVOKED
+
+
+# --- the catalog's word on the principal ----------------------------------
+
+
+def test_a_suspended_principal_is_refused_at_the_current_epoch(
+    store: sqlite3.Connection,
+) -> None:
+    """The hole the tenant counters cannot close.
+
+    Suspension bumps the revocation epoch, so contexts already issued go
+    stale. But a context minted AFTER the bump carries the current epoch and
+    validated cleanly, restoring access to a principal the catalog has
+    suspended -- while `authorized_collections()` correctly returns nothing
+    for it.
+    """
+    catalog.ensure_teams_catalog(store)
+    _provisioned(store)
+    catalog.suspend_principal(
+        store, principal_id="principal-a", tenant_id="tenant-1", now=1.0
+    )
+    current = catalog.read_revisions(store, "tenant-1")
+    minted_after = _context(
+        policy_revision=current.policy_revision,
+        membership_revision=current.membership_revision,
+        revocation_epoch=current.revocation_epoch,
+    )
+
+    policy = policy_for_engine(_Engine(store, minted_after))
+
+    assert isinstance(policy, FailClosedPolicy)
+    assert policy.denial_reason is DenialReason.CONTEXT_REVOKED
+
+
+def test_a_principal_the_catalog_never_provisioned_is_refused(
+    store: sqlite3.Connection,
+) -> None:
+    """An existing catalog is authoritative about who its principals are."""
+    catalog.ensure_teams_catalog(store)
+
+    policy = policy_for_engine(_Engine(store, _context()))
+
+    assert isinstance(policy, FailClosedPolicy)
+    assert policy.denial_reason is DenialReason.CONTEXT_INVALID
+
+
+def test_a_principal_belonging_to_another_tenant_is_refused(
+    store: sqlite3.Connection,
+) -> None:
+    """A context may not borrow a principal id that lives in another tenant."""
+    catalog.ensure_teams_catalog(store)
+    catalog.provision_principal(
+        store, principal_id="principal-a", tenant_id="tenant-other", now=0.0
+    )
+
+    policy = policy_for_engine(_Engine(store, _context()))
+
+    assert isinstance(policy, FailClosedPolicy)
+    assert policy.denial_reason is DenialReason.CONTEXT_INVALID
+
+
+def test_a_re_provisioned_principal_is_served_again(
+    store: sqlite3.Connection,
+) -> None:
+    """POSITIVE CONTROL: refusing everyone also passes the three tests above."""
+    catalog.ensure_teams_catalog(store)
+    _provisioned(store)
+    catalog.suspend_principal(
+        store, principal_id="principal-a", tenant_id="tenant-1", now=1.0
+    )
+
+    policy = policy_for_engine(_Engine(store, _provisioned(store)))
+
+    assert isinstance(policy, TeamsPolicy)
 
 
 def test_a_context_carrier_with_no_store_is_not_treated_as_an_inconsistent_store(
