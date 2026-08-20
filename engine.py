@@ -5100,9 +5100,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         return durable_content is not None
 
     @classmethod
-    def _is_active_context_droppable_identity(cls, identity: tuple[str, str, str, str]) -> bool:
+    def _is_active_context_droppable_identity(cls, identity: tuple[str, str, str, str, str]) -> bool:
         """Return true for durable rows sanitized out of active replay only."""
-        role, content, _tool_call_id, tool_calls = identity
+        role, content, _tool_call_id, tool_calls, _tool_name = identity
         if role != "assistant" or tool_calls:
             return False
         return _should_drop_active_assistant_message({
@@ -5221,6 +5221,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             scan_start=scan_start,
             ignored_messages=ignored_original_messages,
         )
+        reconciled_existing_session = self._ingest_cursor_needs_reconcile
+        reconcile_messages = replay_messages
         if self._ingest_cursor_needs_reconcile:
             reconcile_messages = [
                 original_msg
@@ -5246,6 +5248,34 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             )
             self._ingest_cursor_needs_reconcile = False
         cursor = min(max(self._ingest_cursor, 0), n)
+        # A restart can preserve a genuinely new row (so the cursor stops early)
+        # and still replay exact durable tool pairs AFTER it. Those pairs are
+        # matched on their durable ``tool_call_id`` identity, so suppressing
+        # them is de-duplication, not the silent drop #259 vetoed -- but it is
+        # still ingest-path consumption, so it is recorded rather than silent.
+        # ``cursor > 0`` is load-bearing, not an optimisation: at cursor 0
+        # reconciliation proved NOTHING, and main's ruling for that case is to
+        # persist the batch whole ("persisted ambiguous delta"). Letting this
+        # helper strip rows out of an unproven batch would partially re-instate
+        # the batch-suppression #259 removed. It runs only once reconciliation
+        # has already proven a partial replay.
+        replayed_tool_segment_indexes = (
+            self._replayed_tool_segment_indexes_after_cursor(reconcile_messages, cursor)
+            if reconciled_existing_session and cursor > 0
+            else set()
+        )
+        if replayed_tool_segment_indexes:
+            self._last_ingest_reconciliation["replayed_tool_segment_rows"] = len(
+                replayed_tool_segment_indexes
+            )
+            logger.debug(
+                "LCM suppressed %d replayed durable tool-segment rows after cursor: "
+                "session=%s cursor=%d incoming=%d",
+                len(replayed_tool_segment_indexes),
+                self._session_id,
+                cursor,
+                n,
+            )
         if cursor > 0:
             cached_source_identities = getattr(self, "_last_active_replay_source_identities", None)
             cached_active_replay_messages = getattr(self, "_last_active_replay_messages", None)
@@ -5355,6 +5385,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             )
             for offset, (original_msg, replay_msg) in enumerate(zip(original_new_messages, new_messages)):
                 absolute_idx = cursor + offset
+                if absolute_idx in replayed_tool_segment_indexes:
+                    continue
                 replay_text = text_content_for_pattern_matching(replay_msg.get("content")) or ""
                 original_text = text_content_for_pattern_matching(original_msg.get("content")) or ""
                 volatile_placeholder = self._is_volatile_ignored_quarantine_placeholder(

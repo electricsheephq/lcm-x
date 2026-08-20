@@ -108,6 +108,43 @@ _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX = "compacted_active_replay_snapshot_dig
 _SESSION_END_REPLAY_METADATA_PREFIX = "session_end_replay_snapshot_digests"
 
 
+def _contains_identity_window(
+    haystack: list[tuple[str, str, str, str, str]],
+    needle: list[tuple[str, str, str, str, str]],
+) -> bool:
+    """True when ``needle`` appears as a contiguous exact window in ``haystack``.
+
+    Suffix matching (``_matches_store_tail_suffix``) only proves replay of the
+    END of the durable tail. A restarted host can replay a window from the
+    middle of the session, so callers that carry their own anchor -- a durable
+    ``tool_call_id`` -- use this instead. Callers MUST supply that anchor:
+    a bare window match is a content coincidence, not replay evidence.
+    """
+    if not needle or len(needle) > len(haystack):
+        return False
+    return any(
+        haystack[start : start + len(needle)] == needle
+        for start in range(len(haystack) - len(needle) + 1)
+    )
+
+
+def _has_lossy_redacted_identity(identity: tuple[str, str, str, str, str]) -> bool:
+    """True when redaction collapsed any matched half of a replay identity.
+
+    A replay identity is ``(role, content, tool_call_id, tool_calls,
+    tool_name)``. Two of those five are model-authored payloads that
+    ``_redact_active_replay_messages`` rewrites -- it redacts ``tool_calls``
+    exactly as it redacts ``content`` -- and a ``password_assignment``
+    placeholder deliberately omits the sha256 digest, so distinct same-length
+    secrets normalize onto ONE value. Equality of a collapsed component is
+    therefore not identity, whichever component was collapsed: the secret can
+    sit in the call ARGUMENTS just as easily as in the tool result, and a
+    fence that inspects only the result half proves replay of a call that was
+    never made.
+    """
+    return _has_lossy_sensitive_redaction(identity[1]) or _has_lossy_sensitive_redaction(identity[3])
+
+
 class ReconcileMixin:
     @staticmethod
     def _canonicalize_tool_call_identity_value(value: Any) -> Any:
@@ -298,7 +335,7 @@ class ReconcileMixin:
                 return False
         return True
 
-    def _message_replay_identity(self, msg: Dict[str, Any], *, stored_row: bool = False) -> tuple[str, str, str, str]:
+    def _message_replay_identity(self, msg: Dict[str, Any], *, stored_row: bool = False) -> tuple[str, str, str, str, str]:
         role = str(msg.get("role") or "unknown")
         content = normalize_content_value(msg.get("content")) or ""
         # Strip volatile compaction scaffolding suffixes so identity matching
@@ -440,11 +477,29 @@ class ReconcileMixin:
             if payload is not None and isinstance(payload.get("content"), str):
                 content = payload["content"]
         tool_calls_identity = self._stable_tool_calls_identity(tool_calls)
+        # WHICH TOOL RAN is part of a tool row's identity. A tool result
+        # carries no ``tool_calls``, so without the name the only distinguishing
+        # components are the content and the ``tool_call_id`` -- and LCM does
+        # not get to assume an id is minted once (see ``stored_tool_identities``
+        # below). A host that re-issues an id for a DIFFERENT tool returning the
+        # same innocuous result would otherwise exact-match a durable window and
+        # the new invocation would be skipped as replay. The store persists the
+        # name in ``messages.tool_name`` and hosts send it under the same key, so
+        # both sides of every comparison carry it; ``name`` is accepted too
+        # because that is how ``MessageStore.to_openai_msg`` spells it when a
+        # durable row goes back out to the host. Restricted to tool rows:
+        # ``name`` on other roles is a participant label, not an execution
+        # identity.
+        # Pinned by ``test_tool_window_replay_requires_tool_identity``.
+        tool_name_identity = (
+            str(msg.get("tool_name") or msg.get("name") or "") if role == "tool" else ""
+        )
         return (
             role,
             content,
             str(msg.get("tool_call_id") or ""),
             tool_calls_identity,
+            tool_name_identity,
         )
 
     def _replay_snapshot_digest(
@@ -606,8 +661,8 @@ class ReconcileMixin:
 
     @staticmethod
     def _matches_store_tail_suffix(
-        stored_tail: list[tuple[str, str, str, str]],
-        candidate_prefix: list[tuple[str, str, str, str]],
+        stored_tail: list[tuple[str, str, str, str, str]],
+        candidate_prefix: list[tuple[str, str, str, str, str]],
     ) -> bool:
         if not candidate_prefix:
             return True
@@ -617,9 +672,9 @@ class ReconcileMixin:
 
     @staticmethod
     def _strip_inline_persisted_output_generation_identity(
-        identity: tuple[str, str, str, str],
-    ) -> tuple[str, str, str, str]:
-        role, content, tool_call_id, tool_calls = identity
+        identity: tuple[str, str, str, str, str],
+    ) -> tuple[str, str, str, str, str]:
+        role, content, tool_call_id, tool_calls, tool_name = identity
         if role != "tool" or not isinstance(content, str):
             return identity
         stripped = re.sub(
@@ -628,7 +683,7 @@ class ReconcileMixin:
             "\n",
             content,
         )
-        return (role, stripped, tool_call_id, tool_calls)
+        return (role, stripped, tool_call_id, tool_calls, tool_name)
 
     def _stored_row_has_durable_persisted_output_marker(self, row: Dict[str, Any]) -> bool:
         if str(row.get("role") or "") != "tool":
@@ -645,22 +700,28 @@ class ReconcileMixin:
 
     @staticmethod
     def _persisted_output_durable_wildcard_identity(
-        identity: tuple[str, str, str, str],
-    ) -> tuple[str, str, str, str]:
-        role, _content, tool_call_id, tool_calls = identity
-        return (role, "[LCM persisted-output durable replay]", tool_call_id, tool_calls)
+        identity: tuple[str, str, str, str, str],
+    ) -> tuple[str, str, str, str, str]:
+        role, _content, tool_call_id, tool_calls, tool_name = identity
+        return (
+            role,
+            "[LCM persisted-output durable replay]",
+            tool_call_id,
+            tool_calls,
+            tool_name,
+        )
 
     def _matches_persisted_output_durable_full_replay(
         self,
         candidate_messages: list[Dict[str, Any]],
-        candidate_prefix: list[tuple[str, str, str, str]],
-        stored_tail: list[tuple[str, str, str, str]],
+        candidate_prefix: list[tuple[str, str, str, str, str]],
+        stored_tail: list[tuple[str, str, str, str, str]],
         stored_tail_rows: list[Dict[str, Any]] | None,
     ) -> bool:
         if not stored_tail_rows or len(candidate_prefix) != len(stored_tail) or len(candidate_messages) != len(candidate_prefix):
             return False
-        transformed_candidate: list[tuple[str, str, str, str]] = []
-        transformed_stored: list[tuple[str, str, str, str]] = []
+        transformed_candidate: list[tuple[str, str, str, str, str]] = []
+        transformed_stored: list[tuple[str, str, str, str, str]] = []
         saw_persisted_output = False
         for candidate_msg, candidate_identity, stored_identity, stored_row in zip(
             candidate_messages,
@@ -711,9 +772,9 @@ class ReconcileMixin:
     @classmethod
     def _active_cleanup_replay_identity(
         cls,
-        identity: tuple[str, str, str, str],
-    ) -> tuple[str, str, str, str] | None:
-        role, content, tool_call_id, tool_calls = identity
+        identity: tuple[str, str, str, str, str],
+    ) -> tuple[str, str, str, str, str] | None:
+        role, content, tool_call_id, tool_calls, tool_name = identity
         if role != "assistant":
             return identity
         msg: dict[str, Any] = {
@@ -734,11 +795,12 @@ class ReconcileMixin:
             normalize_content_value(cleaned.get("content")) or "",
             tool_call_id,
             tool_calls,
+            tool_name,
         )
 
     @staticmethod
-    def _is_quarantined_assistant_replay_identity(identity: tuple[str, str, str, str]) -> bool:
-        role, content, _tool_call_id, _tool_calls = identity
+    def _is_quarantined_assistant_replay_identity(identity: tuple[str, str, str, str, str]) -> bool:
+        role, content, _tool_call_id, _tool_calls, _tool_name = identity
         if role != "assistant":
             return False
         text = str(content or "").strip()
@@ -765,15 +827,15 @@ class ReconcileMixin:
 
     def _stored_tail_for_sanitized_active_replay(
         self,
-        stored_tail: list[tuple[str, str, str, str]],
-    ) -> list[tuple[str, str, str, str]]:
+        stored_tail: list[tuple[str, str, str, str, str]],
+    ) -> list[tuple[str, str, str, str, str]]:
         """Mirror active-context cleanup for restart replay reconciliation.
 
         Raw storage remains lossless. This view is used only to reconcile a
         restarted process when the host replays sanitized active context where
         assistant rows may be removed or have internal content stripped.
         """
-        sanitized_tail: list[tuple[str, str, str, str]] = []
+        sanitized_tail: list[tuple[str, str, str, str, str]] = []
         for identity in stored_tail:
             cleaned_identity = self._active_cleanup_replay_identity(identity)
             if cleaned_identity is not None:
@@ -783,7 +845,7 @@ class ReconcileMixin:
     def _find_reconciled_cursor_for_store_tail(
         self,
         messages: List[Dict[str, Any]],
-        stored_tail: list[tuple[str, str, str, str]],
+        stored_tail: list[tuple[str, str, str, str, str]],
         *,
         stored_tail_rows: list[Dict[str, Any]] | None = None,
         allow_empty_prefix: bool,
@@ -797,7 +859,7 @@ class ReconcileMixin:
 
         def active_identity(
             message: Dict[str, Any],
-        ) -> tuple[str, str, str, str]:
+        ) -> tuple[str, str, str, str, str]:
             return active_lineage_identities.get(
                 id(message),
                 self._message_replay_identity(message),
@@ -808,7 +870,7 @@ class ReconcileMixin:
         sanitized_tail_collapsed = len(sanitized_replay_tail) < len(stored_tail)
         boundary_messages = list(stored_tail_rows or [])
         if not boundary_messages:
-            for role, content, tool_call_id, tool_calls in stored_tail:
+            for role, content, tool_call_id, tool_calls, tool_name in stored_tail:
                 try:
                     decoded_tool_calls = json.loads(tool_calls) if tool_calls else []
                 except (TypeError, ValueError, json.JSONDecodeError):
@@ -818,6 +880,7 @@ class ReconcileMixin:
                     "content": content,
                     "tool_call_id": tool_call_id,
                     "tool_calls": decoded_tool_calls,
+                    "tool_name": tool_name,
                 })
         effective_fresh_tail_count = self._fresh_tail_boundary(boundary_messages).count
         # Engine-assembled compacted-snapshot proof is always eligible. The
@@ -831,6 +894,56 @@ class ReconcileMixin:
             if allow_session_end_replay_proof
             else set()
         )
+        # Durable tool-result identities: WHOLE replay identities
+        # ``(role, normalized content, tool_call_id, tool_calls)`` for the tool
+        # rows that carry an execution id -- not a set of bare ids.
+        #
+        # Keeping the whole tuple is load-bearing, and the reason is the
+        # opposite of an id-uniqueness assumption. LCM does NOT get to assume a
+        # host mints each ``tool_call_id`` once: no enforced contract makes them
+        # unique per session, and this codebase already says so in the one place
+        # that resolves content by id --
+        # ``find_externalized_tool_result_content_for_call`` documents that "a
+        # reused tool-call id alone is not sufficient proof" and demands
+        # marker-specific metadata alongside it.
+        #
+        # So the tool-anchored terms below are a proof for a narrower reason: a
+        # candidate row only matches when its ENTIRE identity, content included,
+        # equals a durable row's. If a provider or gateway re-issues an id for a
+        # genuinely new invocation, that call's result differs, no durable
+        # identity matches, and the batch falls through to the ambiguous-delta
+        # path and persists (#259: visible duplication beats silent loss).
+        # Pinned by
+        # ``test_reused_tool_call_id_with_new_result_content_is_persisted_not_replayed``.
+        #
+        # Residual, accepted deliberately: an id reused for a BYTE-IDENTICAL
+        # repeat is indistinguishable from replay here and is skipped, so a
+        # repeated identical call collapses to one durable pair. What is dropped
+        # is byte-identical to a row the store already holds, and the advance is
+        # recorded on ``_last_ingest_reconciliation`` rather than being silent.
+        # Narrowing this match to the id alone would turn that bounded
+        # de-duplication into real data loss.
+        #
+        # Lossy-redacted rows are excluded, because for them that residual is
+        # NOT bounded. A ``password_assignment`` placeholder deliberately omits
+        # the sha256 digest, so it carries only ``chars``/``bytes``; redaction
+        # runs on the ingest path before reconciliation, so two genuinely
+        # different secrets of the same length arrive here as the SAME identity.
+        # Content equality then stops being evidence of anything and the "byte
+        # identical" premise above no longer holds. Such a row must fall through
+        # to the ambiguous-delta path (#259) instead of being proven replay.
+        # The exclusion is identity-wide (``_has_lossy_redacted_identity``), not
+        # content-only: redaction rewrites ``tool_calls`` too.
+        stored_tool_identities = {
+            identity
+            for identity in stored_tail
+            if identity[0] == "tool"
+            and identity[2]
+            and not _has_lossy_redacted_identity(identity)
+        }
+        # Every identity the tool-anchored terms are allowed to advance over
+        # must itself be durable, on either the raw or the cleaned-up view.
+        durable_replay_identities = set(stored_tail) | set(sanitized_replay_tail)
         empty_prefix_cursor: int | None = None
         for cursor in range(len(messages), -1, -1):
             candidate_messages = messages[:cursor]
@@ -932,6 +1045,75 @@ class ReconcileMixin:
                 or matches_raw_tail
                 or has_ordered_folded_snapshot_mapping
             )
+            # Tool-anchored replay evidence. Unlike the snapshot-digest proof
+            # above -- which is a registered engine-assembled fingerprint -- this
+            # term is anchored on a durable tool row carrying an execution id.
+            # The anchor is NOT "the id is minted once": LCM does not get to
+            # assume that (see ``stored_tool_identities``). What it requires is
+            # that every disjunct below exact-match the WHOLE identity -- role,
+            # normalized content, tool_call_id and tool_calls -- against durable
+            # rows; content resemblance alone never qualifies.
+            candidate_tool_anchor_indexes = [
+                index
+                for index, identity in enumerate(candidate_prefix)
+                if identity[0] == "tool" and identity[2]
+            ]
+            candidate_has_tool_anchor = bool(candidate_tool_anchor_indexes)
+            # ...and that exact-identity match is only evidence when EVERY
+            # identity the terms below advance over is lossless. A lossy
+            # sensitive redaction collapses distinct secrets of equal length
+            # onto one placeholder, so a collapsed component proves nothing and
+            # the anchor cannot carry the length-guard bypass below.
+            #
+            # The scope is the whole prefix, and both redacted components of
+            # each identity, because the terms below match the whole prefix:
+            # ``login(password=abcdef)`` and ``login(password=ghijkl)`` differ
+            # only inside the issuing assistant's ``tool_calls`` and can return
+            # the same innocuous result, so a fence reading only the tool row's
+            # content sees nothing lossy and lets ``candidate_ends_with_``
+            # ``replayed_tool_result`` advance over the second real call.
+            candidate_has_lossy_redacted_replay_identity = any(
+                _has_lossy_redacted_identity(identity) for identity in candidate_prefix
+            )
+            candidate_tool_identities = {
+                candidate_prefix[index] for index in candidate_tool_anchor_indexes
+            }
+            # The tool pair itself is durable, the prefix ends on that durable
+            # tool result, and everything ahead of it is the contentless
+            # assistant that issued the call -- required to be durable too, so
+            # this term can never advance over a row the store has not seen.
+            # Whatever follows the pair in the incoming batch is left to the
+            # caller as a genuinely new delta.
+            candidate_ends_with_replayed_tool_result = (
+                len(candidate_tool_anchor_indexes) == 1
+                and candidate_tool_anchor_indexes[0] == len(candidate_prefix) - 1
+                and candidate_tool_identities.issubset(stored_tool_identities)
+                and all(
+                    identity[0] == "assistant"
+                    and not identity[1]
+                    and identity in durable_replay_identities
+                    for identity in candidate_prefix[: candidate_tool_anchor_indexes[0]]
+                )
+            )
+            # A restart can replay a durable window from the MIDDLE of the
+            # session, so suffix matching alone misses it. Accept a contiguous
+            # exact window anywhere in the durable tail, but never one that
+            # spans a user turn after the last tool anchor: a user turn is the
+            # boundary at which a repeated window stops being provably replay
+            # and becomes an ambiguous delta, which main persists by design
+            # (#259 -- visible duplication is preferred over silent loss).
+            candidate_has_user_after_tool_anchor = candidate_has_tool_anchor and any(
+                identity[0] == "user"
+                for identity in candidate_prefix[candidate_tool_anchor_indexes[-1] + 1 :]
+            )
+            matches_tool_anchored_stale_window = (
+                candidate_has_tool_anchor
+                and not candidate_has_user_after_tool_anchor
+                and (
+                    _contains_identity_window(sanitized_replay_tail, candidate_prefix)
+                    or _contains_identity_window(stored_tail, candidate_prefix)
+                )
+            )
             matches_visible_sanitized_tail = (
                 filtered_candidate_placeholders
                 and bool(candidate_visible_prefix)
@@ -996,6 +1178,8 @@ class ReconcileMixin:
             if (
                 not matches_sanitized_tail
                 and not matches_raw_tail
+                and not candidate_ends_with_replayed_tool_result
+                and not matches_tool_anchored_stale_window
                 and not matches_inline_generation_cleanup_tail
                 and not matches_durable_persisted_output_full_replay
                 and not has_durable_compacted_snapshot_replay
@@ -1097,6 +1281,60 @@ class ReconcileMixin:
                 and matches_raw_tail
                 and candidate_prefix == stored_tail[-len(candidate_prefix) :]
             )
+            # Tool-anchored replay proof.
+            #
+            # The full-replay terms above carry a length guard (a candidate must
+            # cover the durable session) because repeated CONTENT ALONE is not
+            # proof: a fresh delta can legitimately repeat the visible tail, and
+            # treating it as replay silently loses it. The tool-anchored terms
+            # drop that length guard, so they need their own justification.
+            #
+            # It is NOT "a tool_call_id is minted once and cannot be re-issued".
+            # LCM cannot assume that -- see the note on
+            # ``stored_tool_identities`` above, and the explicit disclaimer in
+            # ``find_externalized_tool_result_content_for_call``.
+            #
+            # The invariant that actually makes the bypass safe: EVERY identity
+            # in the advanced prefix is exact-matched -- role, normalized
+            # content, tool_call_id and tool_calls together -- to a durable row,
+            # and at least one of them is a durable tool row carrying an id.
+            # ``matches_sanitized_tail`` and ``matches_raw_tail`` match the whole
+            # prefix against the durable tail suffix;
+            # ``matches_tool_anchored_stale_window`` matches it against a
+            # contiguous durable window; ``candidate_ends_with_``
+            # ``replayed_tool_result`` requires the durable tool pair plus
+            # durable contentless assistants. Nothing outside the durable set is
+            # ever consumed here, so a genuinely new turn -- including one that
+            # reuses an id but produces a different result -- cannot be skipped:
+            # it falls through to the ambiguous-delta path and is persisted
+            # (#259: visible duplication beats silent loss). The one accepted
+            # residual is a byte-identical repeat; see ``stored_tool_identities``.
+            #
+            # That invariant depends on every advanced identity being LOSSLESS,
+            # so a lossy-redacted prefix is excluded here as well as from
+            # ``stored_tool_identities``: this guard is what also withholds the
+            # bypass from ``matches_tool_anchored_stale_window``, which window
+            # matches ``stored_tail`` directly and never consults that set.
+            # Pinned by
+            # ``test_reused_tool_call_id_with_lossy_redacted_result_is_persisted_not_replayed``
+            # and, for the call-arguments half of the identity, by
+            # ``test_lossy_redacted_tool_call_arguments_are_not_replay_proof``.
+            #
+            # Persisted-output markers are excluded: their identity is recovered
+            # from an external file, so it is not a durable-row match and gets
+            # its own proof terms above.
+            has_tool_id_anchored_replay = (
+                not candidate_has_persisted_marker
+                and candidate_has_tool_anchor
+                and not candidate_has_lossy_redacted_replay_identity
+                and (
+                    matches_sanitized_tail
+                    or matches_raw_tail
+                    or matches_tool_anchored_stale_window
+                    or candidate_ends_with_replayed_tool_result
+                )
+            )
+
             has_persisted_marker_specific_replay_evidence = (
                 not candidate_has_persisted_marker
                 or has_durable_persisted_marker_suffix_replay
@@ -1158,6 +1396,7 @@ class ReconcileMixin:
                 or matches_durable_persisted_output_full_replay
                 or has_inline_generation_cleanup_replay
                 or has_inline_persisted_generation_suffix_replay
+                or has_tool_id_anchored_replay
                 or has_raw_full_replay
                 or has_scaffold_suffix_replay
                 or has_raw_cleanup_replay
@@ -1191,7 +1430,7 @@ class ReconcileMixin:
     def _effective_replay_identities(
         self,
         messages: List[Dict[str, Any]],
-    ) -> list[tuple[str, str, str, str]]:
+    ) -> list[tuple[str, str, str, str, str]]:
         active_lineage_identities = self._active_folded_tail_identity_overrides(
             messages
         )
@@ -1207,9 +1446,9 @@ class ReconcileMixin:
 
     def _is_suspicious_stale_no_overlap_snapshot(
         self,
-        incoming_identities: list[tuple[str, str, str, str]],
-        stored_tail: list[tuple[str, str, str, str]],
-        stored_head: list[tuple[str, str, str, str]],
+        incoming_identities: list[tuple[str, str, str, str, str]],
+        stored_tail: list[tuple[str, str, str, str, str]],
+        stored_head: list[tuple[str, str, str, str, str]],
     ) -> bool:
         """Return true for short stale snapshots with no durable-tail overlap.
 
@@ -1381,6 +1620,104 @@ class ReconcileMixin:
         )
         return 0
 
+    def _replayed_tool_segment_indexes_after_cursor(
+        self,
+        messages: List[Dict[str, Any]],
+        cursor: int,
+    ) -> set[int]:
+        """Find exact durable tool pairs replayed after a preserved new delta.
+
+        This runs on the residual messages once ``_reconcile_ingest_cursor_``
+        ``from_store`` has advanced over an earlier durable prefix, and it
+        matches durable identities on its own -- it never consults that
+        function's guards. So it carries its own copy of the lossy-redaction
+        rule: redacted-normalized equality is NOT identity for replay proof.
+        Without it, a fresh same-id result of ``password=ghijkl`` matches the
+        stored placeholder of ``password=abcdef`` and this helper removes both
+        the new invocation and its issuing assistant. Excluded at both ends --
+        the durable set and the candidate rows -- so neither side can supply
+        the collapsed half of a match. Pinned by ``test_lossy_redacted_pair_``
+        ``after_reconciled_prefix_is_persisted_not_replayed``.
+
+        The durable side is a MULTISET, not a set, and every marked segment
+        CONSUMES the identities it matched. A reused ``tool_call_id`` is
+        permitted (see ``stored_tool_identities``), so N identical candidate
+        invocations -- a side-effecting tool called twice, both returning "ok"
+        -- are not all proven by the K<N copies the store actually holds. Set
+        membership dropped every copy; the counter drops exactly K and lets the
+        surplus persist (#259: visible duplication beats silent loss; the #203
+        out-of-band fix bounds the same way). Consumption is atomic per
+        segment: the assistant and all of its matched results are debited
+        together, and a segment that cannot fully cover its needs debits
+        nothing. Pinned by ``test_repeated_identical_tool_invocation_is_``
+        ``persisted_not_replayed``.
+        """
+        if not self._session_id or cursor >= len(messages):
+            return set()
+        session_count = self._store.get_session_count(self._session_id)
+        if session_count <= 0:
+            return set()
+        tail_limit = min(max(len(messages) * 4, 64), session_count)
+        stored_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
+        stored_identity_counts = Counter(
+            identity
+            for identity in (
+                self._message_replay_identity(row, stored_row=True)
+                for row in stored_rows
+                if not self._matches_ignore_message_patterns(row, stored_row=True)
+            )
+            if not _has_lossy_redacted_identity(identity)
+        )
+        replayed: set[int] = set()
+        index = max(0, cursor)
+        while index < len(messages):
+            assistant = messages[index]
+            if str(assistant.get("role") or "") != "assistant" or not assistant.get("tool_calls"):
+                index += 1
+                continue
+            assistant_identity = self._message_replay_identity(assistant)
+            if _has_lossy_redacted_identity(assistant_identity):
+                index += 1
+                continue
+            call_ids = {
+                str(call.get("id") or "")
+                for call in assistant.get("tool_calls") or []
+                if isinstance(call, dict) and str(call.get("id") or "")
+            }
+            result_indexes: dict[str, int] = {}
+            # What this segment would consume from the durable multiset: its
+            # assistant plus one occurrence per matched result.
+            segment_needs: Counter[tuple[str, str, str, str, str]] = Counter()
+            segment_needs[assistant_identity] += 1
+            probe = index + 1
+            while probe < len(messages) and str(messages[probe].get("role") or "") == "tool":
+                result = messages[probe]
+                tool_call_id = str(result.get("tool_call_id") or "")
+                content = normalize_content_value(result.get("content")) or ""
+                result_identity = self._message_replay_identity(result)
+                if (
+                    tool_call_id in call_ids
+                    and not _is_hermes_persisted_output_marker(content)
+                    and not _has_lossy_redacted_identity(result_identity)
+                    and result_identity in stored_identity_counts
+                ):
+                    result_indexes[tool_call_id] = probe
+                    segment_needs[result_identity] += 1
+                probe += 1
+            if (
+                call_ids
+                and call_ids.issubset(result_indexes)
+                and all(
+                    stored_identity_counts[identity] >= needed
+                    for identity, needed in segment_needs.items()
+                )
+            ):
+                stored_identity_counts.subtract(segment_needs)
+                replayed.add(index)
+                replayed.update(result_indexes.values())
+            index = max(index + 1, probe)
+        return replayed
+
     def _raw_externalized_placeholder_replay_identity(self, msg: Dict[str, Any]) -> tuple[str, str, str, str]:
         return (
             str(msg.get("role") or "unknown"),
@@ -1531,7 +1868,7 @@ class ReconcileMixin:
     def _active_folded_tail_identity_overrides(
         self,
         messages: List[Dict[str, Any]],
-    ) -> dict[int, tuple[str, str, str, str]]:
+    ) -> dict[int, tuple[str, str, str, str, str]]:
         """Return exact active-to-source identity overrides for one durable fold."""
         folded_lineage = self._load_folded_tail_lineage(messages)
         if folded_lineage is None:
@@ -1622,7 +1959,7 @@ class ReconcileMixin:
 
         def active_lineage_identity(
             message: Dict[str, Any],
-        ) -> tuple[str, str, str, str]:
+        ) -> tuple[str, str, str, str, str]:
             return active_lineage_identities.get(
                 id(message),
                 self._message_replay_identity(message),
