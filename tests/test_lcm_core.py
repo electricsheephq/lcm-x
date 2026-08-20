@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 import sys
@@ -2276,6 +2277,41 @@ class TestMessageStore:
 
         assert results == []
 
+    def test_search_apostrophe_query_stays_on_fts_path(self, store, caplog):
+        store.append("sess1", {"role": "user", "content": "no, don't reschedule the meeting"})
+
+        with caplog.at_level(logging.WARNING):
+            results = store.search("don't", session_id="sess1")
+
+        assert len(results) == 1
+        assert results[0]["content"] == "no, don't reschedule the meeting"
+        assert "falling back to LIKE" not in caplog.text
+
+    def test_search_conversational_query_does_not_crash_fts(self, store, caplog):
+        store.append(
+            "sess1",
+            {"role": "user", "content": "what did I tell you, don't you remember?"},
+        )
+
+        with caplog.at_level(logging.WARNING):
+            results = store.search(
+                "what did I tell you, don't you remember?", session_id="sess1"
+            )
+
+        assert len(results) == 1
+        assert "falling back to LIKE" not in caplog.text
+
+    def test_search_quoted_phrase_with_conversational_punctuation(self, store, caplog):
+        store.append("sess1", {"role": "user", "content": "the vendoring external plan, remember?"})
+        store.append("sess1", {"role": "user", "content": "external vendoring is different"})
+
+        with caplog.at_level(logging.WARNING):
+            results = store.search('"vendoring external", remember?', session_id="sess1")
+
+        assert len(results) == 1
+        assert results[0]["content"] == "the vendoring external plan, remember?"
+        assert "falling back to LIKE" not in caplog.text
+
     def test_init_low_disk_degrades_without_leaving_broken_message_fts_triggers(self, tmp_path, monkeypatch):
         db_path = tmp_path / "low-disk-broken-message-fts.db"
         conn = sqlite3.connect(db_path)
@@ -3592,6 +3628,15 @@ class TestLifecycleStateStore:
 class TestDbBootstrapGuards:
     def test_sanitize_fts5_query_preserves_balanced_phrase_quotes(self):
         assert sanitize_fts5_query('"vendoring external" *') == '"vendoring external"'
+
+    def test_sanitize_fts5_query_keeps_quoted_phrases_verbatim(self):
+        # A balanced phrase is a literal: the hyphen inside it survives even
+        # though it is a separator outside, while the conversational comma
+        # after the phrase is still neutralized (#159).
+        assert (
+            sanitize_fts5_query('"plugin-only support" yes, really')
+            == '"plugin-only support" yes really'
+        )
 
     def test_sanitize_fts5_query_breaks_unbalanced_quotes_into_separate_terms(self):
         assert sanitize_fts5_query('foo"bar') == 'foo bar'
