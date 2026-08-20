@@ -1,6 +1,8 @@
 # Operator guide
 
-This page holds the detailed install, activation, configuration, diagnostics, and slash-command reference that used to live in the top-level README. The README stays focused on first-run adoption; this file is the operator reference.
+This page holds the detailed install, activation, configuration, diagnostics,
+and slash-command reference for LCM-X. The README stays focused on first-run
+adoption; this file is the operator reference.
 
 ## Requirements
 
@@ -10,17 +12,18 @@ This page holds the detailed install, activation, configuration, diagnostics, an
 
 ## Install
 
-Canonical install path: clone `hermes-lcm` as a general user plugin.
+Canonical install path: clone LCM-X into the compatibility plugin directory
+`hermes-lcm`.
 
 ```bash
-git clone https://github.com/stephenschoettler/hermes-lcm \
+git clone https://github.com/electricsheephq/lcm-x \
   ~/.hermes/plugins/hermes-lcm
 ```
 
 For a profile-specific install:
 
 ```bash
-git clone https://github.com/stephenschoettler/hermes-lcm \
+git clone https://github.com/electricsheephq/lcm-x \
   ~/.hermes/profiles/myprofile/plugins/hermes-lcm
 ```
 
@@ -31,6 +34,11 @@ From an existing checkout, install a symlink:
 # Optional profile-aware install:
 HERMES_PROFILE=myprofile ./scripts/install.sh
 ```
+
+The installer exposes both the plugin checkout and the bundled
+`skills/hermes-lcm` package in the matching global/profile skill tree. It is
+safe to run from a checkout already cloned into the canonical plugin path and
+refuses a conflicting plugin or skill path before creating either link.
 
 ## Activate
 
@@ -74,6 +82,38 @@ If you installed a symlink from a separate checkout:
 
 Restart Hermes after updating.
 
+## Upgrade from v0.20.0 to v0.22.0
+
+1. While the old runtime is running, run `/lcm backup`. If Hermes or any other
+   SQLite writer may still be running, this is the only supported online backup
+   path.
+2. Alternatively, stop Hermes and every other process that can write the
+   database. After all writers are fully stopped, copy the profile's `lcm.db`
+   plus any existing `lcm.db-wal` and `lcm.db-shm` companions together as one
+   quiescent snapshot. Do not copy these files separately while a writer is
+   live.
+3. Update the plugin checkout to the RC and restart Hermes.
+4. Send one normal message, then confirm `lcm_status` reports plugin version
+   `0.22.0` and the expected database path.
+5. For a migration-shape audit, query that database with
+   `SELECT value FROM metadata WHERE key = 'schema_version';`; the expected
+   result is `5`.
+
+No manual core migration, data import, or embedding backfill is required. An
+existing v0.20 database opens in place and remains on core schema version 5.
+The 0.21 assertion, query-view, and trajectory families use additive named
+feature markers and create their tables only when the corresponding store or
+workflow is invoked. A stock/default-off upgrade therefore creates none of
+those optional tables. If you later enable a 0.21-only store, treat the
+pre-upgrade backup as the downgrade path rather than opening that modified
+database with an older plugin.
+
+Temporal rollup settings do not change. When rollups are enabled, maintenance
+now runs through bounded eventual background work instead of blocking session
+start. A busy or full maintenance queue defers work to a later opportunity;
+`lcm_recent` continues to fall back to bounded leaf summaries while rollups are
+missing or stale.
+
 ## Verify
 
 Run:
@@ -86,13 +126,19 @@ Expected signals:
 
 - plugin list includes `hermes-lcm`
 - selected context engine is `lcm`
-- tool list includes `lcm_grep`, `lcm_load_session`, `lcm_describe`, `lcm_expand`, `lcm_expand_query`, `lcm_status`, `lcm_inspect`, and `lcm_doctor`
+- tool list includes all 15 schemas: `lcm_grep`, `lcm_recall`,
+  `lcm_query_state`, `lcm_compute`, `lcm_compile_evidence`,
+  `lcm_evidence_pack`, `lcm_retrieve`, `lcm_recent`, `lcm_load_session`,
+  `lcm_describe`, `lcm_expand`, `lcm_expand_query`, `lcm_status`, `lcm_inspect`,
+  and `lcm_doctor`
+- ordinary skill discovery includes `hermes-lcm`; plugin-qualified explicit
+  loading is `hermes-lcm:hermes-lcm` on hosts that support plugin skills
 
 Typical output:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm v0.19.0 (8 tools)
+  ✓ hermes-lcm v0.22.0 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm
@@ -102,6 +148,14 @@ For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
 `lcm_doctor`, and `/lcm doctor` also report the loaded plugin path and
 best-effort git identity:
 `plugin_git_commit`, `plugin_git_branch`, and `plugin_git_dirty`.
+
+The product-owned recall policy is distributed through the bundled
+`hermes-lcm` skill. It is deliberately not injected through the host's
+`pre_llm_call` user-context seam because current Hermes persists that context
+as user `api_content` and replays it on later turns. Bounded pre-answer
+evidence may still use the hook when explicitly enabled, but the hook never
+prepends the policy. The canonical file and digest source is
+`skills/hermes-lcm/references/recall-policy.md`.
 
 ## Troubleshooting
 
@@ -120,7 +174,7 @@ LCM tools are still available through the context-engine schema/dispatch path
 registration (Path A) on those hosts because Path A would shadow Path B and lose
 current-turn ingest.
 
-Healthy signals are the same as above: selected context engine `lcm`, the eight
+Healthy signals are the same as above: selected context engine `lcm`, all 15
 `lcm_*` tools in the live tool list, and `lcm_status` / `lcm_inspect` / `lcm_doctor` responding
 after one normal message initializes the session.
 
@@ -138,8 +192,11 @@ environment variables:
 | Variable | Default | Use |
 |----------|---------|-----|
 | `LCM_CONTEXT_THRESHOLD` | `0.35` | Fraction of the context window that triggers LCM compaction |
+| `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `0` | If `> 0`, force compaction at this absolute prompt-token count instead of `context_length × LCM_CONTEXT_THRESHOLD`. Cross-model context-health setpoint (common coding default: `130000`) so large windows do not delay compaction and degrade recall |
 | `LCM_FRESH_TAIL_COUNT` | `32` | Recent messages protected from compaction |
 | `LCM_FRESH_TAIL_MAX_TOKENS` | `0` | Optional token cap for the protected fresh tail (`0` disables it); always retains the newest message and complete assistant/tool-result groups |
+| `LCM_FRESH_TAIL_PRESSURE_YIELD_ENABLED` | `true` | Default-on: when compaction is deadlocked because the count-protected tail covers the whole over-threshold session (#441), the tail yields to a derived token bound so compaction can progress; `false` restores the strict count tail (rollback switch) |
+| `LCM_FRESH_TAIL_PRESSURE_YIELD_MIN_OBSERVATIONS` | `3` | Consecutive tail-blocked compaction attempts under host-observed pressure before the yield engages; any attempt not blocked by the tail resets the count; `1` yields on first observation |
 | `LCM_INCREMENTAL_MAX_DEPTH` | `3` | Max DAG condensation depth (`-1` = unlimited, `0` = leaf only); enables hierarchical summarization |
 | `LCM_LEAF_CHUNK_TOKENS` | `20000` | Raw-backlog floor before leaf compaction; with dynamic chunking enabled, the base chunk target |
 | `LCM_DYNAMIC_LEAF_CHUNK_ENABLED` | `false` | Enable chunk-sized leaf compaction passes instead of compacting the whole non-tail raw backlog per pass |
@@ -175,6 +232,8 @@ environment variables:
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `24` | Minimum hours between startup FTS5 deep integrity-checks (O(index size)). `0` checks every startup (previous behavior); a negative value never checks on startup. Structural checks always run regardless. |
 | `LCM_ENABLE_SLASH_COMMAND` | `false` | Enable the optional `/lcm` operator command surface |
 | `LCM_EMBEDDINGS_ENABLED` | `false` | Opt in to embedding warmup, backfill, and semantic retrieval storage |
+| `LCM_RERANK_WINDOW_LIMIT` | `0` | Optional positive cap on the `lcm_recall` rerank delivery window; `0` keeps the historical window unchanged, while a bound can stabilize the delivery set at `k ≤ limit` |
+| `LCM_RERANK_MARGIN` | `0.0` | Optional positive relevance-gap gate that holds the incoming rank-1 `lcm_recall` candidate unless the rerank challenger clears the margin |
 | `LCM_EMBEDDING_PROVIDER` | empty | Embedding provider: `voyage`, `ollama`, or `fastembed` |
 | `LCM_EMBEDDING_MODEL` | empty | Provider model identifier registered by `/lcm embed warmup` |
 | `LCM_EMBEDDING_STORAGE_DTYPE` | `float32` | Vector storage dtype for newly-registered embedding profiles: `float32` (byte-identical legacy path) or `int8` (per-vector quantization plus a sign-bit prescreen, a distinct profile identity). See [Vector storage scale options (v3)](#vector-storage-scale-options-v3) |
@@ -183,6 +242,7 @@ environment variables:
 | `LCM_KNN_PRESCREEN_MULTIPLIER` | `4` | Stage-1 prescreen breadth for two-stage KNN: `M = multiplier × k` lowest-Hamming-distance survivors are exact-rescored |
 | `LCM_RERANK_ENABLED` | `false` | Let `lcm_recall` ask Voyage to rerank its bounded fused candidate window. Failures preserve the incoming RRF order; `lcm_grep` is unaffected |
 | `LCM_RERANK_MODEL` | `rerank-2.5-lite` | Voyage reranker model used by `lcm_recall`; set `rerank-2.5` for the quality-oriented model |
+| `LCM_EMBEDDING_BACKFILL_BATCH_SIZE` | `32` | Documents claimed per backfill batch (`/lcm embed backfill` and state/chunk backfill). Non-positive or non-integer values fall back to the default. The effective value also clamps to the provider request-item ceiling — the lower of `LCM_EMBEDDING_MAX_BATCH_ITEMS` (normalized like the provider: non-positive means 1) and 1000 — so the dry-run estimate always matches real request splits |
 | `LCM_PROACTIVE_RECALL_ENABLED` | `false` | Opt in to proactive memory injection: at assembly, embed the newest user message and inject one budget-capped "relevant memories" block (needs `LCM_EMBEDDINGS_ENABLED`). Default-off keeps assembly byte-identical |
 | `LCM_PROACTIVE_RECALL_MIN_SCORE` | `0.01` | Relevance floor for an injected memory on the RRF/composite scale (a top-of-arm hit is ~0.016). Reranking changes candidate order only and does not replace this score with Voyage's incompatible `0..1` relevance score |
 | `LCM_PROACTIVE_RECALL_BUDGET_TOKENS` | `500` | Hard token budget for the single injected block (1-3 items) |
@@ -191,6 +251,50 @@ environment variables:
 | `LCM_EMPTY_LIFECYCLE_GC_ENABLED` | `true` | Master toggle for automatic pruning of lifecycle rows for sessions that never ingested any messages or summary nodes |
 | `LCM_EMPTY_LIFECYCLE_GC_THRESHOLD` | `200` | Number of lifecycle rows at which the GC pass fires (default 200 so fresh installs skip the work) |
 | `LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS` | `24` | Automatic GC only deletes empty lifecycle rows at least this old; set `0` only in trusted/test environments that intentionally want immediate empty-row pruning |
+
+### Evidence and adaptive retrieval (0.21 RC)
+
+Hermes exposes all 15 LCM tool schemas whenever LCM is the active context
+engine. Exposure is not activation. On a stock install:
+
+- `lcm_compute`, `lcm_compile_evidence`, and `lcm_evidence_pack` are bounded,
+  provider-neutral operations over caller-supplied exact refs. Calling them does
+  not enable a store, run an extractor, or activate an answering model.
+- `lcm_query_state` returns `status: disabled` until
+  `LCM_ASSERTIONS_ENABLED=true` creates/binds the rebuildable assertion sidecar.
+- `lcm_retrieve` returns `status: disabled` until
+  `LCM_ADAPTIVE_RETRIEVAL_ENABLED=true`. The controller itself has no model or
+  provider client, but retrieval calls it dispatches retain their existing
+  embedding-provider behavior.
+
+| Variable | Default | Use |
+|----------|---------|-----|
+| `LCM_ASSERTIONS_ENABLED` | `false` | Create and bind the same-DB assertion sidecar so `lcm_query_state` can return typed, source-cited state. This alone performs no extraction or backfill. |
+| `LCM_ASSERTION_EXTRACTION_ENABLED` | `false` | With assertions enabled, run bounded structured extraction over exact persisted rows before compaction. This may send source text to the configured extraction/summary model. |
+| `LCM_ASSERTION_EXTRACTION_MODEL` | empty | Extraction-model override; otherwise uses `LCM_EXTRACTION_MODEL`, then the summary model. |
+| `LCM_ASSERTION_EXTRACTION_MAX_SOURCES_PER_PASS` | `4` | Maximum exact source rows per extraction pass; runtime clamps to 1-8. |
+| `LCM_ASSERTION_EXTRACTION_TIMEOUT_SECONDS` | `30` | Timeout for each exact-source extraction call; runtime clamps to 0.1-120 seconds. |
+| `LCM_QUERY_VIEWS_ENABLED` | `false` | Create and bind demand-shaped evidence views without invoking a model or retrieval provider. |
+| `LCM_ADAPTIVE_RETRIEVAL_ENABLED` | `false` | Enable `lcm_retrieve` and bind query views for evidence reuse. Episodes are bounded to existing retrieval tools and store evidence/traces, never final prose. |
+| `LCM_PREANSWER_EVIDENCE_ENABLED` | `false` | Enable the automatic pre-answer evidence hook. Disabled preserves the ordinary hook context and performs no retrieval or computation. |
+| `LCM_PREANSWER_EVIDENCE_MODE` | empty | When the master flag is enabled, empty selects legacy selective behavior; explicit values are `off`, `legacy_selective`, or `requirements_v1`. |
+| `LCM_SELECTIVE_COMPILER_ENABLED` | `false` | Separately opt into the semantic selector for code-derived closed operations. Disabling the selective compiler does not prevent the pre-answer hook from retrieving a baseline. |
+| `LCM_SELECTIVE_COMPILER_MODEL` | empty | Optional model override for the selective compiler. |
+
+When no caller-supplied baseline is available, routed pre-answer turns may call
+`lcm_recall` to build one. If embeddings are enabled, this retrieval inherits
+the configured embedding provider and may send the current question to that
+provider. Disabling the selective compiler prevents its selector and answering
+model calls; it does not disable this retrieval path.
+
+Privacy boundary: assertion and query-view records live in the selected
+profile's existing `lcm.db` and may include exact quotes, spans, and dependency
+refs. Provider-neutral evidence tools do not upload them by themselves.
+Embedding-backed retrieval, including automatic pre-answer baseline retrieval,
+assertion extraction, and the optional selective compiler can send configured
+content to their selected providers. Review those provider and redaction
+settings before opting in; sensitive-pattern redaction is also default-off and
+is forward-only.
 
 Advanced compaction, assembly, and extraction knobs are defined in `config.py`.
 
@@ -297,6 +401,14 @@ When `context.engine: lcm` is active, `LCM_CONTEXT_THRESHOLD` is the compaction
 threshold LCM uses. Hermes core `compression.threshold` belongs to the built-in
 compressor. Hermes core `compression.enabled` is still the global gate that
 allows compaction, so leave it enabled when using LCM.
+
+If `LCM_ABSOLUTE_THRESHOLD_TOKENS` is set to a positive integer, it overrides the
+ratio-derived trigger after window math runs. Use this when you want a fixed
+context-health setpoint across model switches (for example `130000` for coding
+agents) so a larger window does not silently delay compaction, lower recall, or
+let long sessions accumulate more noise before LCM intervenes. Leave it at `0`
+to keep ratio-based behavior. When the absolute override is active, Codex
+GPT-5.5 ratio auto-raise is suppressed so the absolute setpoint stays pinned.
 
 If startup/status output shows a host-side compression percentage that disagrees
 with LCM, trust live LCM status after a normal message has initialized the
@@ -938,7 +1050,7 @@ precondition that makes the final unlink safe.
 ### OpenClaw/lossless-claw history
 
 `scripts/import_lossless_claw.py` is the local, dry-run-by-default operator path
-for moving OpenClaw history into a Hermes-LCM `lcm.db`. It supports two source
+for moving OpenClaw history into an LCM-X `lcm.db`. It supports two source
 families:
 
 - `--source-db <path>`: import from an existing lossless-claw/OpenClaw SQLite
