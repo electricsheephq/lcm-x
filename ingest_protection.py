@@ -1933,6 +1933,20 @@ def scan_externalized_payload_integrity(conn, config, *, hermes_home: str = "", 
             #      when recovery is broken and doctor most needs to report it.
             # A ref with neither signal is the quoted-source case the heuristics
             # target: hand-written docs examples have no file and no minted shape.
+            #
+            # Accepted residual, deliberate -- do NOT "fix" it by re-gating signal 2
+            # on local state: a stored excerpt quoting a real placeholder minted on
+            # a DIFFERENT installation carries the minted shape with no local file,
+            # so it is reported missing. That is a visible, self-correcting false
+            # alarm (the operator sees a ref name nothing local ever minted), and it
+            # is exactly what main did before any of this filtering existed, so it
+            # is not a behavior this filter introduced. The conservative direction
+            # for an integrity diagnostic is to over-report a broken ref rather than
+            # go silent on one; re-gating on existence would restore the silence
+            # this promotion was added to remove. Separating a foreign minted ref
+            # from a local GC'd one needs durable local provenance -- a persisted
+            # minted-ref ledger or a per-install salt in the filename -- which
+            # changes the payload storage contract and is future work.
             promoted_refs = [
                 ref
                 for ref in source_context_refs
