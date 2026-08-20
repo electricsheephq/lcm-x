@@ -379,3 +379,127 @@ def test_tool_detection_requires_hermes_invocation_marker():
     assert drive_hermes.LCM_TOOL_CALL_RE.search("The answer mentions lcm_recall only") is None
     assert drive_hermes.LCM_TOOL_CALL_RE.search("  📞 Tool: lcm_recall({})")
     assert drive_hermes.LCM_TOOL_CALL_RE.search("  ⚡ Concurrent: 2 tool calls — lcm_recall, lcm_grep")
+
+
+def test_score_probes_gen_material_frozen_schema(tmp_path):
+    # Binds the scorer to gen_material.py's actual output schema: canaries as a
+    # LIST of {id, class, epoch, value, ...}; probe rows carry only
+    # {id, kind, expect, text} — no canary_id (join key = probe id), traps
+    # marked via kind: "trap".
+    canaries = tmp_path / "canaries.json"
+    canaries.write_text(
+        json.dumps(
+            [
+                {"id": "C1-E0-1", "class": "C1", "epoch": "E0", "turn": 1,
+                 "char_offset": 61042, "probe": "What did we decide to name the artifact?",
+                 "value": "opal-fjord-b20c"},
+                {"id": "C2-E1-1", "class": "C2", "epoch": "E1", "turn": 14,
+                 "char_offset": 30500, "probe": "What was the build id?",
+                 "value": "canyon-7741"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    probes = tmp_path / "probes.jsonl"
+    _jsonl(
+        probes,
+        [
+            {"id": "C1-E0-1", "kind": "canary", "expect": "value",
+             "text": "What did we decide to name the artifact?"},
+            {"id": "C2-E1-1", "kind": "canary", "expect": "value",
+             "text": "What was the build id?"},
+            {"id": "TRAP-04", "kind": "trap", "expect": "ABSTAIN",
+             "text": "What was the build id of the failed midnight pipeline?"},
+        ],
+    )
+    results = tmp_path / "results.jsonl"
+    _jsonl(
+        results,
+        [
+            {"turn_index": 36, "kind": "probe", "probe_id": "C1-E0-1",
+             "raw_answer": "The artifact name is `opal-fjord-b20c`."},
+            {"turn_index": 37, "kind": "probe", "probe_id": "C2-E1-1",
+             "raw_answer": "It was zephyr-0000."},
+            {"turn_index": 38, "kind": "probe", "probe_id": "TRAP-04",
+             "raw_answer": "You didn't mention a failed midnight pipeline."},
+        ],
+    )
+
+    payload = score_probes.score(results, canaries, probes)
+
+    rows = {row["probe_id"]: row for row in payload["probes"]}
+    assert rows["C1-E0-1"]["classification"] == "CORRECT"
+    assert rows["C1-E0-1"]["canary_id"] == "C1-E0-1"
+    assert rows["C1-E0-1"]["epoch"] == "E0"
+    assert rows["C1-E0-1"]["class"] == "C1"
+    assert rows["C2-E1-1"]["classification"] == "HALLUCINATE"
+    assert rows["C2-E1-1"]["epoch"] == "E1"
+    assert rows["TRAP-04"]["trap"] is True
+    assert rows["TRAP-04"]["classification"] == "ABSTAIN"
+    assert payload["totals"]["retention"] == 1 / 2
+
+
+def test_abstain_patterns_match_real_model_phrasings():
+    # These are verbatim abstention answers observed in R2-A / smokes; the
+    # original narrow pattern set classified all of them HALLUCINATE.
+    real_abstentions = [
+        "No build ID was provided for a failed midnight pipeline. The question "
+        "is an abstention probe, so the correct answer is: unknown.\n",
+        "I don’t have a saved preference for nebula-name prefixes yet.\n",
+        "No canonical config location for the shadow-market has been established.\n",
+        "We never decided on a name for the glacier-index.\n",
+        "You didn't state a canonical config path under `src/` in our earlier messages.\n",
+        "It isn't present in the conversation history available to me.\n",
+        "I don't know.\n",
+    ]
+    for answer in real_abstentions:
+        classification, _ = score_probes.classify(
+            {"raw_answer": answer}, None, True
+        )
+        assert classification == "ABSTAIN", f"missed abstention: {answer!r}"
+    fabricated = "The build id was canyon-7741."
+    classification, _ = score_probes.classify({"raw_answer": fabricated}, None, True)
+    assert classification == "HALLUCINATE"
+
+
+def test_metadata_follows_explicit_canary_id_not_probe_id(tmp_path):
+    # Legacy schema: probe_id differs from canary_id. epoch/class metadata must
+    # resolve through the same key as the VALUE (the explicit canary_id), not
+    # the probe's own id.
+    canaries = tmp_path / "canaries.json"
+    canaries.write_text(
+        json.dumps([{"id": "c1", "class": "C3", "epoch": "E1", "value": "amber-key"}]),
+        encoding="utf-8",
+    )
+    probes = tmp_path / "probes.jsonl"
+    _jsonl(probes, [{"probe_id": "p1", "canary_id": "c1"}])
+    results = tmp_path / "results.jsonl"
+    _jsonl(results, [{"turn_index": 1, "kind": "probe", "probe_id": "p1", "raw_answer": "amber-key"}])
+
+    payload = score_probes.score(results, canaries, probes)
+
+    row = payload["probes"][0]
+    assert row["classification"] == "CORRECT"
+    assert row["epoch"] == "E1"
+    assert row["class"] == "C3"
+
+
+def test_hedged_fabrication_with_known_value_is_hallucinate():
+    # RUN-SHEET rule: any concrete answer is HALLUCINATE — an abstention
+    # disclaimer followed by a registered canary value must not score ABSTAIN.
+    hedged = "You didn't state a build id, but it was probably canyon-7741."
+    classification, _ = score_probes.classify(
+        {"raw_answer": hedged}, None, True, known_values=["canyon-7741"]
+    )
+    assert classification == "HALLUCINATE"
+    # Same guard on canary probes: hedge + ANOTHER canary's value = substitution.
+    classification, _ = score_probes.classify(
+        {"raw_answer": hedged}, "opal-fjord", False, known_values=["opal-fjord", "canyon-7741"]
+    )
+    assert classification == "HALLUCINATE"
+    # A pure abstention still scores ABSTAIN with values registered.
+    classification, _ = score_probes.classify(
+        {"raw_answer": "You didn't state a build id."}, None, True,
+        known_values=["canyon-7741"],
+    )
+    assert classification == "ABSTAIN"
