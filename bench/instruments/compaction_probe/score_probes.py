@@ -259,10 +259,13 @@ def score(results_path: Path, canaries_path: Path, probes_path: Path) -> dict[st
                 UserWarning,
                 stacklevel=2,
             )
-        meta = canary_meta.get(pid, {})
         canary_id = _field(probe, "canary_id", "canary")
         if canary_id is None and pid in canary_meta:
             canary_id = pid  # resolved via the probe-id join (gen_material schema)
+        # Metadata must follow the same key the VALUE resolved through: an
+        # explicit canary_id when present, else the probe-id join.
+        meta_key = pid if isinstance(canary_id, dict) or canary_id is None else str(canary_id)
+        meta = canary_meta.get(meta_key, {})
         scored = {
             "probe_id": pid,
             "epoch": str(

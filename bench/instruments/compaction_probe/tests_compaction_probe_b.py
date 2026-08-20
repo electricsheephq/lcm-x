@@ -460,3 +460,25 @@ def test_abstain_patterns_match_real_model_phrasings():
     fabricated = "The build id was canyon-7741."
     classification, _ = score_probes.classify({"raw_answer": fabricated}, None, True)
     assert classification == "HALLUCINATE"
+
+
+def test_metadata_follows_explicit_canary_id_not_probe_id(tmp_path):
+    # Legacy schema: probe_id differs from canary_id. epoch/class metadata must
+    # resolve through the same key as the VALUE (the explicit canary_id), not
+    # the probe's own id.
+    canaries = tmp_path / "canaries.json"
+    canaries.write_text(
+        json.dumps([{"id": "c1", "class": "C3", "epoch": "E1", "value": "amber-key"}]),
+        encoding="utf-8",
+    )
+    probes = tmp_path / "probes.jsonl"
+    _jsonl(probes, [{"probe_id": "p1", "canary_id": "c1"}])
+    results = tmp_path / "results.jsonl"
+    _jsonl(results, [{"turn_index": 1, "kind": "probe", "probe_id": "p1", "raw_answer": "amber-key"}])
+
+    payload = score_probes.score(results, canaries, probes)
+
+    row = payload["probes"][0]
+    assert row["classification"] == "CORRECT"
+    assert row["epoch"] == "E1"
+    assert row["class"] == "C3"
