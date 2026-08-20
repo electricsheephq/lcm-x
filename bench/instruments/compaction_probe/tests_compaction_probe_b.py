@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
+import selectors
+import time
 from pathlib import Path
 
 import pytest
@@ -18,6 +21,7 @@ def _load_module(name: str, filename: str):
 
 
 drive_hermes = _load_module("compaction_probe_drive_hermes", "drive_hermes.py")
+drive_hermes_acp = _load_module("compaction_probe_drive_hermes_acp", "drive_hermes_acp.py")
 report_pilot = _load_module("compaction_probe_report_pilot", "report_pilot.py")
 score_probes = _load_module("compaction_probe_score_probes", "score_probes.py")
 
@@ -27,6 +31,215 @@ def _jsonl(path: Path, rows: list[object]) -> None:
         "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
         encoding="utf-8",
     )
+
+
+def test_acp_driver_protocol_framing_and_agent_chunk_extraction():
+    wire = drive_hermes_acp.jsonrpc_request(
+        7,
+        "session/prompt",
+        {
+            "sessionId": "session-1",
+            "prompt": [{"type": "text", "text": "hello"}],
+        },
+    )
+    assert wire.endswith(b"\n")
+    assert json.loads(wire) == {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "session/prompt",
+        "params": {
+            "sessionId": "session-1",
+            "prompt": [{"type": "text", "text": "hello"}],
+        },
+    }
+    update = {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "session-1",
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "answer"},
+            },
+        },
+    }
+    assert drive_hermes_acp.agent_message_chunk(update) == "answer"
+    update["params"]["update"]["sessionUpdate"] = "tool_call"
+    assert drive_hermes_acp.agent_message_chunk(update) is None
+    update["params"]["update"]["title"] = "lcm_recall"
+    assert drive_hermes_acp.lcm_tool_update(update) is True
+    update["params"]["update"]["title"] = "terminal: echo hi"
+    assert drive_hermes_acp.lcm_tool_update(update) is False
+
+
+def test_acp_driver_partial_line_obeys_deadline_and_blank_lines_are_skipped():
+    read_fd, write_fd = os.pipe()
+    stream = os.fdopen(read_fd, "rb", buffering=0)
+    selector = selectors.DefaultSelector()
+    selector.register(stream, selectors.EVENT_READ)
+    client = drive_hermes_acp.StdioJsonRpc.__new__(drive_hermes_acp.StdioJsonRpc)
+    client._selector = selector
+    client._stdout_buffer = bytearray()
+    client.process = type("Process", (), {"stdout": stream, "poll": lambda self: None})()
+    try:
+        os.write(write_fd, b'{"jsonrpc":"2.0"')
+        started = time.monotonic()
+        with pytest.raises(drive_hermes_acp.TurnTimeout):
+            client._read_message(0.05)
+        assert time.monotonic() - started < 0.5
+
+        client._stdout_buffer.clear()
+        os.write(write_fd, b'\n\n{"jsonrpc":"2.0","id":1,"result":{}}\n')
+        assert client._read_message(0.5)["id"] == 1
+    finally:
+        os.close(write_fd)
+        selector.close()
+        stream.close()
+
+
+def test_acp_driver_short_write_loop_sends_every_byte():
+    class ShortWriter:
+        def __init__(self):
+            self.received = bytearray()
+
+        def write(self, data):
+            count = min(3, len(data))
+            self.received.extend(data[:count])
+            return count
+
+    writer = ShortWriter()
+    drive_hermes_acp._write_all(writer, b"0123456789")
+    assert bytes(writer.received) == b"0123456789"
+
+
+def test_acp_driver_plan_construction_preserves_material_then_probes():
+    material = [{"turn": 1, "text": "first"}, {"prompt": "second"}]
+    probes = [{"id": "p1", "question": "recall"}]
+    phases = drive_hermes_acp.build_plan_phases(
+        material, probes, restart_before_probes=False
+    )
+    assert phases == [[
+        ("material", material[0]),
+        ("material", material[1]),
+        ("probe", probes[0]),
+    ]]
+    assert drive_hermes_acp.row_text(material[0]) == "first"
+    assert drive_hermes_acp.row_text(probes[0]) == "recall"
+
+
+def test_acp_driver_restart_mode_creates_probe_session_boundary():
+    material = [{"text": "material"}]
+    probes = [{"text": "probe"}]
+    phases = drive_hermes_acp.build_plan_phases(
+        material, probes, restart_before_probes=True
+    )
+    assert phases == [[("material", material[0])], [("probe", probes[0])]]
+    with pytest.raises(ValueError, match="requires non-empty material and probes"):
+        drive_hermes_acp.build_plan_phases([], probes, restart_before_probes=True)
+
+
+def _acp_args(tmp_path: Path, material_rows: list[object], probe_rows: list[object]):
+    home = tmp_path / "hermes-acp"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "context:\n  engine: lcm\nmodel:\n  default: gpt-5.6-sol\n",
+        encoding="utf-8",
+    )
+    material = tmp_path / "acp-material.jsonl"
+    probes = tmp_path / "acp-probes.jsonl"
+    _jsonl(material, material_rows)
+    _jsonl(probes, probe_rows)
+    return [
+        "--hermes-home", str(home), "--material", str(material),
+        "--probes", str(probes), "--log", str(tmp_path / "acp-raw.log"),
+        "--results", str(tmp_path / "acp-results.jsonl"),
+        "--manifest", str(tmp_path / "acp-manifest.json"),
+        "--expect-engine", "lcm", "--expect-model", "gpt-5.6-sol",
+    ]
+
+
+def test_acp_driver_non_end_turn_preserves_row_and_exits_72(tmp_path, monkeypatch):
+    class StoppedClient:
+        def __init__(self, _home):
+            pass
+
+        def initialize(self, _home, _timeout):
+            return "session-1"
+
+        def prompt(self, _session_id, _text, _timeout):
+            raise drive_hermes_acp.TurnStopped("max_tokens", "partial answer", True)
+
+        def close(self):
+            pass
+
+        def stderr_text(self):
+            return ""
+
+    monkeypatch.setattr(drive_hermes_acp, "StdioJsonRpc", StoppedClient)
+    assert drive_hermes_acp.main(_acp_args(tmp_path, [{"text": "turn"}], [])) == 72
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "acp-results.jsonl").read_text().splitlines()
+    ]
+    assert rows == [{
+        "turn_index": 1,
+        "kind": "material",
+        "ts": rows[0]["ts"],
+        "wall_ms": rows[0]["wall_ms"],
+        "raw_answer": "partial answer",
+        "timed_out": False,
+        "stop_reason": "max_tokens",
+    }]
+
+
+def test_acp_driver_initialize_timeout_exits_72_without_row(tmp_path, monkeypatch):
+    class TimedOutClient:
+        def __init__(self, _home):
+            pass
+
+        def initialize(self, _home, _timeout):
+            raise drive_hermes_acp.TurnTimeout("initialize timeout")
+
+        def close(self):
+            pass
+
+        def stderr_text(self):
+            return "boot stderr"
+
+    monkeypatch.setattr(drive_hermes_acp, "StdioJsonRpc", TimedOutClient)
+    assert drive_hermes_acp.main(_acp_args(tmp_path, [{"text": "turn"}], [])) == 72
+    assert (tmp_path / "acp-results.jsonl").read_text() == ""
+    assert "[stderr]\nboot stderr\n" in (tmp_path / "acp-raw.log").read_text()
+
+
+def test_acp_driver_constructor_failure_kills_and_waits(tmp_path, monkeypatch):
+    class Stream:
+        def close(self):
+            pass
+
+    class Process:
+        pid = 4321
+        stdin, stdout, stderr = Stream(), Stream(), Stream()
+        waited = False
+
+        def wait(self):
+            self.waited = True
+
+    process = Process()
+    signals = []
+    monkeypatch.setattr(drive_hermes_acp.subprocess, "Popen", lambda *a, **k: process)
+    monkeypatch.setattr(
+        drive_hermes_acp.selectors,
+        "DefaultSelector",
+        lambda: (_ for _ in ()).throw(RuntimeError("selector failed")),
+    )
+    monkeypatch.setattr(
+        drive_hermes_acp.os, "killpg", lambda pid, sig: signals.append((pid, sig))
+    )
+    with pytest.raises(RuntimeError, match="selector failed"):
+        drive_hermes_acp.StdioJsonRpc(tmp_path)
+    assert process.waited is True
+    assert signals == [(4321, drive_hermes_acp.signal.SIGKILL)]
 
 
 def test_score_probes_covers_three_way_unparseable_and_trap_negative(tmp_path):
