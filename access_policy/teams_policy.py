@@ -78,8 +78,15 @@ class TeamsPolicy:
         self._session_owner = session_owner
         self.teams_enabled = True
 
-    def _target_owner(self, session_id: str) -> str | None:
-        """Who owns a target session, or None when nothing claims it.
+    #: Sentinel: the owner lookup itself failed. Distinct from None
+    #: ("nothing claims this target") because an UNREADABLE owner must fail
+    #: closed (#68: callback exceptions leave no fail-open path), while a
+    #: genuinely unclaimed target keeps the deliberate legacy-allow decision.
+    _OWNER_LOOKUP_FAILED = object()
+
+    def _target_owner(self, session_id: str) -> object:
+        """Who owns a target session, None when nothing claims it, or
+        ``_OWNER_LOOKUP_FAILED`` when the lookup raised.
 
         Resolved through a seam-bound callable rather than a database handle,
         the same way the audit sink is bound -- the policy stays pure and
@@ -90,8 +97,8 @@ class TeamsPolicy:
             return None
         try:
             owner = self._session_owner(session_id)
-        except Exception:  # noqa: BLE001 - an unreadable owner is not a claim
-            return None
+        except Exception:  # noqa: BLE001 - unreadable owner fails CLOSED
+            return self._OWNER_LOOKUP_FAILED
         return str(owner) if owner else None
 
     # -- authorization ----------------------------------------------------
@@ -154,6 +161,10 @@ class TeamsPolicy:
             if target == str(effective.session_id):
                 continue
             owner = self._target_owner(target)
+            if owner is self._OWNER_LOOKUP_FAILED:
+                # An unreadable owner is not "unclaimed" -- denying here is
+                # the #68 fail-closed direction for callback failures.
+                return Decision.deny(DenialReason.CONTEXT_INVALID)
             if owner is not None and owner != principal:
                 return Decision.deny(DenialReason.SCOPE_FORBIDDEN)
 

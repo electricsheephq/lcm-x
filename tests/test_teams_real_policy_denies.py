@@ -99,3 +99,21 @@ def test_every_store_wide_kind_the_command_layer_uses_is_enumerated() -> None:
         f"command.py gates on kinds the policy does not treat as store-wide: "
         f"{sorted(missing)} -- those gates are inert"
     )
+
+
+def test_owner_lookup_failure_denies_instead_of_allowing() -> None:
+    """An exception in the owner lookup must fail CLOSED (#68), not read as
+    'unclaimed'. Before the fix, a raising session_owner collapsed to None,
+    None read as unclaimed, and another principal's target was ALLOWED."""
+
+    def raising_owner(_session_id: str) -> str:
+        raise RuntimeError("owner store unreadable")
+
+    policy = TeamsPolicy(_context(), session_owner=raising_owner)
+    decision = policy.authorize_operation(
+        None, "read", {"session_id": "someone-elses-session"}
+    )
+
+    assert not decision.allowed
+    from hermes_lcm.access_context.denials import DenialReason
+    assert decision.denial_reason is DenialReason.CONTEXT_INVALID
