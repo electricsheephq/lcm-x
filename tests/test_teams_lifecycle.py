@@ -155,14 +155,15 @@ def test_stamp_detection_tolerates_absent_tables(store: sqlite3.Connection) -> N
     assert access_scope_stamps_exist(store) is False
 
 
-def _doctor_status(result: dict) -> str:
-    """Mirror of the mapping in tools.py's lcm_doctor scope_storage check."""
-    status = str(result.get("status"))
-    if status in {"fail", "stamped-without-marker"}:
-        return "fail"
-    if status == "nothing-to-verify":
-        return "warn"
-    return "pass"
+#: The PRODUCTION classifier, not a mirror of it.
+#:
+#: This was a copy of the mapping the doctor uses, so a change on the doctor
+#: side -- classifying `stamped-without-marker` as `warn`, or forgetting a
+#: status added later -- left all three assertions below passing while the
+#: doctor went green on exactly the store it exists to refuse. The mapping now
+#: lives in scope_storage, with the statuses it classifies, and both the tool
+#: and these tests call it.
+_doctor_status = scope_storage.doctor_status_for
 
 
 def test_doctor_is_not_green_on_an_aborted_enable(store: sqlite3.Connection) -> None:

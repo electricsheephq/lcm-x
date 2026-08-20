@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
+from .access_policy.resolution import TEAMS_ENABLED_ATTR
 from .db_bootstrap import (
     add_column_if_missing,
     ensure_metadata_table,
@@ -48,19 +49,15 @@ SCOPE_BEARING_TABLES = (
     "lcm_chunk_binary",
 )
 
-_ACCESS_SCOPE_TABLES = (
-    "messages",
-    "summary_nodes",
-    "lcm_rollups",
-    "lcm_rollup_invalidations",
-    "lcm_rollup_state",
-    "lcm_embedding_meta",
-    "lcm_embedding_vectors",
-    "lcm_embedding_binary",
-    "lcm_chunk_meta",
-    "lcm_chunk_vectors",
-    "lcm_chunk_binary",
-)
+# The migration and the verification must never disagree about the table set.
+# These were two byte-identical tuples driving different code paths: this one
+# adds and detects the column (`ensure_scope_columns`,
+# `access_scope_stamps_exist`), the one above audits it (`verify_scope_storage`,
+# `enumerate_scope_writers`). A table added to only one of them is either
+# silently unverified -- unstamped rows in it never produce a `fail` -- or
+# reported as defective forever, because the migration never touches it.
+# Neither failure is loud at the point of the edit. One definition, one alias.
+_ACCESS_SCOPE_TABLES = SCOPE_BEARING_TABLES
 
 _SESSION_SCOPE_TABLES = ("messages", "summary_nodes")
 _OPTIONAL_SCOPE_TABLES = {
@@ -91,19 +88,25 @@ class ScopeBackfillIncompleteError(RuntimeError):
             "scope backfill incomplete for "
             + ", ".join(f"{table} ({error})" for table, error in failures.items())
         )
-_TEAMS_ENABLED_ATTRIBUTE = "lcm_" + "teams_enabled"
+
+
+# The SAME constant `policy_for_engine` reads, imported rather than spelled out
+# again. Two independent definitions of "lcm_teams_enabled" meant a rename of
+# either one left `mark_teams_enabled()` setting an attribute the policy seam
+# does not read -- a permissive policy on scoped data, and nothing fails.
+_TEAMS_ENABLED_ATTRIBUTE = TEAMS_ENABLED_ATTR
 
 
 def teams_enabled(engine: object) -> bool:
     """Read the host's explicit Teams flag for storage-only decisions."""
 
-    return bool(getattr(engine, _TEAMS_ENABLED_ATTRIBUTE, False))
+    return bool(getattr(engine, TEAMS_ENABLED_ATTR, False))
 
 
 def mark_teams_enabled(engine: object) -> None:
     """Publish the Teams setup completion flag after backfill succeeds."""
 
-    setattr(engine, _TEAMS_ENABLED_ATTRIBUTE, True)
+    setattr(engine, TEAMS_ENABLED_ATTR, True)
 
 
 # The DURABLE record of the operator's decision. Deliberately not a
@@ -113,9 +116,25 @@ def mark_teams_enabled(engine: object) -> None:
 # whether or not anyone enabled Teams.
 TEAMS_ENABLED_METADATA_KEY = "teams_enabled_v1"
 
+# The spellings an operator's decision may be written in. Anything else is not
+# a decision -- see `read_persisted_teams_marker`.
+_TRUE_MARKERS = frozenset({"1", "true", "yes", "on"})
+_FALSE_MARKERS = frozenset({"0", "false", "no", "off"})
 
-def read_persisted_teams_enabled(conn: sqlite3.Connection) -> bool | None:
-    """Return the recorded decision, or None when none was ever recorded.
+
+def read_persisted_teams_marker(conn: sqlite3.Connection) -> str:
+    """Classify the recorded decision: enabled / disabled / malformed / absent.
+
+    The marker used to be read as ``value in {"1","true","yes","on"}``, so a
+    value that is corrupted, truncated, or written by an incompatible version
+    -- ``"tru"`` -- was indistinguishable from an operator's explicit
+    ``false``. `resolve_startup_teams_state` then returned ``disabled`` BEFORE
+    checking whether the store carries owner stamps, which selects the
+    permissive policy for a scoped store.
+
+    An unrecognized value is therefore its own answer. It is not authority to
+    disable: nobody wrote it deliberately, and the direction to fail in when
+    the store might be scoped is closed.
 
     Deliberately does NOT create the metadata table. This runs on the doctor
     path and on every storage bind, and a verification that mutates schema is
@@ -127,13 +146,33 @@ def read_persisted_teams_enabled(conn: sqlite3.Connection) -> bool | None:
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'"
     ).fetchone()
     if exists is None:
-        return None
+        return "absent"
     row = conn.execute(
         "SELECT value FROM metadata WHERE key = ?", (TEAMS_ENABLED_METADATA_KEY,)
     ).fetchone()
     if row is None or row[0] is None:
+        return "absent"
+    value = str(row[0]).strip().lower()
+    if value in _TRUE_MARKERS:
+        return "enabled"
+    if value in _FALSE_MARKERS:
+        return "disabled"
+    return "malformed"
+
+
+def read_persisted_teams_enabled(conn: sqlite3.Connection) -> bool | None:
+    """Return the recorded decision, or None when none was ever recorded.
+
+    A MALFORMED marker reads as True, not False: it is not an operator's
+    authority to disable, and treating it as one hands a permissive policy a
+    store that may be fully stamped. Callers that need to tell the two apart
+    use :func:`read_persisted_teams_marker`.
+    """
+
+    marker = read_persisted_teams_marker(conn)
+    if marker == "absent":
         return None
-    return str(row[0]).strip().lower() in {"1", "true", "yes", "on"}
+    return marker in {"enabled", "malformed"}
 
 
 def persist_teams_enabled(conn: sqlite3.Connection, enabled: bool) -> None:
@@ -184,10 +223,14 @@ def resolve_startup_teams_state(conn: sqlite3.Connection) -> tuple[bool, str]:
     to another.
     """
 
-    persisted = read_persisted_teams_enabled(conn)
-    if persisted is True:
+    marker = read_persisted_teams_marker(conn)
+    if marker == "enabled":
         return True, "enabled"
-    if persisted is False:
+    if marker == "malformed":
+        # A fourth case, and it fails in the same direction as the third: an
+        # unreadable decision is not a decision to disable.
+        return True, "malformed-marker"
+    if marker == "disabled":
         return False, "disabled"
     if access_scope_stamps_exist(conn):
         return True, "stamped-without-marker"
@@ -308,7 +351,13 @@ def ensure_scope_columns(
         # ``scope`` on the non-rollup tables.  Rename that column in place so
         # its values survive the corrective migration.  Rollup ``scope`` is a
         # different, NOT NULL partition key and must never be renamed.
-        if table not in rollup_tables and "scope" in columns and ACCESS_SCOPE_COLUMN not in columns:
+        #
+        # Bounded to the module's OWN table set: `tables` is a targeted-repair
+        # argument, and a caller naming an arbitrary table there must not have
+        # a `scope` column of unrelated meaning repurposed as owner attribution
+        # by a migration it only asked to add a column.
+        renameable = table in _ACCESS_SCOPE_TABLES and table not in rollup_tables
+        if renameable and "scope" in columns and ACCESS_SCOPE_COLUMN not in columns:
             conn.execute(f'ALTER TABLE "{table}" RENAME COLUMN scope TO {ACCESS_SCOPE_COLUMN}')
             columns.remove("scope")
             columns.add(ACCESS_SCOPE_COLUMN)
@@ -472,12 +521,23 @@ def _backfill_session_table(
         if not rows:
             return updated
         values = [(_resolve_scope(resolver, row[1]), int(row[0])) for row in rows]
-        conn.executemany(
+        cursor = conn.executemany(
             f'UPDATE "{table}" SET {ACCESS_SCOPE_COLUMN}=? WHERE rowid=? '
             f'AND {ACCESS_SCOPE_COLUMN} IS NULL', values
         )
         conn.commit()
-        updated += len(values)
+        # Rows WRITTEN, not rows selected. The UPDATE carries
+        # `AND access_scope IS NULL`, so a row a concurrent writer stamped
+        # between the SELECT and the UPDATE is selected, counted and not
+        # written -- and `total_updated` is the number an operator reads to
+        # confirm an enable.
+        updated += _rows_written(cursor)
+
+
+def _rows_written(cursor: sqlite3.Cursor) -> int:
+    """How many rows an executemany actually modified, never negative."""
+
+    return max(int(cursor.rowcount or 0), 0)
 
 
 def _backfill_joined_table(
@@ -492,9 +552,12 @@ def _backfill_joined_table(
 
     updated = 0
     while True:
+        # DISTINCT on the pair: the join can return several source rows for one
+        # target rowid, and every duplicate past the first no-ops against the
+        # `IS NULL` guard while still being counted.
         rows = conn.execute(
             f"""
-            SELECT target.rowid, source.access_scope
+            SELECT DISTINCT target.rowid, source.access_scope
             FROM {table} AS target
             JOIN {source_table} AS source ON {join_sql}
             WHERE target.access_scope IS NULL AND source.access_scope IS NOT NULL
@@ -504,13 +567,16 @@ def _backfill_joined_table(
         ).fetchall()
         if not rows:
             return updated
-        conn.executemany(
+        cursor = conn.executemany(
             f"UPDATE {table} SET {ACCESS_SCOPE_COLUMN}=? WHERE rowid=? "
             f"AND {ACCESS_SCOPE_COLUMN} IS NULL",
             [(str(row[1]), int(row[0])) for row in rows],
         )
         conn.commit()
-        updated += len(rows)
+        # Progress is guaranteed by the SELECT's own `IS NULL` predicate, not
+        # by this count: a row stamped concurrently drops out of the next
+        # batch. So a zero here is a reporting fact, never a spin.
+        updated += _rows_written(cursor)
 
 
 def _backfill_rollup_table(
@@ -531,13 +597,37 @@ def _backfill_rollup_table(
         if not rows:
             return updated
         values = [(_resolve_scope(resolver, row[1]), int(row[0])) for row in rows]
-        conn.executemany(
+        cursor = conn.executemany(
             f'UPDATE "{table}" SET {ACCESS_SCOPE_COLUMN}=? WHERE rowid=? '
             f'AND {ACCESS_SCOPE_COLUMN} IS NULL',
             values,
         )
         conn.commit()
-        updated += len(values)
+        updated += _rows_written(cursor)
+
+
+def _unstamped_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """Rows that still carry no access_scope, per table.
+
+    Asked of the DATABASE rather than inferred from what the backfill believes
+    it did, so a row no code path selected is still counted.
+    """
+
+    counts: dict[str, int] = {}
+    for table in SCOPE_BEARING_TABLES:
+        if not _table_exists(conn, table):
+            continue
+        if ACCESS_SCOPE_COLUMN not in _table_columns(conn, table):
+            continue
+        remaining = int(
+            conn.execute(
+                f'SELECT COUNT(*) FROM "{table}" '
+                f"WHERE {ACCESS_SCOPE_COLUMN} IS NULL"
+            ).fetchone()[0]
+        )
+        if remaining:
+            counts[table] = remaining
+    return counts
 
 
 def backfill_scopes(
@@ -556,13 +646,20 @@ def backfill_scopes(
     messages/summary nodes have been processed.
     """
 
+    # EVERY argument is validated before the first write. `ensure_scope_columns`
+    # used to run first, so a call with no resolver performed eleven ALTER
+    # statements and wrote the `scope_v1` marker before raising -- the caller
+    # reasonably assumed nothing happened, while the store's schema state had
+    # changed permanently and a later `ensure_scope_columns` short-circuits on
+    # the marker and skips the verification sweep. Rejecting a call must not
+    # mutate the store, the same discipline `preflight_teams_scope` documents.
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
-    ensure_scope_columns(conn)
     if owner_for_session is None:
         raise ValueError(
             "owner_for_session is required to attribute pre-Teams rows to their owner"
         )
+    ensure_scope_columns(conn)
     resolver = compose_scope_resolver(
         owner_for_session, overrides=overrides, fallback_owner=fallback_owner
     )
@@ -654,11 +751,28 @@ def backfill_scopes(
             )
 
     conn.commit()
+
+    # An UNSTAMPED REMAINDER is a failure even when no table raised.
+    #
+    # `_backfill_joined_table` needs a matching source row, and these schemas
+    # have no foreign key preventing an orphan chunk or embedding row. An
+    # orphan is simply not selected, so the function returns normally,
+    # `failures` stays empty, and the report declared the migration complete
+    # with NULL scopes still on disk -- while `verify_scope_storage` reports
+    # the same store as `fail`. Two verdicts on one store, and the optimistic
+    # one is the one an enable reads.
+    remaining = _unstamped_counts(conn)
+    for table, count in remaining.items():
+        failures.setdefault(
+            table, f"UnstampedRowsRemain: {count} row(s) still have no access_scope"
+        )
+
     report = {
         "updated": updated,
         "total_updated": sum(updated.values()),
         "attempted": attempted,
         "failures": failures,
+        "unstamped_remaining": remaining,
         "complete": not failures,
     }
     if failures:
@@ -866,7 +980,14 @@ def verify_scope_storage(
         # store full of real per-owner stamps -- green in exactly the state you
         # would run the doctor to detect.
         _, persisted_reason = resolve_startup_teams_state(conn)
-        if persisted_reason == "stamped-without-marker":
+        if persisted_reason == "malformed-marker":
+            status = "malformed-marker"
+            message = (
+                "the recorded Teams decision is unreadable, so it is not an "
+                "authority to disable: repair or rewrite it with an explicit "
+                "enable or disable. Until then the store fails closed."
+            )
+        elif persisted_reason == "stamped-without-marker":
             status = "stamped-without-marker"
             message = (
                 "access_scope stamps exist but no enable decision is recorded: "
@@ -898,6 +1019,31 @@ def verify_scope_storage(
         "observed_rows": observed_rows,
         "unstamped_rows": unstamped_total,
     }
+
+
+#: Statuses `verify_scope_storage` reports that must make a doctor RED.
+#: `stamped-without-marker` and `malformed-marker` are both "an enable is in an
+#: unresolved state on a store carrying real per-owner stamps", which is
+#: precisely the condition someone runs the doctor to find.
+_DOCTOR_FAIL_STATUSES = frozenset({"fail", "stamped-without-marker", "malformed-marker"})
+
+
+def doctor_status_for(result: Mapping[str, object]) -> str:
+    """Classify a `verify_scope_storage` result as pass / warn / fail.
+
+    Lives HERE, with the statuses it classifies, rather than being spelled out
+    at the doctor call site. A copy of the mapping in the caller means adding a
+    status -- `malformed-marker` is one -- silently classifies as `pass`, and a
+    test written against the copy keeps passing while the doctor goes green on
+    a store it should refuse.
+    """
+
+    status = str(result.get("status"))
+    if status in _DOCTOR_FAIL_STATUSES:
+        return "fail"
+    if status == "nothing-to-verify":
+        return "warn"
+    return "pass"
 
 
 # Names used by callers that describe the operation as an explicit migration

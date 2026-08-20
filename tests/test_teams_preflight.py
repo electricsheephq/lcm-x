@@ -121,6 +121,39 @@ def test_overrides_win_over_the_host_resolver(store: sqlite3.Connection) -> None
     assert resolve("known-a") == "principal-corrected"
 
 
+def test_preflight_refuses_a_store_with_blank_session_keys(
+    store: sqlite3.Connection,
+) -> None:
+    """The only signal that a store holds rows the backfill can NEVER stamp.
+
+    `_resolve_scope` raises for a row with no session_id, so an enable that
+    skipped this check fails partway and leaves the store in the
+    `stamped-without-marker` state. Nothing exercised the branch: every other
+    case here supplies a non-blank session_id.
+    """
+    _message(store, "known-a")
+    store.execute("INSERT INTO messages(session_id, content) VALUES('', 'x')")
+    store.commit()
+
+    report = preflight_teams_scope(store, _resolver)
+
+    assert report["ready"] is False
+    assert report["blank_key_tables"] == ["messages"]
+    assert report["unresolvable"] == []
+    assert report["tables"]["messages"]["blank_keys"] == 1
+
+
+def test_a_null_session_key_counts_as_blank(store: sqlite3.Connection) -> None:
+    """NULL and empty string are the same unstampable row."""
+    store.execute("INSERT INTO messages(session_id, content) VALUES(NULL, 'x')")
+    store.commit()
+
+    report = preflight_teams_scope(store, _resolver)
+
+    assert report["ready"] is False
+    assert report["blank_key_tables"] == ["messages"]
+
+
 def test_the_fallback_is_only_used_when_nothing_else_answers(
     store: sqlite3.Connection,
 ) -> None:

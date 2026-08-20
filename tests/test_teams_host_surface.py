@@ -157,9 +157,14 @@ def test_the_command_that_reaches_them_actually_gates(method: str, handler: str)
     raise AssertionError(f"{handler} not found in command.py")
 
 
-@pytest.mark.parametrize("method", sorted(HOST_ONLY - {"clone_for_agent"}))
+@pytest.mark.parametrize("method", sorted(HOST_ONLY))
 def test_host_only_methods_are_not_reachable_from_a_tool_or_command(method: str) -> None:
     """The safety argument for HOST_ONLY is unreachability, so test THAT.
+
+    `clone_for_agent` was excluded and does not need to be: nothing in tools.py
+    or command.py reaches it. The exclusion meant a later call from either
+    surface would expose `LCMEngine.clone_for_agent` without failing CI --
+    exactly the hole the parametrization exists to close.
 
     `disable_teams` turns isolation off for every principal in the store. It is
     ungated, and that is only acceptable while nothing the model can drive can

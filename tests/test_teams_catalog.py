@@ -84,10 +84,19 @@ def test_a_missing_table_is_reported_as_a_defect(store: sqlite3.Connection) -> N
     ]
 
 
-@_NEEDS_DB_BOOTSTRAP
 def test_every_table_carries_the_allowlisted_family_prefix() -> None:
-    """Repair tooling recognises families by prefix, not by table name."""
+    """Repair tooling recognises families by prefix, not by table name.
+
+    Split from the allowlist-membership check below. The prefix invariant is a
+    property of THIS module and needs no database bootstrap, so gating it on
+    the call-site slice left the whole thing uncovered for no reason.
+    """
     assert all(name.startswith("lcm_teams") for name in catalog.TEAMS_TABLES)
+
+
+@_NEEDS_DB_BOOTSTRAP
+def test_the_family_prefix_is_in_the_repair_allowlist() -> None:
+    """The half that genuinely needs db_bootstrap."""
     assert "lcm_teams" in db_bootstrap._KNOWN_FEATURE_TABLE_PREFIXES
 
 

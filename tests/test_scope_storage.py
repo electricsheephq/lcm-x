@@ -124,10 +124,51 @@ def test_backfill_resumes_after_a_committed_batch(tmp_path):
 
 def test_empty_store_is_nothing_to_verify_not_verified():
     conn = sqlite3.connect(":memory:")
-    result = verify_scope_storage(conn)
-    assert result["status"] == "nothing-to-verify"
-    assert result["status"] != "verified"
-    assert result["observed_rows"] == 0
+    try:
+        result = verify_scope_storage(conn)
+        assert result["status"] == "nothing-to-verify"
+        assert result["observed_rows"] == 0
+    finally:
+        conn.close()
+
+
+def test_unstamped_rows_fail_honestly_on_a_synthetic_store():
+    """The `fail` branch, covered WITHOUT waiting for the dag/rollup slice.
+
+    `test_unstamped_row_counts_fail_honestly` below is the same property built
+    through MessageStore/SummaryDAG, and is skipped until those carry the
+    column. That left the only assertion on a real unstamped-row COUNT with no
+    live coverage at all, which is the one number an operator reads to decide
+    an enable is unfinished. A synthetic table needs neither.
+    """
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.executescript(
+            "CREATE TABLE messages ("
+            " store_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " session_id TEXT NOT NULL, content TEXT, access_scope TEXT);"
+        )
+        conn.execute(
+            "INSERT INTO messages(session_id, access_scope) VALUES('s', 'owner')"
+        )
+        conn.executemany(
+            "INSERT INTO messages(session_id) VALUES(?)", [("s",), ("s",)]
+        )
+        conn.commit()
+
+        result = verify_scope_storage(conn)
+
+        assert result["status"] == "fail"
+        assert result["unstamped_rows"] == 2
+        assert result["tables"]["messages"] == {
+            "exists": True,
+            "stamped": 1,
+            "unstamped": 2,
+            "total": 3,
+        }
+        assert "2 unstamped access-scope row(s)" in str(result["message"])
+    finally:
+        conn.close()
 
 
 @_NEEDS_SCHEMA_SLICE

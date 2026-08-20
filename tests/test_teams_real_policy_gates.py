@@ -132,6 +132,9 @@ def test_no_gate_site_names_a_decision_key_the_policy_ignores() -> None:
         "source_session_id",
         "partition_key",
         "target_access_scopes",
+        # The collection dimension of the context's narrowing. A gate site that
+        # names a collection outside the validated allowlist is denied.
+        "collection_id",
     }
     # Carried for humans and the audit trail; naming one of these decides nothing
     # and is not meant to. Each stays listed so that adding a key is deliberate.
