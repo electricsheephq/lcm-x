@@ -2061,6 +2061,110 @@ def test_preflight_scan_expiry_fails_open_to_full_fts_budget(
     assert payload["hits"][0]["node_id"] == node
 
 
+def test_excluded_summary_vectors_do_not_cap_the_fts_arm(recall_engine, monkeypatch):
+    """Session eligibility is part of the scans' predicate, so the preflight mirrors it.
+
+    The vector arms consume ``candidate_session_ids`` as a hard scope filter, so
+    a corpus whose only live summary vectors sit in an EXCLUDED session cannot
+    return an eligible semantic hit. Capping FTS on its account would shorten
+    the only arm able to reach the eligible session's content.
+    """
+    recall_engine._config.recall_query_timeout_s = 8.0
+    node = _add_summary(
+        recall_engine,
+        "summary vector living in the excluded session",
+        session_id="session-a",
+        created_at=1.0,
+    )
+    _seed_summary_vectors(recall_engine, [(node, [1.0, 0.0])])
+    # Eligible FTS-only content keeps the candidate whitelist non-empty, so the
+    # preflight's exclusion predicate itself is what must decline the corpus.
+    recall_engine._store.append(
+        "session-b", {"role": "user", "content": "eligible fts-only content"}
+    )
+
+    captured = _capture_fts_deadline(monkeypatch, [100.0])
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {
+                "query": "excluded summary corpus",
+                "include": "all",
+                "limit": 5,
+                "exclude_session_ids": ["session-a"],
+            },
+            engine=recall_engine,
+        )
+    )
+
+    assert captured["fts_deadline"] == 108.0
+    assert all(hit.get("node_id") != node for hit in payload["hits"])
+
+
+def test_excluded_chunk_vectors_do_not_cap_the_fts_arm(recall_engine, monkeypatch):
+    """Same fence on the chunk arm: its scan is scoped to eligible sessions."""
+    recall_engine._config.recall_query_timeout_s = 8.0
+    store_id = recall_engine._store.append(
+        "session-a", {"role": "user", "content": "chunk vector in excluded session"}
+    )
+    _seed_chunk_vectors(recall_engine, [(store_id, 0, 0, 20, [1.0, 0.0])])
+    recall_engine._store.append(
+        "session-b", {"role": "user", "content": "eligible fts-only content"}
+    )
+
+    captured = _capture_fts_deadline(monkeypatch, [100.0])
+    json.loads(
+        lcm_tools.lcm_recall(
+            {
+                "query": "excluded chunk corpus",
+                "include": "verbatim",
+                "limit": 5,
+                "exclude_session_ids": ["session-a"],
+            },
+            engine=recall_engine,
+        )
+    )
+
+    assert captured["fts_deadline"] == 108.0
+
+
+def test_scope_resolution_timeout_does_not_cap_the_fts_arm(recall_engine, monkeypatch):
+    """A timed-out scope resolution drops the vector arms, so it must not cap FTS.
+
+    ``_retrieval_candidate_session_ids`` failing closed means the semantic arms
+    deliver nothing this request; FTS is the only arm left and keeps the full
+    budget.
+    """
+    recall_engine._config.recall_query_timeout_s = 8.0
+    node = _add_summary(
+        recall_engine,
+        "live corpus behind a timed-out scope resolution",
+        session_id="session-a",
+        created_at=1.0,
+    )
+    _seed_summary_vectors(recall_engine, [(node, [1.0, 0.0])])
+
+    captured = _capture_fts_deadline(monkeypatch, [100.0])
+    monkeypatch.setattr(
+        lcm_tools,
+        "_retrieval_candidate_session_ids",
+        lambda _engine, _excluded, *, deadline=None: ([], True),
+    )
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {
+                "query": "timed out scope",
+                "include": "all",
+                "limit": 5,
+                "exclude_session_ids": ["session-zz"],
+            },
+            engine=recall_engine,
+        )
+    )
+
+    assert captured["fts_deadline"] == 108.0
+    assert payload["provenance"]["coverage"]["summary"] == "none"
+
+
 @pytest.mark.parametrize(
     ("embeddings_enabled", "provider_name", "model_name"),
     [

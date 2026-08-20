@@ -4905,6 +4905,7 @@ def _lcm_recall_has_usable_vector_corpus(
     run_chunk: bool,
     provider_name: str,
     model_name: str,
+    excluded_session_ids: set[str],
     deadline: float,
 ) -> bool:
     """Return whether a requested semantic arm has vectors for its selected profile.
@@ -4917,6 +4918,14 @@ def _lcm_recall_has_usable_vector_corpus(
     best-effort purge therefore cannot shorten the only usable FTS fallback.
     Missing or partial optional schema fails closed without materializing
     feature tables.
+
+    Session eligibility is part of the real scans' predicate too: the vector
+    arms consume ``candidate_session_ids`` as a hard scope filter, so a corpus
+    whose only live pairs sit in EXCLUDED sessions is not a semantic route for
+    this request. Both source joins therefore carry the same exclusion
+    predicate (``NOT IN`` over the request's exclusion set is equivalent to the
+    whitelist for an existence probe: every source row's session is enumerated
+    by the scope tables, so eligible == not excluded).
     """
     provider_name = str(provider_name or "").strip().lower()
     # Profiles are registered under ``provider.provider_id`` (command.py warmup),
@@ -4961,6 +4970,13 @@ def _lcm_recall_has_usable_vector_corpus(
                 for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
             }
 
+        exclusion_where = ""
+        exclusion_params: tuple[str, ...] = ()
+        if excluded_session_ids:
+            exclusion_params = tuple(sorted(excluded_session_ids))
+            placeholders = ",".join("?" for _ in exclusion_params)
+            exclusion_where = f" AND src.session_id NOT IN ({placeholders})"
+
         def corpus_has_vectors(
             *,
             task: str,
@@ -4999,10 +5015,10 @@ def _lcm_recall_has_usable_vector_corpus(
                   ON v.{id_column} = m.{id_column}
                  AND v.identity_hash = m.identity_hash
                 {source_join}
-                WHERE m.identity_hash = ? AND m.archived = 0{source_where}
+                WHERE m.identity_hash = ? AND m.archived = 0{source_where}{exclusion_where}
                 LIMIT 1
                 """,
-                (identity_hash,),
+                (identity_hash, *exclusion_params),
             ).fetchone()
             return row is not None
 
@@ -5172,12 +5188,19 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         semantic_available = (
             embeddings_enabled
             and (run_summary or run_chunk)
+            # A timed-out scope resolution drops the vector arms (fail closed)
+            # and an empty whitelist leaves them nothing eligible to return;
+            # in both states FTS is the only arm that can produce hits, so the
+            # sub-budget cap must not engage.
+            and not session_scope_timed_out
+            and candidate_session_ids != []
             and _lcm_recall_has_usable_vector_corpus(
                 engine,
                 run_summary=run_summary,
                 run_chunk=run_chunk,
                 provider_name=configured_provider,
                 model_name=configured_model,
+                excluded_session_ids=excluded_session_ids,
                 deadline=deadline,
             )
         )
