@@ -298,3 +298,29 @@ Consequences:
   GATE: any generic-tool result carrying a canary value ⇒ arm invalid; (iii) if attempt 2 also
   trips the gate, R3 is declared **unmeasurable under the current ACP tool surface** (product
   gap lcm-x#301) — a valid pilot outcome, not a retry loop.
+
+## 13. AMENDMENT (2026-08-21, append-only, owner-directed) — luna arms; multi-compaction stress; effort pin; exec retirement
+
+**Owner review of F59 raised four gaps; three become arms now, one is recorded:**
+- **Reasoning-effort pin (retro-recorded):** every P0 arm served reasoning effort HIGH — hermes
+  homes carry `reasoning_effort: high` (config line pinned by each arm's config sha) and the
+  R1/R4 rollouts record `effort: high` on every turn. Cross-arm effort parity held; future arms
+  must pin effort explicitly in the run record, not discover it retroactively.
+- **R2s-L-A / R2s-L-A′ (gpt-5.6-luna single-session pair):** identical R2s protocol (ACP
+  transport, SOUL instruction, tool-audit gate, fresh homes, same frozen material + salt), model
+  flipped to gpt-5.6-luna, `--expect-model` accordingly. Pre-declared read: extends or refutes
+  the F59 recommendation for the cost tier. Contrast vs R2s(sol) reads against the R2s 0.0pt
+  band; ANY luna drop >0pt on the intersection is reportable, with the C1 class watched first.
+- **R2s-MC (multi-compaction stress, sol):** identical R2s protocol with the home's
+  `compression.threshold` lowered 0.5 → 0.12 (compaction at ~32.6K instead of 136K), forcing
+  repeated compaction over the SAME frozen material (expected ≥8 summary events vs P0's 1).
+  Pre-declared question (owner): does retention degrade with compaction COUNT under LCM?
+  Mechanism read: summary_nodes count + per-epoch/per-class profile + tool-call mix. Note the
+  asymmetry honestly: LCM's store is lossless, so the stress lands on retrieval-under-
+  compaction-pressure, not on summary information loss; the native-side multi-compaction
+  question remains P1 (interactive transport only).
+- **Codex exec retirement for long arms (owner):** no future arm runs >10 turns on codex exec —
+  the R1-lc quota burn (a full OAuth window in 9 minutes) makes it a probe-only transport.
+  R4-ref (35 turns, gpt-5.4, one-shot before retirement) is the standing exception, already
+  in flight.
+Seeded order continuation: R4-ref → R2s-L-A → R2s-L-A′ → R2s-MC (positions fixed here).
