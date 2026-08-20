@@ -442,10 +442,13 @@ def test_rerank_margin_holds_incumbent_and_reports_scores(recall_engine, monkeyp
     )
     assert payload["provenance"]["rerank"] == "applied: rank1-held"
     assert [hit["node_id"] for hit in payload["hits"][:3]] == [nodes[2], nodes[1], nodes[0]]
+    # Provider-order triples [input_index, session_id, relevance]: the input
+    # index pins the EXACT incumbent item (index 0) even when a session id
+    # appears multiple times in the window — margin audits need exact gaps.
     assert payload["provenance"]["rerank_scores"] == [
-        ["session-b", 0.8],
-        ["session-a", 0.7],
-        ["session-c", 0.6],
+        [1, "session-b", 0.8],
+        [0, "session-a", 0.7],
+        [2, "session-c", 0.6],
     ]
 
 

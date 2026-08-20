@@ -4607,7 +4607,7 @@ def _lcm_recall_rerank(
         # This is the historical rerank path. Keep it structurally unchanged for
         # rerank_margin == 0.0 so the default output ordering remains byte-identical.
         rerank_scores = [
-            [head[index]["hit"].get("session_id"), float(relevance)]
+            [int(index), head[index]["hit"].get("session_id"), float(relevance)]
             for index, relevance in ranked
             if 0 <= index < len(head)
         ]
@@ -4632,7 +4632,7 @@ def _lcm_recall_rerank(
         if 0 <= int(index) < len(head)
     ]
     rerank_scores = [
-        [head[index]["hit"].get("session_id"), relevance]
+        [index, head[index]["hit"].get("session_id"), relevance]
         for index, relevance in valid_ranked
     ]
 
