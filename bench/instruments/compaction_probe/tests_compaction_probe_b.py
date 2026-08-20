@@ -783,3 +783,29 @@ def test_drive_codex_turn_timeout_aborts_with_code_72(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as excinfo:
         drive_codex.drive(args)
     assert excinfo.value.code == drive_codex.ABORT_EXIT_CODE
+
+
+def test_score_probes_accepts_drive_codex_result_rows(tmp_path):
+    # drive_codex result rows have NO kind field ({probe_id, raw_answer,
+    # turn_index, usage}); requiring kind:"probe" dropped every row and scored
+    # a live arm 0/30 (2026-08-20). Material rows in mixed files still carry
+    # kind:"material" and must stay excluded.
+    canaries = tmp_path / "canaries.json"
+    canaries.write_text(
+        json.dumps([{"id": "C9-E0-1", "class": "C9", "epoch": "E0", "value": "dummy-gamma-2222"}]),
+        encoding="utf-8",
+    )
+    probes = tmp_path / "probes.jsonl"
+    _jsonl(probes, [{"id": "C9-E0-1", "kind": "canary", "expect": "value", "text": "q?"}])
+    results = tmp_path / "results.jsonl"
+    _jsonl(
+        results,
+        [
+            {"kind": "material", "turn_index": 1, "raw_answer": "ack"},
+            {"probe_id": "C9-E0-1", "raw_answer": "`dummy-gamma-2222`",
+             "turn_index": 36, "usage": {"input": 1, "cached": 0, "output": 1}},
+        ],
+    )
+    payload = score_probes.score(results, canaries, probes)
+    assert payload["probes"][0]["classification"] == "CORRECT"
+    assert payload["totals"]["retention"] == 1.0
