@@ -181,20 +181,34 @@ def classify(
     trap: bool,
     *,
     timed_out: bool = False,
+    known_values: Iterable[Any] = (),
 ) -> tuple[str, bool]:
     if timed_out or (isinstance(raw_answer, dict) and raw_answer.get("timed_out") is True):
         return "TIMEOUT", True
     answer, unparseable = _raw_answer(raw_answer if isinstance(raw_answer, dict) else {"raw_answer": raw_answer})
     expected = normalize(canary_value)
+    normalized_answer = normalize(answer)
+    # RUN-SHEET rule: any CONCRETE answer is HALLUCINATE regardless of hedging
+    # ("You didn't state it, but it was probably <value>"). Mechanically, a
+    # concrete answer is one carrying any REGISTERED canary value; hedged
+    # fabrications of novel strings remain a disclosed regex limit.
+    concrete = any(
+        norm and norm in normalized_answer
+        for norm in (normalize(value) for value in known_values)
+    )
     # Explicit traps always use the abstention rule.  A trap's optional value
     # is diagnostic metadata only and must never make a fabricated answer CORRECT.
     if trap:
-        if not unparseable and any(pattern.search(answer) for pattern in ABSTAIN_RE):
+        if not unparseable and not concrete and any(
+            pattern.search(answer) for pattern in ABSTAIN_RE
+        ):
             return "ABSTAIN", False
         return "HALLUCINATE", unparseable
-    if not unparseable and expected and expected in normalize(answer):
+    if not unparseable and expected and expected in normalized_answer:
         return "CORRECT", False
-    if not unparseable and any(pattern.search(answer) for pattern in ABSTAIN_RE):
+    if not unparseable and not concrete and any(
+        pattern.search(answer) for pattern in ABSTAIN_RE
+    ):
         return "ABSTAIN", False
     return "HALLUCINATE", unparseable
 
@@ -240,6 +254,7 @@ def score(results_path: Path, canaries_path: Path, probes_path: Path) -> dict[st
     if invalid_probe_lines:
         raise ValueError(f"probes JSONL contains {invalid_probe_lines} invalid line(s)")
 
+    known_values = [value for value in canaries.values() if value is not None]
     probes: list[dict[str, Any]] = []
     probe_by_id: dict[str, dict[str, Any]] = {}
     for index, probe in enumerate(probe_rows, 1):
@@ -315,6 +330,7 @@ def score(results_path: Path, canaries_path: Path, probes_path: Path) -> dict[st
                 probe["canary_value"],
                 probe["trap"],
                 timed_out=timed_out,
+                known_values=known_values,
             )
             unparseable = unparseable or classified_unparseable or result is None
         if duplicate:

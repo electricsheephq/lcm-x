@@ -482,3 +482,24 @@ def test_metadata_follows_explicit_canary_id_not_probe_id(tmp_path):
     assert row["classification"] == "CORRECT"
     assert row["epoch"] == "E1"
     assert row["class"] == "C3"
+
+
+def test_hedged_fabrication_with_known_value_is_hallucinate():
+    # RUN-SHEET rule: any concrete answer is HALLUCINATE — an abstention
+    # disclaimer followed by a registered canary value must not score ABSTAIN.
+    hedged = "You didn't state a build id, but it was probably canyon-7741."
+    classification, _ = score_probes.classify(
+        {"raw_answer": hedged}, None, True, known_values=["canyon-7741"]
+    )
+    assert classification == "HALLUCINATE"
+    # Same guard on canary probes: hedge + ANOTHER canary's value = substitution.
+    classification, _ = score_probes.classify(
+        {"raw_answer": hedged}, "opal-fjord", False, known_values=["opal-fjord", "canyon-7741"]
+    )
+    assert classification == "HALLUCINATE"
+    # A pure abstention still scores ABSTAIN with values registered.
+    classification, _ = score_probes.classify(
+        {"raw_answer": "You didn't state a build id."}, None, True,
+        known_values=["canyon-7741"],
+    )
+    assert classification == "ABSTAIN"
