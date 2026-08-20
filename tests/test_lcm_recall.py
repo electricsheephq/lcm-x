@@ -36,6 +36,22 @@ def test_cross_session_summary_hint_targets_explicit_node_expansion():
     assert hint == "lcm_expand(node_id=42, session_id='archived-session')"
 
 
+def test_cross_session_summary_hint_quotes_hostile_session_ids():
+    """An imported session ID may carry quotes/backslashes; the advertised
+    handle must round-trip through lcm_expand's parser, so the hint uses !r
+    quoting via _session_expand_hint instead of raw interpolation."""
+    hostile = "o'brien\\import"
+    hint = lcm_tools._lcm_recall_summary_expand_hint(
+        {
+            "node_id": 7,
+            "session_id": hostile,
+            "from_current_session": False,
+        }
+    )
+
+    assert hint == f"lcm_expand(node_id=7, session_id={hostile!r})"
+
+
 class MockProvider:
     provider_id = "mock"
     model_id = "mock-model"
@@ -3104,3 +3120,17 @@ def test_recall_fts_finds_oldest_matching_message_beyond_candidate_window(
     )
 
     assert payload["hits"][0]["store_id"] == oldest
+
+
+def test_describe_rejects_externalized_ref_with_session_id(recall_engine):
+    """An explicit session_id alongside externalized_ref was silently ignored,
+    so current-session payload content could be misattributed to the requested
+    archive session. The combination is rejected before dereferencing."""
+    payload = json.loads(
+        lcm_tools.lcm_describe(
+            {"externalized_ref": "some-ref", "session_id": "archived-session"},
+            engine=recall_engine,
+        )
+    )
+
+    assert "cannot be combined with session_id" in payload["error"]

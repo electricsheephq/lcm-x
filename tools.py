@@ -3568,10 +3568,10 @@ def _lcm_recall_recency_boost(timestamp: Any, *, now: float) -> float:
 def _lcm_recall_summary_expand_hint(hit: dict[str, Any]) -> str:
     if hit.get("from_current_session"):
         return f"lcm_expand(node_id={hit.get('node_id')})"
-    return (
-        f"lcm_expand(node_id={hit.get('node_id')}, "
-        f"session_id='{hit.get('session_id') or ''}')"
-    )
+    # _session_expand_hint applies !r quoting: imported session IDs may carry
+    # apostrophes/backslashes, and an unescaped interpolation would advertise
+    # a handle lcm_expand cannot parse back.
+    return _session_expand_hint(hit.get("node_id"), hit.get("session_id") or "")
 
 
 def _lcm_recall_excerpt_expand_hint(hit: dict[str, Any]) -> str:
@@ -5387,6 +5387,19 @@ def lcm_describe(args: Dict[str, Any], **kwargs) -> str:
 
     externalized_ref = str(args.get("externalized_ref") or "").strip()
     if externalized_ref:
+        # Externalized payloads are current-session objects; an explicit
+        # session_id alongside the ref would be silently ignored below and the
+        # response could misattribute current-session content to the requested
+        # archive session. Reject the combination before dereferencing, the
+        # same way lcm_expand validates its mode arguments.
+        if "session_id" in args:
+            return json.dumps(
+                {
+                    "error": "externalized_ref cannot be combined with "
+                    "session_id; externalized payloads are current-session "
+                    "objects"
+                }
+            )
         payload = _get_externalized_payload(engine, externalized_ref)
         if payload is None:
             return json.dumps(
