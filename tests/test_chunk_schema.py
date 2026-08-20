@@ -65,6 +65,9 @@ class TestChunkSchema:
             "token_estimate",
             "embedded_at",
             "archived",
+            # Additive, nullable, and LAST: an ALTER on an older store appends
+            # the column, so the created shape has to match the migrated one.
+            "access_scope",
         ]
 
     def test_partial_index_predicate_is_present(self):

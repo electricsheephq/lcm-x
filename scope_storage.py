@@ -232,6 +232,71 @@ def persist_teams_enabled(conn: sqlite3.Connection, enabled: bool) -> None:
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (TEAMS_ENABLED_METADATA_KEY, "true" if enabled else "false"),
     )
+    # A recorded decision outranks the cached observation below, so the cache is
+    # dead weight from here on -- and it must not survive a later REVOCATION of
+    # this decision, which `TEAMS_ENABLED_METADATA_KEY` is explicitly allowed to
+    # be. A revoked decision on a stamped store has to fall through to the probe.
+    conn.execute(
+        "DELETE FROM metadata WHERE key = ?", (TEAMS_NEVER_ENABLED_METADATA_KEY,)
+    )
+    conn.commit()
+
+
+# The cached ANSWER to the expensive half of `resolve_startup_teams_state`.
+#
+# Deliberately NOT written into `TEAMS_ENABLED_METADATA_KEY` as a "false".
+# "Nobody has ever enabled Teams here" and "an operator explicitly disabled
+# Teams" are different facts, and the second is an authority the first does not
+# have: `read_persisted_teams_marker` treats `disabled` as a decision and stops
+# looking at the store. Writing one absence in the other's spelling is the same
+# two-absences-read-alike defect this module already fixed once.
+#
+# The value records only what was OBSERVED: at the moment it was written, no
+# table carried a non-NULL access_scope. Every path that can turn that
+# observation false clears it first (`backfill_scopes`, `persist_teams_enabled`),
+# and `doctor_scope_check` re-derives the truth from the rows themselves, so a
+# cache that somehow outlives its fact is reported rather than believed.
+TEAMS_NEVER_ENABLED_METADATA_KEY = "teams_never_enabled_v1"
+
+
+def read_never_enabled_cache(conn: sqlite3.Connection) -> bool:
+    """True when an earlier startup proved this store carries no stamps.
+
+    Creates nothing, for the same reason `read_persisted_teams_marker` creates
+    nothing: this runs on the doctor path and on every storage bind.
+    """
+
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'"
+    ).fetchone()
+    if exists is None:
+        return False
+    row = conn.execute(
+        "SELECT value FROM metadata WHERE key = ?",
+        (TEAMS_NEVER_ENABLED_METADATA_KEY,),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return False
+    return str(row[0]).strip().lower() in _TRUE_MARKERS
+
+
+def clear_never_enabled_cache(conn: sqlite3.Connection) -> None:
+    """Drop the cached observation before anything can invalidate it.
+
+    Called BEFORE the first stamp of an enable, and committed on its own, so an
+    enable that dies partway leaves the store in the state
+    `resolve_startup_teams_state` documents: stamps present, no decision
+    recorded, and the probe -- not a stale cache -- deciding what that means.
+    """
+
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'"
+    ).fetchone()
+    if exists is None:
+        return
+    conn.execute(
+        "DELETE FROM metadata WHERE key = ?", (TEAMS_NEVER_ENABLED_METADATA_KEY,)
+    )
     conn.commit()
 
 
@@ -280,9 +345,41 @@ def resolve_startup_teams_state(conn: sqlite3.Connection) -> tuple[bool, str]:
         return True, "malformed-marker"
     if marker == "disabled":
         return False, "disabled"
+    if read_never_enabled_cache(conn):
+        # The cached observation, not a decision: see
+        # `TEAMS_NEVER_ENABLED_METADATA_KEY`. Skipping the probe here is the
+        # whole point -- it is eleven unindexed `access_scope IS NOT NULL`
+        # scans of tables that are customer-sized, paid on every bind of a
+        # store that has never had Teams enabled.
+        return False, "never-enabled"
     if access_scope_stamps_exist(conn):
         return True, "stamped-without-marker"
     return False, "never-enabled"
+
+
+def bind_startup_teams_state(conn: sqlite3.Connection) -> tuple[bool, str]:
+    """Resolve the startup flag, remembering a store proven never-enabled.
+
+    The engine-binding entry point. `resolve_startup_teams_state` stays a pure
+    read because the doctor calls it too, and a verification that mutates the
+    store is not a verification; the write-once cache therefore lives here, on
+    the path that actually opens the store for work.
+
+    Only the `never-enabled` answer is cached, and only after the probe proved
+    it. Every other answer is already cheap: it comes from the recorded
+    decision, or from a probe that stopped at the first stamped row.
+    """
+
+    enabled, reason = resolve_startup_teams_state(conn)
+    if reason == "never-enabled" and not read_never_enabled_cache(conn):
+        ensure_metadata_table(conn)
+        conn.execute(
+            "INSERT INTO metadata(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (TEAMS_NEVER_ENABLED_METADATA_KEY, "true"),
+        )
+        conn.commit()
+    return enabled, reason
 
 
 @dataclass(frozen=True)
@@ -801,6 +898,11 @@ def backfill_scopes(
 
     _validate_enable_arguments(owner_for_session, batch_size)
     ensure_scope_columns(conn)
+    # BEFORE the first stamp, and committed on its own: this is the only writer
+    # of access_scope in the package, so clearing here is what keeps the cached
+    # "no stamps here" observation from outliving its fact when an enable dies
+    # partway. Both enable entry points funnel through this function.
+    clear_never_enabled_cache(conn)
     resolver = compose_scope_resolver(
         owner_for_session, overrides=overrides, fallback_owner=fallback_owner
     )
@@ -1159,6 +1261,100 @@ def doctor_status_for(result: Mapping[str, object]) -> str:
     if status == "nothing-to-verify":
         return "warn"
     return "pass"
+
+
+#: The doctor check name. Named ONCE so the check, its guidance branch and the
+#: tests that pin them cannot drift into three spellings.
+SCOPE_DOCTOR_CHECK = "teams_scope_storage"
+
+#: What an operator does about stamps with no recorded decision. Both origins
+#: are named because the repair differs: an aborted enable is finished, while a
+#: stray stamp from an importer is resolved by recording the decision that was
+#: never made. Doing nothing is the one option that is not available -- the
+#: store fails closed and refuses ALL work until the state is resolved.
+STRAY_STAMP_REPAIR = (
+    "access_scope stamps exist with no recorded Teams decision, so the store "
+    "fails closed and refuses all work. Either finish the enable "
+    "(`hermes_lcm.scope_storage.setup_teams_scope`, which is resumable and "
+    "leaves already-stamped rows untouched), or -- if these stamps arrived "
+    "from an importer rather than an enable, `scripts/import_lossless_claw.py` "
+    "being the known one -- record the decision that was never made with "
+    "`persist_teams_enabled(conn, False)`. Disabling retains the stamps, so a "
+    "later enable keeps their attribution. Back the database up first."
+)
+
+#: An unreadable decision. Not authority to disable, so the store fails closed
+#: exactly as it does for a stray stamp -- and the repair is to say which one
+#: the operator meant.
+MALFORMED_MARKER_REPAIR = (
+    "the recorded Teams decision is unreadable, so it is not an authority to "
+    "disable and the store fails closed. Rewrite it explicitly with "
+    "`persist_teams_enabled(conn, True|False)`. Back the database up first."
+)
+
+#: A cached "never enabled" observation that the rows contradict. Reported
+#: rather than believed: the cache is an optimization, and an optimization that
+#: can select a permissive policy on a stamped store has to be visible.
+STALE_NEVER_ENABLED_REPAIR = (
+    "the cached never-enabled observation is contradicted by stamped rows in "
+    "this store. Clear it with "
+    "`hermes_lcm.scope_storage.clear_never_enabled_cache(conn)` and rerun "
+    "`/lcm doctor`, which will then report the real startup state."
+)
+
+
+def doctor_scope_check(conn: sqlite3.Connection | None) -> dict[str, object]:
+    """One ``lcm_doctor`` check covering this store's scope-storage state.
+
+    Built HERE rather than at the doctor call site for the reason
+    `doctor_status_for` documents: the statuses, their classification and the
+    operator's repair path are one thing, and a copy of any of them in the
+    caller goes green on a store it should refuse.
+
+    The check is also the backstop for the startup cache. `verify_scope_storage`
+    counts stamped rows from the rows themselves, so a cached
+    ``never-enabled`` that the data contradicts surfaces here as a failure
+    instead of quietly selecting a permissive policy.
+    """
+
+    if conn is None:
+        return {
+            "check": SCOPE_DOCTOR_CHECK,
+            "status": "fail",
+            "detail": "scope storage connection is not initialized",
+        }
+    enabled, reason = resolve_startup_teams_state(conn)
+    result = verify_scope_storage(conn, teams_enabled=enabled)
+    status = doctor_status_for(result)
+    tables = result.get("tables")
+    stamped = {
+        table: int(info.get("stamped") or 0)
+        for table, info in (tables or {}).items()
+        if isinstance(info, Mapping) and int(info.get("stamped") or 0) > 0
+    }
+    detail: dict[str, object] = {
+        "startup_state": reason,
+        "teams_enabled": enabled,
+        "storage_status": result.get("status"),
+        "message": result.get("message"),
+        "stamped_tables": stamped,
+        "unstamped_rows": result.get("unstamped_rows", 0),
+    }
+    if reason in _DOCTOR_FAIL_STATUSES:
+        # `verify_scope_storage` reports these as a STATUS only when its caller
+        # believed Teams was off. The resolved startup state is the same fact
+        # about the same store, and it has to fail the doctor either way --
+        # otherwise passing the resolved (True) flag in, which is what makes
+        # the row counts meaningful, is also what hides the finding.
+        status = "fail"
+    if reason == "stamped-without-marker":
+        detail["repair"] = STRAY_STAMP_REPAIR
+    elif reason == "malformed-marker":
+        detail["repair"] = MALFORMED_MARKER_REPAIR
+    elif reason == "never-enabled" and stamped:
+        status = "fail"
+        detail["repair"] = STALE_NEVER_ENABLED_REPAIR
+    return {"check": SCOPE_DOCTOR_CHECK, "status": status, "detail": detail}
 
 
 # Names used by callers that describe the operation as an explicit migration
