@@ -1708,7 +1708,7 @@ def test_slow_fts_arm_cannot_starve_semantic_recall_and_rerank(recall_engine, mo
 
     provider = VoyageProvider()
 
-    def slow_fts(_engine, _query, *, candidate_limit, deadline):
+    def slow_fts(_engine, _query, *, candidate_limit, deadline, excluded_session_ids):
         del candidate_limit
         captured["fts_deadline"] = deadline
         clock[0] = deadline
@@ -1804,7 +1804,7 @@ def test_capped_fts_expiry_reports_coverage_not_request_timeout(
     provider.provider_id = "voyage"
     provider.model_id = "voyage-4-large"
 
-    def slow_fts(_engine, _query, *, candidate_limit, deadline):
+    def slow_fts(_engine, _query, *, candidate_limit, deadline, excluded_session_ids):
         del candidate_limit
         captured["fts_deadline"] = deadline
         # Burn exactly the arm's sub-budget, nothing of the rest.
@@ -1886,7 +1886,7 @@ def test_uncapped_fts_timeout_still_reports_request_timeout(
     clock = [100.0]
     captured: dict[str, float] = {}
 
-    def timing_out_fts(_engine, _query, *, candidate_limit, deadline):
+    def timing_out_fts(_engine, _query, *, candidate_limit, deadline, excluded_session_ids):
         del candidate_limit
         captured["fts_deadline"] = deadline
         return [], {
@@ -1972,7 +1972,7 @@ def test_provider_alias_uses_existing_vector_corpus_for_fts_fairness(
     clock = [100.0]
     captured: dict[str, float] = {}
 
-    def fts_arm(_engine, _query, *, candidate_limit, deadline):
+    def fts_arm(_engine, _query, *, candidate_limit, deadline, excluded_session_ids):
         del candidate_limit
         captured["fts_deadline"] = deadline
         return [], None
@@ -2016,7 +2016,7 @@ def test_fts_fallback_keeps_full_recall_budget_without_semantic_route(
     clock = [100.0]
     captured: dict[str, float] = {}
 
-    def fts_arm(_engine, _query, *, candidate_limit, deadline):
+    def fts_arm(_engine, _query, *, candidate_limit, deadline, excluded_session_ids):
         del candidate_limit
         captured["fts_deadline"] = deadline
         return [], None
@@ -2045,7 +2045,7 @@ def test_fts_keeps_full_budget_when_requested_vector_corpus_is_unbackfilled(
     clock = [100.0]
     captured: dict[str, float] = {}
 
-    def fts_arm(_engine, _query, *, candidate_limit, deadline):
+    def fts_arm(_engine, _query, *, candidate_limit, deadline, excluded_session_ids):
         del candidate_limit
         captured["fts_deadline"] = deadline
         return [], None
@@ -2069,7 +2069,7 @@ def _capture_fts_deadline(monkeypatch, clock):
     """Freeze both clocks, stub the FTS arm, and report the deadline it was given."""
     captured: dict[str, float] = {}
 
-    def fts_arm(_engine, _query, *, candidate_limit, deadline):
+    def fts_arm(_engine, _query, *, candidate_limit, deadline, excluded_session_ids):
         del candidate_limit
         captured["fts_deadline"] = deadline
         return [], None
