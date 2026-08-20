@@ -103,3 +103,36 @@ reference on the exec transport:**
 
 Extension arms (sol control, luna pair, multi-compaction stress) are registered as run-sheet
 Amendment 13.
+
+## 8. APPENDIX 2 (2026-08-20 UTC, append-only) — Amendment-13 extension arms: sol control, luna pair, multi-compaction stress
+
+| arm | model | retention | traps | notes |
+|---|---|---|---|---|
+| R2s-S-ctrl | sol | **100%** (30/30) | 4/5* | same-day control: NO serving drift; sol single-session now 3/3 at 100% |
+| R2s-L-A | luna | 90.0% (27/30) | 5/5 | 3 misses ALL honest ABSTAIN, all E0 (deepest epoch) |
+| R2s-L-A′ | luna | **100%** (30/30) | 5/5 | all three E0 flips recovered — luna band 90–100, 3/35 discordant |
+| R2s-MC | sol, threshold 0.12 | 93.3% (28/30) | 5/5 | **UNDEREXPOSED** per the §13 validity gate (0 compaction events, see below); 2 misses honest ABSTAIN, 0 hallucinations at a 32.6K live window |
+*regex-missed abstention (frozen set honored, disclosed).
+
+**Luna verdict (pre-declared read):** luna's memory-tool retrieval depth is STOCHASTIC — it
+sometimes fails to surface the deepest-epoch facts and always abstains honestly when it does
+(zero hallucinations across both arms). Guidance: sol for load-bearing deep recall
+(deterministic 100% ×3); luna acceptable for cost-first workloads with fail-loud semantics.
+Served-model receipts from the host record both arms.
+
+**Multi-compaction stress — the question was ill-posed for this architecture (measured):**
+lowering compression.threshold 0.5→0.12 (verified effective pre-spend: 32,640 tokens) produced
+ZERO compactions, not more. Re-examining the banked arms with timestamps: R2s-A's single
+compaction fired ~80 SECONDS into the run (source = material turns 1-2, ~30.6K tokens) — **on
+this path LCM compacts once, early, and never again at any threshold we set; everything after
+is store retrieval.** §13's regime-under-pressure caveat was therefore the right instinct but
+understated: compaction COUNT is not a controllable variable on the ACP path via
+compression.threshold, and "retention after a few compactions" reduces, for LCM, to "retention
+under retrieval at depth" — which the MC record measures anyway (93.3% at a 32.6K live window,
+honest failures only). Native-side multi-compaction remains the P1 interactive-transport
+question. The threshold-vs-compaction-count semantics are filed as a product question (see
+issue reference in the PR); the R2s-MC arm is excluded from any count claim per the
+pre-declared gate.
+
+**Session-hygiene note:** the MC pre-spend gate's warm/status one-shots added 2 extra host
+sessions to the home before the ACP run (benign — no canary content; disclosed).
