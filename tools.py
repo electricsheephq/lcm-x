@@ -413,6 +413,15 @@ _LCM_RECALL_VALID_INCLUDE = frozenset({"all", "summaries", "verbatim"})
 # budget; hybrid recall reserves the remainder for provider resolution, vector
 # arms, hydration, fusion, and optional reranking.
 _LCM_RECALL_FTS_MAX_BUDGET_FRACTION = 0.25
+# The vector-corpus preflight guards the budget split above, so its own scan
+# must never be able to spend the request budget it exists to protect: a
+# no-match probe over a large fully-orphaned corpus has to exhaust candidates
+# despite LIMIT 1, and aborting that scan only at the REQUEST deadline would
+# hand FTS an already-expired budget — no arm runs at all. The preflight
+# therefore gets a small independent scan budget; expiry fails open to False,
+# which keeps the full remaining budget with the FTS arm.
+_LCM_RECALL_PREFLIGHT_MAX_BUDGET_S = 0.25
+_LCM_RECALL_PREFLIGHT_BUDGET_FRACTION = 0.1
 _LCM_RECALL_VALID_DETAIL = frozenset({"snippets", "answer_ready"})
 _LCM_RECALL_ANSWER_READY_PER_SESSION_LIMIT = 5
 _LCM_RECALL_ANSWER_READY_EXPANDED_HIT_LIMIT = 8
@@ -4870,6 +4879,25 @@ def _lcm_recall_rerank(
     return reordered, "applied", rerank_scores
 
 
+def _lcm_recall_preflight_scan_deadline(now: float, deadline: float) -> float:
+    """Derive the corpus preflight's independent scan deadline.
+
+    Bounded by a small absolute cap and a fraction of the remaining request
+    budget, and never past the request deadline itself. A preflight that hits
+    this bound returns False (fail-open), leaving the full remaining budget
+    with the FTS arm instead of starving every arm at once.
+    """
+    remaining = max(0.0, deadline - now)
+    return min(
+        deadline,
+        now
+        + min(
+            _LCM_RECALL_PREFLIGHT_MAX_BUDGET_S,
+            max(0.001, remaining * _LCM_RECALL_PREFLIGHT_BUDGET_FRACTION),
+        ),
+    )
+
+
 def _lcm_recall_has_usable_vector_corpus(
     engine: "LCMEngine",
     *,
@@ -4909,11 +4937,12 @@ def _lcm_recall_has_usable_vector_corpus(
     model_name = str(model_name or "").strip()
     if not provider_name or not model_name or time.monotonic() >= deadline:
         return False
+    scan_deadline = _lcm_recall_preflight_scan_deadline(time.monotonic(), deadline)
 
     conn: sqlite3.Connection | None = None
     try:
         db_path = Path(engine._store.db_path).resolve()
-        remaining_s = max(0.001, deadline - time.monotonic())
+        remaining_s = max(0.001, scan_deadline - time.monotonic())
         conn = sqlite3.connect(
             f"{db_path.as_uri()}?mode=ro",
             uri=True,
@@ -4922,7 +4951,7 @@ def _lcm_recall_has_usable_vector_corpus(
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only=ON")
         conn.set_progress_handler(
-            lambda: 1 if time.monotonic() >= deadline else 0,
+            lambda: 1 if time.monotonic() >= scan_deadline else 0,
             1000,
         )
 
@@ -4942,6 +4971,12 @@ def _lcm_recall_has_usable_vector_corpus(
             source_join: str,
             source_where: str = "",
         ) -> bool:
+            # The progress handler only fires every 1000 VM ops, so a probe
+            # that starts after scan expiry could still slip through whole;
+            # this check makes the scan budget binding regardless of handler
+            # granularity.
+            if time.monotonic() >= scan_deadline:
+                return False
             profile = conn.execute(
                 """
                 SELECT identity_hash

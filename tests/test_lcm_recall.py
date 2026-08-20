@@ -1994,6 +1994,73 @@ def test_provider_alias_uses_existing_vector_corpus_for_fts_fairness(
     assert payload["hits"][0]["node_id"] == node
 
 
+def test_preflight_scan_deadline_is_bounded():
+    """The corpus preflight gets a small independent scan budget.
+
+    A no-match probe over a fully-orphaned corpus must exhaust candidates
+    despite ``LIMIT 1``; aborting it only at the REQUEST deadline would hand
+    the FTS arm an already-expired budget -- the preflight would starve the
+    very request it exists to protect. The scan deadline is therefore bounded
+    by a small absolute cap, a fraction of the remaining budget, and the
+    request deadline itself.
+    """
+    # Long request: the absolute cap binds.
+    assert lcm_tools._lcm_recall_preflight_scan_deadline(100.0, 200.0) == pytest.approx(
+        100.0 + lcm_tools._LCM_RECALL_PREFLIGHT_MAX_BUDGET_S
+    )
+    # Short request: the fractional bound binds.
+    assert lcm_tools._lcm_recall_preflight_scan_deadline(100.0, 101.0) == pytest.approx(
+        100.0 + 1.0 * lcm_tools._LCM_RECALL_PREFLIGHT_BUDGET_FRACTION
+    )
+    # Nearly-expired request: never extends past the request deadline.
+    assert (
+        lcm_tools._lcm_recall_preflight_scan_deadline(100.0, 100.0005) == 100.0005
+    )
+    # Already-expired request: scan is born expired, preflight fails open fast.
+    assert lcm_tools._lcm_recall_preflight_scan_deadline(100.0, 99.0) <= 100.0
+
+
+def test_preflight_scan_expiry_fails_open_to_full_fts_budget(
+    recall_engine, monkeypatch
+):
+    """An expired preflight scan keeps the FULL budget with the FTS arm.
+
+    Same live corpus as
+    ``test_provider_alias_uses_existing_vector_corpus_for_fts_fairness`` (the
+    engaged-cap control at 102.0): when the preflight's scan budget expires the
+    preflight reports no semantic route, so FTS keeps the entire request budget
+    (fail-open) -- and the semantic arms themselves still run and score, so the
+    only cost of the expiry is the missing cap, never lost recall.
+    """
+    recall_engine._config.recall_query_timeout_s = 8.0
+    node = _add_summary(
+        recall_engine,
+        "semantic result behind an expired preflight scan",
+        session_id="session-a",
+        created_at=1.0,
+    )
+    _seed_summary_vectors(recall_engine, [(node, [1.0, 0.0])])
+
+    clock = [100.0]
+    captured = _capture_fts_deadline(monkeypatch, clock)
+    monkeypatch.setattr(
+        lcm_tools,
+        "_lcm_recall_preflight_scan_deadline",
+        lambda now, deadline: now,
+    )
+
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "expired preflight", "include": "all", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    assert captured["fts_deadline"] == 108.0
+    assert payload["provenance"]["coverage"]["summary"] == "full"
+    assert payload["hits"][0]["node_id"] == node
+
+
 @pytest.mark.parametrize(
     ("embeddings_enabled", "provider_name", "model_name"),
     [
