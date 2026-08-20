@@ -192,3 +192,49 @@ over an abstention hedge). Two review corrections on top:
   retrieval degraded is asymmetric-exclusion bias and would corrupt the
   registered denominator (§2 boundary exclusions + pairwise intersections are
   the only permitted exclusions).
+
+## 10. AMENDMENT (2026-08-20, append-only, pre-official-report) — agentic tool access is a contamination vector; audit results; tool policy for all arms
+
+**Threat found (measured, not hypothetical):** the hermes host is a coding
+agent with filesystem tools. During the R2r/R2b runs the model spontaneously
+fired generic tools (search_files / read_file / terminal / execute_code) —
+including an in-run repo grep that surfaced a REAL canary value which had
+leaked into repo test fixtures via the scorer PR (#275; fixed in this PR — no
+frozen-material value or phrasing may appear in any repo file), a terminal/
+execute_code dump of the arm's own lcm.db (all 30 values), and reads of the
+instrument source that let TRAP answers identify the bench design.
+
+**Mechanical audit (scripted, per probe-turn session; receipts in the pilot
+kit):** per-turn session isolation bounded the blast radius — a tool result
+only reaches the turn (=session) that fired it. Findings:
+- R2r-A: 2/35 probe turns fired generic tools; 1 value-bearing (turn 36 =
+  TRAP-04, terminal dump). R2r-A′: 3/35; value-bearing turns 36 (TRAP-04,
+  execute_code dump + read_file) and 56 (TRAP-03, search_files → 2 unrelated
+  values). R2b: 13/35 attempted; value-bearing turns 36/39/54 (1 leaked value
+  each, never that turn's expected value).
+- **Zero TAINTED-CORRECT rows in any arm** (no CORRECT canary answer's value
+  appeared in any generic-tool result of its own session) → the banked
+  retention numbers (R2r-A 86.7%, R2r-A′ 96.7%, R2b 86.7%) STAND.
+- **Trap metric is design-read tainted** in the affected turns (models read
+  the instrument/bench text and inferred "abstention trap"): R2r-A TRAP-04,
+  R2r-A′ TRAP-04+TRAP-03, R2b TRAP-04. Already demoted to secondary (Am. 9);
+  now additionally flagged per-arm as partially informed abstention.
+
+**Policy from here (applies to every remaining and future arm; reruns of the
+banked arms are NOT required for retention, and their trap rows carry the
+flag):**
+- Hermes arms: during home setup (BEFORE the config-sha pin) disable the
+  generic toolsets and non-memory MCP servers: `web browser terminal file
+  code_execution skills delegation vision image_gen tts bfl homeassistant
+  cronjob` + all MCP servers. KEEP the memory surface: `memory`,
+  `context_engine`, `session_search`, plus `todo`/`clarify`. The bench
+  measures memory assembly, not filesystem retrieval.
+- Drivers run with cwd = a fresh EMPTY sandbox directory, never a repo or the
+  kit.
+- R1/R4 (codex; tools cannot be disabled): DETECTION rule, pre-declared —
+  parse the rollout for shell/tool items; the arm is INVALID if any tool call
+  reads material/kit paths, greps a canary value, or runs the generator;
+  every tool call is disclosed in the run record either way. Ground-truth
+  affordance is reduced (empty cwd), not eliminated; detection is the gate.
+- Prior-arm outputs (results.jsonl, consoles) also contain values → covered
+  by the same deny/detection rules.
