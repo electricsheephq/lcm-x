@@ -73,8 +73,19 @@ def _make_engine(tmp_path: Path, **overrides):
     return engine
 
 
+def _seed_durable_tool_row(engine, content):
+    """Persist one tool row so its out-of-band text counts as durable."""
+    engine._ingest_messages(
+        [
+            {"role": "user", "content": "seed"},
+            {"role": "assistant", "content": "seeding."},
+            {"role": "tool", "tool_call_id": "seed", "content": content},
+        ]
+    )
+
+
 class TestOutOfBandBlockIdentity:
-    """The OOB block is identity-transparent."""
+    """The OOB block is identity-transparent once its text is durable."""
 
     def test_identity_strips_oob_block_preserves_content(self, tmp_path):
         """Stored row (with block) and incoming row (without) match."""
@@ -82,7 +93,8 @@ class TestOutOfBandBlockIdentity:
         try:
             base = '{"output": "build finished, 0 errors", "exit_code": 0}'
             id_with = engine._message_replay_identity(
-                {"role": "tool", "tool_call_id": "c1", "content": base + OOB_BLOCK}
+                {"role": "tool", "tool_call_id": "c1", "content": base + OOB_BLOCK},
+                stored_row=True,
             )
             id_without = engine._message_replay_identity(
                 {"role": "tool", "tool_call_id": "c1", "content": base}
@@ -104,12 +116,56 @@ class TestOutOfBandBlockIdentity:
                 "check the 2026 logs instead", "and also run the tests"
             )
             id_twice = engine._message_replay_identity(
-                {"role": "tool", "tool_call_id": "c1", "content": twice}
+                {"role": "tool", "tool_call_id": "c1", "content": twice},
+                stored_row=True,
             )
             id_plain = engine._message_replay_identity(
                 {"role": "tool", "tool_call_id": "c1", "content": base}
             )
             assert id_twice == id_plain
+        finally:
+            engine.shutdown()
+
+    def test_incoming_identity_strips_block_already_durable(self, tmp_path):
+        """An incoming block the store already holds is identity-transparent."""
+        engine = _make_engine(tmp_path)
+        try:
+            base = '{"output": "build finished, 0 errors", "exit_code": 0}'
+            _seed_durable_tool_row(engine, base + OOB_BLOCK)
+            id_with = engine._message_replay_identity(
+                {"role": "tool", "tool_call_id": "c1", "content": base + OOB_BLOCK}
+            )
+            id_without = engine._message_replay_identity(
+                {"role": "tool", "tool_call_id": "c1", "content": base}
+            )
+            assert id_with == id_without, (
+                "A durable OOB block must strip from the incoming identity too"
+            )
+        finally:
+            engine.shutdown()
+
+    def test_incoming_identity_keeps_block_not_yet_durable(self, tmp_path):
+        """An incoming block the store has never seen keeps the row distinct.
+
+        The host only ever APPENDS the steer marker (hermes-agent
+        agent/conversation_loop.py:1723 mutates a tool row in place and no host
+        path removes the marker), so a block absent from the store is a genuine
+        user instruction arriving for the first time.  Collapsing it onto the
+        stored row would advance reconciliation past the only copy of that text.
+        """
+        engine = _make_engine(tmp_path)
+        try:
+            base = '{"output": "build finished, 0 errors", "exit_code": 0}'
+            id_with = engine._message_replay_identity(
+                {"role": "tool", "tool_call_id": "c1", "content": base + OOB_BLOCK}
+            )
+            id_without = engine._message_replay_identity(
+                {"role": "tool", "tool_call_id": "c1", "content": base}
+            )
+            assert id_with != id_without, (
+                "An unproven OOB block must not be treated as identity-transparent"
+            )
+            assert "check the 2026 logs instead" in id_with[1]
         finally:
             engine.shutdown()
 
@@ -165,8 +221,16 @@ class TestOutOfBandBlockReconciliation:
         finally:
             engine.shutdown()
 
-    def test_reverse_direction_no_reingest(self, tmp_path):
-        """Stored without block, replayed with block -> no re-ingest."""
+    def test_reverse_direction_preserves_out_of_band_text(self, tmp_path):
+        """Stored without block, replayed with block -> the steer text lands.
+
+        This is the direction the live host actually produces: a /steer is
+        appended in place to a tool row LCM has already ingested, and the host
+        never removes the marker again, so the replay carries text the store has
+        never seen.  Collapsing that row onto the stored one would advance the
+        cursor past the only copy of the user's instruction.  Re-ingest (with
+        the duplication that implies) is the loss-avoiding direction here.
+        """
         engine = _make_engine(tmp_path)
         try:
             tool_content = '{"output": "deploy ok", "exit_code": 0}'
@@ -189,7 +253,41 @@ class TestOutOfBandBlockReconciliation:
             engine._ingest_cursor_needs_reconcile = True
             engine._ingest_messages(turn2)
 
+            stored = engine._store.get_session_tail("oob-block-test", limit=64)
+            assert any(
+                "check the 2026 logs instead" in (row.get("content") or "")
+                for row in stored
+            ), "The out-of-band user instruction must reach the store"
+        finally:
+            engine.shutdown()
+
+    def test_reverse_direction_converges_once_block_is_durable(self, tmp_path):
+        """Once the enriched row is stored, replaying it again does not re-ingest."""
+        engine = _make_engine(tmp_path)
+        try:
+            tool_content = '{"output": "deploy ok", "exit_code": 0}'
+            enriched = [
+                {"role": "user", "content": "Deploy"},
+                {"role": "assistant", "content": "Deploying."},
+                {
+                    "role": "tool",
+                    "tool_call_id": "c1",
+                    "content": tool_content + OOB_BLOCK,
+                },
+                {"role": "assistant", "content": "Done."},
+            ]
+            engine._ingest_messages(enriched)
+            assert engine._store.get_session_count("oob-block-test") == 4
+
+            replay = enriched.copy()
+            replay.append({"role": "user", "content": "Verify"})
+            engine._ingest_cursor_needs_reconcile = True
+            engine._ingest_messages(replay)
+
             count = engine._store.get_session_count("oob-block-test")
-            assert count == 5, f"Expected 5, got {count}"
+            assert count == 5, (
+                f"Expected 5 (4 stored + 1 new), got {count}. "
+                "A durable OOB block must not force a full re-ingest."
+            )
         finally:
             engine.shutdown()
