@@ -38,3 +38,4 @@ architect):
 | #183 cross-session summary DAG expansion | 2026-08-21 | retrieval path (expand/describe/expand_query cross-session; provenance session attribution) | next full-500 V1-M run + next main-tree LoCoMo row | OPEN |
 | #286 teams-slice-1 AccessContextV1 contract | 2026-08-21 | additive, eval-unreachable (all-new paths; verdict 5356722388) | no re-baseline owed | RECORDED |
 | #297 auto-focus keeps newest request (summary-steering) | 2026-08-21 | compaction/assembly focus string for over-cap user turns (ingest-side summarization included) | next full-500 V1-M run re-baselines (deterministic); next main-tree LoCoMo row records post-#297 | OPEN |
+| #300 teams-slice-2 policy/catalog/scope-storage | 2026-08-21 | additive, eval-unreachable (all-new paths, zero call sites; verdict 5358203472) | no re-baseline owed | RECORDED |
