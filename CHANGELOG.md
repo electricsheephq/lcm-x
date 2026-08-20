@@ -26,6 +26,8 @@ score-sensitive changes carry architect verdicts (#252) and boundary rows in
   config posture).
 - Teams candidate (NOT enabled): #286 — AccessContextV1 contract package, pure additive.
 - Tests/docs: #254 #257 (salvaged regression coverage), #262 (gpt-5.4 retirement note).
+- #297 — P1 #90: recovered/compacted sessions keep the newest user request authoritative
+  (auto-focus middle-elision + newest-backwards budget); summary-steering ledger row.
 - Governance: #241 — the main ruleset is satisfiable again (phantom CodeQL contexts dropped,
   last-push-approval deadlock removed); --admin is an exception, not the path.
 
