@@ -3097,7 +3097,13 @@ def repair_external_content_fts(
             if not _fts_missing_triggers(conn, spec) and not _fts_stale_triggers(
                 conn, spec
             ):
-                _clear_integrity_failed(conn, spec)
+                # Clear only when the deep check actually ran this call
+                # (unthrottled). Under throttle `_fts_needs_rebuild` may have
+                # deferred the scan to the background worker, and that worker
+                # can record `fts_integrity_failed` concurrently — clearing
+                # here would erase evidence of drift nothing has repaired.
+                if not throttle:
+                    _clear_integrity_failed(conn, spec)
                 conn.commit()
                 return {
                     "rebuilt": False,
@@ -3179,7 +3185,16 @@ def repair_external_content_fts(
         # `/lcm doctor` stops reporting issues-found (and the next self-healing
         # scan is not pushed out a full interval). Without this an explicit
         # `repair apply` left the flag stuck.
-        _clear_integrity_failed(conn, spec)
+        #
+        # But only a repair that VERIFIED integrity may clear: a rebuild is
+        # known-consistent, and an unthrottled call ran the deep check itself.
+        # The throttled trigger-only path proves nothing about token drift —
+        # its deep check was deferred to the background scan, which can record
+        # `fts_integrity_failed` concurrently with this repair. Clearing there
+        # would leave the stale index in place while erasing the only evidence
+        # `/lcm doctor` has of it.
+        if rebuilt or not throttle:
+            _clear_integrity_failed(conn, spec)
 
     if not owns_transaction:
         # Preserve the helper's historical behavior for callers that supplied an

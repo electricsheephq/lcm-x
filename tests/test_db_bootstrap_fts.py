@@ -512,6 +512,48 @@ def test_explicit_repair_clears_stuck_integrity_failed_flag(tmp_path, monkeypatc
     conn.close()
 
 
+def test_throttled_trigger_repair_preserves_concurrent_integrity_failure(
+    tmp_path, monkeypatch
+):
+    """A trigger-only throttled repair must not clear a corruption flag it
+    never verified.
+
+    Race: the throttled startup path defers the deep check to the background
+    scan and repairs triggers only. If the scan records
+    `fts_integrity_failed` before the repair's transaction, an unconditional
+    clear erases the only evidence of same-row-count token drift while the
+    stale index stays in place. Only a rebuild (known-consistent) or an
+    unthrottled call (deep check ran here) may clear.
+    """
+    from hermes_lcm.store import build_message_fts_spec
+
+    monkeypatch.setenv(INTERVAL_ENV, "24")
+    conn = _make_conn(tmp_path)
+    spec = build_message_fts_spec()
+    ensure_external_content_fts(conn, spec)  # build + fresh marker
+
+    # The background scan recorded corruption (stands in for the concurrent
+    # scan landing just before this repair's transaction).
+    db_bootstrap._record_integrity_failed(conn, spec, detail="synthetic drift")
+    conn.commit()
+
+    # A trigger defect forces the repair through the ownership path without a
+    # rebuild: the interval marker is fresh, so the throttled deep check is
+    # skipped.
+    trigger_name = db_bootstrap._extract_trigger_name(spec.trigger_sqls[0])
+    assert trigger_name is not None
+    conn.execute(f"DROP TRIGGER {db_bootstrap.quote_sql_identifier(trigger_name)}")
+    conn.commit()
+
+    repaired = db_bootstrap.repair_external_content_fts(conn, spec, throttle=True)
+
+    assert repaired["rebuilt"] is False
+    assert repaired["triggers_recreated"] is True
+    # The unverified flag survives for /lcm doctor and the next scan.
+    assert db_bootstrap.load_integrity_failed(conn, spec) is not None
+    conn.close()
+
+
 def test_explicit_repair_rebuilds_same_count_corruption_with_missing_triggers(tmp_path):
     """Explicit repair must fix index drift even while recreating triggers."""
     from hermes_lcm.store import build_message_fts_spec
@@ -625,7 +667,17 @@ def test_throttled_startup_with_missing_triggers_still_dispatches_background_sca
 
 
 def test_repair_without_rebuild_still_clears_integrity_failed_flag(tmp_path, monkeypatch):
-    """Even a no-op repair (nothing to rebuild) clears a stale corruption flag."""
+    """An UNTHROTTLED no-op repair clears a stale corruption flag.
+
+    Contract updated with the concurrent-scan race fix: only a repair that
+    VERIFIED integrity may clear — a rebuild, or an unthrottled call (the deep
+    check ran in this call). A throttled no-op pass proves nothing and must
+    leave the flag for `/lcm doctor` (see
+    test_throttled_trigger_repair_preserves_concurrent_integrity_failure).
+    Unsticking is served by explicit `repair apply` (unthrottled) and by the
+    next background scan — a failing scan never stamps the throttle marker, so
+    the recheck is prompt.
+    """
     monkeypatch.setenv(INTERVAL_ENV, "24")
     conn = _make_conn(tmp_path)
     spec = _spec()
@@ -635,8 +687,13 @@ def test_repair_without_rebuild_still_clears_integrity_failed_flag(tmp_path, mon
     conn.commit()
     assert db_bootstrap.load_integrity_failed(conn, spec) is not None
 
-    # Index is healthy: repair makes no rebuild but must still clear the flag.
+    # Throttled pass: verified nothing, must preserve the flag.
     repaired = db_bootstrap.repair_external_content_fts(conn, spec, throttle=True)
+    assert repaired["rebuilt"] is False
+    assert db_bootstrap.load_integrity_failed(conn, spec) is not None
+
+    # Unthrottled no-op repair: deep check ran here and passed, flag clears.
+    repaired = db_bootstrap.repair_external_content_fts(conn, spec)
     assert repaired["rebuilt"] is False
     assert db_bootstrap.load_integrity_failed(conn, spec) is None
     conn.close()
