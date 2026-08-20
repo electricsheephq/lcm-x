@@ -49,3 +49,13 @@ drifted to post-train main between 14:27Z and 15:06Z (mover unidentified; low pr
 ## R4-ref status
 VOID attempt 2026-08-20 (OAuth CLI quota exhausted by R1-lc; reset Aug 26 15:01). Runs in the
 Aug 26–31 window; reference-only (excluded from contrasts by §3b), appended when banked.
+
+
+## SOUL.md pins (Amendment 14 — system prompt joins the per-arm pin set)
+stock soul 2765a846e1bb371d: R2-A, R2-Aprime, R2b, R2s-A, R2s-Aprime
+Am.12 bench soul b5805cf97a861b35: R3, R2s-S-ctrl, R2s-L-A, R2s-L-Aprime, R2s-MC
+(banked-arm consoles print no SOUL line — absence IS the stock-soul receipt)
+
+## Correction: R1 token pin
+"last request 553,914" was request 64/70; final request input = 554,094 (series max;
+cumulative 554,107). Parity-gate conclusion unchanged.
