@@ -16,6 +16,7 @@ import shutil
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from typing import Iterable, Sequence
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,32 @@ class ExternalContentFtsSpec:
         self.content_rowid = content_rowid
         self.indexed_column = indexed_column
         self.trigger_sqls = tuple(trigger_sqls)
+
+
+def _is_sqlite_lock_error(exc: BaseException) -> bool:
+    """Return True when an exception chain represents SQLite lock contention."""
+    lock_codes = {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+    lock_messages = (
+        "database is locked",
+        "database table is locked",
+        "database schema is locked",
+        "database is busy",
+        "database table is busy",
+        "database schema is busy",
+    )
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, sqlite3.Error):
+            error_code = getattr(current, "sqlite_errorcode", None)
+            if isinstance(error_code, int) and (error_code & 0xFF) in lock_codes:
+                return True
+            detail = str(current).lower()
+            if any(message in detail for message in lock_messages):
+                return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def configure_connection(conn: sqlite3.Connection) -> None:
@@ -2403,7 +2430,12 @@ def _fts_needs_rebuild_structural(conn: sqlite3.Connection, spec: ExternalConten
         ).fetchone()[0]
         if int(content_count or 0) != int(fts_count or 0):
             return True
-    except sqlite3.DatabaseError:
+    except sqlite3.DatabaseError as exc:
+        # A busy/locked snapshot is an availability problem, not FTS
+        # corruption. Let the bounded caller transaction report it instead of
+        # turning lock exhaustion into destructive repair.
+        if _is_sqlite_lock_error(exc):
+            raise
         return True
 
     return False
@@ -2648,10 +2680,34 @@ def _run_background_integrity_scan(
         try:
             meta_conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
             status = result.get("status")
+            # Fence the publish on our own scan-started stamp (compare-and-
+            # swap): a repair that mutated triggers/index while this scan was
+            # in flight DELETES the stamp, which invalidates the snapshot this
+            # result was computed from. Publishing a stale 'pass' would restore
+            # a fresh 24h marker over an index the repair just proved was
+            # behind. Claim first, publish only if the claim succeeded, all in
+            # ONE transaction so repair cannot interleave.
+            meta_conn.execute("BEGIN IMMEDIATE")
+            claim = meta_conn.execute(
+                "DELETE FROM metadata WHERE key = ? AND value = ?",
+                (_integrity_scan_started_key(spec), str(started_at)),
+            )
+            claimed = claim.rowcount == 1
             if status == "pass":
-                _record_integrity_checked(meta_conn, spec, now=started_at)
-                _clear_integrity_failed(meta_conn, spec)
+                # A 'pass' may publish ONLY when our claim survived: a repair
+                # that mutated triggers/index while this scan was in flight
+                # deletes the stamp, and a pass computed on the pre-repair
+                # snapshot could restore a fresh 24h marker over an index that
+                # went stale during the missing-trigger window.
+                if claimed:
+                    _record_integrity_checked(meta_conn, spec, now=started_at)
+                    _clear_integrity_failed(meta_conn, spec)
             elif status == "fail":
+                # A 'fail' publishes even when the claim was invalidated:
+                # trigger recreation does not repair token drift, so the
+                # evidence stays valid — and if a rebuild DID fix it, the next
+                # verified-pass clear removes the flag properly. Erring toward
+                # a recorded flag is the fail-safe direction.
                 _record_integrity_failed(
                     meta_conn, spec, detail=result.get("detail", ""), now=started_at
                 )
@@ -2661,9 +2717,8 @@ def _run_background_integrity_scan(
                     spec.table_name,
                     result.get("detail", ""),
                 )
-            # 'unchecked' (e.g. a read-only DB): leave the throttle marker unset
-            # so the next bind retries; do not stamp or flag.
-            _clear_scan_started(meta_conn, spec, expected=started_at)
+            # 'unchecked' (e.g. a read-only DB): leave the throttle marker
+            # unset so the next bind retries; do not stamp or flag.
             meta_conn.commit()
         finally:
             meta_conn.close()
@@ -2819,8 +2874,20 @@ def check_external_content_fts_integrity(
     behind on the shared connection.
     """
 
-    if _fts_needs_rebuild_structural(conn, spec):
-        return {"status": "fail", "detail": "structural repair needed"}
+    try:
+        if _fts_needs_rebuild_structural(conn, spec):
+            return {"status": "fail", "detail": "structural repair needed"}
+    except sqlite3.DatabaseError as exc:
+        # The structural probe re-raises lock contention rather than reporting it
+        # as corruption. This is a read-only DIAGNOSTIC boundary, so apply the
+        # same rule the savepoint branch below already applies: a busy/locked
+        # snapshot is 'unchecked', never 'fail'. Without this the background scan
+        # loses its result and `/lcm doctor` reports a transient lock as FTS
+        # corruption. Repair paths keep the raise: they reach
+        # `_fts_needs_rebuild_structural` directly, not through here.
+        if not _is_sqlite_lock_error(exc):
+            raise
+        return {"status": "unchecked", "detail": str(exc)}
 
     savepoint = f"lcm_fts_integrity_{spec.table_name}"
     savepoint_sql = quote_sql_identifier(savepoint)
@@ -2975,6 +3042,71 @@ def external_content_fts_needs_repair(conn: sqlite3.Connection, spec: ExternalCo
     )
 
 
+@contextmanager
+def _fts_repair_ownership(conn: sqlite3.Connection):
+    """Own the short FTS structural-repair transaction.
+
+    Fresh startup connections are normally outside a transaction, so
+    ``BEGIN IMMEDIATE`` serializes the structural recheck and all FTS DDL
+    across independent processes. A caller that already owns a transaction
+    gets a savepoint instead; committing that caller-owned transaction remains
+    the historical behavior of the repair helper.
+    """
+    if conn.in_transaction:
+        savepoint = quote_sql_identifier("lcm_fts_repair_ownership")
+        conn.execute(f"SAVEPOINT {savepoint}")
+        try:
+            yield False
+        except BaseException:
+            try:
+                conn.execute(f"ROLLBACK TO {savepoint}")
+            finally:
+                conn.execute(f"RELEASE {savepoint}")
+            raise
+        else:
+            conn.execute(f"RELEASE {savepoint}")
+        return
+
+    previous_timeout = conn.execute("PRAGMA busy_timeout").fetchone()
+    previous_timeout_ms = int(previous_timeout[0]) if previous_timeout else 0
+    conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+    try:
+        # A loser waits for the winner, then takes a current write snapshot and
+        # rechecks the complete FTS state before deciding whether to repair.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield True
+        except BaseException:
+            conn.rollback()
+            raise
+        else:
+            try:
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+    finally:
+        conn.execute(f"PRAGMA busy_timeout={previous_timeout_ms}")
+
+
+def _fts_verified_pass(
+    conn: sqlite3.Connection, spec: ExternalContentFtsSpec, *, now: float | None = None
+) -> bool:
+    """True only when the deep check RAN here, NOW, and returned 'pass'.
+
+    'unchecked' (read-only handle, transient non-corruption error) proves
+    nothing and must never authorize clearing ``fts_integrity_failed`` —
+    and neither may a pass computed BEFORE the caller held the write lock
+    (a background scan can record corruption in that window). Callers run
+    this inside their own write transaction.
+    """
+    result = check_external_content_fts_integrity(conn, spec)
+    if result.get("status") != "pass":
+        return False
+    _record_integrity_checked(conn, spec, now=now)
+    return True
+
+
 def repair_external_content_fts(
     conn: sqlite3.Connection,
     spec: ExternalContentFtsSpec,
@@ -2984,57 +3116,153 @@ def repair_external_content_fts(
 ) -> dict[str, bool]:
     rebuilt = False
     degraded = False
-    if _fts_needs_rebuild(conn, spec, now=now, throttle=throttle):
-        db_path = conn.execute("PRAGMA database_list").fetchone()
-        if db_path:
-            db_file = db_path[2]
-            if db_file and not _check_disk_space(db_file):
+    # Only a full structural REBUILD subsumes the deep check, so only that case
+    # may skip it on the cheap startup path. A trigger-only defect must NOT skip
+    # it: `_fts_needs_rebuild_structural` cannot see same-row-count token drift,
+    # so skipping there would recreate the triggers, report success, and leave
+    # the stale index in place with no background integrity scan dispatched and
+    # (with background scans disabled) no synchronous rebuild either.
+    structural_rebuild_needed = _fts_needs_rebuild_structural(conn, spec)
+    deep_repair_needed = False
+    if not structural_rebuild_needed or not throttle:
+        # Preserve the cheap startup path and its background integrity-scan
+        # behavior. Explicit repair remains unthrottled even when a structural
+        # trigger repair is also needed, so same-row-count index drift is not
+        # hidden behind the trigger-only path.
+        deep_repair_needed = _fts_needs_rebuild(conn, spec, now=now, throttle=throttle)
+        if not deep_repair_needed:
+            # A trigger can disappear (or drift) after the initial complete-state
+            # check. Return on the healthy fast path only while it is still
+            # complete AND undrifted; any observed trigger repair must pass
+            # through write ownership below.
+            if not _fts_missing_triggers(conn, spec) and not _fts_stale_triggers(
+                conn, spec
+            ):
+                # Clearing requires a VERIFIED PASS inside our own write
+                # transaction — `not throttle` was not proof (an 'unchecked'
+                # deep check is indistinguishable from a pass at this point,
+                # and a pre-lock pass races the background scan's flag write).
+                if not throttle:
+                    if conn.in_transaction:
+                        conn.commit()
+                    conn.execute("BEGIN IMMEDIATE")
+                    if _fts_verified_pass(conn, spec, now=now):
+                        _clear_integrity_failed(conn, spec)
+                conn.commit()
+                return {
+                    "rebuilt": False,
+                    "degraded": False,
+                    "triggers_recreated": False,
+                }
+
+    with _fts_repair_ownership(conn) as owns_transaction:
+        # This is the decisive cross-process recheck. If another process won
+        # while we waited, accept its complete table/shadow/trigger state and do
+        # not drop or recreate it.
+        winner_state_needs_repair = external_content_fts_needs_repair(conn, spec)
+        owner_rebuild_needed = (
+            _fts_needs_rebuild_structural(conn, spec) if winner_state_needs_repair else False
+        )
+        if not owner_rebuild_needed and deep_repair_needed:
+            # Explicit repair (and synchronous startup when background scans are
+            # disabled) must revalidate same-row-count token drift while owning
+            # the write boundary. A repaired winner is accepted without a second
+            # destructive rebuild.
+            owner_rebuild_needed = _fts_needs_rebuild(
+                conn, spec, now=now, throttle=False
+            )
+        if owner_rebuild_needed:
+            # Use the shared helper: it selects the row whose schema is 'main'
+            # (an ATTACHed schema can otherwise come first), length-checks the
+            # row, and contains a PRAGMA failure instead of letting it abort the
+            # repair transaction we currently own.
+            db_file = _database_path_for_connection(conn)
+            low_disk = bool(db_file and not _check_disk_space(db_file))
+            if low_disk:
                 logger.warning(
                     "Low disk space for FTS rebuild of '%s' (%d MB needed), degrading to LIKE search",
                     spec.table_name,
                     _MIN_DISK_SPACE_BYTES // (1024 * 1024),
                 )
                 _drop_fts_artifacts(conn, spec)
-                # The corrupt index is gone (degraded to LIKE search); a stale
-                # integrity-failed flag would otherwise keep `/lcm doctor`
-                # reporting issues-found for an index that no longer exists.
-                _clear_integrity_failed(conn, spec)
-                conn.commit()
-                return {"rebuilt": False, "degraded": True, "triggers_recreated": False}
-        _drop_fts_table(conn, spec.table_name)
-        conn.execute(
-            f"""
-            CREATE VIRTUAL TABLE {quote_sql_identifier(spec.table_name)} USING fts5(
-                {quote_sql_identifier(spec.indexed_column)},
-                content={quote_sql_identifier(spec.content_table)},
-                content_rowid={quote_sql_identifier(spec.content_rowid)}
-            )
-            """
-        )
-        conn.execute(
-            f"INSERT INTO {quote_sql_identifier(spec.table_name)}({quote_sql_identifier(spec.table_name)}) VALUES('rebuild')"
-        )
-        rebuilt = True
+                degraded = True
+            else:
+                _drop_fts_table(conn, spec.table_name)
+                conn.execute(
+                    f"""
+                    CREATE VIRTUAL TABLE {quote_sql_identifier(spec.table_name)} USING fts5(
+                        {quote_sql_identifier(spec.indexed_column)},
+                        content={quote_sql_identifier(spec.content_table)},
+                        content_rowid={quote_sql_identifier(spec.content_rowid)}
+                    )
+                    """
+                )
+                conn.execute(
+                    f"INSERT INTO {quote_sql_identifier(spec.table_name)}({quote_sql_identifier(spec.table_name)}) VALUES('rebuild')"
+                )
+                rebuilt = True
 
-    triggers_were_missing = _fts_missing_triggers(conn, spec)
-    triggers_were_stale = _fts_stale_triggers(conn, spec)
-    if triggers_were_stale:
-        # A stale trigger exists by name with a drifted body, so the spec's bare
-        # `CREATE TRIGGER IF NOT EXISTS` would no-op and leave the broken trigger
-        # in place. Drop first so the body is guaranteed to be recreated fresh.
-        _drop_fts_triggers(conn, spec.trigger_sqls)
-    for trigger_sql in spec.trigger_sqls:
-        conn.execute(trigger_sql)
-    if rebuilt:
-        # A freshly rebuilt index is known-consistent; record the marker so the
-        # next startup can skip the deep integrity-check within the interval.
-        _record_integrity_checked(conn, spec, now=now)
-    # A completed repair resolves any prior background-scan corruption flag: clear
-    # it in the SAME transaction that commits the rebuild so `/lcm doctor` stops
-    # reporting issues-found (and the next self-healing scan is not pushed out a
-    # full interval). Without this an explicit `repair apply` left the flag stuck.
-    _clear_integrity_failed(conn, spec)
-    conn.commit()
+        if degraded:
+            # The degraded path already dropped the triggers along with the
+            # index; recreating them here would reference a table that no longer
+            # exists. Matches the historical early-return's `triggers_recreated`.
+            triggers_were_missing = False
+            triggers_were_stale = False
+        else:
+            triggers_were_missing = _fts_missing_triggers(conn, spec)
+            triggers_were_stale = _fts_stale_triggers(conn, spec)
+            if triggers_were_stale:
+                # A stale trigger exists by name with a drifted body, so the
+                # spec's bare `CREATE TRIGGER IF NOT EXISTS` would no-op and
+                # leave the broken trigger in place. Drop first so the body is
+                # guaranteed to be recreated fresh.
+                _drop_fts_triggers(conn, spec.trigger_sqls)
+            for trigger_sql in spec.trigger_sqls:
+                conn.execute(trigger_sql)
+        if rebuilt:
+            # A freshly rebuilt index is known-consistent; record the marker so
+            # the next startup can skip the deep integrity-check within the
+            # interval.
+            _record_integrity_checked(conn, spec, now=now)
+        elif triggers_were_missing or triggers_were_stale:
+            # A recreated trigger is EVIDENCE of an unindexed-write window:
+            # while it was missing/drifted, same-row-count content changes
+            # bypassed the index, which only the deep check can see. A fresh
+            # marker would suppress that check for the rest of the interval,
+            # so invalidate it — the next startup (or explicit repair) runs or
+            # dispatches the deep check immediately.
+            conn.execute(
+                "DELETE FROM metadata WHERE key = ?", (_integrity_marker_key(spec),)
+            )
+        if rebuilt or triggers_were_missing or triggers_were_stale:
+            # Any index/trigger mutation invalidates an IN-FLIGHT background
+            # scan's claim: its result was computed against the pre-repair
+            # snapshot, and its publish is CAS-fenced on this stamp — deleting
+            # it here (inside the ownership transaction) makes a stale 'pass'
+            # unpublishable over the repaired state.
+            _clear_scan_started(conn, spec)
+        # A completed repair resolves any prior background-scan corruption flag:
+        # clear it in the SAME transaction that commits the rebuild so
+        # `/lcm doctor` stops reporting issues-found (and the next self-healing
+        # scan is not pushed out a full interval). Without this an explicit
+        # `repair apply` left the flag stuck.
+        #
+        # But only a repair that VERIFIED integrity may clear. A rebuild is
+        # known-consistent. Anything else must prove a pass HERE, inside the
+        # ownership transaction — `not throttle` was not proof: an 'unchecked'
+        # deep check (read-only handle, transient error) is indistinguishable
+        # from a pass upstream, and the pre-lock deep check races the
+        # background scan's flag write.
+        if rebuilt:
+            _clear_integrity_failed(conn, spec)
+        elif not throttle and _fts_verified_pass(conn, spec, now=now):
+            _clear_integrity_failed(conn, spec)
+
+    if not owns_transaction:
+        # Preserve the helper's historical behavior for callers that supplied an
+        # already-active transaction while keeping the startup path's ownership
+        # boundary isolated and rollback-safe.
+        conn.commit()
     return {
         "rebuilt": rebuilt,
         "degraded": degraded,
