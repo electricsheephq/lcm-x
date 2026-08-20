@@ -131,15 +131,35 @@ messages recorded in lcm.db during the run).
   session restart + LCM store bridge** — architecturally the R3 mechanism at
   maximum granularity, and LCM's differentiated capability (native codex
   compaction cannot bridge sessions at all).
-- **R3-material / R3-probes are SUBSUMED** by R2r (a single restart between
-  material and probes is a strictly milder version of R2r's per-turn restart)
-  and will not run as separate arms. Registered-order note: the seeded order
-  continues R2r-A → R2r-A′ → R2b → R1 → R4-ref.
+- **R3 is CONDITIONAL on the ACP spike, not subsumed** (review correction —
+  the registered R3 topology is genuinely distinct: all material in ONE
+  session, where the 136K compaction actually fires and answer-ready's
+  five-hit per-session density cap binds differently than across 35 sessions;
+  only its one-shot IMPLEMENTATION collapses into R2r). Disposition: R3 is
+  transport-blocked for the same reason as R2s. If the ACP spike lands, R3
+  runs via ACP (single-session material → fresh-session probes) and is the
+  fullest LCM regime (in-session compaction + cross-session bridge); if the
+  spike fails, R3 is declared transport-blocked alongside R2s — not silently
+  absorbed.
+- **Pre-registered continuation order (fixed now, regardless of any observed
+  outcome):** R2r-A → R2r-A′ → R2b → R1 → R4-ref → [if the spike lands:
+  R2s-A → R2s-A′ → R3] — R2s/R3 positions are declared here precisely so a
+  successful spike cannot insert them discretionarily after seeing completed
+  arms. (Spike outcome, recorded at PR time: **PASS** — one threaded session,
+  SESSIONS=1, codeword recalled, `initialize → session/new → session/prompt`
+  newline-delimited JSON-RPC; receipt in the pilot kit's `acp-spike/REPORT.md`.
+  The bracketed branch is therefore ACTIVE; the ACP arm driver goes through
+  the same spec→review→PR path as the one-shot driver before any R2s spend.)
 - **R2b (compressor engine, same one-shot transport) is PROMOTED to the key
-  control**: it distinguishes the LCM store bridge from any host-level
-  cross-session memory (hermes state.db / workspace memories are shared across
-  sessions in the same home). If R2b retains ≈ R2r, the bridge is host-level,
-  not LCM's; if R2b ≈ 0, retention is LCM's store assembly.
+  control**, with the inference rule stated one-sidedly (review correction):
+  R2b has NO lcm.db, so its retention can only come from host-level channels
+  (state.db context, workspace memories) — R2b therefore measures the
+  host-level channel's CAPACITY. **R2b ≈ 0 cleanly establishes that R2r's
+  retention required LCM's store** (one-sided inference, valid). R2b ≈ R2r
+  does NOT establish that R2r's answers came from the host channel — equal
+  aggregates can hide different per-probe subsets and independent mechanisms;
+  in that branch, attribution for R2r uses per-probe evidence instead
+  (lcm.db tool messages, per-probe discordance between the arms' miss sets).
 - Epoch re-binning against measured compaction boundaries is **vacuous for R2r
   arms** (no boundaries exist); the pre-planted E0/E1/E2 epoch labels remain
   reportable as material-position strata only. Boundary re-binning still
@@ -150,10 +170,25 @@ messages recorded in lcm.db during the run).
   asymmetry is a required disclosure line in the pilot report.
 
 **Scoring amendments already public in PR #275** (scorer binds to frozen
-material schema; abstain-regex expanded to real observed phrasings pre-official
-scoring, retention unaffected by construction; concrete-answer guard: any
-registered canary value in an answer classifies HALLUCINATE over an abstention
-hedge). One scorer discipline rule added: `coverage.fts: 'none'` (or any
-disclosed crashed-arm marker, cf. product PR #273) appearing in a bench run's
-logs is a run-invalidating signal under fail-closed accounting — the affected
-rows are excluded or the run repeated, never scored as legitimate zero-recall.
+material schema; abstain-regex expanded to real observed phrasings; concrete-
+answer guard: any registered canary value in an answer classifies HALLUCINATE
+over an abstention hedge). Two review corrections on top:
+- **Abstain-regex FREEZE (review correction):** the expansion was made after
+  observing the first valid arm's answers. Retention (CORRECT/canaries) is
+  unaffected by construction (CORRECT is evaluated before the abstain regex),
+  but the trap-abstention rate IS regex-sensitive, so: (a) the PR #275 scorer
+  is FROZEN as the single scorer for every arm in this pilot — **no further
+  abstention-pattern changes for any reason, including future arms' phrasings
+  missing the set** (a missed abstention scores HALLUCINATE and is disclosed
+  as a regex miss — the fail-closed direction); (b) the trap metric for every
+  arm is reported with the flag "instrument amended mid-pilot, pre-official-
+  scoring" and both R2r-A trap readings (1/5 original set, 5/5 expanded set)
+  stay on the record; (c) trap-abstention is a secondary diagnostic in this
+  pilot, never a contrast metric.
+- **Crashed-arm rule (review correction — row exclusion forbidden):**
+  `coverage.fts: 'none'` (or any disclosed crashed-arm marker, cf. product
+  PR #273) in a run's logs invalidates the AFFECTED ARM, which is repeated.
+  Row-level exclusion is forbidden: dropping exactly the observations where
+  retrieval degraded is asymmetric-exclusion bias and would corrupt the
+  registered denominator (§2 boundary exclusions + pairwise intersections are
+  the only permitted exclusions).
