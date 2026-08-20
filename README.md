@@ -519,6 +519,10 @@ If startup/status output shows a host-side compression percentage that disagrees
 with LCM, trust live LCM status after a normal message has initialized the
 session.
 
+For the 2026-08-31 gpt-5.4 Codex-auth retirement, migrate to `gpt-5.6-sol`
+(quality) or `gpt-5.6-luna` (cost); `codex_gpt_long_context` remains correct for
+their 272K effective window.
+
 ### Tuning for large context windows
 
 Long-context models change the tuning problem. A 1M-token model does not mean
