@@ -2278,6 +2278,12 @@ class TestMessageStore:
         assert results == []
 
     def test_search_apostrophe_query_stays_on_fts_path(self, store, caplog):
+        from hermes_lcm.search_query import requires_like_fallback
+
+        # Guard against vacuous passes: search() takes the pre-emptive LIKE
+        # route (which logs nothing) when requires_like_fallback is True, so
+        # the caplog assertion below only has teeth while this holds.
+        assert requires_like_fallback("don't") is False
         store.append("sess1", {"role": "user", "content": "no, don't reschedule the meeting"})
 
         with caplog.at_level(logging.WARNING):
@@ -2288,6 +2294,9 @@ class TestMessageStore:
         assert "falling back to LIKE" not in caplog.text
 
     def test_search_conversational_query_does_not_crash_fts(self, store, caplog):
+        from hermes_lcm.search_query import requires_like_fallback
+
+        assert requires_like_fallback("what did I tell you, don't you remember?") is False
         store.append(
             "sess1",
             {"role": "user", "content": "what did I tell you, don't you remember?"},
@@ -2302,6 +2311,9 @@ class TestMessageStore:
         assert "falling back to LIKE" not in caplog.text
 
     def test_search_quoted_phrase_with_conversational_punctuation(self, store, caplog):
+        from hermes_lcm.search_query import requires_like_fallback
+
+        assert requires_like_fallback('"vendoring external", remember?') is False
         store.append("sess1", {"role": "user", "content": "the vendoring external plan, remember?"})
         store.append("sess1", {"role": "user", "content": "external vendoring is different"})
 

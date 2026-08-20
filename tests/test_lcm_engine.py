@@ -4975,7 +4975,15 @@ class TestEngineABC:
             limit=len(persisted_messages) + len(delta),
         )
         assert len(rows) == len(persisted_messages) + len(delta)
-        assert rows[-1]["content"] == "new instruction"
+        # The complete trailing payload, in order — a reconciliation defect
+        # could persist the overlapping rows out of order while the count and
+        # final-row checks still pass.
+        assert [row["content"] for row in rows[-len(delta):]] == [
+            "heartbeat ping",
+            "heartbeat pong",
+            "new instruction",
+        ]
+        assert after_restart._ingest_cursor == len(delta)
         reconciliation = after_restart.get_status()["ingest_reconciliation"]
         assert reconciliation["action"] == "persisted batch"
         assert reconciliation["reason"] == "persisted ambiguous delta"
@@ -5021,7 +5029,12 @@ class TestEngineABC:
             limit=len(persisted_messages) + len(delta),
         )
         assert len(rows) == len(persisted_messages) + len(delta)
-        assert rows[-1]["content"] == "fresh turn after singleton overlap"
+        # Complete trailing payload in order, not just the final row.
+        assert [row["content"] for row in rows[-len(delta):]] == [
+            persisted_messages[-1]["content"],
+            "fresh turn after singleton overlap",
+        ]
+        assert after_restart._ingest_cursor == len(delta)
         reconciliation = after_restart.get_status()["ingest_reconciliation"]
         assert reconciliation["action"] == "persisted batch"
         assert reconciliation["reason"] == "persisted ambiguous delta"
