@@ -422,6 +422,77 @@ def test_rerank_applies_and_reorders_with_voyage_provider(recall_engine, monkeyp
     assert payload["hits"][0]["node_id"] == b
 
 
+def test_rerank_margin_holds_incumbent_and_reports_scores(recall_engine, monkeypatch):
+    recall_engine._config.rerank_enabled = True
+    recall_engine._config.rerank_margin = 0.3
+    nodes = [
+        _add_summary(recall_engine, f"kanban margin {name}", session_id=f"session-{name}", created_at=5.0)
+        for name in ("a", "b", "c")
+    ]
+    _seed_summary_vectors(recall_engine, [(node, [1.0, 0.0]) for node in nodes], provider="voyage")
+
+    class RerankProvider(MockProvider):
+        provider_id = "voyage"
+
+        def rerank(self, query, documents, *, top_k=None, timeout, model="rerank-2.5-lite"):
+            return [(1, 0.8), (2, 0.7), (0, 0.6)]
+
+    payload = _recall(
+        recall_engine, monkeypatch, provider=RerankProvider(), include="summaries", scope_bias=0.0, limit=5
+    )
+    assert payload["provenance"]["rerank"] == "applied: rank1-held"
+    assert [hit["node_id"] for hit in payload["hits"][:3]] == [nodes[2], nodes[1], nodes[0]]
+    assert payload["provenance"]["rerank_scores"] == [
+        ["session-b", 0.8],
+        ["session-a", 0.7],
+        ["session-c", 0.6],
+    ]
+
+
+def test_rerank_margin_overrides_when_gap_reaches_margin(recall_engine, monkeypatch):
+    recall_engine._config.rerank_enabled = True
+    recall_engine._config.rerank_margin = 0.3
+    nodes = [
+        _add_summary(recall_engine, f"kanban margin override {name}", session_id=f"session-{name}", created_at=5.0)
+        for name in ("a", "b")
+    ]
+    _seed_summary_vectors(recall_engine, [(node, [1.0, 0.0]) for node in nodes], provider="voyage")
+
+    class RerankProvider(MockProvider):
+        provider_id = "voyage"
+
+        def rerank(self, query, documents, *, top_k=None, timeout, model="rerank-2.5-lite"):
+            return [(1, 0.9), (0, 0.6)]
+
+    payload = _recall(
+        recall_engine, monkeypatch, provider=RerankProvider(), include="summaries", scope_bias=0.0, limit=5
+    )
+    assert payload["provenance"]["rerank"] == "applied"
+    assert payload["hits"][0]["node_id"] == nodes[0]
+
+
+def test_rerank_margin_partial_result_fails_open(recall_engine, monkeypatch):
+    recall_engine._config.rerank_enabled = True
+    recall_engine._config.rerank_margin = 0.3
+    nodes = [
+        _add_summary(recall_engine, f"kanban partial margin {name}", session_id=f"session-{name}", created_at=5.0)
+        for name in ("a", "b")
+    ]
+    _seed_summary_vectors(recall_engine, [(node, [1.0, 0.0]) for node in nodes], provider="voyage")
+
+    class RerankProvider(MockProvider):
+        provider_id = "voyage"
+
+        def rerank(self, query, documents, *, top_k=None, timeout, model="rerank-2.5-lite"):
+            return [(1, 0.9)]
+
+    payload = _recall(
+        recall_engine, monkeypatch, provider=RerankProvider(), include="summaries", scope_bias=0.0, limit=5
+    )
+    assert payload["provenance"]["rerank"] == "skipped: partial rerank result"
+    assert payload["hits"][0]["node_id"] == nodes[1]
+
+
 def test_rerank_window_limit_clamps_provider_documents(recall_engine, monkeypatch):
     class CountingRerankProvider(MockProvider):
         provider_id = "voyage"
@@ -1157,6 +1228,12 @@ def test_rerank_window_limit_defaults_to_zero_and_reads_env(monkeypatch, tmp_pat
     assert LCMConfig(database_path=str(tmp_path / "default.db")).rerank_window_limit == 0
     monkeypatch.setenv("LCM_RERANK_WINDOW_LIMIT", "10")
     assert LCMConfig.from_env().rerank_window_limit == 10
+
+
+def test_rerank_margin_defaults_to_zero_and_reads_env(monkeypatch, tmp_path):
+    assert LCMConfig(database_path=str(tmp_path / "default.db")).rerank_margin == 0.0
+    monkeypatch.setenv("LCM_RERANK_MARGIN", "0.25")
+    assert LCMConfig.from_env().rerank_margin == 0.25
 
 
 def test_summary_source_expansion_refuses_an_expired_deadline(recall_engine):

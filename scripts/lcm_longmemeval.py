@@ -113,6 +113,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "requires --recall-rerank.",
     )
     run.add_argument(
+        "--recall-rerank-margin",
+        type=float,
+        default=0.0,
+        metavar="X",
+        help="Hold the incoming production lcm_recall rank-1 candidate unless the "
+        "rerank relevance gap reaches X (default: 0.0); requires --recall-rerank.",
+    )
+    run.add_argument(
         "--no-db-template",
         dest="reuse_db_template",
         action="store_false",
@@ -172,6 +180,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     args._recall_rerank_window_given = any(
         token == "--recall-rerank-window"
         or token.startswith("--recall-rerank-window=")
+        for token in argv
+    )
+    args._recall_rerank_margin_given = any(
+        token == "--recall-rerank-margin"
+        or token.startswith("--recall-rerank-margin=")
         for token in argv
     )
     return args
@@ -258,6 +271,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
         or args.recall_rerank_window != 0
     ) and not args.recall_rerank:
         raise SystemExit("--recall-rerank-window requires --recall-rerank")
+    if (
+        getattr(args, "_recall_rerank_margin_given", False)
+        or args.recall_rerank_margin != 0.0
+    ) and not args.recall_rerank:
+        raise SystemExit("--recall-rerank-margin requires --recall-rerank")
     if args.limit is not None and args.limit <= 0:
         raise SystemExit("--limit must be a positive integer")
     output_dir = _validate_output_path(Path(args.output), allow_external=args.allow_external_output)
@@ -332,6 +350,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 use_rerank=args.rerank,
                 recall_rerank=args.recall_rerank,
                 recall_rerank_window=args.recall_rerank_window,
+                recall_rerank_margin=args.recall_rerank_margin,
                 reuse_db_template=args.reuse_db_template,
                 question_count=question_count,
                 dataset_label=args.dataset_label,
