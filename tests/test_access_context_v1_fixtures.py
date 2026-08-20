@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from hermes_lcm.access_context.fixtures import FIXTURE_KINDS, fixture_paths, load_fixture
+from hermes_lcm.access_context.fixtures import (
+    FIXTURE_KINDS,
+    FixtureCorpusNotFound,
+    fixture_paths,
+    fixture_root,
+    load_fixture,
+)
 
 def test_fixture_corpus_is_non_empty_in_every_kind() -> None:
     minimums = {"positive": 5, "negative": 16, "delegation": 10, "revocation": 4, "derivation": 8}
@@ -26,6 +32,20 @@ def test_each_discovered_fixture_has_an_envelope(path: Path) -> None:
 def test_fixture_kinds_are_closed_and_shared_root_is_present() -> None:
     assert FIXTURE_KINDS == {"positive", "negative", "delegation", "revocation", "derivation"}
     assert fixture_paths()[0].parents[1].name == "access_context_v1"
+
+
+def test_supplied_but_absent_fixture_root_fails_loud(tmp_path: Path) -> None:
+    # A conformance run that points at ITS OWN copied corpus must not be
+    # silently served the package-local one: the run would report green over a
+    # corpus it never validated.
+    with pytest.raises(FixtureCorpusNotFound):
+        fixture_root(tmp_path / "missing-corpus")
+    with pytest.raises(FixtureCorpusNotFound):
+        fixture_paths("positive", root=tmp_path)
+    # A supplied root that does exist still resolves, in both spellings.
+    base = Path("tests/fixtures/access_context_v1")
+    assert fixture_root(base) == base
+    assert fixture_root(base.parent) == base
 
 
 def test_derived_scope_vectors_reject_widening_for_each_derived_kind() -> None:

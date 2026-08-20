@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Iterable
 
 from .denials import Decision, DenialReason
-from .model import ACCESS_CONTEXT_CONTRACT_REVISION, AccessContextV1, ScopeMismatchError
+from .model import (
+    ACCESS_CONTEXT_CONTRACT_REVISION,
+    AccessContextV1,
+    ScopeMismatchError,
+    ungranted_operations,
+)
 
 
 class ValidationStage(str, Enum):
@@ -126,7 +132,11 @@ def validate(
         elif stage is ValidationStage.CONTEXT_WELL_FORMED:
             assert context is not None
             missing = _invalid_fields(context)
-            if missing or context.issued_at >= context.expires_at:
+            # A narrowing token naming an operation outside the host grants is
+            # a claim of authority, not a restriction: the envelope is
+            # malformed, so it fails here rather than being quietly intersected
+            # away at the scope stage.
+            if missing or context.issued_at >= context.expires_at or ungranted_operations(context):
                 return Decision.deny(
                     DenialReason.CONTEXT_INVALID,
                     context_id=context.context_id,
@@ -299,10 +309,18 @@ def derive_child(
     if not chain or chain[-1] != parent.context_id:
         chain = chain + (parent.context_id,)
     child_number = len(chain) + 1
+    # Depth alone is not an identity: two children derived independently from
+    # one parent then shared a context_id and a request_id, so revoking either
+    # revoked both (revocation is keyed by context_id) and replay checks could
+    # not tell them apart. One nonce per derivation keeps the pair correlated
+    # within a call and unique across siblings. Nothing in the contract
+    # requires a derivation to be reproducible; callers that need a stable
+    # identity pass child_context_id/child_request_id.
+    nonce = uuid.uuid4().hex[:12]
     return replace(
         narrowed,
-        context_id=child_context_id or f"{parent.context_id}:child:{child_number}",
-        request_id=child_request_id or f"{parent.request_id}:child:{child_number}",
+        context_id=child_context_id or f"{parent.context_id}:child:{child_number}:{nonce}",
+        request_id=child_request_id or f"{parent.request_id}:child:{child_number}:{nonce}",
         delegation_chain=chain,
         delegated_by=parent.context_id,
     )

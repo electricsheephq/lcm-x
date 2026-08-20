@@ -152,6 +152,81 @@ def test_subset_uses_effective_operations_and_transitive_delegation() -> None:
     assert not is_subset_of(widened, one)
 
 
+def test_narrow_rejects_empty_collections_on_restricted_context() -> None:
+    # An empty allowlist READS as unrestricted everywhere it is consumed, so
+    # narrowing a restricted dimension to nothing is a widening dressed as a
+    # deny-all: the child keeps no collection token and then authorizes any
+    # collection its parent had fenced off.
+    restricted = _human().narrow(collections=["collection-main"])
+    assert restricted.collection_allowlist == frozenset({"collection-main"})
+    with pytest.raises(ScopeMismatchError):
+        restricted.narrow(collections=[])
+    with pytest.raises(ScopeMismatchError):
+        restricted.narrow(collection_allowlist=[])
+
+
+def test_narrow_rejects_empty_audience_on_restricted_context() -> None:
+    parent = _human().narrow(audience=["profile-human"])
+    assert parent.audience == frozenset({"profile-human"})
+    with pytest.raises(ScopeMismatchError):
+        parent.narrow(audience=[])
+    # The proof side of the same hole: a hand-built context that dropped the
+    # audience restriction must not read as a subset of the restricted parent,
+    # or a second derivation re-widens it to a different profile.
+    emptied = replace(parent, audience=frozenset())
+    assert not is_subset_of(emptied, parent)
+    stranger = replace(parent, audience=frozenset({"profile-other"}))
+    assert not is_subset_of(stranger, parent)
+
+
+def test_operation_narrowing_outside_grants_cannot_manufacture_authority() -> None:
+    payload = _human().to_payload()
+    payload["grants"] = ["read"]
+    payload["narrowing"] = ["operation:write"]
+    with pytest.raises(ScopeMismatchError):
+        AccessContextV1.from_payload(payload)
+    host_fields = {key: value for key, value in payload.items() if key != "authenticated_transport"}
+    with pytest.raises(ScopeMismatchError):
+        AccessContextV1.from_host(authenticated_transport="host-session", **host_fields)
+    # Defense in depth: even a context assembled around the constructors can
+    # only ever hold the INTERSECTION of its grants and its narrowing tokens.
+    forged = replace(_human(), grants=frozenset({"read"}), narrowing=frozenset({"operation:write"}))
+    assert forged.operation_allowlist == frozenset()
+    decision = validate(forged, required_scope="write", now=NOW)
+    assert not decision.allowed
+    assert decision.denial_reason.value == "context_invalid"
+
+
+def test_subset_accepts_narrowing_that_drops_superseded_tokens() -> None:
+    parent = replace(_human(), narrowing=frozenset({"operation:read", "operation:write"}))
+    child = parent.narrow(operations=["read"])
+    assert child.narrowing == frozenset({"operation:read"})
+    assert is_subset_of(child, parent)
+
+    # Dropping a restricted dimension outright is still a widening.
+    collection_parent = _human().narrow(collections=["collection-main"])
+    unrestricted = replace(
+        collection_parent,
+        narrowing=frozenset(
+            token for token in collection_parent.narrowing if not token.startswith("collection:")
+        ),
+    )
+    assert not is_subset_of(unrestricted, collection_parent)
+
+
+def test_subset_rejects_fabricated_delegation_provenance() -> None:
+    root = _human()
+    child = replace(
+        root.narrow(operations=["read"]),
+        context_id="ctx-child",
+        delegation_chain=(root.context_id,),
+        delegated_by=root.context_id,
+    )
+    assert is_subset_of(child, root)
+    assert not is_subset_of(replace(child, delegated_by="ctx-somebody-else"), root)
+    assert not is_subset_of(replace(child, delegated_by=""), root)
+
+
 def test_from_payload_normalizes_json_collections_and_timestamps() -> None:
     context = _human()
     payload = context.to_payload()

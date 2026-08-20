@@ -23,6 +23,30 @@ Delegation intersects operation, collection, audience/binding, expiry, and
 current revision boundaries. The complete delegation chain and narrowing set
 are retained for re-delegation inspection.
 
+Four rules make "reject any widening" total:
+
+- **Empty is unrestricted, so narrowing to empty is widening.** A collection
+  allowlist or audience with no members is read as "any" by every consumer, so
+  `narrow(collections=[])` and `narrow(audience=[])` raise `ScopeMismatchError`
+  rather than erase the parent's restriction, and a candidate that dropped a
+  restricted dimension is not a subset. (Operations are the exception and need
+  no such rule: the operation allowlist falls back to `grants`, where empty
+  really does mean deny-all.)
+- **A narrowing token is a restriction, never a grant.** The effective
+  operation allowlist is the INTERSECTION of `grants` and the `operation:*`
+  tokens; a token outside the grants is a claim of authority, so `from_host()`
+  and `from_payload()` reject it and `validate()` denies `context_invalid`.
+- **Sibling delegations have distinct identities.** `derive_child()` mints a
+  per-derivation nonce into `context_id` and `request_id`, because revocation
+  is keyed by `context_id`: depth-derived IDs made two independent children of
+  one parent revoke each other. Callers needing a stable identity pass
+  `child_context_id`/`child_request_id`.
+- **Subset proofs compare effective bounds and provenance.** `is_subset_of()`
+  compares each effective dimension rather than demanding the parent's raw
+  token set survive verbatim (a superseded `operation:write` is correctly
+  dropped by a read-only child), and it verifies that a delegated candidate's
+  `delegated_by` is the final entry of its own chain.
+
 Validation is deterministic and injected-time only:
 
 `CONTEXT_PRESENT → CONTEXT_WELL_FORMED → REVISION_SUPPORTED → NOT_EXPIRED → NOT_REVOKED → OWNERSHIP_CURRENT → LEASE_CURRENT → SCOPE_PERMITTED → TARGET_RESOLUTION`

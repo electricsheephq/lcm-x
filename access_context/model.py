@@ -46,6 +46,19 @@ def _freeze_chain(value: Iterable[str] | str | None) -> tuple[str, ...]:
     return tuple(str(item) for item in value)
 
 
+#: Dimensions whose restrictions have an EFFECTIVE representation on the model
+#: (``operation_allowlist``, ``collection_allowlist``, ``audience``).  Tokens in
+#: any other dimension are opaque and are compared verbatim.
+MODELLED_NARROWING_DIMENSIONS = frozenset({"operation", "collection", "audience"})
+
+
+def _dimension_values(tokens: Iterable[str], dimension: str) -> frozenset[str]:
+    prefix = f"{dimension}:"
+    return frozenset(
+        token.partition(":")[2] for token in tokens if token.startswith(prefix) and token.partition(":")[2]
+    )
+
+
 def _as_datetime(value: datetime | str) -> datetime:
     if isinstance(value, datetime):
         result = value
@@ -131,7 +144,9 @@ class AccessContextV1:
             raise ValueError("authenticated_transport is required for host-derived contexts")
         fields["authenticated_transport"] = authenticated_transport
         fields.setdefault("contract_revision", ACCESS_CONTEXT_CONTRACT_REVISION)
-        return cls(**fields)
+        context = cls(**fields)
+        _reject_ungranted_narrowing(context)
+        return context
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "AccessContextV1":
@@ -140,28 +155,30 @@ class AccessContextV1:
         values = dict(payload)
         if "actor_type" in values:
             values["actor_type"] = ActorType(values["actor_type"])
-        return cls(**values)
+        context = cls(**values)
+        _reject_ungranted_narrowing(context)
+        return context
 
     @property
     def collection_allowlist(self) -> frozenset[str]:
         """Explicit collection restrictions encoded in ``narrowing``."""
 
-        return frozenset(
-            token.partition(":")[2]
-            for token in self.narrowing
-            if token.startswith("collection:") and token.partition(":")[2]
-        )
+        return _dimension_values(self.narrowing, "collection")
 
     @property
     def operation_allowlist(self) -> frozenset[str]:
-        """Explicit operation restrictions, or the grants when absent."""
+        """Explicit operation restrictions INTERSECTED with the host grants.
 
-        explicit = frozenset(
-            token.partition(":")[2]
-            for token in self.narrowing
-            if token.startswith("operation:") and token.partition(":")[2]
-        )
-        return explicit or self.grants
+        A narrowing token is a restriction, never a grant. Letting the explicit
+        tokens REPLACE the grants manufactured authority the host never issued:
+        ``grants={"read"}`` with ``narrowing={"operation:write"}`` reported
+        write. Intersecting can only ever remove. Construction rejects such a
+        context outright (:func:`ungranted_operations`); the intersection is
+        the second line of defence for contexts assembled some other way.
+        """
+
+        explicit = _dimension_values(self.narrowing, "operation")
+        return explicit & self.grants if explicit else self.grants
 
     def narrow(
         self,
@@ -200,12 +217,28 @@ class AccessContextV1:
             child_collections = parent_collections
         else:
             child_collections = _freeze_strings(requested_collections)
+            # An empty allowlist READS as unrestricted everywhere it is
+            # consumed -- validate() and is_subset_of() both treat "no
+            # collection token" as "any collection". Narrowing to empty is
+            # therefore a widening wearing a deny-all costume, not a deny-all:
+            # it erases the parent's restriction. The contract has no way to
+            # spell "no collection at all", so the transition is rejected.
+            if not child_collections:
+                raise ScopeMismatchError("an empty collection allowlist would read as unrestricted")
             if parent_collections and not child_collections <= parent_collections:
                 raise ScopeMismatchError("collections would widen the parent allowlist")
 
-        child_audience = self.audience if audience is None else _freeze_strings(audience)
-        if self.audience and not child_audience <= self.audience:
-            raise ScopeMismatchError("audience would widen the parent audience")
+        if audience is None:
+            child_audience = self.audience
+        else:
+            child_audience = _freeze_strings(audience)
+            # Same shape as the empty collection allowlist above: an emptied
+            # audience is unrestricted, and the next derivation can then aim it
+            # at a different profile.
+            if not child_audience:
+                raise ScopeMismatchError("an empty audience would read as unrestricted")
+            if self.audience and not child_audience <= self.audience:
+                raise ScopeMismatchError("audience would widen the parent audience")
 
         child_expiry = self.expires_at if expires_at is None else _as_datetime(expires_at)
         if child_expiry > self.expires_at or child_expiry < self.issued_at:
@@ -345,8 +378,58 @@ class AccessContextV1:
         return values
 
 
-def _same_or_unrestricted(child: frozenset[str], parent: frozenset[str]) -> bool:
-    return not parent or child <= parent
+def ungranted_operations(context: AccessContextV1) -> frozenset[str]:
+    """Return the ``operation:*`` tokens this context claims outside its grants.
+
+    A non-empty result means the narrowing set claims authority the host never
+    granted, which is a malformed context rather than a narrow one.
+    """
+
+    return _dimension_values(context.narrowing, "operation") - context.grants
+
+
+def _reject_ungranted_narrowing(context: AccessContextV1) -> None:
+    ungranted = ungranted_operations(context)
+    if ungranted:
+        raise ScopeMismatchError(
+            f"narrowing names operations outside the host grants: {', '.join(sorted(ungranted))}"
+        )
+
+
+def _is_narrower(child: frozenset[str], parent: frozenset[str]) -> bool:
+    """Compare one restricted dimension, where empty means UNRESTRICTED.
+
+    Collections and audiences have no deny-all spelling: an empty set is read
+    as "any". A child that dropped a restricted parent dimension has therefore
+    widened, even though ``frozenset() <= parent`` is trivially true. (This is
+    the opposite of the operation dimension, where the allowlist falls back to
+    ``grants`` and empty really does mean deny-all.)
+    """
+
+    if not parent:
+        return True
+    return bool(child) and child <= parent
+
+
+def _audience_is_narrower(child: AccessContextV1, parent: AccessContextV1) -> bool:
+    """Check both representations of the audience restriction.
+
+    ``narrow()`` writes the field and the ``audience:*`` tokens together, so a
+    candidate that kept one and cleared the other is not a narrowing: whichever
+    view a consumer reads, it must still see the parent's fence.
+    """
+
+    return _is_narrower(child.audience, parent.audience) and _is_narrower(
+        _dimension_values(child.narrowing, "audience"), _dimension_values(parent.narrowing, "audience")
+    )
+
+
+def _provenance_is_consistent(context: AccessContextV1) -> bool:
+    """A delegated context must name its immediate delegator as ``chain[-1]``."""
+
+    if context.delegated_by:
+        return bool(context.delegation_chain) and context.delegation_chain[-1] == context.delegated_by
+    return not context.delegation_chain
 
 
 def is_subset_of(child: AccessContextV1, parent: AccessContextV1) -> bool:
@@ -377,11 +460,15 @@ def is_subset_of(child: AccessContextV1, parent: AccessContextV1) -> bool:
     ):
         if getattr(child, name) != getattr(parent, name):
             return False
+    # A context whose narrowing claims ungranted operations is malformed, and a
+    # proof about a malformed envelope proves nothing -- on either side.
+    if ungranted_operations(child) or ungranted_operations(parent):
+        return False
     if not child.grants <= parent.grants:
         return False
     if not child.operation_allowlist <= parent.operation_allowlist:
         return False
-    if not _same_or_unrestricted(child.audience, parent.audience):
+    if not _audience_is_narrower(child, parent):
         return False
     if child.expires_at > parent.expires_at or child.issued_at < parent.issued_at:
         return False
@@ -390,11 +477,25 @@ def is_subset_of(child: AccessContextV1, parent: AccessContextV1) -> bool:
     if child.context_id != parent.context_id:
         if parent.context_id not in child.delegation_chain:
             return False
-    if not parent.narrowing <= child.narrowing:
+    # The chain prefix alone never proved WHO delegated: a candidate naming a
+    # fabricated delegator (or none at all) carried a well-formed chain.
+    if not _provenance_is_consistent(child) or not _provenance_is_consistent(parent):
+        return False
+    # Compare EFFECTIVE per-dimension allowlists rather than requiring the raw
+    # parent token set to survive verbatim. Narrowing REPLACES a dimension, so
+    # a parent restricted to {operation:read, operation:write} legitimately
+    # produces a read-only child that no longer carries operation:write --
+    # demanding the superseded token back rejected correct narrowing. Tokens in
+    # dimensions this model does not interpret stay compared verbatim, since
+    # nothing else can tell whether dropping one loosened the fence.
+    parent_opaque = frozenset(
+        token for token in parent.narrowing if token.partition(":")[0] not in MODELLED_NARROWING_DIMENSIONS
+    )
+    if not parent_opaque <= child.narrowing:
         return False
     parent_collections = parent.collection_allowlist
     child_collections = child.collection_allowlist
-    if parent_collections and not child_collections <= parent_collections:
+    if not _is_narrower(child_collections, parent_collections):
         return False
     if child_collections and child.default_write_collection_id not in child_collections:
         return False

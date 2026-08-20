@@ -22,6 +22,48 @@ class InventoryError(ValueError):
 
 
 @dataclass(frozen=True)
+class InventoryHook:
+    """The wiring obligation a later slice owes this authority path.
+
+    This is the machine-checkable half of the inventory: the completeness test
+    grades the wiring slices against ``sites``, so dropping it would leave the
+    obligation as prose only.
+    """
+
+    required: bool
+    sites: tuple[str, ...] = ()
+    reason: str = ""
+
+    @classmethod
+    def from_mapping(cls, payload: Mapping[str, Any]) -> "InventoryHook":
+        if "required" not in payload:
+            raise InventoryError("inventory hook must declare 'required'")
+        if not isinstance(payload["required"], bool):
+            raise InventoryError("inventory hook 'required' must be a boolean")
+        hook = cls(
+            required=payload["required"],
+            sites=tuple(str(item) for item in payload.get("sites", ())),
+            reason=str(payload.get("reason", "")),
+        )
+        hook.validate()
+        return hook
+
+    def validate(self) -> None:
+        if self.required:
+            if not self.sites:
+                raise InventoryError("a required hook must name at least one site")
+            for site in self.sites:
+                module, separator, symbol = site.partition(":")
+                if not separator or not module.endswith(".py") or not symbol:
+                    raise InventoryError(f"malformed hook site: {site}")
+        else:
+            if self.sites:
+                raise InventoryError("an exempt hook must not name sites")
+            if not self.reason:
+                raise InventoryError("an exempt hook must record why no hook is needed")
+
+
+@dataclass(frozen=True)
 class InventoryEntry:
     id: str
     category: str
@@ -30,13 +72,25 @@ class InventoryEntry:
     authority_requirement: str
     discloses: tuple[str, ...]
     notes: str
+    hook: InventoryHook
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> "InventoryEntry":
-        required = ("id", "category", "module", "entry_point", "authority_requirement", "discloses", "notes")
+        required = (
+            "id",
+            "category",
+            "module",
+            "entry_point",
+            "authority_requirement",
+            "discloses",
+            "notes",
+            "hook",
+        )
         missing = [name for name in required if name not in payload]
         if missing:
             raise InventoryError(f"inventory entry missing fields: {', '.join(missing)}")
+        if not isinstance(payload["hook"], Mapping):
+            raise InventoryError(f"inventory hook must be an object: {payload['id']}")
         entry = cls(
             id=str(payload["id"]),
             category=str(payload["category"]),
@@ -45,6 +99,7 @@ class InventoryEntry:
             authority_requirement=str(payload["authority_requirement"]),
             discloses=tuple(str(item) for item in payload["discloses"]),
             notes=str(payload["notes"]),
+            hook=InventoryHook.from_mapping(payload["hook"]),
         )
         entry.validate()
         return entry
@@ -115,6 +170,14 @@ def validate_inventory_against_repo(
     missing = [entry.module for entry in items if not (root / entry.module).is_file()]
     if missing:
         raise InventoryError(f"inventory references missing modules: {', '.join(missing)}")
+    missing_sites = [
+        site
+        for entry in items
+        for site in entry.hook.sites
+        if not (root / site.partition(":")[0]).is_file()
+    ]
+    if missing_sites:
+        raise InventoryError(f"inventory hook sites reference missing modules: {', '.join(missing_sites)}")
     categories = {entry.category for entry in items}
     if categories != CATEGORIES:
         raise InventoryError(f"inventory categories differ: missing={sorted(CATEGORIES - categories)}")

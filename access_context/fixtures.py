@@ -25,11 +25,16 @@ def fixture_root(root: str | Path | None = None) -> Path:
     """Resolve corpus paths from a checkout or an installed package layout."""
 
     if root is not None:
-        candidate = Path(root)
-        if candidate.name != FIXTURE_ROOT_NAME:
-            candidate = candidate / FIXTURE_ROOT_NAME
+        # An explicitly supplied root is the caller's answer, not a hint.
+        # Falling through to the package-local corpus let a conformance run
+        # that meant to validate its own copy report green over a corpus it
+        # never opened -- the one failure this fail-loud module exists to
+        # prevent.
+        supplied = Path(root)
+        candidate = supplied if supplied.name == FIXTURE_ROOT_NAME else supplied / FIXTURE_ROOT_NAME
         if candidate.is_dir():
             return candidate
+        raise FixtureCorpusNotFound(f"supplied AccessContextV1 fixture root is not a directory: {candidate}")
     package_root = Path(__file__).resolve().parent
     candidates = (
         package_root.parent / "tests" / "fixtures" / FIXTURE_ROOT_NAME,

@@ -144,8 +144,9 @@ class Decision:
 class PublicDecision:
     """Public projection that does not reveal target existence.
 
-    ``detail`` is empty for every projected denial: see ``project_public``.
-    The field is kept so the two decision types stay shape-compatible.
+    ``detail`` is empty for EVERY instance, however it was built: see
+    ``project_public`` and ``__post_init__``. The field is kept so the two
+    decision types stay shape-compatible.
     """
 
     allowed: bool
@@ -153,9 +154,15 @@ class PublicDecision:
     detail: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 
     def __post_init__(self) -> None:
-        # Sanitize on this type too. Without it a caller-built PublicDecision
-        # can hold a mutable dict, so its hash would change after construction.
-        object.__setattr__(self, "detail", _safe_detail(self.detail))
+        # Public denials emit NO detail, and the guarantee cannot live in
+        # project_public() alone: this type is exported, so a consumer can
+        # build PublicDecision(False, SCOPE_FORBIDDEN, {"context_id": ...})
+        # directly and re-identify a blurred reason through the echoed ID.
+        # _safe_detail() would have kept that key, since it only filters for
+        # content. Emptying here is also what makes the mappingproxy conversion
+        # unconditional, so a caller-supplied mutable dict cannot change the
+        # hash after construction.
+        object.__setattr__(self, "detail", MappingProxyType({}))
 
     def __hash__(self) -> int:
         # See Decision.__hash__ — same mappingproxy caveat.

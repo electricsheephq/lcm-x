@@ -108,16 +108,24 @@ def test_delegation_vectors_prove_subset_and_reject_each_widening() -> None:
         assert is_subset_of(candidate, parent) is expected["subset"], path
         if not expected["subset"]:
             widening_fields.add(expected["widen_field"])
-    assert {"operations", "collections", "audience", "profile_binding", "session_binding", "expiry", "policy_revision", "membership_revision", "revocation_epoch", "ownership_generation", "lease_generation"} <= widening_fields
+    assert {"operations", "collections", "audience", "profile_binding", "session_binding", "expiry", "policy_revision", "membership_revision", "revocation_epoch", "ownership_generation", "lease_generation", "delegation_provenance"} <= widening_fields
 
 
 def test_three_deep_redelegation_preserves_chain_and_narrowing() -> None:
-    root = _context(Path("tests/fixtures/access_context_v1/delegation/redelegation-chain-3-deep.json"))
+    path = Path("tests/fixtures/access_context_v1/delegation/redelegation-chain-3-deep.json")
+    expected = load_fixture(path)["expected"]
+    root = _context(path)
     one = derive_child(root, operations=["read"], collections=["collection-a"], audience=["profile-a"], expires_at="2026-09-01T00:00:00Z")
     two = derive_child(one, operations=["read"], collections=["collection-a"], audience=["profile-a"], expires_at="2026-08-01T00:00:00Z")
     three = derive_child(two, operations=["read"], collections=["collection-a"], audience=["profile-a"], expires_at="2026-07-01T00:00:00Z")
     assert three.delegation_chain == (root.context_id, one.context_id, two.context_id)
-    assert len(three.delegation_chain) == 3
+    assert len(three.delegation_chain) == expected["depth"] == 3
+    # The vector pins the SHAPE of the chain, not literal child IDs: those now
+    # carry a per-derivation nonce so sibling delegations cannot collide.
+    assert three.delegation_chain[0] == expected["chain_root"]
+    assert set(expected["narrowing"]) <= three.narrowing
+    assert expected["unique_child_ids"]
+    assert len({root.context_id, one.context_id, two.context_id, three.context_id}) == 4
     assert root.narrowing <= three.narrowing
     assert is_subset_of(one, root)
     assert is_subset_of(two, one)
@@ -131,6 +139,46 @@ def test_revocation_vectors_invalidate_the_next_use() -> None:
         payload = load_fixture(path)
         decision = _expected_decision(path)
         assert decision.denial_reason.value == payload["expected"]["denial_reason"], path
+
+
+def test_sibling_delegations_receive_distinct_identities() -> None:
+    # Revocation is keyed by context_id and replay by request_id, so two
+    # children derived independently from one parent must not share either:
+    # revoking one would otherwise revoke its unrelated sibling.
+    parent = AccessContextV1.from_payload(
+        load_fixture(Path("tests/fixtures/access_context_v1/delegation/subset-proof.json"))["context"]
+    )
+    first = derive_child(parent, operations=["read"], expires_at="2026-06-01T00:00:00Z")
+    second = derive_child(parent, operations=["read"], expires_at="2026-03-01T00:00:00Z")
+    assert first.context_id != second.context_id
+    assert first.request_id != second.request_id
+    assert first.delegation_chain == second.delegation_chain == (parent.context_id,)
+    assert first.delegated_by == second.delegated_by == parent.context_id
+    assert is_subset_of(first, parent) and is_subset_of(second, parent)
+
+    revoked = [first.context_id]
+    assert not validate(first, required_scope="read", now=NOW, revoked_context_ids=revoked).allowed
+    assert validate(second, required_scope="read", now=NOW, revoked_context_ids=revoked).allowed
+
+    # Caller-supplied identities still win, unchanged.
+    explicit = derive_child(
+        parent,
+        operations=["read"],
+        expires_at="2026-06-01T00:00:00Z",
+        child_context_id="ctx-explicit",
+        child_request_id="req-explicit",
+    )
+    assert (explicit.context_id, explicit.request_id) == ("ctx-explicit", "req-explicit")
+
+
+def test_caller_built_public_decision_discloses_no_detail() -> None:
+    # PublicDecision is exported, so the no-disclosure guarantee cannot live in
+    # project_public() alone.
+    public = PublicDecision(False, DenialReason.SCOPE_FORBIDDEN, {"context_id": "secret"})
+    assert dict(public.detail) == {}
+    assert public == PublicDecision(False, DenialReason.SCOPE_FORBIDDEN)
+    assert hash(public) == hash(PublicDecision(False, DenialReason.SCOPE_FORBIDDEN))
+    assert dict(PublicDecision(True, None, {"context_id": "secret"}).detail) == {}
 
 
 def test_absent_carrier_compatibility_matrix() -> None:
