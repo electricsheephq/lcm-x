@@ -632,7 +632,7 @@ class SummaryDAG:
                 logger.warning("FTS node search failed, falling back to LIKE: %s", exc)
                 return self._search_like(query, session_id=session_id, limit=limit, sort=sort, source=source)
 
-            raw_nodes = [self._row_to_node(r) for r in rows]
+            raw_nodes = [self._row_to_node(r, with_search_rank=True) for r in rows]
             for node in raw_nodes:
                 if source and not self._node_matches_source(node.node_id, source, cache=source_match_cache):
                     continue
@@ -884,7 +884,17 @@ class SummaryDAG:
 
     # -- Helpers ------------------------------------------------------------
 
-    def _row_to_node(self, row) -> SummaryNode:
+    def _row_to_node(self, row, *, with_search_rank: bool = False) -> SummaryNode:
+        """Map one ``summary_nodes`` row, optionally carrying an FTS rank.
+
+        The rank is the LAST column of the FTS query's projection, not a fixed
+        position: this table is additive, and reading it as "column 12 when the
+        row is longer than twelve" silently returns the first NEW table column
+        instead the moment one lands. That is not an error anywhere -- rank
+        ``None`` just makes relevance and hybrid ordering quietly degrade to
+        recency. Callers that do not project a rank say so by omission.
+        """
+
         return SummaryNode(
             node_id=row[0],
             session_id=row[1],
@@ -898,7 +908,7 @@ class SummaryDAG:
             earliest_at=row[9],
             latest_at=row[10],
             expand_hint=row[11] or "",
-            search_rank=row[12] if len(row) > 12 else None,
+            search_rank=row[-1] if with_search_rank else None,
         )
 
     def close(self) -> None:
