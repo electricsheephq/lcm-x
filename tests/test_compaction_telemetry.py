@@ -1,7 +1,9 @@
 """Tests for B2 compaction telemetry (per-conversation snapshot in metadata)."""
 
 import json
+import sqlite3
 import threading
+import time
 
 import pytest
 
@@ -341,6 +343,123 @@ def test_zero_delta_snapshot_cannot_overwrite_concurrent_increment(tmp_path):
     finally:
         for current in engines:
             current.shutdown()
+
+
+def test_zero_delta_snapshot_preserves_concurrent_compaction_metadata(tmp_path):
+    config = LCMConfig(database_path=str(tmp_path / "lcm_test.db"))
+    snapshot_engine = LCMEngine(
+        config=config,
+        hermes_home=str(tmp_path / "hermes_home_snapshot"),
+    )
+    compaction_engine = LCMEngine(
+        config=config,
+        hermes_home=str(tmp_path / "hermes_home_compaction"),
+    )
+    snapshot_ready = threading.Event()
+    compaction_done = threading.Event()
+    errors = []
+
+    try:
+        snapshot_engine.on_session_start(
+            "snapshot-session",
+            platform="cli",
+            conversation_id="conv-1",
+        )
+        compaction_engine.on_session_start(
+            "compaction-session",
+            platform="cli",
+            conversation_id="conv-1",
+        )
+        original_increment = snapshot_engine._store.increment_compaction_telemetry
+
+        def paused_snapshot(conversation_id, increment, updates):
+            snapshot_ready.set()
+            assert compaction_done.wait(timeout=5)
+            return original_increment(conversation_id, increment, updates)
+
+        snapshot_engine._store.increment_compaction_telemetry = paused_snapshot
+
+        def record_snapshot():
+            try:
+                snapshot_engine.update_from_response(_hot_usage(prompt=1000))
+            except Exception as exc:
+                errors.append(exc)
+
+        snapshot_thread = threading.Thread(target=record_snapshot)
+        snapshot_thread.start()
+        assert snapshot_ready.wait(timeout=5)
+
+        compaction_engine.compression_count = 1
+        compaction_engine._last_compaction_duration_ms = 12.5
+        compaction_engine._record_successful_compaction_telemetry()
+        compaction_done.set()
+        snapshot_thread.join(timeout=10)
+
+        assert not snapshot_thread.is_alive()
+        assert errors == []
+        telemetry = snapshot_engine._store.read_compaction_telemetry("conv-1")
+        assert telemetry["total_compactions"] == 1
+        assert telemetry["turns_since_leaf_compaction"] == 0
+        assert telemetry["peak_prompt_tokens_since_leaf_compaction"] == 0
+        assert telemetry["last_leaf_compaction_at"] is not None
+        assert telemetry["last_compaction_duration_ms"] == 12.5
+    finally:
+        compaction_done.set()
+        snapshot_engine.shutdown()
+        compaction_engine.shutdown()
+
+
+def test_compaction_telemetry_lock_contention_is_nonblocking(tmp_path):
+    db_path = tmp_path / "lcm_test.db"
+    lock_owner = MessageStore(db_path)
+    telemetry_store = MessageStore(db_path)
+    lock_ready = threading.Event()
+    release_lock = threading.Event()
+    write_done = threading.Event()
+    write_errors = []
+
+    def hold_write_lock():
+        lock_owner._conn.execute("BEGIN IMMEDIATE")
+        lock_ready.set()
+        release_lock.wait(timeout=5)
+        lock_owner._conn.rollback()
+
+    def write_telemetry():
+        try:
+            telemetry_store.increment_compaction_telemetry(
+                "conv-1",
+                1,
+                {"compression_count_at_record": 1},
+            )
+        except Exception as exc:
+            write_errors.append(exc)
+        finally:
+            write_done.set()
+
+    holder = threading.Thread(target=hold_write_lock)
+    writer = threading.Thread(target=write_telemetry)
+    try:
+        holder.start()
+        assert lock_ready.wait(timeout=5)
+        assert telemetry_store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+
+        started = time.monotonic()
+        writer.start()
+        assert write_done.wait(timeout=0.25)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 0.25
+        assert len(write_errors) == 1
+        assert isinstance(write_errors[0], sqlite3.OperationalError)
+        assert "locked" in str(write_errors[0]).lower()
+        assert telemetry_store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+        assert telemetry_store.read_compaction_telemetry("conv-1") is None
+    finally:
+        release_lock.set()
+        writer.join(timeout=5)
+        holder.join(timeout=5)
+        lock_owner.close()
+        telemetry_store.close()
 
 
 def test_successful_compaction_is_durable_before_response_hook(tmp_path, monkeypatch):
