@@ -4231,6 +4231,63 @@ class TestEngineABC:
         assert "Current user objective preserved" in combined_context
         assert latest_request in combined_context
 
+    def test_compaction_focus_topic_follows_newest_host_composed_request(self, tmp_path, monkeypatch):
+        """Issue #90: a recovered session must not steer on stale intent.
+
+        Recovery makes compaction fire on the very turn that carries the new
+        request. The host composes that turn as auto-loaded skill text followed
+        by the request, so the derived focus topic must still name the new
+        request and not just the older, shorter turns it replaced.
+        """
+        db_path = tmp_path / "gateway-newest-request-focus.db"
+        config = LCMConfig(
+            fresh_tail_count=3,
+            leaf_chunk_tokens=1,
+            database_path=str(db_path),
+        )
+        engine = LCMEngine(config=config, hermes_home=str(tmp_path))
+        engine.on_session_start(
+            "gateway-newest-request-focus-session",
+            platform="telegram",
+            conversation_id="telegram:topic-1",
+            context_length=200000,
+        )
+
+        observed_focus_topics = []
+
+        def mock_summary(**kwargs):
+            observed_focus_topics.append(kwargs.get("focus_topic") or "")
+            return "Older sync-worker summary.\nExpand for details about: sync worker", 1
+
+        monkeypatch.setattr(lcm_engine, "summarize_with_escalation", mock_summary)
+
+        latest_request = "draft the Q3 vendor renewal email"
+        host_composed_turn = (
+            "[auto-loaded skill: scheduled-jobs]\n"
+            + ("Guidance about scheduled job delivery and prompts. " * 60)
+            + "\n\n"
+            + latest_request
+        )
+        try:
+            active_context = engine.compress([
+                {"role": "user", "content": "investigate the scheduled-job delivery bug"},
+                {"role": "assistant", "content": "Inspecting the scheduler."},
+                {"role": "user", "content": "also update the scheduled-job prompts"},
+                {"role": "assistant", "content": "Patching prompts."},
+                {"role": "user", "content": host_composed_turn},
+                {"role": "assistant", "content": "Acknowledged."},
+            ])
+        finally:
+            engine.shutdown()
+
+        assert observed_focus_topics
+        assert any(latest_request in topic for topic in observed_focus_topics), (
+            "compaction steered on stale intent: the newest request never "
+            f"reached the summarizer focus topic ({observed_focus_topics!r})"
+        )
+        combined_context = "\n".join(str(msg.get("content", "")) for msg in active_context)
+        assert latest_request in combined_context
+
     def test_preserved_objective_anchor_externalizes_inline_payloads(self, tmp_path):
         db_path = tmp_path / "preserved-objective-payload.db"
         data_uri = "data:image/png;base64," + ("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=" * 20)

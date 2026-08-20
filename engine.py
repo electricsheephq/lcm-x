@@ -7263,7 +7263,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         bearer-style auth text that survived structured-content flattening).
 
         Mirrors Hermes upstream ``ContextCompressor._derive_auto_focus_topic``
-        from ``fix/compression-auto-focus-topic``.
+        from ``fix/compression-auto-focus-topic``, except that both truncation
+        passes here protect the newest turn (issue #90): upstream cuts from the
+        head, which drops the operative request out of a host-composed payload
+        and leaves the summarizer steering on stale intent.
         """
         candidates: list[str] = []
         for idx in range(len(messages) - 1, -1, -1):
@@ -7291,8 +7294,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             if not text:
                 continue
             text = " ".join(text.split())
-            if len(text) > _AUTO_FOCUS_TURN_MAX_CHARS:
-                text = text[: _AUTO_FOCUS_TURN_MAX_CHARS - 1].rstrip() + "…"
+            text = self._clamp_focus_turn_text(text, _AUTO_FOCUS_TURN_MAX_CHARS)
             candidates.append(text)
             if len(candidates) >= _AUTO_FOCUS_MAX_TURNS:
                 break
@@ -7300,11 +7302,44 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         if not candidates:
             return None
 
-        candidates.reverse()
-        focus = "Recent user focus:\n" + "\n".join(f"- {item}" for item in candidates)
-        if len(focus) > _AUTO_FOCUS_MAX_CHARS:
-            focus = focus[: _AUTO_FOCUS_MAX_CHARS - 1].rstrip() + "…"
-        return focus
+        # ``candidates`` is newest-first here.  Spend the block budget from the
+        # newest turn backwards so a tight budget drops stale turns rather than
+        # the turn the host is about to answer.
+        header = "Recent user focus:\n"
+        budget = _AUTO_FOCUS_MAX_CHARS - len(header)
+        selected: list[str] = []
+        for position, item in enumerate(candidates):
+            line = f"- {item}"
+            cost = len(line) + (1 if selected else 0)
+            if cost > budget:
+                if position == 0:
+                    # The newest turn alone overruns the block. Clamp it rather
+                    # than emit a focus topic that states no current intent.
+                    selected.append(f"- {self._clamp_focus_turn_text(item, budget - 2)}")
+                break
+            budget -= cost
+            selected.append(line)
+
+        selected.reverse()
+        return header + "\n".join(selected)
+
+    @staticmethod
+    def _clamp_focus_turn_text(text: str, limit: int) -> str:
+        """Clamp one focus bullet to ``limit`` chars, keeping both ends.
+
+        Gateway hosts compose a user turn as auto-loaded preamble (skill text,
+        reminders) followed by the operative request, so a head-only cut drops
+        exactly the part that states current intent while shorter, older turns
+        survive intact.  Eliding the middle keeps both ends.
+        """
+        if len(text) <= limit:
+            return text
+        if limit <= 1:
+            return "…"
+        keep = limit - 1
+        head = keep // 2
+        tail = keep - head
+        return text[:head].rstrip() + "…" + text[len(text) - tail:].lstrip()
 
     @staticmethod
     def _is_context_summary_content(content: Any) -> bool:
