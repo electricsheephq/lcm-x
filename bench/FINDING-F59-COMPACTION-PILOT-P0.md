@@ -142,3 +142,38 @@ pre-declared gate.
 
 **Session-hygiene note:** the MC pre-spend gate's warm/status one-shots added 2 extra host
 sessions to the home before the ACP run (benign — no canary content; disclosed).
+
+
+## 9. CORRECTION (2026-08-20 UTC, append-only — adversarial-review round; run-sheet Amendment 14 carries the receipts)
+
+1. **Mechanism attribution corrected.** §3.2/§6 attributed retention to "LCM's store-level
+   cross-session assembly / memory-tool recall path". The registered lcm_* diagnostic fired
+   0/350 across all arms; recall was carried by the HOST memory surface (session_search,
+   memory) operating over the run's own history, with the LCM engine as context assembler —
+   an attribution Amendment 9 explicitly forbids collapsing. The REGIME-level results and the
+   recommendation are unchanged (arms measured end-to-end systems; R2s 100% ×3 vs R2b 86.7
+   still separates the setups); the internal mechanism story as previously written was wrong,
+   and the R2s-vs-R2b gap is attributable to the LCM ENGINE (assembly/limits), not to lcm_*
+   retrieval tools, which never engaged.
+2. **Luna failure-mode claim downgraded to prompt-conditioned.** The luna arms (and the sol
+   control) carried a system-prompt abstain instruction the banked sol pair lacked (Amendment
+   14 §1). "The cost tier fails loud, not wrong" is therefore unestablished as a MODEL
+   property; the banked statement becomes: luna's misses were abstentions UNDER A PROMPT THAT
+   INSTRUCTED ABSTENTION, and miss-mode attribution across the pilot is UNATTRIBUTABLE
+   (prompt, regime, and date are collinear). Retention numbers unchanged. Trap metrics
+   unaffected by the soul split (Fisher ≈ 1.0).
+3. **Restart-bridge miss pattern corrected.** "ALL R2r/R2b misses concentrate in the
+   confusable-naming class" and "every substitution was noun+epoch-matched" are both false at
+   the row level: R2r's 5 misses all fit that pattern; R2b's do not — 3/4 fit, one is a
+   NON-CANARY SPLICE (saffron-zephyr-b20c = fragments of two canaries across class AND epoch),
+   and one is an intra-class cross-epoch entity mis-bind (C1-E0-1 answered C1-E2-1's value).
+   "Store assembly binds entity and recency reliably" is thereby weakened to a tendency with
+   two counter-examples; the P1 lever scope widens from attribute-type disambiguation to
+   binding fidelity generally.
+4. **Engine-failure disclosure**: every ACP arm ran with 59 (R3: 24; MC: 78) failed summary
+   publications (publication_invariant_conflict — plausibly lcm-x#247 live); the "(ACP; 1
+   compaction)" characterization was incomplete. Rows stand as measurements of the shipped
+   system; the product defect is now on the record and joins #314's investigation.
+5. **Numeric relabels**: R1 last-request pin → 554,094 (553,914 was request 64/70; parity-gate
+   conclusion unchanged). R2s-MC "32.6K live window" → 32,640 is the TRIGGER; the protected
+   tail reached ~123K, same as the 0.5 arms — threshold does not shrink the live window.

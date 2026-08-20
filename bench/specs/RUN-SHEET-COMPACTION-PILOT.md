@@ -341,3 +341,45 @@ before this amendment — the order below lists only remaining arms.**
   model-fallback; parser payload-shape — both fixed with fail-loud guards, PRs #308/#311);
   attempt 3 is in flight on the fixed driver at this revision.
 **Continuation order (fixed):** R4-ref(att.3) → R2s-S-ctrl → R2s-L-A → R2s-L-A′ → R2s-MC.
+
+## 14. AMENDMENT (2026-08-20 UTC, append-only) — adversarial-review corrections: SOUL divergence, mechanism attribution, undisclosed engine failures
+
+An owner-directed adversarial workflow (5 lenses × 2 refuters per finding) confirmed five
+defects that survived per-PR review. Recorded here; the F59 §9 correction carries the
+claim-level restatements.
+
+1. **SOUL.md (system prompt) diverged mid-pilot, undisclosed and unpinned.** Stock Hermes soul
+   (sha 2765a846e1bb371d) in R2r-A/A′, R2b, R2s-A/A′; the Amendment-12 bench soul
+   (sha b5805cf97a861b35, ends with an explicit abstain instruction) in R3, R2s-S-ctrl,
+   R2s-L-A/A′, R2s-MC. Consequences: Amendment 13's "identical protocol" claim for the sol
+   control is FALSE on the system prompt; the luna failure-mode verdict is prompt-conditioned
+   (and per the refuters, miss-mode attribution is UNATTRIBUTABLE — the stock-soul
+   hallucinations all sit in restart-regime arms); trap metrics are NOT affected (Fisher ≈ 1.0
+   across the soul split, and both trap misses are frozen-regex artifacts on opposite sides).
+   REMEDY: SOUL sha joins the per-arm pin set (recorded per arm in PINS-FINAL, not via console
+   echoes that pre-Am.12 arms lack); run_arm.sh's current SOUL-writing case covers R2s-A/A′
+   and therefore documents the FUTURE protocol, not the banked one — banked-arm consoles
+   (no SOUL line) are the receipts of record. P1 owns the disambiguating arm (luna under stock
+   soul, or matched-soul pairs).
+2. **The registered lcm_* recall diagnostic fired 0/350.** Every probe row in every arm has
+   lcm_tool_fired=false; the tools that carried recall are session_search/memory — the HOST
+   memory surface, which Amendment 9 forbids attributing to LCM. R3's §1-declared mechanism
+   ("bundled recall policy + lcm_recall") never engaged as declared. Regime-level scores stand
+   (arms measured end-to-end systems); every LCM-mechanism attribution in F59 is corrected in
+   §9 of that finding.
+3. **Undisclosed engine failure in every ACP arm:** `publication_invariant_conflict`
+   ("LCM summary publication could not finish; preserving replay-safe context") 59× in each of
+   R2s-A/A′/S-ctrl/L-A/L-A′, 24× in R3, 78× in R2s-MC — each paired with a zero-reduction
+   compression commit. R2s-MC additionally: 90 compression attempts, 49 no_progress aborts, 41
+   in-place commits, 0 successful leaf compactions. This is plausibly lcm-x#247 live on the
+   pilot path and the leading explanation for #314's threshold-insensitivity. Adjudication:
+   retention rows remain valid MEASUREMENTS of the shipped system's behavior (fail-closed
+   review found no score impact), but "1 compaction" characterizations were incomplete and the
+   failure is now part of the record.
+4. **"32.6K live window" was wrong ~4×**: 32,640 is the trigger threshold; the protected fresh
+   tail reached ~123K tokens in R2s-MC (largest served request ~79K) — statistically the same
+   tail as the 0.5-threshold arms. Threshold does not control the live window on this path.
+5. **Receipt precision**: the R1 "final request 553,914" pin is actually request 64/70; the
+   final is 554,094 (series max; no conclusion moves — the §4 parity gate used 554K). The
+   R4-ref zero-compaction statement is sourced to its ROLLOUT (grep receipt), not the
+   known-degenerate events.jsonl channel.
