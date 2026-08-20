@@ -73,13 +73,18 @@ def _make_engine(tmp_path: Path, **overrides):
     return engine
 
 
-def _seed_durable_tool_row(engine, content):
-    """Persist one tool row so its out-of-band text counts as durable."""
+def _seed_durable_tool_row(engine, content, tool_call_id="c1"):
+    """Persist one tool row so ITS out-of-band text counts as durable.
+
+    The proof is occurrence-bound, so the seeded row must be the same row the
+    identity under test describes: same ``tool_call_id``, same content minus
+    the out-of-band blocks.
+    """
     engine._ingest_messages(
         [
             {"role": "user", "content": "seed"},
             {"role": "assistant", "content": "seeding."},
-            {"role": "tool", "tool_call_id": "seed", "content": content},
+            {"role": "tool", "tool_call_id": tool_call_id, "content": content},
         ]
     )
 
@@ -165,6 +170,53 @@ class TestOutOfBandBlockIdentity:
             assert id_with != id_without, (
                 "An unproven OOB block must not be treated as identity-transparent"
             )
+            assert "check the 2026 logs instead" in id_with[1]
+        finally:
+            engine.shutdown()
+
+    def test_incoming_identity_keeps_block_durable_only_on_another_row(self, tmp_path):
+        """A block durable on a DIFFERENT row is not proof for this row.
+
+        ``STEER_MARKER_OPEN`` is a static host constant (hermes-agent
+        agent/prompt_builder.py:675 — no timestamp, no occurrence id), so the
+        same /steer text sent twice in one session produces byte-identical
+        blocks.  Proving durability from the block text alone would let the
+        first occurrence vouch for a second one appended to a different tool
+        row, collapse that row onto its stored pre-steer copy, and advance the
+        cursor past the only copy of the repeated instruction.
+        """
+        engine = _make_engine(tmp_path)
+        try:
+            first = '{"output": "deploy ok", "exit_code": 0}'
+            second = '{"output": "smoke ok", "exit_code": 0}'
+            _seed_durable_tool_row(engine, first + OOB_BLOCK, tool_call_id="c1")
+            id_with = engine._message_replay_identity(
+                {"role": "tool", "tool_call_id": "c2", "content": second + OOB_BLOCK}
+            )
+            id_without = engine._message_replay_identity(
+                {"role": "tool", "tool_call_id": "c2", "content": second}
+            )
+            assert id_with != id_without, (
+                "Durability proof must be bound to this row's occurrence, not "
+                "to the block text shared with an earlier row"
+            )
+            assert "check the 2026 logs instead" in id_with[1]
+        finally:
+            engine.shutdown()
+
+    def test_incoming_identity_keeps_block_when_stored_row_lacks_it(self, tmp_path):
+        """Same row, but the stored copy predates the block -> keep it distinct."""
+        engine = _make_engine(tmp_path)
+        try:
+            base = '{"output": "deploy ok", "exit_code": 0}'
+            _seed_durable_tool_row(engine, base, tool_call_id="c1")
+            id_with = engine._message_replay_identity(
+                {"role": "tool", "tool_call_id": "c1", "content": base + OOB_BLOCK}
+            )
+            id_without = engine._message_replay_identity(
+                {"role": "tool", "tool_call_id": "c1", "content": base}
+            )
+            assert id_with != id_without
             assert "check the 2026 logs instead" in id_with[1]
         finally:
             engine.shutdown()
@@ -258,6 +310,79 @@ class TestOutOfBandBlockReconciliation:
                 "check the 2026 logs instead" in (row.get("content") or "")
                 for row in stored
             ), "The out-of-band user instruction must reach the store"
+        finally:
+            engine.shutdown()
+
+    def test_repeated_identical_steer_on_a_later_row_still_lands(self, tmp_path):
+        """The same /steer text sent twice must land on BOTH tool rows.
+
+        The host marker carries no occurrence id (``STEER_MARKER_OPEN`` is a
+        static constant), so a user repeating an instruction verbatim — the
+        common case, because the first steer was ignored — produces two
+        byte-identical blocks on two different tool rows.  Before the
+        occurrence-bound proof, the durable block on c1 vouched for the fresh
+        one on c2: the enriched c2 row collapsed onto its stored pre-steer
+        copy, the cursor advanced past it, and the repeated instruction never
+        reached the store (verified on 42c33b9f: 8 -> 9 rows, none carrying
+        both "smoke ok" and the steer text).
+        """
+        engine = _make_engine(tmp_path)
+        try:
+            first_tool = '{"output": "deploy ok", "exit_code": 0}'
+            second_tool = '{"output": "smoke ok", "exit_code": 0}'
+
+            # Turn 1 carries the first steer and is ingested as-is.
+            turn1 = [
+                {"role": "user", "content": "Deploy"},
+                {"role": "assistant", "content": "Deploying."},
+                {
+                    "role": "tool",
+                    "tool_call_id": "c1",
+                    "content": first_tool + OOB_BLOCK,
+                },
+                {"role": "assistant", "content": "Done."},
+            ]
+            engine._ingest_messages(turn1)
+            assert engine._store.get_session_count("oob-block-test") == 4
+
+            # Turn 2 is ingested before the second steer arrives, so the store
+            # holds c2 WITHOUT a block.  Reconciliation must match cleanly here
+            # or the rest of the test proves nothing.
+            turn2 = turn1 + [
+                {"role": "user", "content": "Smoke test"},
+                {"role": "assistant", "content": "Testing."},
+                {"role": "tool", "tool_call_id": "c2", "content": second_tool},
+                {"role": "assistant", "content": "Green."},
+            ]
+            engine._ingest_cursor_needs_reconcile = True
+            engine._ingest_messages(turn2)
+            assert engine._store.get_session_count("oob-block-test") == 8, (
+                "Setup guard: turn 2 must reconcile against the stored tail, "
+                "otherwise the re-ingest hides the drop this test looks for"
+            )
+
+            # Second /steer: same text, byte-identical block, appended in place
+            # to c2 — a row LCM has already ingested.
+            replay = turn2.copy()
+            replay[6] = {
+                "role": "tool",
+                "tool_call_id": "c2",
+                "content": second_tool + OOB_BLOCK,
+            }
+            replay.append({"role": "user", "content": "Verify"})
+            engine._ingest_cursor_needs_reconcile = True
+            engine._ingest_messages(replay)
+
+            stored = engine._store.get_session_tail("oob-block-test", limit=64)
+            assert any(
+                "smoke ok" in (row.get("content") or "")
+                and "check the 2026 logs instead" in (row.get("content") or "")
+                for row in stored
+            ), (
+                "The repeated out-of-band instruction must reach the store on "
+                "its own tool row; an identical earlier block on another row "
+                "is not proof that this occurrence is durable"
+            )
         finally:
             engine.shutdown()
 
