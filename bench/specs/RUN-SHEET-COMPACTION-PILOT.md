@@ -298,3 +298,46 @@ Consequences:
   GATE: any generic-tool result carrying a canary value ⇒ arm invalid; (iii) if attempt 2 also
   trips the gate, R3 is declared **unmeasurable under the current ACP tool surface** (product
   gap lcm-x#301) — a valid pilot outcome, not a retry loop.
+
+## 13. AMENDMENT (2026-08-20 UTC, append-only, owner-directed; revised in-PR per 11 review corrections) — luna arms; multi-compaction stress; effort pin; exec retirement
+
+**Owner review of F59 raised four gaps; review hardening added five controls. Positions
+pre-registered at the end of this section. R3 is already BANKED (100%, Amendment-12 gate)
+before this amendment — the order below lists only remaining arms.**
+
+- **Reasoning-effort pin (retro-recorded):** every P0 arm served reasoning effort HIGH — hermes
+  homes carry `reasoning_effort: high` (pinned by each arm's config sha) and the R1/R4 rollouts
+  record `effort: high` per turn. Future arms pin effort explicitly in the run record.
+- **R2s-S-ctrl (contemporaneous sol control, review-added):** a same-day R2s(sol) single-session
+  rerun, identical protocol. The luna contrast reads PRIMARILY against this control (isolates
+  model choice from run-date/serving drift); the banked 0.0pt sol band remains the within-period
+  noise estimate only.
+- **R2s-L-A / R2s-L-A′ (gpt-5.6-luna pair):** identical R2s protocol, model flipped to
+  gpt-5.6-luna (`--expect-model` accordingly). Post-run audit ADDITIONALLY asserts the
+  SERVED model from the host record (state.db sessions.model == gpt-5.6-luna) — the hermes-side
+  twin of the R4 served-model lesson. Read: extends or refutes F59's recommendation for the
+  cost tier; C1 class watched first.
+- **R2s-MC (multi-compaction stress, sol):** `compression.threshold` 0.5 → 0.12 (~32,640-token
+  trigger on the 272,000 window). REVISED FRAMING (review correction): the threshold change
+  moves BOTH compaction frequency AND how early answers depend on retrieval, so this arm
+  answers "does the R2s regime hold up under ~8× compaction pressure and a much smaller live
+  tail" — NOT the isolated effect of compaction count (isolating count needs same-threshold,
+  longer material: P1). Controls, all pre-spend or fail-closed:
+  (a) env guard: `LCM_ABSOLUTE_THRESHOLD_TOKENS` and `LCM_CONTEXT_THRESHOLD` explicitly unset
+      for every arm invocation;
+  (b) pre-spend threshold gate: a warm+status one-shot on the built home must report
+      context_threshold 0.12 / threshold_tokens 32,640 / source config compression.threshold,
+      with compression.enabled true — else abort before any material turn;
+  (c) validity gate at scoring: the run-scoped count of SUCCESSFUL compaction events (from the
+      engine's own compaction telemetry — NOT summary_nodes, which one compaction can publish
+      several of, rolling) must be ≥8, else the arm is marked UNDEREXPOSED and excluded from
+      the count question (still reportable as a run record).
+- **Host capability pin (review-added, bounded):** each hermes arm's console records
+  `hermes --version` at launch; the ACP driver already hard-fails on a failed handshake.
+  Full capability-contract negotiation/validation is DECLINED as beyond a pilot instrument
+  (recorded trade-off, not an oversight).
+- **Codex exec retirement for long arms (owner):** no future arm runs >10 turns on codex exec
+  (the R1-lc quota burn). R4-ref is the standing exception: attempts 1-2 were VOID (resume
+  model-fallback; parser payload-shape — both fixed with fail-loud guards, PRs #308/#311);
+  attempt 3 is in flight on the fixed driver at this revision.
+**Continuation order (fixed):** R4-ref(att.3) → R2s-S-ctrl → R2s-L-A → R2s-L-A′ → R2s-MC.
