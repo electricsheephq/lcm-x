@@ -235,3 +235,9 @@ def test_dry_run_prints_commands_without_spawning(tmp_path, monkeypatch, capsys)
         "hermes -z probe --continue",
     ]
     assert not (tmp_path / "raw.log").exists()
+
+
+def test_row_text_uses_text_not_turn_index():
+    # The frozen material schema: {"turn": N, "text": "..."} — the index must
+    # never be sent as the message.
+    assert driver.row_text({"turn": 7, "text": "hello world"}) == "hello world"

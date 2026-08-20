@@ -185,7 +185,10 @@ def row_text(row: Any) -> str:
         return row
     if not isinstance(row, dict):
         raise ValueError(f"turn row must be an object or string, got {type(row).__name__}")
-    for key in ("turn", "prompt", "content", "message", "text", "question"):
+    # "turn" is the material schema's INDEX field ({"turn": N, "text": ...}),
+    # never a text source — checking it first sent literal turn numbers to the
+    # model (caught by the content-level live smoke).
+    for key in ("text", "prompt", "content", "message", "question"):
         if key in row:
             value = row[key]
             if isinstance(value, str):
