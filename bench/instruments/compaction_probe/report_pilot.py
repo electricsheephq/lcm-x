@@ -19,6 +19,21 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _read_required_scores(path: Path) -> dict[str, Any]:
+    """Read one arm's scores artifact without defaulting failures to zeros."""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(f"scores artifact missing or unreadable: {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"scores artifact invalid JSON: {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"scores artifact must be a JSON object: {path}")
+    if not isinstance(value.get("probes"), list) or not isinstance(value.get("totals"), dict):
+        raise ValueError(f"scores artifact missing probes/totals: {path}")
+    return value
+
+
 def _number(value: Any) -> float | int | None:
     if isinstance(value, bool):
         return int(value)
@@ -103,7 +118,7 @@ def _config_sha(manifest: dict[str, Any]) -> str:
 
 
 def _arm_metrics(name: str, directory: Path) -> dict[str, Any]:
-    scores = _read_json(directory / "scores.json")
+    scores = _read_required_scores(directory / "scores.json")
     manifest_path = directory / "run.manifest.json"
     if not manifest_path.exists():
         manifest_path = directory / "manifest.json"
@@ -177,6 +192,12 @@ def _arm_metrics(name: str, directory: Path) -> dict[str, Any]:
         "stall_total_ms": stall_total,
         "token_total": token_total,
         "config_sha": _config_sha(manifest),
+        "timeout_count": _number(
+            (scores.get("totals") or {}).get(
+                "timeout", (scores.get("totals") or {}).get("timed_out", 0)
+            )
+        )
+        or 0,
     }
 
 
@@ -254,14 +275,15 @@ def render(arm_specs: Iterable[str]) -> str:
     lines = [
         "# Compaction pilot report",
         "",
-        "| arm | epoch_retention | class_retention | hallucination_rate | compaction_count | stall_total_ms | token_total | config_sha |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
+        "| arm | epoch_retention | class_retention | hallucination_rate | compaction_count | stall_total_ms | token_total | config_sha | timeout_count |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | --- | ---: |",
     ]
     for arm in arms:
         lines.append(
             f"| {arm['name']} | {arm['epoch_retention']} | {arm['class_retention']} | "
             f"{arm['hallucination_rate']:.6g} | {arm['compaction_count']} | "
-            f"{arm['stall_total_ms']} | {arm['token_total']} | {arm['config_sha']} |"
+            f"{arm['stall_total_ms']} | {arm['token_total']} | {arm['config_sha']} | "
+            f"{arm['timeout_count']} |"
         )
     aa_lines = _render_aa(arms)
     if aa_lines:

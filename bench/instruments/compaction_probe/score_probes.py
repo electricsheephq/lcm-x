@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import warnings
 import unicodedata
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -88,13 +89,7 @@ def _canary_map(payload: Any) -> dict[str, Any]:
         for index, row in enumerate(payload):
             if isinstance(row, dict):
                 key = row.get("canary_id", row.get("id", row.get("name", index)))
-                value = row.get(
-                    "value",
-                    row.get(
-                        "answer",
-                        row.get("expected", row.get("expected_value", row.get("canary"))),
-                    ),
-                )
+                value = _canary_entry_value(row)
                 result[str(key)] = value
             else:
                 result[str(index)] = row
@@ -103,17 +98,20 @@ def _canary_map(payload: Any) -> dict[str, Any]:
         result = {}
         for key, value in payload.items():
             if isinstance(value, dict):
-                result[str(key)] = value.get(
-                    "value",
-                    value.get(
-                        "answer",
-                        value.get("expected", value.get("expected_value", value.get("canary"))),
-                    ),
-                )
+                result[str(key)] = _canary_entry_value(value)
             else:
                 result[str(key)] = value
         return result
     raise ValueError("canaries JSON must be a list or object")
+
+
+def _canary_entry_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        for key in ("value", "answer", "expected", "expected_value", "canary"):
+            if value.get(key) is not None:
+                return value[key]
+        return None
+    return value
 
 
 def _canary_value(probe: Any, canaries: dict[str, Any]) -> Any:
@@ -122,17 +120,18 @@ def _canary_value(probe: Any, canaries: dict[str, Any]) -> Any:
         return direct
     canary_id = _field(probe, "canary_id", "canary")
     if isinstance(canary_id, dict):
-        return canary_id.get("value", canary_id.get("answer"))
+        return _canary_entry_value(canary_id)
     if canary_id is not None:
         return canaries.get(str(canary_id))
     return None
 
 
-def _is_trap(probe: Any, canary_value: Any) -> bool:
+def _is_trap(probe: Any, canary_value: Any = None) -> bool:
+    del canary_value  # Explicit trap metadata, never an unresolved-positive fallback.
     value = _field(probe, "trap", "is_trap", "negative", default=False)
     if isinstance(value, str):
         value = value.casefold() in {"1", "true", "yes", "trap", "negative"}
-    return bool(value) or canary_value is None
+    return bool(value)
 
 
 def _raw_answer(result: Any) -> tuple[str, bool]:
@@ -144,9 +143,23 @@ def _raw_answer(result: Any) -> tuple[str, bool]:
     return value, False
 
 
-def classify(raw_answer: Any, canary_value: Any, trap: bool) -> tuple[str, bool]:
+def classify(
+    raw_answer: Any,
+    canary_value: Any,
+    trap: bool,
+    *,
+    timed_out: bool = False,
+) -> tuple[str, bool]:
+    if timed_out or (isinstance(raw_answer, dict) and raw_answer.get("timed_out") is True):
+        return "TIMEOUT", True
     answer, unparseable = _raw_answer(raw_answer if isinstance(raw_answer, dict) else {"raw_answer": raw_answer})
     expected = normalize(canary_value)
+    # Explicit traps always use the abstention rule.  A trap's optional value
+    # is diagnostic metadata only and must never make a fabricated answer CORRECT.
+    if trap:
+        if not unparseable and any(pattern.search(answer) for pattern in ABSTAIN_RE):
+            return "ABSTAIN", False
+        return "HALLUCINATE", unparseable
     if not unparseable and expected and expected in normalize(answer):
         return "CORRECT", False
     if not unparseable and any(pattern.search(answer) for pattern in ABSTAIN_RE):
@@ -157,7 +170,8 @@ def classify(raw_answer: Any, canary_value: Any, trap: bool) -> tuple[str, bool]
 def _aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
     counts = Counter(row["classification"] for row in rows)
     traps = sum(bool(row["trap"]) for row in rows)
-    canaries = len(rows) - traps
+    timeouts = counts["TIMEOUT"]
+    canaries = max(0, len(rows) - traps - timeouts)
     correct_negative = sum(row["classification"] == "ABSTAIN" and row["trap"] for row in rows)
     correct = counts["CORRECT"]
     total = len(rows)
@@ -166,6 +180,8 @@ def _aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "correct": correct,
         "abstain": counts["ABSTAIN"],
         "hallucinate": counts["HALLUCINATE"],
+        "timeout": timeouts,
+        "timed_out": timeouts,
         "correct_negative": correct_negative,
         "canary_total": canaries,
         "trap_total": traps,
@@ -190,11 +206,23 @@ def score(results_path: Path, canaries_path: Path, probes_path: Path) -> dict[st
         if pid in probe_by_id:
             raise ValueError(f"duplicate probe id in probes JSONL: {pid}")
         value = _canary_value(probe, canaries)
+        trap = _is_trap(probe)
+        if not trap and (value is None or not str(value).strip()):
+            canary_id = _field(probe, "canary_id", "canary", default="<missing>")
+            raise ValueError(
+                f"positive probe {pid!r} has unresolved canary {canary_id!r}"
+            )
+        if trap and value is not None:
+            warnings.warn(
+                f"trap probe {pid!r} carries a value; ignoring it for scoring",
+                UserWarning,
+                stacklevel=2,
+            )
         scored = {
             "probe_id": pid,
             "epoch": str(_field(probe, "epoch", "epoch_id", default="unknown")),
             "class": str(_field(probe, "class", "info_class", "category", default="unknown")),
-            "trap": _is_trap(probe, value),
+            "trap": trap,
             "canary_id": _field(probe, "canary_id", "canary"),
             "canary_value": value,
         }
@@ -225,10 +253,18 @@ def score(results_path: Path, canaries_path: Path, probes_path: Path) -> dict[st
             raw_answer = ""
         else:
             raw_answer, unparseable = _raw_answer(result)
+            timed_out = bool(isinstance(result, dict) and result.get("timed_out") is True)
             classification, classified_unparseable = classify(
-                result or {}, probe["canary_value"], probe["trap"]
+                result or {},
+                probe["canary_value"],
+                probe["trap"],
+                timed_out=timed_out,
             )
             unparseable = unparseable or classified_unparseable or result is None
+        if duplicate:
+            timed_out = False
+        elif result is None:
+            timed_out = False
         scored_rows.append(
             {
                 **probe,
@@ -236,6 +272,7 @@ def score(results_path: Path, canaries_path: Path, probes_path: Path) -> dict[st
                 "classification": classification,
                 "score": classification,
                 "unparseable": bool(unparseable),
+                "timed_out": bool(timed_out),
                 "correct_negative": bool(probe["trap"] and classification == "ABSTAIN"),
             }
         )

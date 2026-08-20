@@ -29,6 +29,27 @@ DEFAULT_TURN_TIMEOUT = 600.0
 DEFAULT_BOOT_TIMEOUT = 90.0
 DEFAULT_QUIET_SECONDS = 6.0
 DEFAULT_STATUS_COMMAND = "/lcm status"
+BOOT_FAILURE_EXIT_CODE = 72
+LCM_TOOL_NAMES = (
+    "recall",
+    "grep",
+    "retrieve",
+    "recent",
+    "expand",
+    "query_state",
+    "load_session",
+    "compile_evidence",
+    "evidence_pack",
+)
+# Hermes' classic CLI prints an invocation as ``Tool[: N]: lcm_name(...)``
+# (or as a marked concurrent-call line).  Requiring those host markers avoids
+# treating a probe's prose mention of ``lcm_recall`` as an invocation.  A tool
+# call is still missed when display.tool_progress is disabled, so this remains
+# diagnostic-only rather than a score input.
+LCM_TOOL_CALL_RE = re.compile(
+    rf"(?m)^\s*(?:📞\s*)?Tool(?:\s+\d+)?\s*:\s*lcm_(?:{'|'.join(LCM_TOOL_NAMES)})\s*\("
+    rf"|^\s*⚡\s*Concurrent:.*\blcm_(?:{'|'.join(LCM_TOOL_NAMES)})\b"
+)
 # Compatibility names retained from the base script and the run-sheet wording.
 TURN_TIMEOUT = DEFAULT_TURN_TIMEOUT
 BOOT_TIMEOUT = DEFAULT_BOOT_TIMEOUT
@@ -137,6 +158,35 @@ def load_jsonl(path: Path, label: str) -> list[Any]:
     return rows
 
 
+def _canary_value(row: Any) -> Any:
+    if isinstance(row, dict):
+        for key in ("value", "answer", "expected", "expected_value", "canary"):
+            if row.get(key) is not None:
+                return row[key]
+        return None
+    return row
+
+
+def load_canary_values(path: Path) -> list[str]:
+    """Load canonical canaries JSON (list, flat object, or wrapped object)."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read canaries JSON {path}: {exc}") from exc
+    if isinstance(payload, dict) and "canaries" in payload:
+        payload = payload["canaries"]
+    if isinstance(payload, list):
+        raw_values = [_canary_value(row) for row in payload]
+    elif isinstance(payload, dict):
+        raw_values = [_canary_value(value) for value in payload.values()]
+    else:
+        raise ValueError("canaries JSON must be a list or object")
+    values = [str(value) for value in raw_values if value is not None and str(value)]
+    if not values:
+        raise ValueError(f"canaries JSON {path} contains no extractable values")
+    return values
+
+
 def row_text(row: Any) -> str:
     if isinstance(row, str):
         return row
@@ -176,10 +226,14 @@ def clean_output(data: bytes) -> str:
 class PtySession:
     """Minimal pty pump copied from the base driver, with per-turn capture."""
 
-    def __init__(self, log_path: Path):
+    def __init__(self, log_path: Path, *, child_env: dict[str, str] | None = None):
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            os.execvp("hermes", ["hermes", "--cli"])
+            os.execvpe(
+                "hermes",
+                ["hermes", "--cli"],
+                child_env if child_env is not None else os.environ.copy(),
+            )
         log_path.parent.mkdir(parents=True, exist_ok=True)
         self.log = log_path.open("ab")
         self.current = bytearray()
@@ -252,7 +306,20 @@ def build_manifest(
     args: argparse.Namespace,
     raw_log: Path,
     results: Path,
+    material: Path | None = None,
+    probes: Path | None = None,
+    canaries: Path | None = None,
 ) -> dict[str, Any]:
+    def input_identity(path: Path | None) -> dict[str, str] | None:
+        if path is None:
+            return None
+        return {"path": str(path), "sha256": sha256_file(path)}
+
+    input_files = {
+        "material": input_identity(material),
+        "probes": input_identity(probes),
+        "canaries": input_identity(canaries),
+    }
     return {
         "created_at": utc_now(),
         "config_path": str(config_path),
@@ -266,6 +333,7 @@ def build_manifest(
         "model_default": values.get("model.default"),
         "expected_engine": args.expect_engine,
         "expected_model": args.expect_model,
+        "expected_config_sha256": getattr(args, "expect_config_sha", None),
         "turn_timeout_s": args.turn_timeout,
         "boot_timeout_s": args.boot_timeout,
         "quiet_seconds": args.quiet_seconds,
@@ -273,10 +341,21 @@ def build_manifest(
         "probes_only": bool(args.probes_only),
         "raw_log": str(raw_log),
         "results": str(results),
+        "input_files": input_files,
+        "material_path": input_files["material"]["path"] if input_files["material"] else None,
+        "material_sha256": input_files["material"]["sha256"] if input_files["material"] else None,
+        "probes_path": input_files["probes"]["path"] if input_files["probes"] else None,
+        "probes_sha256": input_files["probes"]["sha256"] if input_files["probes"] else None,
+        "canaries_path": input_files["canaries"]["path"] if input_files["canaries"] else None,
+        "canaries_sha256": input_files["canaries"]["sha256"] if input_files["canaries"] else None,
     }
 
 
-def assert_config(values: dict[str, str | None], args: argparse.Namespace) -> None:
+def assert_config(
+    values: dict[str, str | None],
+    args: argparse.Namespace,
+    config_sha256: str | None = None,
+) -> None:
     actual_engine = values.get("context.engine")
     actual_model = values.get("model.default")
     mismatches = []
@@ -284,6 +363,9 @@ def assert_config(values: dict[str, str | None], args: argparse.Namespace) -> No
         mismatches.append(f"context.engine={actual_engine!r} expected {args.expect_engine!r}")
     if actual_model != args.expect_model:
         mismatches.append(f"model.default={actual_model!r} expected {args.expect_model!r}")
+    expected_sha = getattr(args, "expect_config_sha", None)
+    if expected_sha is not None and config_sha256 != expected_sha:
+        mismatches.append(f"config_sha256={config_sha256!r} expected {expected_sha!r}")
     if mismatches:
         raise ValueError("config assertion failed: " + "; ".join(mismatches))
 
@@ -317,8 +399,13 @@ def _dispatch_turn(
 
 
 def run(args: argparse.Namespace) -> int:
-    hermes_home = Path(args.hermes_home).expanduser()
-    config_path = hermes_home if hermes_home.suffix in {".yaml", ".yml"} else hermes_home / "config.yaml"
+    hermes_home_arg = Path(args.hermes_home).expanduser()
+    config_path = (
+        hermes_home_arg
+        if hermes_home_arg.suffix in {".yaml", ".yml"}
+        else hermes_home_arg / "config.yaml"
+    )
+    hermes_home = config_path.parent
     if not config_path.exists():
         raise ValueError(f"Hermes config not found: {config_path}")
     values = read_config_values(config_path)
@@ -327,6 +414,17 @@ def run(args: argparse.Namespace) -> int:
     raw_log = Path(args.raw_log)
     results_path = Path(args.results) if args.results else raw_log.with_name("results.jsonl")
     manifest_path = Path(args.manifest) if args.manifest else raw_log.with_name("run.manifest.json")
+    material_path = None if args.probes_only else Path(args.material)
+    probes_path = Path(args.probes)
+    canaries_path = Path(args.canaries) if args.canaries else None
+    material_rows = [] if args.probes_only else load_jsonl(material_path, "material")
+    probe_rows = load_jsonl(probes_path, "probe")
+    if canaries_path is not None:
+        load_canary_values(canaries_path)
+
+    # Validate every declared arm identity before writing artifacts or spawning
+    # Hermes.  The manifest remains attributable to the exact input files.
+    assert_config(values, args, config_sha)
     manifest = build_manifest(
         config_path=config_path,
         config_sha256=config_sha,
@@ -334,13 +432,12 @@ def run(args: argparse.Namespace) -> int:
         args=args,
         raw_log=raw_log,
         results=results_path,
+        material=material_path,
+        probes=probes_path,
+        canaries=canaries_path,
     )
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    assert_config(values, args)
-
-    material_rows = [] if args.probes_only else load_jsonl(Path(args.material), "material")
-    probe_rows = load_jsonl(Path(args.probes), "probe")
     plan_rows: list[tuple[str, Any]] = []
     if not args.probes_only:
         plan_rows.extend(("status" if is_status_row(row) else "material", row) for row in material_rows)
@@ -363,10 +460,9 @@ def run(args: argparse.Namespace) -> int:
     # Contamination guard (run-sheet §3): before any material turn, the fresh
     # store must contain ZERO canary values. Fail closed on any hit.
     if args.canaries and not args.probes_only:
-        canary_rows = load_jsonl(Path(args.canaries), "canaries")
-        values = [str(r.get("value")) for r in canary_rows if isinstance(r, dict) and r.get("value")]
+        values = load_canary_values(canaries_path)
         lcm_db_hits = 0
-        home = Path(args.hermes_home).expanduser() if args.hermes_home else Path.home() / ".hermes"
+        home = hermes_home
         for db in home.rglob("lcm.db"):
             blob = db.read_bytes()
             lcm_db_hits += sum(1 for v in values if v.encode() in blob)
@@ -374,9 +470,18 @@ def run(args: argparse.Namespace) -> int:
             sys.stderr.write(f"[driver] CONTAMINATION: {lcm_db_hits} canary-value hits in pre-run store(s) under {home}\n")
             return 71
 
-    session = PtySession(raw_log)
+    child_env = os.environ.copy()
+    # Hermes resolves config, sessions, and the LCM store from HERMES_HOME.
+    # Pin it in the child so the requested/fingerprinted arm is the one run.
+    child_env["HERMES_HOME"] = str(hermes_home.resolve())
+    session = PtySession(raw_log, child_env=child_env)
     try:
-        session.wait_idle(args.boot_timeout, args.quiet_seconds)
+        if not session.wait_idle(args.boot_timeout, args.quiet_seconds):
+            sys.stderr.write(
+                f"[driver] boot readiness failed within {args.boot_timeout:g}s; no turns sent\n"
+            )
+            return BOOT_FAILURE_EXIT_CODE
+        probe_ordinal = 0
         for turn_index, (kind, row) in enumerate(plan_rows, 1):
             if kind == "status":
                 if isinstance(row, dict):
@@ -400,13 +505,14 @@ def run(args: argparse.Namespace) -> int:
                 "ts": utc_now(),
             }
             if kind == "probe":
-                entry["probe_id"] = probe_id(row, turn_index)
+                probe_ordinal += 1
+                entry["probe_id"] = probe_id(row, probe_ordinal)
                 # R3 diagnostic (run-sheet §1): did any lcm_* retrieval tool
                 # fire during this probe turn? Detected from the pty transcript
                 # of the turn -- distinguishes "recall policy never triggered"
                 # from "retrieval failed". Diagnostic only, never a score.
                 entry["lcm_tool_fired"] = bool(
-                    re.search(r"lcm_(recall|grep|retrieve|recent|expand|query_state|load_session|compile_evidence|evidence_pack)", answer)
+                    LCM_TOOL_CALL_RE.search(answer)
                 )
             if not completed:
                 entry["timed_out"] = True
@@ -436,6 +542,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hermes-home", default="~/.hermes")
     parser.add_argument("--expect-engine", required=True)
     parser.add_argument("--expect-model", required=True)
+    parser.add_argument("--expect-config-sha", help="expected config.yaml SHA-256")
     parser.add_argument("--turn-timeout", type=float, default=DEFAULT_TURN_TIMEOUT)
     parser.add_argument("--boot-timeout", type=float, default=DEFAULT_BOOT_TIMEOUT)
     parser.add_argument("--quiet-seconds", type=float, default=DEFAULT_QUIET_SECONDS)
