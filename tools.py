@@ -256,6 +256,123 @@ def _parse_grep_role(value: Any) -> tuple[str | None, str | None]:
     return role, None
 
 
+def _parse_retrieval_excluded_session_ids(
+    args: Dict[str, Any], current_session_id: str
+) -> tuple[set[str], str | None]:
+    exclude_current_session = args.get("exclude_current_session", False)
+    if not isinstance(exclude_current_session, bool):
+        return set(), "exclude_current_session must be a boolean"
+    raw_session_ids = args.get("exclude_session_ids", [])
+    if not isinstance(raw_session_ids, list):
+        return set(), "exclude_session_ids must be an array of strings"
+    excluded: set[str] = set()
+    for value in raw_session_ids:
+        if not isinstance(value, str) or not value.strip():
+            return set(), "exclude_session_ids must contain only non-empty strings"
+        excluded.add(value.strip())
+    if exclude_current_session and current_session_id:
+        excluded.add(current_session_id)
+    return excluded, None
+
+
+# Tables whose distinct ``session_id`` values define the eligible retrieval
+# scope. Both carry a ``session_id``-LEADING index (``idx_msg_session_ts`` and
+# ``idx_nodes_session_latest``), which is what makes the skip-scan below an
+# indexed seek rather than a corpus scan. Fixed literals -- never interpolate
+# caller input into the statement.
+_RETRIEVAL_SESSION_SCOPE_TABLES = ("messages", "summary_nodes")
+
+# Loose index scan ("skip scan"): seek once per DISTINCT session_id instead of
+# reading every row and sorting a temp B-tree. Cost is O(sessions * log rows),
+# not O(rows). Measured on 300k messages + 9k summary nodes over 300 sessions:
+# 66.2 ms (SCAN + USE TEMP B-TREE FOR DISTINCT) -> 0.5 ms (SEARCH ... session_id>?).
+_RETRIEVAL_DISTINCT_SESSIONS_SQL = """
+        WITH RECURSIVE distinct_sessions(session_id) AS (
+            SELECT MIN(session_id) FROM {table}
+            UNION ALL
+            SELECT (
+                SELECT MIN(session_id) FROM {table}
+                WHERE session_id > distinct_sessions.session_id
+            )
+            FROM distinct_sessions
+            WHERE distinct_sessions.session_id IS NOT NULL
+        )
+        SELECT session_id FROM distinct_sessions WHERE session_id IS NOT NULL
+"""
+
+
+def _retrieval_candidate_session_ids(
+    engine: "LCMEngine",
+    excluded_session_ids: set[str],
+    *,
+    deadline: float | None = None,
+) -> tuple[list[str] | None, bool]:
+    """Resolve the eligible-session whitelist for a retrieval exclusion set.
+
+    Returns ``(candidate_session_ids, enumeration_timed_out)``. ``None`` means
+    "no exclusions, no whitelist needed"; ``[]`` means "exclusions left no
+    eligible session". The second element is True only when ``deadline`` lapsed
+    mid-enumeration -- callers must fail CLOSED on it (drop the arms that depend
+    on the whitelist), never fall back to ``None``, which would silently
+    discard the caller's hard exclusion filter.
+    """
+    if not excluded_session_ids:
+        return None, False
+    # Liveness gate only. The enumeration itself runs on its OWN connection
+    # (below); a closed store still means "no eligible session", fail closed.
+    if engine._store.connection is None:
+        return [], False
+    # An already-lapsed budget fails closed before any DB work: the progress
+    # handler only fires every N opcodes, so a short query could otherwise slip
+    # past an expired deadline purely because it was cheap.
+    if deadline is not None and time.monotonic() >= deadline:
+        return [], True
+    sessions: set[str] = set()
+    # A progress handler is CONNECTION-GLOBAL, and ``MessageStore._conn`` is
+    # explicitly shared across threads (opened ``check_same_thread=False``).
+    # Installing this request's deadline there would let it interrupt a
+    # concurrent read/ingest on the same connection, and the `finally` teardown
+    # would clear a concurrent request's handler -- silently disabling ITS
+    # timeout. So the enumeration gets a private read-only connection and owns
+    # its handler alone: the same idiom every other deadline-guarded read path
+    # here uses (``_lcm_recall_summary_sources``, the chunk/summary hydrators in
+    # ``retrieval_core``). Python's sqlite3 exposes no getter for the installed
+    # handler, so save/restore on the shared connection is not expressible.
+    connection: sqlite3.Connection | None = None
+    try:
+        db_path = Path(engine._store.db_path).resolve()
+        connection = sqlite3.connect(
+            f"{db_path.as_uri()}?mode=ro",
+            uri=True,
+            timeout=(
+                5.0
+                if deadline is None
+                else max(0.001, deadline - time.monotonic())
+            ),
+        )
+        connection.execute("PRAGMA query_only=ON")
+        if deadline is not None:
+            connection.set_progress_handler(
+                lambda: 1 if time.monotonic() >= deadline else 0, 1000
+            )
+        for table in _RETRIEVAL_SESSION_SCOPE_TABLES:
+            rows = connection.execute(
+                _RETRIEVAL_DISTINCT_SESSIONS_SQL.format(table=table)
+            ).fetchall()
+            sessions.update(str(row[0]) for row in rows if row[0] is not None)
+    except sqlite3.OperationalError:
+        if deadline is not None and time.monotonic() >= deadline:
+            return [], True
+        raise
+    finally:
+        if connection is not None:
+            connection.close()
+    # The exclusion difference moves to Python: both ``session_id`` columns are
+    # declared TEXT NOT NULL, so set difference on the stringified values is
+    # exactly the SQL ``NOT IN`` it replaces, without a second pass over rows.
+    return sorted(sessions - excluded_session_ids), False
+
+
 def _parse_strict_int(value: Any, name: str) -> tuple[int | None, str | None]:
     try:
         if isinstance(value, bool):
@@ -2522,9 +2639,13 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
 
     current_session_id = engine.current_session_id
     has_current_session = bool(current_session_id)
+    excluded_session_ids = set(args.get("_excluded_session_ids") or ())
     results: list[Dict[str, Any]] = []
 
-    if content_scope in {"history", "both"}:
+    if (
+        content_scope in {"history", "both"}
+        and search_session_id not in excluded_session_ids
+    ):
         try:
             msg_hits = engine._store.search(
                 query,
@@ -2536,8 +2657,11 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 role=role,
                 time_from=time_from,
                 time_to=time_to,
+                exclude_session_ids=excluded_session_ids,
             )
             for hit in msg_hits:
+                if hit.get("session_id") in excluded_session_ids:
+                    continue
                 results.append(
                     _shape_message_hit(
                         hit,
@@ -2553,7 +2677,12 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     # contract would push this tool toward a memory-system shape rather than
     # a plugin-local archive search. Raw-message hits remain expandable across
     # sessions via lcm_expand(store_id=...).
-    if content_scope in {"history", "both"} and session_scope == "current" and not raw_message_filter_active:
+    if (
+        content_scope in {"history", "both"}
+        and session_scope == "current"
+        and not raw_message_filter_active
+        and search_session_id not in excluded_session_ids
+    ):
         try:
             node_hits = engine._dag.search(
                 query,
@@ -2563,6 +2692,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 source=source,
             )
             for node in node_hits:
+                if node.session_id in excluded_session_ids:
+                    continue
                 results.append(_shape_summary_hit(node))
         except Exception as exc:
             logger.warning("Node search failed: %s", exc)
@@ -2576,7 +2707,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         # rather than leak unscoped payloads. Source remains valid for summary
         # search above, so it intentionally does not affect summary omission.
         externalized_results_omitted = True
-    elif searches_externalized:
+    elif searches_externalized and current_session_id not in excluded_session_ids:
         try:
             storage_dir = get_large_output_storage_dir(
                 engine._config,
@@ -3094,6 +3225,7 @@ def _lcm_grep_semantic(
     allow_fallback: bool = True,
 ) -> dict[str, Any]:
     mode = str(args.get("mode") or "semantic").lower()
+    excluded_session_ids = set(args.get("_excluded_session_ids") or ())
     if time.monotonic() >= deadline:
         return _lcm_grep_deadline_error(mode, "semantic_entry")
     query = _coerce_query_arg(args.get("query"))
@@ -3216,8 +3348,37 @@ def _lcm_grep_semantic(
     knn_conversation_ids = _resolve_semantic_conversation_scope(
         engine, search_session_id=search_session_id, conversation_id=conversation_id
     )
+    if excluded_session_ids:
+        knn_conversation_ids = [
+            session_id
+            for session_id in knn_conversation_ids or []
+            if session_id not in excluded_session_ids
+        ]
     if time.monotonic() >= deadline:
         return _lcm_grep_deadline_error(mode, "scope_resolution")
+    if knn_conversation_ids == []:
+        response: dict[str, Any] = {
+            "query": query,
+            "mode": "semantic",
+            "sort": normalize_search_sort(args.get("sort")),
+            "session_scope": session_scope,
+            "source": source,
+            "conversation_id": conversation_id,
+            "limit": limit,
+            "total_results": 0,
+            "results": [],
+            "coverage": "full",
+            "degraded_to_fts": False,
+        }
+        if requested_limit > _LCM_GREP_HARD_LIMIT_CAP:
+            response["limit_clamped_from"] = requested_limit
+        if requested_session_scope not in _LCM_GREP_VALID_SCOPES:
+            response["ignored_session_scope"] = requested_session_scope
+            response["scope_note"] = (
+                "Unsupported session_scope; stayed on current. "
+                "Valid values: current, all, session."
+            )
+        return response
 
     try:
         provider = _run_within_deadline(
@@ -3307,9 +3468,13 @@ def _lcm_grep_semantic(
     current_session_id = engine.current_session_id
     has_current_session = bool(current_session_id)
     results: list[dict[str, Any]] = []
+    excluded_candidates = False
     for node, score in hydrated_nodes:
         if time.monotonic() >= deadline:
             return _lcm_grep_deadline_error(mode, "result_resolution")
+        if node.session_id in excluded_session_ids:
+            excluded_candidates = True
+            continue
         # conversation/role/source/time filters are enforced inside knn() before
         # the top-k cap, so no eligible lower-ranked vector was dropped for an
         # ineligible top hit; nothing further to post-filter here.
@@ -3334,7 +3499,7 @@ def _lcm_grep_semantic(
         if len(results) >= knn_limit:
             break
 
-    if not results:
+    if not results and not excluded_candidates:
         return degraded("semantic vector candidates could not be resolved")
 
     response: dict[str, Any] = {
@@ -3496,12 +3661,19 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
     """Search LCM history using full-text, semantic, or RRF hybrid retrieval."""
     request_started = time.monotonic()
     mode = str(args.get("mode") or "full_text").strip().lower()
-    if mode == "full_text":
-        return _lcm_grep_full_text(args, **kwargs)
-
     engine = _require_engine(kwargs)
     if engine is None:
         return json.dumps({"error": "LCM engine not initialized"})
+    excluded_session_ids, exclusions_error = _parse_retrieval_excluded_session_ids(
+        args, engine.current_session_id
+    )
+    if exclusions_error:
+        return json.dumps({"error": exclusions_error})
+    parsed_args = dict(args)
+    parsed_args["_excluded_session_ids"] = excluded_session_ids
+    if mode == "full_text":
+        return _lcm_grep_full_text(parsed_args, **kwargs)
+
     timeout_s = max(
         0.001,
         float(getattr(engine._config, "embedding_query_timeout_s", 3.0)),
@@ -3510,9 +3682,9 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
     if time.monotonic() >= deadline:
         return json.dumps(_lcm_grep_deadline_error(mode, "tool_entry"))
     if mode == "semantic":
-        return json.dumps(_lcm_grep_semantic(args, engine=engine, deadline=deadline))
+        return json.dumps(_lcm_grep_semantic(parsed_args, engine=engine, deadline=deadline))
     if mode == "hybrid":
-        return json.dumps(_lcm_grep_hybrid(args, engine=engine, deadline=deadline))
+        return json.dumps(_lcm_grep_hybrid(parsed_args, engine=engine, deadline=deadline))
     return json.dumps({
         "error": "mode must be one of: full_text, semantic, hybrid",
     })
@@ -4241,15 +4413,21 @@ def _lcm_recall_approx_reason(arm: str) -> str:
 
 
 def _lcm_recall_fts_arm(
-    engine: "LCMEngine", query: str, *, candidate_limit: int, deadline: float
+    engine: "LCMEngine",
+    query: str,
+    *,
+    candidate_limit: int,
+    deadline: float,
+    excluded_session_ids: set[str],
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-    """FTS arm: raw messages across ALL sessions (no conversation filter)."""
+    """FTS arm: raw messages across all eligible sessions."""
     payload = _lcm_grep_full_text_with_deadline(
         {
             "query": query,
             "mode": "recall",
             "session_scope": "all",
             "limit": candidate_limit,
+            "_excluded_session_ids": excluded_session_ids,
         },
         engine=engine,
         deadline=deadline,
@@ -4434,9 +4612,10 @@ def _lcm_recall_summary_arm(
     candidate_limit: int,
     lead_limit: int,
     deadline: float,
+    candidate_session_ids: list[str] | None,
     reference_strict: bool = False,
 ) -> tuple[list[dict[str, Any]], str, int | None, int | None, list[dict[str, Any]]]:
-    """Summary KNN arm: embedded summaries across ALL sessions (no filter)."""
+    """Summary KNN arm: embedded summaries across all eligible sessions."""
     knn_results = _run_within_deadline(
         lambda: run_knn(
             engine,
@@ -4446,7 +4625,7 @@ def _lcm_recall_summary_arm(
             deadline=deadline,
             since=None,
             until=None,
-            conversation_ids=None,
+            conversation_ids=candidate_session_ids,
             source=None,
             vector_store_cls=VectorStore,
             scan_rows=max(1, int(getattr(engine._config, "recall_scan_rows", 25_000))),
@@ -4508,8 +4687,9 @@ def _lcm_recall_chunk_arm(
     provider: Any,
     candidate_limit: int,
     deadline: float,
-) -> tuple[list[dict[str, Any]], str]:
-    """Chunk KNN arm: verbatim chunk vectors across ALL sessions (no filter)."""
+    candidate_session_ids: list[str] | None,
+) -> tuple[list[dict[str, Any]], str, int | None, int | None]:
+    """Chunk KNN arm: verbatim chunk vectors across all eligible sessions."""
     knn_results = _run_within_deadline(
         lambda: run_chunk_knn(
             engine,
@@ -4519,7 +4699,7 @@ def _lcm_recall_chunk_arm(
             deadline=deadline,
             since=None,
             until=None,
-            conversation_ids=None,
+            conversation_ids=candidate_session_ids,
             source=None,
             vector_store_cls=VectorStore,
             scan_rows=max(1, int(getattr(engine._config, "recall_scan_rows", 25_000))),
@@ -4688,7 +4868,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     Fuses three arms over the whole local database — FTS raw messages, embedded
     summary KNN, and verbatim chunk KNN — with RRF, then applies a soft
     scope/recency prior and (optionally) a cross-encoder rerank. The current
-    conversation is only ever a ranking BOOST, never a hard filter.
+    conversation is a ranking boost by default; explicit session exclusions are
+    hard filters applied before fusion.
     """
     request_started = time.monotonic()
     engine = _require_engine(kwargs)
@@ -4698,6 +4879,12 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     query = _coerce_query_arg(args.get("query"))
     if not query:
         return json.dumps({"error": "No query provided"})
+
+    excluded_session_ids, exclusions_error = _parse_retrieval_excluded_session_ids(
+        args, engine.current_session_id
+    )
+    if exclusions_error:
+        return json.dumps({"error": exclusions_error})
 
     parsed_limit = _parse_int_value(args.get("limit", _LCM_RECALL_DEFAULT_LIMIT), _LCM_RECALL_DEFAULT_LIMIT)
     if parsed_limit <= 0:
@@ -4745,6 +4932,12 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     timeout_s = max(0.001, float(getattr(engine._config, "recall_query_timeout_s", 8.0)))
     deadline = request_started + timeout_s
 
+    # Resolved under the deadline, not before it: this is DB work, and the
+    # vector arms below consume its result as a hard scope filter.
+    candidate_session_ids, session_scope_timed_out = _retrieval_candidate_session_ids(
+        engine, excluded_session_ids, deadline=deadline
+    )
+
     candidate_limit = min(_LCM_GREP_HYBRID_CANDIDATE_CAP, max(50, limit * 4))
     rerank_window = min(50, max(1, limit * 4))
     rerank_window_limit = int(getattr(engine._config, "rerank_window_limit", 0))
@@ -4775,7 +4968,11 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     if run_fts:
         try:
             hits, fts_error = _lcm_recall_fts_arm(
-                engine, query, candidate_limit=candidate_limit, deadline=deadline
+                engine,
+                query,
+                candidate_limit=candidate_limit,
+                deadline=deadline,
+                excluded_session_ids=excluded_session_ids,
             )
         except (_WorkerCapacityError, TimeoutError) as exc:
             hits, fts_error = [], {"error": str(exc)}
@@ -4790,7 +4987,24 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     # -- Vector arms. Local/same-model corpora share one query embedding;
     # Voyage's context chunk corpus resolves and embeds with its own model. --
     if run_summary or run_chunk:
-        if not embeddings_enabled:
+        # Ordered before the empty-scope branch on purpose: a timed-out
+        # enumeration also yields [], and must NOT be reported as the
+        # 'full' coverage of a genuinely empty eligible scope.
+        if session_scope_timed_out:
+            timed_out = True
+            degraded_reasons.append("session exclusion scope resolution timed out")
+            if run_summary:
+                coverage["summary"] = "none"
+            if run_chunk:
+                coverage["chunk"] = "none"
+        elif candidate_session_ids == []:
+            if run_summary:
+                arm_hits["summary"] = []
+                coverage["summary"] = "full"
+            if run_chunk:
+                arm_hits["chunk"] = []
+                coverage["chunk"] = "full"
+        elif not embeddings_enabled:
             degraded_reasons.append("semantic retrieval is disabled")
             if run_summary:
                 coverage["summary"] = "disabled"
@@ -4879,6 +5093,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                             candidate_limit=candidate_limit,
                             lead_limit=limit,
                             deadline=deadline,
+                            candidate_session_ids=candidate_session_ids,
                             reference_strict=reference_strict,
                         )
                         arm_hits["summary"] = hits
@@ -4908,6 +5123,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                             provider=chunk_provider,
                             candidate_limit=candidate_limit,
                             deadline=deadline,
+                            candidate_session_ids=candidate_session_ids,
                         )
                         arm_hits["chunk"] = hits
                         coverage["chunk"] = cov

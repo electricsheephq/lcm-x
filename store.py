@@ -17,7 +17,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Collection, Dict, List, Optional
 
 from .db_bootstrap import (
     ExternalContentFtsSpec,
@@ -1147,6 +1147,7 @@ class MessageStore:
                role: str | None = None,
                time_from: float | None = None,
                time_to: float | None = None,
+               exclude_session_ids: Collection[str] | None = None,
                allow_operators: bool = False) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
@@ -1158,6 +1159,7 @@ class MessageStore:
         - ``source='unknown'`` means the explicit unknown-source bucket, with
           legacy blank-source rows treated as equivalent for back-compat
         - ``conversation_id`` limits rows to one gateway conversation/session key
+        - ``exclude_session_ids`` removes sessions before candidate limits apply
         - ``allow_operators`` marks a query the CALLER composed as FTS5 syntax,
           keeping its bare AND/OR/NOT/NEAR. Never set it for user or agent text
         """
@@ -1179,6 +1181,7 @@ class MessageStore:
                 role=role,
                 time_from=time_from,
                 time_to=time_to,
+                exclude_session_ids=exclude_session_ids,
             )
 
         order_by = _build_search_order_by(
@@ -1202,6 +1205,11 @@ class MessageStore:
                 if session_id is not None:
                     where.append("m.session_id = ?")
                     args.append(session_id)
+                if exclude_session_ids:
+                    where.append(
+                        "m.session_id NOT IN (SELECT value FROM json_each(?))"
+                    )
+                    args.append(json.dumps(list(exclude_session_ids)))
                 if source_clause:
                     where.append(source_clause)
                     args.extend(source_args)
@@ -1243,6 +1251,7 @@ class MessageStore:
                     role=role,
                     time_from=time_from,
                     time_to=time_to,
+                    exclude_session_ids=exclude_session_ids,
                 )
 
             raw_primary_values: list[float] = []
@@ -1283,7 +1292,8 @@ class MessageStore:
                      conversation_id: str | None = None,
                      role: str | None = None,
                      time_from: float | None = None,
-                     time_to: float | None = None) -> List[Dict[str, Any]]:
+                     time_to: float | None = None,
+                     exclude_session_ids: Collection[str] | None = None) -> List[Dict[str, Any]]:
         # LIKE keeps every character the index cannot spell (emoji, punctuation)
         # because substring matching is the only way to find those rows.
         safe_query = sanitize_like_query(query)
@@ -1298,6 +1308,9 @@ class MessageStore:
         if session_id is not None:
             where.append("session_id = ?")
             args.append(session_id)
+        if exclude_session_ids:
+            where.append("session_id NOT IN (SELECT value FROM json_each(?))")
+            args.append(json.dumps(list(exclude_session_ids)))
         source_clause, source_args = _source_filter_clause("source", source)
         if source_clause:
             where.append(source_clause)
