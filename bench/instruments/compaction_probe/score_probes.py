@@ -13,8 +13,29 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
+# Expanded 2026-08-20 pre-official-scoring (disclosed in RUN-SHEET amendment):
+# the original set missed the model's dominant abstention phrasings observed in
+# smokes ("You didn't state …", "It isn't present in the conversation …"),
+# which would bias traps toward false HALLUCINATE. CORRECT is checked before
+# the abstain regex, so retention (CORRECT/canaries) is unaffected by
+# construction; only the ABSTAIN/HALLUCINATE split moves. Applied uniformly to
+# every arm.
 ABSTAIN_PATTERNS = [
-    r"(?i)\b(don'?t know|do not know|no (record|memory|information)|not (sure|mentioned|specified)|cannot (recall|find)|unsure)\b",
+    r"(?i)\b(don'?t|do not|didn'?t|did not|doesn'?t|does not|can'?t|cannot|"
+    r"couldn'?t|could not)\s+(know|recall|find|locate|see|have|remember|"
+    r"mention|state|specify|provide|say|share|define|give|record|include)\b",
+    r"(?i)\b(isn'?t|is not|wasn'?t|was not|aren'?t|are not|weren'?t|were not|"
+    r"not)\s+(present|mentioned|specified|stated|provided|included|available|"
+    r"recorded|defined|given|said|shared|sure|in (the|our|my))\b",
+    r"(?i)\bno (record|memory|information|mention|such)\b",
+    r"(?i)\bno\b.{0,60}\b(was|were|has been|have been)\s+(provided|"
+    r"established|decided|set|given|specified|mentioned|recorded|defined|"
+    r"chosen)\b",
+    r"(?i)\bnever (mentioned|stated|specified|provided|said|defined|recorded|"
+    r"shared|gave|included|decided|chose|set|established|agreed|picked)\b",
+    r"(?i)\bunable to (find|locate|recall|see)\b",
+    r"(?i)\banswer is:?\s*unknown\b",
+    r"(?i)\bunsure\b",
 ]
 ABSTAIN_RE = tuple(re.compile(pattern) for pattern in ABSTAIN_PATTERNS)
 
@@ -123,12 +144,21 @@ def _canary_value(probe: Any, canaries: dict[str, Any]) -> Any:
         return _canary_entry_value(canary_id)
     if canary_id is not None:
         return canaries.get(str(canary_id))
+    # gen_material schema: probe rows carry no canary_id; the join key is the
+    # probe's own id (probes.jsonl id == canaries.json id).
+    own_id = _field(probe, "id", "probe_id")
+    if own_id is not None:
+        return canaries.get(str(own_id))
     return None
 
 
 def _is_trap(probe: Any, canary_value: Any = None) -> bool:
     del canary_value  # Explicit trap metadata, never an unresolved-positive fallback.
-    value = _field(probe, "trap", "is_trap", "negative", default=False)
+    value = _field(probe, "trap", "is_trap", "negative", default=None)
+    if value is None:
+        # gen_material schema marks traps via kind: "trap".
+        kind = _field(probe, "kind")
+        return isinstance(kind, str) and kind.casefold() in {"trap", "negative"}
     if isinstance(value, str):
         value = value.casefold() in {"1", "true", "yes", "trap", "negative"}
     return bool(value)
@@ -140,7 +170,9 @@ def _raw_answer(result: Any) -> tuple[str, bool]:
     value = result.get("raw_answer", result.get("answer", result.get("output")))
     if not isinstance(value, str) or not value.strip():
         return "", True
-    return value, False
+    # Model output uses curly apostrophes ("don’t"); fold to ASCII so the
+    # abstain patterns' '?  alternations match real phrasing.
+    return value.replace("’", "'").replace("‘", "'"), False
 
 
 def classify(
@@ -193,7 +225,16 @@ def _aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def score(results_path: Path, canaries_path: Path, probes_path: Path) -> dict[str, Any]:
-    canaries = _canary_map(_load_json(canaries_path))
+    canary_payload = _load_json(canaries_path)
+    canaries = _canary_map(canary_payload)
+    canary_meta: dict[str, dict[str, Any]] = {}
+    meta_rows = canary_payload.get("canaries") if isinstance(canary_payload, dict) else canary_payload
+    if isinstance(meta_rows, list):
+        for row in meta_rows:
+            if isinstance(row, dict):
+                key = row.get("canary_id", row.get("id", row.get("name")))
+                if key is not None:
+                    canary_meta[str(key)] = row
     probe_rows, invalid_probe_lines = _load_jsonl(probes_path)
     result_rows, invalid_result_lines = _load_jsonl(results_path)
     if invalid_probe_lines:
@@ -218,12 +259,24 @@ def score(results_path: Path, canaries_path: Path, probes_path: Path) -> dict[st
                 UserWarning,
                 stacklevel=2,
             )
+        meta = canary_meta.get(pid, {})
+        canary_id = _field(probe, "canary_id", "canary")
+        if canary_id is None and pid in canary_meta:
+            canary_id = pid  # resolved via the probe-id join (gen_material schema)
         scored = {
             "probe_id": pid,
-            "epoch": str(_field(probe, "epoch", "epoch_id", default="unknown")),
-            "class": str(_field(probe, "class", "info_class", "category", default="unknown")),
+            "epoch": str(
+                _field(probe, "epoch", "epoch_id", default=None)
+                or meta.get("epoch")
+                or "unknown"
+            ),
+            "class": str(
+                _field(probe, "class", "info_class", "category", default=None)
+                or meta.get("class")
+                or "unknown"
+            ),
             "trap": trap,
-            "canary_id": _field(probe, "canary_id", "canary"),
+            "canary_id": canary_id,
             "canary_value": value,
         }
         probe_by_id[pid] = scored
