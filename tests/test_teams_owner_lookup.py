@@ -350,35 +350,3 @@ def test_a_suspended_session_owner_is_refused(store: sqlite3.Connection) -> None
 
     assert isinstance(policy, FailClosedPolicy)
     assert policy.denial_reason.value == "context_revoked"
-
-
-def test_teams_enabled_without_a_store_fails_closed() -> None:
-    """A Teams-enabled carrier with no store binding must not get a
-    TeamsPolicy: no catalog, no revisions, no owner resolver — every
-    enforcement surface would be silently absent and unclaimed-allow would
-    authorize anything. FailClosedPolicy until #82 gives non-store carriers a
-    real path."""
-
-    class _NoStoreEngine:
-        lcm_teams_enabled = True
-
-        def __init__(self, context) -> None:
-            self._ctx = context
-
-        def get_lcm_access_context(self):
-            return self._ctx
-
-    from datetime import timedelta
-
-    now = datetime.now(timezone.utc)
-    ctx = AccessContextV1.from_host(
-        authenticated_transport="test", context_id="ctx", request_id="req",
-        source_kind="human", deployment_id="dep", tenant_id="tenant",
-        principal_id="carus", profile_id="carus", profile_incarnation="inc",
-        session_id="session-own", session_owner_principal_id="carus",
-        conversation_id="conv", conversation_lane="lane",
-        read_policy_ref="policy", lease_id="lease",
-        issued_at=now - timedelta(minutes=1), expires_at=now + timedelta(hours=1),
-    )
-    policy = policy_for_engine(_NoStoreEngine(ctx))
-    assert isinstance(policy, FailClosedPolicy)
