@@ -322,6 +322,41 @@ def test_cli_parses_recall_rerank_flag():
     )
     assert args.recall_rerank is True
     assert args.recall_rerank_window == 0
+    assert args.recall_rerank_margin == 0.0
+
+
+def test_cli_parses_recall_rerank_margin():
+    cli = _load_cli()
+    args = cli._parse_args(
+        [
+            "run",
+            "--dataset",
+            "x.json",
+            "--output",
+            "out",
+            "--recall-rerank",
+            "--recall-rerank-margin",
+            "0.25",
+        ]
+    )
+    assert args.recall_rerank_margin == 0.25
+
+
+def test_cli_recall_rerank_margin_requires_recall_rerank(tmp_path):
+    cli = _load_cli()
+    args = cli._parse_args(
+        [
+            "run",
+            "--dataset",
+            str(tmp_path / "missing.json"),
+            "--output",
+            str(tmp_path / "out"),
+            "--recall-rerank-margin",
+            "0",
+        ]
+    )
+    with pytest.raises(SystemExit, match="requires --recall-rerank"):
+        cli._cmd_run(args)
 
 
 def test_cli_recall_rerank_window_requires_recall_rerank(tmp_path):
@@ -780,10 +815,16 @@ def test_recall_rerank_on_records_status_and_mode_counts(tmp_path):
     header = json.loads(rows[0])
     assert header["__checkpoint_header__"]["recall_rerank"] is True
     assert header["__checkpoint_header__"]["recall_rerank_window"] == 10
+    assert header["__checkpoint_header__"]["recall_rerank_margin"] == 0.0
     dump_header = json.loads(dump_path.read_text(encoding="utf-8").splitlines()[0])
     assert dump_header["__dump_header__"]["recall_rerank_window"] == 10
+    assert dump_header["__dump_header__"]["recall_rerank_margin"] == 0.0
     for row in map(json.loads, rows[1:]):
         assert row["arms"]["lcm_recall"]["recall_rerank_status"] == expected_status
+        assert "rerank_scores" not in row["arms"]["lcm_recall"]
+    dump_rows = list(map(json.loads, dump_path.read_text(encoding="utf-8").splitlines()[1:]))
+    for row in dump_rows:
+        assert row["arms"]["lcm_recall"]["rerank_scores"] == []
 
 
 def test_recall_rerank_resume_rejects_flag_off_checkpoint(tmp_path):

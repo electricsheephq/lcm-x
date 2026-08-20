@@ -443,6 +443,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("embeddings_enabled", "LCM_EMBEDDINGS_ENABLED", bool),
     _EnvFieldSpec("rerank_enabled", "LCM_RERANK_ENABLED", bool),
     _EnvFieldSpec("rerank_window_limit", "LCM_RERANK_WINDOW_LIMIT", int),
+    _EnvFieldSpec("rerank_margin", "LCM_RERANK_MARGIN", float),
     _EnvFieldSpec("recall_scan_rows", "LCM_RECALL_SCAN_ROWS", int),
     _EnvFieldSpec("recall_scan_max_rows", "LCM_RECALL_SCAN_MAX_ROWS", int),
     _EnvFieldSpec("recall_scan_budget_s", "LCM_RECALL_SCAN_BUDGET_S", float),
@@ -709,6 +710,9 @@ class LCMConfig:
     # Optional product clamp for the lcm_recall rerank window. Zero preserves
     # the historical ``min(50, max(1, limit * 4))`` window byte-for-byte.
     rerank_window_limit: int = 0
+    # Optional rank-1 margin gate for the lcm_recall rerank stage. Zero
+    # preserves the historical rerank ordering byte-for-byte.
+    rerank_margin: float = 0.0
     embedding_bounded_scan_rows: int = 2_000
     # Vector storage dtype for NEWLY-registered embedding profiles: float32
     # (default; a stock install keeps summary vectors byte-identical) or int8

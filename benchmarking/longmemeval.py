@@ -1494,7 +1494,7 @@ def production_recall_hits(
     embeddings_enabled: bool,
     limit: int,
     return_status: bool = False,
-) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], str]:
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], str, list[list[Any]]]:
     """Invoke the REAL ``tools.lcm_recall`` against this question's temp store.
 
     This is the tool users call: weighted RRF over the FTS + summary + chunk arms
@@ -1531,7 +1531,10 @@ def production_recall_hits(
     status = payload.get("provenance", {}).get("rerank")
     if not isinstance(status, str) or not status:
         raise ValueError("lcm_recall response is missing provenance.rerank status")
-    return hits, status
+    scores = payload.get("provenance", {}).get("rerank_scores", [])
+    if not isinstance(scores, list):
+        raise ValueError("lcm_recall response has invalid provenance.rerank_scores")
+    return hits, status, scores
 
 
 def _fuse_tiebreak(item):
@@ -1681,6 +1684,7 @@ def evaluate_question(
     use_rerank: bool = False,
     recall_rerank: bool = False,
     recall_rerank_window: int = 0,
+    recall_rerank_margin: float = 0.0,
     db_template: Path | None = None,
     embedding_batch_size: int | None = None,
     include_rankings: bool = False,
@@ -1715,6 +1719,7 @@ def evaluate_question(
         embedding_model=model,
         rerank_enabled=recall_rerank,
         rerank_window_limit=recall_rerank_window,
+        rerank_margin=recall_rerank_margin,
     )
     ingest_start = time.perf_counter()
     # F7: clone a pre-migrated template instead of re-running schema bootstrap.
@@ -1889,7 +1894,7 @@ def evaluate_question(
             )
         )
         if recall_rerank:
-            recall_raw, recall_rerank_status = recall_result
+            recall_raw, recall_rerank_status, recall_rerank_scores = recall_result
         else:
             recall_raw = recall_result
         recall_ranked = recall_hit_sessions(recall_raw)
@@ -1925,7 +1930,7 @@ def evaluate_question(
         if recall_rerank:
             scored["lcm_recall"]["recall_rerank_status"] = recall_rerank_status
         if include_rankings:
-            scored["_candidate_rankings"] = {
+            candidate_rankings = {
                 arm: {
                     "sessions": list(dict.fromkeys(ranked))[:_CANDIDATE_DUMP_TOP_K],
                     "turns": list(dict.fromkeys(turn_keys))[:_CANDIDATE_DUMP_TOP_K],
@@ -1933,6 +1938,11 @@ def evaluate_question(
                 for arm, (ranked, _elapsed_ms, turn_keys, _session_granularity)
                 in ranked_by_arm.items()
             }
+            if recall_rerank:
+                candidate_rankings["lcm_recall"]["rerank_scores"] = list(
+                    recall_rerank_scores
+                )
+            scored["_candidate_rankings"] = candidate_rankings
         return scored
     finally:
         vector_store.close()
@@ -2041,6 +2051,7 @@ def _checkpoint_header(
     rerank: bool,
     recall_rerank: bool = False,
     recall_rerank_window: int = 0,
+    recall_rerank_margin: float = 0.0,
     embeddings_enabled: bool,
     dataset_label: str,
     direct_source_sha256: str | None,
@@ -2063,6 +2074,8 @@ def _checkpoint_header(
         bindings["source_sha256"] = direct_source_sha256
     if manifest_sha256 is not None:
         bindings["manifest_sha256"] = manifest_sha256
+    if recall_rerank or recall_rerank_margin != 0.0:
+        bindings["recall_rerank_margin"] = recall_rerank_margin
     return {_CHECKPOINT_HEADER_KEY: bindings}
 
 
@@ -2073,6 +2086,7 @@ def _candidate_dump_header(
     rerank: bool,
     recall_rerank: bool = False,
     recall_rerank_window: int = 0,
+    recall_rerank_margin: float = 0.0,
     embeddings_enabled: bool,
     dataset_label: str,
     direct_source_sha256: str | None,
@@ -2095,6 +2109,8 @@ def _candidate_dump_header(
         "recall_rerank_window": recall_rerank_window,
         "top_k": top_k,
     }
+    if recall_rerank or recall_rerank_margin != 0.0:
+        bindings["recall_rerank_margin"] = recall_rerank_margin
     return {_DUMP_HEADER_KEY: bindings}
 
 
@@ -2106,7 +2122,10 @@ def _validate_candidate_dump_header(
 
 
 def _candidate_dump_record(
-    question: Question, rankings: dict[str, Any] | None
+    question: Question,
+    rankings: dict[str, Any] | None,
+    *,
+    recall_rerank: bool = False,
 ) -> dict[str, Any]:
     def _turn_sort_key(turn_key: TurnKey) -> tuple[str, int]:
         return (str(turn_key[0]), -1 if turn_key[1] is None else int(turn_key[1]))
@@ -2137,6 +2156,8 @@ def _candidate_dump_record(
                 "sessions_top10": session_ids,
                 "turns_top10": [list(turn_key) for turn_key in turn_keys],
             }
+            if recall_rerank and arm == "lcm_recall" and "rerank_scores" in ranking:
+                arms[arm]["rerank_scores"] = list(ranking["rerank_scores"])
 
     return {
         "question_id": question.question_id,
@@ -2439,6 +2460,7 @@ def run_harness(
     use_rerank: bool = False,
     recall_rerank: bool = False,
     recall_rerank_window: int = 0,
+    recall_rerank_margin: float = 0.0,
     reuse_db_template: bool = True,
     question_count: int | None = None,
     dataset_label: str = "s",
@@ -2487,6 +2509,7 @@ def run_harness(
         rerank=use_rerank,
         recall_rerank=recall_rerank,
         recall_rerank_window=recall_rerank_window,
+        recall_rerank_margin=recall_rerank_margin,
         embeddings_enabled=embeddings_enabled,
         dataset_label=dataset_label,
         direct_source_sha256=direct_source_sha256,
@@ -2500,6 +2523,7 @@ def run_harness(
         rerank=use_rerank,
         recall_rerank=recall_rerank,
         recall_rerank_window=recall_rerank_window,
+        recall_rerank_margin=recall_rerank_margin,
         embeddings_enabled=embeddings_enabled,
         dataset_label=dataset_label,
         direct_source_sha256=direct_source_sha256,
@@ -2665,6 +2689,7 @@ def run_harness(
                         use_rerank=use_rerank,
                         recall_rerank=recall_rerank,
                         recall_rerank_window=recall_rerank_window,
+                        recall_rerank_margin=recall_rerank_margin,
                         db_template=db_template,
                         embedding_batch_size=effective_embedding_batch_size,
                         include_rankings=dump_candidates_path is not None,
@@ -2696,7 +2721,11 @@ def run_harness(
                 if candidate_dump_file is not None:
                     _write_candidate_dump_record(
                         candidate_dump_file,
-                        _candidate_dump_record(question, candidate_rankings),
+                        _candidate_dump_record(
+                            question,
+                            candidate_rankings,
+                            recall_rerank=recall_rerank,
+                        ),
                     )
                 if checkpoint_file is not None:
                     _write_checkpoint_record(checkpoint_file, record)

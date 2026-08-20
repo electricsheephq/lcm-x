@@ -4560,7 +4560,7 @@ def _lcm_recall_rerank(
     window: int,
     deadline: float,
     config: Any,
-) -> tuple[list[dict[str, Any]], str]:
+) -> tuple[list[dict[str, Any]], str, list[list[Any]]]:
     """Optionally REORDER the top ``window`` fused candidates in ONE API call.
 
     Default OFF. This is a pure rank-reorder WITHIN the window: the reranker's
@@ -4575,16 +4575,16 @@ def _lcm_recall_rerank(
     order with a ``skipped: <reason>`` status.
     """
     if not bool(getattr(config, "rerank_enabled", False)):
-        return ordered, "disabled"
+        return ordered, "disabled", []
     if (
         provider is None
         or getattr(provider, "provider_id", "") != "voyage"
         or not hasattr(provider, "rerank")
     ):
-        return ordered, "skipped: rerank requires the voyage provider"
+        return ordered, "skipped: rerank requires the voyage provider", []
     head = ordered[:window]
     if not head:
-        return ordered, "skipped: no candidates to rerank"
+        return ordered, "skipped: no candidates to rerank", []
     documents = [str(entry["hit"].get("snippet") or "") for entry in head]
     try:
         ranked = _run_within_deadline(
@@ -4598,20 +4598,84 @@ def _lcm_recall_rerank(
             name="lcm-recall-rerank",
         )
     except Exception as exc:  # noqa: BLE001 - any failure => skip rerank
-        return ordered, f"skipped: {exc}"
+        return ordered, f"skipped: {exc}", []
     if not ranked:
-        return ordered, "skipped: empty rerank result"
+        return ordered, "skipped: empty rerank result", []
+
+    rerank_margin = float(getattr(config, "rerank_margin", 0.0) or 0.0)
+    if rerank_margin <= 0:
+        # This is the historical rerank path. Keep it structurally unchanged for
+        # rerank_margin == 0.0 so the default output ordering remains byte-identical.
+        rerank_scores = [
+            [head[index]["hit"].get("session_id"), float(relevance)]
+            for index, relevance in ranked
+            if 0 <= index < len(head)
+        ]
+        reordered: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        for index, _relevance in ranked:
+            if 0 <= index < len(head) and index not in seen:
+                reordered.append(head[index])
+                seen.add(index)
+        for index, entry in enumerate(head):
+            if index not in seen:
+                reordered.append(entry)
+        reordered.extend(ordered[window:])
+        return reordered, "applied", rerank_scores
+
+    # Keep score telemetry in provider order, before the positive-margin gate
+    # changes the resulting candidate order. VoyageProvider already filters
+    # invalid indices; the bounds check also keeps test doubles safe.
+    valid_ranked = [
+        (int(index), float(relevance))
+        for index, relevance in ranked
+        if 0 <= int(index) < len(head)
+    ]
+    rerank_scores = [
+        [head[index]["hit"].get("session_id"), relevance]
+        for index, relevance in valid_ranked
+    ]
+
+    # If the provider did not score the incoming incumbent, fail open rather
+    # than guessing its relevance.
+    incumbent_relevance = next(
+        (relevance for index, relevance in valid_ranked if index == 0),
+        None,
+    )
+    if incumbent_relevance is None:
+        return ordered, "skipped: partial rerank result", rerank_scores
+    challenger_index, challenger_relevance = max(
+        valid_ranked,
+        key=lambda item: (item[1], -item[0]),
+    )
+    if (
+        challenger_index == 0
+        or challenger_relevance - incumbent_relevance < rerank_margin
+    ):
+        reordered = [head[0]]
+        seen = {0}
+        for index, _relevance in valid_ranked:
+            if index != 0 and index not in seen:
+                reordered.append(head[index])
+                seen.add(index)
+        for index, entry in enumerate(head):
+            if index not in seen:
+                reordered.append(entry)
+        reordered.extend(ordered[window:])
+        return reordered, "applied: rank1-held", rerank_scores
+
+    # The positive-margin override takes exactly the historical rerank order.
     reordered: list[dict[str, Any]] = []
     seen: set[int] = set()
-    for index, _relevance in ranked:
-        if 0 <= index < len(head) and index not in seen:
+    for index, _relevance in valid_ranked:
+        if index not in seen:
             reordered.append(head[index])
             seen.add(index)
     for index, entry in enumerate(head):
         if index not in seen:
             reordered.append(entry)
     reordered.extend(ordered[window:])
-    return reordered, "applied"
+    return reordered, "applied", rerank_scores
 
 
 def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
@@ -4954,7 +5018,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
 
     # -- Optional rerank stage (default OFF): a pure rank-REORDER within the top
     #    window of the post-prior order (no score splicing onto the RRF scale). --
-    ordered, rerank_status = _lcm_recall_rerank(
+    ordered, rerank_status, rerank_scores = _lcm_recall_rerank(
         provider, query, ordered, window=rerank_window, deadline=deadline, config=engine._config
     )
 
@@ -5176,6 +5240,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         },
         "degraded": degraded,
     }
+    if bool(getattr(engine._config, "rerank_enabled", False)) and rerank_scores:
+        response["provenance"]["rerank_scores"] = rerank_scores
     if degraded:
         response["degraded_reason"] = "; ".join(dict.fromkeys(degraded_reasons))
     if timed_out:
