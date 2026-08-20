@@ -11,6 +11,7 @@ boundaries. Boundaries are appended, never edited.
 | #199 preflight maintenance deferral | 2026-08-19 | compaction timing on default path | next full-500 V1-M run doubles as re-baseline (deterministic); LoCoMo on next main-tree config. Containment note: both post-#199 benchmark trees reproduced the pre-#199 95q subset BITWISE → empirically inert on the V1-M declared config | PARTIALLY DISCHARGED (subset evidence); full-500 pending |
 | #245 summary-contract acceptance widened | 2026-08-19 | summary ingest (fail-open widening) | ledger entry (this row) + zero-moved-rows confirmation on next full run | OPEN — check on next full run |
 | #180 query arg coercion | 2026-08-19 | AMA/agentic arms only | scoped re-baseline on next AMA row. Retrieval rows PROVABLY inert: only retro PR inside the F56 comparison trees; F56 non-override rows bitwise-identical | OPEN (AMA); DISCHARGED (retrieval) |
+| #263-fix (gpt-5.6 OAuth cap 372K→272K) | 2026-08-21 | compaction cadence on gpt-5.6 codex-OAuth routes where the host advertises >272K (threshold now computed on the real window; compaction earlier, overflow risk closed) | banked rows predate and pinned their effective windows (F53 tree-pinned; F59 arms recorded windows per-arm); next main-tree row on a 5.6 OAuth route records post-#263-fix | OPEN |
 
 Standing caveats adopted from the #252 retro pack (recorded, no re-baseline owed):
 - #158 / #170: if any bench profile ever routes through `LCMConfig.from_env()`, per-model
