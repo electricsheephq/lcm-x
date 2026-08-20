@@ -77,3 +77,29 @@ transport captures (P1), where the encrypted server-side summary is behaviorally
 same canary battery. LCM-side: the single compaction event in R2s/R3 (30.6K tokens → 236-token
 summary) plus 100% downstream retention shows the memory-tool recall path, not the summary alone,
 carries retention — a design validation for compact-aggressively + recall-on-demand.
+
+## 7. APPENDIX (2026-08-20 UTC, append-only) — R4-ref disposition: unmeasurable on exec for gpt-5.4; quota-window note void
+
+**Account/quota correction:** the "Aug 26–31 window" constraint in §5 is VOID — the exhausted
+bucket was simply a low account the owner swapped same-day; gpt-5.4 was live immediately.
+
+**R4-ref: three attempts, zero valid runs — DECLARED UNMEASURABLE as a context-retention
+reference on the exec transport:**
+1. Attempt 1 VOID: `exec resume` carried no `-m`; 69/70 turns silently served the default
+   gpt-5.6-sol (fixed with a fail-loud per-turn served-model assertion, PRs #308/#311 — the
+   guard then correctly caught its own author's parser bug on attempt 2's first turn).
+2. Attempt 3 ran clean mechanically (70 turns, model receipt 285× gpt-5.4, zero compactions —
+   the §3b long-context expectation held) but **tripped the Amendment-10 detection gate**:
+   16 exec tool calls during probe turns, `rg`-ing codex's own memories directory and the
+   session's OWN LIVE ROLLOUT FILE for the answers, with literal canary values in the search
+   patterns. Answers derived from disk are not context retention; the pre-declared rule
+   invalidates the arm.
+3. **Behavioral observation banked in lieu of the row:** on identical material and probes,
+   gpt-5.6-sol (R1-lc) made ZERO tool calls and answered from context; gpt-5.4 reached for
+   filesystem tools on every attempt. Since codex exec offers no tool off-switch and the
+   model's own home (memories, rollouts) cannot be hidden from it, a tools-clean gpt-5.4
+   exec reference is not obtainable — and the model retires from codex-auth 2026-08-31.
+   The pilot's contrasts never depended on R4 (§3b excluded it from all contrasts).
+
+Extension arms (sol control, luna pair, multi-compaction stress) are registered as run-sheet
+Amendment 13.
