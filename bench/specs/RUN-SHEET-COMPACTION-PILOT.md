@@ -29,7 +29,8 @@ Model: gpt-5.6-sol only in P0 (luna → P1). R4 (long-context >272K) deferred to
   Sized to cross the native trigger band (86–93% of 258,400) ≥2 times.
 - 30 canaries (5 info classes: decisions / file-paths / constraints / tool-output facts /
   user preferences; ×2 per class per epoch; 3 epochs by token depth) + 5 hallucination
-  traps. Values salted per run (contamination alarm). Probes never contain the value.
+  traps. One registered salt for all P0 runs (see §3); pre-material zero-hit assertions
+  replace salt rotation as the contamination guard. Probes never contain the value.
 - Post-hoc epoch re-binning against MEASURED compaction boundaries; canaries within ±1
   turn of a boundary excluded + disclosed. **Cross-arm contrasts are computed on the
   INTERSECTION of each compared pair's surviving canary sets** (per-arm exclusion lists
@@ -42,9 +43,13 @@ Model: gpt-5.6-sol only in P0 (luna → P1). R4 (long-context >272K) deferred to
 S0 cost/auth smoke → S1 resume-continuity smoke → **material freeze** (gen_material with
 the registered seed; shas pinned HERE, before any behavioral smoke touches the measured
 surface) → S2 pty smoke (frozen material) → S3 denominator gate → then the five 5.6 runs
-in an order drawn by the registered seed (R2-A and R2-A′ adjacent by design — the pair
-shares ONE salt so their scripts are IDENTICAL; other runs use distinct salts, which also
-keeps the cross-run contamination alarm) + the perishable gpt-5.4 run last (see §3b).
+in an order drawn by the registered seed (R2-A and R2-A′ adjacent by design) + the
+perishable gpt-5.4 run last (see §3b). **ALL P0 runs share ONE registered salt** — full
+script identity across every arm (the same value-identity argument that binds the A/A′
+pair binds every cross-arm contrast). Contamination is guarded directly instead of by
+salt rotation: each run starts from a fresh HERMES_HOME/LCM store (or fresh codex
+session), and the driver asserts PRE-MATERIAL that zero canary values exist in the
+store/session — a nonzero hit aborts the run fail-closed.
 Fresh HERMES_HOME/LCM store per run; per-turn append-only results JSONL (the V1M
 Amendment-2 lesson); ~2h wall per run, staggered. Single-run-per-regime remains a declared
 P0 limitation: seeded order randomization reduces but cannot eliminate time-of-day/serving
