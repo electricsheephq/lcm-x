@@ -53,12 +53,8 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-RUNTIME_CONFIG_PATH: Path | None = None
-RUNTIME_CONFIG_SHA: str | None = None
-
-
 class ConfigDriftError(RuntimeError):
-    """config.yaml changed while a multi-hour run was in flight."""
+    """config.yaml changed (or vanished) while a run was in flight."""
 
 
 def sha256_file(path: Path) -> str:
@@ -254,6 +250,7 @@ def _invoke(
     command: list[str],
     child_env: dict[str, str],
     timeout: float,
+    runtime_config: "tuple[Path, str] | None" = None,
 ) -> tuple[str, str, bool]:
     """Run one turn and return stdout, stderr, and whether it timed out.
 
@@ -262,11 +259,16 @@ def _invoke(
     timeout boundary easy to mock while preserving fail-closed behavior.
     """
     try:
-        current_sha = sha256_file(RUNTIME_CONFIG_PATH) if RUNTIME_CONFIG_PATH else None
-        if RUNTIME_CONFIG_SHA is not None and current_sha != RUNTIME_CONFIG_SHA:
-            raise ConfigDriftError(
-                f"config.yaml changed mid-run: {current_sha} != {RUNTIME_CONFIG_SHA}"
-            )
+        if runtime_config is not None:
+            cfg_path, cfg_sha = runtime_config
+            try:
+                current_sha = sha256_file(cfg_path)
+            except OSError as exc:
+                raise ConfigDriftError(f"config.yaml unreadable mid-run: {exc}") from exc
+            if current_sha != cfg_sha:
+                raise ConfigDriftError(
+                    f"config.yaml changed mid-run: {current_sha} != {cfg_sha}"
+                )
         completed = subprocess.run(
             command,
             env=child_env,
@@ -414,9 +416,10 @@ def run(args: argparse.Namespace) -> int:
         else hermes_home_arg / "config.yaml"
     )
     hermes_home = config_path.parent
-    global RUNTIME_CONFIG_PATH, RUNTIME_CONFIG_SHA
-    RUNTIME_CONFIG_PATH = config_path
-    RUNTIME_CONFIG_SHA = sha256_file(config_path)
+    if not config_path.is_file():
+        sys.stderr.write(f"[driver] config not found: {config_path}\n")
+        return 64
+    runtime_config = (config_path, sha256_file(config_path))
     if not config_path.exists():
         raise ValueError(f"Hermes config not found: {config_path}")
     values = read_config_values(config_path)
@@ -500,6 +503,7 @@ def run(args: argparse.Namespace) -> int:
                     fallback_command,
                     child_env,
                     args.turn_timeout,
+                    runtime_config,
                 )
                 _append_raw_log(raw_log, fallback_stdout, fallback_stderr)
                 stdout = fallback_stdout
@@ -537,6 +541,16 @@ def run(args: argparse.Namespace) -> int:
             return BOOT_FAILURE_EXIT_CODE
 
     sys.stderr.write("[driver] done\n")
+    if runtime_config is not None:
+        cfg_path, cfg_sha = runtime_config
+        try:
+            final_sha = sha256_file(cfg_path)
+        except OSError as exc:
+            sys.stderr.write(f"[driver] config unreadable at run end: {exc}\n")
+            return 73
+        if final_sha != cfg_sha:
+            sys.stderr.write("[driver] config drift detected AFTER the final turn\n")
+            return 73
     return 0
 
 
