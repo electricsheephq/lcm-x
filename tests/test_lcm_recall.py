@@ -4197,3 +4197,58 @@ def test_recall_fts_finds_oldest_matching_message_beyond_candidate_window(
     )
 
     assert payload["hits"][0]["store_id"] == oldest
+
+
+def test_crashed_message_search_is_not_reported_as_ok_coverage(
+    recall_engine, monkeypatch
+):
+    """A crashed FTS message search must surface as coverage 'none', not 'ok'.
+
+    ``_lcm_grep_full_text`` deliberately degrades on a message-search crash
+    (grep's other stages may still produce results), but the recall FTS arm
+    consumes ONLY the message rows -- so before the disclosure existed, the
+    crash was logged and swallowed, and recall reported ``coverage.fts: 'ok'``
+    with zero hits. On an FTS-only install (embeddings disabled) that made a
+    crashed search arm indistinguishable from an empty corpus (#256; the
+    assertion ports the intent of #191's excluded coverage test to main's
+    none/ok vocabulary).
+    """
+    recall_engine._config.embeddings_enabled = False
+
+    def raising_search(*_a, **_k):
+        raise RuntimeError("simulated FTS crash")
+
+    # Instance-level patch: survives the shallow copy.copy(engine._store)
+    # inside _lcm_grep_full_text_with_deadline's worker.
+    recall_engine._store.search = raising_search
+
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "anything", "include": "verbatim", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    assert payload["provenance"]["coverage"]["fts"] == "none"
+    assert "full-text arm unavailable" in [
+        reason.strip() for reason in payload["degraded_reason"].split(";")
+    ]
+    assert payload["hits"] == []
+
+
+def test_grep_payload_discloses_message_search_crash(recall_engine):
+    """The grep payload itself carries the crash, not only the process log."""
+    def raising_search(*_a, **_k):
+        raise RuntimeError("simulated FTS crash")
+
+    recall_engine._store.search = raising_search
+
+    payload = json.loads(
+        lcm_tools._lcm_grep_full_text(
+            {"query": "anything", "session_scope": "all", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    assert "error" not in payload  # grep still degrades, it does not fail
+    assert payload["message_search_error"] == "simulated FTS crash"

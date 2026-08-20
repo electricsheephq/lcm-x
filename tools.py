@@ -3139,6 +3139,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     has_current_session = bool(current_session_id)
     excluded_session_ids = set(args.get("_excluded_session_ids") or ())
     results: list[Dict[str, Any]] = []
+    message_search_error: str | None = None
 
     if (
         content_scope in {"history", "both"}
@@ -3168,6 +3169,13 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                     )
                 )
         except Exception as exc:
+            # Grep degrades to whatever the other stages produce, but the
+            # failure must reach the PAYLOAD, not just the log: lcm_recall's
+            # FTS arm consumes only these message rows, so a swallowed crash
+            # here previously reported coverage.fts='ok' with zero hits --
+            # on an FTS-only install that made a crashed search arm
+            # indistinguishable from an empty corpus (#256).
+            message_search_error = str(exc) or type(exc).__name__
             logger.warning("Message search failed: %s", exc)
 
     # Summary-node search is intentionally current-session only. Cross-session
@@ -3434,6 +3442,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         response["externalized_refs"] = externalized_refs
     if externalized_scan is not None:
         response["externalized_scan"] = externalized_scan
+    if message_search_error is not None:
+        response["message_search_error"] = message_search_error
     return json.dumps(response)
 
 
@@ -4933,6 +4943,13 @@ def _lcm_recall_fts_arm(
     )
     if "error" in payload:
         return [], payload
+    # Grep survives a message-search crash on its other stages, but THIS arm
+    # consumes only the message rows -- a disclosed crash means the arm
+    # produced nothing, which must surface as coverage 'none', never as an
+    # 'ok' empty result indistinguishable from an empty corpus (#256).
+    message_search_error = payload.get("message_search_error")
+    if message_search_error:
+        return [], {"error": f"full-text message search failed: {message_search_error}"}
     hits: list[dict[str, Any]] = []
     for row in payload.get("results", []):
         store_id = row.get("store_id")
