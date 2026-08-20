@@ -414,6 +414,8 @@ Most installs only need `plugins.enabled` and `context.engine: lcm`.
 | Variable | Default | Use |
 |----------|---------|-----|
 | `LCM_CONTEXT_THRESHOLD` | `0.35` | Fraction of the context window that triggers LCM compaction |
+| `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `0` | If `> 0`, force compaction at this absolute prompt-token count instead of `context_length × LCM_CONTEXT_THRESHOLD`. Cross-model context-health setpoint (common coding default: `130000`) so large windows do not delay compaction and degrade recall |
+| `LCM_MODEL_THRESHOLDS` | empty | Per-model threshold overrides. Format: `"glm-5.2:0.70,glm-5.2-1M:0.25"`. Keys matched as substrings (longest wins). Also settable as `lcm.model_thresholds` in config.yaml. |
 | `LCM_FRESH_TAIL_COUNT` | `32` | Recent messages protected from compaction |
 | `LCM_FRESH_TAIL_MAX_TOKENS` | `0` | Optional token cap for the protected fresh tail (`0` disables it); always retains the newest message and complete assistant/tool-result groups |
 | `LCM_FRESH_TAIL_PRESSURE_YIELD_ENABLED` | `true` | Default-on: when compaction is deadlocked because the count-protected tail covers the whole over-threshold session (#441), the tail yields to a derived token bound so compaction can progress; `false` restores the strict count tail (rollback switch) |
@@ -452,6 +454,7 @@ moved back to that assistant even when doing so exceeds a configured bound.
 | `LCM_EMPTY_LIFECYCLE_GC_ENABLED` | `true` | Master toggle for automatic pruning of lifecycle rows for sessions that never ingested any messages or summary nodes |
 | `LCM_EMPTY_LIFECYCLE_GC_THRESHOLD` | `200` | Number of lifecycle rows at which the GC pass fires |
 | `LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS` | `24` | Automatic GC only deletes empty lifecycle rows at least this old; set `0` only in trusted/test environments that intentionally want immediate empty-row pruning |
+| `LCM_DISABLED_TOOLS` | empty | Comma-separated `lcm_*` tool names excluded from injected tool schemas, refused in `handle_tool_call` before message ingest, and filtered from plugin-registry registration — disabled tools cost zero tokens per turn. Unset to restore all tools. |
 
 ### Model and timeout settings
 
@@ -502,6 +505,14 @@ threshold LCM uses. Hermes core `compression.threshold` belongs to the built-in
 compressor. Hermes core `compression.enabled` is still the global gate that
 allows compaction, so leave it enabled when using LCM.
 
+If `LCM_ABSOLUTE_THRESHOLD_TOKENS` is set to a positive integer, it overrides the
+ratio-derived trigger after window math runs. Use this when you want a fixed
+context-health setpoint across model switches (for example `130000` for coding
+agents) so a larger window does not silently delay compaction, lower recall, or
+let long sessions accumulate more noise before LCM intervenes. Leave it at `0`
+to keep ratio-based behavior. When the absolute override is active, Codex
+GPT-5.5 ratio auto-raise is suppressed so the absolute setpoint stays pinned.
+
 If startup/status output shows a host-side compression percentage that disagrees
 with LCM, trust live LCM status after a normal message has initialized the
 session.
@@ -511,11 +522,14 @@ session.
 Long-context models change the tuning problem. A 1M-token model does not mean
 you always want to spend 750k prompt tokens before LCM starts compacting. Start
 with the active prompt budget you are willing to pay for, then tune the threshold
-around that budget.
+around that budget. If the budget itself should stay fixed across models, set
+`LCM_ABSOLUTE_THRESHOLD_TOKENS` instead of recomputing a ratio per window.
 
 ```text
 compaction trigger = effective context window * LCM_CONTEXT_THRESHOLD
 LCM_CONTEXT_THRESHOLD = desired compaction trigger / effective context window
+# or, model-independent:
+# LCM_ABSOLUTE_THRESHOLD_TOKENS = desired compaction trigger
 ```
 
 Examples, as math rather than universal recommendations:
@@ -806,9 +820,12 @@ Hermes host discovery/status mismatch, not an LCM storage or compaction failure.
 
 ### `/lcm status` looks unbound after restart
 
-After a fresh Hermes restart, `/lcm status` may show `session_id: (unbound)` or
-`threshold_tokens: (uninitialized)`. Send one normal Hermes message first, then
-run `lcm_status` or `/lcm status` again for live per-session fields.
+Compatible Hermes gateway hosts expose task-local lane metadata while
+dispatching `/lcm`. Once that lane has constructed an agent, `/lcm status`
+resolves the same active LCM runtime as `lcm_status`, including its foreground
+view while an ignored or stateless side channel is bound. Before the first
+normal message constructs an agent, or in a genuinely sessionless process,
+`session_id: (unbound)` and `threshold_tokens: (uninitialized)` remain expected.
 
 ## Architecture
 

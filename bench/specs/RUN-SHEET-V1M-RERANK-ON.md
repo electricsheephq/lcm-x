@@ -66,3 +66,74 @@ RUN-LOG entry; scoreboard row only on ADOPT (GRAY/FAIL publish as findings, not 
 Program session (release-manager lane) owns launch + verdict. Finding number on completion:
 next free (F56 expected). C1's LoCoMo verdict (N1) is independent and takes precedence on
 wake.
+
+## Amendment 1 — 2026-08-20: window-10 sub-variant (registered before its run)
+**Window-50 A/A′ outcome (the §3 step-1 subset, 95 scored):** V3 clean (95/95 `applied`,
+both arms), **A/A′ spread 0.00pt (0/95 discordant — the voyage reranker is deterministic on
+identical inputs)**, r@1 +5.93pt (0.4639→0.5232) — but recall@10 **−1.84pt** and r@5 −1.00pt:
+the effective window is `min(50, limit×4)` = **50** in the instrument's call path
+(tools.py rerank_window; the instrument fetches 50), so the reorder crosses the top-10
+boundary and trades delivery for precision. With a 0.00pt noise floor, any delivery loss
+violates the §4 ADOPT guard → **the full 500 was NOT run on window-50** (band discipline).
+Demotion gate at n=95: promotions 11, demotions 4 (needs ≤2.75) — unresolved at subset n,
+binds at the full run.
+
+**Zero-spend synthetic window-10** (exact for a pointwise reranker: relative order of any
+candidate subset is window-invariant; computed from the rerank-run dumps + the baseline
+dumps, artifacts/synthetic-window10.txt): r@1 **+5.93pt with r@10 +0.00pt** — the entire
+gain lives inside the top-10; the 11-50 range contributes only damage.
+
+**Registered sub-variant:** identical to §1 plus a bounded rerank window:
+- product change (landed before the run): configurable `rerank_window_limit`
+  (LCMConfig field + `LCM_RERANK_WINDOW_LIMIT` env spec; 0 = existing `min(50, limit×4)`
+  behavior, byte-identical default) clamping the window in the lcm_recall rerank stage;
+- instrument threading: `--recall-rerank-window N` recorded in both config-binding headers;
+- this run uses window **10**, making the §4 invariant (r@10 unchanged BY CONSTRUCTION)
+  active — any r@10 delta is an instrument/product bug, stop and investigate.
+**Order:** A/A′ first (re-measure determinism under the bounded window; expected 0.00pt by
+the pointwise argument, but measured, not assumed) → full 500 → paired verdict per §4
+(unchanged bands; the demotion gate resolves at n=500) → F56.
+
+## Amendment 2 — 2026-08-20: invariant clause corrected (see FINDING-F56 §3)
+The §4/Amendment-1 claim that window ≤ 10 leaves recall@10 unchanged BY CONSTRUCTION was
+mis-derived (item-window reorder vs deduped-session scoring). Measured full-500 effect: 3
+questions, all mechanically confirmed as dedup-boundary cases. Verdict recorded in F56:
+GRAY → NOT ADOPTED; declared config remains F53 (rerank off). Next iteration (margin-gated
+override) requires its own amendment before running.
+
+## Amendment 3 — 2026-08-20: margin-gated override sub-variant (registered before its runs)
+
+Basis: F56 §4. The unconditional window-10 reorder gains +4.24pt r@1 but demotes 16
+previously-correct rank-1s (46:16 vs the 4:1 gate). The reranker's per-candidate relevance
+scores are currently discarded after reordering; a margin gate uses them to protect the
+incumbent.
+
+**Product change** (`_lcm_recall_rerank`): new config `rerank_margin: float = 0.0`
+(`LCM_RERANK_MARGIN` env spec; 0.0 = today's unconditional reorder, byte-identical). When
+> 0: the incoming rank-1 entry (the incumbent) keeps position 1 unless the reranker's top
+candidate outscores the incumbent's own rerank relevance by ≥ margin. The held output is a
+PERMUTATION by definition: [incumbent] followed by the rerank order with the incumbent
+removed (never a literal splice, which could duplicate the incumbent and drop a candidate).
+Status telemetry distinguishes `applied` vs `applied: rank1-held`.
+
+**Score telemetry** (instrument): with `--recall-rerank`, the candidates sidecar row gains
+`lcm_recall_rerank_scores` — the window's (session_id, relevance) pairs — so margin selection
+and audits read scores from artifacts, never from memory. Config-binding unchanged (scores
+are outputs, not bindings); flag-off rows byte-identical.
+
+**Margin selection rule (pre-registered, BEFORE seeing full-500 score data):** run the 100q
+A/A′ subset once with scores logged (margin 0). Since the gate fires at gap ≥ M, "smallest
+value holding all demotions" is ill-defined over real scores; the mechanical rule is:
+**M = the smallest logged PROMOTION gap that is strictly greater than every logged DEMOTION
+gap** (M is then an observed promotion gap, so gap ≥ M retains that promotion and every
+larger one, and holds every demotion, whose gaps are all < M). Validity conditions: such an
+M exists AND promotions retained at gap ≥ M are ≥ 80% of subset promotions; otherwise the
+lever is rejected without a full run (publish the gap distributions). M is then FROZEN and the
+full 500 (margin = M) is the evaluation — the 405 non-subset questions are held out by
+construction. If no margin satisfies both conditions on the subset, the lever is rejected
+without a full run (report the gap distribution).
+
+**Bands:** §4 unchanged (ADOPT needs r@1 ≥ +3pt, delivery guard vs the variant's own
+measured spread, demotions ≤ promotions/4 — now expected to pass by design; if the margin
+holds demotions but r@1 falls below +3pt, the trade is REJECTED and both data points
+publish). A/A′ (determinism) re-measured at margin = M before the full run.

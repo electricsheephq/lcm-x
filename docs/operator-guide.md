@@ -192,6 +192,7 @@ environment variables:
 | Variable | Default | Use |
 |----------|---------|-----|
 | `LCM_CONTEXT_THRESHOLD` | `0.35` | Fraction of the context window that triggers LCM compaction |
+| `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `0` | If `> 0`, force compaction at this absolute prompt-token count instead of `context_length × LCM_CONTEXT_THRESHOLD`. Cross-model context-health setpoint (common coding default: `130000`) so large windows do not delay compaction and degrade recall |
 | `LCM_FRESH_TAIL_COUNT` | `32` | Recent messages protected from compaction |
 | `LCM_FRESH_TAIL_MAX_TOKENS` | `0` | Optional token cap for the protected fresh tail (`0` disables it); always retains the newest message and complete assistant/tool-result groups |
 | `LCM_FRESH_TAIL_PRESSURE_YIELD_ENABLED` | `true` | Default-on: when compaction is deadlocked because the count-protected tail covers the whole over-threshold session (#441), the tail yields to a derived token bound so compaction can progress; `false` restores the strict count tail (rollback switch) |
@@ -231,15 +232,19 @@ environment variables:
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `24` | Minimum hours between startup FTS5 deep integrity-checks (O(index size)). `0` checks every startup (previous behavior); a negative value never checks on startup. Structural checks always run regardless. |
 | `LCM_ENABLE_SLASH_COMMAND` | `false` | Enable the optional `/lcm` operator command surface |
 | `LCM_EMBEDDINGS_ENABLED` | `false` | Opt in to embedding warmup, backfill, and semantic retrieval storage |
+| `LCM_RERANK_WINDOW_LIMIT` | `0` | Optional positive cap on the `lcm_recall` rerank delivery window; `0` keeps the historical window unchanged, while a bound can stabilize the delivery set at `k ≤ limit` |
+| `LCM_RERANK_MARGIN` | `0.0` | Optional positive relevance-gap gate that holds the incoming rank-1 `lcm_recall` candidate unless the rerank challenger clears the margin |
 | `LCM_EMBEDDING_PROVIDER` | empty | Embedding provider: `voyage`, `ollama`, or `fastembed` |
 | `LCM_EMBEDDING_MODEL` | empty | Provider model identifier registered by `/lcm embed warmup` |
 | `LCM_EMBEDDING_STORAGE_DTYPE` | `float32` | Vector storage dtype for newly-registered embedding profiles: `float32` (byte-identical legacy path) or `int8` (per-vector quantization plus a sign-bit prescreen, a distinct profile identity). See [Vector storage scale options (v3)](#vector-storage-scale-options-v3) |
 | `LCM_EMBEDDING_STORE_DIM` | `0` | Optional Matryoshka truncation dimension for newly-registered profiles (`0` = full profile dim); truncated vectors are renormalized and are also a distinct profile identity |
 | `LCM_EMBEDDING_BINARY_PRESCREEN` | `false` | Write the sign-bit prescreen for float32 identities too (int8 identities always write it), unlocking the full-corpus two-stage KNN; flipping it on an already-populated identity mints a new, distinct identity rather than mutating the existing one |
 | `LCM_KNN_PRESCREEN_MULTIPLIER` | `4` | Stage-1 prescreen breadth for two-stage KNN: `M = multiplier × k` lowest-Hamming-distance survivors are exact-rescored |
+| `LCM_RERANK_ENABLED` | `false` | Let `lcm_recall` ask Voyage to rerank its bounded fused candidate window. Failures preserve the incoming RRF order; `lcm_grep` is unaffected |
+| `LCM_RERANK_MODEL` | `rerank-2.5-lite` | Voyage reranker model used by `lcm_recall`; set `rerank-2.5` for the quality-oriented model |
 | `LCM_EMBEDDING_BACKFILL_BATCH_SIZE` | `32` | Documents claimed per backfill batch (`/lcm embed backfill` and state/chunk backfill). Non-positive or non-integer values fall back to the default. The effective value also clamps to the provider request-item ceiling — the lower of `LCM_EMBEDDING_MAX_BATCH_ITEMS` (normalized like the provider: non-positive means 1) and 1000 — so the dry-run estimate always matches real request splits |
 | `LCM_PROACTIVE_RECALL_ENABLED` | `false` | Opt in to proactive memory injection: at assembly, embed the newest user message and inject one budget-capped "relevant memories" block (needs `LCM_EMBEDDINGS_ENABLED`). Default-off keeps assembly byte-identical |
-| `LCM_PROACTIVE_RECALL_MIN_SCORE` | `0.01` | Relevance floor for an injected memory. RRF-scale by default (a top-of-arm hit is ~0.016); with `LCM_RERANK_ENABLED` the score is a `[0,1]` cross-encoder relevance, so raise this (e.g. `0.3`) for a strict semantic gate |
+| `LCM_PROACTIVE_RECALL_MIN_SCORE` | `0.01` | Relevance floor for an injected memory on the RRF/composite scale (a top-of-arm hit is ~0.016). Reranking changes candidate order only and does not replace this score with Voyage's incompatible `0..1` relevance score |
 | `LCM_PROACTIVE_RECALL_BUDGET_TOKENS` | `500` | Hard token budget for the single injected block (1-3 items) |
 | `LCM_PROACTIVE_RECALL_PROVIDER` | empty | Embedding-provider override for the injection query only (e.g. keep a local `fastembed` provider offline even when search uses `voyage`). Empty reuses the main provider. The override provider must have embedded the corpus for its arms to return hits |
 | `LCM_DOCTOR_CLEAN_APPLY_ENABLED` | `false` | Permit destructive `/lcm doctor clean apply` in trusted operator contexts |
@@ -396,6 +401,14 @@ When `context.engine: lcm` is active, `LCM_CONTEXT_THRESHOLD` is the compaction
 threshold LCM uses. Hermes core `compression.threshold` belongs to the built-in
 compressor. Hermes core `compression.enabled` is still the global gate that
 allows compaction, so leave it enabled when using LCM.
+
+If `LCM_ABSOLUTE_THRESHOLD_TOKENS` is set to a positive integer, it overrides the
+ratio-derived trigger after window math runs. Use this when you want a fixed
+context-health setpoint across model switches (for example `130000` for coding
+agents) so a larger window does not silently delay compaction, lower recall, or
+let long sessions accumulate more noise before LCM intervenes. Leave it at `0`
+to keep ratio-based behavior. When the absolute override is active, Codex
+GPT-5.5 ratio auto-raise is suppressed so the absolute setpoint stays pinned.
 
 If startup/status output shows a host-side compression percentage that disagrees
 with LCM, trust live LCM status after a normal message has initialized the

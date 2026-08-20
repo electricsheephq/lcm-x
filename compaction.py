@@ -186,9 +186,22 @@ class CompactionMixin:
                 observed_tokens=replay_rough,
             )
             if eligible:
-                return self._mark_preflight_compression_requested(
-                    depends_on_pressure_yield=self._pressure_yield_preflight_candidate,
+                if self.threshold_tokens > 0 and replay_rough >= self.threshold_tokens:
+                    return self._mark_preflight_compression_requested(
+                        depends_on_pressure_yield=self._pressure_yield_preflight_candidate,
+                    )
+                self._refresh_raw_backlog_debt(
+                    replay_messages,
+                    observed_tokens=replay_rough,
                 )
+                if self._critical_budget_pressure_reached(
+                    observed_tokens=replay_rough,
+                    messages=replay_messages,
+                ):
+                    return self._mark_preflight_compression_requested(
+                        depends_on_pressure_yield=self._pressure_yield_preflight_candidate,
+                    )
+                return False
             if self._has_ignored_backlog_outside_fresh_tail(replay_messages):
                 return self._mark_preflight_compression_requested()
             if self.threshold_tokens > 0 and replay_rough >= self.threshold_tokens:
@@ -199,7 +212,16 @@ class CompactionMixin:
                 logger.info("LCM preflight compression no-op: %s", reason)
                 return False
             self._refresh_raw_backlog_debt(replay_messages, observed_tokens=replay_rough)
-            if self._should_run_deferred_maintenance(replay_messages, observed_tokens=replay_rough):
+            # A disabled critical-pressure ratio intentionally leaves this debt
+            # deferred until threshold, overflow, cleanup, ignored-backlog, or
+            # another explicit required trigger makes preflight synchronous.
+            if self._critical_budget_pressure_reached(
+                observed_tokens=replay_rough,
+                messages=replay_messages,
+            ) and self._should_run_deferred_maintenance(
+                replay_messages,
+                observed_tokens=replay_rough,
+            ):
                 return self._mark_preflight_compression_requested()
             return False
         if self._compression_boundary_cooldown_active():
@@ -234,7 +256,15 @@ class CompactionMixin:
             logger.info("LCM preflight compression no-op: %s", reason)
             return False
         self._refresh_raw_backlog_debt(messages, observed_tokens=rough)
-        if self._should_run_deferred_maintenance(messages, observed_tokens=rough):
+        # With critical pressure disabled, routine debt remains recorded until
+        # another required preflight trigger is reached.
+        if self._critical_budget_pressure_reached(
+            observed_tokens=rough,
+            messages=messages,
+        ) and self._should_run_deferred_maintenance(
+            messages,
+            observed_tokens=rough,
+        ):
             return self._mark_preflight_compression_requested()
         return False
 
@@ -401,6 +431,9 @@ class CompactionMixin:
             working_leaf_chunk_tokens = self._working_leaf_chunk_tokens(raw_tokens_outside_tail)
         else:
             working_leaf_chunk_tokens = self._config.leaf_chunk_tokens
+            ctx_cap = self._context_aware_leaf_cap()
+            if ctx_cap is not None and working_leaf_chunk_tokens > ctx_cap:
+                working_leaf_chunk_tokens = ctx_cap
         if (
             raw_tokens_outside_tail < working_leaf_chunk_tokens
             and self._pressure_yield_tail_token_limit <= 0
@@ -412,11 +445,31 @@ class CompactionMixin:
             )
         return True, "eligible raw backlog outside fresh tail", raw_tokens_outside_tail
 
+    def _context_aware_leaf_cap(self) -> int | None:
+        """Return a context-proportional cap for leaf chunk sizing.
+
+        When context_length is known and large enough to matter (> 50K),
+        leaf chunks should never exceed ~40% of the model window —
+        otherwise the fresh tail alone can consume the entire context
+        and compression becomes impossible.
+        Returns None when context_length is unknown or too small to
+        warrant clamping (test fixtures, tiny models).
+        """
+        ctx = getattr(self, "context_length", 0) or 0
+        if ctx < 50_000:
+            return None
+        return max(1, int(ctx * 0.4))
+
     def _working_leaf_chunk_tokens(self, raw_tokens_outside_tail: int) -> int:
         base = max(1, self._config.leaf_chunk_tokens)
+        ctx_cap = self._context_aware_leaf_cap()
+        if ctx_cap is not None and base > ctx_cap:
+            base = ctx_cap
         if not self._config.dynamic_leaf_chunk_enabled:
             return base
         ceiling = max(base, self._config.dynamic_leaf_chunk_max)
+        if ctx_cap is not None and ceiling > ctx_cap:
+            ceiling = ctx_cap
         working = base
         while working < ceiling and raw_tokens_outside_tail > working * 2:
             working = min(ceiling, working * 2)

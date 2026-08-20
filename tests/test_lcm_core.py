@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 import sys
@@ -30,6 +31,7 @@ from hermes_lcm.db_bootstrap import (
     ensure_external_content_fts,
 )
 from hermes_lcm.search_query import sanitize_fts5_query
+from hermes_lcm.sqlite_util import _run_sqlite_write_with_snapshot_retry
 from hermes_lcm.session_patterns import (
     build_session_match_keys,
     compile_session_pattern,
@@ -412,6 +414,43 @@ class TestProviderPrefixedAuxiliaryCalls:
         assert result == body
         assert "nonce=" not in result
         assert [message["role"] for message in seen["messages"]] == ["system", "user"]
+
+    def test_summary_body_may_quote_the_closing_tag(self, monkeypatch):
+        """A summary that quotes `</lcm-summary>` in its body must be accepted.
+
+        The closing tag carries no nonce, so any transcript that has discussed
+        the envelope contract contains it verbatim -- and a summarizer
+        faithfully reporting that discussion reproduces it. Rejecting on a
+        second occurrence meant such a session could never be summarized again,
+        and the rejection is silent: the caller receives "".
+
+        Extraction is unaffected because the body is sliced from both ends.
+        """
+        from hermes_lcm.escalation import _build_l1_prompt, _call_llm_for_summary
+
+        body = (
+            "- Decision: the summarizer wraps output in `</lcm-summary>` as the envelope's end.\n"
+            "- Current state: that literal tag appears in this transcript as quoted content.\n"
+            "Expand for details about: the summary envelope contract"
+        )
+
+        def fake_call_llm(**kwargs):
+            system_content = kwargs["messages"][0]["content"]
+            match = re.search(r'<lcm-summary nonce="([0-9a-f]{32})">', system_content)
+            assert match is not None
+            nonce = match.group(1)
+            return self._fake_response(
+                f'<lcm-summary nonce="{nonce}">\n{body}\n</lcm-summary>'
+            )
+
+        self._install_fake_auxiliary_client(monkeypatch, fake_call_llm)
+
+        result = _call_llm_for_summary(
+            _build_l1_prompt("transcript discussing the envelope " * 30, token_budget=80, depth=0),
+            160,
+        )
+
+        assert result == body
 
     @pytest.mark.parametrize("variant", ["wrong_nonce", "outside_text", "missing_footer"])
     def test_summary_call_rejects_malformed_integrity_contract(self, monkeypatch, variant):
@@ -1478,6 +1517,65 @@ class TestMessageStore:
         assert len(ids) == 3
         assert ids[0] < ids[1] < ids[2]
 
+    def test_append_batch_retries_after_stale_read_snapshot(self, tmp_path):
+        db_path = tmp_path / "append-snapshot-retry.db"
+        store = MessageStore(db_path)
+        writer = sqlite3.connect(db_path)
+        try:
+            store.connection.execute("BEGIN")
+            store.connection.execute("SELECT COUNT(*) FROM messages").fetchone()
+            writer.execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES('other-writer', 'advanced')"
+            )
+            writer.commit()
+
+            ids = store._append_protected_batch(
+                "snapshot",
+                [{"role": "user", "content": "retry on a fresh transaction"}],
+            )
+
+            assert len(ids) == 1
+            assert store.connection.in_transaction is False
+            assert store.get(ids[0])["content"] == "retry on a fresh transaction"
+        finally:
+            writer.close()
+            store.close()
+
+    def test_write_snapshot_retry_does_not_retry_ordinary_busy(self, tmp_path, caplog):
+        db_path = tmp_path / "append-ordinary-busy.db"
+        store = MessageStore(db_path)
+        store.connection.execute("PRAGMA busy_timeout=25")
+        holder = sqlite3.connect(db_path, timeout=0.025)
+        holder.execute("PRAGMA busy_timeout=25")
+        holder.execute("BEGIN IMMEDIATE")
+        attempts = 0
+
+        def blocked_write():
+            nonlocal attempts
+            attempts += 1
+            store.connection.execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES('victim', 'blocked')"
+            )
+
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="database is locked") as exc_info:
+                _run_sqlite_write_with_snapshot_retry(
+                    store.connection,
+                    blocked_write,
+                    operation_name="test.ordinary_busy",
+                )
+
+            assert exc_info.value.sqlite_errorcode == sqlite3.SQLITE_BUSY
+            assert attempts == 1
+            assert store.connection.in_transaction is False
+            assert "operation=test.ordinary_busy" in caplog.text
+            assert "code=5" in caplog.text
+            assert "name=SQLITE_BUSY" in caplog.text
+        finally:
+            holder.rollback()
+            holder.close()
+            store.close()
+
     def test_append_batch_accepts_content_parts(self, store):
         msgs = [
             {
@@ -2178,6 +2276,53 @@ class TestMessageStore:
         results = store.search("docker*", session_id="sess1")
 
         assert results == []
+
+    def test_search_apostrophe_query_stays_on_fts_path(self, store, caplog):
+        from hermes_lcm.search_query import requires_like_fallback
+
+        # Guard against vacuous passes: search() takes the pre-emptive LIKE
+        # route (which logs nothing) when requires_like_fallback is True, so
+        # the caplog assertion below only has teeth while this holds.
+        assert requires_like_fallback("don't") is False
+        store.append("sess1", {"role": "user", "content": "no, don't reschedule the meeting"})
+
+        with caplog.at_level(logging.WARNING):
+            results = store.search("don't", session_id="sess1")
+
+        assert len(results) == 1
+        assert results[0]["content"] == "no, don't reschedule the meeting"
+        assert "falling back to LIKE" not in caplog.text
+
+    def test_search_conversational_query_does_not_crash_fts(self, store, caplog):
+        from hermes_lcm.search_query import requires_like_fallback
+
+        assert requires_like_fallback("what did I tell you, don't you remember?") is False
+        store.append(
+            "sess1",
+            {"role": "user", "content": "what did I tell you, don't you remember?"},
+        )
+
+        with caplog.at_level(logging.WARNING):
+            results = store.search(
+                "what did I tell you, don't you remember?", session_id="sess1"
+            )
+
+        assert len(results) == 1
+        assert "falling back to LIKE" not in caplog.text
+
+    def test_search_quoted_phrase_with_conversational_punctuation(self, store, caplog):
+        from hermes_lcm.search_query import requires_like_fallback
+
+        assert requires_like_fallback('"vendoring external", remember?') is False
+        store.append("sess1", {"role": "user", "content": "the vendoring external plan, remember?"})
+        store.append("sess1", {"role": "user", "content": "external vendoring is different"})
+
+        with caplog.at_level(logging.WARNING):
+            results = store.search('"vendoring external", remember?', session_id="sess1")
+
+        assert len(results) == 1
+        assert results[0]["content"] == "the vendoring external plan, remember?"
+        assert "falling back to LIKE" not in caplog.text
 
     def test_init_low_disk_degrades_without_leaving_broken_message_fts_triggers(self, tmp_path, monkeypatch):
         db_path = tmp_path / "low-disk-broken-message-fts.db"
@@ -3496,6 +3641,15 @@ class TestDbBootstrapGuards:
     def test_sanitize_fts5_query_preserves_balanced_phrase_quotes(self):
         assert sanitize_fts5_query('"vendoring external" *') == '"vendoring external"'
 
+    def test_sanitize_fts5_query_keeps_quoted_phrases_verbatim(self):
+        # A balanced phrase is a literal: the hyphen inside it survives even
+        # though it is a separator outside, while the conversational comma
+        # after the phrase is still neutralized (#159).
+        assert (
+            sanitize_fts5_query('"plugin-only support" yes, really')
+            == '"plugin-only support" yes really'
+        )
+
     def test_sanitize_fts5_query_breaks_unbalanced_quotes_into_separate_terms(self):
         assert sanitize_fts5_query('foo"bar') == 'foo bar'
 
@@ -3599,6 +3753,64 @@ class TestSummaryDAG:
         self._assert_write_lock_obtainable(db_path)
 
         dag.close()
+
+    def test_add_node_lock_failure_rolls_back_connection(self, tmp_path, caplog):
+        db_path = tmp_path / "add-node-lock-cleanup.db"
+        dag = SummaryDAG(db_path)
+        dag.connection.execute("PRAGMA busy_timeout=25")
+        holder = sqlite3.connect(db_path, timeout=0.025)
+        holder.execute("PRAGMA busy_timeout=25")
+        holder.execute("BEGIN IMMEDIATE")
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+                dag.add_node(
+                    SummaryNode(
+                        session_id="locked",
+                        depth=0,
+                        summary="must roll back",
+                        token_count=3,
+                        source_ids=[1],
+                        source_type="messages",
+                    )
+                )
+            assert dag.connection.in_transaction is False
+            assert "operation=summary_dag.add_node" in caplog.text
+            assert "code=5" in caplog.text
+            assert "name=SQLITE_BUSY" in caplog.text
+        finally:
+            holder.rollback()
+            holder.close()
+            dag.close()
+
+    def test_add_node_retries_after_stale_read_snapshot(self, tmp_path):
+        db_path = tmp_path / "add-node-snapshot-retry.db"
+        dag = SummaryDAG(db_path)
+        writer = sqlite3.connect(db_path)
+        try:
+            dag.connection.execute("BEGIN")
+            dag.connection.execute("SELECT COUNT(*) FROM summary_nodes").fetchone()
+            writer.execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES('other-writer', 'advanced')"
+            )
+            writer.commit()
+
+            node_id = dag.add_node(
+                SummaryNode(
+                    session_id="snapshot",
+                    depth=0,
+                    summary="retry on a fresh transaction",
+                    token_count=6,
+                    source_ids=[1],
+                    source_type="messages",
+                )
+            )
+
+            assert node_id > 0
+            assert dag.connection.in_transaction is False
+            assert dag.get_node(node_id).summary == "retry on a fresh transaction"
+        finally:
+            writer.close()
+            dag.close()
 
     def test_add_and_get(self, dag):
         node = SummaryNode(

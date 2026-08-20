@@ -321,6 +321,77 @@ def test_cli_parses_recall_rerank_flag():
         ]
     )
     assert args.recall_rerank is True
+    assert args.recall_rerank_window == 0
+    assert args.recall_rerank_margin == 0.0
+
+
+def test_cli_parses_recall_rerank_margin():
+    cli = _load_cli()
+    args = cli._parse_args(
+        [
+            "run",
+            "--dataset",
+            "x.json",
+            "--output",
+            "out",
+            "--recall-rerank",
+            "--recall-rerank-margin",
+            "0.25",
+        ]
+    )
+    assert args.recall_rerank_margin == 0.25
+
+
+def test_cli_recall_rerank_margin_requires_recall_rerank(tmp_path):
+    cli = _load_cli()
+    args = cli._parse_args(
+        [
+            "run",
+            "--dataset",
+            str(tmp_path / "missing.json"),
+            "--output",
+            str(tmp_path / "out"),
+            "--recall-rerank-margin",
+            "0",
+        ]
+    )
+    with pytest.raises(SystemExit, match="requires --recall-rerank"):
+        cli._cmd_run(args)
+
+
+def test_cli_recall_rerank_window_requires_recall_rerank(tmp_path):
+    cli = _load_cli()
+    args = cli._parse_args(
+        [
+            "run",
+            "--dataset",
+            str(tmp_path / "missing.json"),
+            "--output",
+            str(tmp_path / "out"),
+            "--recall-rerank-window",
+            "10",
+        ]
+    )
+    assert args.recall_rerank_window == 10
+    with pytest.raises(SystemExit, match="requires --recall-rerank"):
+        cli._cmd_run(args)
+
+
+def test_cli_recall_rerank_window_zero_is_still_bound_to_recall_rerank(tmp_path):
+    cli = _load_cli()
+    args = cli._parse_args(
+        [
+            "run",
+            "--dataset",
+            str(tmp_path / "missing.json"),
+            "--output",
+            str(tmp_path / "out"),
+            "--recall-rerank-window",
+            "0",
+        ]
+    )
+    with pytest.raises(SystemExit, match="requires --recall-rerank"):
+        cli._cmd_run(args)
 
 
 def test_load_questions_limit_validation(tmp_path):
@@ -712,6 +783,7 @@ def test_recall_rerank_off_leaves_checkpoint_byte_identical(tmp_path, monkeypatc
         tmp_dir=tmp_path / "explicit-off" / "tmp",
         embeddings_enabled=False,
         recall_rerank=False,
+        recall_rerank_window=0,
         checkpoint_path=explicit_off_checkpoint,
     )
     assert default_checkpoint.read_bytes() == explicit_off_checkpoint.read_bytes()
@@ -724,6 +796,7 @@ def test_recall_rerank_off_leaves_checkpoint_byte_identical(tmp_path, monkeypatc
 def test_recall_rerank_on_records_status_and_mode_counts(tmp_path):
     questions = _synthetic_dataset()
     checkpoint_path = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    dump_path = tmp_path / "run" / "candidates.jsonl"
     report = run_harness(
         questions,
         provider_name="stub",
@@ -731,7 +804,9 @@ def test_recall_rerank_on_records_status_and_mode_counts(tmp_path):
         tmp_dir=tmp_path / "tmp",
         embeddings_enabled=True,
         recall_rerank=True,
+        recall_rerank_window=10,
         checkpoint_path=checkpoint_path,
+        dump_candidates_path=dump_path,
     )
 
     expected_status = "skipped: rerank requires the voyage provider"
@@ -739,8 +814,17 @@ def test_recall_rerank_on_records_status_and_mode_counts(tmp_path):
     rows = checkpoint_path.read_text(encoding="utf-8").splitlines()
     header = json.loads(rows[0])
     assert header["__checkpoint_header__"]["recall_rerank"] is True
+    assert header["__checkpoint_header__"]["recall_rerank_window"] == 10
+    assert header["__checkpoint_header__"]["recall_rerank_margin"] == 0.0
+    dump_header = json.loads(dump_path.read_text(encoding="utf-8").splitlines()[0])
+    assert dump_header["__dump_header__"]["recall_rerank_window"] == 10
+    assert dump_header["__dump_header__"]["recall_rerank_margin"] == 0.0
     for row in map(json.loads, rows[1:]):
         assert row["arms"]["lcm_recall"]["recall_rerank_status"] == expected_status
+        assert "rerank_scores" not in row["arms"]["lcm_recall"]
+    dump_rows = list(map(json.loads, dump_path.read_text(encoding="utf-8").splitlines()[1:]))
+    for row in dump_rows:
+        assert row["arms"]["lcm_recall"]["rerank_scores"] == []
 
 
 def test_recall_rerank_resume_rejects_flag_off_checkpoint(tmp_path):
@@ -804,6 +888,7 @@ def test_dump_candidates_stub_has_header_rows_gold_and_null_markers(tmp_path):
             "embeddings_enabled": True,
             "rerank": False,
             "recall_rerank": False,
+            "recall_rerank_window": 0,
             "top_k": 10,
         }
     }
