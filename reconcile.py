@@ -710,10 +710,21 @@ class ReconcileMixin:
         # recorded on ``_last_ingest_reconciliation`` rather than being silent.
         # Narrowing this match to the id alone would turn that bounded
         # de-duplication into real data loss.
+        #
+        # Lossy-redacted rows are excluded, because for them that residual is
+        # NOT bounded. A ``password_assignment`` placeholder deliberately omits
+        # the sha256 digest, so it carries only ``chars``/``bytes``; redaction
+        # runs on the ingest path before reconciliation, so two genuinely
+        # different secrets of the same length arrive here as the SAME identity.
+        # Content equality then stops being evidence of anything and the "byte
+        # identical" premise above no longer holds. Such a row must fall through
+        # to the ambiguous-delta path (#259) instead of being proven replay.
         stored_tool_identities = {
             identity
             for identity in stored_tail
-            if identity[0] == "tool" and identity[2]
+            if identity[0] == "tool"
+            and identity[2]
+            and not _has_lossy_sensitive_redaction(identity[1])
         }
         # Every identity the tool-anchored terms are allowed to advance over
         # must itself be durable, on either the raw or the cleaned-up view.
@@ -821,18 +832,27 @@ class ReconcileMixin:
             )
             # Tool-anchored replay evidence. Unlike the snapshot-digest proof
             # above -- which is a registered engine-assembled fingerprint -- this
-            # term is anchored on the durable ``tool_call_id``: a provider issues
-            # each id once, so an incoming row carrying a durable tool identity
-            # is that durable row replayed, not a new turn that happens to look
-            # alike. Every disjunct below therefore requires an exact identity
-            # match against durable rows; content resemblance alone never
-            # qualifies.
+            # term is anchored on a durable tool row carrying an execution id.
+            # The anchor is NOT "the id is minted once": LCM does not get to
+            # assume that (see ``stored_tool_identities``). What it requires is
+            # that every disjunct below exact-match the WHOLE identity -- role,
+            # normalized content, tool_call_id and tool_calls -- against durable
+            # rows; content resemblance alone never qualifies.
             candidate_tool_anchor_indexes = [
                 index
                 for index, identity in enumerate(candidate_prefix)
                 if identity[0] == "tool" and identity[2]
             ]
             candidate_has_tool_anchor = bool(candidate_tool_anchor_indexes)
+            # ...and that exact-identity match is only evidence when the
+            # identity is lossless. A lossy sensitive redaction collapses
+            # distinct secrets of equal length onto one placeholder, so the
+            # content half of the identity proves nothing and the anchor cannot
+            # carry the length-guard bypass below.
+            candidate_has_lossy_redacted_tool_anchor = any(
+                _has_lossy_sensitive_redaction(candidate_prefix[index][1])
+                for index in candidate_tool_anchor_indexes
+            )
             candidate_tool_identities = {
                 candidate_prefix[index] for index in candidate_tool_anchor_indexes
             }
@@ -1068,12 +1088,21 @@ class ReconcileMixin:
             # (#259: visible duplication beats silent loss). The one accepted
             # residual is a byte-identical repeat; see ``stored_tool_identities``.
             #
+            # That invariant depends on the identity being LOSSLESS, so a
+            # lossy-redacted anchor is excluded here as well as from
+            # ``stored_tool_identities``: this guard is what also withholds the
+            # bypass from ``matches_tool_anchored_stale_window``, which window
+            # matches ``stored_tail`` directly and never consults that set.
+            # Pinned by
+            # ``test_reused_tool_call_id_with_lossy_redacted_result_is_persisted_not_replayed``.
+            #
             # Persisted-output markers are excluded: their identity is recovered
             # from an external file, so it is not a durable-row match and gets
             # its own proof terms above.
             has_tool_id_anchored_replay = (
                 not candidate_has_persisted_marker
                 and candidate_has_tool_anchor
+                and not candidate_has_lossy_redacted_tool_anchor
                 and (
                     matches_sanitized_tail
                     or matches_raw_tail

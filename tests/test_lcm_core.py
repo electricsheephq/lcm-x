@@ -5052,6 +5052,84 @@ class TestAssemblyBudgetSelection:
         assert len(rows) == original_count + 3
         assert rows[-1]["content"] == "new user after reused id"
 
+    def test_reused_tool_call_id_with_lossy_redacted_result_is_persisted_not_replayed(self, tmp_path, monkeypatch):
+        """Lossy redaction must not manufacture tool-anchored replay proof.
+
+        ``password_assignment`` placeholders deliberately omit the sha256 digest
+        (README: "to avoid making password-like values easier to dictionary-
+        check"), so they carry only ``chars``/``bytes``. Redaction runs on the
+        ingest path BEFORE reconciliation (engine.py: ``_redact_active_replay_
+        messages`` then ``_reconcile_ingest_cursor_from_store``), so two
+        genuinely different same-length secrets normalize to the SAME identity.
+
+        Without a fence, a reused ``tool_call_id`` plus that collapsed identity
+        satisfies ``candidate_tool_identities.issubset(stored_tool_identities)``
+        and the cursor advances over a real second invocation. That is not the
+        accepted byte-identical-repeat residual: the raw results differ, and the
+        store never held occurrence proof that could recover the difference.
+
+        This repo already treats lossy redaction as defeating identity proof in
+        the persisted-output marker path (``_has_lossy_sensitive_redaction`` at
+        engine.py and reconcile.py). The inline tool-result path must agree.
+        """
+        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=450)
+        engine._config.sensitive_patterns_enabled = True
+        engine._config.sensitive_patterns = ["password_assignment"]
+        tool_call = {
+            "id": "call_lossy_redaction_anchor",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        }
+        engine._ingest_messages([
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "historical objective"},
+            {"role": "assistant", "content": "", "tool_calls": [tool_call]},
+            {
+                "role": "tool",
+                "tool_call_id": "call_lossy_redaction_anchor",
+                "tool_name": "read_file",
+                "content": "password=abcdef",
+            },
+            {"role": "assistant", "content": "durable answer"},
+        ])
+        original_count = engine._store.get_session_count("assembly-session")
+
+        durable_rows = engine._store.get_session_messages("assembly-session")
+        redacted_first = [
+            row["content"]
+            for row in durable_rows
+            if row["tool_call_id"] == "call_lossy_redaction_anchor"
+        ]
+        # Precondition: the durable row really is the digest-free placeholder,
+        # otherwise this test would pass for the wrong reason.
+        assert len(redacted_first) == 1
+        assert "name=password_assignment" in redacted_first[0]
+        assert "sha256" not in redacted_first[0]
+
+        from hermes_lcm.engine import LCMEngine
+
+        replay = LCMEngine(config=engine._config, hermes_home=str(tmp_path / "hermes"))
+        replay._session_id = "assembly-session"
+        replay._ingest_cursor_needs_reconcile = True
+        # Same call id, same secret LENGTH, genuinely different secret. Post
+        # redaction both results are the identical placeholder.
+        replay._ingest_messages([
+            {"role": "assistant", "content": "", "tool_calls": [tool_call]},
+            {
+                "role": "tool",
+                "tool_call_id": "call_lossy_redaction_anchor",
+                "tool_name": "read_file",
+                "content": "password=ghijkl",
+            },
+            {"role": "user", "content": "new user after lossy redacted repeat"},
+        ])
+
+        rows = replay._store.get_session_messages("assembly-session")
+        # The second occurrence survives: a collapsed lossy identity is not proof.
+        assert [row["tool_call_id"] for row in rows].count("call_lossy_redaction_anchor") == 2
+        assert len(rows) == original_count + 3
+        assert rows[-1]["content"] == "new user after lossy redacted repeat"
+
     def test_tool_anchored_stale_replay_does_not_consume_new_assistant_after_tool(self, tmp_path, monkeypatch):
         engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=450)
         tool_call = {
