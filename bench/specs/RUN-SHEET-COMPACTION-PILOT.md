@@ -238,3 +238,42 @@ flag):**
   affordance is reduced (empty cwd), not eliminated; detection is the gate.
 - Prior-arm outputs (results.jsonl, consoles) also contain values → covered
   by the same deny/detection rules.
+
+## 11. AMENDMENT (2026-08-21, append-only) — R1 measured as long-context/no-compaction; window-parity consequences; quota event + forced order deviation
+
+**R1 result (banked; detection gate PASS — zero tool/shell items):** 30/30
+retention, traps 5/5, every epoch 10/10 including E0 (falsifies silent
+truncation), C1 6/6. **Native codex compaction NEVER ENGAGED**: every
+turn_context advertises model_context_window=258,400, yet the final request
+carried 553,914 input tokens with zero `compacted`/`context_compacted`
+markers — codex exec+resume (0.148.0, OAuth) held the entire ~600K-token
+thread verbatim (long-context serving silently engaged). The smokes' 86-93%
+triggers came from interactive/live-session rollouts; **compaction engagement
+is transport-dependent**, and measuring it for gpt-5.6 moves to interactive
+transport or larger material (P1).
+- **Relabel: R1-as-run = R1-lc (long-context, no-compaction).** Under §4's
+  window-parity gate (554K-observed vs 272K), R1-lc vs R2r/R2s is NOT a valid
+  G3 contrast; it stands as a reference row like the R4 class.
+- **m3 economics (rollout-derived):** R1-lc moved 29,536,531 input tokens
+  (98.0% cache-reads; 592K uncached; output 2,352) vs ~3.0-3.6M total for the
+  R2r arms — the retention-vs-tokens-moved trade-off is the pilot's central
+  product finding: LCM restart-bridge ≈ 10x fewer tokens moved at 86.7-96.7%
+  retention vs R1-lc's 100%.
+- **Third wire-contract catch (disclosed):** drive_codex result rows carry no
+  `kind` field; the scorer's `kind=="probe"` filter dropped every row and
+  scored the arm 0/30-unparseable-35 before the fix (PR #293). The two
+  toolchain dispatches were acceptance-tested against their own fixtures,
+  never against each other's real emissions — the pins PR must include one
+  cross-driver scoring test per driver output shape.
+- **Driver defect fixed before any valid R1 turn (disclosed):** the first R1
+  attempt stalled 17 min at zero CPU (subprocess stdin inheritance +
+  no per-turn timeout; PR #291); zero turns consumed, clean relaunch.
+
+**Quota event + forced order deviation (disclosed):** the R1-lc run exhausted
+the ChatGPT-OAuth codex-CLI bucket ("try again Aug 26 15:01"), killing the
+R4-ref attempt before any turn. The hermes openai-codex route is measured
+ALIVE (separate bucket), so the ACP arms proceed now and **R4-ref runs in the
+Aug 26–31 window** (still before the gpt-5.4 retirement). Deviation from the
+§9 pre-registered order (R4-ref before R2s) is quota-forced, not
+discretionary. C1-lineage answer/judge phases sharing the CLI bucket are
+paused until reset (recorded in that run's own record).
