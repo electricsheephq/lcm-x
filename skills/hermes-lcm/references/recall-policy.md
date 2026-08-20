@@ -7,7 +7,7 @@ Compacted summaries are recall cues, not proof of exact wording or values. If ne
 Use the narrowest bounded route that fits the question:
 
 - Current compacted conversation: start with `lcm_grep` using 1-3 distinctive terms or one quoted phrase. Use `lcm_describe` for a known summary/file handle, then `lcm_expand_query` when precise recovery or synthesis is required.
-- Cross-conversation memory already stored in LCM: use `lcm_recall`, then follow its expansion hint with `lcm_load_session` or exact-handle `lcm_expand`.
+- Cross-conversation memory already stored in LCM: use `lcm_recall`, then follow its expansion hint — every hit now carries an exact-handle `lcm_expand` (cross-session summaries as `lcm_expand(node_id=..., session_id=...)`). Use `lcm_load_session(session_id)` when the whole transcript is wanted rather than one node.
 - Recent or time-bounded history: use `lcm_recent` for its supported natural periods or `lcm_grep` with explicit time bounds.
 - Hermes-tracked history outside `lcm.db`: use the host's `session_search` when available.
 - Multi-facet, conflict, latest-state, or exact-operand questions: first recover source-backed exact refs, then use `lcm_compile_evidence` to validate one bounded semantic proposal. If deterministic parsing exposes only `answer`, name the distinct generic requirements in `requested_facets`; never remove deterministic requirements. Use `lcm_evidence_pack` for lower-level hydration and `lcm_compute` only for a compiler-validated canonical operation. Open-cardinality evidence remains incomplete without product-verifiable coverage.

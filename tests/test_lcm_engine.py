@@ -26,7 +26,7 @@ from hermes_lcm.engine_registry import (
     use_active_lcm_engine,
 )
 from hermes_lcm.externalize import externalize_ingest_payload
-from hermes_lcm.tokens import count_message_tokens, count_messages_tokens
+from hermes_lcm.tokens import count_message_tokens, count_messages_tokens, count_tokens
 
 
 @pytest.fixture
@@ -1834,7 +1834,13 @@ class TestEngineABC:
         assert "session_id" in grep_props
         assert "session_scope='session'" in grep_props["session_id"]["description"]
         assert "role" in grep_props
-        assert grep_props["role"]["enum"] == ["system", "user", "assistant", "tool", "unknown"]
+        assert grep_props["role"]["enum"] == [
+            "system",
+            "user",
+            "assistant",
+            "tool",
+            "unknown",
+        ]
         assert "time_from" in grep_props
         assert "time_to" in grep_props
         assert "source" in grep_props
@@ -1859,17 +1865,31 @@ class TestEngineABC:
         # The schema now documents the broader scopes — assert by enumerating them in the
         # session_scope description rather than enforcing the legacy current-only wording.
         scope_description = grep_props["session_scope"]["description"]
-        assert "all" in scope_description and "session" in scope_description and "current" in scope_description
+        assert (
+            "all" in scope_description
+            and "session" in scope_description
+            and "current" in scope_description
+        )
         assert "session_search" in scope_description
         # Cross-session search is positioned as plugin-local archive recovery, not memory.
-        assert "archive" in grep_schema["description"].lower() or "plugin-local" in grep_schema["description"].lower()
+        assert (
+            "archive" in grep_schema["description"].lower()
+            or "plugin-local" in grep_schema["description"].lower()
+        )
 
         describe_schema = next(s for s in schemas if s["name"] == "lcm_describe")
         expand_schema = next(s for s in schemas if s["name"] == "lcm_expand")
-        expand_query_schema = next(s for s in schemas if s["name"] == "lcm_expand_query")
+        expand_query_schema = next(
+            s for s in schemas if s["name"] == "lcm_expand_query"
+        )
 
+        # lcm_describe gained an optional session_id, but its DEFAULT scope is still the
+        # current session and it still cannot discover session ids, so both contract
+        # strings main pins must survive the feature.
         assert "current session" in describe_schema["description"].lower()
         assert "session_search" in describe_schema["description"]
+        describe_props = describe_schema["parameters"]["properties"]
+        assert describe_props["session_id"]["type"] == "string"
         # lcm_expand picked up a third mode (store_id); its description must surface that.
         assert "store_id" in expand_schema["description"]
         assert "session_search" in expand_schema["description"]
@@ -1880,7 +1900,11 @@ class TestEngineABC:
         assert "include_exact_ref" in expand_props
         assert expand_props["include_exact_ref"]["default"] is False
         assert "store_id" in expand_props
-        assert "across sessions" in expand_props["store_id"]["description"].lower() or "cross-session" in expand_props["store_id"]["description"].lower()
+        assert expand_props["session_id"]["type"] == "string"
+        assert (
+            "across sessions" in expand_props["store_id"]["description"].lower()
+            or "cross-session" in expand_props["store_id"]["description"].lower()
+        )
         assert "pagination" in expand_props["source_offset"]["description"].lower()
         load_schema = next(s for s in schemas if s["name"] == "lcm_load_session")
         load_props = load_schema["parameters"]["properties"]
@@ -1893,11 +1917,23 @@ class TestEngineABC:
         assert "time_to" in load_props
         assert "include_exact_ref" in load_props
         assert load_props["include_exact_ref"]["default"] is False
-        assert "current session" in expand_query_schema["description"].lower()
-        assert "session_search" in expand_query_schema["description"]
+        # lcm_expand_query is no longer current-session-only and no longer routes the
+        # model to session_search: it performs bounded cross-session retrieval itself
+        # over <=20 explicit session_ids. Those two description asserts are therefore
+        # forced out by the feature (architect sign-off, 2026-08-20). The default-scope
+        # contract they also carried is re-pinned positively below.
+        assert "active session" in expand_query_schema["description"].lower()
+        assert "session_ids" in expand_query_schema["description"]
         expand_query_props = expand_query_schema["parameters"]["properties"]
         assert "context_max_tokens" in expand_query_props
-        assert "fresh context budget" in expand_query_props["context_max_tokens"]["description"]
+        assert (
+            "fresh context budget"
+            in expand_query_props["context_max_tokens"]["description"]
+        )
+        assert expand_query_props["session_ids"]["minItems"] == 1
+        assert expand_query_props["session_ids"]["maxItems"] == 20
+        assert expand_query_props["output"]["enum"] == ["answer", "evidence"]
+        assert expand_query_props["output"]["default"] == "answer"
 
     def test_readme_documents_session_scope_contract(self):
         readme = Path(__file__).resolve().parents[1].joinpath("README.md").read_text()
@@ -25710,7 +25746,9 @@ class TestEngineTools:
             for item in result["context_pagination"]
         )
 
-    def test_handle_expand_query_externalized_truncation_returns_ref_in_context_pagination(self, tmp_path, monkeypatch):
+    def test_handle_expand_query_externalized_truncation_returns_ref_in_context_pagination(
+        self, tmp_path, monkeypatch
+    ):
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
@@ -25726,9 +25764,9 @@ class TestEngineTools:
         engine = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
         engine._session_id = "test-session"
         content = "EXTERNALIZED RAW DETAIL " + ("abcdef" * 1000)
-        engine._serialize_messages([
-            {"role": "tool", "tool_call_id": "call_ext", "content": content}
-        ])
+        engine._serialize_messages(
+            [{"role": "tool", "tool_call_id": "call_ext", "content": content}]
+        )
         ref = next((tmp_path / "hermes" / "lcm-large-outputs").glob("*.json")).name
         placeholder = f"[GC'd externalized tool output: tool_call_id=call_ext; chars={len(content)}; ref={ref}]"
         store_id = engine._store.append(
@@ -25760,7 +25798,9 @@ class TestEngineTools:
             )
         )
 
-        message_block = next(block for block in captured["context_blocks"] if block["type"] == "messages")
+        message_block = next(
+            block for block in captured["context_blocks"] if block["type"] == "messages"
+        )
         assert message_block["messages"][0]["content_source"] == "externalized_payload"
         assert message_block["messages"][0]["content_truncated"] is True
         assert result["context_truncated"] is True
@@ -25770,11 +25810,37 @@ class TestEngineTools:
             and item["content_source"] == "externalized_payload"
             and item["externalized_ref"] == ref
             and item["pagination"]["has_more"] is True
-            and item["expand_args"] == {
+            and item["expand_args"]
+            == {
                 "externalized_ref": ref,
                 "content_offset": item["pagination"]["next_content_offset"],
             }
             for item in result["context_pagination"]
+        )
+
+        captured.clear()
+        engine._session_id = "new-session"
+        cross_session_result = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "prompt": "What externalized detail exists?",
+                    "node_ids": [node_id],
+                    "session_ids": ["test-session"],
+                    "max_tokens": 5,
+                    "context_max_tokens": 20,
+                },
+            )
+        )
+        cross_session_block = next(
+            block for block in captured["context_blocks"] if block["type"] == "messages"
+        )
+        assert cross_session_block["messages"][0]["content_source"] != (
+            "externalized_payload"
+        )
+        assert all(
+            "externalized_ref" not in item.get("expand_args", {})
+            for item in cross_session_result["context_pagination"]
         )
 
     def test_handle_expand_query_counts_externalized_transcript_content_against_context_budget(self, tmp_path, monkeypatch):
@@ -26881,6 +26947,658 @@ class TestEngineTools:
         fts_check = next(c for c in result["checks"] if c["check"] == "fts_index_sync")
         assert fts_check["status"] == "pass"
         assert fts_check["detail"] == "1 session FTS rows, 1 session messages"
+
+    def test_handle_describe_and_expand_accept_explicit_cross_session_node(
+        self, engine
+    ):
+        store_id = engine._store.append(
+            "old-session",
+            {"role": "user", "content": "historical expanded evidence"},
+        )
+        child_id = engine._dag.add_node(
+            SummaryNode(
+                session_id="old-session",
+                depth=0,
+                summary="historical child summary",
+                token_count=5,
+                source_token_count=5,
+                source_ids=[store_id],
+                source_type="messages",
+                created_at=1,
+            )
+        )
+        node_id = engine._dag.add_node(
+            SummaryNode(
+                session_id="old-session",
+                depth=1,
+                summary="historical parent summary",
+                token_count=5,
+                source_token_count=10,
+                source_ids=[child_id],
+                source_type="nodes",
+                created_at=2,
+            )
+        )
+
+        describe = json.loads(
+            engine.handle_tool_call(
+                "lcm_describe",
+                {"node_id": node_id, "session_id": "old-session"},
+            )
+        )
+        mismatched = json.loads(
+            engine.handle_tool_call(
+                "lcm_describe",
+                {"node_id": node_id, "session_id": "wrong-session"},
+            )
+        )
+        expanded = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand",
+                {"node_id": node_id, "session_id": "old-session"},
+            )
+        )
+
+        assert describe["node_id"] == node_id
+        assert describe["session_id"] == "old-session"
+        assert describe["expand_hint"] == (
+            f"lcm_expand(node_id={node_id}, session_id='old-session')"
+        )
+        assert describe["children"][0]["expand_hint"] == (
+            f"lcm_expand(node_id={child_id}, session_id='old-session')"
+        )
+        assert (
+            mismatched["error"] == f"Node {node_id} not found in session wrong-session"
+        )
+        assert expanded["session_id"] == "old-session"
+        assert expanded["expanded"][0]["node_id"] == child_id
+        assert expanded["expanded"][0]["expand_hint"] == (
+            f"lcm_expand(node_id={child_id}, session_id='old-session')"
+        )
+        child_expanded = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand",
+                {"node_id": child_id, "session_id": "old-session"},
+            )
+        )
+        assert (
+            child_expanded["expanded"][0]["content"] == "historical expanded evidence"
+        )
+
+    def test_handle_expand_query_merges_sessions_by_relevance(
+        self, engine, monkeypatch
+    ):
+        strong_id = engine._dag.add_node(
+            SummaryNode(
+                session_id="older-session",
+                depth=0,
+                summary="strong needle match",
+                token_count=20,
+                source_token_count=20,
+                source_ids=[],
+                source_type="messages",
+                created_at=1,
+            )
+        )
+        weak_id = engine._dag.add_node(
+            SummaryNode(
+                session_id="newer-session",
+                depth=0,
+                summary="weak needle match",
+                token_count=1,
+                source_token_count=1,
+                source_ids=[],
+                source_type="messages",
+                created_at=2,
+            )
+        )
+
+        def fake_node_search(query, session_id=None, limit=20):
+            del query, limit
+            node = engine._dag.get_node(
+                strong_id if session_id == "older-session" else weak_id
+            )
+            node.search_rank = -4.0 if session_id == "older-session" else -3.0
+            return [node]
+
+        monkeypatch.setattr(engine._dag, "search", fake_node_search)
+        monkeypatch.setattr(engine._store, "search", lambda *args, **kwargs: [])
+
+        result = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "prompt": "Find the strongest match",
+                    "query": "needle",
+                    "session_ids": ["older-session", "newer-session"],
+                    "max_results": 1,
+                    "output": "evidence",
+                },
+            )
+        )
+
+        assert result["node_ids"] == [strong_id]
+
+    def test_handle_expand_query_searches_bounded_explicit_sessions(
+        self, engine, monkeypatch
+    ):
+        captured = {}
+        old_store_id = engine._store.append(
+            "old-session",
+            {"role": "user", "content": "NEEDLE historical raw evidence"},
+        )
+        engine._store.append(
+            "other-session",
+            {"role": "user", "content": "NEEDLE excluded raw evidence"},
+        )
+        old_node_id = engine._dag.add_node(
+            SummaryNode(
+                session_id="old-session",
+                depth=0,
+                summary="NEEDLE historical summary evidence",
+                token_count=5,
+                source_token_count=5,
+                source_ids=[old_store_id],
+                source_type="messages",
+                created_at=1,
+            )
+        )
+
+        def fake_synthesize(**kwargs):
+            captured["context_blocks"] = kwargs["context_blocks"]
+            return "cross-session answer"
+
+        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        result = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "prompt": "What is the historical evidence?",
+                    "query": "NEEDLE",
+                    "session_ids": ["old-session"],
+                    "context_max_tokens": 1000,
+                },
+            )
+        )
+
+        assert result["answer"] == "cross-session answer"
+        assert result["node_ids"] == [old_node_id]
+        assert result["matches"][0]["session_id"] == "old-session"
+        serialized_context = json.dumps(captured["context_blocks"])
+        assert "NEEDLE historical raw evidence" in serialized_context
+        assert "NEEDLE excluded raw evidence" not in serialized_context
+
+    def test_handle_expand_query_raw_matches_carry_session_ownership(
+        self, engine, monkeypatch
+    ):
+        # Cross-session hits that match only raw messages: `matches` is empty
+        # because no summary node matches, and the `answer` output returns no
+        # context blocks, so `raw_matches` is the caller's only channel for
+        # session ownership. Losing it here loses provenance entirely.
+        alpha_store_id = engine._store.append(
+            "alpha-session",
+            {"role": "user", "content": "KRYPTONITE alpha raw evidence"},
+        )
+        beta_store_id = engine._store.append(
+            "beta-session",
+            {"role": "user", "content": "KRYPTONITE beta raw evidence"},
+        )
+
+        monkeypatch.setattr(
+            lcm_tools,
+            "_synthesize_expansion_answer",
+            lambda **kwargs: "cross-session raw answer",
+        )
+
+        result = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "prompt": "Which sessions mention KRYPTONITE?",
+                    "query": "KRYPTONITE",
+                    "session_ids": ["alpha-session", "beta-session"],
+                    "context_max_tokens": 1000,
+                },
+            )
+        )
+
+        assert result["answer"] == "cross-session raw answer"
+        assert result["matches"] == []
+        assert {
+            match["store_id"]: match["session_id"] for match in result["raw_matches"]
+        } == {
+            alpha_store_id: "alpha-session",
+            beta_store_id: "beta-session",
+        }
+
+    def test_handle_expand_query_evidence_raw_matches_carry_session_ownership(
+        self, engine
+    ):
+        gamma_store_id = engine._store.append(
+            "gamma-session",
+            {"role": "user", "content": "OBSIDIAN gamma raw evidence"},
+        )
+
+        result = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "prompt": "Which session mentions OBSIDIAN?",
+                    "query": "OBSIDIAN",
+                    "session_ids": ["gamma-session"],
+                    "output": "evidence",
+                    "context_max_tokens": 1000,
+                },
+            )
+        )
+
+        assert [match["session_id"] for match in result["raw_matches"]] == [
+            "gamma-session"
+        ]
+        assert result["raw_matches"][0]["store_id"] == gamma_store_id
+
+    def test_handle_expand_query_evidence_budget_counts_emitted_encoding(self, engine):
+        # `lcm_expand_query` emits every payload as json.dumps(payload) with the
+        # default ensure_ascii=True, so non-ASCII evidence goes out as \uXXXX
+        # escapes (a surrogate pair per astral emoji). Budgeting an
+        # ensure_ascii=False serialization under-counts CJK/emoji evidence by a
+        # multiple: the emitted payload overruns context_max_tokens while
+        # context_tokens claims it is inside budget.
+        engine._store.append(
+            "cjk-session",
+            {
+                "role": "user",
+                "content": "TANUKI " + "日本語の長い会話記録です。🎉🚀 " * 40,
+            },
+        )
+
+        def _evidence(context_max_tokens: int) -> dict:
+            return json.loads(
+                engine.handle_tool_call(
+                    "lcm_expand_query",
+                    {
+                        "prompt": "What mentions TANUKI?",
+                        "query": "TANUKI",
+                        "session_ids": ["cjk-session"],
+                        "output": "evidence",
+                        "context_max_tokens": context_max_tokens,
+                    },
+                )
+            )
+
+        probe = _evidence(100_000)
+        assert probe["evidence"], "probe must admit the non-ASCII evidence block"
+        emitted_tokens = count_tokens(json.dumps(probe["evidence"]))
+        unescaped_tokens = count_tokens(
+            json.dumps(probe["evidence"], ensure_ascii=False)
+        )
+        assert emitted_tokens > unescaped_tokens, "fixture must carry non-ASCII"
+
+        # context_tokens describes what the caller actually receives.
+        assert probe["context_tokens"] == emitted_tokens
+
+        # A budget the unescaped serialization fits under but the emitted one
+        # does not must be enforced against the emitted encoding.
+        budget = (emitted_tokens + unescaped_tokens) // 2
+        assert unescaped_tokens <= budget < emitted_tokens
+        result = _evidence(budget)
+        assert count_tokens(json.dumps(result["evidence"])) <= budget
+        assert result["context_tokens"] <= budget
+        assert result["context_truncated"] is True
+
+    def test_handle_expand_query_rejects_more_than_twenty_session_ids(self, engine):
+        result = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "prompt": "Find evidence",
+                    "query": "anything",
+                    "session_ids": [f"session-{index}" for index in range(21)],
+                },
+            )
+        )
+
+        assert result["error"] == "session_ids accepts at most 20 entries"
+
+    def test_handle_expand_query_evidence_skips_synthesis_and_stays_bounded(
+        self, engine, monkeypatch
+    ):
+        store_id = engine._store.append(
+            "old-session",
+            {"role": "user", "content": "bounded evidence " * 200},
+        )
+        node_id = engine._dag.add_node(
+            SummaryNode(
+                session_id="old-session",
+                depth=0,
+                summary="bounded evidence summary",
+                token_count=5,
+                source_token_count=400,
+                source_ids=[store_id],
+                source_type="messages",
+                created_at=1,
+            )
+        )
+
+        def fail_synthesis(**kwargs):
+            raise AssertionError("evidence output must not call the synthesis model")
+
+        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fail_synthesis)
+        result = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "prompt": "Return the evidence",
+                    "node_ids": [node_id],
+                    "session_ids": ["old-session"],
+                    "output": "evidence",
+                    "context_max_tokens": 200,
+                },
+            )
+        )
+
+        assert result["output"] == "evidence"
+        assert "answer" not in result
+        assert result["node_ids"] == [node_id]
+        serialized_evidence = json.dumps(result["evidence"], ensure_ascii=False)
+        assert count_tokens(serialized_evidence) <= 200
+        assert result["context_tokens"] == count_tokens(serialized_evidence)
+        assert result["evidence"][0]["session_id"] == "old-session"
+
+    def test_handle_expand_query_evidence_drops_metadata_over_budget(self, engine):
+        node_ids = [
+            engine._dag.add_node(
+                SummaryNode(
+                    session_id="old-session",
+                    depth=0,
+                    summary="",
+                    token_count=0,
+                    source_token_count=0,
+                    source_ids=[],
+                    source_type="messages",
+                    created_at=index,
+                )
+            )
+            for index in range(100)
+        ]
+
+        result = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "prompt": "Return bounded evidence",
+                    "node_ids": node_ids,
+                    "session_ids": ["old-session"],
+                    "output": "evidence",
+                    "max_results": 100,
+                    "context_max_tokens": 1,
+                },
+            )
+        )
+
+        serialized_evidence = json.dumps(result["evidence"], ensure_ascii=False)
+        assert count_tokens(serialized_evidence) <= 1
+        assert result["context_tokens"] == count_tokens(serialized_evidence)
+        assert result["context_truncated"] is True
+
+    def test_handle_expand_query_evidence_counts_emitted_json_spacing(self, engine):
+        node_id = engine._dag.add_node(
+            SummaryNode(
+                session_id="old-session",
+                depth=0,
+                summary="",
+                token_count=0,
+                source_token_count=0,
+                source_ids=[],
+                source_type="messages",
+                created_at=1,
+            )
+        )
+
+        result = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "prompt": "Return bounded evidence",
+                    "node_ids": [node_id],
+                    "session_ids": ["old-session"],
+                    "output": "evidence",
+                    "context_max_tokens": 36,
+                },
+            )
+        )
+
+        serialized_evidence = json.dumps(result["evidence"], ensure_ascii=False)
+        assert count_tokens(serialized_evidence) <= 36
+        assert result["context_tokens"] == count_tokens(serialized_evidence)
+        assert result["context_truncated"] is True
+
+    @pytest.mark.parametrize("invalid_output", ["", 0, []])
+    def test_handle_expand_query_rejects_explicit_invalid_output(
+        self, engine, monkeypatch, invalid_output
+    ):
+        monkeypatch.setattr(
+            lcm_tools,
+            "_synthesize_expansion_answer",
+            lambda **kwargs: pytest.fail("invalid output must not invoke synthesis"),
+        )
+
+        result = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "prompt": "Return evidence",
+                    "query": "anything",
+                    "output": invalid_output,
+                },
+            )
+        )
+
+        assert result["error"] == "output must be one of: answer, evidence"
+
+    def test_handle_expand_query_keeps_raw_cursor_when_summaries_exhaust_budget(
+        self, engine, monkeypatch
+    ):
+        # Summaries can consume the whole context budget while distinct raw
+        # messages still matched. Dropping the raw arm silently strands those
+        # hits: `context_truncated` alone gives the caller no handle to
+        # continue into them, so the raw-message cursor must survive even when
+        # no raw content fits.
+        raw_store_id = engine._store.append(
+            "old-session",
+            {"role": "user", "content": "SENTINEL raw hit that must stay reachable"},
+        )
+        engine._dag.add_node(
+            SummaryNode(
+                session_id="old-session",
+                depth=0,
+                summary="SENTINEL " + "summary padding " * 200,
+                token_count=400,
+                source_token_count=400,
+                source_ids=[],
+                source_type="messages",
+                created_at=1,
+            )
+        )
+
+        monkeypatch.setattr(
+            lcm_tools, "_synthesize_expansion_answer", lambda **kwargs: "answer"
+        )
+        result = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "prompt": "What is SENTINEL?",
+                    "query": "SENTINEL",
+                    "session_ids": ["old-session"],
+                    "context_max_tokens": 12,
+                },
+            )
+        )
+
+        assert result["context_truncated"] is True
+        raw_entry = next(
+            (
+                item
+                for item in result["context_pagination"]
+                if item.get("type") == "raw_messages"
+            ),
+            None,
+        )
+        assert raw_entry is not None
+        assert raw_entry["pagination"]["next_store_id"] == raw_store_id
+        assert raw_entry["expand_args"] == {"store_id": raw_store_id}
+
+    def test_handle_expand_query_evidence_keeps_raw_cursor_when_block_is_dropped(
+        self, engine
+    ):
+        # Evidence output drops a raw block that will not fit the serialized
+        # budget. The omitted hits still need a continuation handle.
+        raw_store_id = engine._store.append(
+            "old-session",
+            {"role": "user", "content": "OBELISK raw hit that must stay reachable"},
+        )
+
+        result = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "prompt": "What is OBELISK?",
+                    "query": "OBELISK",
+                    "session_ids": ["old-session"],
+                    "output": "evidence",
+                    "context_max_tokens": 1,
+                },
+            )
+        )
+
+        assert result["evidence"] == []
+        assert result["context_truncated"] is True
+        raw_entry = next(
+            (
+                item
+                for item in result["context_pagination"]
+                if item.get("type") == "raw_messages"
+            ),
+            None,
+        )
+        assert raw_entry is not None
+        assert raw_entry["expand_args"] == {"store_id": raw_store_id}
+
+    def test_handle_expand_query_answer_provenance_reports_explicit_sessions(
+        self, engine, monkeypatch
+    ):
+        # A multi-session answer must not describe its retrieval scope as the
+        # current session, and its summary locators must replay against the
+        # session the node came from rather than the active one.
+        historical_node_id = engine._dag.add_node(
+            SummaryNode(
+                session_id="old-session",
+                depth=0,
+                summary="ZIRCON historical summary",
+                token_count=5,
+                source_token_count=5,
+                source_ids=[],
+                source_type="messages",
+                created_at=1,
+            )
+        )
+        current_node_id = engine._dag.add_node(
+            SummaryNode(
+                session_id="test-session",
+                depth=0,
+                summary="ZIRCON current summary",
+                token_count=5,
+                source_token_count=5,
+                source_ids=[],
+                source_type="messages",
+                created_at=2,
+            )
+        )
+
+        monkeypatch.setattr(
+            lcm_tools,
+            "_synthesize_expansion_answer",
+            lambda **kwargs: "cross-session answer",
+        )
+        result = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "prompt": "What is ZIRCON?",
+                    "query": "ZIRCON",
+                    "session_ids": ["old-session", "test-session"],
+                    "context_max_tokens": 2000,
+                },
+            )
+        )
+
+        scope = result["evidence_provenance"]["retrieval_scope"]
+        assert scope["kind"] == "explicit_sessions"
+        assert scope["session_ids"] == ["old-session", "test-session"]
+        items = {
+            item["node_id"]: item
+            for item in result["evidence_provenance"]["items"]
+            if item["source_type"] == "summary"
+        }
+        assert items[historical_node_id]["session_id"] == "old-session"
+        assert items[historical_node_id]["expand_args"] == {
+            "node_id": historical_node_id,
+            "session_id": "old-session",
+        }
+        assert items[current_node_id]["session_id"] == "test-session"
+        assert items[current_node_id]["expand_args"] == {"node_id": current_node_id}
+
+    def test_handle_expand_query_marks_historical_messages_as_not_current(
+        self, engine, monkeypatch
+    ):
+        # Threading the node's session into child expansion selects the lookup
+        # scope. `from_current_session` still describes the ACTIVE session, so
+        # archived rows must not be advertised as current.
+        store_id = engine._store.append(
+            "old-session",
+            {"role": "user", "content": "TOPAZ historical raw evidence"},
+        )
+        node_id = engine._dag.add_node(
+            SummaryNode(
+                session_id="old-session",
+                depth=0,
+                summary="TOPAZ historical summary",
+                token_count=5,
+                source_token_count=5,
+                source_ids=[store_id],
+                source_type="messages",
+                created_at=1,
+            )
+        )
+
+        captured = {}
+
+        def fake_synthesize(**kwargs):
+            captured["context_blocks"] = kwargs["context_blocks"]
+            return "historical answer"
+
+        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "prompt": "What is TOPAZ?",
+                    "node_ids": [node_id],
+                    "session_ids": ["old-session"],
+                    "context_max_tokens": 2000,
+                },
+            )
+        )
+
+        message_block = next(
+            block
+            for block in captured["context_blocks"]
+            if block.get("type") == "messages"
+        )
+        assert message_block["messages"][0]["store_id"] == store_id
+        assert message_block["messages"][0]["session_id"] == "old-session"
+        assert message_block["messages"][0]["from_current_session"] is False
 
 
 class TestHandleGrepCrossSession:

@@ -65,7 +65,7 @@ Use for semantic discovery across all conversations stored in the local LCM data
 - `include` selects all, summary, or verbatim hits.
 - `detail='snippets'` is the byte-compatible default.
 - `detail='answer_ready'` adds bounded per-session diversity and exact-ref hydration.
-- Follow each result's `expand_hint`: current/verbatim hits normally use `lcm_expand`; cross-session summaries normally use `lcm_load_session`.
+- Follow each result's `expand_hint`: verbatim hits use `lcm_expand(store_id=...)`, current-session summaries use `lcm_expand(node_id=...)`, and cross-session summaries use `lcm_expand(node_id=..., session_id=...)`. Reach for `lcm_load_session` when the whole transcript is wanted rather than one node.
 
 ### `lcm_load_session`
 
