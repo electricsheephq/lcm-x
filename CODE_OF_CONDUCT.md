@@ -2,7 +2,7 @@
 
 ## Our pledge
 
-We want `hermes-lcm` to be a focused, useful, and respectful technical project.
+We want LCM-X to be a focused, useful, and respectful technical project.
 Contributors, maintainers, and users are expected to keep discussion constructive,
 specific, and safe for people with different backgrounds and experience levels.
 

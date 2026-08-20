@@ -16,6 +16,8 @@ reporting ``coverage='full'``. These assert the two guarantees the fix adds:
 """
 from __future__ import annotations
 
+
+import hermes_lcm.vector_store as vector_store_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, SummaryNode
 from hermes_lcm.vector_store import VectorStore, _pack_sign_bits
@@ -24,6 +26,12 @@ from hermes_lcm.vector_store import VectorStore, _pack_sign_bits
 MODEL = "flip-model"
 PROVIDER = "local"
 DIM = 3
+
+
+def _expire_after_first_prescreen_batch(deadline, scanned_rows):
+    """Position-keyed deadline stub: expire once the first prescreen batch
+    has completed (scanned_rows >= 1), regardless of clock call patterns."""
+    return deadline is not None and scanned_rows >= 1
 
 
 def _add_summary(dag: SummaryDAG, *, created_at: float) -> int:
@@ -135,5 +143,85 @@ def test_partial_binary_corpus_falls_back_to_exact_scan(tmp_path):
     assert str(node_x) in ids
     assert str(node_y) in ids
     assert result[0][0] == str(node_x)
+    store.close()
+    dag.close()
+
+
+def test_scan_bounds_route_a_synced_binary_identity_to_the_exact_scan(tmp_path):
+    """Review finding 3: a fully-synced binary identity returned ``full_approx``
+    BEFORE the scan limits were consulted, so recall_scan_max_rows and
+    recall_scan_budget_s were silently ignored on those profiles. A requested
+    hard bound must reach every scan path and report bounded coverage."""
+    db_path = tmp_path / "bounded-prescreen.db"
+    dag = SummaryDAG(db_path)
+    config = LCMConfig(embedding_binary_prescreen=True)
+    store = VectorStore(db_path, config=config)
+    store.register_profile(MODEL, PROVIDER, DIM)
+    oldest = _add_summary(dag, created_at=1.0)
+    _record(store, oldest, [1.0, 0.0, 0.0])
+    for index in range(1, 4):
+        _record(store, _add_summary(dag, created_at=1.0 + index), [0.0, 1.0, 0.0])
+    assert store._binary_fully_synced(store._current_profile()["identity_hash"], chunk=False)
+
+    # Unbounded: the two-stage path still runs and discloses its approximation.
+    unbounded = store.knn([1.0, 0.0, 0.0], k=1, model=MODEL, full_scan=True)
+    assert unbounded.coverage == "full_approx"
+
+    capped = store.knn(
+        [1.0, 0.0, 0.0], k=1, model=MODEL, full_scan=True, scan_max_rows=1
+    )
+    assert capped.coverage == "bounded"
+    assert capped.scanned == 1
+    assert capped.total == 4
+    assert [row[0] for row in capped] != [str(oldest)]  # oldest is outside the cap
+
+    budgeted = store.knn(
+        [1.0, 0.0, 0.0], k=1, model=MODEL, full_scan=True, scan_budget_s=0.0001
+    )
+    assert budgeted.coverage in {"full", "bounded"}  # exact path, never full_approx
+    store.close()
+    dag.close()
+
+
+def test_deadline_bounds_a_synced_binary_summary_prescreen(tmp_path, monkeypatch):
+    """An expired deadline bounds the prescreen without changing its live path."""
+    db_path = tmp_path / "deadline-prescreen.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(
+        db_path,
+        config=LCMConfig(embedding_binary_prescreen=True),
+        bounded_scan_rows=1,
+    )
+    store.register_profile(MODEL, PROVIDER, DIM)
+    _record(store, _add_summary(dag, created_at=1.0), [1.0, 0.0, 0.0])
+    _record(store, _add_summary(dag, created_at=2.0), [0.0, 1.0, 0.0])
+
+    unbounded = store.knn([1.0, 0.0, 0.0], k=1, model=MODEL, full_scan=True)
+    monkeypatch.setattr(
+        vector_store_module,
+        "_prescreen_deadline_expired",
+        _expire_after_first_prescreen_batch,
+    )
+    monkeypatch.setattr(
+        store,
+        "_count_embedded_vectors",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("deadline expiry must not start COUNT(*)")
+        ),
+    )
+    expired = store.knn(
+        [1.0, 0.0, 0.0],
+        k=1,
+        model=MODEL,
+        full_scan=True,
+        # A genuinely-future deadline: only the patched position-keyed seam
+        # trips; the real clock never expires the load path.
+        deadline=vector_store_module._monotonic() + 60.0,
+    )
+
+    assert unbounded.coverage == "full_approx"
+    assert expired.coverage == "bounded"
+    assert expired.scanned == 1
+    assert expired.total == 2
     store.close()
     dag.close()

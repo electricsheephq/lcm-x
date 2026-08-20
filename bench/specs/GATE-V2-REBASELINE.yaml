@@ -1,0 +1,34 @@
+{
+  "name": "v2-rebaseline-paired-v1",
+  "status": "REGISTERED \u2014 frozen at PR #190 final head a3a31dd (review rounds 1-8 complete; rounds' P1s fixed in-PR, tail routed to #191). Any code change to the treatment branch after this freeze voids the registration.",
+  "instrument": "LongMemEval-V2 official static protocol, all 451 questions, fixed reader, one pass per arm",
+  "arms": {
+    "control": "fork main @ e5acbbf (the batch branch's merge-base)",
+    "treatment": "PR #190 @ a3a31dd (batch/v2-rebaseline)",
+    "both_arms_rules": [
+      "#166 HTTP-524 retry applies to BOTH arms (instrument change, never inside the treatment delta \u2014 R3 plan amendment 5)",
+      "same store, same pins (pinverify), storefreeze pre/post, failclose signatures on every row",
+      "transport binary version recorded per 6e.13"
+    ]
+  },
+  "primary_metric": "paired per-question correctness (b = wrong->right under treatment, c = right->wrong)",
+  "bars": {
+    "PASS": "net (b - c) >= -3 (non-inferiority: this batch is correctness/composition work, not a headline-gain claim) AND deliveryprofile compare shows NO arm-death and the composition delta is attributable to D-ARCH-2's backfill (larger delivered-hit counts at limit, no other arm share moving beyond bounds)",
+    "GRAY": "net in [-7, -4] \u2014 architect decision with this power memo attached",
+    "KILL": "net <= -8 (the batch materially harms V2 accuracy) OR deliveryprofile shows an unattributable mechanism swap (arm-death signature outside the decided D-ARCH-2 change)"
+  },
+  "power": {
+    "b_pool": "the 326 currently-wrong questions of the banked 125/451 baseline (upside pool)",
+    "c_pool": "the 125 currently-right questions (harm pool \u2014 the pool that powers the non-inferiority read)",
+    "floor_check": "c_pool 125 >> 20 floor; a -8 net harm requires ~6.4% right->wrong conversion, well within detection at n=451 paired",
+    "note": "expected direction is mildly positive (D-ARCH-2 restores 5 dropped hits at limit=16; D-ARCH-1/3 fix certified-wrong answers) but NO gain bar is registered \u2014 gains report as observed"
+  },
+  "secondary": [
+    "deliveryprofile capture BOTH arms (bench/tools/deliveryprofile.py) \u2014 the composition change is documented, not gated beyond the attribution clause",
+    "V1 sanity slice at the batch boundary (R3 plan amendment 4): zero-LLM retrieval-identity check on the V1 official store family; PASS = rank-identical or every diff traced to a decided item",
+    "fail-close count per arm reported as a first-class field (instrument 1)"
+  ],
+  "cost_ceiling": "V2 static protocol reader spend x 2 arms; hard stop if either arm exceeds 1.5x the banked run's harness-unit count",
+  "registered_at": null,
+  "frozen_sha256": null
+}
