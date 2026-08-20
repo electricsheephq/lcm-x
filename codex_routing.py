@@ -22,19 +22,17 @@ _CODEX_OAUTH_CONTEXT_CAPS: dict[str, int] = {
     "gpt-5.3-codex-spark": 128_000,
     "gpt-5.3-codex": 272_000,
     "gpt-5.2-codex": 272_000,
-    # ⚠ RETIREMENT (owner-verified 2026-08-20): gpt-5.4 and gpt-5.4-mini leave
-    # Codex for ChatGPT-signed-in sessions on 2026-08-31 — the auth mode our
-    # users run. Nothing may DEFAULT to a 5.4 slug past that date (verified: no
-    # code default exists). For the record, the owner-verified real windows are
-    # gpt-5.4 = 1,050,000 (experimental 1M, changelog 2026-03-05) and
-    # gpt-5.4-mini = 400,000; the conservative enforcement values below are
-    # deliberately left as-is for the remaining days — they can only under-use
-    # a window, never overflow one, and the slugs retire before tuning matters.
+    # Codex-auth access to gpt-5.4/5.4-mini ends 2026-08-31; rows stay for API
+    # routes. Migrate to gpt-5.6-sol (quality) or gpt-5.6-luna (cost); see
+    # bench/FINDING-F59-COMPACTION-PILOT-P0.md.
     "gpt-5.4-mini": 272_000,
     "gpt-5.5": 272_000,
     "gpt-5.4": 272_000,
     "gpt-5.2": 272_000,
-    "gpt-5.6": 372_000,
+    # Live lcm_status measured 272,000 (source=update_model, 2026-08-20 S3);
+    # production evidence is pinned in tests/test_context_aware_clamping.py.
+    # 372K left 272,001-372,000 unclamped, risking late compaction/overflow (#263).
+    "gpt-5.6": 272_000,
     "gpt-5": 272_000,
 }
 

@@ -932,6 +932,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     f"model_thresholds:{best_key}",
                     {"from": configured, "to": override},
                 )
+        # 5.6 deliberately excluded — F59 measured the standard threshold regime at 100% retention on gpt-5.6-sol; extension requires its own registered run.
         if (
             _is_codex_gpt55_route(route_model, route_provider)
             and self._config.codex_gpt55_autoraise_enabled

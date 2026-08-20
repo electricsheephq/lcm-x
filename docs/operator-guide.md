@@ -452,6 +452,14 @@ LCM_FRESH_TAIL_COUNT=16
 LCM_LEAF_CHUNK_TOKENS=8000
 ```
 
+### Migrating off gpt-5.4 (codex-auth retirement 2026-08-31)
+
+Move quality-first Codex-auth workloads to `gpt-5.6-sol` and cost-first
+workloads to `gpt-5.6-luna`. The `codex_gpt_long_context` preset applies
+unchanged: its 272K window assumption is correct for both gpt-5.6 routes.
+[FINDING-F59](../bench/FINDING-F59-COMPACTION-PILOT-P0.md) recommends
+single-session LCM for long runs and records the measured regime guidance.
+
 `target_after_compaction=0.55` is still benchmark provenance, not a runtime
 setting, because the engine does not expose that live knob yet.
 

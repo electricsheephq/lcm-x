@@ -615,6 +615,20 @@ def test_codex_gpt55_uses_route_cap_and_hermes_autoraise_threshold(tmp_path):
         engine.shutdown()
 
 
+def test_codex_gpt56_variants_share_272k_oauth_cap(engine):
+    for model in ("gpt-5.6-sol", "gpt-5.6-luna"):
+        engine.update_model(
+            model=model,
+            provider="openai-codex",
+            context_length=372_000,
+        )
+
+        assert engine.raw_context_length == 372_000
+        assert engine.context_length == 272_000
+        assert engine.effective_context_length_cap == 272_000
+        assert engine.effective_context_length_reason == "codex_oauth_context_cap"
+
+
 def test_codex_oauth_context_cap_keeps_explicit_lcm_threshold(tmp_path):
     config = LCMConfig(
         context_threshold=0.68,
