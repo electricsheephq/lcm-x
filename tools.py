@@ -415,6 +415,20 @@ _LCM_QUERY_STATE_LIMIT_CAP = 50
 _LCM_QUERY_STATE_RESPONSE_CHAR_CAP = 64_000
 _LCM_COMPUTE_RESPONSE_CHAR_CAP = 64_000
 _LCM_RECALL_VALID_INCLUDE = frozenset({"all", "summaries", "verbatim"})
+# A slow first FTS arm must not consume the whole shared recall deadline when a
+# real semantic route is configured. FTS-only/degraded installs keep the full
+# budget; hybrid recall reserves the remainder for provider resolution, vector
+# arms, hydration, fusion, and optional reranking.
+_LCM_RECALL_FTS_MAX_BUDGET_FRACTION = 0.25
+# The vector-corpus preflight guards the budget split above, so its own scan
+# must never be able to spend the request budget it exists to protect: a
+# no-match probe over a large fully-orphaned corpus has to exhaust candidates
+# despite LIMIT 1, and aborting that scan only at the REQUEST deadline would
+# hand FTS an already-expired budget — no arm runs at all. The preflight
+# therefore gets a small independent scan budget; expiry fails open to False,
+# which keeps the full remaining budget with the FTS arm.
+_LCM_RECALL_PREFLIGHT_MAX_BUDGET_S = 0.25
+_LCM_RECALL_PREFLIGHT_BUDGET_FRACTION = 0.1
 _LCM_RECALL_VALID_DETAIL = frozenset({"snippets", "answer_ready"})
 _LCM_RECALL_ANSWER_READY_PER_SESSION_LIMIT = 5
 _LCM_RECALL_ANSWER_READY_EXPANDED_HIT_LIMIT = 8
@@ -5346,6 +5360,199 @@ def _lcm_recall_rerank(
     return reordered, "applied", rerank_scores
 
 
+def _lcm_recall_preflight_scan_deadline(now: float, deadline: float) -> float:
+    """Derive the corpus preflight's independent scan deadline.
+
+    Bounded by a small absolute cap and a fraction of the remaining request
+    budget, and never past the request deadline itself. A preflight that hits
+    this bound returns False (fail-open), leaving the full remaining budget
+    with the FTS arm instead of starving every arm at once.
+    """
+    remaining = max(0.0, deadline - now)
+    return min(
+        deadline,
+        now
+        + min(
+            _LCM_RECALL_PREFLIGHT_MAX_BUDGET_S,
+            max(0.001, remaining * _LCM_RECALL_PREFLIGHT_BUDGET_FRACTION),
+        ),
+    )
+
+
+def _lcm_recall_has_usable_vector_corpus(
+    engine: "LCMEngine",
+    *,
+    run_summary: bool,
+    run_chunk: bool,
+    provider_name: str,
+    model_name: str,
+    excluded_session_ids: set[str],
+    deadline: float,
+) -> bool:
+    """Return whether a requested semantic arm has vectors for its selected profile.
+
+    This read-only preflight mirrors ``VectorStore`` profile ordering and requires
+    a live metadata+vector pair whose SOURCE ROW is still present -- the same
+    liveness predicate the real scans apply (``summary_nodes`` for the summary
+    arm, ``messages`` for the chunk arm). Merely configuring embeddings,
+    registering an empty profile, or leaving orphaned vectors behind a
+    best-effort purge therefore cannot shorten the only usable FTS fallback.
+    Missing or partial optional schema fails closed without materializing
+    feature tables.
+
+    Session eligibility is part of the real scans' predicate too: the vector
+    arms consume ``candidate_session_ids`` as a hard scope filter, so a corpus
+    whose only live pairs sit in EXCLUDED sessions is not a semantic route for
+    this request. Both source joins therefore carry the same exclusion
+    predicate (``NOT IN`` over the request's exclusion set is equivalent to the
+    whitelist for an existence probe: every source row's session is enumerated
+    by the scope tables, so eligible == not excluded).
+    """
+    provider_name = str(provider_name or "").strip().lower()
+    # Profiles are registered under ``provider.provider_id`` (command.py warmup),
+    # never under the operator's config spelling, so EVERY alias
+    # ``resolve_provider`` accepts must collapse to the same canonical ID here.
+    # An alias left unmapped makes the preflight miss a real corpus, the cap
+    # never engages, and a slow FTS scan can still starve the valid vector arm --
+    # the exact starvation this preflight exists to prevent. The authority for
+    # these sets is embedding_provider.py:1965-1985 (voyage/voyageai,
+    # fastembed/fast-embed, openai-compatible/openai/siliconflow); ollama has no
+    # alias. Adding an alias there requires adding it here.
+    provider_name = {
+        "voyageai": "voyage",
+        "fast-embed": "fastembed",
+        "openai": "openai-compatible",
+        "siliconflow": "openai-compatible",
+    }.get(provider_name, provider_name)
+    model_name = str(model_name or "").strip()
+    if not provider_name or not model_name or time.monotonic() >= deadline:
+        return False
+    scan_deadline = _lcm_recall_preflight_scan_deadline(time.monotonic(), deadline)
+
+    conn: sqlite3.Connection | None = None
+    try:
+        db_path = Path(engine._store.db_path).resolve()
+        remaining_s = max(0.001, scan_deadline - time.monotonic())
+        conn = sqlite3.connect(
+            f"{db_path.as_uri()}?mode=ro",
+            uri=True,
+            timeout=min(0.05, remaining_s),
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.set_progress_handler(
+            lambda: 1 if time.monotonic() >= scan_deadline else 0,
+            1000,
+        )
+
+        def table_columns(table: str) -> set[str]:
+            return {
+                str(row[1])
+                for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+
+        exclusion_where = ""
+        exclusion_params: tuple[str, ...] = ()
+        if excluded_session_ids:
+            exclusion_params = tuple(sorted(excluded_session_ids))
+            placeholders = ",".join("?" for _ in exclusion_params)
+            exclusion_where = f" AND src.session_id NOT IN ({placeholders})"
+
+        def corpus_has_vectors(
+            *,
+            task: str,
+            selected_model: str,
+            meta_table: str,
+            vector_table: str,
+            id_column: str,
+            source_join: str,
+            source_where: str = "",
+        ) -> bool:
+            # The progress handler only fires every 1000 VM ops, so a probe
+            # that starts after scan expiry could still slip through whole;
+            # this check makes the scan budget binding regardless of handler
+            # granularity.
+            if time.monotonic() >= scan_deadline:
+                return False
+            profile = conn.execute(
+                """
+                SELECT identity_hash
+                FROM lcm_embedding_profile
+                WHERE model_name = ? AND provider = ? AND task = ?
+                ORDER BY (active = 1 AND archived_at IS NULL) DESC,
+                         registered_at DESC, identity_hash DESC
+                LIMIT 1
+                """,
+                (selected_model, provider_name, task),
+            ).fetchone()
+            if profile is None:
+                return False
+            identity_hash = str(profile["identity_hash"])
+            row = conn.execute(
+                f"""
+                SELECT 1
+                FROM {meta_table} m
+                JOIN {vector_table} v
+                  ON v.{id_column} = m.{id_column}
+                 AND v.identity_hash = m.identity_hash
+                {source_join}
+                WHERE m.identity_hash = ? AND m.archived = 0{source_where}{exclusion_where}
+                LIMIT 1
+                """,
+                (identity_hash, *exclusion_params),
+            ).fetchone()
+            return row is not None
+
+        # A metadata+vector pair is NOT a usable corpus on its own: both real
+        # scans INNER-join the source row, so a vector whose source is gone (or,
+        # for summaries, suppressed) scores nothing. That state is reachable and
+        # supported on both arms -- ``_purge_embeddings_for_nodes``
+        # (engine.py:4116-4147) and ``_archive_chunks_for_messages``
+        # (engine.py:4149-4183) both swallow failures on purpose, the former
+        # precisely because "the summary_nodes join still keeps orphaned vectors
+        # out of ranking". Without these joins such an orphan reports a semantic
+        # route, cuts FTS to a quarter of the budget, and leaves the request with
+        # no arm that can return anything. Authority for the predicates:
+        # vector_store.py:1414 + 1892 with suppressed_at at 1395/1713/1872
+        # (summary), vector_store.py:1839 + 2647 (chunk).
+        if run_summary:
+            # Legacy databases predate ``suppressed_at``; the real scan gates the
+            # clause on the column existing, so this one does too.
+            summary_where = (
+                " AND src.suppressed_at IS NULL"
+                if "suppressed_at" in table_columns("summary_nodes")
+                else ""
+            )
+            if corpus_has_vectors(
+                task="summary",
+                selected_model=model_name,
+                meta_table="lcm_embedding_meta",
+                vector_table="lcm_embedding_vectors",
+                id_column="embedded_id",
+                source_join=(
+                    "JOIN summary_nodes src "
+                    "ON src.node_id = CAST(m.embedded_id AS INTEGER)"
+                ),
+                source_where=summary_where,
+            ):
+                return True
+        if run_chunk and corpus_has_vectors(
+            task="chunk",
+            selected_model=default_chunk_model(provider_name, model_name),
+            meta_table="lcm_chunk_meta",
+            vector_table="lcm_chunk_vectors",
+            id_column="chunk_id",
+            source_join="JOIN messages src ON src.store_id = m.store_id",
+        ):
+            return True
+        return False
+    except (OSError, ValueError, sqlite3.Error):
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     """Search the agent's entire memory (all conversations, all time) by meaning.
 
@@ -5447,23 +5654,87 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     embedding_query_metrics: list[dict[str, Any]] = []
     timed_out = False
     provider: Any = None
+    provider_override = str(kwargs.get("provider_override") or "").strip()
 
     # -- FTS arm (the default-on value: works with embeddings disabled) --
     if run_fts:
+        fts_deadline = deadline
+        fts_sub_budget_applied = False
+        configured_provider = provider_override or str(
+            getattr(engine._config, "embedding_provider", "") or ""
+        ).strip()
+        configured_model = str(
+            getattr(engine._config, "embedding_model", "") or ""
+        ).strip()
+        semantic_available = (
+            embeddings_enabled
+            and (run_summary or run_chunk)
+            # A timed-out scope resolution drops the vector arms (fail closed)
+            # and an empty whitelist leaves them nothing eligible to return;
+            # in both states FTS is the only arm that can produce hits, so the
+            # sub-budget cap must not engage.
+            and not session_scope_timed_out
+            and candidate_session_ids != []
+            and _lcm_recall_has_usable_vector_corpus(
+                engine,
+                run_summary=run_summary,
+                run_chunk=run_chunk,
+                provider_name=configured_provider,
+                model_name=configured_model,
+                excluded_session_ids=excluded_session_ids,
+                deadline=deadline,
+            )
+        )
+        if semantic_available:
+            now = time.monotonic()
+            remaining_s = max(0.0, deadline - now)
+            fts_budget_s = min(
+                remaining_s,
+                max(0.001, remaining_s * _LCM_RECALL_FTS_MAX_BUDGET_FRACTION),
+            )
+            fts_deadline = now + fts_budget_s
+            fts_sub_budget_applied = fts_deadline < deadline
         try:
             hits, fts_error = _lcm_recall_fts_arm(
                 engine,
                 query,
                 candidate_limit=candidate_limit,
-                deadline=deadline,
+                deadline=fts_deadline,
                 excluded_session_ids=excluded_session_ids,
             )
         except (_WorkerCapacityError, TimeoutError) as exc:
             hits, fts_error = [], {"error": str(exc)}
         if fts_error is not None:
             coverage["fts"] = "none"
-            degraded_reasons.append("full-text arm unavailable")
-            timed_out = timed_out or bool(fts_error.get("timeout"))
+            # The sub-budget above is a DELIBERATE cap, so its expiry is not
+            # budget exhaustion: the request still has time left and the vector
+            # arms are about to spend it. Reporting it as the request-level
+            # ``timeout`` would tell the agent its whole recall was cut short
+            # when in fact only this arm was fenced -- an assertion the run
+            # itself refutes. It degrades as missing FTS coverage instead
+            # (coverage stays in the none/ok vocabulary, with its own reason),
+            # and a genuine request-deadline overrun still falls through to the
+            # exhaustion branch below.
+            # ``timeout``-shaped errors are not all deadline expiries: worker
+            # saturation returns the same shape (``_run_within_deadline``
+            # raises ``_WorkerCapacityError``; ``_lcm_grep_full_text_with_
+            # deadline`` converts both causes to the deadline payload). The
+            # cap may only take credit when the sub-deadline actually elapsed
+            # -- otherwise an arm that never ran would be reported as
+            # deliberately fenced.
+            capped_expiry = (
+                fts_sub_budget_applied
+                and bool(fts_error.get("timeout"))
+                and time.monotonic() >= fts_deadline
+                and time.monotonic() < deadline
+            )
+            if capped_expiry:
+                degraded_reasons.append(
+                    "full-text arm capped to preserve semantic recall budget"
+                )
+            else:
+                degraded_reasons.append("full-text arm unavailable")
+                timed_out = timed_out or bool(fts_error.get("timeout"))
         else:
             arm_hits["fts"] = hits
             coverage["fts"] = "ok"
@@ -5500,7 +5771,6 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             query_vector: list[float] | None = None
             chunk_provider: Any = None
             chunk_query_vector: list[float] | None = None
-            provider_override = kwargs.get("provider_override")
             try:
                 provider = _run_within_deadline(
                     lambda: _resolve_recall_provider(
