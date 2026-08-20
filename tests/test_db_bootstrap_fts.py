@@ -554,6 +554,39 @@ def test_throttled_trigger_repair_preserves_concurrent_integrity_failure(
     conn.close()
 
 
+def test_trigger_repair_invalidates_fresh_integrity_marker(tmp_path, monkeypatch):
+    """Recreating a trigger invalidates the throttle marker.
+
+    A missing/drifted trigger is an unindexed-write window: same-row-count
+    content changes during it are invisible to the structural check, and a
+    still-fresh marker would suppress the deep check for the rest of the
+    interval — leaving MATCH returning stale tokens. After a trigger-only
+    repair the marker must be gone so the next startup deep-checks.
+    """
+    from hermes_lcm.store import build_message_fts_spec
+
+    monkeypatch.setenv(INTERVAL_ENV, "24")
+    conn = _make_conn(tmp_path)
+    spec = build_message_fts_spec()
+    ensure_external_content_fts(conn, spec)  # build + fresh marker
+
+    trigger_name = db_bootstrap._extract_trigger_name(spec.trigger_sqls[0])
+    assert trigger_name is not None
+    conn.execute(f"DROP TRIGGER {db_bootstrap.quote_sql_identifier(trigger_name)}")
+    conn.commit()
+
+    repaired = db_bootstrap.repair_external_content_fts(conn, spec, throttle=True)
+
+    assert repaired["rebuilt"] is False
+    assert repaired["triggers_recreated"] is True
+    marker = conn.execute(
+        "SELECT value FROM metadata WHERE key = ?",
+        (db_bootstrap._integrity_marker_key(spec),),
+    ).fetchone()
+    assert marker is None
+    conn.close()
+
+
 def test_explicit_repair_rebuilds_same_count_corruption_with_missing_triggers(tmp_path):
     """Explicit repair must fix index drift even while recreating triggers."""
     from hermes_lcm.store import build_message_fts_spec

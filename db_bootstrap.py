@@ -3180,6 +3180,16 @@ def repair_external_content_fts(
             # the next startup can skip the deep integrity-check within the
             # interval.
             _record_integrity_checked(conn, spec, now=now)
+        elif triggers_were_missing or triggers_were_stale:
+            # A recreated trigger is EVIDENCE of an unindexed-write window:
+            # while it was missing/drifted, same-row-count content changes
+            # bypassed the index, which only the deep check can see. A fresh
+            # marker would suppress that check for the rest of the interval,
+            # so invalidate it — the next startup (or explicit repair) runs or
+            # dispatches the deep check immediately.
+            conn.execute(
+                "DELETE FROM metadata WHERE key = ?", (_integrity_marker_key(spec),)
+            )
         # A completed repair resolves any prior background-scan corruption flag:
         # clear it in the SAME transaction that commits the rebuild so
         # `/lcm doctor` stops reporting issues-found (and the next self-healing
