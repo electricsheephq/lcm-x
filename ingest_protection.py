@@ -1700,7 +1700,16 @@ def _placeholder_line_prefix(text: str, start: int) -> str:
 
 
 def _is_incidental_source_placeholder(text: str, start: int) -> bool:
-    """Return true when a placeholder match is quoted source/docs, not a recovery ref."""
+    """Return true when a placeholder match *looks like* quoted source/docs.
+
+    This is a text-shape heuristic only. It cannot distinguish an ingest-generated
+    placeholder that happens to sit inside a code fence, a backticked span, or a
+    line-numbered/diff excerpt from an incidental quotation of one, because both
+    look identical in isolation. Callers must treat a true result as "suspect",
+    not "drop"; see ``_refs_for_externalized_integrity_scan`` and
+    ``scan_externalized_payload_integrity``, which settle the question with the
+    robust discriminator (does the referenced payload file exist?).
+    """
     prefix = _placeholder_line_prefix(text, start)
     if (
         _SOURCE_LITERAL_ASSIGNMENT_RE.search(prefix)
@@ -1714,14 +1723,30 @@ def _is_incidental_source_placeholder(text: str, start: int) -> bool:
     return prefix.count("`") % 2 == 1
 
 
-def _extract_unescaped_externalized_payload_refs(text: str, *, ignore_quoted_spans: bool = False) -> list[str]:
+def _record_source_context_ref(target: list[str] | None, ref: str) -> None:
+    if target is not None and ref not in target:
+        target.append(ref)
+
+
+def _extract_unescaped_externalized_payload_refs(
+    text: str,
+    *,
+    ignore_quoted_spans: bool = False,
+    source_context_refs: list[str] | None = None,
+) -> list[str]:
+    """Return confident refs; park source-context-shaped ones in ``source_context_refs``.
+
+    A ref whose match sits in quoted-source context is not dropped here: it is
+    appended to ``source_context_refs`` (when the caller supplies a list) so the
+    layer that owns ``hermes_home`` can promote it back if a payload file with
+    that name actually exists. With no list supplied the parked refs are simply
+    not returned, preserving the conservative text-only behavior.
+    """
     refs: list[str] = []
     for pattern in (_INGEST_PLACEHOLDER_RE, _EXTERNALIZED_PAYLOAD_PLACEHOLDER_RE):
         for match in pattern.finditer(text):
             ref = match.group(1).strip()
             if not _is_basename_ref(ref):
-                continue
-            if _is_incidental_source_placeholder(text, match.start()):
                 continue
             if _looks_like_example_payload_ref(ref) and _is_escaped_placeholder_example(text, match.start()):
                 continue
@@ -1731,12 +1756,21 @@ def _extract_unescaped_externalized_payload_refs(text: str, *, ignore_quoted_spa
                 and _is_quoted_placeholder_example(text, match.start())
             ):
                 continue
+            if _is_incidental_source_placeholder(text, match.start()):
+                _record_source_context_ref(source_context_refs, ref)
+                continue
             if ref not in refs:
                 refs.append(ref)
     return refs
 
 
-def _refs_for_externalized_integrity_scan(value: str, *, role: str, field: str) -> list[str]:
+def _refs_for_externalized_integrity_scan(
+    value: str,
+    *,
+    role: str,
+    field: str,
+    source_context_refs: list[str] | None = None,
+) -> list[str]:
     """Return refs that plausibly came from LCM storage-boundary placeholders.
 
     Tool outputs and tool-call arguments often contain escaped code snippets,
@@ -1746,6 +1780,10 @@ def _refs_for_externalized_integrity_scan(value: str, *, role: str, field: str) 
     are counted for message content, raw JSON-container tool-call argument
     strings, and raw free-form tool-call argument strings so ingestion-produced
     refs do not disappear while quoted examples stay ignored.
+
+    Refs suppressed only by the source-context text heuristic are appended to
+    ``source_context_refs`` instead of being discarded, so the caller can settle
+    them on payload-file existence rather than on text shape alone.
     """
     if not isinstance(value, str) or not value:
         return []
@@ -1755,7 +1793,11 @@ def _refs_for_externalized_integrity_scan(value: str, *, role: str, field: str) 
     if field == "tool_calls":
         parsed = _maybe_parse_json_string(value)
         if parsed is None:
-            return _extract_unescaped_externalized_payload_refs(value, ignore_quoted_spans=True)
+            return _extract_unescaped_externalized_payload_refs(
+                value,
+                ignore_quoted_spans=True,
+                source_context_refs=source_context_refs,
+            )
         # Raw JSON text erases whether a match came from quoted source. Once the
         # envelope parses, scan decoded values only and keep raw scanning as the
         # malformed-envelope fallback above.
@@ -1766,7 +1808,11 @@ def _refs_for_externalized_integrity_scan(value: str, *, role: str, field: str) 
                 if parsed_argument is None:
                     _append_unique_refs(
                         refs,
-                        _extract_unescaped_externalized_payload_refs(argument, ignore_quoted_spans=True),
+                        _extract_unescaped_externalized_payload_refs(
+                            argument,
+                            ignore_quoted_spans=True,
+                            source_context_refs=source_context_refs,
+                        ),
                     )
                 else:
                     for nested in _walk_string_values(parsed_argument):
@@ -1776,7 +1822,11 @@ def _refs_for_externalized_integrity_scan(value: str, *, role: str, field: str) 
                         else:
                             _append_unique_refs(
                                 refs,
-                                _extract_unescaped_externalized_payload_refs(nested, ignore_quoted_spans=True),
+                                _extract_unescaped_externalized_payload_refs(
+                                    nested,
+                                    ignore_quoted_spans=True,
+                                    source_context_refs=source_context_refs,
+                                ),
                             )
             else:
                 for nested in _walk_string_values(argument):
@@ -1784,16 +1834,33 @@ def _refs_for_externalized_integrity_scan(value: str, *, role: str, field: str) 
                     if is_externalized_ingest_placeholder(nested_stripped) or is_externalized_placeholder(nested_stripped):
                         _append_unique_refs(refs, extract_all_externalized_payload_refs(nested_stripped))
                     else:
-                        _append_unique_refs(refs, _extract_unescaped_externalized_payload_refs(nested, ignore_quoted_spans=True))
+                        _append_unique_refs(
+                            refs,
+                            _extract_unescaped_externalized_payload_refs(
+                                nested,
+                                ignore_quoted_spans=True,
+                                source_context_refs=source_context_refs,
+                            ),
+                        )
         for nested in _walk_string_values(parsed):
             nested_stripped = nested.strip()
             if is_externalized_ingest_placeholder(nested_stripped) or is_externalized_placeholder(nested_stripped):
                 _append_unique_refs(refs, extract_all_externalized_payload_refs(nested_stripped))
             else:
-                _append_unique_refs(refs, _extract_unescaped_externalized_payload_refs(nested, ignore_quoted_spans=True))
+                _append_unique_refs(
+                    refs,
+                    _extract_unescaped_externalized_payload_refs(
+                        nested,
+                        ignore_quoted_spans=True,
+                        source_context_refs=source_context_refs,
+                    ),
+                )
         return refs
     if role == "tool":
-        refs = _extract_unescaped_externalized_payload_refs(value)
+        refs = _extract_unescaped_externalized_payload_refs(
+            value,
+            source_context_refs=source_context_refs,
+        )
         parsed = _maybe_parse_json_string(value)
         if parsed is not None:
             for nested in _walk_string_values(parsed):
@@ -1801,9 +1868,19 @@ def _refs_for_externalized_integrity_scan(value: str, *, role: str, field: str) 
                 if is_externalized_ingest_placeholder(nested_stripped) or is_externalized_placeholder(nested_stripped):
                     _append_unique_refs(refs, extract_all_externalized_payload_refs(nested_stripped))
                 else:
-                    _append_unique_refs(refs, _extract_unescaped_externalized_payload_refs(nested, ignore_quoted_spans=True))
+                    _append_unique_refs(
+                        refs,
+                        _extract_unescaped_externalized_payload_refs(
+                            nested,
+                            ignore_quoted_spans=True,
+                            source_context_refs=source_context_refs,
+                        ),
+                    )
         return refs
-    return _extract_unescaped_externalized_payload_refs(value)
+    return _extract_unescaped_externalized_payload_refs(
+        value,
+        source_context_refs=source_context_refs,
+    )
 
 
 def scan_externalized_payload_integrity(conn, config, *, hermes_home: str = "", limit: int = 5) -> dict[str, Any]:
@@ -1833,7 +1910,24 @@ def scan_externalized_payload_integrity(conn, config, *, hermes_home: str = "", 
         for field, value in (("content", content), ("tool_calls", tool_calls)):
             if not isinstance(value, str):
                 continue
-            for ref in _refs_for_externalized_integrity_scan(value, role=str(role or ""), field=field):
+            source_context_refs: list[str] = []
+            scanned_refs = _refs_for_externalized_integrity_scan(
+                value,
+                role=str(role or ""),
+                field=field,
+                source_context_refs=source_context_refs,
+            )
+            # The text heuristics cannot tell an ingest-GENERATED placeholder that
+            # happens to sit inside a code fence, a backticked span, or a
+            # line-numbered excerpt from an incidental quotation of one; assistant
+            # turns routinely wrap real tool output in fences. Payload-file
+            # existence is the robust discriminator and only this layer has it:
+            # a backing file means the ref is live and must stay counted, while a
+            # ref with no file is the quoted-source case the heuristics target.
+            promoted_refs = [
+                ref for ref in source_context_refs if ref in existing_files and ref not in scanned_refs
+            ]
+            for ref in (*scanned_refs, *promoted_refs):
                 referenced_refs.add(ref)
                 first_location_by_ref.setdefault(
                     ref,

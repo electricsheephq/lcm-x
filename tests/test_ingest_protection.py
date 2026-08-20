@@ -2123,14 +2123,23 @@ def test_externalized_payload_integrity_scan_ignores_incidental_source_excerpts(
     missing_ref = "20260719_missing_payload_0123456789ab_abcdef.json"
     braced_ref = "20260719_call-{index}_payload_0123456789ab_abcdef.json"
     orphan_ref = "20260719_orphan_payload_0123456789ab_abcdef.json"
-    incidental_existing_refs = (
+    # Truly incidental refs are quotations of somebody else's placeholder text, so
+    # no payload file backs them. That absence is what makes them incidental: a ref
+    # that DOES have a backing file is a live placeholder even inside quoted-looking
+    # source, and is promoted back by scan_externalized_payload_integrity (covered by
+    # test_externalized_payload_integrity_scan_keeps_generated_placeholder_in_source_context).
+    incidental_refs = (
         "docs-placeholder.json",
         "foreign_payload_ref.json",
         "tool-result.json",
         "inc-tool-colon.json",
+        "inc-tool-pipe.json",
+        "20260708T120000Z-tool-call-{index}.json",
     )
-    for ref in (present_ref, braced_ref, orphan_ref, *incidental_existing_refs):
+    for ref in (present_ref, braced_ref, orphan_ref):
         (storage_dir / ref).write_text(json.dumps({"content": "fixture payload"}))
+    for ref in incidental_refs:
+        assert not (storage_dir / ref).exists()
 
     template_source_excerpt = "\n".join(
         [
@@ -2262,11 +2271,8 @@ def test_externalized_payload_integrity_scan_ignores_incidental_source_excerpts(
             "externalized_ref": missing_ref,
         }
     ]
-    assert detail["externalized_payload_files_unreferenced"] == 5
-    assert detail["unreferenced_externalized_payload_files"] == [
-        {"externalized_ref": ref}
-        for ref in sorted((orphan_ref, *incidental_existing_refs))
-    ]
+    assert detail["externalized_payload_files_unreferenced"] == 1
+    assert detail["unreferenced_externalized_payload_files"] == [{"externalized_ref": orphan_ref}]
     for key in (
         "externalized_payload_refs_total",
         "externalized_payload_refs_existing",
@@ -2277,13 +2283,169 @@ def test_externalized_payload_integrity_scan_ignores_incidental_source_excerpts(
     ):
         assert doctor_detail[key] == detail[key]
     encoded = json.dumps(detail)
-    for incidental_ref in incidental_existing_refs:
-        assert {"externalized_ref": incidental_ref} in detail["unreferenced_externalized_payload_files"]
-    for incidental_ref in (
-        "20260708T120000Z-tool-call-{index}.json",
-        "inc-tool-pipe.json",
-    ):
+    for incidental_ref in incidental_refs:
         assert incidental_ref not in encoded
+
+
+def test_externalized_payload_integrity_scan_keeps_generated_placeholder_in_source_context(tmp_path):
+    """A GENERATED placeholder that lands inside source-looking text stays counted.
+
+    Externalization rewrites a message in place, so an ingest-generated placeholder
+    routinely ends up inside a code fence, an inline-backtick span, or a
+    line-numbered/diff excerpt that the assistant was already quoting. The text
+    heuristics cannot separate that from an incidental quotation; payload-file
+    existence can, and doctor must not report a live payload as unreferenced.
+    """
+    engine = _engine(tmp_path)
+    storage_dir = tmp_path / "externalized"
+    storage_dir.mkdir()
+
+    def placeholder(ref: str) -> str:
+        return (
+            "[Externalized payload: kind=raw_payload; role=assistant; "
+            f"chars=1; bytes=1; ref={ref}]"
+        )
+
+    fenced_ref = "20260719_fenced_payload_0123456789ab_abcdef.json"
+    inline_tick_ref = "20260719_inline_payload_0123456789ab_abcdef.json"
+    unbalanced_fence_ref = "20260719_unbalanced_payload_0123456789ab_abcdef.json"
+    bullet_tick_ref = "20260719_bullet_payload_0123456789ab_abcdef.json"
+    numbered_line_ref = "20260719_numbered_payload_0123456789ab_abcdef.json"
+    diff_line_ref = "20260719_diffline_payload_0123456789ab_abcdef.json"
+    tool_call_ref = "20260719_toolcall_payload_0123456789ab_abcdef.json"
+    live_refs = (
+        fenced_ref,
+        inline_tick_ref,
+        unbalanced_fence_ref,
+        bullet_tick_ref,
+        numbered_line_ref,
+        diff_line_ref,
+        tool_call_ref,
+    )
+    for ref in live_refs:
+        (storage_dir / ref).write_text(json.dumps({"content": "fixture payload"}))
+    # Same source-looking shapes, but nothing on disk backs them: still incidental.
+    quoted_only_refs = ("quoted-fenced-example.json", "quoted-numbered-example.json")
+    for ref in quoted_only_refs:
+        assert not (storage_dir / ref).exists()
+
+    fenced_content = "\n".join(
+        [
+            "Here is the tool output:",
+            "```",
+            placeholder(fenced_ref),
+            "```",
+            f"and a quoted example inside another fence:\n```\n{placeholder(quoted_only_refs[0])}\n```",
+        ]
+    )
+    inline_tick_content = f"Recover it with `{placeholder(inline_tick_ref)}` when needed."
+    unbalanced_fence_content = "\n".join(
+        [
+            "The transcript was truncated mid-fence:",
+            "```python",
+            placeholder(unbalanced_fence_ref),
+        ]
+    )
+    bullet_tick_content = f"- `{placeholder(bullet_tick_ref)}`"
+    numbered_line_content = "\n".join(
+        [
+            "12:     result = (",
+            f'13:         "{placeholder(numbered_line_ref)}"',
+            "14:     )",
+            f'15:         "{placeholder(quoted_only_refs[1])}"',
+        ]
+    )
+    diff_line_content = "\n".join(
+        [
+            "@@ -1,0 +1,1 @@",
+            f'+        "{placeholder(diff_line_ref)}"',
+        ]
+    )
+    for role, row_content in (
+        ("assistant", fenced_content),
+        ("assistant", inline_tick_content),
+        ("assistant", unbalanced_fence_content),
+        ("assistant", bullet_tick_content),
+        ("tool", json.dumps({"content": numbered_line_content})),
+        ("tool", json.dumps({"content": diff_line_content})),
+    ):
+        engine._store._conn.execute(
+            """INSERT INTO messages
+               (session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                engine.current_session_id,
+                "test",
+                role,
+                row_content,
+                None,
+                None,
+                None,
+                1.0,
+                1,
+                0,
+            ),
+        )
+    engine._store._conn.execute(
+        """INSERT INTO messages
+           (session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            engine.current_session_id,
+            "test",
+            "assistant",
+            "calling source inspection tool",
+            None,
+            json.dumps(
+                [
+                    {
+                        "function": {
+                            "name": "inspect",
+                            "arguments": json.dumps(
+                                {"source": f'42: value = "{placeholder(tool_call_ref)}"'}
+                            ),
+                        }
+                    }
+                ]
+            ),
+            None,
+            1.0,
+            1,
+            0,
+        ),
+    )
+    engine._store._conn.commit()
+
+    detail = scan_externalized_payload_integrity(
+        engine._store._conn,
+        engine._config,
+        hermes_home=engine._hermes_home,
+    )
+    doctor_result = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    doctor_detail = next(
+        check["detail"] for check in doctor_result["checks"] if check["check"] == "payload_storage"
+    )
+
+    assert detail["externalized_payload_refs_total"] == len(live_refs)
+    assert detail["externalized_payload_refs_existing"] == len(live_refs)
+    assert detail["externalized_payload_refs_missing"] == 0
+    assert detail["missing_externalized_payload_refs"] == []
+    # The load-bearing assertion: none of these live payload files is reported
+    # unreferenced just because its placeholder sits in source-shaped text.
+    assert detail["externalized_payload_files_unreferenced"] == 0
+    assert detail["unreferenced_externalized_payload_files"] == []
+    for key in (
+        "externalized_payload_refs_total",
+        "externalized_payload_refs_existing",
+        "externalized_payload_refs_missing",
+        "externalized_payload_files_unreferenced",
+        "missing_externalized_payload_refs",
+        "unreferenced_externalized_payload_files",
+    ):
+        assert doctor_detail[key] == detail[key]
+    encoded = json.dumps(detail)
+    for ref in quoted_only_refs:
+        assert ref not in encoded
 
 
 def test_externalized_payload_integrity_scan_ignores_nested_serialized_diff_literals(tmp_path):
