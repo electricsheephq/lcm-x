@@ -232,6 +232,9 @@ def run_knn(
     source: str | None,
     vector_store_cls: Any,
     scan_rows: int | None = None,
+    full_scan: bool = False,
+    scan_max_rows: int = 0,
+    scan_budget_s: float = 0.0,
 ) -> Any:
     """Run the vector KNN query inside the operation's absolute deadline.
 
@@ -240,6 +243,9 @@ def run_knn(
     overrides the candidate-scan bound when set (``None`` keeps the configured
     ``embedding_bounded_scan_rows`` — the lcm_grep contract is unchanged); a
     cross-conversation caller passes a larger bound so "all time" is real.
+    ``full_scan`` turns that bound into a per-batch size and covers the whole
+    corpus (the lcm_recall contract), optionally capped by ``scan_max_rows`` /
+    ``scan_budget_s`` — both 0 (no early stop) by default.
     """
     if time.monotonic() >= deadline:
         raise TimeoutError("semantic vector search deadline exhausted")
@@ -257,6 +263,10 @@ def run_knn(
             until=until,
             conversation_ids=conversation_ids,
             source=source,
+            full_scan=full_scan,
+            scan_max_rows=scan_max_rows,
+            scan_budget_s=scan_budget_s,
+            deadline=deadline,
         ),
     )
 
@@ -274,14 +284,17 @@ def run_chunk_knn(
     source: str | None,
     vector_store_cls: Any,
     scan_rows: int | None = None,
+    full_scan: bool = False,
+    scan_max_rows: int = 0,
+    scan_budget_s: float = 0.0,
 ) -> Any:
     """Run the chunk-corpus KNN query inside the operation's absolute deadline.
 
     Mirrors ``run_knn`` for the second (chunk) corpus: the same injected
-    ``vector_store_cls`` binding, ``scan_rows`` candidate-bound override, and
-    progress-handler deadline guard, calling ``knn_chunks`` instead of ``knn``.
-    Returns the store's coverage contract (full|bounded|none) so the caller
-    degrades identically to the summary arm.
+    ``vector_store_cls`` binding, ``scan_rows`` candidate-bound override, the
+    same ``full_scan`` batching, and progress-handler deadline guard, calling
+    ``knn_chunks`` instead of ``knn``. Returns the store's coverage contract
+    (full|bounded|none) so the caller degrades identically to the summary arm.
     """
     if time.monotonic() >= deadline:
         raise TimeoutError("chunk vector search deadline exhausted")
@@ -299,6 +312,10 @@ def run_chunk_knn(
             until=until,
             conversation_ids=conversation_ids,
             source=source,
+            full_scan=full_scan,
+            scan_max_rows=scan_max_rows,
+            scan_budget_s=scan_budget_s,
+            deadline=deadline,
         ),
     )
 

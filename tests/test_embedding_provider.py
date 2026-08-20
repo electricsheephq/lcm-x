@@ -18,6 +18,7 @@ from hermes_lcm.embedding_provider import (
     EmbeddingSpendGuard,
     FastembedProvider,
     HttpResponse,
+    OpenAICompatibleProvider,
     OllamaProvider,
     ProviderCircuitOpen,
     ProviderNotWarmedUp,
@@ -79,6 +80,29 @@ def test_voyage_batch_bin_packing_boundary(monkeypatch):
         ["d"],
     ]
     assert all(call["payload"]["truncation"] is False for call in transport.calls)
+
+
+def test_voyage_flat_embeddings_record_provider_billed_tokens(monkeypatch):
+    monkeypatch.setattr(provider_mod, "count_tokens", lambda _text: 1)
+    monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+    document_response = _voyage_success(1)
+    document_payload = json.loads(document_response.body)
+    document_payload["usage"] = {"total_tokens": 17}
+    query_response = _voyage_success(1)
+    query_payload = json.loads(query_response.body)
+    query_payload["usage"] = {"total_tokens": 5}
+    provider = VoyageProvider(
+        "voyage-test",
+        transport=FakeTransport(
+            _response(200, document_payload),
+            _response(200, query_payload),
+        ),
+    )
+
+    provider.embed_documents(["document"])
+    assert provider.last_usage_tokens == 17
+    provider.embed_query("query")
+    assert provider.last_usage_tokens == 5
 
 
 def test_voyage_batch_splits_on_item_count_cap(monkeypatch):
@@ -773,6 +797,87 @@ def test_spend_guard_rate_limits_provider_calls():
     assert len(transport.calls) == 1
 
 
+def test_resolve_provider_query_path_guard_is_generous_and_unthrottled():
+    # Regression for #123: the query path (for_backfill=False) must NOT inherit
+    # the strict 60/60s default that gutted retrieval; it gets the generous
+    # configurable guard and survives a tight loop of 100+ back-to-back embeds.
+    config = LCMConfig(embedding_provider="voyage", embedding_model="voyage-4")
+    provider = resolve_provider(config, for_backfill=False)
+    guard = provider.spend_guard
+    assert guard.max_calls == 600
+    assert guard.window_seconds == 60.0
+    assert guard.backoff_seconds == 60.0
+
+    now = 0.0
+    for _ in range(120):
+        assert guard.allows(now=now) is True
+        guard.record_call(now=now)
+        now += 0.001  # 120 calls inside one 60s window, as the benchmark does
+    assert guard.allows(now=now) is True
+
+
+def test_resolve_provider_query_guard_is_configurable():
+    # Constructor-arg surface: the LCMConfig fields thread straight into the
+    # query-path guard so a benchmark harness can widen or disable it.
+    config = LCMConfig(
+        embedding_provider="voyage",
+        embedding_model="voyage-4",
+        embedding_query_spend_max_calls=5,
+        embedding_query_spend_window_seconds=30.0,
+        embedding_query_spend_backoff_seconds=15.0,
+    )
+    provider = resolve_provider(config, for_backfill=False)
+    assert provider.spend_guard.max_calls == 5
+    assert provider.spend_guard.window_seconds == 30.0
+    assert provider.spend_guard.backoff_seconds == 15.0
+
+
+def test_query_guard_env_override(monkeypatch):
+    # Env surface: LCM_EMBEDDING_QUERY_SPEND_* overrides the defaults.
+    monkeypatch.setenv("LCM_EMBEDDING_PROVIDER", "voyage")
+    monkeypatch.setenv("LCM_EMBEDDING_MODEL", "voyage-4")
+    monkeypatch.setenv("LCM_EMBEDDING_QUERY_SPEND_MAX_CALLS", "1200")
+    monkeypatch.setenv("LCM_EMBEDDING_QUERY_SPEND_WINDOW_SECONDS", "90")
+    monkeypatch.setenv("LCM_EMBEDDING_QUERY_SPEND_BACKOFF_SECONDS", "45")
+    config = LCMConfig.from_env()
+    assert config.embedding_query_spend_max_calls == 1200
+    assert config.embedding_query_spend_window_seconds == 90.0
+    assert config.embedding_query_spend_backoff_seconds == 45.0
+    provider = resolve_provider(config, for_backfill=False)
+    assert provider.spend_guard.max_calls == 1200
+
+
+def test_resolve_provider_backfill_path_stays_exempt():
+    # Backfill's bulk contract is unchanged: max_calls=0 => allows() always
+    # True, record_call() a no-op, even after many calls.
+    config = LCMConfig(embedding_provider="voyage", embedding_model="voyage-4")
+    provider = resolve_provider(config, for_backfill=True)
+    guard = provider.spend_guard
+    assert guard.max_calls == 0
+    for _ in range(100):
+        guard.record_call()
+    assert guard.allows() is True
+
+
+def test_query_path_rate_limit_surfaces_typed_reason(monkeypatch):
+    # Zero-discard: when the guard does trip, the caller receives the TYPED
+    # ProviderRateLimited with the exact operator-readable message the live
+    # probe recorded -- never a bare swallowed counter bump. The rejection is
+    # pre-network (no transport call is made for the throttled attempt).
+    monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+    guard = EmbeddingSpendGuard(max_calls=1, window_seconds=100, backoff_seconds=50)
+    transport = FakeTransport(_voyage_success(1))
+    provider = VoyageProvider("voyage", transport=transport, spend_guard=guard)
+
+    assert provider.embed_query("first")
+    with pytest.raises(
+        ProviderRateLimited,
+        match="voyage embedding call-rate guard is cooling down",
+    ):
+        provider.embed_query("second")
+    assert len(transport.calls) == 1
+
+
 def test_voyage_document_splits_share_one_absolute_deadline(monkeypatch):
     monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
     monkeypatch.setattr(provider_mod, "count_tokens", lambda _text: 1)
@@ -1219,3 +1324,135 @@ def test_voyage_rerank_empty_documents_short_circuits(monkeypatch):
 
     assert provider.rerank("q", [], timeout=5.0) == []
     assert transport.calls == []
+
+
+def _openai_compatible_success(count: int, dim: int = 3) -> HttpResponse:
+    return _response(
+        200,
+        {
+            "data": [
+                {"index": index, "embedding": [float(index + 1)] * dim}
+                for index in range(count)
+            ]
+        },
+    )
+
+
+def test_openai_compatible_request_shape_and_success(monkeypatch):
+    monkeypatch.setenv("LCM_EMBEDDING_API_KEY", "test-key")
+    transport = FakeTransport(_openai_compatible_success(2))
+    provider = OpenAICompatibleProvider(
+        "BAAI/bge-m3",
+        base_url="https://api.example.com/v1/",
+        transport=transport,
+    )
+
+    vectors = provider.embed_documents(["first", "second"])
+
+    assert len(vectors) == 2
+    assert provider.dim == 3
+    assert len(transport.calls) == 1
+    call = transport.calls[0]
+    # Trailing slash on the base URL is stripped before joining.
+    assert call["url"] == "https://api.example.com/v1/embeddings"
+    assert call["payload"] == {
+        "model": "BAAI/bge-m3",
+        "input": ["first", "second"],
+    }
+    assert call["headers"]["Authorization"] == "Bearer test-key"
+
+
+def test_openai_compatible_query_and_interactive(monkeypatch):
+    monkeypatch.setenv("LCM_EMBEDDING_API_KEY", "test-key")
+    transport = FakeTransport(
+        _openai_compatible_success(1, dim=4),
+        _openai_compatible_success(1, dim=4),
+    )
+    provider = OpenAICompatibleProvider(
+        "bge-m3", base_url="http://localhost:8080/v1", transport=transport
+    )
+
+    assert provider.embed_query("question") == [1.0, 1.0, 1.0, 1.0]
+    assert provider.embed_query_interactive("q", timeout=5.0) == [1.0, 1.0, 1.0, 1.0]
+
+    assert [call["url"] for call in transport.calls] == [
+        "http://localhost:8080/v1/embeddings",
+        "http://localhost:8080/v1/embeddings",
+    ]
+
+
+def test_openai_compatible_missing_api_key_raises(monkeypatch):
+    monkeypatch.delenv("LCM_EMBEDDING_API_KEY", raising=False)
+    monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
+    transport = FakeTransport(_openai_compatible_success(1))
+    provider = OpenAICompatibleProvider(
+        "bge-m3", base_url="https://api.example.com/v1", transport=transport
+    )
+
+    with pytest.raises(EmbeddingProviderError, match="LCM_EMBEDDING_API_KEY"):
+        provider.embed_query("q")
+
+    assert transport.calls == []
+
+
+def test_openai_compatible_siliconflow_key_fallback(monkeypatch):
+    monkeypatch.delenv("LCM_EMBEDDING_API_KEY", raising=False)
+    monkeypatch.setenv("SILICONFLOW_API_KEY", "fallback-key")
+    transport = FakeTransport(_openai_compatible_success(1))
+    provider = OpenAICompatibleProvider(
+        "bge-m3", base_url="https://api.example.com/v1", transport=transport
+    )
+
+    provider.embed_query("q")
+
+    assert transport.calls[0]["headers"]["Authorization"] == "Bearer fallback-key"
+
+
+def test_openai_compatible_empty_base_url_raises():
+    with pytest.raises(ValueError, match="LCM_EMBEDDING_BASE_URL"):
+        OpenAICompatibleProvider("bge-m3", base_url="   ")
+
+
+def test_openai_compatible_empty_model_raises():
+    with pytest.raises(ValueError, match="must not be empty"):
+        OpenAICompatibleProvider("  ", base_url="https://api.example.com/v1")
+
+
+def test_openai_compatible_network_error_is_not_retried(monkeypatch):
+    monkeypatch.setenv("LCM_EMBEDDING_API_KEY", "test-key")
+    transport = FakeTransport(OSError("boom"))
+    provider = OpenAICompatibleProvider(
+        "bge-m3", base_url="https://api.example.com/v1", transport=transport
+    )
+
+    with pytest.raises(EmbeddingProviderError, match="network error"):
+        provider.embed_documents(["doc"])
+
+    # The transport start makes an automatic identical resend unsafe.
+    assert len(transport.calls) == 1
+
+
+def test_openai_compatible_response_count_mismatch_raises(monkeypatch):
+    monkeypatch.setenv("LCM_EMBEDDING_API_KEY", "test-key")
+    transport = FakeTransport(_openai_compatible_success(1))  # 1 vector for 2 texts
+    provider = OpenAICompatibleProvider(
+        "bge-m3", base_url="https://api.example.com/v1", transport=transport
+    )
+
+    with pytest.raises(EmbeddingProviderError, match="different number of embeddings"):
+        provider.embed_documents(["a", "b"])
+
+
+def test_resolve_provider_openai_compatible(monkeypatch):
+    config = LCMConfig(
+        embedding_provider="openai-compatible",
+        embedding_model="BAAI/bge-m3",
+        embedding_base_url="https://api.example.com/v1",
+    )
+    provider = resolve_provider(config)
+    assert isinstance(provider, OpenAICompatibleProvider)
+    assert provider.model_id == "BAAI/bge-m3"
+    assert provider.base_url == "https://api.example.com/v1"
+
+    config.embedding_provider = "siliconflow"
+    assert isinstance(resolve_provider(config), OpenAICompatibleProvider)

@@ -18,6 +18,7 @@ avoid an import cycle (staticmethod resolution is identical).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -50,6 +51,40 @@ import logging
 logger = logging.getLogger(__name__)
 
 _PRESERVED_OBJECTIVE_CONTEXT_PREFIX = "[Current user objective preserved from compacted history]"
+_PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across context compression]"
+_MODEL_SWITCH_NOTIFICATION_PREFIX = "[Note: model was just switched from "
+
+# Replay-proof metadata namespaces. Both are session-scoped, versioned, bounded
+# and best-effort. They are kept strictly separate so provenance controls
+# consumption:
+#   * ENGINE-assembled compacted snapshots (proven by this engine emitting them
+#     as provider-visible context) are consumed by ordinary ingest/compress.
+#   * SESSION-END full-history snapshots (proven only by a successful
+#     current-session ``on_session_end`` persistence) are consumed ONLY by the
+#     current-session full-history session-end ingest, never by ordinary ingest.
+# Host-supplied session-end history must never leak proof into normal ingest.
+_COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX = "compacted_active_replay_snapshot_digests"
+_SESSION_END_REPLAY_METADATA_PREFIX = "session_end_replay_snapshot_digests"
+
+
+def _contains_identity_window(
+    haystack: list[tuple[str, str, str, str]],
+    needle: list[tuple[str, str, str, str]],
+) -> bool:
+    """True when ``needle`` appears as a contiguous exact window in ``haystack``.
+
+    Suffix matching (``_matches_store_tail_suffix``) only proves replay of the
+    END of the durable tail. A restarted host can replay a window from the
+    middle of the session, so callers that carry their own anchor -- a durable
+    ``tool_call_id`` -- use this instead. Callers MUST supply that anchor:
+    a bare window match is a content coincidence, not replay evidence.
+    """
+    if not needle or len(needle) > len(haystack):
+        return False
+    return any(
+        haystack[start : start + len(needle)] == needle
+        for start in range(len(haystack) - len(needle) + 1)
+    )
 
 
 class ReconcileMixin:
@@ -127,6 +162,26 @@ class ReconcileMixin:
     def _message_replay_identity(self, msg: Dict[str, Any], *, stored_row: bool = False) -> tuple[str, str, str, str]:
         role = str(msg.get("role") or "unknown")
         content = normalize_content_value(msg.get("content")) or ""
+        # Strip volatile compaction scaffolding suffixes so identity matching
+        # survives compression cycles.  The host appends a task-list annotation
+        # to the last user message during context compression; the annotation
+        # changes on every cycle (task statuses update), so including it in the
+        # replay identity causes reconciliation to fail and triggers full
+        # re-ingest of already-stored messages (duplication bug).
+        _todo_idx = content.find(_PRESERVED_TODO_CONTEXT_PREFIX)
+        if _todo_idx > 0:
+            content = content[:_todo_idx].rstrip()
+        # Model-switch notifications are ephemeral host scaffolding: the
+        # host prepends "[Note: model was just switched from X to Y...]"
+        # to the user's message, then strips the prefix on the next turn.
+        # The stored row keeps the prefix; the incoming row does not.
+        # Strip ONLY the prefix (up to and including the closing "]" and
+        # trailing newlines) so the user's actual content survives and
+        # identity matching works across the switch boundary.
+        if content.startswith(_MODEL_SWITCH_NOTIFICATION_PREFIX):
+            _bracket_end = content.find("]")
+            if _bracket_end != -1:
+                content = content[_bracket_end + 1:].lstrip("\n")
         if (
             role == "tool"
             and _is_hermes_persisted_output_marker(content)
@@ -240,6 +295,163 @@ class ReconcileMixin:
             content,
             str(msg.get("tool_call_id") or ""),
             tool_calls_identity,
+        )
+
+    def _replay_snapshot_digest(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        require_lcm_system_note: bool,
+    ) -> str:
+        """Fingerprint an eligible compacted snapshot for one proof source.
+
+        Engine-assembled proof remains anchored by BOTH the generated LCM
+        system note and a generated summary scaffold. Session-end full-history
+        proof may accept a summary-only snapshot because hosts can drop the
+        system note, but that weaker proof lives in a separate namespace and is
+        consumed only by the explicitly marked session-end path.
+        """
+        has_lcm_system_note = any(
+            str(message.get("role") or "") == "system"
+            and "[Note: This conversation uses Lossless Context Management (LCM)." in (
+                normalize_content_value(message.get("content")) or ""
+            )
+            and "Earlier turns have been compacted into hierarchical summaries below." in (
+                normalize_content_value(message.get("content")) or ""
+            )
+            for message in messages
+        )
+        has_generated_summary = any(
+            str(message.get("role") or "") != "system"
+            and "[Expand for details:" in (normalize_content_value(message.get("content")) or "")
+            and bool(
+                re.search(
+                    r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d\d+, node \d+\)\]",
+                    normalize_content_value(message.get("content")) or "",
+                )
+            )
+            for message in messages
+        )
+        if not has_generated_summary or (require_lcm_system_note and not has_lcm_system_note):
+            return ""
+        identities = [list(self._message_replay_identity(message)) for message in messages]
+        payload = json.dumps(
+            {"version": 1, "messages": identities},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _compacted_active_replay_snapshot_digest(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> str:
+        """Fingerprint engine-assembled context using the stronger anchor."""
+        return self._replay_snapshot_digest(messages, require_lcm_system_note=True)
+
+    def _session_end_replay_snapshot_digest(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> str:
+        """Fingerprint summary-only full history for session-end proof only."""
+        return self._replay_snapshot_digest(messages, require_lcm_system_note=False)
+
+    def _replay_snapshot_metadata_key(self, prefix: str) -> str:
+        return f"{prefix}:{getattr(self, '_session_id', '')}"
+
+    def _load_replay_snapshot_digests(self, prefix: str) -> list[str]:
+        """Load a bounded, versioned digest list from a replay-proof namespace.
+
+        Any missing/corrupt/unreadable metadata resolves to an empty list, so a
+        caller can never mistake a load failure for durable replay proof.
+        """
+        if not getattr(self, "_session_id", ""):
+            return []
+        store = getattr(self, "_store", None)
+        if store is None:
+            return []
+        try:
+            data = store.read_metadata_json(self._replay_snapshot_metadata_key(prefix))
+        except Exception:
+            logger.debug("LCM replay snapshot metadata load failed", exc_info=True)
+            return []
+        if not isinstance(data, dict) or data.get("version") != 1:
+            return []
+        raw_digests = data.get("digests")
+        if not isinstance(raw_digests, list):
+            return []
+        ordered: list[str] = []
+        for digest in raw_digests:
+            normalized = str(digest)
+            if re.fullmatch(r"[0-9a-f]{64}", normalized) and normalized not in ordered:
+                ordered.append(normalized)
+        return ordered[-16:]
+
+    def _remember_replay_snapshot(
+        self,
+        prefix: str,
+        digest: str,
+    ) -> None:
+        if not getattr(self, "_session_id", ""):
+            return
+        store = getattr(self, "_store", None)
+        if store is None or not digest:
+            return
+        ordered = self._load_replay_snapshot_digests(prefix)
+        ordered = [item for item in ordered if item != digest]
+        ordered.append(digest)
+        ordered = ordered[-16:]
+        try:
+            store.write_metadata_json(
+                [self._replay_snapshot_metadata_key(prefix)],
+                json.dumps({"version": 1, "digests": ordered}, sort_keys=True),
+                skip_unchanged=True,
+            )
+        except Exception:
+            # Missing metadata must fail toward duplicate preservation, never
+            # toward silently dropping an ambiguous incoming delta.
+            logger.debug("LCM replay snapshot metadata write failed", exc_info=True)
+
+    # -- Engine-assembled compacted snapshot proof (consumed by normal ingest) --
+
+    def _active_replay_snapshot_metadata_key(self) -> str:
+        return self._replay_snapshot_metadata_key(_COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX)
+
+    def _load_compacted_active_replay_snapshot_digests(self) -> list[str]:
+        return self._load_replay_snapshot_digests(_COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX)
+
+    def _remember_compacted_active_replay_snapshot(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> None:
+        self._remember_replay_snapshot(
+            _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX,
+            self._compacted_active_replay_snapshot_digest(messages),
+        )
+
+    # -- Session-end full-history proof (consumed ONLY by current-session
+    #    full-history session-end ingest) --
+
+    def _session_end_replay_snapshot_metadata_key(self) -> str:
+        return self._replay_snapshot_metadata_key(_SESSION_END_REPLAY_METADATA_PREFIX)
+
+    def _load_session_end_replay_snapshot_digests(self) -> list[str]:
+        return self._load_replay_snapshot_digests(_SESSION_END_REPLAY_METADATA_PREFIX)
+
+    def _remember_session_end_replay_snapshot(
+        self,
+        session_id: str,
+        messages: List[Dict[str, Any]],
+    ) -> None:
+        # Bind proof strictly to the currently-bound session. A late/off-current
+        # end (e.g. session A ending after B is bound) must never write proof
+        # under the bound session's namespace.
+        if session_id != getattr(self, "_session_id", ""):
+            return
+        self._remember_replay_snapshot(
+            _SESSION_END_REPLAY_METADATA_PREFIX,
+            self._session_end_replay_snapshot_digest(messages),
         )
 
     @staticmethod
@@ -427,7 +639,20 @@ class ReconcileMixin:
         allow_empty_prefix: bool,
         session_count: int,
         raw_session_count: int,
+        allow_session_end_replay_proof: bool = False,
     ) -> int | None:
+        active_lineage_identities = self._active_folded_tail_identity_overrides(
+            messages
+        )
+
+        def active_identity(
+            message: Dict[str, Any],
+        ) -> tuple[str, str, str, str]:
+            return active_lineage_identities.get(
+                id(message),
+                self._message_replay_identity(message),
+            )
+
         sanitized_replay_tail = self._stored_tail_for_sanitized_active_replay(stored_tail)
         effective_session_count = len(sanitized_replay_tail)
         sanitized_tail_collapsed = len(sanitized_replay_tail) < len(stored_tail)
@@ -445,12 +670,32 @@ class ReconcileMixin:
                     "tool_calls": decoded_tool_calls,
                 })
         effective_fresh_tail_count = self._fresh_tail_boundary(boundary_messages).count
+        # Engine-assembled compacted-snapshot proof is always eligible. The
+        # session-end full-history proof namespace is admitted ONLY for the
+        # current-session full-history session-end ingest; ordinary
+        # ingest/compress/tool-call reconciliation must never consume it, so a
+        # host-supplied session-end history cannot silently skip a fresh delta.
+        engine_snapshot_digests = set(self._load_compacted_active_replay_snapshot_digests())
+        session_end_snapshot_digests = (
+            set(self._load_session_end_replay_snapshot_digests())
+            if allow_session_end_replay_proof
+            else set()
+        )
+        # Durable tool-result identities, keyed by their execution id. A
+        # provider-issued ``tool_call_id`` is unique per call -- the durable
+        # externalization lookup already keys on it
+        # (``find_externalized_tool_result_content_for_call``) -- so a durable
+        # tool identity cannot be re-minted by a genuinely new turn. That
+        # uniqueness is what makes the tool-anchored terms below a proof rather
+        # than a content coincidence.
         stored_tool_identities = {
             identity
             for identity in stored_tail
-            for role, _content, tool_call_id, _tool_calls in [identity]
-            if role == "tool" and tool_call_id
+            if identity[0] == "tool" and identity[2]
         }
+        # Every identity the tool-anchored terms are allowed to advance over
+        # must itself be durable, on either the raw or the cleaned-up view.
+        durable_replay_identities = set(stored_tail) | set(sanitized_replay_tail)
         empty_prefix_cursor: int | None = None
         for cursor in range(len(messages), -1, -1):
             candidate_messages = messages[:cursor]
@@ -474,7 +719,7 @@ class ReconcileMixin:
                 and not (
                     self._compiled_ignore_message_patterns
                     and self._is_quarantined_assistant_replay_identity(
-                        self._message_replay_identity(msg)
+                        active_identity(msg)
                     )
                     and self._matches_ignore_message_patterns(msg, stored_row=True)
                 )
@@ -484,7 +729,7 @@ class ReconcileMixin:
                 self._is_replayed_context_scaffold_message(msg) for msg in candidate_messages
             )
             candidate_has_quarantined_replay_evidence = any(
-                self._is_quarantined_assistant_replay_identity(self._message_replay_identity(msg))
+                self._is_quarantined_assistant_replay_identity(active_identity(msg))
                 for msg in candidate_messages
             )
             candidate_identity_messages = (
@@ -493,11 +738,11 @@ class ReconcileMixin:
                 else candidate_visible_messages
             )
             candidate_visible_prefix = [
-                self._message_replay_identity(msg)
+                active_identity(msg)
                 for msg in candidate_visible_messages
             ]
             candidate_prefix = [
-                self._message_replay_identity(msg)
+                active_identity(msg)
                 for msg in candidate_identity_messages
             ]
             if not candidate_prefix:
@@ -515,47 +760,96 @@ class ReconcileMixin:
                 and self._matches_store_tail_suffix(sanitized_replay_tail, candidate_prefix)
             )
             matches_raw_tail = self._matches_store_tail_suffix(stored_tail, candidate_prefix)
-            candidate_has_tool_anchor = any(
-                role == "tool" and bool(tool_call_id)
-                for role, _content, tool_call_id, _tool_calls in candidate_prefix
+            engine_snapshot_digest = self._compacted_active_replay_snapshot_digest(candidate_messages)
+            session_end_snapshot_digest = (
+                self._session_end_replay_snapshot_digest(candidate_messages)
+                if allow_session_end_replay_proof
+                else ""
             )
+            has_registered_engine_snapshot = (
+                bool(engine_snapshot_digest)
+                and engine_snapshot_digest in engine_snapshot_digests
+            )
+            has_ordered_folded_snapshot_mapping = False
+            if has_registered_engine_snapshot and active_lineage_identities:
+                candidate_store_ids = self._get_store_id_map_for_messages(
+                    candidate_identity_messages
+                )
+                ordered_store_ids = [
+                    int(candidate_store_ids.get(id(message)) or 0)
+                    for message in candidate_identity_messages
+                ]
+                has_ordered_folded_snapshot_mapping = (
+                    bool(ordered_store_ids)
+                    and all(store_id > 0 for store_id in ordered_store_ids)
+                    and ordered_store_ids == sorted(set(ordered_store_ids))
+                )
+            has_durable_compacted_snapshot_replay = (
+                (
+                    has_registered_engine_snapshot
+                )
+                or (
+                    bool(session_end_snapshot_digest)
+                    and session_end_snapshot_digest in session_end_snapshot_digests
+                )
+            ) and (
+                matches_sanitized_tail
+                or matches_raw_tail
+                or has_ordered_folded_snapshot_mapping
+            )
+            # Tool-anchored replay evidence. Unlike the snapshot-digest proof
+            # above -- which is a registered engine-assembled fingerprint -- this
+            # term is anchored on the durable ``tool_call_id``: a provider issues
+            # each id once, so an incoming row carrying a durable tool identity
+            # is that durable row replayed, not a new turn that happens to look
+            # alike. Every disjunct below therefore requires an exact identity
+            # match against durable rows; content resemblance alone never
+            # qualifies.
             candidate_tool_anchor_indexes = [
                 index
-                for index, (role, _content, tool_call_id, _tool_calls) in enumerate(candidate_prefix)
-                if role == "tool" and bool(tool_call_id)
+                for index, identity in enumerate(candidate_prefix)
+                if identity[0] == "tool" and identity[2]
             ]
+            candidate_has_tool_anchor = bool(candidate_tool_anchor_indexes)
             candidate_tool_identities = {
-                candidate_prefix[index]
-                for index in candidate_tool_anchor_indexes
+                candidate_prefix[index] for index in candidate_tool_anchor_indexes
             }
+            # The tool pair itself is durable, the prefix ends on that durable
+            # tool result, and everything ahead of it is the contentless
+            # assistant that issued the call -- required to be durable too, so
+            # this term can never advance over a row the store has not seen.
+            # Whatever follows the pair in the incoming batch is left to the
+            # caller as a genuinely new delta.
             candidate_ends_with_replayed_tool_result = (
                 len(candidate_tool_anchor_indexes) == 1
-                and candidate_tool_identities.issubset(stored_tool_identities)
                 and candidate_tool_anchor_indexes[0] == len(candidate_prefix) - 1
+                and candidate_tool_identities.issubset(stored_tool_identities)
                 and all(
-                    identity[0] == "assistant" and not identity[1]
+                    identity[0] == "assistant"
+                    and not identity[1]
+                    and identity in durable_replay_identities
                     for identity in candidate_prefix[: candidate_tool_anchor_indexes[0]]
                 )
             )
-            candidate_has_user_after_tool_anchor = any(
+            # A restart can replay a durable window from the MIDDLE of the
+            # session, so suffix matching alone misses it. Accept a contiguous
+            # exact window anywhere in the durable tail, but never one that
+            # spans a user turn after the last tool anchor: a user turn is the
+            # boundary at which a repeated window stops being provably replay
+            # and becomes an ambiguous delta, which main persists by design
+            # (#259 -- visible duplication is preferred over silent loss).
+            candidate_has_user_after_tool_anchor = candidate_has_tool_anchor and any(
                 identity[0] == "user"
                 for identity in candidate_prefix[candidate_tool_anchor_indexes[-1] + 1 :]
-            ) if candidate_tool_anchor_indexes else False
+            )
             matches_tool_anchored_stale_window = (
                 candidate_has_tool_anchor
                 and not candidate_has_user_after_tool_anchor
                 and (
-                    any(
-                        sanitized_replay_tail[start : start + len(candidate_prefix)] == candidate_prefix
-                        for start in range(len(sanitized_replay_tail) - len(candidate_prefix) + 1)
-                    )
-                    or any(
-                        stored_tail[start : start + len(candidate_prefix)] == candidate_prefix
-                        for start in range(len(stored_tail) - len(candidate_prefix) + 1)
-                    )
+                    _contains_identity_window(sanitized_replay_tail, candidate_prefix)
+                    or _contains_identity_window(stored_tail, candidate_prefix)
                 )
             )
-
             matches_visible_sanitized_tail = (
                 filtered_candidate_placeholders
                 and bool(candidate_visible_prefix)
@@ -624,6 +918,7 @@ class ReconcileMixin:
                 and not matches_tool_anchored_stale_window
                 and not matches_inline_generation_cleanup_tail
                 and not matches_durable_persisted_output_full_replay
+                and not has_durable_compacted_snapshot_replay
             ):
                 continue
 
@@ -650,7 +945,7 @@ class ReconcileMixin:
                 or (
                     self._compiled_ignore_message_patterns
                     and self._is_quarantined_assistant_replay_identity(
-                        self._message_replay_identity(msg)
+                        active_identity(msg)
                     )
                     and self._matches_ignore_message_patterns(msg, stored_row=True)
                 )
@@ -722,11 +1017,31 @@ class ReconcileMixin:
                 and matches_raw_tail
                 and candidate_prefix == stored_tail[-len(candidate_prefix) :]
             )
-            # Tool results carry stable execution identities. A stale exact
-            # window may be skipped through matching assistant rows, but never
-            # through a user turn after the final tool anchor. If surrounding
-            # content changed, only skip through the final durable tool result;
-            # later assistant/user messages may be genuinely new after recovery.
+            # Tool-anchored replay proof.
+            #
+            # The full-replay terms above carry a length guard (a candidate must
+            # cover the durable session) because repeated CONTENT is not proof:
+            # a fresh delta can legitimately repeat the visible tail, and
+            # treating it as replay silently loses it. A durable
+            # ``tool_call_id`` is a different kind of evidence -- it is minted
+            # once by the provider and cannot be re-issued -- so a prefix
+            # anchored by one is replay at any length, and the length guard does
+            # not apply.
+            #
+            # The invariant that makes that safe: EVERY identity in the advanced
+            # prefix is exact-matched to a durable row. ``matches_sanitized_tail``
+            # and ``matches_raw_tail`` match the whole prefix against the durable
+            # tail suffix; ``matches_tool_anchored_stale_window`` matches it
+            # against a contiguous durable window; ``candidate_ends_with_``
+            # ``replayed_tool_result`` requires the durable tool pair plus
+            # durable contentless assistants. Nothing outside the durable set is
+            # ever consumed here, so a genuinely new turn cannot be skipped --
+            # it falls through to the ambiguous-delta path and is persisted
+            # (#259: visible duplication beats silent loss).
+            #
+            # Persisted-output markers are excluded: their identity is recovered
+            # from an external file, so it is not a durable-row match and gets
+            # its own proof terms above.
             has_tool_id_anchored_replay = (
                 not candidate_has_persisted_marker
                 and candidate_has_tool_anchor
@@ -803,6 +1118,7 @@ class ReconcileMixin:
                 or has_raw_full_replay
                 or has_scaffold_suffix_replay
                 or has_raw_cleanup_replay
+                or has_durable_compacted_snapshot_replay
             ):
                 return cursor
         return empty_prefix_cursor if allow_empty_prefix else None
@@ -833,8 +1149,14 @@ class ReconcileMixin:
         self,
         messages: List[Dict[str, Any]],
     ) -> list[tuple[str, str, str, str]]:
+        active_lineage_identities = self._active_folded_tail_identity_overrides(
+            messages
+        )
         return [
-            self._message_replay_identity(msg)
+            active_lineage_identities.get(
+                id(msg),
+                self._message_replay_identity(msg),
+            )
             for msg in messages
             if not self._is_replayed_context_scaffold_message(msg)
             and not self._matches_ignore_message_patterns(msg)
@@ -867,7 +1189,12 @@ class ReconcileMixin:
             return False
         return stored_head[: len(incoming_identities)] == incoming_identities
 
-    def _reconcile_ingest_cursor_from_store(self, messages: List[Dict[str, Any]]) -> int:
+    def _reconcile_ingest_cursor_from_store(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        allow_session_end_replay_proof: bool = False,
+    ) -> int:
         """Infer the in-memory cursor for an existing session after process restart."""
         if not self._session_id or not messages:
             return 0
@@ -927,6 +1254,7 @@ class ReconcileMixin:
             allow_empty_prefix=True,
             session_count=len(stored_tail),
             raw_session_count=session_count,
+            allow_session_end_replay_proof=allow_session_end_replay_proof,
         )
         if cursor is not None and cursor > 0:
             reason = (
@@ -1072,6 +1400,168 @@ class ReconcileMixin:
             str(msg.get("tool_call_id") or ""),
         )
 
+    def _replay_identity_sha256(
+        self,
+        message: Dict[str, Any],
+        *,
+        stored_row: bool = False,
+    ) -> str:
+        identity = self._message_replay_identity(
+            message,
+            stored_row=stored_row,
+        )
+        serialized = json.dumps(
+            list(identity),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _folded_tail_lineage_metadata_key(self) -> str:
+        return self._replay_snapshot_metadata_key("folded_tail_lineage")
+
+    def _exact_session_store_row(
+        self,
+        store_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        if not self._session_id or store_id <= 0:
+            return None
+        rows = self._store.load_session_page(
+            self._session_id,
+            after_store_id=store_id - 1,
+            limit=1,
+        )
+        if not rows or int(rows[0].get("store_id") or 0) != store_id:
+            return None
+        return rows[0]
+
+    def _write_folded_tail_lineage(
+        self,
+        folded_message: Dict[str, Any],
+        source_store_id: int,
+    ) -> bool:
+        """Persist exact occurrence proof for one generated-context fold."""
+        if not self._session_id:
+            return False
+        try:
+            source_row = self._exact_session_store_row(int(source_store_id))
+            if source_row is None:
+                return False
+            folded_identity = self._message_replay_identity(folded_message)
+            source_identity = self._message_replay_identity(
+                source_row,
+                stored_row=True,
+            )
+            if (
+                folded_identity[0] != source_identity[0]
+                or folded_identity[2:] != source_identity[2:]
+            ):
+                return False
+            payload = {
+                "version": 1,
+                "folded_identity_sha256": self._replay_identity_sha256(
+                    folded_message
+                ),
+                "source_store_id": int(source_store_id),
+                "source_identity_sha256": self._replay_identity_sha256(
+                    source_row,
+                    stored_row=True,
+                ),
+            }
+            self._store.write_metadata_json(
+                [self._folded_tail_lineage_metadata_key()],
+                json.dumps(payload, sort_keys=True),
+                skip_unchanged=True,
+            )
+        except Exception:
+            logger.debug("LCM folded-tail lineage metadata write failed", exc_info=True)
+            return False
+        return True
+
+    def _clear_folded_tail_lineage(self) -> bool:
+        if not self._session_id:
+            return False
+        try:
+            self._store.write_metadata_json(
+                [self._folded_tail_lineage_metadata_key()],
+                json.dumps({"version": 1, "source_store_id": 0}, sort_keys=True),
+                skip_unchanged=True,
+            )
+        except Exception:
+            logger.debug("LCM folded-tail lineage metadata clear failed", exc_info=True)
+            return False
+        return True
+
+    def _load_folded_tail_lineage(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> Optional[tuple[Dict[str, Any], Dict[str, Any]]]:
+        """Resolve one exact folded active occurrence to its durable source row."""
+        if not self._session_id:
+            return None
+        try:
+            payload = self._store.read_metadata_json(
+                self._folded_tail_lineage_metadata_key()
+            )
+            if not isinstance(payload, dict) or payload.get("version") != 1:
+                return None
+            source_store_id = int(payload.get("source_store_id") or 0)
+            folded_digest = str(payload.get("folded_identity_sha256") or "")
+            source_digest = str(payload.get("source_identity_sha256") or "")
+            if source_store_id <= 0 or not folded_digest or not source_digest:
+                return None
+            source_row = self._exact_session_store_row(source_store_id)
+            if (
+                source_row is None
+                or self._replay_identity_sha256(source_row, stored_row=True)
+                != source_digest
+            ):
+                return None
+            matches = [
+                message
+                for message in messages
+                if self._replay_identity_sha256(message) == folded_digest
+            ]
+            if len(matches) != 1:
+                return None
+            folded_identity = self._message_replay_identity(matches[0])
+            source_identity = self._message_replay_identity(
+                source_row,
+                stored_row=True,
+            )
+            if (
+                folded_identity[0] != source_identity[0]
+                or folded_identity[2:] != source_identity[2:]
+            ):
+                return None
+            return matches[0], source_row
+        except Exception:
+            logger.debug("LCM folded-tail lineage metadata load failed", exc_info=True)
+            return None
+
+    def _active_folded_tail_identity_overrides(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> dict[int, tuple[str, str, str, str]]:
+        """Return exact active-to-source identity overrides for one durable fold."""
+        folded_lineage = self._load_folded_tail_lineage(messages)
+        if folded_lineage is None:
+            return {}
+        folded_message, source_row = folded_lineage
+        return {
+            id(folded_message): self._message_replay_identity(
+                source_row,
+                stored_row=True,
+            )
+        }
+
+    def _is_registered_folded_tail_message(
+        self,
+        message: Dict[str, Any],
+    ) -> bool:
+        """Return whether ``message`` is the unique active durable fold."""
+        return bool(self._active_folded_tail_identity_overrides([message]))
+
     def _get_store_id_map_for_messages(self, messages: List[Dict[str, Any]]) -> dict[int, int]:
         """Map current raw message objects back to store_ids in stable order.
 
@@ -1082,8 +1572,54 @@ class ReconcileMixin:
         the store has, the surplus earliest active occurrences are treated as
         synthetic/carry-over and left unmapped so they cannot steal later stored
         literal copies with the same content.
+
+        One explicitly registered retained-user occurrence may sit at or below
+        the compaction frontier. It is admitted only when exactly one active
+        message has its durable identity, so content duplication cannot make the
+        old row hijack another occurrence.
         """
         candidates: list[Dict[str, Any]] = []
+        active_lineage_identities = self._active_folded_tail_identity_overrides(
+            messages
+        )
+        folded_lineage = self._load_folded_tail_lineage(messages)
+        if folded_lineage is not None:
+            _folded_message, source_row = folded_lineage
+            if int(source_row.get("store_id") or 0) <= int(
+                self._last_compacted_store_id or 0
+            ):
+                candidates.append(source_row)
+        retained_anchor_loader = getattr(
+            self,
+            "_load_retained_user_anchor_row",
+            None,
+        )
+        if callable(retained_anchor_loader):
+            retained_anchor = retained_anchor_loader()
+            retained_store_id = int(
+                retained_anchor.get("store_id") or 0
+            ) if retained_anchor else 0
+            if 0 < retained_store_id <= int(self._last_compacted_store_id or 0):
+                retained_identity = self._message_replay_identity(
+                    retained_anchor,
+                    stored_row=True,
+                )
+                active_matches = sum(
+                    1
+                    for message in messages
+                    if self._message_replay_identity(message) == retained_identity
+                )
+                if active_matches == 1:
+                    candidates.append(retained_anchor)
+        if candidates:
+            candidates = list(
+                {
+                    int(candidate.get("store_id") or 0): candidate
+                    for candidate in candidates
+                    if int(candidate.get("store_id") or 0) > 0
+                }.values()
+            )
+            candidates.sort(key=lambda candidate: int(candidate["store_id"]))
         next_candidate_after = self._last_compacted_store_id
         while True:
             page = self._store.get_session_messages_after(
@@ -1094,9 +1630,18 @@ class ReconcileMixin:
                 break
             candidates.extend(page)
             next_candidate_after = page[-1]["store_id"]
+
+        def active_lineage_identity(
+            message: Dict[str, Any],
+        ) -> tuple[str, str, str, str]:
+            return active_lineage_identities.get(
+                id(message),
+                self._message_replay_identity(message),
+            )
+
         active_identity_counts: dict[tuple[Any, ...], int] = {}
         for msg in messages:
-            identity = self._message_replay_identity(msg)
+            identity = active_lineage_identity(msg)
             active_identity_counts[identity] = active_identity_counts.get(identity, 0) + 1
         stored_identity_counts: dict[tuple[Any, ...], int] = {}
         stored_cleanup_identity_counts: dict[tuple[Any, ...], int] = {}
@@ -1154,7 +1699,7 @@ class ReconcileMixin:
                         break
                     if id(msg) not in generated_placeholder_message_ids:
                         continue
-                    if self._message_replay_identity(msg) != identity:
+                    if active_lineage_identity(msg) != identity:
                         continue
                     generated_surplus_skip_message_ids.add(id(msg))
                     surplus_count -= 1
@@ -1188,7 +1733,7 @@ class ReconcileMixin:
                 if raw_match_idx is not None:
                     return raw_match_idx
 
-            message_identity = self._message_replay_identity(msg)
+            message_identity = active_lineage_identity(msg)
             wanted_cleanup_identity = self._active_cleanup_replay_identity(message_identity)
             probe_idx = start_idx
             while probe_idx < len(candidates):
@@ -1223,7 +1768,7 @@ class ReconcileMixin:
                         matched_message_ids.add(id(remaining_msg))
                         probe_idx = raw_match_idx + 1
                         continue
-                message_identity = self._message_replay_identity(remaining_msg)
+                message_identity = active_lineage_identity(remaining_msg)
                 if id(remaining_msg) in generated_surplus_skip_message_ids:
                     continue
                 surplus = local_surplus_skips.get(message_identity, 0)
@@ -1278,7 +1823,7 @@ class ReconcileMixin:
                         probe_idx -= 1
                 if id(msg) in ids_by_message_id:
                     continue
-            message_identity = self._message_replay_identity(msg)
+            message_identity = active_lineage_identity(msg)
             if id(msg) in generated_surplus_skip_message_ids:
                 continue
             surplus = active_surplus_skips.get(message_identity, 0)

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Triage Backlog"
+  short_description: "Read-only LCM-X issue and PR triage"
+  default_prompt: "Use $triage-backlog to assess one LCM-X issue, pull request, or duplicate cluster without writing to GitHub."
