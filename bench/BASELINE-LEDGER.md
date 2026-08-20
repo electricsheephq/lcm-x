@@ -21,3 +21,19 @@ Standing caveats adopted from the #252 retro pack (recorded, no re-baseline owed
   turns stop entering the corpus), not just a prompt-size change.
 - #211: a SiliconFlow embedding arm, if ever wanted, enters the scoreboard as a NEW row,
   never as a delta against F53.
+
+Rows appended by the v0.23.0 maintainer train (authorized by the architect ruling, #252
+comment 5356005454; classes per its derivation rule; ARCHITECT-TBD cells to be filled by the
+architect):
+
+| boundary (merge) | date | surface | required re-baseline | status |
+|---|---|---|---|---|
+| #168 durable compaction totals in status | 2026-08-20 | status/observability output only | ledger entry only, no re-baseline owed | RECORDED |
+| #196 expand-query evidence provenance | 2026-08-20 | answer/assembly (expand-query provenance object) | next main-tree answer row records "post-#196" | OPEN — no main-tree answer row exists yet |
+| #173 recall FTS sub-budget + hardened corpus preflight | 2026-08-20 | retrieval path (FTS/vector budget split; scan-budget, session-scope, expiry-evidence preflight; timeout-semantics fix ed586a27) | next full-500 V1-M run + next main-tree LoCoMo row | OPEN |
+| #203 replay scaffolding normalization + OOB unique-identity binding | 2026-08-20 | ingest/reconcile (replay proofs; ID-less rows fail closed) | ARCHITECT-TBD | OPEN |
+| #273 crashed-search disclosure (coverage 'none', never 'ok') | 2026-08-20 | disclosure-only, crash paths | ledger entry only, no re-baseline owed (verdict 5355967878) | RECORDED |
+| #177 partial tool tail replay: occurrence-bounded proofs + tool-name identity | 2026-08-20 | ingest/reconcile (replay identity 5-tuple; replay-snapshot digests change once post-upgrade — persists instead of matching) | ARCHITECT-TBD | OPEN |
+| #261 startup FTS bootstrap race + integrity-state publish contract | 2026-08-20 | startup bootstrap (verified-pass clearing; CAS-fenced scan publish) | ARCHITECT-TBD | OPEN |
+| #183 cross-session summary DAG expansion | 2026-08-21 | retrieval path (expand/describe/expand_query cross-session; provenance session attribution) | next full-500 V1-M run + next main-tree LoCoMo row | OPEN |
+| #286 teams-slice-1 AccessContextV1 contract | 2026-08-21 | additive, eval-unreachable (all-new paths; verdict 5356722388) | no re-baseline owed | RECORDED |
