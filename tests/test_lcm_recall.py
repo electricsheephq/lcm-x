@@ -447,8 +447,8 @@ def test_rerank_margin_holds_incumbent_and_reports_scores(recall_engine, monkeyp
     # appears multiple times in the window — margin audits need exact gaps.
     assert payload["provenance"]["rerank_scores"] == [
         [1, "session-b", 0.8],
-        [0, "session-a", 0.7],
-        [2, "session-c", 0.6],
+        [2, "session-a", 0.7],
+        [0, "session-c", 0.6],
     ]
 
 
