@@ -87,6 +87,23 @@ def _contains_identity_window(
     )
 
 
+def _has_lossy_redacted_identity(identity: tuple[str, str, str, str]) -> bool:
+    """True when redaction collapsed any matched half of a replay identity.
+
+    A replay identity is ``(role, content, tool_call_id, tool_calls)``. Two of
+    those four are model-authored payloads that
+    ``_redact_active_replay_messages`` rewrites -- it redacts ``tool_calls``
+    exactly as it redacts ``content`` -- and a ``password_assignment``
+    placeholder deliberately omits the sha256 digest, so distinct same-length
+    secrets normalize onto ONE value. Equality of a collapsed component is
+    therefore not identity, whichever component was collapsed: the secret can
+    sit in the call ARGUMENTS just as easily as in the tool result, and a
+    fence that inspects only the result half proves replay of a call that was
+    never made.
+    """
+    return _has_lossy_sensitive_redaction(identity[1]) or _has_lossy_sensitive_redaction(identity[3])
+
+
 class ReconcileMixin:
     @staticmethod
     def _canonicalize_tool_call_identity_value(value: Any) -> Any:
@@ -719,12 +736,14 @@ class ReconcileMixin:
         # Content equality then stops being evidence of anything and the "byte
         # identical" premise above no longer holds. Such a row must fall through
         # to the ambiguous-delta path (#259) instead of being proven replay.
+        # The exclusion is identity-wide (``_has_lossy_redacted_identity``), not
+        # content-only: redaction rewrites ``tool_calls`` too.
         stored_tool_identities = {
             identity
             for identity in stored_tail
             if identity[0] == "tool"
             and identity[2]
-            and not _has_lossy_sensitive_redaction(identity[1])
+            and not _has_lossy_redacted_identity(identity)
         }
         # Every identity the tool-anchored terms are allowed to advance over
         # must itself be durable, on either the raw or the cleaned-up view.
@@ -844,14 +863,21 @@ class ReconcileMixin:
                 if identity[0] == "tool" and identity[2]
             ]
             candidate_has_tool_anchor = bool(candidate_tool_anchor_indexes)
-            # ...and that exact-identity match is only evidence when the
-            # identity is lossless. A lossy sensitive redaction collapses
-            # distinct secrets of equal length onto one placeholder, so the
-            # content half of the identity proves nothing and the anchor cannot
-            # carry the length-guard bypass below.
-            candidate_has_lossy_redacted_tool_anchor = any(
-                _has_lossy_sensitive_redaction(candidate_prefix[index][1])
-                for index in candidate_tool_anchor_indexes
+            # ...and that exact-identity match is only evidence when EVERY
+            # identity the terms below advance over is lossless. A lossy
+            # sensitive redaction collapses distinct secrets of equal length
+            # onto one placeholder, so a collapsed component proves nothing and
+            # the anchor cannot carry the length-guard bypass below.
+            #
+            # The scope is the whole prefix, and both redacted components of
+            # each identity, because the terms below match the whole prefix:
+            # ``login(password=abcdef)`` and ``login(password=ghijkl)`` differ
+            # only inside the issuing assistant's ``tool_calls`` and can return
+            # the same innocuous result, so a fence reading only the tool row's
+            # content sees nothing lossy and lets ``candidate_ends_with_``
+            # ``replayed_tool_result`` advance over the second real call.
+            candidate_has_lossy_redacted_replay_identity = any(
+                _has_lossy_redacted_identity(identity) for identity in candidate_prefix
             )
             candidate_tool_identities = {
                 candidate_prefix[index] for index in candidate_tool_anchor_indexes
@@ -1088,13 +1114,15 @@ class ReconcileMixin:
             # (#259: visible duplication beats silent loss). The one accepted
             # residual is a byte-identical repeat; see ``stored_tool_identities``.
             #
-            # That invariant depends on the identity being LOSSLESS, so a
-            # lossy-redacted anchor is excluded here as well as from
+            # That invariant depends on every advanced identity being LOSSLESS,
+            # so a lossy-redacted prefix is excluded here as well as from
             # ``stored_tool_identities``: this guard is what also withholds the
             # bypass from ``matches_tool_anchored_stale_window``, which window
             # matches ``stored_tail`` directly and never consults that set.
             # Pinned by
-            # ``test_reused_tool_call_id_with_lossy_redacted_result_is_persisted_not_replayed``.
+            # ``test_reused_tool_call_id_with_lossy_redacted_result_is_persisted_not_replayed``
+            # and, for the call-arguments half of the identity, by
+            # ``test_lossy_redacted_tool_call_arguments_are_not_replay_proof``.
             #
             # Persisted-output markers are excluded: their identity is recovered
             # from an external file, so it is not a durable-row match and gets
@@ -1102,7 +1130,7 @@ class ReconcileMixin:
             has_tool_id_anchored_replay = (
                 not candidate_has_persisted_marker
                 and candidate_has_tool_anchor
-                and not candidate_has_lossy_redacted_tool_anchor
+                and not candidate_has_lossy_redacted_replay_identity
                 and (
                     matches_sanitized_tail
                     or matches_raw_tail
@@ -1401,7 +1429,20 @@ class ReconcileMixin:
         messages: List[Dict[str, Any]],
         cursor: int,
     ) -> set[int]:
-        """Find exact durable tool pairs replayed after a preserved new delta."""
+        """Find exact durable tool pairs replayed after a preserved new delta.
+
+        This runs on the residual messages once ``_reconcile_ingest_cursor_``
+        ``from_store`` has advanced over an earlier durable prefix, and it
+        matches durable identities on its own -- it never consults that
+        function's guards. So it carries its own copy of the lossy-redaction
+        rule: redacted-normalized equality is NOT identity for replay proof.
+        Without it, a fresh same-id result of ``password=ghijkl`` matches the
+        stored placeholder of ``password=abcdef`` and this helper removes both
+        the new invocation and its issuing assistant. Excluded at both ends --
+        the durable set and the candidate rows -- so neither side can supply
+        the collapsed half of a match. Pinned by ``test_lossy_redacted_pair_``
+        ``after_reconciled_prefix_is_persisted_not_replayed``.
+        """
         if not self._session_id or cursor >= len(messages):
             return set()
         session_count = self._store.get_session_count(self._session_id)
@@ -1410,9 +1451,13 @@ class ReconcileMixin:
         tail_limit = min(max(len(messages) * 4, 64), session_count)
         stored_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
         stored_identities = {
-            self._message_replay_identity(row, stored_row=True)
-            for row in stored_rows
-            if not self._matches_ignore_message_patterns(row, stored_row=True)
+            identity
+            for identity in (
+                self._message_replay_identity(row, stored_row=True)
+                for row in stored_rows
+                if not self._matches_ignore_message_patterns(row, stored_row=True)
+            )
+            if not _has_lossy_redacted_identity(identity)
         }
         replayed: set[int] = set()
         index = max(0, cursor)
@@ -1422,6 +1467,9 @@ class ReconcileMixin:
                 index += 1
                 continue
             assistant_identity = self._message_replay_identity(assistant)
+            if _has_lossy_redacted_identity(assistant_identity):
+                index += 1
+                continue
             call_ids = {
                 str(call.get("id") or "")
                 for call in assistant.get("tool_calls") or []
@@ -1433,10 +1481,12 @@ class ReconcileMixin:
                 result = messages[probe]
                 tool_call_id = str(result.get("tool_call_id") or "")
                 content = normalize_content_value(result.get("content")) or ""
+                result_identity = self._message_replay_identity(result)
                 if (
                     tool_call_id in call_ids
                     and not _is_hermes_persisted_output_marker(content)
-                    and self._message_replay_identity(result) in stored_identities
+                    and not _has_lossy_redacted_identity(result_identity)
+                    and result_identity in stored_identities
                 ):
                     result_indexes[tool_call_id] = probe
                 probe += 1

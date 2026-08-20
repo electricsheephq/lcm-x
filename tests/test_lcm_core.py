@@ -5130,6 +5130,189 @@ class TestAssemblyBudgetSelection:
         assert len(rows) == original_count + 3
         assert rows[-1]["content"] == "new user after lossy redacted repeat"
 
+    def test_lossy_redacted_tool_call_arguments_are_not_replay_proof(self, tmp_path, monkeypatch):
+        """The lossy fence must cover the CALL arguments, not just the result.
+
+        ``_redact_active_replay_messages`` redacts ``tool_calls`` as well as
+        ``content`` (engine.py), so a ``password_assignment`` placeholder can
+        sit in the serialized arguments half of the identity while the tool
+        result itself is perfectly innocuous. Two genuinely different calls --
+        ``login(password=abcdef)`` and ``login(password=ghijkl)`` -- then reach
+        reconciliation as ONE identity, and the innocuous result is a lossless
+        durable tool anchor, so a fence that inspects only the tool row's
+        content sees nothing lossy and lets ``candidate_ends_with_replayed_
+        tool_result`` advance over the second real invocation.
+
+        Redacted-normalized equality is not identity. Whichever component of
+        the matched identity redaction collapsed, the match stops being proof
+        and the batch must persist (#259: visible duplication beats silent
+        loss of a distinct secret).
+        """
+        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=450)
+        engine._config.sensitive_patterns_enabled = True
+        engine._config.sensitive_patterns = ["password_assignment"]
+
+        def _login_call(secret: str) -> dict:
+            return {
+                "id": "call_lossy_args_anchor",
+                "type": "function",
+                "function": {
+                    "name": "login",
+                    "arguments": json.dumps({"command": f"login password={secret}"}),
+                },
+            }
+
+        engine._ingest_messages([
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "historical objective"},
+            {"role": "assistant", "content": "", "tool_calls": [_login_call("abcdef")]},
+            {
+                "role": "tool",
+                "tool_call_id": "call_lossy_args_anchor",
+                "tool_name": "login",
+                "content": "login ok",
+            },
+            {"role": "assistant", "content": "durable answer"},
+        ])
+        original_count = engine._store.get_session_count("assembly-session")
+
+        durable_rows = engine._store.get_session_messages("assembly-session")
+        durable_calls = [
+            json.dumps(row.get("tool_calls"))
+            for row in durable_rows
+            if row.get("tool_calls")
+        ]
+        # Preconditions, so this test cannot pass for the wrong reason: the
+        # secret really is redacted inside the ARGUMENTS with the digest-free
+        # placeholder, and the tool result really is lossless.
+        assert len(durable_calls) == 1
+        assert "name=password_assignment" in durable_calls[0]
+        assert "sha256" not in durable_calls[0]
+        assert "abcdef" not in durable_calls[0]
+        durable_tool_content = [
+            row["content"]
+            for row in durable_rows
+            if row["tool_call_id"] == "call_lossy_args_anchor"
+        ]
+        assert durable_tool_content == ["login ok"]
+
+        from hermes_lcm.engine import LCMEngine
+
+        replay = LCMEngine(config=engine._config, hermes_home=str(tmp_path / "hermes"))
+        replay._session_id = "assembly-session"
+        replay._ingest_cursor_needs_reconcile = True
+        # Same call id, same secret LENGTH, genuinely different secret, in the
+        # arguments. Post redaction both assistant identities are identical.
+        replay._ingest_messages([
+            {"role": "assistant", "content": "", "tool_calls": [_login_call("ghijkl")]},
+            {
+                "role": "tool",
+                "tool_call_id": "call_lossy_args_anchor",
+                "tool_name": "login",
+                "content": "login ok",
+            },
+            {"role": "user", "content": "new user after lossy redacted arguments"},
+        ])
+
+        rows = replay._store.get_session_messages("assembly-session")
+        # The second login survives: a collapsed lossy identity is not proof.
+        assert [row["tool_call_id"] for row in rows].count("call_lossy_args_anchor") == 2
+        assert len(rows) == original_count + 3
+        assert rows[-1]["content"] == "new user after lossy redacted arguments"
+
+    def test_lossy_redacted_pair_after_reconciled_prefix_is_persisted_not_replayed(
+        self, tmp_path, monkeypatch
+    ):
+        """The post-cursor segment filter needs its own lossy fence.
+
+        When reconciliation advances over an earlier durable pair, the residual
+        messages are handed to ``_replayed_tool_segment_indexes_after_cursor``,
+        which drops any assistant/tool pair whose identities are in the durable
+        tail. That helper never consults the guard in
+        ``_reconcile_ingest_cursor_from_store``, so it must reject lossy
+        identities independently: otherwise a fresh same-id tool result
+        (``password=ghijkl``) matches the stored placeholder of
+        ``password=abcdef`` and both its assistant and tool rows are removed.
+        """
+        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=450)
+        engine._config.sensitive_patterns_enabled = True
+        engine._config.sensitive_patterns = ["password_assignment"]
+        replayed_call = {
+            "id": "call_prefix_anchor",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        }
+        lossy_call = {
+            "id": "call_post_cursor_lossy_anchor",
+            "type": "function",
+            "function": {"name": "read_secret", "arguments": "{}"},
+        }
+        engine._ingest_messages([
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "historical objective"},
+            {"role": "assistant", "content": "", "tool_calls": [replayed_call]},
+            {
+                "role": "tool",
+                "tool_call_id": "call_prefix_anchor",
+                "tool_name": "read_file",
+                "content": "durable prefix result",
+            },
+            {"role": "assistant", "content": "", "tool_calls": [lossy_call]},
+            {
+                "role": "tool",
+                "tool_call_id": "call_post_cursor_lossy_anchor",
+                "tool_name": "read_secret",
+                "content": "password=abcdef",
+            },
+            {"role": "assistant", "content": "durable answer"},
+        ])
+        original_count = engine._store.get_session_count("assembly-session")
+
+        durable_rows = engine._store.get_session_messages("assembly-session")
+        redacted_first = [
+            row["content"]
+            for row in durable_rows
+            if row["tool_call_id"] == "call_post_cursor_lossy_anchor"
+        ]
+        # Precondition: the durable row is the digest-free placeholder.
+        assert len(redacted_first) == 1
+        assert "name=password_assignment" in redacted_first[0]
+        assert "sha256" not in redacted_first[0]
+
+        from hermes_lcm.engine import LCMEngine
+
+        replay = LCMEngine(config=engine._config, hermes_home=str(tmp_path / "hermes"))
+        replay._session_id = "assembly-session"
+        replay._ingest_cursor_needs_reconcile = True
+        # [replayed pair, new assistant, fresh lossy pair, new user]: the
+        # reconciled prefix moves the cursor past the first pair, and the
+        # post-cursor helper then sees the lossy pair.
+        replay._ingest_messages([
+            {"role": "assistant", "content": "", "tool_calls": [replayed_call]},
+            {
+                "role": "tool",
+                "tool_call_id": "call_prefix_anchor",
+                "tool_name": "read_file",
+                "content": "durable prefix result",
+            },
+            {"role": "assistant", "content": "new assistant after replayed prefix"},
+            {"role": "assistant", "content": "", "tool_calls": [lossy_call]},
+            {
+                "role": "tool",
+                "tool_call_id": "call_post_cursor_lossy_anchor",
+                "tool_name": "read_secret",
+                "content": "password=ghijkl",
+            },
+            {"role": "user", "content": "new user after post-cursor lossy pair"},
+        ])
+
+        rows = replay._store.get_session_messages("assembly-session")
+        contents = [row["content"] for row in rows]
+        # The second read_secret invocation survives with its issuing assistant.
+        assert [row["tool_call_id"] for row in rows].count("call_post_cursor_lossy_anchor") == 2
+        assert "new assistant after replayed prefix" in contents
+        assert rows[-1]["content"] == "new user after post-cursor lossy pair"
+
     def test_tool_anchored_stale_replay_does_not_consume_new_assistant_after_tool(self, tmp_path, monkeypatch):
         engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=450)
         tool_call = {
