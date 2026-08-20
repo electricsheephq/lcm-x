@@ -175,11 +175,14 @@ def _canary_probe(class_code: str, noun: str) -> str:
     if class_code == "C1":
         return f"What did we decide to name the {noun}?"
     if class_code == "C2":
-        return "Where does the canonical config now live?"
+        # The noun slot disambiguates the two same-class canaries per epoch —
+        # identical probe text with different planted values made the second
+        # of each pair structurally unscorable (caught pre-launch).
+        return f"Where does the canonical {noun} config now live?"
     if class_code == "C3":
         return f"What must the {noun} limit stay exactly?"
     if class_code == "C4":
-        return "What was the build id printed by the last successful pipeline run?"
+        return f"What was the build id printed by the last successful {noun} pipeline run?"
     if class_code == "C5":
         return f"What prefix should all {noun} names use going forward?"
     raise ValueError(f"unknown canary class: {class_code}")
@@ -189,11 +192,11 @@ def _canary_sentence(class_code: str, noun: str, value: str) -> str:
     if class_code == "C1":
         return f"After weighing both options we decided to name the {noun} `{value}`."
     if class_code == "C2":
-        return f"The canonical config now lives at src/{value}/settings.toml — remember that path."
+        return f"The canonical {noun} config now lives at src/{value}/settings.toml — remember that path."
     if class_code == "C3":
         return f"Hard constraint from ops: the {noun} limit must stay exactly {value}."
     if class_code == "C4":
-        return f"The build id printed by the last successful pipeline run was {value}."
+        return f"The build id printed by the last successful {noun} pipeline run was {value}."
     if class_code == "C5":
         return f"I prefer that all {noun} names use the `{value}` prefix going forward."
     raise ValueError(f"unknown canary class: {class_code}")
