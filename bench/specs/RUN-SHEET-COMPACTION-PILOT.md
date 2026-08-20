@@ -107,3 +107,53 @@ owner content sign-off required.
 - codex binary: release path + sha256 (S0 output) · cli_version asserted from session_meta
 - hermes version + config.yaml sha256 per arm · lcm-x sha (engine under test)
 - material/probe script shas + run seed · effective windows per arm (S3 output)
+
+## 9. AMENDMENT (2026-08-20, append-only, pre-scoring) — measured mechanism of the hermes one-shot arms; regime relabels
+
+**Measured facts (R2-A, first valid run, receipts in the run's pilot-home
+state.db + lcm.db):** the one-shot driver (`hermes -z` per turn) produced **70
+distinct host sessions and 70 distinct conversations** for 70 turns —
+`--continue` (and `--resume latest`, micro-verified separately) **do not thread
+a conversation in `-z` mode**; every turn is a fresh session. Consequently the
+LCM engine's in-session compaction **never fired** (0 summary_nodes; the 136K
+`threshold_tokens` was never approached per-invocation), and probe retention is
+delivered by LCM's **store-level cross-session context assembly** (57 tool
+messages recorded in lcm.db during the run).
+
+**What this means (relabels, not silent re-scopes):**
+- The registered "R2 = single-session + LCM compaction ≤272K" DID NOT RUN and
+  is headless-unreachable via `-z` (pty input path already measured dead —
+  #268/#269 chain). It is renamed **R2s** and PARKED pending an ACP-transport
+  spike (`hermes acp` holds one session over stdio JSON-RPC; spike dispatched;
+  if it fails within budget, R2s is declared unmeasurable-headless in P0 and
+  the interactive-user regime is disclosed as an unmeasured cell).
+- The arms actually run are relabeled **R2r ("restart-bridge") = per-turn
+  session restart + LCM store bridge** — architecturally the R3 mechanism at
+  maximum granularity, and LCM's differentiated capability (native codex
+  compaction cannot bridge sessions at all).
+- **R3-material / R3-probes are SUBSUMED** by R2r (a single restart between
+  material and probes is a strictly milder version of R2r's per-turn restart)
+  and will not run as separate arms. Registered-order note: the seeded order
+  continues R2r-A → R2r-A′ → R2b → R1 → R4-ref.
+- **R2b (compressor engine, same one-shot transport) is PROMOTED to the key
+  control**: it distinguishes the LCM store bridge from any host-level
+  cross-session memory (hermes state.db / workspace memories are shared across
+  sessions in the same home). If R2b retains ≈ R2r, the bridge is host-level,
+  not LCM's; if R2b ≈ 0, retention is LCM's store assembly.
+- Epoch re-binning against measured compaction boundaries is **vacuous for R2r
+  arms** (no boundaries exist); the pre-planted E0/E1/E2 epoch labels remain
+  reportable as material-position strata only. Boundary re-binning still
+  applies to R1/R4 (rollout markers) and to R2s if the ACP spike lands.
+- Cross-arm contrast R1-vs-R2r compares different session topologies
+  (single-session native compaction vs per-turn restart + store bridge). This
+  IS the honest product-level comparison for headless/automation users, and the
+  asymmetry is a required disclosure line in the pilot report.
+
+**Scoring amendments already public in PR #275** (scorer binds to frozen
+material schema; abstain-regex expanded to real observed phrasings pre-official
+scoring, retention unaffected by construction; concrete-answer guard: any
+registered canary value in an answer classifies HALLUCINATE over an abstention
+hedge). One scorer discipline rule added: `coverage.fts: 'none'` (or any
+disclosed crashed-arm marker, cf. product PR #273) appearing in a bench run's
+logs is a run-invalidating signal under fail-closed accounting — the affected
+rows are excluded or the run repeated, never scored as legitimate zero-recall.
