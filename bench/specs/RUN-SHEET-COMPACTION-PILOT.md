@@ -277,3 +277,24 @@ Aug 26–31 window** (still before the gpt-5.4 retirement). Deviation from the
 §9 pre-registered order (R4-ref before R2s) is quota-forced, not
 discretionary. C1-lineage answer/judge phases sharing the CLI bucket are
 paused until reset (recorded in that run's own record).
+
+## 12. AMENDMENT (2026-08-20, append-only) — Amendment 10's hermes tool policy was never mechanically effective for ACP arms; R3 attempt 1 invalid; attempt-2 protocol
+
+**Measured (receipts in lcm-x#301):** `hermes tools disable` writes per-platform state for the
+cli/messaging platform list only; ACP sessions hardcode the `hermes-acp` toolset
+(terminal/read_file/search_files/execute_code/browser/delegate baked in) and never read the
+disable list — verified empirically (terminal executed in a home with cli+api_server disables).
+Consequences:
+- **R2s-A / R2s-A′ results STAND, relabeled "clean by AUDIT" not "by construction"**: their
+  per-session tool audits show ZERO generic-tool attempts (memory/session_search only) — the
+  restriction was behavioral reality, not an enforced mechanism.
+- **R3 attempt 1 is INVALID (unscored)**: its threaded PROBE session fired search_files/terminal
+  (its own lcm.db sqlite dump included) exposing 9 canary values; in a threaded session an
+  exposure persists in-context for every later probe, so per-turn containment (the Am.10 basis
+  for the one-shot arms) does not apply. Arm-level invalidation per the Am.9 exclusion rule.
+- **R3 attempt-2 protocol (pre-declared):** (i) the fresh home receives a pilot SOUL.md
+  behavioral instruction — answer only from memory/conversation; generic tools declared
+  off-limits (sha echoed in the run console); (ii) the post-run per-session tool audit is THE
+  GATE: any generic-tool result carrying a canary value ⇒ arm invalid; (iii) if attempt 2 also
+  trips the gate, R3 is declared **unmeasurable under the current ACP tool surface** (product
+  gap lcm-x#301) — a valid pilot outcome, not a retry loop.
