@@ -5234,9 +5234,17 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             # (coverage stays in the none/ok vocabulary, with its own reason),
             # and a genuine request-deadline overrun still falls through to the
             # exhaustion branch below.
+            # ``timeout``-shaped errors are not all deadline expiries: worker
+            # saturation returns the same shape (``_run_within_deadline``
+            # raises ``_WorkerCapacityError``; ``_lcm_grep_full_text_with_
+            # deadline`` converts both causes to the deadline payload). The
+            # cap may only take credit when the sub-deadline actually elapsed
+            # -- otherwise an arm that never ran would be reported as
+            # deliberately fenced.
             capped_expiry = (
                 fts_sub_budget_applied
                 and bool(fts_error.get("timeout"))
+                and time.monotonic() >= fts_deadline
                 and time.monotonic() < deadline
             )
             if capped_expiry:

@@ -2127,6 +2127,56 @@ def test_excluded_chunk_vectors_do_not_cap_the_fts_arm(recall_engine, monkeypatc
     assert captured["fts_deadline"] == 108.0
 
 
+def test_worker_saturation_is_not_reported_as_the_fts_cap(recall_engine, monkeypatch):
+    """A saturated worker pool returns the deadline-shaped payload without the
+    arm ever running, so it must not be reported as the deliberate cap firing.
+
+    ``_run_within_deadline`` raises ``_WorkerCapacityError`` when all slots are
+    busy and ``_lcm_grep_full_text_with_deadline`` converts that to the same
+    ``timeout: True`` payload as a real expiry. The cap may only take credit
+    when the sub-deadline actually elapsed; here the clock never advances, so
+    the honest disclosure is "unavailable", not "capped to preserve semantic
+    recall budget".
+    """
+    recall_engine._config.recall_query_timeout_s = 8.0
+    node = _add_summary(
+        recall_engine,
+        "live corpus while the fts worker pool is saturated",
+        session_id="session-a",
+        created_at=1.0,
+    )
+    _seed_summary_vectors(recall_engine, [(node, [1.0, 0.0])])
+
+    clock = [100.0]
+
+    def saturated_fts(_engine, _query, *, candidate_limit, deadline, excluded_session_ids):
+        del candidate_limit, deadline, excluded_session_ids
+        # No clock advance: the arm never acquired a worker slot.
+        return [], {
+            "error": "lcm_grep request deadline exceeded",
+            "mode": "recall",
+            "timeout": True,
+            "timeout_stage": "full_text",
+        }
+
+    monkeypatch.setattr(lcm_tools.time, "monotonic", lambda: clock[0])
+    _freeze_vector_store_clock(monkeypatch, clock)
+    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: MockProvider())
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_fts_arm", saturated_fts)
+
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "saturated workers", "include": "all", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    assert payload["provenance"]["coverage"]["fts"] == "none"
+    reasons = [r.strip() for r in payload["degraded_reason"].split(";")]
+    assert "full-text arm unavailable" in reasons
+    assert "full-text arm capped to preserve semantic recall budget" not in reasons
+
+
 def test_scope_resolution_timeout_does_not_cap_the_fts_arm(recall_engine, monkeypatch):
     """A timed-out scope resolution drops the vector arms, so it must not cap FTS.
 
