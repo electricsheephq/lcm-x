@@ -463,6 +463,9 @@ def run(args: argparse.Namespace) -> int:
         values = load_canary_values(canaries_path)
         lcm_db_hits = 0
         home = hermes_home
+        if home.suffix in {".yaml", ".yml"}:
+            # A config-file path was supplied; the store lives under its home dir.
+            home = home.parent
         for db in home.rglob("lcm.db"):
             blob = db.read_bytes()
             lcm_db_hits += sum(1 for v in values if v.encode() in blob)
@@ -522,6 +525,17 @@ def run(args: argparse.Namespace) -> int:
                 + (" (timeout)" if not completed else "")
                 + "\n"
             )
+            if not completed:
+                # A timed-out turn leaves the pty in an unknown state: a late
+                # response would be captured under the NEXT turn, corrupting
+                # answer attribution. Abort fail-closed; results so far are
+                # retained (registered semantics: partial data kept, never
+                # silently continued).
+                sys.stderr.write(
+                    f"[driver] ABORT: turn {turn_index} timed out; refusing to "
+                    "send further turns into an unknown pty state\n"
+                )
+                return 72
         try:
             session.send("/exit", min(args.turn_timeout, 30.0), args.quiet_seconds)
         except (OSError, ValueError):
