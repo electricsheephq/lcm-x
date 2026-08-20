@@ -108,24 +108,30 @@ Amendment 13.
 
 | arm | model | retention | traps | notes |
 |---|---|---|---|---|
-| R2s-S-ctrl | sol | **100%** (30/30) | 4/5* | same-day control: NO serving drift; sol single-session now 3/3 at 100% |
+| R2s-S-ctrl | sol | **100%** (30/30) | 4/5[^ctrl-trap] | same-day control: NO serving drift; sol single-session now 3/3 at 100% |
 | R2s-L-A | luna | 90.0% (27/30) | 5/5 | 3 misses ALL honest ABSTAIN, all E0 (deepest epoch) |
 | R2s-L-A′ | luna | **100%** (30/30) | 5/5 | all three E0 flips recovered — luna band 90–100, 3/35 discordant |
 | R2s-MC | sol, threshold 0.12 | 93.3% (28/30) | 5/5 | **UNDEREXPOSED** per the §13 validity gate (0 compaction events, see below); 2 misses honest ABSTAIN, 0 hallucinations at a 32.6K live window |
-*regex-missed abstention (frozen set honored, disclosed).
 
-**Luna verdict (pre-declared read):** luna's memory-tool retrieval depth is STOCHASTIC — it
-sometimes fails to surface the deepest-epoch facts and always abstains honestly when it does
-(zero hallucinations across both arms). Guidance: sol for load-bearing deep recall
-(deterministic 100% ×3); luna acceptable for cost-first workloads with fail-loud semantics.
-Served-model receipts from the host record both arms.
+[^ctrl-trap]: R2s-S-ctrl's 4/5 is a regex-missed abstention (frozen set honored, disclosed).
+
+**Luna verdict (pre-declared read, band-disciplined):** the sol-vs-luna retention difference
+(0 or 10 points depending on the luna arm) never exceeds luna's OWN repeated-run spread
+(10 points; discordance 3/30 canaries = 10%, traps excluded per §5), so **no model
+recommendation is licensed by these data** — sol's 3×100% vs luna's one 3-miss run in two is
+SUGGESTIVE of a depth-of-retrieval difference and nothing more; separating it needs more
+repetitions (P1). What IS established: luna's failure MODE — every miss was an honest
+E0 abstention, zero hallucinations, traps 5/5 both arms — so the cost tier fails loud, not
+wrong. Served-model receipts from the host record both arms.
 
 **Multi-compaction stress — the question was ill-posed for this architecture (measured):**
 lowering compression.threshold 0.5→0.12 (verified effective pre-spend: 32,640 tokens) produced
 ZERO compactions, not more. Re-examining the banked arms with timestamps: R2s-A's single
 compaction fired ~80 SECONDS into the run (source = material turns 1-2, ~30.6K tokens) — **on
-this path LCM compacts once, early, and never again at any threshold we set; everything after
-is store retrieval.** §13's regime-under-pressure caveat was therefore the right instinct but
+this path LCM compaction never recurred and never scaled in ANY tested configuration —
+once-early at threshold 0.5 (×3 runs), zero events at 0.12 — so compaction count is not
+controllable via compression.threshold, and the trigger semantics are unexplained (#314).
+Everything after the early window is store retrieval.** §13's regime-under-pressure caveat was therefore the right instinct but
 understated: compaction COUNT is not a controllable variable on the ACP path via
 compression.threshold, and "retention after a few compactions" reduces, for LCM, to "retention
 under retrieval at depth" — which the MC record measures anyway (93.3% at a 32.6K live window,
