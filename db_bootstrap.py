@@ -2680,10 +2680,34 @@ def _run_background_integrity_scan(
         try:
             meta_conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
             status = result.get("status")
+            # Fence the publish on our own scan-started stamp (compare-and-
+            # swap): a repair that mutated triggers/index while this scan was
+            # in flight DELETES the stamp, which invalidates the snapshot this
+            # result was computed from. Publishing a stale 'pass' would restore
+            # a fresh 24h marker over an index the repair just proved was
+            # behind. Claim first, publish only if the claim succeeded, all in
+            # ONE transaction so repair cannot interleave.
+            meta_conn.execute("BEGIN IMMEDIATE")
+            claim = meta_conn.execute(
+                "DELETE FROM metadata WHERE key = ? AND value = ?",
+                (_integrity_scan_started_key(spec), str(started_at)),
+            )
+            claimed = claim.rowcount == 1
             if status == "pass":
-                _record_integrity_checked(meta_conn, spec, now=started_at)
-                _clear_integrity_failed(meta_conn, spec)
+                # A 'pass' may publish ONLY when our claim survived: a repair
+                # that mutated triggers/index while this scan was in flight
+                # deletes the stamp, and a pass computed on the pre-repair
+                # snapshot could restore a fresh 24h marker over an index that
+                # went stale during the missing-trigger window.
+                if claimed:
+                    _record_integrity_checked(meta_conn, spec, now=started_at)
+                    _clear_integrity_failed(meta_conn, spec)
             elif status == "fail":
+                # A 'fail' publishes even when the claim was invalidated:
+                # trigger recreation does not repair token drift, so the
+                # evidence stays valid — and if a rebuild DID fix it, the next
+                # verified-pass clear removes the flag properly. Erring toward
+                # a recorded flag is the fail-safe direction.
                 _record_integrity_failed(
                     meta_conn, spec, detail=result.get("detail", ""), now=started_at
                 )
@@ -2693,9 +2717,8 @@ def _run_background_integrity_scan(
                     spec.table_name,
                     result.get("detail", ""),
                 )
-            # 'unchecked' (e.g. a read-only DB): leave the throttle marker unset
-            # so the next bind retries; do not stamp or flag.
-            _clear_scan_started(meta_conn, spec, expected=started_at)
+            # 'unchecked' (e.g. a read-only DB): leave the throttle marker
+            # unset so the next bind retries; do not stamp or flag.
             meta_conn.commit()
         finally:
             meta_conn.close()
@@ -3066,6 +3089,24 @@ def _fts_repair_ownership(conn: sqlite3.Connection):
         conn.execute(f"PRAGMA busy_timeout={previous_timeout_ms}")
 
 
+def _fts_verified_pass(
+    conn: sqlite3.Connection, spec: ExternalContentFtsSpec, *, now: float | None = None
+) -> bool:
+    """True only when the deep check RAN here, NOW, and returned 'pass'.
+
+    'unchecked' (read-only handle, transient non-corruption error) proves
+    nothing and must never authorize clearing ``fts_integrity_failed`` —
+    and neither may a pass computed BEFORE the caller held the write lock
+    (a background scan can record corruption in that window). Callers run
+    this inside their own write transaction.
+    """
+    result = check_external_content_fts_integrity(conn, spec)
+    if result.get("status") != "pass":
+        return False
+    _record_integrity_checked(conn, spec, now=now)
+    return True
+
+
 def repair_external_content_fts(
     conn: sqlite3.Connection,
     spec: ExternalContentFtsSpec,
@@ -3097,13 +3138,16 @@ def repair_external_content_fts(
             if not _fts_missing_triggers(conn, spec) and not _fts_stale_triggers(
                 conn, spec
             ):
-                # Clear only when the deep check actually ran this call
-                # (unthrottled). Under throttle `_fts_needs_rebuild` may have
-                # deferred the scan to the background worker, and that worker
-                # can record `fts_integrity_failed` concurrently — clearing
-                # here would erase evidence of drift nothing has repaired.
+                # Clearing requires a VERIFIED PASS inside our own write
+                # transaction — `not throttle` was not proof (an 'unchecked'
+                # deep check is indistinguishable from a pass at this point,
+                # and a pre-lock pass races the background scan's flag write).
                 if not throttle:
-                    _clear_integrity_failed(conn, spec)
+                    if conn.in_transaction:
+                        conn.commit()
+                    conn.execute("BEGIN IMMEDIATE")
+                    if _fts_verified_pass(conn, spec, now=now):
+                        _clear_integrity_failed(conn, spec)
                 conn.commit()
                 return {
                     "rebuilt": False,
@@ -3190,20 +3234,28 @@ def repair_external_content_fts(
             conn.execute(
                 "DELETE FROM metadata WHERE key = ?", (_integrity_marker_key(spec),)
             )
+        if rebuilt or triggers_were_missing or triggers_were_stale:
+            # Any index/trigger mutation invalidates an IN-FLIGHT background
+            # scan's claim: its result was computed against the pre-repair
+            # snapshot, and its publish is CAS-fenced on this stamp — deleting
+            # it here (inside the ownership transaction) makes a stale 'pass'
+            # unpublishable over the repaired state.
+            _clear_scan_started(conn, spec)
         # A completed repair resolves any prior background-scan corruption flag:
         # clear it in the SAME transaction that commits the rebuild so
         # `/lcm doctor` stops reporting issues-found (and the next self-healing
         # scan is not pushed out a full interval). Without this an explicit
         # `repair apply` left the flag stuck.
         #
-        # But only a repair that VERIFIED integrity may clear: a rebuild is
-        # known-consistent, and an unthrottled call ran the deep check itself.
-        # The throttled trigger-only path proves nothing about token drift —
-        # its deep check was deferred to the background scan, which can record
-        # `fts_integrity_failed` concurrently with this repair. Clearing there
-        # would leave the stale index in place while erasing the only evidence
-        # `/lcm doctor` has of it.
-        if rebuilt or not throttle:
+        # But only a repair that VERIFIED integrity may clear. A rebuild is
+        # known-consistent. Anything else must prove a pass HERE, inside the
+        # ownership transaction — `not throttle` was not proof: an 'unchecked'
+        # deep check (read-only handle, transient error) is indistinguishable
+        # from a pass upstream, and the pre-lock deep check races the
+        # background scan's flag write.
+        if rebuilt:
+            _clear_integrity_failed(conn, spec)
+        elif not throttle and _fts_verified_pass(conn, spec, now=now):
             _clear_integrity_failed(conn, spec)
 
     if not owns_transaction:

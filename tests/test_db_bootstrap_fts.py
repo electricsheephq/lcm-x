@@ -587,6 +587,68 @@ def test_trigger_repair_invalidates_fresh_integrity_marker(tmp_path, monkeypatch
     conn.close()
 
 
+def test_unchecked_deep_check_does_not_clear_integrity_flag(tmp_path, monkeypatch):
+    """'unchecked' proves nothing: an unthrottled no-op repair must not clear.
+
+    A read-only handle or transient error makes the deep check return
+    'unchecked', which upstream is indistinguishable from a pass. Clearing on
+    it would erase corruption evidence nothing verified.
+    """
+    monkeypatch.setenv(INTERVAL_ENV, "24")
+    conn = _make_conn(tmp_path)
+    spec = _spec()
+    ensure_external_content_fts(conn, spec)
+
+    db_bootstrap._record_integrity_failed(conn, spec, detail="pending drift")
+    conn.commit()
+
+    monkeypatch.setattr(
+        db_bootstrap,
+        "check_external_content_fts_integrity",
+        lambda *_a, **_k: {"status": "unchecked"},
+    )
+    repaired = db_bootstrap.repair_external_content_fts(conn, spec)
+
+    assert repaired["rebuilt"] is False
+    assert db_bootstrap.load_integrity_failed(conn, spec) is not None
+    conn.close()
+
+
+def test_trigger_repair_fences_inflight_scan_stamp(tmp_path, monkeypatch):
+    """An index/trigger mutation deletes the in-flight scan's claim stamp.
+
+    The background scan's 'pass' publish is CAS-fenced on its started-stamp;
+    a repair that recreated triggers deletes the stamp inside its ownership
+    transaction so a pass computed on the pre-repair snapshot cannot restore
+    a fresh marker over an index that went stale in the missing-trigger
+    window. ('fail' results still publish — drift evidence survives repair.)
+    """
+    from hermes_lcm.store import build_message_fts_spec
+
+    monkeypatch.setenv(INTERVAL_ENV, "24")
+    conn = _make_conn(tmp_path)
+    spec = build_message_fts_spec()
+    ensure_external_content_fts(conn, spec)
+
+    db_bootstrap._record_scan_started(conn, spec, now=123.0)
+    conn.commit()
+
+    trigger_name = db_bootstrap._extract_trigger_name(spec.trigger_sqls[0])
+    assert trigger_name is not None
+    conn.execute(f"DROP TRIGGER {db_bootstrap.quote_sql_identifier(trigger_name)}")
+    conn.commit()
+
+    repaired = db_bootstrap.repair_external_content_fts(conn, spec, throttle=True)
+
+    assert repaired["triggers_recreated"] is True
+    stamp = conn.execute(
+        "SELECT value FROM metadata WHERE key = ?",
+        (db_bootstrap._integrity_scan_started_key(spec),),
+    ).fetchone()
+    assert stamp is None
+    conn.close()
+
+
 def test_explicit_repair_rebuilds_same_count_corruption_with_missing_triggers(tmp_path):
     """Explicit repair must fix index drift even while recreating triggers."""
     from hermes_lcm.store import build_message_fts_spec
@@ -693,6 +755,14 @@ def test_throttled_startup_with_missing_triggers_still_dispatches_background_sca
     assert repaired["triggers_recreated"] is True
     verify = sqlite3.connect(_db_file(tmp_path))
     try:
+        # The scan COMPLETED (its started-stamp is gone — either consumed by
+        # its own publish claim or fenced by the repair), so the flag
+        # assertion below observes a finished scan, not a timeout.
+        stamp = verify.execute(
+            "SELECT value FROM metadata WHERE key = ?",
+            (db_bootstrap._integrity_scan_started_key(spec),),
+        ).fetchone()
+        assert stamp is None
         assert db_bootstrap.load_integrity_failed(verify, spec) is not None
     finally:
         verify.close()
