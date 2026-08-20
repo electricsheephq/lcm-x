@@ -7,6 +7,31 @@ version tags but does not have a destination GitHub Release object for RC2.
 
 (nothing yet)
 
+## v0.23.0 — 2026-08-21
+
+The correctness batch: 17 product PRs, each adversarially reviewed with RED/GREEN receipts;
+score-sensitive changes carry architect verdicts (#252) and boundary rows in
+`bench/BASELINE-LEDGER.md`.
+
+- Replay-proof/data-integrity: #177 (occurrence-bounded replay proofs + tool-name identity;
+  one-time snapshot-digest re-persist on upgrade), #203 (OOB proofs bound to unique row
+  identity; ID-less rows fail closed), #259 (fork-guard removed per architect veto; drop
+  contract fenced).
+- Retrieval: #173 (FTS cannot starve semantic recall; hardened preflight), #183
+  (cross-session summary DAG expansion), #184 (session exclusion filters), #273 (crashed
+  search discloses, never reports 'ok'), #172 (configurable Voyage reranker).
+- Reliability/ops: #261 (FTS bootstrap race; integrity state publishes only with
+  proof-at-publish-time), #179 (doctor payload-ref provenance), #168 (durable compaction
+  totals in status), #198 (separate summary/expansion reasoning controls; warn-and-ignore
+  config posture).
+- Teams candidate (NOT enabled): #286 — AccessContextV1 contract package, pure additive.
+- Tests/docs: #254 #257 (salvaged regression coverage), #262 (gpt-5.4 retirement note).
+- Governance: #241 — the main ruleset is satisfiable again (phantom CodeQL contexts dropped,
+  last-push-approval deadlock removed); --admin is an exception, not the path.
+
+Known gaps are listed in `.github/release-notes/v0.23.0.md` (notably #90 under
+investigation, #244/#288/#265/#260 accepted follow-ups, Teams slices 2-5 in v0.24.0).
+
 ## v0.22.0 - 2026-08-19
 
 - Rename the project-facing documentation to **LCM-X — Lossless Context Memory
