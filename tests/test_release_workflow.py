@@ -3,7 +3,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
-RELEASE_VERSION = "0.22.0"
+RELEASE_VERSION = "0.23.0"
 RELEASE_NOTES = REPO_ROOT / ".github" / "release-notes" / f"v{RELEASE_VERSION}.md"
 
 
@@ -82,9 +82,10 @@ def test_release_candidate_notes_cover_only_the_merged_release_scope():
     notes = RELEASE_NOTES.read_text(encoding="utf-8")
 
     assert notes.startswith(f"# hermes-lcm v{RELEASE_VERSION}\n")
-    assert "#492" in notes
+    assert "#177" in notes
     assert "## Highlights" in notes
     assert "## Changes" in notes
     assert "## Contributors" in notes
-    assert "UTF-8 character boundaries" in notes
+    assert "occurrence-bounded" in notes
+    assert "DORMANT" in notes
     assert len(notes.splitlines()) <= 60

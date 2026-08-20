@@ -7,7 +7,7 @@ version tags but does not have a destination GitHub Release object for RC2.
 
 (nothing yet)
 
-## v0.23.0 — 2026-08-21
+## v0.23.0 - 2026-08-21
 
 The correctness batch: 17 product PRs, each adversarially reviewed with RED/GREEN receipts;
 score-sensitive changes carry architect verdicts (#252) and boundary rows in
