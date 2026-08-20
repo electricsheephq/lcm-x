@@ -4699,9 +4699,13 @@ def _lcm_recall_has_usable_vector_corpus(
     """Return whether a requested semantic arm has vectors for its selected profile.
 
     This read-only preflight mirrors ``VectorStore`` profile ordering and requires
-    a live metadata+vector pair. Merely configuring embeddings or registering an
-    empty profile therefore cannot shorten the only usable FTS fallback. Missing
-    or partial optional schema fails closed without materializing feature tables.
+    a live metadata+vector pair whose SOURCE ROW is still present -- the same
+    liveness predicate the real scans apply (``summary_nodes`` for the summary
+    arm, ``messages`` for the chunk arm). Merely configuring embeddings,
+    registering an empty profile, or leaving orphaned vectors behind a
+    best-effort purge therefore cannot shorten the only usable FTS fallback.
+    Missing or partial optional schema fails closed without materializing
+    feature tables.
     """
     provider_name = str(provider_name or "").strip().lower()
     # Profiles are registered under ``provider.provider_id`` (command.py warmup),
@@ -4739,6 +4743,12 @@ def _lcm_recall_has_usable_vector_corpus(
             1000,
         )
 
+        def table_columns(table: str) -> set[str]:
+            return {
+                str(row[1])
+                for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+
         def corpus_has_vectors(
             *,
             task: str,
@@ -4746,6 +4756,8 @@ def _lcm_recall_has_usable_vector_corpus(
             meta_table: str,
             vector_table: str,
             id_column: str,
+            source_join: str,
+            source_where: str = "",
         ) -> bool:
             profile = conn.execute(
                 """
@@ -4768,27 +4780,54 @@ def _lcm_recall_has_usable_vector_corpus(
                 JOIN {vector_table} v
                   ON v.{id_column} = m.{id_column}
                  AND v.identity_hash = m.identity_hash
-                WHERE m.identity_hash = ? AND m.archived = 0
+                {source_join}
+                WHERE m.identity_hash = ? AND m.archived = 0{source_where}
                 LIMIT 1
                 """,
                 (identity_hash,),
             ).fetchone()
             return row is not None
 
-        if run_summary and corpus_has_vectors(
-            task="summary",
-            selected_model=model_name,
-            meta_table="lcm_embedding_meta",
-            vector_table="lcm_embedding_vectors",
-            id_column="embedded_id",
-        ):
-            return True
+        # A metadata+vector pair is NOT a usable corpus on its own: both real
+        # scans INNER-join the source row, so a vector whose source is gone (or,
+        # for summaries, suppressed) scores nothing. That state is reachable and
+        # supported on both arms -- ``_purge_embeddings_for_nodes``
+        # (engine.py:4116-4147) and ``_archive_chunks_for_messages``
+        # (engine.py:4149-4183) both swallow failures on purpose, the former
+        # precisely because "the summary_nodes join still keeps orphaned vectors
+        # out of ranking". Without these joins such an orphan reports a semantic
+        # route, cuts FTS to a quarter of the budget, and leaves the request with
+        # no arm that can return anything. Authority for the predicates:
+        # vector_store.py:1414 + 1892 with suppressed_at at 1395/1713/1872
+        # (summary), vector_store.py:1839 + 2647 (chunk).
+        if run_summary:
+            # Legacy databases predate ``suppressed_at``; the real scan gates the
+            # clause on the column existing, so this one does too.
+            summary_where = (
+                " AND src.suppressed_at IS NULL"
+                if "suppressed_at" in table_columns("summary_nodes")
+                else ""
+            )
+            if corpus_has_vectors(
+                task="summary",
+                selected_model=model_name,
+                meta_table="lcm_embedding_meta",
+                vector_table="lcm_embedding_vectors",
+                id_column="embedded_id",
+                source_join=(
+                    "JOIN summary_nodes src "
+                    "ON src.node_id = CAST(m.embedded_id AS INTEGER)"
+                ),
+                source_where=summary_where,
+            ):
+                return True
         if run_chunk and corpus_has_vectors(
             task="chunk",
             selected_model=default_chunk_model(provider_name, model_name),
             meta_table="lcm_chunk_meta",
             vector_table="lcm_chunk_vectors",
             id_column="chunk_id",
+            source_join="JOIN messages src ON src.store_id = m.store_id",
         ):
             return True
         return False

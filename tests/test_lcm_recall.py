@@ -1705,6 +1705,129 @@ def test_fts_keeps_full_budget_when_requested_vector_corpus_is_unbackfilled(
     assert payload["provenance"]["coverage"]["chunk"] == "none"
 
 
+def _capture_fts_deadline(monkeypatch, clock):
+    """Freeze both clocks, stub the FTS arm, and report the deadline it was given."""
+    captured: dict[str, float] = {}
+
+    def fts_arm(_engine, _query, *, candidate_limit, deadline):
+        del candidate_limit
+        captured["fts_deadline"] = deadline
+        return [], None
+
+    monkeypatch.setattr(lcm_tools.time, "monotonic", lambda: clock[0])
+    _freeze_vector_store_clock(monkeypatch, clock)
+    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: MockProvider())
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_fts_arm", fts_arm)
+    return captured
+
+
+def test_orphaned_summary_vectors_do_not_cap_the_fts_arm(recall_engine, monkeypatch):
+    """A vector whose ``summary_nodes`` row is gone is not a semantic route.
+
+    ``LCMEngine._purge_embeddings_for_nodes`` swallows purge failures ON PURPOSE
+    (engine.py:4116-4136 -- "the summary_nodes join still keeps orphaned vectors
+    out of ranking"), so deleted-node + surviving-vector is a supported state.
+    The real summary scan inner-joins ``summary_nodes``
+    (vector_store.py:1414/1892), so the orphan scores nothing. Capping FTS to 25%
+    on its account would leave the request with NO arm that can return anything:
+    a recoverable slow-FTS run turned into an empty one.
+
+    The live-node control is
+    ``test_provider_alias_uses_existing_vector_corpus_for_fts_fairness``, which
+    pins the same corpus at the capped 102.0 deadline.
+    """
+    recall_engine._config.recall_query_timeout_s = 8.0
+    node = _add_summary(
+        recall_engine,
+        "summary behind an orphaned vector",
+        session_id="session-a",
+        created_at=1.0,
+    )
+    _seed_summary_vectors(recall_engine, [(node, [1.0, 0.0])])
+    # The deletion path engine.py takes on session reset, WITHOUT the
+    # best-effort embedding purge -- i.e. the purge that was allowed to fail.
+    assert recall_engine._dag.delete_session_nodes("session-a") == 1
+
+    captured = _capture_fts_deadline(monkeypatch, [100.0])
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "orphaned summary corpus", "include": "all", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    # Full 8s budget, not the 25% cap (102.0).
+    assert captured["fts_deadline"] == 108.0
+    # ...and the semantic arm really did produce nothing, which is exactly why
+    # the cap would have been unrecoverable rather than merely conservative.
+    assert payload["provenance"]["coverage"]["summary"] == "none"
+    assert payload["hits"] == []
+
+
+def test_orphaned_chunk_vectors_do_not_cap_the_fts_arm(recall_engine, monkeypatch):
+    """Same fence on the chunk arm: its scan inner-joins ``messages``.
+
+    ``MessageStore.delete_session_messages`` (store.py:554-563) drops rows
+    without touching ``lcm_chunk_meta``, so chunk vectors outlive their source
+    message. The bounded and full-corpus chunk scans both require the message row
+    (vector_store.py:1839/2647), so those vectors cannot answer either.
+    """
+    recall_engine._config.recall_query_timeout_s = 8.0
+    store_id = recall_engine._store.append(
+        CURRENT, {"role": "user", "content": "kanban dashboard sprint chunk"}
+    )
+    _seed_chunk_vectors(recall_engine, [(store_id, 0, 0, 20, [1.0, 0.0])])
+    assert recall_engine._store.delete_session_messages(CURRENT) == 1
+
+    captured = _capture_fts_deadline(monkeypatch, [100.0])
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "orphaned chunk corpus", "include": "verbatim", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    assert captured["fts_deadline"] == 108.0
+    assert payload["provenance"]["coverage"]["chunk"] == "none"
+    assert payload["hits"] == []
+
+
+def test_suppressed_summary_corpus_does_not_cap_the_fts_arm(recall_engine, monkeypatch):
+    """Suppression is the scan's other liveness filter, so the preflight honors it.
+
+    ``vector_store.py:1395-1396`` (and 1713/1872) drop suppressed nodes from every
+    summary scan when the column exists. A corpus whose only vectors sit on
+    suppressed nodes therefore returns nothing, so it must not shorten FTS either.
+    """
+    recall_engine._config.recall_query_timeout_s = 8.0
+    node = _add_summary(
+        recall_engine,
+        "suppressed summary with a live vector",
+        session_id="session-a",
+        created_at=1.0,
+    )
+    _seed_summary_vectors(recall_engine, [(node, [1.0, 0.0])])
+    conn = recall_engine._dag.connection
+    conn.execute("ALTER TABLE summary_nodes ADD COLUMN suppressed_at TEXT")
+    conn.execute(
+        "UPDATE summary_nodes SET suppressed_at = '2026-08-20' WHERE node_id = ?",
+        (node,),
+    )
+    conn.commit()
+
+    captured = _capture_fts_deadline(monkeypatch, [100.0])
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "suppressed summary corpus", "include": "all", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    assert captured["fts_deadline"] == 108.0
+    assert payload["provenance"]["coverage"]["summary"] == "none"
+    assert payload["hits"] == []
+
+
 def test_bounded_chunk_coverage_surfaces_as_degraded(recall_engine, monkeypatch):
     """SCAN-1: a chunk arm capped by recall_scan_max_rows reports a
     degraded_reasons entry naming the arm + scanned/total, instead of silently
