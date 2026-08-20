@@ -137,14 +137,61 @@ def _compaction_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return found
 
 
+def _turn_model(events: list[dict[str, Any]]) -> str | None:
+    for event in events:
+        for node in _walk(event):
+            if node.get("type") == "turn_context":
+                value = node.get("model")
+                if isinstance(value, str) and value:
+                    return value
+    return None
+
+
+def _served_model_from_rollout(session_id: str, sessions_root: Path) -> str | None:
+    """Read the LAST turn_context model from the persisted rollout.
+
+    ``--json`` stdout carries only public events (verified on 0.148.0: no
+    turn_context, no model field anywhere), so the served model is only
+    observable in the rollout file.
+    """
+    candidates = sorted(
+        path
+        for path in sessions_root.expanduser().rglob("*.jsonl")
+        if session_id in path.name
+    )
+    if not candidates:
+        return None
+    served: str | None = None
+    with candidates[-1].open(encoding="utf-8") as handle:
+        for line in handle:
+            if "turn_context" not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            for node in _walk(row):
+                if node.get("type") == "turn_context":
+                    value = node.get("model")
+                    if isinstance(value, str) and value:
+                        served = value
+    return served
+
+
 def _command(codex_bin: Path, model: str, text: str, sid: str | None) -> list[str]:
     if sid:
+        # -m is REQUIRED on resume too: without it, resumed turns silently
+        # fall back to the account/config default model (measured: an R4-ref
+        # run requested gpt-5.4 and got 69/70 turns of the gpt-5.6-sol
+        # default — invisible whenever requested == default).
         return [
             str(codex_bin),
             "exec",
             "resume",
             sid,
             "--json",
+            "-m",
+            model,
             "--skip-git-repo-check",
             text,
         ]
@@ -254,6 +301,27 @@ def drive(args: argparse.Namespace) -> int:
                 manifest["sid"] = actual_sid
                 _write_manifest(manifest_path, manifest)
 
+            # Fail-loud model identity per turn (turn 1 included — sid is
+            # known by here): the arm is void if any turn served a different
+            # model than requested (the resume-fallback class above). stdout
+            # events lack the model (verified on 0.148.0: public events only),
+            # so the persisted rollout is the source of truth; stdout is a
+            # forward-compat fallback. FAIL-CLOSED: an undeterminable model
+            # aborts the arm.
+            served = _turn_model(events)
+            if served is None:
+                served = _served_model_from_rollout(actual_sid, args.sessions_root)
+            if served is None:
+                raise RuntimeError(
+                    f"Codex turn {turn_index}: served model undeterminable from "
+                    f"stdout or rollout for session {actual_sid!r} — fail-closed"
+                )
+            if served != args.model:
+                raise RuntimeError(
+                    f"Codex turn {turn_index} served model {served!r}, "
+                    f"requested {args.model!r} — arm invalid (model drift)"
+                )
+
             usage = _usage(events)
             telemetry = {
                 "turn_index": turn_index,
@@ -287,6 +355,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--probes", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--resume-sid")
+    parser.add_argument(
+        "--sessions-root",
+        type=Path,
+        default=Path("~/.codex/sessions"),
+        help="Codex rollout root for the served-model assertion.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser
 

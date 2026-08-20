@@ -749,9 +749,17 @@ def test_drive_codex_subprocess_gets_devnull_stdin_and_turn_timeout(tmp_path, mo
         return sp.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(drive_codex.subprocess, "run", fake_run)
+    sessions_root = tmp_path / "sessions"
+    day = sessions_root / "2026" / "08" / "21"
+    day.mkdir(parents=True)
+    (day / "rollout-x-t-1.jsonl").write_text(
+        '{"type":"turn_context","payload":{"type":"turn_context","model":"gpt-5.6-sol"}}\n',
+        encoding="utf-8",
+    )
     args = argparse.Namespace(
         codex_bin=fake_bin, model="gpt-5.6-sol", material=material,
         probes=probes, out_dir=out_dir, resume_sid=None, dry_run=False,
+        sessions_root=sessions_root,
     )
     drive_codex.drive(args)
 
@@ -779,6 +787,7 @@ def test_drive_codex_turn_timeout_aborts_with_code_72(tmp_path, monkeypatch):
     args = argparse.Namespace(
         codex_bin=fake_bin, model="gpt-5.6-sol", material=material,
         probes=probes, out_dir=out_dir, resume_sid=None, dry_run=False,
+        sessions_root=tmp_path / "sessions",
     )
     with pytest.raises(SystemExit) as excinfo:
         drive_codex.drive(args)
@@ -809,3 +818,50 @@ def test_score_probes_accepts_drive_codex_result_rows(tmp_path):
     payload = score_probes.score(results, canaries, probes)
     assert payload["probes"][0]["classification"] == "CORRECT"
     assert payload["totals"]["retention"] == 1.0
+
+
+def test_drive_codex_resume_command_pins_model_and_asserts_served_model(tmp_path, monkeypatch):
+    # Measured defect: `exec resume` without -m silently fell back to the
+    # account default model (an R4 arm requested gpt-5.4, got 69/70 turns of
+    # gpt-5.6-sol). Resume commands must carry -m, and a served-model
+    # mismatch must fail loud.
+    import argparse
+    import subprocess as sp
+
+    cmd = drive_codex._command(tmp_path / "codex", "gpt-5.4", "hello", "sid-1")
+    assert "-m" in cmd and cmd[cmd.index("-m") + 1] == "gpt-5.4"
+
+    material = tmp_path / "turns.jsonl"
+    _jsonl(material, [{"text": "turn one"}])
+    probes = tmp_path / "probes.jsonl"
+    probes.write_text("", encoding="utf-8")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    fake_bin = tmp_path / "codex"
+    fake_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def fake_run(command, **kwargs):
+        # Real 0.148.0 --json stdout: public events only, NO turn_context.
+        stdout = '{"type":"thread.started","thread_id":"t-1"}\n'
+        return sp.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(drive_codex.subprocess, "run", fake_run)
+    sessions_root = tmp_path / "sessions"
+    day = sessions_root / "2026" / "08" / "21"
+    day.mkdir(parents=True)
+    (day / "rollout-2026-08-21T00-00-00-t-1.jsonl").write_text(
+        '{"type":"turn_context","payload":{"type":"turn_context","model":"gpt-5.6-sol"}}\n',
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(
+        codex_bin=fake_bin, model="gpt-5.4", material=material,
+        probes=probes, out_dir=out_dir, resume_sid=None, dry_run=False,
+        sessions_root=sessions_root,
+    )
+    with pytest.raises(RuntimeError, match="model drift"):
+        drive_codex.drive(args)
+
+    # FAIL-CLOSED: no rollout found -> undeterminable -> hard error.
+    (day / "rollout-2026-08-21T00-00-00-t-1.jsonl").unlink()
+    with pytest.raises(RuntimeError, match="fail-closed"):
+        drive_codex.drive(args)

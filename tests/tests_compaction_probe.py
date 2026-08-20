@@ -96,7 +96,11 @@ def test_drive_codex_dry_run_echoes_exact_command_shapes(tmp_path, capsys):
     ) == 0
     lines = capsys.readouterr().out.splitlines()
     assert lines[0].endswith("exec --json -m gpt-5.6-sol --skip-git-repo-check 'material text'")
-    assert lines[1].endswith("exec resume '<THREAD_ID>' --json --skip-git-repo-check 'probe text'")
+    # resume now pins -m (the R4 model-fallback fix): without it, resumed
+    # turns silently serve the account default model.
+    assert lines[1].endswith(
+        "exec resume '<THREAD_ID>' --json -m gpt-5.6-sol --skip-git-repo-check 'probe text'"
+    )
     assert all("--ephemeral" not in line for line in lines)
     manifest = json.loads((out_dir / "run.manifest.json").read_text())
     assert manifest["sid"] is None
@@ -118,9 +122,15 @@ def test_parse_named_real_rollouts(tmp_path, session_id, expected_compactions):
     report = parser.parse_rollout(session_id, sessions_root)
     assert report["model_context_window"] == 258400
     assert report["token_series"]
-    assert len(report["compactions"]) == expected_compactions
+    # The named rollouts are LIVE files under ~/.codex/sessions: an
+    # interactive session can keep running and compact again after this
+    # expectation was recorded (measured: the 3-compaction reference grew to
+    # 9). Compaction count is monotone on a living session, so assert the floor.
+    assert len(report["compactions"]) >= expected_compactions
     if expected_compactions:
-        assert [row["window_number"] for row in report["compactions"]] == [1, 2, 3]
+        # Same live-file caveat: assert the recorded prefix, not the full
+        # (still-growing) sequence.
+        assert [row["window_number"] for row in report["compactions"]][:3] == [1, 2, 3]
         # This rollout's schema carries no ContextCompaction completion items:
         # stall must be reported as UNMEASURED (null + source), never as the
         # marker-spacing milliseconds (that would fabricate a metric).
