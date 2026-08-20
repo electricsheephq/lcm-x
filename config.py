@@ -205,7 +205,12 @@ def _load_hermes_config_yaml() -> dict[str, Any]:
     return root
 
 
-_SUPPORTED_LCM_CONFIG_YAML_KEYS = {"context_threshold", "model_thresholds"}
+_SUPPORTED_LCM_CONFIG_YAML_KEYS = {
+    "context_threshold",
+    "model_thresholds",
+    "summary_reasoning_effort",
+    "expansion_reasoning_effort",
+}
 
 
 def _ignored_lcm_config_yaml_keys(cfg: dict[str, Any] | None = None) -> list[str]:
@@ -343,6 +348,52 @@ def _hermes_auxiliary_compression_timeout_ms_with_source(default: int) -> tuple[
         return int(float(value) * 1000), "config_yaml:auxiliary.compression.timeout"
     except Exception:
         return default, "default"
+
+
+def _lcm_config_string_with_source(env_name: str, yaml_key: str, default: str) -> tuple[str, str]:
+    env_value = os.environ.get(env_name)
+    if env_value is not None:
+        return env_value, "env"
+    cfg = _load_hermes_config_yaml()
+    try:
+        lcm_section = cfg.get("lcm") or {}
+        if isinstance(lcm_section, dict):
+            value = lcm_section.get(yaml_key)
+            if value is not None:
+                return str(value), f"config_yaml:lcm.{yaml_key}"
+    except Exception:
+        return default, "default"
+    return default, "default"
+
+
+_SUPPORTED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
+
+
+def _normalize_reasoning_effort(value: str) -> str:
+    """Return a supported reasoning-effort token, or "" when unset/unsupported."""
+    normalized = value.strip().lower()
+    return normalized if normalized in _SUPPORTED_REASONING_EFFORTS else ""
+
+
+def _lcm_reasoning_effort_with_source(
+    env_name: str, yaml_key: str, default: str
+) -> tuple[str, str, str | None]:
+    """Resolve a reasoning-effort setting, ignoring unsupported values.
+
+    An unsupported configured value falls back to the safe default (empty = the
+    task/provider default) and reports a warning that ``/lcm doctor`` and
+    ``lcm_status`` surface, rather than failing the whole config load over one
+    misspelled setting.
+    """
+    raw, source = _lcm_config_string_with_source(env_name, yaml_key, default)
+    if raw.strip() and not _normalize_reasoning_effort(raw):
+        logger.warning(
+            "unsupported %s=%r ignored; using the task/provider reasoning default",
+            yaml_key,
+            raw,
+        )
+        return default, "default", f"invalid {yaml_key}={raw!r} ignored"
+    return _normalize_reasoning_effort(raw), source, None
 
 
 def _hermes_codex_gpt55_autoraise_with_source(default: bool) -> tuple[bool, str]:
@@ -678,6 +729,8 @@ class LCMConfig:
 
     # -- Models ---
     summary_model: str = ""       # empty = use Hermes auxiliary model
+    # Optional reasoning override for summary LLM calls. Empty = use task/default routing.
+    summary_reasoning_effort: str = ""
     # Optional fallback summary models tried after summary_model/task default.
     summary_fallback_models: list[str] = field(default_factory=list)
     # Consecutive failed summary calls before a route is skipped temporarily.
@@ -692,6 +745,8 @@ class LCMConfig:
     # Backoff, in seconds, after the spend window is exhausted.
     summary_spend_backoff_seconds: float = 1800.0
     expansion_model: str = ""     # empty = fall back to summary_model / Hermes auxiliary model
+    # Optional reasoning override for lcm_expand_query synthesis calls.
+    expansion_reasoning_effort: str = ""
     # Serialized summary/raw/child-source/externalized context budget fed to lcm_expand_query's auxiliary LLM before it returns a bounded answer.
     expansion_context_tokens: int = 32_000
 
@@ -951,6 +1006,14 @@ class LCMConfig:
             c.summary_spend_backoff_seconds,
         )
         _record("summary_spend_backoff_seconds", source, warning)
+        c.summary_reasoning_effort, source, warning = _lcm_reasoning_effort_with_source(
+            "LCM_SUMMARY_REASONING_EFFORT", "summary_reasoning_effort", c.summary_reasoning_effort
+        )
+        _record("summary_reasoning_effort", source, warning)
+        c.expansion_reasoning_effort, source, warning = _lcm_reasoning_effort_with_source(
+            "LCM_EXPANSION_REASONING_EFFORT", "expansion_reasoning_effort", c.expansion_reasoning_effort
+        )
+        _record("expansion_reasoning_effort", source, warning)
         summary_timeout_default, summary_timeout_source = _hermes_auxiliary_compression_timeout_ms_with_source(
             c.summary_timeout_ms
         )

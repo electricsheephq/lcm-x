@@ -267,6 +267,366 @@ def test_summary_hit_carries_direct_source_store_id(recall_engine, monkeypatch):
     assert hit["store_id"] == store_id
 
 
+def test_recall_excludes_sessions_from_lexical_summary_and_chunk_candidates(
+    recall_engine, monkeypatch
+):
+    for session_id in (CURRENT, "session-a", "session-b"):
+        store_id = recall_engine._store.append(
+            session_id,
+            {"role": "user", "content": "kanban dashboard sprint retained detail"},
+        )
+        node_id = _add_summary(
+            recall_engine,
+            "kanban dashboard sprint retained summary",
+            session_id=session_id,
+            created_at=5.0,
+        )
+        _seed_summary_vectors(recall_engine, [(node_id, [1.0, 0.0])])
+        _seed_chunk_vectors(recall_engine, [(store_id, 0, 0, 39, [1.0, 0.0])])
+
+    payload = _recall(
+        recall_engine,
+        monkeypatch,
+        include="all",
+        scope_bias=0.0,
+        limit=25,
+        exclude_current_session=True,
+        exclude_session_ids=["session-a"],
+    )
+
+    assert payload["hits"]
+    assert {hit["session_id"] for hit in payload["hits"]} == {"session-b"}
+    assert {arm for hit in payload["hits"] for arm in hit["arms"]} == {
+        "fts",
+        "summary",
+        "chunk",
+    }
+
+
+def test_recall_rejects_non_list_session_exclusions(recall_engine):
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "kanban", "exclude_session_ids": "session-a"},
+            engine=recall_engine,
+        )
+    )
+
+    assert payload == {"error": "exclude_session_ids must be an array of strings"}
+
+
+@pytest.mark.parametrize("invalid_id", ["", "   ", 7, None])
+def test_recall_rejects_invalid_session_exclusion_entries(recall_engine, invalid_id):
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "kanban", "exclude_session_ids": [invalid_id]},
+            engine=recall_engine,
+        )
+    )
+
+    assert payload == {
+        "error": "exclude_session_ids must contain only non-empty strings"
+    }
+
+
+def test_recall_excludes_sessions_before_the_summary_candidate_cap(
+    recall_engine, monkeypatch
+):
+    vectors = []
+    for index in range(50):
+        node_id = _add_summary(
+            recall_engine,
+            f"crowding summary {index}",
+            session_id="crowding-session",
+            created_at=float(index + 2),
+        )
+        vectors.append((node_id, [1.0, 0.0]))
+    kept = _add_summary(
+        recall_engine,
+        "eligible lower-ranked summary",
+        session_id="kept-session",
+        created_at=1.0,
+    )
+    vectors.append((kept, [0.5, 0.8660254]))
+    _seed_summary_vectors(recall_engine, vectors)
+
+    payload = _recall(
+        recall_engine,
+        monkeypatch,
+        include="summaries",
+        scope_bias=0.0,
+        limit=1,
+        exclude_session_ids=["crowding-session"],
+    )
+
+    assert [hit["node_id"] for hit in payload["hits"]] == [kept]
+
+
+def test_recall_excludes_sessions_before_the_chunk_candidate_cap(
+    recall_engine, monkeypatch
+):
+    vectors = []
+    for index in range(50):
+        store_id = recall_engine._store.append(
+            "crowding-session",
+            {"role": "user", "content": f"unrelated crowding chunk {index}"},
+        )
+        vectors.append((store_id, 0, 0, 20, [1.0, 0.0]))
+    kept = recall_engine._store.append(
+        "kept-session",
+        {"role": "user", "content": "eligible lower-ranked chunk"},
+    )
+    vectors.append((kept, 0, 0, 20, [0.5, 0.8660254]))
+    _seed_chunk_vectors(recall_engine, vectors)
+
+    payload = _recall(
+        recall_engine,
+        monkeypatch,
+        include="verbatim",
+        scope_bias=0.0,
+        limit=1,
+        exclude_session_ids=["crowding-session"],
+    )
+
+    assert [hit["store_id"] for hit in payload["hits"]] == [kept]
+
+
+def test_recall_rejects_non_boolean_current_session_exclusion(recall_engine):
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "kanban", "exclude_current_session": "false"},
+            engine=recall_engine,
+        )
+    )
+
+    assert payload == {"error": "exclude_current_session must be a boolean"}
+
+
+def test_exclusion_session_scope_never_scans_the_whole_archive(recall_engine):
+    """The eligible-session whitelist resolves by indexed seek, not a corpus scan.
+
+    Both scope tables carry a session_id-leading index, so DISTINCT session_id
+    must come from a skip-scan. A plan that SCANs either table, or sorts a
+    temp B-tree, makes an exclusion cost O(rows) on a large archive.
+    """
+    connection = recall_engine._store.connection
+    for table in lcm_tools._RETRIEVAL_SESSION_SCOPE_TABLES:
+        sql = lcm_tools._RETRIEVAL_DISTINCT_SESSIONS_SQL.format(table=table)
+        plan = " | ".join(
+            str(row[3])
+            for row in connection.execute("EXPLAIN QUERY PLAN " + sql).fetchall()
+        )
+        assert f"SEARCH {table}" in plan, plan
+        assert f"SCAN {table}" not in plan, plan
+        assert "TEMP B-TREE" not in plan, plan
+
+
+def test_exclusion_session_scope_matches_not_in_semantics(recall_engine):
+    """The Python set difference is exactly the SQL NOT IN it replaced."""
+    for session_id in ("session-a", "session-b", "session-c"):
+        recall_engine._store.append(
+            session_id, {"role": "user", "content": "kanban detail"}
+        )
+    _add_summary(
+        recall_engine, "kanban summary", session_id="session-d", created_at=5.0
+    )
+
+    candidates, timed_out = lcm_tools._retrieval_candidate_session_ids(
+        recall_engine, {"session-b", "unknown-session"}
+    )
+
+    assert timed_out is False
+    # session-d is summary-only, so both scope tables must contribute.
+    assert candidates == ["session-a", "session-c", "session-d"]
+
+
+def test_exclusion_session_scope_returns_none_only_without_exclusions(recall_engine):
+    assert lcm_tools._retrieval_candidate_session_ids(recall_engine, set()) == (
+        None,
+        False,
+    )
+
+
+def test_exclusion_session_scope_fails_closed_on_an_expired_deadline(recall_engine):
+    """An interrupted enumeration must never drop the caller's hard filter.
+
+    Returning None here would widen the scope back to the whole archive and
+    silently surface the very sessions the caller excluded.
+    """
+    for session_id in ("session-a", "session-b"):
+        recall_engine._store.append(
+            session_id, {"role": "user", "content": "kanban detail"}
+        )
+
+    candidates, timed_out = lcm_tools._retrieval_candidate_session_ids(
+        recall_engine, {"session-a"}, deadline=time.monotonic() - 1.0
+    )
+
+    assert timed_out is True
+    assert candidates == []
+    assert candidates is not None
+
+
+def test_exclusion_scope_does_not_share_a_deadline_with_a_concurrent_operation(
+    recall_engine,
+):
+    """Two interleaved ops on one engine must not share progress-handler state.
+
+    ``MessageStore._conn`` is opened ``check_same_thread=False`` and is shared
+    across threads, and a SQLite progress handler is CONNECTION-global. If the
+    exclusion enumeration installed its handler there, (a) it would execute its
+    own statements under a concurrent operation's already-lapsed deadline and
+    take a spurious SQLITE_INTERRUPT, and (b) its teardown would clear that
+    concurrent operation's handler, silently disabling the other request's
+    timeout. Both arms below are on the SHARED connection; the enumeration must
+    be invisible to it.
+    """
+    for session_id in ("session-a", "session-b"):
+        recall_engine._store.append(
+            session_id, {"role": "user", "content": "kanban detail"}
+        )
+    shared = recall_engine._store.connection
+
+    # Concurrent operation B owns the shared connection's progress handler, and
+    # its budget has already lapsed (it will interrupt the next statement run
+    # on that connection).
+    ticks: list[int] = []
+    b_expired = [True]
+
+    def operation_b_handler() -> int:
+        ticks.append(1)
+        return 1 if b_expired[0] else 0
+
+    shared.set_progress_handler(operation_b_handler, 1)
+    try:
+        # Arm (a): operation A runs with no deadline of its own. It must not
+        # inherit B's lapsed deadline, so it must not touch the shared
+        # connection at all.
+        candidates, timed_out = lcm_tools._retrieval_candidate_session_ids(
+            recall_engine, {"session-b"}
+        )
+        assert timed_out is False
+        assert candidates == ["session-a"]
+        assert ticks == [], "enumeration ran a statement under operation B's handler"
+
+        # Arm (b): operation A runs under its own (live) deadline. Its teardown
+        # must leave B's handler installed and still firing.
+        candidates, timed_out = lcm_tools._retrieval_candidate_session_ids(
+            recall_engine, {"session-b"}, deadline=time.monotonic() + 30.0
+        )
+        assert timed_out is False
+        assert candidates == ["session-a"]
+        assert ticks == [], "enumeration ran a statement under operation B's handler"
+
+        b_expired[0] = False
+        shared.execute("SELECT COUNT(*) FROM messages").fetchall()
+        assert ticks, "the enumeration cleared operation B's progress handler"
+    finally:
+        shared.set_progress_handler(None, 0)
+
+
+def test_recall_scope_timeout_is_not_reported_as_a_complete_empty_scope(
+    recall_engine, monkeypatch
+):
+    """A timed-out scope resolution degrades; it never claims 'full' coverage.
+
+    Both a timeout and a genuinely empty eligible scope yield [], so ordering
+    the timeout branch first is what keeps a deadline miss from being read as
+    a complete, authoritative empty answer.
+    """
+    recall_engine._store.append(
+        "session-a", {"role": "user", "content": "kanban dashboard sprint detail"}
+    )
+    monkeypatch.setattr(
+        lcm_tools,
+        "_retrieval_candidate_session_ids",
+        lambda *_args, **_kwargs: ([], True),
+    )
+
+    payload = _recall(
+        recall_engine, monkeypatch, include="all", exclude_session_ids=["session-b"]
+    )
+
+    coverage = payload["provenance"]["coverage"]
+    assert coverage["summary"] == "none"
+    assert coverage["chunk"] == "none"
+    assert payload["timeout"] is True
+    assert payload["degraded"] is True
+    assert (
+        "session exclusion scope resolution timed out"
+        in payload["degraded_reason"]
+    ), payload["degraded_reason"]
+
+
+def test_recall_all_known_sessions_excluded_is_not_degraded(recall_engine, monkeypatch):
+    store_id = recall_engine._store.append(
+        CURRENT,
+        {"role": "user", "content": "kanban dashboard sprint detail"},
+    )
+    node_id = _add_summary(
+        recall_engine,
+        "kanban dashboard sprint summary",
+        session_id=CURRENT,
+        created_at=5.0,
+    )
+    _seed_summary_vectors(recall_engine, [(node_id, [1.0, 0.0])])
+    _seed_chunk_vectors(recall_engine, [(store_id, 0, 0, 30, [1.0, 0.0])])
+
+    payload = _recall(
+        recall_engine,
+        monkeypatch,
+        include="all",
+        exclude_current_session=True,
+    )
+
+    assert payload["hits"] == []
+    assert payload["degraded"] is False
+
+
+def test_recall_exclusions_hold_through_reference_strict_answer_ready(
+    recall_engine, monkeypatch
+):
+    """Exclusions are enforced at the summary KNN, so the strict path inherits them.
+
+    ``detail='answer_ready'`` with reference-strict delivery does not hand out
+    summary nodes: it carries their relevance onto the nodes' SOURCE MESSAGES.
+    The exclusion set is applied one step earlier, as the candidate session list
+    the summary/chunk KNN scans, so no excluded session can reach that expansion
+    -- this pins that seam between the two mechanisms.
+    """
+    for session_id in (CURRENT, "session-a", "session-b"):
+        store_id = recall_engine._store.append(
+            session_id,
+            {"role": "user", "content": "kanban dashboard sprint retained detail"},
+        )
+        node_id = _add_summary(
+            recall_engine,
+            "kanban dashboard sprint retained summary",
+            session_id=session_id,
+            created_at=5.0,
+            source_ids=[store_id],
+        )
+        _seed_summary_vectors(recall_engine, [(node_id, [1.0, 0.0])])
+        _seed_chunk_vectors(recall_engine, [(store_id, 0, 0, 39, [1.0, 0.0])])
+
+    assert getattr(recall_engine._config, "recall_reference_strict", True) is True
+
+    payload = _recall(
+        recall_engine,
+        monkeypatch,
+        include="all",
+        scope_bias=0.0,
+        limit=25,
+        detail="answer_ready",
+        exclude_current_session=True,
+        exclude_session_ids=["session-a"],
+    )
+
+    assert payload["hits"]
+    assert {hit["session_id"] for hit in payload["hits"]} == {"session-b"}
+    leads = payload["provenance"]["answer_ready"].get("summary_leads", [])
+    assert {lead["session_id"] for lead in leads} <= {"session-b"}
+
+
 def test_scope_bias_boosts_current_conversation_without_filtering(recall_engine, monkeypatch):
     cross = _add_summary(recall_engine, "cross conversation kanban", session_id="session-a", created_at=5.0)
     here = _add_summary(recall_engine, "current conversation kanban", session_id=CURRENT, created_at=5.0)

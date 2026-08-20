@@ -28,6 +28,7 @@ from .externalize import (
     find_externalized_payload_for_message,
     get_large_output_storage_dir,
     is_externalized_placeholder,
+    is_generated_payload_ref_name,
     load_externalized_payload,
     maybe_externalize_payload,
 )
@@ -116,6 +117,19 @@ _GENERIC_BASE64_MIN_CHARS = 4096
 _INGEST_PLACEHOLDER_RE = re.compile(r"\[Externalized LCM ingest payload:.*?;\s*ref=([^;\]\s]+)\]")
 _EXTERNALIZED_PAYLOAD_PLACEHOLDER_RE = re.compile(
     r"\[(?:Externalized|GC'd externalized) (?:tool output|payload):.*?;\s*ref=([^;\]\s]+)\]"
+)
+_SOURCE_LITERAL_ASSIGNMENT_RE = re.compile(
+    r"^\s*(?:(?:\d+[|:])|(?:[+-](?![+-])))?\s*"
+    r"[A-Za-z_][A-Za-z0-9_]*(?:\[[^\r\n]+\])?\s*=\s*(?:[rubf]{0,2})?[\"']\s*$",
+    re.IGNORECASE,
+)
+_SOURCE_LITERAL_LINE_RE = re.compile(
+    r"^\s*(?:(?:\d+[|:])|(?:[+-](?![+-])))\s*(?:[rubf]{0,2})?[\"']\s*$",
+    re.IGNORECASE,
+)
+_SOURCE_DIFF_LITERAL_RE = re.compile(
+    r"^\s*[+-](?![+-])\s*(?:[rubf]{0,2})?[\"'][^\r\n]*$",
+    re.IGNORECASE,
 )
 _PERSISTED_OUTPUT_TAG = "<persisted-output>"
 _PERSISTED_OUTPUT_CLOSING_TAG = "</persisted-output>"
@@ -1595,9 +1609,10 @@ def _append_unique_refs(target: list[str], refs: list[str]) -> None:
 
 def _walk_string_values(value: Any):
     if isinstance(value, str):
-        yield value
         parsed = _maybe_parse_json_string(value)
-        if parsed is not None and not (isinstance(parsed, str) and parsed == value):
+        if parsed is None:
+            yield value
+        else:
             yield from _walk_string_values(parsed)
     elif isinstance(value, dict):
         for key, nested in value.items():
@@ -1675,7 +1690,61 @@ def _looks_like_example_payload_ref(ref: str) -> bool:
     return name.startswith(("example-", "example_", "fake-", "fake_", "dummy-", "dummy_", "placeholder-", "placeholder_"))
 
 
-def _extract_unescaped_externalized_payload_refs(text: str, *, ignore_quoted_spans: bool = False) -> list[str]:
+def _placeholder_line_prefix(text: str, start: int) -> str:
+    separators = (("\n", 1), ("\r", 1), ("\\n", 2), ("\\r", 2))
+    separator_start, separator_length = max(
+        ((text.rfind(token, 0, start), length) for token, length in separators),
+        key=lambda item: item[0],
+    )
+    prefix = text[separator_start + separator_length:start]
+    return re.sub(r"\\+([\"'])", r"\1", prefix)
+
+
+def _is_incidental_source_placeholder(text: str, start: int) -> bool:
+    """Return true when a placeholder match *looks like* quoted source/docs.
+
+    This is a text-shape heuristic only. It cannot distinguish an ingest-generated
+    placeholder that happens to sit inside a code fence, a backticked span, or a
+    line-numbered/diff excerpt from an incidental quotation of one, because both
+    look identical in isolation. Callers must treat a true result as "suspect",
+    not "drop"; see ``_refs_for_externalized_integrity_scan`` and
+    ``scan_externalized_payload_integrity``, which settle the question with the
+    robust discriminators (does the referenced payload file exist, or does the ref
+    name carry externalize.py's minting shape?).
+    """
+    prefix = _placeholder_line_prefix(text, start)
+    if (
+        _SOURCE_LITERAL_ASSIGNMENT_RE.search(prefix)
+        or _SOURCE_LITERAL_LINE_RE.fullmatch(prefix)
+        or _SOURCE_DIFF_LITERAL_RE.fullmatch(prefix)
+    ):
+        return True
+    before = text[:start]
+    if before.count("```") % 2:
+        return True
+    return prefix.count("`") % 2 == 1
+
+
+def _record_source_context_ref(target: list[str] | None, ref: str) -> None:
+    if target is not None and ref not in target:
+        target.append(ref)
+
+
+def _extract_unescaped_externalized_payload_refs(
+    text: str,
+    *,
+    ignore_quoted_spans: bool = False,
+    source_context_refs: list[str] | None = None,
+) -> list[str]:
+    """Return confident refs; park source-context-shaped ones in ``source_context_refs``.
+
+    A ref whose match sits in quoted-source context is not dropped here: it is
+    appended to ``source_context_refs`` (when the caller supplies a list) so the
+    layer that owns ``hermes_home`` can promote it back when a payload file with
+    that name exists or the name carries externalize.py's minting shape. With no
+    list supplied the parked refs are simply not returned, preserving the
+    conservative text-only behavior.
+    """
     refs: list[str] = []
     for pattern in (_INGEST_PLACEHOLDER_RE, _EXTERNALIZED_PAYLOAD_PLACEHOLDER_RE):
         for match in pattern.finditer(text):
@@ -1690,12 +1759,21 @@ def _extract_unescaped_externalized_payload_refs(text: str, *, ignore_quoted_spa
                 and _is_quoted_placeholder_example(text, match.start())
             ):
                 continue
+            if _is_incidental_source_placeholder(text, match.start()):
+                _record_source_context_ref(source_context_refs, ref)
+                continue
             if ref not in refs:
                 refs.append(ref)
     return refs
 
 
-def _refs_for_externalized_integrity_scan(value: str, *, role: str, field: str) -> list[str]:
+def _refs_for_externalized_integrity_scan(
+    value: str,
+    *,
+    role: str,
+    field: str,
+    source_context_refs: list[str] | None = None,
+) -> list[str]:
     """Return refs that plausibly came from LCM storage-boundary placeholders.
 
     Tool outputs and tool-call arguments often contain escaped code snippets,
@@ -1705,6 +1783,10 @@ def _refs_for_externalized_integrity_scan(value: str, *, role: str, field: str) 
     are counted for message content, raw JSON-container tool-call argument
     strings, and raw free-form tool-call argument strings so ingestion-produced
     refs do not disappear while quoted examples stay ignored.
+
+    Refs suppressed only by the source-context text heuristic are appended to
+    ``source_context_refs`` instead of being discarded, so the caller can settle
+    them on payload-file existence rather than on text shape alone.
     """
     if not isinstance(value, str) or not value:
         return []
@@ -1712,15 +1794,30 @@ def _refs_for_externalized_integrity_scan(value: str, *, role: str, field: str) 
     if is_externalized_ingest_placeholder(stripped) or is_externalized_placeholder(stripped):
         return extract_all_externalized_payload_refs(stripped)
     if field == "tool_calls":
-        refs = _extract_unescaped_externalized_payload_refs(value, ignore_quoted_spans=True)
         parsed = _maybe_parse_json_string(value)
         if parsed is None:
-            return refs
+            return _extract_unescaped_externalized_payload_refs(
+                value,
+                ignore_quoted_spans=True,
+                source_context_refs=source_context_refs,
+            )
+        # Raw JSON text erases whether a match came from quoted source. Once the
+        # envelope parses, scan decoded values only and keep raw scanning as the
+        # malformed-envelope fallback above.
+        refs: list[str] = []
         for argument in _walk_tool_call_argument_values(parsed):
             if isinstance(argument, str):
-                _append_unique_refs(refs, _extract_unescaped_externalized_payload_refs(argument, ignore_quoted_spans=True))
                 parsed_argument = _maybe_parse_json_string(argument)
-                if parsed_argument is not None:
+                if parsed_argument is None:
+                    _append_unique_refs(
+                        refs,
+                        _extract_unescaped_externalized_payload_refs(
+                            argument,
+                            ignore_quoted_spans=True,
+                            source_context_refs=source_context_refs,
+                        ),
+                    )
+                else:
                     for nested in _walk_string_values(parsed_argument):
                         nested_stripped = nested.strip()
                         if is_externalized_ingest_placeholder(nested_stripped) or is_externalized_placeholder(nested_stripped):
@@ -1728,7 +1825,11 @@ def _refs_for_externalized_integrity_scan(value: str, *, role: str, field: str) 
                         else:
                             _append_unique_refs(
                                 refs,
-                                _extract_unescaped_externalized_payload_refs(nested, ignore_quoted_spans=True),
+                                _extract_unescaped_externalized_payload_refs(
+                                    nested,
+                                    ignore_quoted_spans=True,
+                                    source_context_refs=source_context_refs,
+                                ),
                             )
             else:
                 for nested in _walk_string_values(argument):
@@ -1736,16 +1837,33 @@ def _refs_for_externalized_integrity_scan(value: str, *, role: str, field: str) 
                     if is_externalized_ingest_placeholder(nested_stripped) or is_externalized_placeholder(nested_stripped):
                         _append_unique_refs(refs, extract_all_externalized_payload_refs(nested_stripped))
                     else:
-                        _append_unique_refs(refs, _extract_unescaped_externalized_payload_refs(nested, ignore_quoted_spans=True))
+                        _append_unique_refs(
+                            refs,
+                            _extract_unescaped_externalized_payload_refs(
+                                nested,
+                                ignore_quoted_spans=True,
+                                source_context_refs=source_context_refs,
+                            ),
+                        )
         for nested in _walk_string_values(parsed):
             nested_stripped = nested.strip()
             if is_externalized_ingest_placeholder(nested_stripped) or is_externalized_placeholder(nested_stripped):
                 _append_unique_refs(refs, extract_all_externalized_payload_refs(nested_stripped))
             else:
-                _append_unique_refs(refs, _extract_unescaped_externalized_payload_refs(nested, ignore_quoted_spans=True))
+                _append_unique_refs(
+                    refs,
+                    _extract_unescaped_externalized_payload_refs(
+                        nested,
+                        ignore_quoted_spans=True,
+                        source_context_refs=source_context_refs,
+                    ),
+                )
         return refs
     if role == "tool":
-        refs = _extract_unescaped_externalized_payload_refs(value)
+        refs = _extract_unescaped_externalized_payload_refs(
+            value,
+            source_context_refs=source_context_refs,
+        )
         parsed = _maybe_parse_json_string(value)
         if parsed is not None:
             for nested in _walk_string_values(parsed):
@@ -1753,9 +1871,19 @@ def _refs_for_externalized_integrity_scan(value: str, *, role: str, field: str) 
                 if is_externalized_ingest_placeholder(nested_stripped) or is_externalized_placeholder(nested_stripped):
                     _append_unique_refs(refs, extract_all_externalized_payload_refs(nested_stripped))
                 else:
-                    _append_unique_refs(refs, _extract_unescaped_externalized_payload_refs(nested, ignore_quoted_spans=True))
+                    _append_unique_refs(
+                        refs,
+                        _extract_unescaped_externalized_payload_refs(
+                            nested,
+                            ignore_quoted_spans=True,
+                            source_context_refs=source_context_refs,
+                        ),
+                    )
         return refs
-    return extract_all_externalized_payload_refs(value)
+    return _extract_unescaped_externalized_payload_refs(
+        value,
+        source_context_refs=source_context_refs,
+    )
 
 
 def scan_externalized_payload_integrity(conn, config, *, hermes_home: str = "", limit: int = 5) -> dict[str, Any]:
@@ -1785,7 +1913,47 @@ def scan_externalized_payload_integrity(conn, config, *, hermes_home: str = "", 
         for field, value in (("content", content), ("tool_calls", tool_calls)):
             if not isinstance(value, str):
                 continue
-            for ref in _refs_for_externalized_integrity_scan(value, role=str(role or ""), field=field):
+            source_context_refs: list[str] = []
+            scanned_refs = _refs_for_externalized_integrity_scan(
+                value,
+                role=str(role or ""),
+                field=field,
+                source_context_refs=source_context_refs,
+            )
+            # The text heuristics cannot tell an ingest-GENERATED placeholder that
+            # happens to sit inside a code fence, a backticked span, or a
+            # line-numbered excerpt from an incidental quotation of one; assistant
+            # turns routinely wrap real tool output in fences. Two independent
+            # signals settle a parked ref, and either one is enough:
+            #   1. A backing payload file exists, so the placeholder is live.
+            #   2. The ref name carries externalize.py's minting shape, so LCM
+            #      generated it. This one does not consult the filesystem, which is
+            #      what keeps a generated ref diagnosable after its payload is
+            #      deleted or GC'd -- existence alone would drop the ref precisely
+            #      when recovery is broken and doctor most needs to report it.
+            # A ref with neither signal is the quoted-source case the heuristics
+            # target: hand-written docs examples have no file and no minted shape.
+            #
+            # Accepted residual, deliberate -- do NOT "fix" it by re-gating signal 2
+            # on local state: a stored excerpt quoting a real placeholder minted on
+            # a DIFFERENT installation carries the minted shape with no local file,
+            # so it is reported missing. That is a visible, self-correcting false
+            # alarm (the operator sees a ref name nothing local ever minted), and it
+            # is exactly what main did before any of this filtering existed, so it
+            # is not a behavior this filter introduced. The conservative direction
+            # for an integrity diagnostic is to over-report a broken ref rather than
+            # go silent on one; re-gating on existence would restore the silence
+            # this promotion was added to remove. Separating a foreign minted ref
+            # from a local GC'd one needs durable local provenance -- a persisted
+            # minted-ref ledger or a per-install salt in the filename -- which
+            # changes the payload storage contract and is future work.
+            promoted_refs = [
+                ref
+                for ref in source_context_refs
+                if ref not in scanned_refs
+                and (ref in existing_files or is_generated_payload_ref_name(ref))
+            ]
+            for ref in (*scanned_refs, *promoted_refs):
                 referenced_refs.add(ref)
                 first_location_by_ref.setdefault(
                     ref,

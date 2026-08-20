@@ -320,6 +320,79 @@ def test_lcm_doctor_warns_about_ignored_lcm_config_yaml_keys(tmp_path, monkeypat
     assert any("lcm.leaf_chunk_tokens" in warning for warning in config_check["detail"])
 
 
+def test_lcm_status_surfaces_invalid_reasoning_effort_and_uses_the_default(tmp_path, monkeypatch):
+    hermes_home = tmp_path / "hermes_home"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("LCM_SUMMARY_REASONING_EFFORT", "turbo")
+    monkeypatch.delenv("LCM_EXPANSION_REASONING_EFFORT", raising=False)
+
+    config = LCMConfig.from_env()
+    config.database_path = str(tmp_path / "lcm_reasoning_source.db")
+    engine = LCMEngine(config=config, hermes_home=str(hermes_home))
+    engine.on_session_start("reasoning-source-session", platform="telegram", context_length=100000)
+
+    payload = json.loads(lcm_tools.lcm_status({}, engine=engine))
+
+    assert payload["config"]["summary_reasoning_effort"] == "(task default)"
+    assert payload["config_sources"]["summary_reasoning_effort"] == "default"
+    assert any(
+        "summary_reasoning_effort" in warning and "turbo" in warning
+        for warning in payload["config_source_warnings"]
+    )
+
+    text = handle_lcm_command("status", engine)
+
+    assert "config_source_warnings:" in text
+    assert "summary_reasoning_effort" in text
+
+
+def test_lcm_doctor_warns_about_invalid_reasoning_effort(tmp_path, monkeypatch):
+    hermes_home = tmp_path / "hermes_home"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text("lcm:\n  expansion_reasoning_effort: turbo\n")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.delenv("LCM_EXPANSION_REASONING_EFFORT", raising=False)
+
+    config = LCMConfig.from_env()
+    config.database_path = str(tmp_path / "lcm_doctor_reasoning.db")
+    engine = LCMEngine(config=config, hermes_home=str(hermes_home))
+    engine.on_session_start("doctor-reasoning-session", platform="telegram", context_length=100000)
+
+    payload = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    config_check = next(c for c in payload["checks"] if c["check"] == "config_validation")
+
+    # The key is supported, so it must warn as an invalid value -- not as an ignored key.
+    assert config.expansion_reasoning_effort == ""
+    assert payload["overall"] == "warnings"
+    assert config_check["status"] == "warn"
+    assert any(
+        "expansion_reasoning_effort" in warning and "turbo" in warning
+        for warning in config_check["detail"]
+    )
+    assert not any("not a supported LCM config.yaml key" in w for w in config_check["detail"])
+
+
+def test_lcm_status_reports_valid_reasoning_effort_verbatim(tmp_path, monkeypatch):
+    hermes_home = tmp_path / "hermes_home"
+    hermes_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("LCM_SUMMARY_REASONING_EFFORT", "low")
+    monkeypatch.delenv("LCM_EXPANSION_REASONING_EFFORT", raising=False)
+
+    config = LCMConfig.from_env()
+    config.database_path = str(tmp_path / "lcm_reasoning_valid.db")
+    engine = LCMEngine(config=config, hermes_home=str(hermes_home))
+    engine.on_session_start("reasoning-valid-session", platform="telegram", context_length=100000)
+
+    payload = json.loads(lcm_tools.lcm_status({}, engine=engine))
+
+    assert payload["config"]["summary_reasoning_effort"] == "low"
+    assert payload["config"]["expansion_reasoning_effort"] == "(task default)"
+    assert payload["config_sources"]["summary_reasoning_effort"] == "env"
+    assert payload["config_source_warnings"] == []
+
+
 def test_lcm_status_reports_last_compression_noop_reason(engine):
     engine._last_compression_status = "noop"
     engine._last_compression_noop_reason = "no eligible raw backlog outside fresh tail"
