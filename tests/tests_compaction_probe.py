@@ -122,9 +122,15 @@ def test_parse_named_real_rollouts(tmp_path, session_id, expected_compactions):
     report = parser.parse_rollout(session_id, sessions_root)
     assert report["model_context_window"] == 258400
     assert report["token_series"]
-    assert len(report["compactions"]) == expected_compactions
+    # The named rollouts are LIVE files under ~/.codex/sessions: an
+    # interactive session can keep running and compact again after this
+    # expectation was recorded (measured: the 3-compaction reference grew to
+    # 9). Compaction count is monotone on a living session, so assert the floor.
+    assert len(report["compactions"]) >= expected_compactions
     if expected_compactions:
-        assert [row["window_number"] for row in report["compactions"]] == [1, 2, 3]
+        # Same live-file caveat: assert the recorded prefix, not the full
+        # (still-growing) sequence.
+        assert [row["window_number"] for row in report["compactions"]][:3] == [1, 2, 3]
         # This rollout's schema carries no ContextCompaction completion items:
         # stall must be reported as UNMEASURED (null + source), never as the
         # marker-spacing milliseconds (that would fabricate a metric).
