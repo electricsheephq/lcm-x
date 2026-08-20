@@ -18,6 +18,11 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
+# Per-turn wall bound, matching the hermes drivers' --turn-timeout default.
+TURN_TIMEOUT_S = 600
+# Abort exit code shared across the pilot drivers (timeout/abort semantics).
+ABORT_EXIT_CODE = 72
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -212,13 +217,30 @@ def drive(args: argparse.Namespace) -> int:
     with tempfile.TemporaryDirectory(prefix="compaction-probe-") as throwaway:
         for turn_index, row in enumerate(turns + probes, 1):
             command = _command(codex_bin, args.model, row["text"], actual_sid)
-            completed = subprocess.run(
-                command,
-                cwd=throwaway,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=throwaway,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    # codex exec blocks at startup waiting for stdin EOF when it
+                    # inherits an open pipe (measured: 17-min zero-CPU stall on
+                    # the first live R1 turn, 2026-08-20; same class as the
+                    # documented `< /dev/null` dispatch rule).
+                    stdin=subprocess.DEVNULL,
+                    # Per-turn wall bound (parity with the hermes drivers'
+                    # --turn-timeout): a hung turn must abort the arm, not
+                    # stall it unbounded.
+                    timeout=TURN_TIMEOUT_S,
+                )
+            except subprocess.TimeoutExpired as exc:
+                print(
+                    f"Codex turn {turn_index} exceeded {TURN_TIMEOUT_S}s; aborting arm "
+                    f"(partial stdout {len(exc.stdout or '')} chars)",
+                    file=sys.stderr,
+                )
+                raise SystemExit(ABORT_EXIT_CODE) from exc
             if completed.returncode != 0:
                 detail = completed.stderr.strip() or completed.stdout.strip()
                 raise RuntimeError(
