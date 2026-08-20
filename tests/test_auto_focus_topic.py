@@ -5,6 +5,7 @@ Covers:
 - skips synthetic context-summary/scaffold content
 - explicit focus_topic still wins
 - per-turn and total truncation
+- neither truncation pass drops the newest turn's request (issue #90)
 - multimodal/text-part content
 - no leakage of configured sensitive values from structured content or bearer-style text
 """
@@ -315,5 +316,67 @@ class TestDeriveAutoFocusTopic:
             assert focus is not None
             assert "This is a real message" in focus
             assert focus.count("-") == 1
+        finally:
+            engine.shutdown()
+
+    # --- Issue #90: the newest real user request stays authoritative ---
+    #
+    # These construct the engine with an explicit ``hermes_home`` so they bind a
+    # per-test SQLite file. The ``LCMEngine(config=None)`` form used above falls
+    # back to the developer's real ``~/.hermes/lcm.db``, which is what makes the
+    # rest of this module fail on a schema-stamped dev machine.
+
+    def test_newest_turn_request_survives_per_turn_truncation(self, tmp_path):
+        """A host-composed payload carries its request at the tail.
+
+        Gateway hosts prepend auto-loaded skill text and reminders to the user's
+        message, so head-only truncation drops the operative request while the
+        older, shorter turns survive intact.
+        """
+        engine = LCMEngine(config=None, hermes_home=str(tmp_path))
+        try:
+            request = "Please draft the Q3 vendor renewal email for Acme."
+            payload = (
+                "[auto-loaded skill: scheduled-jobs]\n"
+                + ("Guidance about scheduled job delivery and prompts. " * 60)
+                + "\n\n"
+                + request
+            )
+            messages = [
+                {"role": "user", "content": "Investigate the scheduled-job delivery bug."},
+                {"role": "assistant", "content": "Looking at the scheduler."},
+                {"role": "user", "content": "Also update the scheduled-job prompts."},
+                {"role": "assistant", "content": "Will do."},
+                {"role": "user", "content": payload},
+            ]
+            focus = engine._derive_auto_focus_topic(messages)
+            assert focus is not None
+            assert request in focus, (
+                "newest user request was truncated out of the focus topic while "
+                "older turns survived intact"
+            )
+        finally:
+            engine.shutdown()
+
+    def test_newest_turn_survives_total_truncation(self, tmp_path):
+        """Total-block truncation must not drop the newest turn.
+
+        Older bullets are emitted first, so a head-only cut on the joined block
+        spends the budget on stale turns and clips the newest one.
+        """
+        engine = LCMEngine(config=None, hermes_home=str(tmp_path))
+        try:
+            request = "NEWEST-REQUEST-MARKER draft the vendor renewal email"
+            messages = [
+                {"role": "user", "content": "a" * 400},
+                {"role": "user", "content": "b" * 400},
+                {"role": "user", "content": ("c" * 400) + " " + request},
+            ]
+            focus = engine._derive_auto_focus_topic(messages)
+            assert focus is not None
+            assert len(focus) <= 700
+            assert request in focus, (
+                "newest user request was truncated out of the joined focus block"
+            )
         finally:
             engine.shutdown()
