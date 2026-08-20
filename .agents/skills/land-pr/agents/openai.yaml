@@ -1,0 +1,4 @@
+interface:
+  display_name: "Land LCM-X PR"
+  short_description: "Verify and merge Hermes LCM-X pull requests"
+  default_prompt: "Use $land-pr to verify whether this LCM-X pull request is ready to merge."

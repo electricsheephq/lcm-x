@@ -1,4 +1,4 @@
-# Tooling configuration for the hermes-lcm plugin.
+# Tooling configuration for LCM-X (compatibility plugin name: hermes-lcm).
 #
 # This file exists only to pin lint settings so `ruff` behaves identically
 # locally and in CI. It intentionally declares no [build-system] or project

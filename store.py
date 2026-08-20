@@ -17,7 +17,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Collection, Dict, List, Optional
 
 from .db_bootstrap import (
     ExternalContentFtsSpec,
@@ -49,6 +49,7 @@ from .search_query import (
     should_apply_directness_rank_adjustment,
 )
 from .message_content import normalize_content_value as _normalize_content_value
+from .sqlite_util import _run_sqlite_write_with_snapshot_retry
 from .tokens import count_message_tokens
 
 logger = logging.getLogger(__name__)
@@ -452,7 +453,16 @@ class MessageStore:
                                 messages: List[Dict[str, Any]],
                                 token_estimates: List[int] | None = None,
                                 source: str = "",
-                                conversation_id: str = "") -> List[int]:
+                                conversation_id: str = "",
+                                metadata_factory: Optional[
+                                    Callable[
+                                        [Dict[str, Any], int],
+                                        List[tuple[str, str]],
+                                    ]
+                                ] = None,
+                                metadata_messages: Optional[
+                                    List[Dict[str, Any]]
+                                ] = None) -> List[int]:
         """Persist messages that already passed ingest protection.
 
         This is an internal fast path for callers that need the protected form
@@ -462,15 +472,23 @@ class MessageStore:
         """
         if token_estimates is None:
             token_estimates = [0] * len(messages)
+        if metadata_messages is not None and len(metadata_messages) != len(messages):
+            raise ValueError(
+                "metadata_messages must align one-to-one with protected messages"
+            )
 
-        ids = []
-        with self._write_lock, self._conn:
-            for msg, est in zip(messages, token_estimates):
+        conn = self._conn
+        if conn is None:
+            raise RuntimeError("MessageStore connection is closed")
+
+        def insert_messages() -> List[int]:
+            ids: List[int] = []
+            for index, (msg, est) in enumerate(zip(messages, token_estimates)):
                 tc = msg.get("tool_calls")
                 tc_json = json.dumps(tc) if tc else None
                 ts = time.time()
                 observed_at = _normalize_observed_at(msg.get("timestamp"))
-                cur = self._conn.execute(
+                cur = conn.execute(
                     """INSERT INTO messages
                        (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
                         tool_name, timestamp, token_estimate, pinned, ingested_at,
@@ -493,8 +511,33 @@ class MessageStore:
                         "host_message_timestamp" if observed_at is not None else None,
                     ),
                 )
-                ids.append(cur.lastrowid)
-        return ids
+                if cur.lastrowid is None:
+                    raise RuntimeError("SQLite did not return a message id")
+                store_id = int(cur.lastrowid)
+                ids.append(store_id)
+                if metadata_factory is not None:
+                    metadata_message = (
+                        metadata_messages[index]
+                        if metadata_messages is not None
+                        else msg
+                    )
+                    for key, value in metadata_factory(metadata_message, store_id):
+                        conn.execute(
+                            """
+                            INSERT INTO metadata(key, value)
+                            VALUES(?, ?)
+                            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                            """,
+                            (key, value),
+                        )
+            return ids
+
+        with self._write_lock:
+            return _run_sqlite_write_with_snapshot_retry(
+                conn,
+                insert_messages,
+                operation_name="message_store.append_protected_batch",
+            )
 
     def reassign_session_messages(self, old_session_id: str, new_session_id: str) -> int:
         """Move all persisted messages from one session_id to another."""
@@ -1104,6 +1147,7 @@ class MessageStore:
                role: str | None = None,
                time_from: float | None = None,
                time_to: float | None = None,
+               exclude_session_ids: Collection[str] | None = None,
                allow_operators: bool = False) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
@@ -1115,6 +1159,7 @@ class MessageStore:
         - ``source='unknown'`` means the explicit unknown-source bucket, with
           legacy blank-source rows treated as equivalent for back-compat
         - ``conversation_id`` limits rows to one gateway conversation/session key
+        - ``exclude_session_ids`` removes sessions before candidate limits apply
         - ``allow_operators`` marks a query the CALLER composed as FTS5 syntax,
           keeping its bare AND/OR/NOT/NEAR. Never set it for user or agent text
         """
@@ -1136,6 +1181,7 @@ class MessageStore:
                 role=role,
                 time_from=time_from,
                 time_to=time_to,
+                exclude_session_ids=exclude_session_ids,
             )
 
         order_by = _build_search_order_by(
@@ -1159,6 +1205,11 @@ class MessageStore:
                 if session_id is not None:
                     where.append("m.session_id = ?")
                     args.append(session_id)
+                if exclude_session_ids:
+                    where.append(
+                        "m.session_id NOT IN (SELECT value FROM json_each(?))"
+                    )
+                    args.append(json.dumps(list(exclude_session_ids)))
                 if source_clause:
                     where.append(source_clause)
                     args.extend(source_args)
@@ -1200,6 +1251,7 @@ class MessageStore:
                     role=role,
                     time_from=time_from,
                     time_to=time_to,
+                    exclude_session_ids=exclude_session_ids,
                 )
 
             raw_primary_values: list[float] = []
@@ -1240,7 +1292,8 @@ class MessageStore:
                      conversation_id: str | None = None,
                      role: str | None = None,
                      time_from: float | None = None,
-                     time_to: float | None = None) -> List[Dict[str, Any]]:
+                     time_to: float | None = None,
+                     exclude_session_ids: Collection[str] | None = None) -> List[Dict[str, Any]]:
         # LIKE keeps every character the index cannot spell (emoji, punctuation)
         # because substring matching is the only way to find those rows.
         safe_query = sanitize_like_query(query)
@@ -1255,6 +1308,9 @@ class MessageStore:
         if session_id is not None:
             where.append("session_id = ?")
             args.append(session_id)
+        if exclude_session_ids:
+            where.append("session_id NOT IN (SELECT value FROM json_each(?))")
+            args.append(json.dumps(list(exclude_session_ids)))
         source_clause, source_args = _source_filter_clause("source", source)
         if source_clause:
             where.append(source_clause)
@@ -1522,6 +1578,12 @@ class MessageStore:
         store's own methods so the ``_write_lock`` contract stays in one place.
         """
         return self._conn
+
+    def rollback_pending_write(self) -> None:
+        """Roll back this store's transaction under its connection-owner lock."""
+        with self._write_lock:
+            if self._conn is not None and self._conn.in_transaction:
+                self._conn.rollback()
 
     def commit(self) -> None:
         """Commit pending writes on the store connection.

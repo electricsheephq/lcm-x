@@ -50,6 +50,28 @@ def _content_digest_prefix(content: str) -> str:
     return hashlib.sha256((content or "").encode("utf-8")).hexdigest()[:12]
 
 
+# Every payload filename this module mints -- ``externalize_ingest_payload`` and both
+# branches of ``maybe_externalize_payload`` -- is built as
+#     f"{time.strftime('%Y%m%d_%H%M%S')}_{stub...}_{_content_digest_prefix(...)}_{time.time_ns():x}.json"
+# so the date_time head, the 12-hex content digest, and the hex nanosecond suffix are
+# invariant across all three. That makes the ref name itself carry generation
+# provenance: a scanner can tell an LCM-minted ref from a hand-written docs example
+# without touching the filesystem, which is the only way a ref stays diagnosable after
+# its payload file is deleted or GC'd. Keep this in sync with the three minting sites.
+_GENERATED_PAYLOAD_REF_RE = re.compile(r"\d{8}_\d{6}_.+_[0-9a-f]{12}_[0-9a-f]+\.json")
+
+
+def is_generated_payload_ref_name(ref: str) -> bool:
+    """Return true when ``ref`` has the filename shape this module mints.
+
+    Existence of the payload file is deliberately not consulted: the caller that
+    needs this predicate is diagnosing refs whose file is *gone*.
+    """
+    if not isinstance(ref, str) or not ref:
+        return False
+    return bool(_GENERATED_PAYLOAD_REF_RE.fullmatch(Path(ref).name))
+
+
 def _preview_sha256(preview_prefix: Any) -> str:
     if not preview_prefix:
         return ""
@@ -57,6 +79,14 @@ def _preview_sha256(preview_prefix: Any) -> str:
 
 
 def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        # Windows cannot use this POSIX directory-fsync path: opening a
+        # directory requires Windows-specific handle semantics
+        # (FILE_FLAG_BACKUP_SEMANTICS) not exposed by this os.open() call.
+        # The payload file itself has already been fsynced by the caller.
+        # Skip the parent-directory fsync on Windows; crash-durability
+        # semantics therefore differ from the POSIX path.
+        return
     flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
         flags |= os.O_DIRECTORY
