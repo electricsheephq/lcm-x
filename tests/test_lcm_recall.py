@@ -3050,3 +3050,35 @@ def test_reversible_rejection_stays_reachable_after_a_partial_refund():
     assert [e["hit"]["store_id"] for e in regained] == [3], (
         "a revisitable candidate must never become unreachable"
     )
+
+
+# --- Salvaged from PR #191 (upstream stephenschoettler/hermes-lcm#461),
+# --- originally authored by @stephenschoettler.
+# --- The PR's own assertion that provenance.coverage.fts == "full" is a design
+# --- fork: it belongs to the PR's new FTS coverage vocabulary ("full"/"bounded"),
+# --- which main does not have (main emits only "none"/"ok" -- tools.py:4779,4784).
+# --- Dropped here; the main-resident behavior below is what this pins.
+def test_recall_fts_finds_oldest_matching_message_beyond_candidate_window(
+    recall_engine, monkeypatch
+):
+    recall_engine._config.embeddings_enabled = False
+    oldest = recall_engine._store.append(
+        "session-old",
+        {"role": "user", "content": "cobalt-orchid immutable recovery note"},
+    )
+    for index in range(75):
+        recall_engine._store.append(
+            f"session-new-{index}",
+            {"role": "user", "content": f"ordinary recent note {index}"},
+        )
+
+    payload = _recall(
+        recall_engine,
+        monkeypatch,
+        provider=MockProvider(),
+        query="cobalt orchid",
+        include="verbatim",
+        limit=1,
+    )
+
+    assert payload["hits"][0]["store_id"] == oldest
