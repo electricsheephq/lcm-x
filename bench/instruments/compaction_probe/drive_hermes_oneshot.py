@@ -490,7 +490,9 @@ def run(args: argparse.Namespace) -> int:
         text = _turn_text(kind, row, args.status_command)
         command = plan_commands[turn_index - 1]
         started = time.monotonic()
-        stdout, stderr, timed_out = _invoke(command, child_env, args.turn_timeout)
+        stdout, stderr, timed_out = _invoke(
+            command, child_env, args.turn_timeout, runtime_config
+        )
         _append_raw_log(raw_log, stdout, stderr)
         status_via: str | None = None
 
