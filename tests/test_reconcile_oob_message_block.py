@@ -279,6 +279,35 @@ class TestOutOfBandBlockIdentity:
         finally:
             engine.shutdown()
 
+    def test_incoming_identity_keeps_block_when_row_has_no_tool_call_id(self, tmp_path):
+        """An ID-less row has no unique identity, so nothing can prove it durable.
+
+        Callers default a missing ``tool_call_id`` to ``""``, so every ID-less
+        row shares one identity key.  Matching on it lets an EARLIER ID-less row
+        that happens to reduce to the same payload vouch for a block arriving
+        fresh on a LATER ID-less row — the block strips, the enriched row
+        collapses onto the stored one, and the instruction is never ingested.
+        With no unique row identity the proof cannot hold: fail closed and keep
+        the row distinct (duplication over silent loss).
+        """
+        engine = _make_engine(tmp_path)
+        try:
+            base = '{"output": "deploy ok", "exit_code": 0}'
+            _seed_durable_tool_row(engine, base + OOB_BLOCK, tool_call_id="")
+            id_with = engine._message_replay_identity(
+                {"role": "tool", "tool_call_id": "", "content": base + OOB_BLOCK}
+            )
+            id_without = engine._message_replay_identity(
+                {"role": "tool", "tool_call_id": "", "content": base}
+            )
+            assert id_with != id_without, (
+                "An empty tool_call_id is not a unique row identity; it must "
+                "never prove an out-of-band block durable"
+            )
+            assert "check the 2026 logs instead" in id_with[1]
+        finally:
+            engine.shutdown()
+
     def test_oob_text_without_markers_not_stripped(self, tmp_path):
         """Content merely mentioning the phrase keeps its identity."""
         engine = _make_engine(tmp_path)
@@ -489,6 +518,110 @@ class TestOutOfBandBlockReconciliation:
             ), (
                 "Both occurrences of the repeated out-of-band instruction must "
                 "reach the store; one durable copy is not proof for two"
+            )
+        finally:
+            engine.shutdown()
+
+    def test_repeated_identical_steer_on_a_later_id_less_row_still_lands(self, tmp_path):
+        """Two ID-less tool rows sharing a base output must each keep their steer.
+
+        Not every host tool row carries a ``tool_call_id``; callers default the
+        missing value to ``""``, so two such rows are indistinguishable to the
+        durability proof.  When they also share a base output (a repeated
+        command — ``git status`` twice — is the ordinary case), the earlier row's
+        durable block satisfies the occurrence check for a block arriving fresh
+        on the later row: the enriched row strips down to its stored pre-steer
+        identity, reconciliation advances past it, and only the following user
+        message is stored.  The repeated instruction is lost.
+        """
+        engine = _make_engine(tmp_path)
+        try:
+            tool_content = '{"output": "deploy ok", "exit_code": 0}'
+
+            # Turn 1: the first steer is appended before ingest, so the store
+            # holds the first ID-less row WITH the block.
+            turn1 = [
+                {"role": "user", "content": "Deploy"},
+                {"role": "assistant", "content": "Deploying."},
+                {"role": "tool", "tool_call_id": "", "content": tool_content + OOB_BLOCK},
+                {"role": "assistant", "content": "Done."},
+            ]
+            engine._ingest_messages(turn1)
+            assert engine._store.get_session_count("oob-block-test") == 4
+
+            # Turn 2 runs the same command again and is ingested before the
+            # second steer arrives, so the store holds the second ID-less row
+            # WITHOUT a block.
+            turn2 = turn1 + [
+                {"role": "user", "content": "Deploy again"},
+                {"role": "assistant", "content": "Deploying."},
+                {"role": "tool", "tool_call_id": "", "content": tool_content},
+                {"role": "assistant", "content": "Done."},
+            ]
+            engine._ingest_cursor_needs_reconcile = True
+            engine._ingest_messages(turn2)
+            assert engine._store.get_session_count("oob-block-test") == 8, (
+                "Setup guard: turn 2 must reconcile against the stored tail, "
+                "otherwise the re-ingest hides the drop this test looks for"
+            )
+
+            # Second /steer: same text, byte-identical block, appended in place
+            # to the SECOND ID-less row.
+            replay = turn2.copy()
+            replay[6] = {
+                "role": "tool",
+                "tool_call_id": "",
+                "content": tool_content + OOB_BLOCK,
+            }
+            replay.append({"role": "user", "content": "Verify"})
+            engine._ingest_cursor_needs_reconcile = True
+            engine._ingest_messages(replay)
+
+            stored = engine._store.get_session_tail("oob-block-test", limit=64)
+            carriers = sum(
+                1
+                for row in stored
+                if "check the 2026 logs instead" in (row.get("content") or "")
+            )
+            assert carriers >= 2, (
+                f"Expected both out-of-band instructions in the store, found "
+                f"{carriers} row(s) carrying one.  An earlier ID-less row is "
+                "not proof that a later ID-less row's block is durable."
+            )
+        finally:
+            engine.shutdown()
+
+    def test_id_less_row_with_block_converges_without_reingest(self, tmp_path):
+        """An ID-less row carrying a block must still stop re-ingesting.
+
+        Failing closed only on the INCOMING side would leave this row
+        permanently unreconcilable: the stored copy reduces to its pre-steer
+        text while every replay keeps the block, so each turn mismatches and
+        re-ingests the whole session.  The block is therefore kept on BOTH
+        sides for an ID-less row, which converges.
+        """
+        engine = _make_engine(tmp_path)
+        try:
+            tool_content = '{"output": "deploy ok", "exit_code": 0}'
+            enriched = [
+                {"role": "user", "content": "Deploy"},
+                {"role": "assistant", "content": "Deploying."},
+                {"role": "tool", "tool_call_id": "", "content": tool_content + OOB_BLOCK},
+                {"role": "assistant", "content": "Done."},
+            ]
+            engine._ingest_messages(enriched)
+            assert engine._store.get_session_count("oob-block-test") == 4
+
+            replay = enriched.copy()
+            replay.append({"role": "user", "content": "Verify"})
+            engine._ingest_cursor_needs_reconcile = True
+            engine._ingest_messages(replay)
+
+            count = engine._store.get_session_count("oob-block-test")
+            assert count == 5, (
+                f"Expected 5 (4 stored + 1 new), got {count}. "
+                "An ID-less row carrying an OOB block must not re-ingest the "
+                "session on every turn."
             )
         finally:
             engine.shutdown()

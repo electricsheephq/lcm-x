@@ -154,14 +154,15 @@ class ReconcileMixin:
 
         Proof that stripping is identity-transparent: the store's copy of this
         very row already carries the user's mid-turn text, so collapsing the
-        incoming row onto it loses nothing.  The proof is occurrence-bound — a
-        stored row qualifies only when it shares this row's ``tool_call_id``,
-        carries at least as many copies of every block being stripped, and
-        reduces to the same content once its own blocks are removed.  Matching
-        on the block text alone is not enough: the marker header is a static
-        host constant, so a repeated /steer produces byte-identical blocks and
-        an earlier row — or an earlier occurrence on THIS row — would vouch for
-        a later one (see the module note on _OOB_MESSAGE_BLOCK_RE).
+        incoming row onto it loses nothing.  The proof is bound to a UNIQUE ROW
+        IDENTITY and occurrence-bound within it — a stored row qualifies only
+        when it shares this row's ``tool_call_id``, carries at least as many
+        copies of every block being stripped, and reduces to the same content
+        once its own blocks are removed.  Matching on (payload, block) alone is
+        not enough: the marker header is a static host constant, so a repeated
+        /steer produces byte-identical blocks and an earlier row — or an earlier
+        occurrence on THIS row — would vouch for a later one (see the module
+        note on _OOB_MESSAGE_BLOCK_RE).
 
         Only positives are memoised — a negative must stay re-checkable, because
         the very next ingest is what makes the row durable.  Every failure path
@@ -169,6 +170,15 @@ class ReconcileMixin:
         """
         if not blocks:
             return True
+        # No unique row identity, no proof.  Callers default a missing
+        # ``tool_call_id`` to "", so every ID-less row collapses onto that one
+        # key: an earlier ID-less row reducing to the same payload would satisfy
+        # the occurrence check for a block arriving fresh on a LATER ID-less row,
+        # strip it, collapse that row onto its stored pre-steer copy, and advance
+        # the cursor past the only copy of the user's instruction.  Fail closed —
+        # the cost is a duplicate, the alternative is silent loss.
+        if not tool_call_id:
+            return False
         session_id = str(getattr(self, "_session_id", "") or "")
         store = getattr(self, "_store", None)
         if not session_id or store is None:
@@ -220,13 +230,24 @@ class ReconcileMixin:
     ) -> str:
         """Remove out-of-band user blocks from a replay identity when sound.
 
-        A stored row is always safe to strip: it IS the durable copy.  An
-        incoming row is stripped only when the store already holds this same row
-        carrying these same blocks; a block the store has never seen at this
-        position is real user content arriving for the first time and must keep
-        the row distinct so it gets ingested.
+        Stripping is sound only for a row with a unique identity — its
+        ``tool_call_id``.  A stored row carrying one is always safe to strip: it
+        IS the durable copy.  An incoming row carrying one is stripped only when
+        the store already holds THAT row with these same blocks; a block the
+        store has never seen at that position is real user content arriving for
+        the first time and must keep the row distinct so it gets ingested.
+
+        A row with no ``tool_call_id`` is stripped on NEITHER side.  Suppressing
+        the strip only on the incoming side would leave such a row permanently
+        unreconcilable — the stored copy would reduce to its pre-steer text while
+        every replay kept the block — so each turn would mismatch and re-ingest
+        the whole session.  Keeping the block on both sides converges instead:
+        identical rows match, and a row whose stored copy predates the block
+        still differs from it, so the new instruction is ingested.
         """
         if _OOB_MESSAGE_BLOCK_MARKER not in content:
+            return content
+        if not tool_call_id:
             return content
         stripped = _OOB_MESSAGE_BLOCK_RE.sub("", content).rstrip()
         if stored_row:
