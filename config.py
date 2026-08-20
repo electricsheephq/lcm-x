@@ -442,6 +442,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("database_path", "LCM_DATABASE_PATH", str),
     _EnvFieldSpec("embeddings_enabled", "LCM_EMBEDDINGS_ENABLED", bool),
     _EnvFieldSpec("rerank_enabled", "LCM_RERANK_ENABLED", bool),
+    _EnvFieldSpec("rerank_model", "LCM_RERANK_MODEL", str),
     _EnvFieldSpec("rerank_window_limit", "LCM_RERANK_WINDOW_LIMIT", int),
     _EnvFieldSpec("rerank_margin", "LCM_RERANK_MARGIN", float),
     _EnvFieldSpec("recall_scan_rows", "LCM_RECALL_SCAN_ROWS", int),
@@ -703,10 +704,17 @@ class LCMConfig:
 
     # -- Embeddings (default-off until a provider/model are configured) ---
     embeddings_enabled: bool = False
-    # lcm_recall cross-encoder rerank stage (voyage rerank-2.5-lite over the top
-    # fused candidates). Default-off: recall ships value on RRF order alone, and
-    # rerank is one extra billable API call the operator opts into.
+    # lcm_recall cross-encoder rerank stage over the top fused candidates.
+    # Default-off: recall ships value on RRF order alone, and rerank is one extra
+    # billable API call the operator opts into. The lite default preserves the
+    # established latency/cost posture; operators may explicitly select Voyage's
+    # quality-oriented rerank-2.5 model.
     rerank_enabled: bool = False
+    # Voyage rerank model for the lcm_recall rerank stage. The default equals
+    # the provider-side literal, so unset == historical behavior byte-for-byte;
+    # a non-default value is a NEW declared config owing its own A/A' run
+    # (architect ruling, eval-queue #252).
+    rerank_model: str = "rerank-2.5-lite"
     # Optional product clamp for the lcm_recall rerank window. Zero preserves
     # the historical ``min(50, max(1, limit * 4))`` window byte-for-byte.
     rerank_window_limit: int = 0
@@ -780,12 +788,11 @@ class LCMConfig:
     # otherwise have to lcm_recall by hand. Default-off => byte-identical
     # assembly; when disabled the whole path is skipped before any work.
     proactive_recall_enabled: bool = False
-    # Relevance floor on the lcm_recall composite score. Two regimes:
-    #  - rerank OFF (default): the score is RRF-scale (~0.014-0.05); a single
-    #    top-ranked arm hit is ~0.016, so this floor mainly drops ancient or
-    #    low-ranked hits. The default keeps fresh top-of-arm hits.
-    #  - rerank ON: a cross-encoder relevance in [0,1] dominates the score;
-    #    raise this floor (e.g. ~0.3) for a true semantic gate.
+    # Relevance floor on lcm_recall's RRF/composite score (~0.014-0.05); a single
+    # top-ranked arm hit is ~0.016, so this floor mainly drops ancient or
+    # low-ranked hits. Reranking only reorders the bounded candidate window and
+    # deliberately does not replace this score with Voyage's incompatible 0..1
+    # relevance scale, so this threshold keeps the same meaning in both modes.
     proactive_recall_min_score: float = 0.01
     # Hard token budget for the single injected "relevant memories" block.
     proactive_recall_budget_tokens: int = 500
