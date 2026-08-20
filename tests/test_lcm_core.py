@@ -5308,6 +5308,10 @@ class TestAssemblyBudgetSelection:
 
         rows = replay._store.get_session_messages("assembly-session")
         contents = [row["content"] for row in rows]
+        # Exactly the four genuinely new rows persist (new assistant, fresh
+        # lossy assistant+tool pair, new user); the replayed prefix is proven
+        # and not re-added.
+        assert len(rows) == original_count + 4
         # The second read_secret invocation survives with its issuing assistant.
         assert [row["tool_call_id"] for row in rows].count("call_post_cursor_lossy_anchor") == 2
         assert "new assistant after replayed prefix" in contents
