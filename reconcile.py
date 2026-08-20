@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -80,7 +81,10 @@ _MODEL_SWITCH_NOTIFICATION_PREFIX = "[Note: model was just switched from "
 # Proving durability from the text alone lets the first occurrence vouch for the
 # second, which collapses the second enriched row onto its stored pre-steer copy
 # and drops the repeat — the same loss this gate exists to prevent, one row over.
-# So the proof requires the store to hold THIS row already carrying the block.
+# So the proof requires the store to hold THIS row already carrying the block,
+# and it counts occurrences: the same steer repeated while ONE tool result is
+# active appends two byte-identical blocks to that row, so a membership test
+# would let the single stored copy vouch for both and lose the second.
 _OOB_MESSAGE_BLOCK_RE = re.compile(
     r"\[OUT-OF-BAND USER MESSAGE[^\]]*\].*?\[/OUT-OF-BAND USER MESSAGE\]",
     re.DOTALL,
@@ -152,10 +156,11 @@ class ReconcileMixin:
         very row already carries the user's mid-turn text, so collapsing the
         incoming row onto it loses nothing.  The proof is occurrence-bound — a
         stored row qualifies only when it shares this row's ``tool_call_id``,
-        carries every block being stripped, and reduces to the same content once
-        its own blocks are removed.  Matching on the block text alone is not
-        enough: the marker header is a static host constant, so a repeated
-        /steer produces byte-identical blocks and an earlier row would vouch for
+        carries at least as many copies of every block being stripped, and
+        reduces to the same content once its own blocks are removed.  Matching
+        on the block text alone is not enough: the marker header is a static
+        host constant, so a repeated /steer produces byte-identical blocks and
+        an earlier row — or an earlier occurrence on THIS row — would vouch for
         a later one (see the module note on _OOB_MESSAGE_BLOCK_RE).
 
         Only positives are memoised — a negative must stay re-checkable, because
@@ -189,7 +194,16 @@ class ReconcileMixin:
             stored_content = normalize_content_value(row.get("content")) or ""
             if _OOB_MESSAGE_BLOCK_MARKER not in stored_content:
                 continue
-            if any(block not in stored_content for block in blocks):
+            # Count-aware, not membership: the same /steer sent twice while one
+            # tool result is active appends two byte-identical blocks, and a
+            # containment test would let the single stored occurrence vouch for
+            # both.  The stored row proves an occurrence only when it carries at
+            # least as many copies of that block as are being stripped; a
+            # surplus incoming copy is new user text and keeps the row distinct.
+            stored_counts = Counter(_OOB_MESSAGE_BLOCK_RE.findall(stored_content))
+            if any(
+                stored_counts[block] < count for block, count in Counter(blocks).items()
+            ):
                 continue
             if _OOB_MESSAGE_BLOCK_RE.sub("", stored_content).rstrip() != stripped:
                 continue

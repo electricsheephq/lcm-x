@@ -221,6 +221,64 @@ class TestOutOfBandBlockIdentity:
         finally:
             engine.shutdown()
 
+    def test_incoming_identity_keeps_second_identical_block_on_same_row(self, tmp_path):
+        """One stored occurrence does not prove TWO incoming occurrences.
+
+        The user repeats a /steer verbatim while the SAME tool result is still
+        active, so the host appends a second byte-identical block to the row it
+        already appended the first one to.  The store holds one copy; the replay
+        carries two.  A membership test ("does this block appear in the stored
+        content?") passes for both entries, strips both, and collapses the row
+        onto its stored single-block copy — the second instruction is never
+        ingested.  Proof is count-aware: the surplus occurrence is new text.
+        """
+        engine = _make_engine(tmp_path)
+        try:
+            base = '{"output": "deploy ok", "exit_code": 0}'
+            _seed_durable_tool_row(engine, base + OOB_BLOCK, tool_call_id="c1")
+            id_twice = engine._message_replay_identity(
+                {
+                    "role": "tool",
+                    "tool_call_id": "c1",
+                    "content": base + OOB_BLOCK + OOB_BLOCK,
+                }
+            )
+            id_once = engine._message_replay_identity(
+                {"role": "tool", "tool_call_id": "c1", "content": base + OOB_BLOCK},
+                stored_row=True,
+            )
+            assert id_twice != id_once, (
+                "A second byte-identical block is a second user instruction; "
+                "one stored occurrence cannot vouch for two incoming ones"
+            )
+            assert id_twice[1].count("check the 2026 logs instead") == 2
+        finally:
+            engine.shutdown()
+
+    def test_incoming_identity_strips_when_stored_row_carries_more_copies(self, tmp_path):
+        """The inverse: stored 2x, incoming 1x still proves durable.
+
+        Count-awareness is a floor, not an equality: the store already carries
+        every occurrence being stripped (and one more), so collapsing the
+        incoming row onto it loses nothing and must not force a re-ingest.
+        """
+        engine = _make_engine(tmp_path)
+        try:
+            base = '{"output": "deploy ok", "exit_code": 0}'
+            _seed_durable_tool_row(engine, base + OOB_BLOCK + OOB_BLOCK, tool_call_id="c1")
+            id_with = engine._message_replay_identity(
+                {"role": "tool", "tool_call_id": "c1", "content": base + OOB_BLOCK}
+            )
+            id_without = engine._message_replay_identity(
+                {"role": "tool", "tool_call_id": "c1", "content": base}
+            )
+            assert id_with == id_without, (
+                "A stored row carrying more copies than are being stripped is "
+                "still proof that this occurrence is durable"
+            )
+        finally:
+            engine.shutdown()
+
     def test_oob_text_without_markers_not_stripped(self, tmp_path):
         """Content merely mentioning the phrase keeps its identity."""
         engine = _make_engine(tmp_path)
@@ -382,6 +440,55 @@ class TestOutOfBandBlockReconciliation:
                 "The repeated out-of-band instruction must reach the store on "
                 "its own tool row; an identical earlier block on another row "
                 "is not proof that this occurrence is durable"
+            )
+        finally:
+            engine.shutdown()
+
+    def test_repeated_identical_steer_on_the_same_row_still_lands(self, tmp_path):
+        """The same /steer repeated while ONE tool result is active must land.
+
+        Sibling of the later-row case above, and the residual it left behind:
+        here both byte-identical blocks are appended to the SAME row, so no
+        stored row ever carries both occurrences.  Under a membership test each
+        incoming entry matched the single stored copy, the enriched row was
+        stripped down to its stored identity, the cursor advanced past it, and
+        the user's repeated instruction never reached the store.
+        """
+        engine = _make_engine(tmp_path)
+        try:
+            tool_content = '{"output": "deploy ok", "exit_code": 0}'
+            turn1 = [
+                {"role": "user", "content": "Deploy"},
+                {"role": "assistant", "content": "Deploying."},
+                {
+                    "role": "tool",
+                    "tool_call_id": "c1",
+                    "content": tool_content + OOB_BLOCK,
+                },
+                {"role": "assistant", "content": "Done."},
+            ]
+            engine._ingest_messages(turn1)
+            assert engine._store.get_session_count("oob-block-test") == 4
+
+            # The user repeats the instruction verbatim before the turn ends,
+            # so the host appends a second identical block to the same row.
+            replay = turn1.copy()
+            replay[2] = {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "content": tool_content + OOB_BLOCK + OOB_BLOCK,
+            }
+            replay.append({"role": "user", "content": "Verify"})
+            engine._ingest_cursor_needs_reconcile = True
+            engine._ingest_messages(replay)
+
+            stored = engine._store.get_session_tail("oob-block-test", limit=64)
+            assert any(
+                (row.get("content") or "").count("check the 2026 logs instead") == 2
+                for row in stored
+            ), (
+                "Both occurrences of the repeated out-of-band instruction must "
+                "reach the store; one durable copy is not proof for two"
             )
         finally:
             engine.shutdown()
