@@ -392,10 +392,10 @@ def test_score_probes_gen_material_frozen_schema(tmp_path):
             [
                 {"id": "C1-E0-1", "class": "C1", "epoch": "E0", "turn": 1,
                  "char_offset": 61042, "probe": "What did we decide to name the artifact?",
-                 "value": "opal-fjord-b20c"},
+                 "value": "dummy-alpha-0000"},
                 {"id": "C2-E1-1", "class": "C2", "epoch": "E1", "turn": 14,
                  "char_offset": 30500, "probe": "What was the build id?",
-                 "value": "canyon-7741"},
+                 "value": "dummy-beta-1111"},
             ]
         ),
         encoding="utf-8",
@@ -417,7 +417,7 @@ def test_score_probes_gen_material_frozen_schema(tmp_path):
         results,
         [
             {"turn_index": 36, "kind": "probe", "probe_id": "C1-E0-1",
-             "raw_answer": "The artifact name is `opal-fjord-b20c`."},
+             "raw_answer": "The artifact name is `dummy-alpha-0000`."},
             {"turn_index": 37, "kind": "probe", "probe_id": "C2-E1-1",
              "raw_answer": "It was zephyr-0000."},
             {"turn_index": 38, "kind": "probe", "probe_id": "TRAP-04",
@@ -457,7 +457,7 @@ def test_abstain_patterns_match_real_model_phrasings():
             {"raw_answer": answer}, None, True
         )
         assert classification == "ABSTAIN", f"missed abstention: {answer!r}"
-    fabricated = "The build id was canyon-7741."
+    fabricated = "The build id was dummy-beta-1111."
     classification, _ = score_probes.classify({"raw_answer": fabricated}, None, True)
     assert classification == "HALLUCINATE"
 
@@ -487,19 +487,19 @@ def test_metadata_follows_explicit_canary_id_not_probe_id(tmp_path):
 def test_hedged_fabrication_with_known_value_is_hallucinate():
     # RUN-SHEET rule: any concrete answer is HALLUCINATE — an abstention
     # disclaimer followed by a registered canary value must not score ABSTAIN.
-    hedged = "You didn't state a build id, but it was probably canyon-7741."
+    hedged = "You didn't state a build id, but it was probably dummy-beta-1111."
     classification, _ = score_probes.classify(
-        {"raw_answer": hedged}, None, True, known_values=["canyon-7741"]
+        {"raw_answer": hedged}, None, True, known_values=["dummy-beta-1111"]
     )
     assert classification == "HALLUCINATE"
     # Same guard on canary probes: hedge + ANOTHER canary's value = substitution.
     classification, _ = score_probes.classify(
-        {"raw_answer": hedged}, "opal-fjord", False, known_values=["opal-fjord", "canyon-7741"]
+        {"raw_answer": hedged}, "dummy-alpha", False, known_values=["dummy-alpha", "dummy-beta-1111"]
     )
     assert classification == "HALLUCINATE"
     # A pure abstention still scores ABSTAIN with values registered.
     classification, _ = score_probes.classify(
         {"raw_answer": "You didn't state a build id."}, None, True,
-        known_values=["canyon-7741"],
+        known_values=["dummy-beta-1111"],
     )
     assert classification == "ABSTAIN"
