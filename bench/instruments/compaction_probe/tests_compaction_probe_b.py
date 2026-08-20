@@ -809,3 +809,39 @@ def test_score_probes_accepts_drive_codex_result_rows(tmp_path):
     payload = score_probes.score(results, canaries, probes)
     assert payload["probes"][0]["classification"] == "CORRECT"
     assert payload["totals"]["retention"] == 1.0
+
+
+def test_drive_codex_resume_command_pins_model_and_asserts_served_model(tmp_path, monkeypatch):
+    # Measured defect: `exec resume` without -m silently fell back to the
+    # account default model (an R4 arm requested gpt-5.4, got 69/70 turns of
+    # gpt-5.6-sol). Resume commands must carry -m, and a served-model
+    # mismatch must fail loud.
+    import argparse
+    import subprocess as sp
+
+    cmd = drive_codex._command(tmp_path / "codex", "gpt-5.4", "hello", "sid-1")
+    assert "-m" in cmd and cmd[cmd.index("-m") + 1] == "gpt-5.4"
+
+    material = tmp_path / "turns.jsonl"
+    _jsonl(material, [{"text": "turn one"}])
+    probes = tmp_path / "probes.jsonl"
+    probes.write_text("", encoding="utf-8")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    fake_bin = tmp_path / "codex"
+    fake_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def fake_run(command, **kwargs):
+        stdout = (
+            '{"type":"thread.started","thread_id":"t-1"}\n'
+            '{"type":"turn_context","model":"gpt-5.6-sol","model_context_window":258400}\n'
+        )
+        return sp.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(drive_codex.subprocess, "run", fake_run)
+    args = argparse.Namespace(
+        codex_bin=fake_bin, model="gpt-5.4", material=material,
+        probes=probes, out_dir=out_dir, resume_sid=None, dry_run=False,
+    )
+    with pytest.raises(RuntimeError, match="model drift"):
+        drive_codex.drive(args)

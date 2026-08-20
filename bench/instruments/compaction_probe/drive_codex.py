@@ -137,14 +137,30 @@ def _compaction_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return found
 
 
+def _turn_model(events: list[dict[str, Any]]) -> str | None:
+    for event in events:
+        for node in _walk(event):
+            if node.get("type") == "turn_context":
+                value = node.get("model")
+                if isinstance(value, str) and value:
+                    return value
+    return None
+
+
 def _command(codex_bin: Path, model: str, text: str, sid: str | None) -> list[str]:
     if sid:
+        # -m is REQUIRED on resume too: without it, resumed turns silently
+        # fall back to the account/config default model (measured: an R4-ref
+        # run requested gpt-5.4 and got 69/70 turns of the gpt-5.6-sol
+        # default — invisible whenever requested == default).
         return [
             str(codex_bin),
             "exec",
             "resume",
             sid,
             "--json",
+            "-m",
+            model,
             "--skip-git-repo-check",
             text,
         ]
@@ -247,6 +263,15 @@ def drive(args: argparse.Namespace) -> int:
                     f"Codex turn {turn_index} failed with exit {completed.returncode}: {detail}"
                 )
             events = _json_events(completed.stdout)
+            # Fail-loud model identity per turn: the arm is void if any turn
+            # served a different model than requested (the resume-fallback
+            # class above).
+            served = _turn_model(events)
+            if served is not None and served != args.model:
+                raise RuntimeError(
+                    f"Codex turn {turn_index} served model {served!r}, "
+                    f"requested {args.model!r} — arm invalid (model drift)"
+                )
             if actual_sid is None:
                 actual_sid = _thread_id(events)
                 if not actual_sid:
