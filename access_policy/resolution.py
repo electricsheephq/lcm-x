@@ -73,6 +73,17 @@ def policy_for_engine(
         return FailClosedPolicy(
             DenialReason.CONTEXT_INVALID, audit_sink=audit_sink, context=context
         )
+    if status is _CatalogLookup.NOT_STORE_BACKED:
+        # Teams is ENABLED and this carrier has no store: no catalog to
+        # validate the principal, no revisions to check revocation, no owner
+        # resolver — every enforcement surface would be silently absent and
+        # TeamsPolicy's deliberate unclaimed-allow would authorize anything.
+        # Fail closed until the connector phase (#82) gives non-store carriers
+        # a real enforcement path; that gap is a recorded hard precondition of
+        # enablement.
+        return FailClosedPolicy(
+            DenialReason.CONTEXT_INVALID, audit_sink=audit_sink, context=context
+        )
 
     principal_denial = _catalog_principal_denial(engine, context)
     if principal_denial is not None:
