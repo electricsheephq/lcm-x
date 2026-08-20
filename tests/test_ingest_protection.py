@@ -28,6 +28,8 @@ from hermes_lcm.externalize import (
     externalize_ingest_payload,
     extract_externalized_ref,
     extract_externalized_refs,
+    is_generated_payload_ref_name,
+    maybe_externalize_payload,
     read_externalized_payload_search_prefix,
     reassign_externalized_payloads,
 )
@@ -2113,6 +2115,591 @@ def test_externalized_payload_integrity_scan_reports_missing_and_unreferenced_re
     assert "UNREFERENCED_RAW_PAYLOAD" not in encoded
     assert "doc-only.json" not in encoded
     assert "not-counted.json" not in encoded
+
+
+def test_externalized_payload_integrity_scan_ignores_incidental_source_excerpts(tmp_path):
+    engine = _engine(tmp_path)
+    storage_dir = tmp_path / "externalized"
+    storage_dir.mkdir()
+    present_ref = "20260719_present_payload_0123456789ab_abcdef.json"
+    missing_ref = "20260719_missing_payload_0123456789ab_abcdef.json"
+    braced_ref = "20260719_call-{index}_payload_0123456789ab_abcdef.json"
+    orphan_ref = "20260719_orphan_payload_0123456789ab_abcdef.json"
+    # Truly incidental refs are quotations of somebody else's placeholder text, so
+    # no payload file backs them. That absence is what makes them incidental: a ref
+    # that DOES have a backing file is a live placeholder even inside quoted-looking
+    # source, and is promoted back by scan_externalized_payload_integrity (covered by
+    # test_externalized_payload_integrity_scan_keeps_generated_placeholder_in_source_context).
+    incidental_refs = (
+        "docs-placeholder.json",
+        "foreign_payload_ref.json",
+        "tool-result.json",
+        "inc-tool-colon.json",
+        "inc-tool-pipe.json",
+        "20260708T120000Z-tool-call-{index}.json",
+    )
+    for ref in (present_ref, braced_ref, orphan_ref):
+        (storage_dir / ref).write_text(json.dumps({"content": "fixture payload"}))
+    for ref in incidental_refs:
+        assert not (storage_dir / ref).exists()
+
+    template_source_excerpt = "\n".join(
+        [
+            "509:     refs = [",
+            '510:         "[Externalized tool output: tool_call_id=call_"',
+            '511:         f"{index}; chars=120000; bytes=120321; '
+            'ref=20260708T120000Z-tool-call-{index}.json]"',
+            "512:         for index in range(3)",
+        ]
+    )
+    read_file_excerpt = "\n".join(
+        [
+            "8210|        placeholder = (",
+            '8211|            "[GC\'d externalized tool output: tool_call_id=call_abc; "',
+            '8212|            "chars=1234; ref=foreign_payload_ref.json]"',
+            "8213|        )",
+        ]
+    )
+    retrieved_diff = "\n".join(
+        [
+            "diff --git a/tests/test_example.py b/tests/test_example.py",
+            "@@ -10,0 +11,2 @@",
+            "+    tool_result = (",
+            '+        "[Externalized payload: kind=tool_result; role=tool; chars=1; bytes=1; ref=tool-result.json]"',
+            "+    )",
+        ]
+    )
+    docs_excerpt = (
+        "The test fixture uses `[Externalized payload: kind=raw_payload; role=assistant; "
+        "chars=1; bytes=1; ref=docs-placeholder.json]` as an example."
+    )
+    content = "\n".join(
+        [
+            f"[Externalized payload: kind=raw_payload; role=assistant; chars=1; bytes=1; ref={present_ref}]",
+            (
+                '<img src="[Externalized payload: kind=raw_payload; role=assistant; '
+                f'chars=1; bytes=1; ref={missing_ref}]">'
+            ),
+            (
+                'recovery ticket: "[Externalized tool output: '
+                f'tool_call_id=call-braced; chars=1; ref={braced_ref}]"'
+            ),
+        ]
+    )
+    for role, row_content in (
+        ("assistant", content),
+        ("tool", json.dumps({"content": template_source_excerpt})),
+        ("tool", json.dumps({"content": read_file_excerpt})),
+        ("tool", json.dumps({"content": retrieved_diff})),
+        ("tool", json.dumps({"content": docs_excerpt})),
+    ):
+        engine._store._conn.execute(
+            """INSERT INTO messages
+               (session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                engine.current_session_id,
+                "test",
+                role,
+                row_content,
+                None,
+                None,
+                None,
+                1.0,
+                1,
+                0,
+            ),
+        )
+    colon_source_excerpt = (
+        '100: value = "[Externalized payload: kind=raw_payload; role=assistant; '
+        'chars=1; bytes=1; ref=inc-tool-colon.json]"'
+    )
+    pipe_source_excerpt = (
+        '200| value = "[Externalized payload: kind=raw_payload; role=assistant; '
+        'chars=1; bytes=1; ref=inc-tool-pipe.json]"'
+    )
+    for stored_tool_calls in (
+        json.dumps([{"function": {"name": "inspect", "arguments": colon_source_excerpt}}]),
+        json.dumps(
+            [
+                {
+                    "function": {
+                        "name": "inspect",
+                        "arguments": json.dumps({"source": pipe_source_excerpt}),
+                    }
+                }
+            ]
+        ),
+    ):
+        engine._store._conn.execute(
+            """INSERT INTO messages
+               (session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                engine.current_session_id,
+                "test",
+                "assistant",
+                "calling source inspection tool",
+                None,
+                stored_tool_calls,
+                None,
+                1.0,
+                1,
+                0,
+            ),
+        )
+    engine._store._conn.commit()
+
+    detail = scan_externalized_payload_integrity(
+        engine._store._conn,
+        engine._config,
+        hermes_home=engine._hermes_home,
+    )
+    doctor_result = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    doctor_detail = next(
+        check["detail"] for check in doctor_result["checks"] if check["check"] == "payload_storage"
+    )
+
+    assert detail["externalized_payload_refs_total"] == 3
+    assert detail["externalized_payload_refs_existing"] == 2
+    assert detail["externalized_payload_refs_missing"] == 1
+    assert detail["missing_externalized_payload_refs"] == [
+        {
+            "store_id": 1,
+            "session_id": engine.current_session_id,
+            "source": "test",
+            "role": "assistant",
+            "field": "content",
+            "externalized_ref": missing_ref,
+        }
+    ]
+    assert detail["externalized_payload_files_unreferenced"] == 1
+    assert detail["unreferenced_externalized_payload_files"] == [{"externalized_ref": orphan_ref}]
+    for key in (
+        "externalized_payload_refs_total",
+        "externalized_payload_refs_existing",
+        "externalized_payload_refs_missing",
+        "externalized_payload_files_unreferenced",
+        "missing_externalized_payload_refs",
+        "unreferenced_externalized_payload_files",
+    ):
+        assert doctor_detail[key] == detail[key]
+    encoded = json.dumps(detail)
+    for incidental_ref in incidental_refs:
+        assert incidental_ref not in encoded
+
+
+def test_externalized_payload_integrity_scan_keeps_generated_placeholder_in_source_context(tmp_path):
+    """A GENERATED placeholder that lands inside source-looking text stays counted.
+
+    Externalization rewrites a message in place, so an ingest-generated placeholder
+    routinely ends up inside a code fence, an inline-backtick span, or a
+    line-numbered/diff excerpt that the assistant was already quoting. The text
+    heuristics cannot separate that from an incidental quotation; payload-file
+    existence can, and doctor must not report a live payload as unreferenced.
+    """
+    engine = _engine(tmp_path)
+    storage_dir = tmp_path / "externalized"
+    storage_dir.mkdir()
+
+    def placeholder(ref: str) -> str:
+        return (
+            "[Externalized payload: kind=raw_payload; role=assistant; "
+            f"chars=1; bytes=1; ref={ref}]"
+        )
+
+    fenced_ref = "20260719_fenced_payload_0123456789ab_abcdef.json"
+    inline_tick_ref = "20260719_inline_payload_0123456789ab_abcdef.json"
+    unbalanced_fence_ref = "20260719_unbalanced_payload_0123456789ab_abcdef.json"
+    bullet_tick_ref = "20260719_bullet_payload_0123456789ab_abcdef.json"
+    numbered_line_ref = "20260719_numbered_payload_0123456789ab_abcdef.json"
+    diff_line_ref = "20260719_diffline_payload_0123456789ab_abcdef.json"
+    tool_call_ref = "20260719_toolcall_payload_0123456789ab_abcdef.json"
+    live_refs = (
+        fenced_ref,
+        inline_tick_ref,
+        unbalanced_fence_ref,
+        bullet_tick_ref,
+        numbered_line_ref,
+        diff_line_ref,
+        tool_call_ref,
+    )
+    for ref in live_refs:
+        (storage_dir / ref).write_text(json.dumps({"content": "fixture payload"}))
+    # Same source-looking shapes, but nothing on disk backs them: still incidental.
+    quoted_only_refs = ("quoted-fenced-example.json", "quoted-numbered-example.json")
+    for ref in quoted_only_refs:
+        assert not (storage_dir / ref).exists()
+
+    fenced_content = "\n".join(
+        [
+            "Here is the tool output:",
+            "```",
+            placeholder(fenced_ref),
+            "```",
+            f"and a quoted example inside another fence:\n```\n{placeholder(quoted_only_refs[0])}\n```",
+        ]
+    )
+    inline_tick_content = f"Recover it with `{placeholder(inline_tick_ref)}` when needed."
+    unbalanced_fence_content = "\n".join(
+        [
+            "The transcript was truncated mid-fence:",
+            "```python",
+            placeholder(unbalanced_fence_ref),
+        ]
+    )
+    bullet_tick_content = f"- `{placeholder(bullet_tick_ref)}`"
+    numbered_line_content = "\n".join(
+        [
+            "12:     result = (",
+            f'13:         "{placeholder(numbered_line_ref)}"',
+            "14:     )",
+            f'15:         "{placeholder(quoted_only_refs[1])}"',
+        ]
+    )
+    diff_line_content = "\n".join(
+        [
+            "@@ -1,0 +1,1 @@",
+            f'+        "{placeholder(diff_line_ref)}"',
+        ]
+    )
+    for role, row_content in (
+        ("assistant", fenced_content),
+        ("assistant", inline_tick_content),
+        ("assistant", unbalanced_fence_content),
+        ("assistant", bullet_tick_content),
+        ("tool", json.dumps({"content": numbered_line_content})),
+        ("tool", json.dumps({"content": diff_line_content})),
+    ):
+        engine._store._conn.execute(
+            """INSERT INTO messages
+               (session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                engine.current_session_id,
+                "test",
+                role,
+                row_content,
+                None,
+                None,
+                None,
+                1.0,
+                1,
+                0,
+            ),
+        )
+    engine._store._conn.execute(
+        """INSERT INTO messages
+           (session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            engine.current_session_id,
+            "test",
+            "assistant",
+            "calling source inspection tool",
+            None,
+            json.dumps(
+                [
+                    {
+                        "function": {
+                            "name": "inspect",
+                            "arguments": json.dumps(
+                                {"source": f'42: value = "{placeholder(tool_call_ref)}"'}
+                            ),
+                        }
+                    }
+                ]
+            ),
+            None,
+            1.0,
+            1,
+            0,
+        ),
+    )
+    engine._store._conn.commit()
+
+    detail = scan_externalized_payload_integrity(
+        engine._store._conn,
+        engine._config,
+        hermes_home=engine._hermes_home,
+    )
+    doctor_result = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    doctor_detail = next(
+        check["detail"] for check in doctor_result["checks"] if check["check"] == "payload_storage"
+    )
+
+    assert detail["externalized_payload_refs_total"] == len(live_refs)
+    assert detail["externalized_payload_refs_existing"] == len(live_refs)
+    assert detail["externalized_payload_refs_missing"] == 0
+    assert detail["missing_externalized_payload_refs"] == []
+    # The load-bearing assertion: none of these live payload files is reported
+    # unreferenced just because its placeholder sits in source-shaped text.
+    assert detail["externalized_payload_files_unreferenced"] == 0
+    assert detail["unreferenced_externalized_payload_files"] == []
+    for key in (
+        "externalized_payload_refs_total",
+        "externalized_payload_refs_existing",
+        "externalized_payload_refs_missing",
+        "externalized_payload_files_unreferenced",
+        "missing_externalized_payload_refs",
+        "unreferenced_externalized_payload_files",
+    ):
+        assert doctor_detail[key] == detail[key]
+    encoded = json.dumps(detail)
+    for ref in quoted_only_refs:
+        assert ref not in encoded
+
+
+def test_externalized_payload_integrity_scan_reports_missing_generated_ref_in_source_context(tmp_path):
+    """A GENERATED placeholder in source-shaped text stays diagnosable once its file is gone.
+
+    Promoting parked refs on payload-file existence alone is the one case that
+    inverts: when a generated placeholder sits inside a fence / backtick span /
+    line-numbered literal AND its backing file has been deleted or GC'd, existence
+    can no longer vouch for it, so the ref would be dropped exactly when recovery is
+    broken and doctor must say so. Generation provenance is readable from the ref
+    name itself -- externalize.py mints every filename as
+    ``{YYYYmmdd}_{HHMMSS}_{stub}_{12-hex digest}_{hex time_ns}.json`` -- so that
+    shape settles the missing case without consulting the filesystem. Hand-written
+    docs refs do not carry it and must stay dropped.
+    """
+    engine = _engine(tmp_path)
+    storage_dir = tmp_path / "externalized"
+    storage_dir.mkdir()
+
+    def placeholder(ref: str) -> str:
+        return (
+            "[Externalized payload: kind=raw_payload; role=assistant; "
+            f"chars=1; bytes=1; ref={ref}]"
+        )
+
+    # Minted by externalize.py's filename contract; asserted against it below.
+    live_generated_ref = "20260719_143000_raw_payload_assistant_0123456789ab_18f3c2d1e0a.json"
+    missing_fenced_ref = "20260719_143001_tool_result_call-abc_1a2b3c4d5e6f_18f3c2d1e0b.json"
+    missing_numbered_ref = "20260719_143002_ingest_payload_content_9f8e7d6c5b4a_18f3c2d1e0c.json"
+    missing_tick_ref = "20260719_143003_raw_payload_assistant_abcdef012345_18f3c2d1e0d.json"
+    missing_generated_refs = (missing_fenced_ref, missing_numbered_ref, missing_tick_ref)
+    # Hand-written docs/example names: no generation provenance, no backing file.
+    quoted_only_refs = ("quoted-fenced-example.json", "docs-tool-call.json")
+
+    (storage_dir / live_generated_ref).write_text(json.dumps({"content": "fixture payload"}))
+    for ref in (*missing_generated_refs, *quoted_only_refs):
+        assert not (storage_dir / ref).exists()
+
+    fenced_content = "\n".join(
+        [
+            "Recovery reference for the deleted payload:",
+            "```",
+            placeholder(missing_fenced_ref),
+            "```",
+            "and a docs example in its own fence:",
+            "```",
+            placeholder(quoted_only_refs[0]),
+            "```",
+        ]
+    )
+    live_fenced_content = "\n".join(
+        [
+            "Still-recoverable output:",
+            "```",
+            placeholder(live_generated_ref),
+            "```",
+        ]
+    )
+    tick_content = f"Recover it with `{placeholder(missing_tick_ref)}` if the file returns."
+    numbered_line_content = "\n".join(
+        [
+            "12:     result = (",
+            f'13:         "{placeholder(missing_numbered_ref)}"',
+            "14:     )",
+            f'15:         "{placeholder(quoted_only_refs[1])}"',
+        ]
+    )
+    for role, row_content in (
+        ("assistant", fenced_content),
+        ("assistant", live_fenced_content),
+        ("assistant", tick_content),
+        ("tool", json.dumps({"content": numbered_line_content})),
+    ):
+        engine._store._conn.execute(
+            """INSERT INTO messages
+               (session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                engine.current_session_id,
+                "test",
+                role,
+                row_content,
+                None,
+                None,
+                None,
+                1.0,
+                1,
+                0,
+            ),
+        )
+    engine._store._conn.commit()
+
+    detail = scan_externalized_payload_integrity(
+        engine._store._conn,
+        engine._config,
+        hermes_home=engine._hermes_home,
+    )
+    doctor_result = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    doctor_detail = next(
+        check["detail"] for check in doctor_result["checks"] if check["check"] == "payload_storage"
+    )
+
+    # The load-bearing assertion: every generated ref whose payload is gone is
+    # reported missing, rather than silently dropped by the source-context filter.
+    assert detail["externalized_payload_refs_missing"] == len(missing_generated_refs)
+    reported_missing = {row["externalized_ref"] for row in detail["missing_externalized_payload_refs"]}
+    assert reported_missing == set(missing_generated_refs)
+    # The live generated ref is still counted and never reported unreferenced.
+    assert detail["externalized_payload_refs_total"] == len(missing_generated_refs) + 1
+    assert detail["externalized_payload_refs_existing"] == 1
+    assert detail["externalized_payload_files_unreferenced"] == 0
+    assert detail["unreferenced_externalized_payload_files"] == []
+    for key in (
+        "externalized_payload_refs_total",
+        "externalized_payload_refs_existing",
+        "externalized_payload_refs_missing",
+        "externalized_payload_files_unreferenced",
+        "missing_externalized_payload_refs",
+        "unreferenced_externalized_payload_files",
+    ):
+        assert doctor_detail[key] == detail[key]
+    # Discriminates in both directions: docs-shaped refs carry no provenance and
+    # no backing file, so they stay out of the scan entirely.
+    encoded = json.dumps(detail)
+    for ref in quoted_only_refs:
+        assert ref not in encoded
+
+
+def test_generated_payload_ref_name_matches_minted_filenames(tmp_path):
+    """The provenance predicate tracks the filenames externalize.py actually mints."""
+    engine = _engine(tmp_path)
+    config = engine._config
+    config.large_output_externalization_enabled = True
+    config.large_output_externalization_threshold_chars = 40
+    long_content = "x" * 5000
+
+    ingest_result = externalize_ingest_payload(
+        long_content,
+        role="assistant",
+        session_id="s1",
+        field_path="content",
+        config=config,
+        hermes_home=str(tmp_path),
+    )
+    assert ingest_result is not None
+    assert is_generated_payload_ref_name(ingest_result["path"].name)
+
+    tool_result = maybe_externalize_payload(
+        long_content + "tool",
+        kind="tool_result",
+        tool_call_id="call_abc",
+        session_id="s1",
+        role="tool",
+        config=config,
+        hermes_home=str(tmp_path),
+        force=True,
+    )
+    assert tool_result is not None
+    assert is_generated_payload_ref_name(tool_result["path"].name)
+
+    raw_result = maybe_externalize_payload(
+        long_content + "raw",
+        kind="raw_payload",
+        session_id="s1",
+        role="assistant",
+        config=config,
+        hermes_home=str(tmp_path),
+        force=True,
+    )
+    assert raw_result is not None
+    assert is_generated_payload_ref_name(raw_result["path"].name)
+
+    # Hand-written docs/example refs carry no generation provenance.
+    for ref in (
+        "docs-placeholder.json",
+        "foreign_payload_ref.json",
+        "tool-result.json",
+        "20260708T120000Z-tool-call-{index}.json",
+        "quoted-fenced-example.json",
+        "20260719_fenced_payload_0123456789ab_abcdef.json",  # no HHMMSS component
+    ):
+        assert not is_generated_payload_ref_name(ref)
+
+
+def test_externalized_payload_integrity_scan_ignores_nested_serialized_diff_literals(tmp_path):
+    engine = _engine(tmp_path)
+    (tmp_path / "externalized").mkdir()
+    review_diff = "\n".join(
+        [
+            "diff --git a/tests/test_example.py b/tests/test_example.py",
+            "@@ -10,2 +10,3 @@",
+            (
+                "-        'fixture_source = \\\"[Externalized tool output: "
+                "tool_call_id=call_1; chars=1; ref=20260708T120000Z-tool-call-{index}.json]\\\"'"
+            ),
+            (
+                "+        '100: value = \\\"[Externalized payload: kind=raw_payload; "
+                "role=assistant; chars=1; ref=inc-tool-colon.json]\\\"'"
+            ),
+            (
+                "+        '200| value = \\\"[Externalized payload: kind=raw_payload; "
+                "role=assistant; chars=1; ref=inc-tool-pipe.json]\\\"'"
+            ),
+        ]
+    )
+    genuine_placeholder = (
+        "[Externalized LCM ingest payload: kind=ingest_payload; field=content; "
+        "chars=1; bytes=1; ref=missing-genuine.json]"
+    )
+    nested_tool_output = json.dumps(
+        {
+            "output": review_diff.replace("\n", "\\n"),
+            "recoverable_payload": genuine_placeholder,
+        }
+    )
+    engine._store._conn.execute(
+        """INSERT INTO messages
+           (session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            engine.current_session_id,
+            "discord",
+            "tool",
+            nested_tool_output,
+            None,
+            None,
+            None,
+            1.0,
+            1,
+            0,
+        ),
+    )
+    engine._store._conn.commit()
+
+    detail = scan_externalized_payload_integrity(
+        engine._store._conn,
+        engine._config,
+        hermes_home=engine._hermes_home,
+    )
+
+    assert detail["externalized_payload_refs_total"] == 1
+    assert detail["externalized_payload_refs_missing"] == 1
+    assert detail["missing_externalized_payload_refs"] == [
+        {
+            "store_id": 1,
+            "session_id": engine.current_session_id,
+            "source": "discord",
+            "role": "tool",
+            "field": "content",
+            "externalized_ref": "missing-genuine.json",
+        }
+    ]
 
 
 def test_externalized_payload_integrity_scan_detects_embedded_content_placeholder_with_trailing_text(tmp_path):
