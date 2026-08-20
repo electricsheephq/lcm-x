@@ -411,6 +411,7 @@ def test_rerank_skips_silently_on_non_voyage_provider(recall_engine, monkeypatch
 
 def test_rerank_applies_and_reorders_with_voyage_provider(recall_engine, monkeypatch):
     recall_engine._config.rerank_enabled = True
+    recall_engine._config.rerank_model = "rerank-2.5"
     a = _add_summary(recall_engine, "kanban alpha", session_id="session-a", created_at=5.0)
     b = _add_summary(recall_engine, "kanban beta", session_id="session-b", created_at=5.0)
     # a is RRF rank 1, b rank 2 (seeded under the voyage identity the rerank
@@ -419,19 +420,149 @@ def test_rerank_applies_and_reorders_with_voyage_provider(recall_engine, monkeyp
 
     class RerankProvider(MockProvider):
         provider_id = "voyage"
+        observed_model = None
 
         def rerank(self, query, documents, *, top_k=None, timeout, model="rerank-2.5-lite"):
+            self.observed_model = model
             # Flip relevance: the LAST document scores highest (index i -> score i),
             # returned in descending-relevance order as the real API does.
             return sorted(
                 ((i, float(i)) for i in range(len(documents))), key=lambda item: -item[1]
             )
 
+    provider = RerankProvider()
+    payload = _recall(
+        recall_engine, monkeypatch, provider=provider, include="summaries", scope_bias=0.0, limit=5
+    )
+    assert payload["provenance"]["rerank"] == "applied"
+    assert payload["hits"][0]["node_id"] == b
+    assert provider.observed_model == "rerank-2.5"
+
+
+def test_rerank_margin_holds_incumbent_and_reports_scores(recall_engine, monkeypatch):
+    recall_engine._config.rerank_enabled = True
+    recall_engine._config.rerank_margin = 0.3
+    nodes = [
+        _add_summary(recall_engine, f"kanban margin {name}", session_id=f"session-{name}", created_at=5.0)
+        for name in ("a", "b", "c")
+    ]
+    _seed_summary_vectors(recall_engine, [(node, [1.0, 0.0]) for node in nodes], provider="voyage")
+
+    class RerankProvider(MockProvider):
+        provider_id = "voyage"
+
+        def rerank(self, query, documents, *, top_k=None, timeout, model="rerank-2.5-lite"):
+            return [(1, 0.8), (2, 0.7), (0, 0.6)]
+
+    payload = _recall(
+        recall_engine, monkeypatch, provider=RerankProvider(), include="summaries", scope_bias=0.0, limit=5
+    )
+    assert payload["provenance"]["rerank"] == "applied: rank1-held"
+    assert [hit["node_id"] for hit in payload["hits"][:3]] == [nodes[2], nodes[1], nodes[0]]
+    # Provider-order triples [input_index, session_id, relevance]: the input
+    # index pins the EXACT incumbent item (index 0) even when a session id
+    # appears multiple times in the window — margin audits need exact gaps.
+    assert payload["provenance"]["rerank_scores"] == [
+        [1, "session-b", 0.8],
+        [2, "session-a", 0.7],
+        [0, "session-c", 0.6],
+    ]
+
+
+def test_rerank_margin_overrides_when_gap_reaches_margin(recall_engine, monkeypatch):
+    recall_engine._config.rerank_enabled = True
+    recall_engine._config.rerank_margin = 0.3
+    nodes = [
+        _add_summary(recall_engine, f"kanban margin override {name}", session_id=f"session-{name}", created_at=5.0)
+        for name in ("a", "b")
+    ]
+    _seed_summary_vectors(recall_engine, [(node, [1.0, 0.0]) for node in nodes], provider="voyage")
+
+    class RerankProvider(MockProvider):
+        provider_id = "voyage"
+
+        def rerank(self, query, documents, *, top_k=None, timeout, model="rerank-2.5-lite"):
+            return [(1, 0.9), (0, 0.6)]
+
     payload = _recall(
         recall_engine, monkeypatch, provider=RerankProvider(), include="summaries", scope_bias=0.0, limit=5
     )
     assert payload["provenance"]["rerank"] == "applied"
-    assert payload["hits"][0]["node_id"] == b
+    assert payload["hits"][0]["node_id"] == nodes[0]
+
+
+def test_rerank_margin_partial_result_fails_open(recall_engine, monkeypatch):
+    recall_engine._config.rerank_enabled = True
+    recall_engine._config.rerank_margin = 0.3
+    nodes = [
+        _add_summary(recall_engine, f"kanban partial margin {name}", session_id=f"session-{name}", created_at=5.0)
+        for name in ("a", "b")
+    ]
+    _seed_summary_vectors(recall_engine, [(node, [1.0, 0.0]) for node in nodes], provider="voyage")
+
+    class RerankProvider(MockProvider):
+        provider_id = "voyage"
+
+        def rerank(self, query, documents, *, top_k=None, timeout, model="rerank-2.5-lite"):
+            return [(1, 0.9)]
+
+    payload = _recall(
+        recall_engine, monkeypatch, provider=RerankProvider(), include="summaries", scope_bias=0.0, limit=5
+    )
+    assert payload["provenance"]["rerank"] == "skipped: partial rerank result"
+    assert payload["hits"][0]["node_id"] == nodes[1]
+
+
+def test_rerank_window_limit_clamps_provider_documents(recall_engine, monkeypatch):
+    class CountingRerankProvider(MockProvider):
+        provider_id = "voyage"
+
+        def __init__(self):
+            super().__init__()
+            self.document_counts = []
+
+        def rerank(self, query, documents, *, top_k=None, timeout, model="rerank-2.5-lite"):
+            self.document_counts.append(len(documents))
+            return [(index, float(len(documents) - index)) for index in range(len(documents))]
+
+    provider = CountingRerankProvider()
+    recall_engine._config.embeddings_enabled = True
+    recall_engine._config.rerank_enabled = True
+    recall_engine._config.embedding_provider = "voyage"
+    recall_engine._config.embedding_model = "voyage-3"
+    hits = [
+        {
+            "kind": "summary",
+            "node_id": index,
+            "session_id": f"session-{index}",
+            "timestamp": 5.0,
+            "snippet": f"kanban dashboard sprint {index}",
+        }
+        for index in range(60)
+    ]
+    monkeypatch.setattr(
+        lcm_tools,
+        "_resolve_recall_provider",
+        lambda *_args, **_kwargs: provider,
+    )
+    monkeypatch.setattr(
+        lcm_tools,
+        "_lcm_recall_summary_arm",
+        lambda *_args, **_kwargs: (list(hits), "full", len(hits), len(hits), []),
+    )
+
+    lcm_tools.lcm_recall(
+        {"query": "kanban dashboard sprint", "include": "summaries", "limit": 25},
+        engine=recall_engine,
+    )
+    assert provider.document_counts == [50]
+
+    recall_engine._config.rerank_window_limit = 10
+    lcm_tools.lcm_recall(
+        {"query": "kanban dashboard sprint", "include": "summaries", "limit": 25},
+        engine=recall_engine,
+    )
+    assert provider.document_counts == [50, 10]
 
 
 def test_rerank_failure_falls_back_to_rrf_order(recall_engine, monkeypatch):
@@ -1111,6 +1242,23 @@ def test_recall_query_timeout_has_its_own_budget(monkeypatch, tmp_path):
     cfg = LCMConfig.from_env()
     assert cfg.recall_query_timeout_s == 12.5
     assert cfg.embedding_query_timeout_s == 3.0  # grep's deadline untouched
+
+
+def test_rerank_model_default_and_env_override(monkeypatch):
+    assert LCMConfig().rerank_model == "rerank-2.5-lite"
+
+    monkeypatch.setenv("LCM_RERANK_MODEL", "rerank-2.5")
+    assert LCMConfig.from_env().rerank_model == "rerank-2.5"
+def test_rerank_window_limit_defaults_to_zero_and_reads_env(monkeypatch, tmp_path):
+    assert LCMConfig(database_path=str(tmp_path / "default.db")).rerank_window_limit == 0
+    monkeypatch.setenv("LCM_RERANK_WINDOW_LIMIT", "10")
+    assert LCMConfig.from_env().rerank_window_limit == 10
+
+
+def test_rerank_margin_defaults_to_zero_and_reads_env(monkeypatch, tmp_path):
+    assert LCMConfig(database_path=str(tmp_path / "default.db")).rerank_margin == 0.0
+    monkeypatch.setenv("LCM_RERANK_MARGIN", "0.25")
+    assert LCMConfig.from_env().rerank_margin == 0.25
 
 
 def test_summary_source_expansion_refuses_an_expired_deadline(recall_engine):
@@ -3131,3 +3279,35 @@ def test_reversible_rejection_stays_reachable_after_a_partial_refund():
     assert [e["hit"]["store_id"] for e in regained] == [3], (
         "a revisitable candidate must never become unreachable"
     )
+
+
+# --- Salvaged from PR #191 (upstream stephenschoettler/hermes-lcm#461),
+# --- originally authored by @stephenschoettler.
+# --- The PR's own assertion that provenance.coverage.fts == "full" is a design
+# --- fork: it belongs to the PR's new FTS coverage vocabulary ("full"/"bounded"),
+# --- which main does not have (main emits only "none"/"ok" -- tools.py:4779,4784).
+# --- Dropped here; the main-resident behavior below is what this pins.
+def test_recall_fts_finds_oldest_matching_message_beyond_candidate_window(
+    recall_engine, monkeypatch
+):
+    recall_engine._config.embeddings_enabled = False
+    oldest = recall_engine._store.append(
+        "session-old",
+        {"role": "user", "content": "cobalt-orchid immutable recovery note"},
+    )
+    for index in range(75):
+        recall_engine._store.append(
+            f"session-new-{index}",
+            {"role": "user", "content": f"ordinary recent note {index}"},
+        )
+
+    payload = _recall(
+        recall_engine,
+        monkeypatch,
+        provider=MockProvider(),
+        query="cobalt orchid",
+        include="verbatim",
+        limit=1,
+    )
+
+    assert payload["hits"][0]["store_id"] == oldest

@@ -186,6 +186,14 @@ erroring the tool. `lcm_grep`'s hybrid RRF is unaffected: it keeps implicit
 actually applied to the arms that ran are echoed back under
 `provenance.arm_weights`.
 
+`LCM_RERANK_ENABLED=true` optionally lets Voyage reorder the bounded top fused
+window after the scope/recency prior. `LCM_RERANK_MODEL` selects the Voyage
+model (`rerank-2.5-lite` by default; `rerank-2.5` for the quality-oriented
+model). Reranking is deliberately order-only: Voyage's `0..1` relevance values
+are not spliced into the much smaller RRF/composite score scale. Provider,
+network, or deadline failures keep the incoming order and are reported under
+`provenance.rerank`. This stage applies to `lcm_recall`, not `lcm_grep`.
+
 If the summary or chunk arm ran under `coverage='bounded'` (recency-truncated
 candidate scan) or `coverage='full_approx'` (two-stage binary-prescreen KNN,
 see [vector storage scale options](operator-guide.md#vector-storage-scale-options-v3)),
@@ -229,7 +237,10 @@ even when the sources still belong to the previous session.
 `lcm_recent` accepts `today`, `yesterday`, `Nd`, `week`, `month`,
 `date:YYYY-MM-DD`, and `last Nh`. All periods are normalized to UTC `[start,
 end)` windows. Results are newest-first, limited to 200 sections, and bounded to
-the same 20,000-character response ceiling used by the retrieval tools.
+the same 20,000-character response ceiling used by the retrieval tools. The
+current schema supports only the active conversation: omit `scope` to use the
+default, or pass `scope: "conversation"` explicitly. Cross-session/global
+rollups remain future work.
 
 ```json
 {"period": "today"}
@@ -240,7 +251,7 @@ the same 20,000-character response ceiling used by the retrieval tools.
 ```
 
 ```json
-{"period": "date:2026-07-15", "scope": "global"}
+{"period": "date:2026-07-15", "scope": "conversation"}
 ```
 
 When temporal rollups are enabled and `ready` rollups cover the **entire**

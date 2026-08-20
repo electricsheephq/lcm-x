@@ -1819,3 +1819,68 @@ def test_summary_knn_survives_chunk_profile_registration(tmp_path):
     finally:
         store.close()
         dag.close()
+
+
+# --- Salvaged from PR #191 (upstream stephenschoettler/hermes-lcm#461),
+# --- originally authored by @stephenschoettler. Kept only the assertions that
+# --- pin behavior main already ships (store.knn(full_scan=True)); the PR's
+# --- scanned/total-populated-on-full-coverage contract change is a design fork
+# --- and is NOT asserted here (main leaves both None outside bounded coverage).
+
+
+def test_full_scan_reaches_best_vector_outside_recency_bound(tmp_path):
+    db_path = tmp_path / "full-scan.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(db_path, bounded_scan_rows=1)
+    try:
+        oldest = _add_summary(dag, created_at=1.0)
+        newest = _add_summary(dag, created_at=2.0)
+        store.register_profile("full-scan", "local", 2)
+        _record_embedding(store, oldest, "summary", "full-scan", [1.0, 0.0])
+        _record_embedding(store, newest, "summary", "full-scan", [0.0, 1.0])
+
+        bounded = store.knn([1.0, 0.0], k=1, model="full-scan")
+        exhaustive = store.knn(
+            [1.0, 0.0],
+            k=1,
+            model="full-scan",
+            full_scan=True,
+        )
+
+        assert bounded.coverage == "bounded"
+        assert [row[0] for row in bounded] == [str(newest)]
+        assert exhaustive.coverage == "full"
+        assert exhaustive.reason is None
+        assert [row[0] for row in exhaustive] == [str(oldest)]
+    finally:
+        store.close()
+        dag.close()
+
+
+
+def test_full_scan_exception_releases_owned_read_transaction(tmp_path, monkeypatch):
+    db_path = tmp_path / "full-scan-exception.db"
+    dag = SummaryDAG(db_path)
+    store = VectorStore(db_path, bounded_scan_rows=1)
+    try:
+        node_id = _add_summary(dag, created_at=1.0)
+        store.register_profile("full-scan", "local", 2)
+        _record_embedding(store, node_id, "summary", "full-scan", [1.0, 0.0])
+
+        def fail_decode(*_args, **_kwargs):
+            raise RuntimeError("simulated decode failure")
+
+        monkeypatch.setattr(store, "_decode_stored_vec", fail_decode)
+        with pytest.raises(RuntimeError, match="simulated decode failure"):
+            store.knn(
+                [1.0, 0.0],
+                k=1,
+                model="full-scan",
+                full_scan=True,
+            )
+        assert store.connection.in_transaction is False
+    finally:
+        store.close()
+        dag.close()
+
+

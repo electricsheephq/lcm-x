@@ -1906,6 +1906,72 @@ class TestEngineABC:
         finally:
             instance.shutdown()
 
+    def test_preflight_defers_noncritical_under_threshold_raw_backlog_after_ingest(self, tmp_path, monkeypatch):
+        config = LCMConfig(
+            database_path=str(tmp_path / "lcm_preflight_deferred_noncritical.db"),
+            fresh_tail_count=4,
+            leaf_chunk_tokens=20,
+            deferred_maintenance_enabled=True,
+            critical_budget_pressure_ratio=0.90,
+        )
+        instance = LCMEngine(config=config)
+        instance.on_session_start("test-session", platform="cli", context_length=10_000)
+        instance.context_length = 10_000
+        instance.threshold_tokens = 5_000
+        messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "old backlog " + "x" * 200},
+            {"role": "assistant", "content": "old answer " + "y" * 200},
+            {"role": "user", "content": "fresh " + "a" * 50},
+            {"role": "assistant", "content": "fresh " + "b" * 50},
+            {"role": "user", "content": "fresh " + "c" * 50},
+        ]
+        monkeypatch.setattr(
+            lcm_engine,
+            "summarize_with_escalation",
+            lambda **_kwargs: (_ for _ in ()).throw(AssertionError("summarizer called")),
+        )
+        try:
+            assert count_messages_tokens(messages) < instance.threshold_tokens
+            assert instance.should_compress_preflight(messages) is False
+            assert instance._store.count_session_load_messages(instance.current_session_id) == len(messages)
+            state = instance._lifecycle.get_by_conversation(instance._conversation_id)
+            assert state is not None
+            assert state.debt_kind == "raw_backlog"
+            assert state.debt_size_estimate > 0
+        finally:
+            instance.shutdown()
+
+    def test_preflight_required_sibling_branches_remain_synchronous(self, tmp_path, monkeypatch):
+        config = LCMConfig(
+            database_path=str(tmp_path / "lcm_preflight_required_siblings.db"),
+            fresh_tail_count=2,
+            leaf_chunk_tokens=20,
+            deferred_maintenance_enabled=True,
+            critical_budget_pressure_ratio=0.50,
+        )
+        instance = LCMEngine(config=config)
+        instance.on_session_start("required-session", platform="cli", context_length=1_000)
+        messages = [
+            {"role": "system", "content": "system"},
+            {"role": "user", "content": "old " + "x" * 500},
+            {"role": "assistant", "content": "old " + "y" * 500},
+            {"role": "user", "content": "fresh"},
+        ]
+        try:
+            instance.threshold_tokens = 1
+            assert instance.should_compress_preflight(messages) is True
+
+            instance.threshold_tokens = 100_000
+            instance.context_length = 50
+            assert instance.should_compress_preflight(messages) is True
+
+            monkeypatch.setattr(instance, "_ingest_messages", lambda _messages: _messages[:-1])
+            instance.context_length = 100_000
+            assert instance.should_compress_preflight(messages) is True
+        finally:
+            instance.shutdown()
+
     def test_preflight_requests_compaction_for_deferred_maintenance_under_critical_pressure(self, tmp_path):
         config = LCMConfig(
             database_path=str(tmp_path / "lcm_preflight_deferred_critical.db"),
@@ -1917,7 +1983,7 @@ class TestEngineABC:
         instance = LCMEngine(config=config)
         instance._bind_lifecycle_state("test-session")
         instance.context_length = 200
-        instance.threshold_tokens = 100
+        instance.threshold_tokens = 10_000
         messages = [
             {"role": "system", "content": "system"},
             {"role": "user", "content": "tiny old backlog"},
@@ -1928,7 +1994,11 @@ class TestEngineABC:
         ]
         try:
             rough = count_messages_tokens(messages)
-            assert rough >= instance.threshold_tokens
+            assert rough < instance.threshold_tokens
+            assert instance._critical_budget_pressure_reached(
+                observed_tokens=rough,
+                messages=messages,
+            )
             eligible, reason = instance._leaf_compaction_candidate_status(messages)
             assert not eligible
             assert "below leaf chunk threshold" in reason
@@ -3887,6 +3957,9 @@ class TestEngineABC:
         after_restart._ingest_messages(active_context)
 
         rows = after_restart._store.get_session_messages("compacted-session")
+        # A scaffold proves that synthetic context was prepended, but does not
+        # prove whether matching durable-tail rows are replay or fresh input.
+        # Preserve the ambiguous fresh rows rather than risk dropping them.
         assert [row["role"] for row in rows] == [
             "system",
             "user",
@@ -4808,6 +4881,163 @@ class TestEngineABC:
         reconciliation = after_restart.get_status()["ingest_reconciliation"]
         assert reconciliation["reason"] == "persisted ambiguous delta"
         assert reconciliation["action"] == "persisted batch"
+
+    def test_existing_session_restart_preserves_fresh_delta_repeating_unique_tail_suffix(self, tmp_path):
+        db_path = tmp_path / "restart-partial-tail-overlap.db"
+        config = LCMConfig(database_path=str(db_path))
+        before_restart = LCMEngine(config=config)
+        before_restart.on_session_start(
+            "partial-overlap-session",
+            platform="cli",
+            conversation_id="partial-overlap-conversation",
+            context_length=200000,
+        )
+        persisted_messages = [{"role": "system", "content": "You are concise."}]
+        persisted_messages.extend(
+            {"role": "user", "content": f"durable message {i}"}
+            for i in range(80)
+        )
+        before_restart._ingest_messages(persisted_messages)
+        before_restart._store.close()
+        before_restart._dag.close()
+        before_restart._lifecycle.close()
+
+        after_restart = LCMEngine(config=config)
+        after_restart.on_session_start(
+            "partial-overlap-session",
+            platform="cli",
+            conversation_id="partial-overlap-conversation",
+            context_length=200000,
+        )
+        repeated_fresh_messages = [dict(message) for message in persisted_messages[-4:]]
+        delta = [
+            *repeated_fresh_messages,
+            {"role": "user", "content": "fresh turn after repeated exchange"},
+        ]
+
+        after_restart._ingest_messages(delta)
+
+        rows = after_restart._store.get_session_messages(
+            "partial-overlap-session",
+            limit=len(persisted_messages) + len(delta),
+        )
+        assert len(rows) == len(persisted_messages) + len(delta)
+        assert [row["content"] for row in rows[-len(delta) :]] == [
+            *[message["content"] for message in repeated_fresh_messages],
+            "fresh turn after repeated exchange",
+        ]
+        assert after_restart._ingest_cursor == len(delta)
+        reconciliation = after_restart.get_status()["ingest_reconciliation"]
+        assert reconciliation["action"] == "persisted batch"
+        assert reconciliation["reason"] == "persisted ambiguous delta"
+
+    def test_existing_session_restart_repeated_tail_sequence_stays_ambiguous(self, tmp_path):
+        db_path = tmp_path / "restart-repeated-tail-sequence.db"
+        config = LCMConfig(database_path=str(db_path))
+        before_restart = LCMEngine(config=config)
+        before_restart.on_session_start(
+            "repeated-tail-session",
+            platform="cli",
+            conversation_id="repeated-tail-conversation",
+            context_length=200000,
+        )
+        persisted_messages = [
+            {"role": "system", "content": "You are concise."},
+            {"role": "user", "content": "heartbeat ping"},
+            {"role": "assistant", "content": "heartbeat pong"},
+            {"role": "user", "content": "heartbeat ping"},
+            {"role": "assistant", "content": "heartbeat pong"},
+        ]
+        before_restart._ingest_messages(persisted_messages)
+        before_restart._store.close()
+        before_restart._dag.close()
+        before_restart._lifecycle.close()
+
+        after_restart = LCMEngine(config=config)
+        after_restart.on_session_start(
+            "repeated-tail-session",
+            platform="cli",
+            conversation_id="repeated-tail-conversation",
+            context_length=200000,
+        )
+        # A fresh heartbeat round repeats the durable tail verbatim; the
+        # repeated sequence must stay ambiguous so the new rows are preserved.
+        delta = [
+            {"role": "user", "content": "heartbeat ping"},
+            {"role": "assistant", "content": "heartbeat pong"},
+            {"role": "user", "content": "new instruction"},
+        ]
+
+        after_restart._ingest_messages(delta)
+
+        rows = after_restart._store.get_session_messages(
+            "repeated-tail-session",
+            limit=len(persisted_messages) + len(delta),
+        )
+        assert len(rows) == len(persisted_messages) + len(delta)
+        # The complete trailing payload, in order — a reconciliation defect
+        # could persist the overlapping rows out of order while the count and
+        # final-row checks still pass.
+        assert [row["content"] for row in rows[-len(delta):]] == [
+            "heartbeat ping",
+            "heartbeat pong",
+            "new instruction",
+        ]
+        assert after_restart._ingest_cursor == len(delta)
+        reconciliation = after_restart.get_status()["ingest_reconciliation"]
+        assert reconciliation["action"] == "persisted batch"
+        assert reconciliation["reason"] == "persisted ambiguous delta"
+
+    def test_existing_session_restart_singleton_partial_overlap_stays_ambiguous(self, tmp_path):
+        db_path = tmp_path / "restart-singleton-partial-overlap.db"
+        config = LCMConfig(database_path=str(db_path))
+        before_restart = LCMEngine(config=config)
+        before_restart.on_session_start(
+            "singleton-overlap-session",
+            platform="cli",
+            conversation_id="singleton-overlap-conversation",
+            context_length=200000,
+        )
+        persisted_messages = [{"role": "system", "content": "You are concise."}]
+        persisted_messages.extend(
+            {"role": "user", "content": f"durable message {i}"}
+            for i in range(10)
+        )
+        before_restart._ingest_messages(persisted_messages)
+        before_restart._store.close()
+        before_restart._dag.close()
+        before_restart._lifecycle.close()
+
+        after_restart = LCMEngine(config=config)
+        after_restart.on_session_start(
+            "singleton-overlap-session",
+            platform="cli",
+            conversation_id="singleton-overlap-conversation",
+            context_length=200000,
+        )
+        # One overlapping row is not enough replay evidence; the batch could
+        # be a fresh delta whose first row repeats the durable tail.
+        delta = [
+            dict(persisted_messages[-1]),
+            {"role": "user", "content": "fresh turn after singleton overlap"},
+        ]
+
+        after_restart._ingest_messages(delta)
+
+        rows = after_restart._store.get_session_messages(
+            "singleton-overlap-session",
+            limit=len(persisted_messages) + len(delta),
+        )
+        assert len(rows) == len(persisted_messages) + len(delta)
+        # Complete trailing payload in order, not just the final row.
+        assert [row["content"] for row in rows[-len(delta):]] == [
+            persisted_messages[-1]["content"],
+            "fresh turn after singleton overlap",
+        ]
+        assert after_restart._ingest_cursor == len(delta)
+        reconciliation = after_restart.get_status()["ingest_reconciliation"]
+        assert reconciliation["action"] == "persisted batch"
+        assert reconciliation["reason"] == "persisted ambiguous delta"
 
     def test_existing_session_restart_scaffold_prefix_does_not_skip_unrelated_new_rows(self, tmp_path):
         db_path = tmp_path / "restart-scaffold-prefix-unrelated.db"
@@ -20932,7 +21162,7 @@ class TestDeferredMaintenanceDebt:
         assert state is not None
         assert state.debt_kind == "raw_backlog"
         assert state.debt_size_estimate > 0
-        assert engine.should_compress_preflight(compressed) is True
+        assert engine.should_compress_preflight(compressed) is False
         refreshed = engine._lifecycle.get_by_conversation(engine._conversation_id)
         assert refreshed is not None
         assert refreshed.debt_kind == "raw_backlog"

@@ -122,6 +122,7 @@ from .session_patterns import (
 from .message_analysis import (
     _is_synthetic_assistant_noise,
     _matched_tool_call_ids,
+    _merge_adjacent_assistant_messages,
     _tool_call_id,
 )
 from .fresh_tail import FreshTailBoundary, resolve_fresh_tail_boundary
@@ -903,6 +904,20 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         }
         route_model = self.model if model is None else model
         route_provider = self.provider if provider is None else provider
+        # Per-model threshold overrides take priority over everything else.
+        # Longest substring match wins (so "glm-5.2-1M" beats "glm-5.2").
+        if self._config.model_thresholds and route_model:
+            best_key = ""
+            for key in self._config.model_thresholds:
+                if key in route_model and len(key) > len(best_key):
+                    best_key = key
+            if best_key:
+                override = float(self._config.model_thresholds[best_key])
+                return (
+                    override,
+                    f"model_thresholds:{best_key}",
+                    {"from": configured, "to": override},
+                )
         if (
             _is_codex_gpt55_route(route_model, route_provider)
             and self._config.codex_gpt55_autoraise_enabled
@@ -1000,6 +1015,22 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         self.threshold_tokens = self._effective_threshold_tokens(
             context_threshold_tokens
         )
+        # Absolute override: pin the compaction trigger to a fixed token budget
+        # so model-window switches do not move the operator's context-health
+        # setpoint (e.g. ~130K for high-quality coding recall). Ratio-based
+        # LCM_CONTEXT_THRESHOLD alone drifts with context_length.
+        try:
+            absolute_threshold_tokens = int(
+                os.environ.get("LCM_ABSOLUTE_THRESHOLD_TOKENS", "0") or 0
+            )
+        except (TypeError, ValueError):
+            absolute_threshold_tokens = 0
+        if absolute_threshold_tokens > 0:
+            self.threshold_tokens = absolute_threshold_tokens
+            # Keep route-specific ratio auto-raise from re-climbing the
+            # intermediate ratio on later recomputes; absolute still wins
+            # above, but disabling auto-raise keeps status/percent honest.
+            self._config.codex_gpt55_autoraise_enabled = False
         return True
 
     def _session_metadata_matches_active_runtime(
@@ -1033,6 +1064,16 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         compactable raw backlog is protected by the fresh tail).
         """
         return self._last_compression_status
+
+    @last_compression_status.setter
+    def last_compression_status(self, value: str) -> None:
+        """Allow host to reset status before each compress() pass.
+
+        Without a setter, ``setattr(engine, "last_compression_status", "")``
+        in ``conversation_compression.py`` raises ``AttributeError: property
+        has no setter``, crashing context compression.
+        """
+        self._last_compression_status = value
 
     @property
     def last_compression_noop_reason(self) -> str:
@@ -1981,8 +2022,36 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             return []
         return messages[leading_anchor_count:fresh_tail_start]
 
+    def _effective_fresh_tail_max_tokens(self) -> int:
+        """Return the active fresh-tail token cap.
+
+        When the user has not set LCM_FRESH_TAIL_MAX_TOKENS explicitly
+        (config value is 0) and the context is large enough to matter
+        (> 50K), derive a context-proportional default so the fresh tail
+        cannot consume the entire model window on small context models.
+        50% of context_length leaves room for leaf chunks to accumulate
+        and trigger compression.  Below 50K the count-based limit is
+        sufficient and clamping would break small-context test fixtures.
+        When fresh_tail_count is 0 the user explicitly wants no fresh
+        tail, so the implicit token cap must not override that.
+        """
+        explicit = self._config.fresh_tail_max_tokens
+        if explicit > 0:
+            return explicit
+        if not self._config.fresh_tail_count:
+            return 0
+        ctx = self.context_length or 0
+        if ctx < 50_000:
+            return 0
+        return max(1, int(ctx * 0.5))
+
     def _fresh_tail_boundary(self, messages: List[Dict[str, Any]]) -> FreshTailBoundary:
-        max_tokens = self._config.fresh_tail_max_tokens
+        # Start from the context-aware effective cap, not the raw config value:
+        # it resolves an explicit setting, the fresh_tail_count=0 opt-out, and
+        # the context-proportional default. The pressure-yield limit then
+        # clamps that further, so the two mechanisms compose rather than one
+        # discarding the other.
+        max_tokens = self._effective_fresh_tail_max_tokens()
         if self._pressure_yield_tail_token_limit > 0:
             max_tokens = (
                 min(max_tokens, self._pressure_yield_tail_token_limit)
@@ -2197,13 +2266,14 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         """Load and resolve a stored tail, expanding backward for tool pairing."""
         total_count = int(self._store.get_session_count(session_id))
         configured_count = max(minimum_count, int(self._config.fresh_tail_count or 0))
-        if self._config.fresh_tail_max_tokens > 0:
+        effective_max_tokens = self._effective_fresh_tail_max_tokens()
+        if effective_max_tokens > 0:
             configured_count = max(1, configured_count)
         if total_count <= 0 or configured_count <= 0:
             return [], resolve_fresh_tail_boundary(
                 [],
                 fresh_tail_count=configured_count,
-                fresh_tail_max_tokens=self._config.fresh_tail_max_tokens,
+                fresh_tail_max_tokens=effective_max_tokens,
             )
 
         load_limit = min(total_count, configured_count)
@@ -2212,7 +2282,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             boundary = resolve_fresh_tail_boundary(
                 rows,
                 fresh_tail_count=configured_count,
-                fresh_tail_max_tokens=self._config.fresh_tail_max_tokens,
+                fresh_tail_max_tokens=effective_max_tokens,
             )
             selected = rows[boundary.start:]
             unresolved_tool_boundary = bool(
@@ -4208,7 +4278,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         return self.carry_over_new_session_context(old_session_id, new_session_id)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [
+        disabled = self._disabled_tool_names()
+        schemas = [
             LCM_GREP,
             LCM_RECALL,
             LCM_QUERY_STATE,
@@ -4225,8 +4296,25 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             LCM_INSPECT,
             LCM_DOCTOR,
         ]
+        if disabled:
+            return [s for s in schemas if s.get("name") not in disabled]
+        return schemas
+
+    @staticmethod
+    def _disabled_tool_names() -> set[str]:
+        """Tools disabled via LCM_DISABLED_TOOLS (comma-separated lcm_* names).
+
+        Disabled tools are excluded from the injected context-engine schemas
+        AND refused in handle_tool_call, so they cost zero tokens per turn.
+        """
+        raw = os.environ.get("LCM_DISABLED_TOOLS", "")
+        if not raw:
+            return set()
+        return {part.strip() for part in raw.split(",") if part.strip()}
 
     def handle_tool_call(self, name: str, args: Dict[str, Any], **kwargs) -> str:
+        if name in self._disabled_tool_names():
+            return json.dumps({"error": f"LCM tool {name} is disabled via LCM_DISABLED_TOOLS"})
         # Ingest live messages if passed (enables current-turn search)
         messages = kwargs.get("messages")
 
@@ -4755,6 +4843,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 and "Earlier turns have been compacted into hierarchical summaries below." in content
             )
         if content.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
+            return True
+        if content.lstrip().startswith(_PRESERVED_TODO_CONTEXT_PREFIX):
             return True
         if "[Expand for details:" not in content:
             return False
@@ -5307,6 +5397,15 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             protected_messages,
         ):
             if self._protected_message_uses_raw_payload_active_stub(protected_msg):
+                # Assistant messages must keep their original content in the
+                # active replay: the host renders active_replay_messages to the
+                # user and feeds it back to the model.  Replacing an assistant
+                # response with a placeholder makes the agent's own reasoning
+                # invisible to both.  The store still holds the externalized
+                # version for durable recovery via lcm_expand.
+                _orig_role = str(active_replay_messages[absolute_idx].get("role") or "")
+                if _orig_role == "assistant":
+                    continue
                 if active_replay_messages is replay_messages:
                     active_replay_messages = self._copy_active_replay_messages_preserving_generated_ids(
                         replay_messages
@@ -5694,12 +5793,20 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         messages: List[Dict[str, Any]],
         *,
         insert_missing_tool_stubs: bool = True,
+        merge_adjacent_assistants: bool = True,
     ) -> List[Dict[str, Any]]:
         """Drop unsafe assistant-only noise, then repair tool sequencing.
 
         This is intentionally active-context-only: callers pass the selected
         provider replay context, and this helper never mutates stored rows,
         source mappings, or DAG nodes.
+
+        ``merge_adjacent_assistants`` collapses assistant rows left adjacent
+        after tool rows are dropped (the final emitted/persisted shape). It is
+        turned OFF for the intermediate token-budget selection pass in
+        ``_assemble_context``, where each turn must be weighed and kept/dropped
+        on its own — merging there would force an all-or-nothing decision on a
+        combined row and could drop a small tail turn glued to an oversized one.
         """
         cleaned: list[Dict[str, Any]] = []
         dropped_assistant_messages = 0
@@ -5728,10 +5835,16 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 stripped_assistant_messages,
             )
 
-        return self._sanitize_tool_pairs(
+        paired = self._sanitize_tool_pairs(
             cleaned,
             insert_missing_tool_stubs=insert_missing_tool_stubs,
         )
+        if not merge_adjacent_assistants:
+            return paired
+        # Merge any assistant rows left adjacent once tool rows were dropped —
+        # emit an alternation-clean active context so downstream loads don't
+        # have to repair it and the persisted message count matches replay.
+        return _merge_adjacent_assistant_messages(paired)
 
     @staticmethod
     def _active_tool_stub_content(original_content: Any, placeholder: str) -> Any:
@@ -6566,6 +6679,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             tail_for_selection = self._sanitize_active_context_messages(
                 assembly_tail_messages,
                 insert_missing_tool_stubs=False,
+                # Intermediate pass for per-turn token-budget selection: weigh
+                # each turn on its own; do NOT merge adjacent assistants here or
+                # a small tail turn glued to an oversized one gets dropped with
+                # it. The final assembled result is merged downstream.
+                merge_adjacent_assistants=False,
             )
             skipped_tail_gap = False
             for msg in reversed(tail_for_selection):
