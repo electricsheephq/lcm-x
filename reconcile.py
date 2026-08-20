@@ -681,13 +681,35 @@ class ReconcileMixin:
             if allow_session_end_replay_proof
             else set()
         )
-        # Durable tool-result identities, keyed by their execution id. A
-        # provider-issued ``tool_call_id`` is unique per call -- the durable
-        # externalization lookup already keys on it
-        # (``find_externalized_tool_result_content_for_call``) -- so a durable
-        # tool identity cannot be re-minted by a genuinely new turn. That
-        # uniqueness is what makes the tool-anchored terms below a proof rather
-        # than a content coincidence.
+        # Durable tool-result identities: WHOLE replay identities
+        # ``(role, normalized content, tool_call_id, tool_calls)`` for the tool
+        # rows that carry an execution id -- not a set of bare ids.
+        #
+        # Keeping the whole tuple is load-bearing, and the reason is the
+        # opposite of an id-uniqueness assumption. LCM does NOT get to assume a
+        # host mints each ``tool_call_id`` once: no enforced contract makes them
+        # unique per session, and this codebase already says so in the one place
+        # that resolves content by id --
+        # ``find_externalized_tool_result_content_for_call`` documents that "a
+        # reused tool-call id alone is not sufficient proof" and demands
+        # marker-specific metadata alongside it.
+        #
+        # So the tool-anchored terms below are a proof for a narrower reason: a
+        # candidate row only matches when its ENTIRE identity, content included,
+        # equals a durable row's. If a provider or gateway re-issues an id for a
+        # genuinely new invocation, that call's result differs, no durable
+        # identity matches, and the batch falls through to the ambiguous-delta
+        # path and persists (#259: visible duplication beats silent loss).
+        # Pinned by
+        # ``test_reused_tool_call_id_with_new_result_content_is_persisted_not_replayed``.
+        #
+        # Residual, accepted deliberately: an id reused for a BYTE-IDENTICAL
+        # repeat is indistinguishable from replay here and is skipped, so a
+        # repeated identical call collapses to one durable pair. What is dropped
+        # is byte-identical to a row the store already holds, and the advance is
+        # recorded on ``_last_ingest_reconciliation`` rather than being silent.
+        # Narrowing this match to the id alone would turn that bounded
+        # de-duplication into real data loss.
         stored_tool_identities = {
             identity
             for identity in stored_tail
@@ -1020,24 +1042,31 @@ class ReconcileMixin:
             # Tool-anchored replay proof.
             #
             # The full-replay terms above carry a length guard (a candidate must
-            # cover the durable session) because repeated CONTENT is not proof:
-            # a fresh delta can legitimately repeat the visible tail, and
-            # treating it as replay silently loses it. A durable
-            # ``tool_call_id`` is a different kind of evidence -- it is minted
-            # once by the provider and cannot be re-issued -- so a prefix
-            # anchored by one is replay at any length, and the length guard does
-            # not apply.
+            # cover the durable session) because repeated CONTENT ALONE is not
+            # proof: a fresh delta can legitimately repeat the visible tail, and
+            # treating it as replay silently loses it. The tool-anchored terms
+            # drop that length guard, so they need their own justification.
             #
-            # The invariant that makes that safe: EVERY identity in the advanced
-            # prefix is exact-matched to a durable row. ``matches_sanitized_tail``
-            # and ``matches_raw_tail`` match the whole prefix against the durable
-            # tail suffix; ``matches_tool_anchored_stale_window`` matches it
-            # against a contiguous durable window; ``candidate_ends_with_``
+            # It is NOT "a tool_call_id is minted once and cannot be re-issued".
+            # LCM cannot assume that -- see the note on
+            # ``stored_tool_identities`` above, and the explicit disclaimer in
+            # ``find_externalized_tool_result_content_for_call``.
+            #
+            # The invariant that actually makes the bypass safe: EVERY identity
+            # in the advanced prefix is exact-matched -- role, normalized
+            # content, tool_call_id and tool_calls together -- to a durable row,
+            # and at least one of them is a durable tool row carrying an id.
+            # ``matches_sanitized_tail`` and ``matches_raw_tail`` match the whole
+            # prefix against the durable tail suffix;
+            # ``matches_tool_anchored_stale_window`` matches it against a
+            # contiguous durable window; ``candidate_ends_with_``
             # ``replayed_tool_result`` requires the durable tool pair plus
             # durable contentless assistants. Nothing outside the durable set is
-            # ever consumed here, so a genuinely new turn cannot be skipped --
+            # ever consumed here, so a genuinely new turn -- including one that
+            # reuses an id but produces a different result -- cannot be skipped:
             # it falls through to the ambiguous-delta path and is persisted
-            # (#259: visible duplication beats silent loss).
+            # (#259: visible duplication beats silent loss). The one accepted
+            # residual is a byte-identical repeat; see ``stored_tool_identities``.
             #
             # Persisted-output markers are excluded: their identity is recovered
             # from an external file, so it is not a durable-row match and gets

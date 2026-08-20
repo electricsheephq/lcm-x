@@ -4991,6 +4991,67 @@ class TestAssemblyBudgetSelection:
             "new user after noncontiguous replay",
         ]
 
+    def test_reused_tool_call_id_with_new_result_content_is_persisted_not_replayed(self, tmp_path, monkeypatch):
+        """A re-minted tool_call_id is NOT by itself replay proof.
+
+        The tool-anchored terms bypass the full-replay length guard. That bypass
+        is admissible only because every identity they advance over is matched
+        on the WHOLE replay identity -- role, normalized content, tool_call_id
+        and tool_calls -- against a durable row, not on the id alone. If a
+        provider or gateway re-issues a ``tool_call_id`` for a genuinely new
+        invocation, the new tool result differs from the durable one, no durable
+        identity matches, and the batch must fall through to the ambiguous-delta
+        path and persist (#259: visible duplication beats silent loss).
+
+        This fence pins the content half of the identity. Narrowing the match to
+        the ``tool_call_id`` alone would silently drop the second call.
+        """
+        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=450)
+        tool_call = {
+            "id": "call_reused_id_anchor",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        }
+        engine._ingest_messages([
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "historical objective"},
+            {"role": "assistant", "content": "", "tool_calls": [tool_call]},
+            {
+                "role": "tool",
+                "tool_call_id": "call_reused_id_anchor",
+                "tool_name": "read_file",
+                "content": "first durable tool result",
+            },
+            {"role": "assistant", "content": "durable answer"},
+        ])
+        original_count = engine._store.get_session_count("assembly-session")
+
+        from hermes_lcm.engine import LCMEngine
+
+        replay = LCMEngine(config=engine._config, hermes_home=str(tmp_path / "hermes"))
+        replay._session_id = "assembly-session"
+        replay._ingest_cursor_needs_reconcile = True
+        # Same call id, genuinely different invocation result.
+        replay._ingest_messages([
+            {"role": "assistant", "content": "", "tool_calls": [tool_call]},
+            {
+                "role": "tool",
+                "tool_call_id": "call_reused_id_anchor",
+                "tool_name": "read_file",
+                "content": "second distinct tool result",
+            },
+            {"role": "user", "content": "new user after reused id"},
+        ])
+
+        rows = replay._store.get_session_messages("assembly-session")
+        contents = [row["content"] for row in rows]
+        # The second occurrence survives: nothing was proven replay.
+        assert "second distinct tool result" in contents
+        assert "first durable tool result" in contents
+        assert [row["tool_call_id"] for row in rows].count("call_reused_id_anchor") == 2
+        assert len(rows) == original_count + 3
+        assert rows[-1]["content"] == "new user after reused id"
+
     def test_tool_anchored_stale_replay_does_not_consume_new_assistant_after_tool(self, tmp_path, monkeypatch):
         engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=450)
         tool_call = {
