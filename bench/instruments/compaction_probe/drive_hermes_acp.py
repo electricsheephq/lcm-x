@@ -45,9 +45,30 @@ class ConfigDriftError(DriverError):
 class TurnTimeout(DriverError):
     """A per-turn ACP response timeout with the required abort status."""
 
-    def __init__(self, message: str, partial_answer: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        partial_answer: str = "",
+        lcm_tool_fired: bool = False,
+    ) -> None:
         self.partial_answer = partial_answer
+        self.lcm_tool_fired = lcm_tool_fired
         super().__init__(message)
+
+
+class TurnStopped(DriverError):
+    """A non-success ACP stop that must preserve the streamed turn output."""
+
+    def __init__(
+        self,
+        stop_reason: str,
+        partial_answer: str,
+        lcm_tool_fired: bool,
+    ) -> None:
+        self.stop_reason = stop_reason
+        self.partial_answer = partial_answer
+        self.lcm_tool_fired = lcm_tool_fired
+        super().__init__(f"session/prompt stopReason={stop_reason!r}")
 
 
 class JsonRpcError(DriverError):
@@ -241,7 +262,11 @@ def build_plan_phases(
 ) -> list[list[tuple[str, Any]]]:
     material = [("material", row) for row in material_rows]
     probes = [("probe", row) for row in probe_rows]
-    if restart_before_probes and material and probes:
+    if restart_before_probes:
+        if not material or not probes:
+            raise ValueError(
+                "--restart-before-probes requires non-empty material and probes"
+            )
         return [material, probes]
     combined = material + probes
     return [combined] if combined else []
@@ -275,6 +300,34 @@ def agent_message_chunk(message: dict[str, Any]) -> str | None:
     return content["text"]
 
 
+def lcm_tool_update(message: dict[str, Any]) -> bool:
+    if message.get("method") != "session/update":
+        return False
+    params = message.get("params")
+    if not isinstance(params, dict):
+        return False
+    update = params.get("update")
+    if not isinstance(update, dict):
+        return False
+    kind = update.get("sessionUpdate", update.get("session_update"))
+    if kind not in {"tool_call", "tool_call_update"}:
+        return False
+    for key in ("title", "name", "toolName", "tool_name"):
+        value = update.get(key)
+        if isinstance(value, str) and value.strip().lower().startswith("lcm_"):
+            return True
+    return False
+
+
+def _write_all(stream: Any, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        written = stream.write(memoryview(payload)[offset:])
+        if not isinstance(written, int) or written <= 0:
+            raise OSError(f"short ACP stdin write returned {written!r}")
+        offset += written
+
+
 class StdioJsonRpc:
     """Synchronous newline-delimited JSON-RPC client for ``hermes acp``."""
 
@@ -294,21 +347,34 @@ class StdioJsonRpc:
             bufsize=0,
             start_new_session=True,
         )
-        if self.process.stdin is None or self.process.stdout is None or self.process.stderr is None:
+        try:
+            if (
+                self.process.stdin is None
+                or self.process.stdout is None
+                or self.process.stderr is None
+            ):
+                raise DriverError("failed to open Hermes ACP stdio pipes")
+            self._selector = selectors.DefaultSelector()
+            self._selector.register(self.process.stdout, selectors.EVENT_READ)
+            self._stdout_buffer = bytearray()
+            self._next_id = 1
+            self._stdin_closed = False
+            self.stderr_bytes = 0
+            self._stderr_buffer = bytearray()
+            self._stderr_thread = threading.Thread(
+                target=self._drain_stderr,
+                args=(self.process.stderr,),
+                name="acp-driver-stderr",
+                daemon=True,
+            )
+            self._stderr_thread.start()
+        except BaseException:
             self._kill_group(signal.SIGKILL)
-            raise DriverError("failed to open Hermes ACP stdio pipes")
-        self._selector = selectors.DefaultSelector()
-        self._selector.register(self.process.stdout, selectors.EVENT_READ)
-        self._next_id = 1
-        self._stdin_closed = False
-        self.stderr_bytes = 0
-        self._stderr_thread = threading.Thread(
-            target=self._drain_stderr,
-            args=(self.process.stderr,),
-            name="acp-driver-stderr",
-            daemon=True,
-        )
-        self._stderr_thread.start()
+            self.process.wait()
+            for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+                if stream is not None:
+                    stream.close()
+            raise
 
     def _drain_stderr(self, stream: Any) -> None:
         while True:
@@ -316,6 +382,10 @@ class StdioJsonRpc:
             if not chunk:
                 return
             self.stderr_bytes += len(chunk)
+            self._stderr_buffer.extend(chunk)
+
+    def stderr_text(self) -> str:
+        return bytes(self._stderr_buffer).decode("utf-8", errors="replace")
 
     def _kill_group(self, sig: signal.Signals) -> None:
         try:
@@ -329,8 +399,10 @@ class StdioJsonRpc:
         request_id = self._next_id
         self._next_id += 1
         try:
-            self.process.stdin.write(jsonrpc_request(request_id, method, params))
-            self.process.stdin.flush()
+            _write_all(
+                self.process.stdin,
+                jsonrpc_request(request_id, method, params),
+            )
         except (BrokenPipeError, OSError) as exc:
             raise DriverError(f"failed to send {method}: {exc}") from exc
         return request_id
@@ -344,28 +416,43 @@ class StdioJsonRpc:
             "error": {"code": -32601, "message": "ACP driver has no client handler"},
         }
         try:
-            self.process.stdin.write(
+            _write_all(
+                self.process.stdin,
                 (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
             )
-            self.process.stdin.flush()
         except (BrokenPipeError, OSError):
             pass
 
     def _read_message(self, timeout_seconds: float) -> dict[str, Any]:
-        if not self._selector.select(max(timeout_seconds, 0.0)):
-            raise TurnTimeout(f"ACP response timeout after {timeout_seconds:.0f}s")
         if self.process.stdout is None:
             raise DriverError("ACP stdout is unavailable")
-        line = self.process.stdout.readline()
-        if not line:
-            raise DriverError(f"ACP stdout closed (returncode={self.process.poll()})")
-        try:
-            message = json.loads(line.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise DriverError(f"invalid JSON-RPC frame: {line[:200]!r}") from exc
-        if not isinstance(message, dict):
-            raise DriverError(f"invalid JSON-RPC object: {message!r}")
-        return message
+        deadline = time.monotonic() + max(timeout_seconds, 0.0)
+        while True:
+            while b"\n" in self._stdout_buffer:
+                line, _, remainder = self._stdout_buffer.partition(b"\n")
+                self._stdout_buffer = bytearray(remainder)
+                if not line.strip():
+                    continue
+                try:
+                    message = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise DriverError(f"invalid JSON-RPC frame: {line[:200]!r}") from exc
+                if not isinstance(message, dict):
+                    raise DriverError(f"invalid JSON-RPC object: {message!r}")
+                return message
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not self._selector.select(remaining):
+                raise TurnTimeout(f"ACP response timeout after {timeout_seconds:.0f}s")
+            chunk = os.read(self.process.stdout.fileno(), 64 * 1024)
+            if not chunk:
+                if self._stdout_buffer.strip():
+                    partial = bytes(self._stdout_buffer[:200])
+                    raise DriverError(f"ACP stdout closed with partial frame: {partial!r}")
+                raise DriverError(
+                    f"ACP stdout closed (returncode={self.process.poll()})"
+                )
+            self._stdout_buffer.extend(chunk)
 
     def wait_for_response(
         self,
@@ -373,6 +460,7 @@ class StdioJsonRpc:
         request_id: int,
         timeout_seconds: float,
         answer_chunks: list[str] | None = None,
+        turn_state: dict[str, bool] | None = None,
     ) -> dict[str, Any] | None:
         deadline = time.monotonic() + timeout_seconds
         try:
@@ -388,6 +476,8 @@ class StdioJsonRpc:
                         chunk = agent_message_chunk(message)
                         if chunk is not None and answer_chunks is not None:
                             answer_chunks.append(chunk)
+                        if turn_state is not None and lcm_tool_update(message):
+                            turn_state["lcm_tool_fired"] = True
                     continue
                 if message.get("id") != request_id:
                     continue
@@ -397,7 +487,8 @@ class StdioJsonRpc:
                 return result if isinstance(result, dict) else None
         except TurnTimeout as exc:
             partial = "" if answer_chunks is None else "".join(answer_chunks).strip()
-            raise TurnTimeout(str(exc), partial) from exc
+            lcm_fired = bool(turn_state and turn_state.get("lcm_tool_fired"))
+            raise TurnTimeout(str(exc), partial, lcm_fired) from exc
 
     def initialize(self, home: Path, timeout_seconds: float) -> str:
         request_id = self.send(
@@ -415,8 +506,9 @@ class StdioJsonRpc:
             raise DriverError(f"session/new returned no sessionId: {result!r}")
         return result["sessionId"]
 
-    def prompt(self, session_id: str, text: str, timeout_seconds: float) -> str:
+    def prompt(self, session_id: str, text: str, timeout_seconds: float) -> tuple[str, bool]:
         chunks: list[str] = []
+        turn_state = {"lcm_tool_fired": False}
         request_id = self.send(
             "session/prompt",
             {
@@ -425,11 +517,16 @@ class StdioJsonRpc:
             },
         )
         response = self.wait_for_response(
-            "session/prompt", request_id, timeout_seconds, chunks
+            "session/prompt", request_id, timeout_seconds, chunks, turn_state
         )
+        answer = "".join(chunks).strip()
         if response and response.get("stopReason") not in (None, "end_turn"):
-            raise DriverError(f"session/prompt stopReason={response.get('stopReason')!r}")
-        return "".join(chunks).strip()
+            raise TurnStopped(
+                str(response.get("stopReason")),
+                answer,
+                turn_state["lcm_tool_fired"],
+            )
+        return answer, turn_state["lcm_tool_fired"]
 
     def close(self) -> None:
         if not self._stdin_closed and self.process.stdin is not None:
@@ -449,6 +546,7 @@ class StdioJsonRpc:
             # final group kill closes that leak class without touching peers.
             self._kill_group(signal.SIGKILL)
             self._selector.close()
+            self._stderr_thread.join(timeout=ACP_SHUTDOWN_SECONDS)
             for stream in (self.process.stdout, self.process.stderr):
                 if stream is not None:
                     try:
@@ -539,14 +637,20 @@ def write_jsonl(path: Path, row: dict[str, Any]) -> None:
         handle.flush()
 
 
-def append_raw_answer(path: Path, answer: str) -> None:
-    if not answer:
+def append_raw_log(path: Path, answer: str = "", stderr: str = "") -> None:
+    if not answer and not stderr:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(answer)
-        if not answer.endswith("\n"):
-            handle.write("\n")
+        if answer:
+            handle.write(answer)
+            if not answer.endswith("\n"):
+                handle.write("\n")
+        if stderr:
+            handle.write("[stderr]\n")
+            handle.write(stderr)
+            if not stderr.endswith("\n"):
+                handle.write("\n")
         handle.flush()
 
 
@@ -562,11 +666,15 @@ def _read_count(db_path: Path, table: str) -> int:
     if not db_path.is_file():
         raise DriverError(f"database was not created: {db_path}")
     uri = f"file:{db_path.resolve()}?mode=ro"
+    connection: sqlite3.Connection | None = None
     try:
-        with sqlite3.connect(uri, uri=True, timeout=5) as connection:
-            row = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+        connection = sqlite3.connect(uri, uri=True, timeout=5)
+        row = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
     except sqlite3.Error as exc:
         raise DriverError(f"cannot count {table} in {db_path}: {exc}") from exc
+    finally:
+        if connection is not None:
+            connection.close()
     if row is None:
         raise DriverError(f"count query returned no row for {table} in {db_path}")
     return int(row[0])
@@ -652,7 +760,11 @@ def run(args: argparse.Namespace) -> int:
                 assert_config(config_path, config_sha, values, args)
                 config_checked_before_probes = True
             client = StdioJsonRpc(home)
-            session_id = client.initialize(home, args.turn_timeout)
+            try:
+                session_id = client.initialize(home, args.turn_timeout)
+            except TurnTimeout as exc:
+                sys.stderr.write(f"[driver] ABORT: ACP initialization timed out: {exc}\n")
+                return TIMEOUT_EXIT_CODE
             manifest["acp_sessions"].append(session_id)
             write_manifest(manifest_path, manifest)
             for kind, row in phase:
@@ -663,12 +775,21 @@ def run(args: argparse.Namespace) -> int:
                 text = row_text(row)
                 started = time.monotonic()
                 timed_out = False
+                stop_reason: str | None = None
+                lcm_tool_fired = False
                 try:
-                    answer = client.prompt(session_id, text, args.turn_timeout)
+                    answer, lcm_tool_fired = client.prompt(
+                        session_id, text, args.turn_timeout
+                    )
                 except TurnTimeout as exc:
                     answer = exc.partial_answer
                     timed_out = True
-                append_raw_answer(raw_log, answer)
+                    lcm_tool_fired = exc.lcm_tool_fired
+                except TurnStopped as exc:
+                    answer = exc.partial_answer
+                    stop_reason = exc.stop_reason
+                    lcm_tool_fired = exc.lcm_tool_fired
+                append_raw_log(raw_log, answer)
                 entry: dict[str, Any] = {
                     "turn_index": turn_index,
                     "kind": kind,
@@ -680,6 +801,9 @@ def run(args: argparse.Namespace) -> int:
                 if kind == "probe":
                     probe_ordinal += 1
                     entry["probe_id"] = probe_id(row, probe_ordinal)
+                    entry["lcm_tool_fired"] = lcm_tool_fired
+                if stop_reason is not None:
+                    entry["stop_reason"] = stop_reason
                 write_jsonl(results_path, entry)
                 sys.stderr.write(
                     f"[driver] sent {kind} turn {turn_index}: {text[:60]!r}"
@@ -691,9 +815,16 @@ def run(args: argparse.Namespace) -> int:
                         f"[driver] ABORT: turn {turn_index} timed out; refusing further turns\n"
                     )
                     return TIMEOUT_EXIT_CODE
+                if stop_reason is not None:
+                    sys.stderr.write(
+                        f"[driver] ABORT: turn {turn_index} stopped with "
+                        f"{stop_reason!r}; refusing further turns\n"
+                    )
+                    return TIMEOUT_EXIT_CODE
         finally:
             if client is not None:
                 client.close()
+                append_raw_log(raw_log, stderr=client.stderr_text())
 
     assert_config(config_path, config_sha, values, args)
     manifest["diagnostics"] = diagnostics(home)
