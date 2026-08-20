@@ -7,7 +7,10 @@ had two ways to answer "unclaimed" when it did not actually know:
 * every read raised `sqlite3.OperationalError` -- a lock, a schema fault, an
   un-migrated store -- and the loop returned `None`, which the policy is
   DELIBERATELY permissive about because an unclaimed session cannot belong to
-  anyone else;
+  anyone else. The chain now covers FIVE owner-stamped tables (`messages`,
+  `summary_nodes` and the three rollup tables), and only a table genuinely
+  absent from `sqlite_master` counts as a tolerable absence -- one that
+  exists and cannot be read may hold the deciding stamp;
 * rows for one session carried more than one owner stamp, and `LIMIT 1` picked
   one arbitrarily and reported it as authoritative -- enough for the chosen
   principal to pass a session-level reset, compaction or lifecycle gate over
@@ -26,7 +29,12 @@ import pytest
 
 from hermes_lcm import db_bootstrap
 from hermes_lcm.access_context.model import AccessContextV1
-from hermes_lcm.access_policy import FailClosedPolicy, TeamsPolicy, policy_for_engine
+from hermes_lcm.access_policy import (
+    FailClosedPolicy,
+    TeamsPolicy,
+    TrustedOwnerPolicy,
+    policy_for_engine,
+)
 from hermes_lcm.access_policy.resolution import (
     OwnerLookupError,
     _session_owner_for_engine,
@@ -168,7 +176,14 @@ def test_conflicting_stamps_within_one_table_are_not_an_answer(
 def test_an_unreadable_store_is_not_an_unclaimed_session(
     store: sqlite3.Connection,
 ) -> None:
-    """Neither owner table can be read, so ownership is UNKNOWN, not absent."""
+    """NO owner table can be read, so ownership is UNKNOWN, not absent.
+
+    The resolver reads five owner-stamped tables: `messages`,
+    `summary_nodes`, and the three rollup tables. The fixture creates only
+    the first two, so dropping both leaves zero readable owner tables. A
+    fixture that later adds a rollup table must drop it here too, or this
+    test stops meaning what its name says.
+    """
     store.execute("DROP TABLE messages")
     store.execute("DROP TABLE summary_nodes")
     store.commit()
@@ -216,7 +231,11 @@ def test_an_owned_target_session_is_still_allowed_end_to_end(
     """POSITIVE CONTROL for the end-to-end path."""
     _stamp(store, "messages", "session-mine", "principal-a")
     policy = policy_for_engine(_Engine(store, _minted(store)))
-    assert not isinstance(policy, FailClosedPolicy)
+    # `isinstance(policy, TeamsPolicy)`, not merely "not FailClosedPolicy":
+    # `policy_for_engine` can also return `TrustedOwnerPolicy`, which allows
+    # unconditionally, so the weaker assertion would report enforcement that
+    # never ran.
+    assert isinstance(policy, TeamsPolicy), "expected the enforcing policy"
 
     assert policy.authorize_operation(
         None, "read", {"session_id": "session-mine"}
@@ -245,3 +264,89 @@ def test_a_rollup_only_session_resolves_to_its_owner(store: sqlite3.Connection) 
     resolve = _session_owner_for_engine(_Engine(store, _context()))
 
     assert resolve("session-rollup-only") == "principal-a"
+
+
+def test_an_existing_but_unreadable_owner_table_is_not_unclaimed(
+    store: sqlite3.Connection,
+) -> None:
+    """A table that EXISTS and cannot be read may hold the deciding stamp.
+
+    Every `sqlite3.OperationalError` was treated as "this table is absent on
+    this store", and the raise required that NO table had been read. So a
+    partially migrated store -- `messages` present but without `access_scope`,
+    alongside a rollup table that exists and is empty -- made `readable`
+    nonzero, `owners` empty, and the answer `None`, which the policy
+    DELIBERATELY allows. Absence and unreadability are now separate: only a
+    table that is not in `sqlite_master` is a tolerable absence.
+    """
+    store.execute("ALTER TABLE messages DROP COLUMN access_scope")
+    store.execute(
+        "CREATE TABLE lcm_rollups (scope TEXT NOT NULL, access_scope TEXT)"
+    )
+    store.commit()
+
+    resolve = _session_owner_for_engine(_Engine(store, _context()))
+
+    with pytest.raises(OwnerLookupError):
+        resolve("session-x")
+
+
+def test_a_disabled_engine_never_reads_the_context_accessor() -> None:
+    """Teams-off must not depend on the host callback succeeding.
+
+    `resolve_mode` returns STANDARD_UNMANAGED for `teams_enabled=False` whatever
+    the context is, so reading one decides nothing -- but the read happened
+    unconditionally, and an accessor raising during teardown or partial wiring
+    took the whole unmanaged request down with it.
+    """
+
+    class _Disabled:
+        lcm_teams_enabled = False
+
+        @staticmethod
+        def get_lcm_access_context():
+            raise RuntimeError("host carrier is torn down")
+
+    policy = policy_for_engine(_Disabled())
+
+    assert isinstance(policy, TrustedOwnerPolicy)
+
+
+def test_a_foreign_tenants_session_owner_is_refused(store: sqlite3.Connection) -> None:
+    """The EFFECTIVE session owner is the row scope, so it must be validated.
+
+    `_catalog_principal_denial` checked only `principal_id`, while
+    `TeamsPolicy.principal_of()` scopes rows by
+    `session_owner_principal_id or principal_id`. An active actor in tenant-1
+    carrying a session owner from another tenant therefore resolved to
+    `TeamsPolicy` and authorized rows stamped for that other tenant's owner.
+    """
+    catalog.provision_principal(
+        store, principal_id="foreign", tenant_id="tenant-2", now=0.0
+    )
+    context = dataclasses.replace(
+        _minted(store), session_owner_principal_id="foreign"
+    )
+
+    policy = policy_for_engine(_Engine(store, context))
+
+    assert isinstance(policy, FailClosedPolicy)
+    assert policy.denial_reason.value == "context_invalid"
+
+
+def test_a_suspended_session_owner_is_refused(store: sqlite3.Connection) -> None:
+    """Same rule, the revocation half: a suspended owner is not an owner."""
+    catalog.provision_principal(
+        store, principal_id="dormant", tenant_id="tenant-1", now=0.0
+    )
+    catalog.suspend_principal(
+        store, principal_id="dormant", tenant_id="tenant-1", now=1.0
+    )
+    context = dataclasses.replace(
+        _minted(store), session_owner_principal_id="dormant"
+    )
+
+    policy = policy_for_engine(_Engine(store, context))
+
+    assert isinstance(policy, FailClosedPolicy)
+    assert policy.denial_reason.value == "context_revoked"

@@ -95,6 +95,12 @@ class TeamsPolicy:
         self._audit_sink = audit_sink
         self._session_owner = session_owner
         self.teams_enabled = True
+        #: One resolved answer per session, for the lifetime of this policy.
+        #: Verifying the BOUND session (below) puts a store lookup on the key
+        #: nearly every operation names, and `audit_decision` records what this
+        #: branch has cost before. A policy instance is one resolved decision,
+        #: so caching within it cannot serve a stale owner across requests.
+        self._owner_cache: dict[str, object] = {}
 
     #: Sentinel: the owner lookup itself failed. Distinct from None
     #: ("nothing claims this target") because an UNREADABLE owner must fail
@@ -113,11 +119,16 @@ class TeamsPolicy:
 
         if self._session_owner is None:
             return None
+        if session_id in self._owner_cache:
+            return self._owner_cache[session_id]
         try:
             owner = self._session_owner(session_id)
         except Exception:  # noqa: BLE001 - unreadable owner fails CLOSED
-            return self._OWNER_LOOKUP_FAILED
-        return str(owner) if owner else None
+            resolved: object = self._OWNER_LOOKUP_FAILED
+        else:
+            resolved = str(owner) if owner else None
+        self._owner_cache[session_id] = resolved
+        return resolved
 
     # -- context binding --------------------------------------------------
 
@@ -219,6 +230,14 @@ class TeamsPolicy:
         # write is stamped with the WRITER's scope on the way in, so an unknown
         # session becomes the writer's rather than a way into someone else's.
         #
+        # The context's OWN session is checked like any other, and it used to
+        # be skipped outright when the ids matched. That does not follow:
+        # the context is what the host ASSERTS, the stamps are what the store
+        # HOLDS, and a context bound to a session whose rows carry another
+        # principal's stamp passed every session-level gate -- reset, end,
+        # compaction -- over those rows. A genuinely new bound session resolves
+        # to None and is still allowed by the unclaimed rule above.
+        #
         # The key differs by path: most carry `session_id`, compression rollover
         # carries `source_session_id`, and rollup scheduling carries the session
         # as `partition_key`.
@@ -226,10 +245,7 @@ class TeamsPolicy:
             target = expected_scope.get(key)
             if not target or effective is None:
                 continue
-            target = str(target)
-            if target == str(effective.session_id):
-                continue
-            owner = self._target_owner(target)
+            owner = self._target_owner(str(target))
             if owner is self._OWNER_LOOKUP_FAILED:
                 # An unreadable owner is not "unclaimed" -- denying here is
                 # the #68 fail-closed direction for callback failures.
@@ -281,6 +297,18 @@ class TeamsPolicy:
             return narrowed
         principal = principal_of(effective)
         if not principal:
+            # DELIBERATELY a pass-through, and the asymmetry with the unbound
+            # branch above is not settled here. Both branches have no principal
+            # to narrow by; the unbound one writes ``access_scope = ""`` as
+            # deny-all, and `test_a_context_without_a_principal_narrows_nothing`
+            # pins this one the other way -- "do not invent a predicate that
+            # matches nothing". Which is right depends on how a CONSUMER reads
+            # an empty `access_scope`: as "restrict to nothing", or, via a
+            # falsy check, as "no restriction at all". No consumer exists in
+            # this slice (see `_NEEDS_CONSUMERS` in that file), so choosing now
+            # is choosing blind. It is defence-in-depth either way:
+            # `authorize_operation` and `authorize_stored_scope` both DENY on
+            # an empty principal, so nothing reaches here through the gates.
             return narrowed
 
         # Narrow by the OWNER STAMP, not by a collection id.

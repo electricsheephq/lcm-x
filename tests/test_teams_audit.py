@@ -144,24 +144,32 @@ def test_auditing_never_breaks_the_operation_it_audits(
     policy.audit_decision(None, "write", denied.denial_reason, denied.public())  # no raise
 
 
-def test_a_sink_that_raises_does_not_fail_the_audited_operation(
-    store: sqlite3.Connection,
-) -> None:
+def test_a_sink_that_raises_does_not_fail_the_audited_operation() -> None:
     """The sink is an arbitrary HOST callable, not only `record_audit_event`.
 
     `record_audit_event` swallows `sqlite3.Error`, so the store-backed sink was
     covered. A custom sink can raise anything, and the exception escaped
     `audit_decision` into the operation being audited -- auditing becoming the
     reason authorized work fails.
+
+    The invocation is COUNTED, because `audit_decision` returns early on
+    several branches -- no sink, and an allowed read. Asserting only that
+    nothing raised meant a later refactor moving the call behind a new early
+    return would leave the isolation property untested with CI still green.
     """
 
-    def explode(**_fields):
+    calls: list[dict] = []
+
+    def explode(**fields):
+        calls.append(fields)
         raise RuntimeError("host audit sink is misconfigured")
 
     policy = TeamsPolicy(_context(), audit_sink=explode)
     denied = Decision.deny(DenialReason.SCOPE_FORBIDDEN)
 
     policy.audit_decision(None, "write", denied.denial_reason, denied.public())
+
+    assert calls, "the raising sink was never reached, so isolation is untested"
 
 
 def test_no_sink_is_not_an_error(store: sqlite3.Connection) -> None:
@@ -181,3 +189,79 @@ def test_events_are_scoped_by_tenant(store: sqlite3.Connection) -> None:
 
     assert len(catalog.read_audit_events(store, tenant_id="tenant-1")) == 1
     assert len(catalog.read_audit_events(store)) == 2
+
+
+# --- the fail-closed denials reach the trail too ---------------------------
+
+
+def test_a_fail_closed_policy_writes_its_denial_to_the_trail(
+    store: sqlite3.Connection,
+) -> None:
+    """The denials an operator most wants to see were the ones not written.
+
+    `resolve_policy` answered an expired, revoked or stale context with a plain
+    `FailClosedPolicy`, whose `audit_decision` appended to a per-instance list
+    and nothing else. So `lcm_teams_audit` held every VALID-context denial and
+    none of the ones where the context itself was refused. The sink and the
+    attributable context now travel WITH the denial.
+    """
+    from hermes_lcm.access_policy import FailClosedPolicy
+
+    policy = FailClosedPolicy(
+        DenialReason.CONTEXT_EXPIRED, audit_sink=_sink(store), context=_context()
+    )
+
+    decision = policy.authorize_operation(None, "write", {})
+    policy.audit_decision(None, "write", decision.denial_reason, decision.public())
+
+    events = catalog.read_audit_events(store)
+    assert len(events) == 1
+    assert events[0]["allowed"] is False
+    assert events[0]["tenant_id"] == "tenant-1"
+    assert events[0]["principal_id"] == "principal-a"
+    # The PUBLIC reason, never the internal one -- these rows reach tenant
+    # admins through `audit.read`, and the projection exists to collapse
+    # "forbidden" and "does not exist".
+    assert events[0]["denial_reason"] == decision.public().denial_reason.value
+
+
+def test_resolve_policy_hands_its_denials_the_audit_sink(
+    store: sqlite3.Connection,
+) -> None:
+    """The wiring half: a rejected context must reach the durable trail.
+
+    Deliberately asserts only that a denial ROW exists. Which refusal branch an
+    expired context lands on is not stable under the full suite's import
+    aliasing -- `isinstance(carrier_context, AccessContextV1)` compares against
+    a twin class -- and both branches are refusals that must be recorded.
+    """
+    from hermes_lcm.access_policy import resolve_policy
+    from hermes_lcm.teams.catalog import CatalogRevisions
+
+    expired = _context(
+        issued_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        expires_at=datetime(2025, 1, 2, tzinfo=timezone.utc),
+    )
+
+    policy = resolve_policy(
+        expired, True, current_revisions=CatalogRevisions(), audit_sink=_sink(store)
+    )
+    decision = policy.authorize_operation(None, "write", {})
+    policy.audit_decision(None, "write", decision.denial_reason, decision.public())
+
+    events = catalog.read_audit_events(store)
+    assert not decision.allowed
+    assert len(events) == 1, "a refused context left no durable record"
+    assert events[0]["allowed"] is False
+
+
+def test_a_fail_closed_policy_without_a_sink_still_records_in_memory() -> None:
+    """The existing in-memory record is unchanged for callers that use it."""
+    from hermes_lcm.access_policy import FailClosedPolicy
+
+    policy = FailClosedPolicy(DenialReason.CONTEXT_MISSING)
+    denied = Decision.deny(DenialReason.CONTEXT_MISSING)
+
+    policy.audit_decision(None, "read", denied.denial_reason, denied.public())
+
+    assert len(policy.audit_records) == 1

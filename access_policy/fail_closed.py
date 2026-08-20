@@ -2,21 +2,38 @@
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from ..access_context.denials import Decision, DenialReason, PublicDecision
 from ..access_context.model import AccessContextV1
 from ..access_context.protocols import TargetScope
 
 from .errors import AuthorizationRequiredError
+from .teams_policy import principal_of
 
 
 class FailClosedPolicy:
-    """Deny every authorization or disclosure operation without a context."""
+    """Deny every authorization or disclosure operation without a context.
 
-    def __init__(self, denial_reason: DenialReason = DenialReason.CONTEXT_MISSING) -> None:
+    Carries the audit sink and the attributable context when the resolver has
+    them. Without them, the denials this policy produces -- an expired,
+    revoked, stale or otherwise rejected Teams context, which is exactly the
+    set an operator investigates -- reached only the in-memory list below,
+    while valid-context denials were written durably by ``TeamsPolicy``. The
+    audit trail was missing precisely the attempts that failed hardest.
+    """
+
+    def __init__(
+        self,
+        denial_reason: DenialReason = DenialReason.CONTEXT_MISSING,
+        *,
+        audit_sink: "Callable[..., None] | None" = None,
+        context: AccessContextV1 | None = None,
+    ) -> None:
         self.denial_reason = DenialReason(denial_reason)
         self.audit_records: list[tuple[DenialReason | None, PublicDecision]] = []
+        self._audit_sink = audit_sink
+        self._context = context
 
     def _deny(self) -> Decision:
         return Decision.deny(self.denial_reason)
@@ -56,6 +73,27 @@ class FailClosedPolicy:
         public_result: PublicDecision,
     ) -> None:
         self.audit_records.append((internal_reason, public_result))
+        if self._audit_sink is None:
+            return None
+        # Every decision this policy makes is a denial, so there is no
+        # read-allow volume to bound the way ``TeamsPolicy.audit_decision``
+        # does. The reason written is the PUBLIC one, for the same reason:
+        # these rows reach tenant admins through `audit.read`.
+        effective = context if context is not None else self._context
+        reason = getattr(public_result, "denial_reason", None)
+        try:
+            self._audit_sink(
+                tenant_id=str(getattr(effective, "tenant_id", "") or ""),
+                principal_id=principal_of(effective),
+                operation=str(operation),
+                allowed=False,
+                denial_reason=getattr(reason, "value", None) if reason else None,
+            )
+        except Exception:  # noqa: BLE001 - auditing is best effort
+            # Same rule as TeamsPolicy: auditing must never be the reason work
+            # fails -- and here the work has already been denied anyway.
+            return None
+        return None
 
     # The disclosure primitives RAISE rather than return a Decision. The
     # protocol declares int/Sequence returns here, and a Decision is truthy,

@@ -60,6 +60,54 @@ SCOPE_BEARING_TABLES = (
 _ACCESS_SCOPE_TABLES = SCOPE_BEARING_TABLES
 
 _SESSION_SCOPE_TABLES = ("messages", "summary_nodes")
+
+_ROLLUP_SCOPE_TABLES = (
+    "lcm_rollups",
+    "lcm_rollup_invalidations",
+    "lcm_rollup_state",
+)
+
+#: ``(derived table, source table, join predicate)``, in dependency order --
+#: chunk/embedding metadata inherits from its leaf, and the vector/binary rows
+#: inherit from that metadata.
+#:
+#: Named ONCE because two readers depend on it and must not disagree: the
+#: backfill, which copies a source's stamp onto the derived row, and the
+#: preflight, which has to know whether such a source exists at all. The
+#: preflight examined only session-keyed and rollup tables and therefore
+#: declared `ready` on stores whose derived rows had nothing to inherit from.
+_DERIVED_SCOPE_TABLES: tuple[tuple[str, str, str], ...] = (
+    ("lcm_chunk_meta", "messages", "source.store_id = target.store_id"),
+    (
+        "lcm_chunk_vectors",
+        "lcm_chunk_meta",
+        "source.chunk_id = target.chunk_id "
+        "AND source.identity_hash = target.identity_hash",
+    ),
+    (
+        "lcm_chunk_binary",
+        "lcm_chunk_meta",
+        "source.chunk_id = target.chunk_id "
+        "AND source.identity_hash = target.identity_hash",
+    ),
+    (
+        "lcm_embedding_meta",
+        "summary_nodes",
+        "source.node_id = CAST(target.embedded_id AS INTEGER)",
+    ),
+    (
+        "lcm_embedding_vectors",
+        "lcm_embedding_meta",
+        "source.embedded_id = target.embedded_id "
+        "AND source.identity_hash = target.identity_hash",
+    ),
+    (
+        "lcm_embedding_binary",
+        "lcm_embedding_meta",
+        "source.embedded_id = target.embedded_id "
+        "AND source.identity_hash = target.identity_hash",
+    ),
+)
 _OPTIONAL_SCOPE_TABLES = {
     "lcm_embedding_meta",
     "lcm_embedding_vectors",
@@ -460,10 +508,7 @@ def preflight_teams_scope(
     blank_key_tables: list[str] = []
 
     keyed = [(table, "session_id") for table in _SESSION_SCOPE_TABLES]
-    keyed += [
-        (table, "scope")
-        for table in ("lcm_rollups", "lcm_rollup_invalidations", "lcm_rollup_state")
-    ]
+    keyed += [(table, "scope") for table in _ROLLUP_SCOPE_TABLES]
 
     for table, key_column in keyed:
         if not _table_exists(conn, table):
@@ -502,19 +547,68 @@ def preflight_teams_scope(
             "blank_keys": len(blank),
         }
 
-    ready = not unresolvable and not blank_key_tables
+    orphaned = _orphaned_derived_rows(conn)
+
+    ready = not unresolvable and not blank_key_tables and not orphaned
+    if ready:
+        message = "every owner resolves; enable can proceed"
+    elif unresolvable or blank_key_tables:
+        message = (
+            "supply an override map or fallback owner for the names above "
+            "before enabling"
+        )
+    else:
+        message = (
+            "derived rows have no source row to inherit an owner from, so the "
+            "backfill would stamp what it can and then fail on the remainder. "
+            "Repair or remove the orphans above before enabling"
+        )
     return {
         "ready": ready,
         "unresolvable": sorted(unresolvable),
         "blank_key_tables": sorted(blank_key_tables),
+        "orphaned_derived_rows": orphaned,
         "tables": tables,
-        "message": (
-            "every owner resolves; enable can proceed"
-            if ready
-            else "supply an override map or fallback owner for the names above "
-            "before enabling"
-        ),
+        "message": message,
     }
+
+
+def _orphaned_derived_rows(conn: sqlite3.Connection) -> dict[str, int]:
+    """Unstamped derived rows with no source row to inherit a scope from.
+
+    Answerable before any write, unlike the owner itself: at preflight time no
+    source is stamped yet, so the only question available is whether the join
+    finds a source AT ALL. An orphan is never selected by
+    `_backfill_joined_table`, so the run returns cleanly, leaves the row NULL,
+    and the unstamped-remainder check then fails the enable -- after earlier
+    batches have already committed.
+    """
+
+    orphaned: dict[str, int] = {}
+    for table, source_table, join_sql in _DERIVED_SCOPE_TABLES:
+        if not _table_exists(conn, table) or not _table_exists(conn, source_table):
+            continue
+        unstamped = (
+            f"target.{ACCESS_SCOPE_COLUMN} IS NULL AND "
+            if ACCESS_SCOPE_COLUMN in _table_columns(conn, table)
+            else ""
+        )
+        try:
+            count = int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM {table} AS target WHERE {unstamped}"
+                    f"NOT EXISTS (SELECT 1 FROM {source_table} AS source "
+                    f"WHERE {join_sql})"
+                ).fetchone()[0]
+            )
+        except sqlite3.Error:
+            # A shape this join does not fit -- an older schema missing a join
+            # column. The backfill guards the same way; reporting a defect the
+            # migration will not hit is worse than reporting nothing.
+            continue
+        if count:
+            orphaned[table] = count
+    return orphaned
 
 
 def _backfill_session_table(
@@ -579,6 +673,26 @@ def _backfill_joined_table(
         ).fetchall()
         if not rows:
             return updated
+        # A conflict is not an answer -- the same rule the session-owner
+        # resolver applies. DISTINCT collapses duplicate PAIRS, not duplicate
+        # rowids: a target joining sources with DIFFERENT owners came back once
+        # per scope, the first won, and every later one no-opped against the
+        # `IS NULL` guard. The migration then reported complete having assigned
+        # the row an arbitrary principal. Failing the table is what `_isolated`
+        # turns into a reported, loud incomplete enable.
+        candidates: dict[int, set[str]] = {}
+        for row in rows:
+            candidates.setdefault(int(row[0]), set()).add(str(row[1]))
+        conflicted = sorted(
+            f"rowid {rowid} <- {sorted(scopes)}"
+            for rowid, scopes in candidates.items()
+            if len(scopes) > 1
+        )
+        if conflicted:
+            raise ValueError(
+                f"{table}: a derived row joins sources with different owners, so "
+                f"any stamp would be arbitrary -- {'; '.join(conflicted)}"
+            )
         cursor = conn.executemany(
             f"UPDATE {table} SET {ACCESS_SCOPE_COLUMN}=? WHERE rowid=? "
             f"AND {ACCESS_SCOPE_COLUMN} IS NULL",
@@ -642,6 +756,33 @@ def _unstamped_counts(conn: sqlite3.Connection) -> dict[str, int]:
     return counts
 
 
+def _validate_enable_arguments(
+    owner_for_session: ScopeResolver | None, batch_size: int
+) -> None:
+    """Reject an unusable enable BEFORE anything touches the store.
+
+    `ensure_scope_columns` used to run first, so a call with no resolver
+    performed eleven ALTER statements and wrote the `scope_v1` marker before
+    raising -- the caller reasonably assumed nothing happened, while the
+    store's schema state had changed permanently and a later
+    `ensure_scope_columns` short-circuits on that marker and skips the
+    verification sweep. Rejecting a call must not mutate the store, the same
+    discipline `preflight_teams_scope` documents.
+
+    Shared by BOTH entry points. It lived inside `backfill_scopes`, and
+    `setup_teams_scope` migrates the schema before delegating to it -- so the
+    wrapper reintroduced at its own level exactly the defect the callee had
+    fixed. One check, called by whoever writes first.
+    """
+
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    if owner_for_session is None:
+        raise ValueError(
+            "owner_for_session is required to attribute pre-Teams rows to their owner"
+        )
+
+
 def backfill_scopes(
     conn: sqlite3.Connection,
     owner_for_session: ScopeResolver | None = None,
@@ -658,19 +799,7 @@ def backfill_scopes(
     messages/summary nodes have been processed.
     """
 
-    # EVERY argument is validated before the first write. `ensure_scope_columns`
-    # used to run first, so a call with no resolver performed eleven ALTER
-    # statements and wrote the `scope_v1` marker before raising -- the caller
-    # reasonably assumed nothing happened, while the store's schema state had
-    # changed permanently and a later `ensure_scope_columns` short-circuits on
-    # the marker and skips the verification sweep. Rejecting a call must not
-    # mutate the store, the same discipline `preflight_teams_scope` documents.
-    if batch_size < 1:
-        raise ValueError("batch_size must be positive")
-    if owner_for_session is None:
-        raise ValueError(
-            "owner_for_session is required to attribute pre-Teams rows to their owner"
-        )
+    _validate_enable_arguments(owner_for_session, batch_size)
     ensure_scope_columns(conn)
     resolver = compose_scope_resolver(
         owner_for_session, overrides=overrides, fallback_owner=fallback_owner
@@ -702,65 +831,31 @@ def backfill_scopes(
                 lambda t=table: _backfill_session_table(conn, t, resolver, batch_size),
             )
 
-    # Chunk metadata points at a raw message; vectors/binary point at metadata.
-    if _table_exists(conn, "lcm_chunk_meta") and _table_exists(conn, "messages"):
-        _isolated(
-            "lcm_chunk_meta",
-            lambda: _backfill_joined_table(
-                conn,
-                table="lcm_chunk_meta",
-                source_table="messages",
-                join_sql="source.store_id = target.store_id",
-                batch_size=batch_size,
-            ),
-        )
-    for table in ("lcm_chunk_vectors", "lcm_chunk_binary"):
-        if _table_exists(conn, table) and _table_exists(conn, "lcm_chunk_meta"):
-            _isolated(
-                table,
-                lambda t=table: _backfill_joined_table(
-                    conn,
-                    table=t,
-                    source_table="lcm_chunk_meta",
-                    join_sql="source.chunk_id = target.chunk_id AND source.identity_hash = target.identity_hash",
-                    batch_size=batch_size,
-                ),
-            )
-
     # Rollups retain their session partition key in ``scope``.  Their access
     # scope is attributed from that key only during the explicit Teams setup.
-    for table in ("lcm_rollups", "lcm_rollup_invalidations", "lcm_rollup_state"):
+    for table in _ROLLUP_SCOPE_TABLES:
         if _table_exists(conn, table):
             _isolated(
                 table,
                 lambda t=table: _backfill_rollup_table(conn, t, resolver, batch_size),
             )
 
-    # Summary embedding metadata points at a summary node; vector/binary rows
-    # point at that metadata.  ``embedded_id`` is the persisted node id.
-    if _table_exists(conn, "lcm_embedding_meta") and _table_exists(conn, "summary_nodes"):
+    # Derived rows copy their leaf's scope, so they run AFTER the session and
+    # rollup tables above -- and in the spec's own order, because the
+    # vector/binary rows inherit from metadata that has to be stamped first.
+    for table, source_table, join_sql in _DERIVED_SCOPE_TABLES:
+        if not _table_exists(conn, table) or not _table_exists(conn, source_table):
+            continue
         _isolated(
-            "lcm_embedding_meta",
-            lambda: _backfill_joined_table(
+            table,
+            lambda t=table, s=source_table, j=join_sql: _backfill_joined_table(
                 conn,
-                table="lcm_embedding_meta",
-                source_table="summary_nodes",
-                join_sql="source.node_id = CAST(target.embedded_id AS INTEGER)",
+                table=t,
+                source_table=s,
+                join_sql=j,
                 batch_size=batch_size,
             ),
         )
-    for table in ("lcm_embedding_vectors", "lcm_embedding_binary"):
-        if _table_exists(conn, table) and _table_exists(conn, "lcm_embedding_meta"):
-            _isolated(
-                table,
-                lambda t=table: _backfill_joined_table(
-                    conn,
-                    table=t,
-                    source_table="lcm_embedding_meta",
-                    join_sql="source.embedded_id = target.embedded_id AND source.identity_hash = target.identity_hash",
-                    batch_size=batch_size,
-                ),
-            )
 
     conn.commit()
 
@@ -805,8 +900,16 @@ def setup_teams_scope(
     overrides: Mapping[str, str] | None = None,
     fallback_owner: str | None = None,
 ) -> dict[str, object]:
-    """Run the additive schema stage and Teams-only historical backfill."""
+    """Run the additive schema stage and Teams-only historical backfill.
 
+    The argument check comes first HERE too. This wrapper writes the schema
+    before delegating to `backfill_scopes`, which is where the check used to
+    live -- so a rejected enable committed the scope columns and the migration
+    marker before raising, reintroducing at the wrapper's level the exact
+    validate-before-write defect the callee had fixed.
+    """
+
+    _validate_enable_arguments(owner_for_session, batch_size)
     columns = ensure_scope_columns(conn)
     result = backfill_scopes(
         conn,

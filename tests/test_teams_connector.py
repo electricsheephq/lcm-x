@@ -295,3 +295,157 @@ def test_every_operation_leaves_an_audit_row_without_payload_content(conn) -> No
 
 def test_the_request_ledger_is_part_of_the_catalog() -> None:
     assert "lcm_teams_requests" in catalog.TEAMS_TABLES
+
+
+# --- one effect, even across a crash ---------------------------------------
+#
+# The ledger was written AFTER the handler. A handler commits its catalog
+# mutation, the process exits or the ledger write fails before the row lands,
+# and the retry runs the handler a SECOND time -- the one-effect guarantee
+# broken by the ordering alone. Reserving the request id first inverts the
+# failure: what a crash leaves behind is a row with no result, which is
+# refused rather than replayed or re-run.
+
+
+def _provisioning_connector(conn, calls: list[str]):
+    def handler(connection, request):
+        calls.append(request.request_id)
+        catalog.provision_principal(
+            connection, principal_id="provisioned", tenant_id="tenant-a", now=1.0
+        )
+        return {"principal_id": "provisioned"}
+
+    return TeamsConnector(
+        conn,
+        credential_check=lambda c: True,
+        handlers={Capability.PRINCIPALS_PROVISION: handler},
+    )
+
+
+def test_an_unrecordable_request_is_refused_before_the_effect(conn) -> None:
+    """With no way to record that the effect happened, it must not happen.
+
+    The ledger write came last and swallowed its own failure -- "the effect
+    already happened, losing the row costs a replay its cached answer". But it
+    also costs the guarantee: nothing records that the handler ran, so the next
+    retry runs it again. Reserving first makes an unwritable ledger a refusal
+    instead of an untracked effect.
+    """
+    calls: list[str] = []
+    connector = _provisioning_connector(conn, calls)
+    conn.execute("DROP TABLE lcm_teams_requests")
+    conn.commit()
+
+    with pytest.raises(ConnectorError) as raised:
+        connector.execute(_request(Capability.PRINCIPALS_PROVISION))
+
+    assert raised.value.failure is FailureClass.UNAVAILABLE
+    assert calls == [], "the handler ran with no way to record that it had"
+    assert catalog.read_principal(conn, "provisioned") is None
+
+
+def test_an_unrecordable_request_reports_no_success_for_a_discardable_effect(
+    conn,
+) -> None:
+    """CodeRabbit's shape: `ok` returned over an open transaction.
+
+    A handler that leaves its transaction open, plus a ledger write that fails
+    and is swallowed, meant `record_audit_event` saw `in_transaction` and
+    declined to commit -- so `execute()` returned `status="ok"` while a later
+    rollback could still discard both the effect and its audit row.
+    """
+
+    def uncommitted(connection, _request):
+        connection.execute(
+            "INSERT INTO lcm_teams_collections(collection_id, tenant_id, kind,"
+            " created_at) VALUES('ghost', 'tenant-a', 'own', 1.0)"
+        )
+        return {"collection_id": "ghost"}
+
+    connector = TeamsConnector(
+        conn,
+        credential_check=lambda c: True,
+        handlers={Capability.COLLECTIONS_CREATE: uncommitted},
+    )
+    conn.execute("DROP TABLE lcm_teams_requests")
+    conn.commit()
+
+    with pytest.raises(ConnectorError):
+        connector.execute(_request(Capability.COLLECTIONS_CREATE))
+
+    conn.rollback()
+    assert conn.execute(
+        "SELECT COUNT(*) FROM lcm_teams_collections WHERE collection_id='ghost'"
+    ).fetchone()[0] == 0
+    assert len(catalog.read_audit_events(conn)) == 1, (
+        "the denial is evidence and a rollback discarded it"
+    )
+
+
+def test_an_interrupted_request_is_refused_not_replayed(conn) -> None:
+    """The row a crash leaves behind is not an answer.
+
+    A reservation whose result was never recorded means the handler was
+    dispatched and its outcome is unknown. Re-running it would break the
+    one-effect guarantee; replaying it would report a success nobody observed.
+    A NULL `result_json` used to read as the second of those -- `data={}` and
+    `replayed=True`.
+    """
+    calls: list[str] = []
+    connector = _provisioning_connector(conn, calls)
+    request = _request(Capability.PRINCIPALS_PROVISION)
+    conn.execute(
+        "INSERT INTO lcm_teams_requests(request_id, payload_digest, capability,"
+        " tenant_id, principal_id, recorded_at, result_json)"
+        " VALUES(?,?,?,?,?,?,NULL)",
+        (
+            request.request_id,
+            request.digest(),
+            request.capability.value,
+            request.tenant_id,
+            request.acting_principal_id,
+            0.0,
+        ),
+    )
+    conn.commit()
+
+    with pytest.raises(ConnectorError) as raised:
+        connector.execute(request)
+
+    assert raised.value.failure is FailureClass.CONFLICT
+    assert calls == [], "an effect of unknown outcome was applied a second time"
+
+
+def test_a_failed_handler_frees_its_request_id(conn) -> None:
+    """A reservation is released when the effect PROVABLY did not happen.
+
+    The handler raised and the connection was rolled back, so there is nothing
+    indeterminate about it -- the id must stay retryable, or an ordinary
+    transient failure would burn it.
+    """
+    attempts: list[str] = []
+
+    def flaky(connection, request):
+        attempts.append(request.request_id)
+        if len(attempts) == 1:
+            raise sqlite3.OperationalError("store went away")
+        catalog.provision_principal(
+            connection, principal_id="provisioned", tenant_id="tenant-a", now=1.0
+        )
+        return {"principal_id": "provisioned"}
+
+    connector = TeamsConnector(
+        conn,
+        credential_check=lambda c: True,
+        handlers={Capability.PRINCIPALS_PROVISION: flaky},
+    )
+    request = _request(Capability.PRINCIPALS_PROVISION)
+
+    with pytest.raises(ConnectorError):
+        connector.execute(request)
+    result = connector.execute(request)
+
+    assert result.status == "ok"
+    assert result.replayed is False
+    assert attempts == [request.request_id, request.request_id]
+    assert catalog.read_principal(conn, "provisioned") is not None

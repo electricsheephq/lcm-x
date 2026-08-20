@@ -242,3 +242,91 @@ def test_rerunning_after_supplying_the_missing_owner_completes(
         store.execute("SELECT session_id, access_scope FROM messages").fetchall()
     )
     assert stamps == {"known-a": "principal-a", "orphan": "principal-c"}
+
+
+# --- the preflight covers DERIVED rows too ---------------------------------
+
+
+def _with_chunk_tables(store: sqlite3.Connection) -> None:
+    store.executescript(
+        """
+        CREATE TABLE lcm_chunk_meta(
+            chunk_id TEXT, store_id INTEGER, identity_hash TEXT
+        );
+        """
+    )
+    store.commit()
+
+
+def test_an_orphaned_derived_row_is_not_ready(store: sqlite3.Connection) -> None:
+    """`ready=True` on a store the backfill is going to fail on.
+
+    The preflight examined only session-keyed and rollup tables. A chunk or
+    embedding row orphaned from its source is simply not selected by
+    `_backfill_joined_table`, so the run commits valid stamps in batches and
+    only then discovers the NULL remainder and raises -- leaving exactly the
+    partially-enabled store the preflight exists to prevent. Whether a derived
+    row has a source to inherit from is answerable BEFORE any write.
+    """
+    store.execute("INSERT INTO messages(store_id, session_id) VALUES(1, 'known-a')")
+    _with_chunk_tables(store)
+    store.execute(
+        "INSERT INTO lcm_chunk_meta(chunk_id, store_id, identity_hash)"
+        " VALUES('c1', 999, 'h1')"
+    )
+    store.commit()
+
+    report = preflight_teams_scope(store, _resolver)
+
+    assert report["ready"] is False
+    assert report["orphaned_derived_rows"] == {"lcm_chunk_meta": 1}
+    assert not report["unresolvable"], "every owner still resolves; the gap is derived"
+
+
+def test_a_derived_row_with_a_source_is_ready(store: sqlite3.Connection) -> None:
+    """POSITIVE CONTROL: a joinable derived row does not block an enable."""
+    store.execute("INSERT INTO messages(store_id, session_id) VALUES(1, 'known-a')")
+    _with_chunk_tables(store)
+    store.execute(
+        "INSERT INTO lcm_chunk_meta(chunk_id, store_id, identity_hash)"
+        " VALUES('c1', 1, 'h1')"
+    )
+    store.commit()
+
+    report = preflight_teams_scope(store, _resolver)
+
+    assert report["ready"] is True
+    assert report["orphaned_derived_rows"] == {}
+
+
+# --- a rejected enable does not migrate ------------------------------------
+
+
+def test_setup_validates_before_it_migrates_the_schema(
+    store: sqlite3.Connection,
+) -> None:
+    """`backfill_scopes` already refuses before its first write; the wrapper
+    reintroduced the defect one level up.
+
+    `setup_teams_scope` ran `ensure_scope_columns` itself and only then called
+    `backfill_scopes`, which is where the argument check lives. So a call with
+    no resolver committed eleven ALTERs and the `scope_v1` marker before
+    raising -- the caller reasonably assumes nothing happened, while a later
+    `ensure_scope_columns` short-circuits on that marker and skips the
+    verification sweep entirely.
+    """
+    from hermes_lcm.scope_storage import setup_teams_scope
+
+    with pytest.raises(ValueError):
+        setup_teams_scope(store, None)
+    with pytest.raises(ValueError):
+        setup_teams_scope(store, _resolver, batch_size=0)
+
+    columns = {row[1] for row in store.execute('PRAGMA table_info("messages")')}
+    assert ACCESS_SCOPE_COLUMN not in columns, (
+        "a rejected enable altered the schema it was refusing to migrate"
+    )
+    marker = store.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='lcm_migration_state'"
+    ).fetchone()
+    assert marker is None, "a rejected enable created migration state"

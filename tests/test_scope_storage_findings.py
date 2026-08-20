@@ -240,10 +240,22 @@ def test_the_counters_report_rows_written_not_rows_selected(
         )
     store.commit()
 
-    report = backfill_scopes(store, _resolver, batch_size=64)
+    def racing(session_id: str) -> str:
+        # Stands in for the concurrent writer the docstring describes: 's3' is
+        # stamped AFTER the SELECT picked it up, so its UPDATE no-ops against
+        # the `IS NULL` guard. Without this the three rows are simply selected
+        # and written, `len(values)` and `rowcount` agree at 3, and the test
+        # passes on the implementation it is supposed to discriminate against.
+        if session_id == "s3":
+            store.execute(
+                "UPDATE messages SET access_scope='other' WHERE session_id='s3'"
+            )
+        return f"owner:{session_id}"
 
-    assert report["updated"]["messages"] == 3
-    assert report["total_updated"] == 3
+    report = backfill_scopes(store, racing, batch_size=64)
+
+    assert report["updated"]["messages"] == 2, "selected rows were counted as written"
+    assert report["total_updated"] == 2
 
 
 def test_a_duplicated_join_does_not_inflate_the_count(
@@ -302,3 +314,73 @@ def test_the_teams_flag_attribute_is_the_one_the_policy_seam_reads() -> None:
     assert getattr(carrier, TEAMS_ENABLED_ATTR) is True
     assert scope_storage._TEAMS_ENABLED_ATTRIBUTE == TEAMS_ENABLED_ATTR
     assert scope_storage.teams_enabled(carrier) is True
+
+
+# --- the derived-row backfill will not guess an owner ----------------------
+
+
+def test_conflicting_source_scopes_fail_the_derived_backfill(
+    store: sqlite3.Connection,
+) -> None:
+    """One derived row, two candidate owners, and no basis to choose.
+
+    `lcm_chunk_meta` has no unique key on (chunk_id, identity_hash), so the
+    vectors join can return several source rows for ONE target rowid. When
+    those sources came from sessions with DIFFERENT owners, `SELECT DISTINCT`
+    returned the pair once per scope, the guarded `executemany` persisted
+    whichever came first, and every later one no-opped against the `IS NULL`
+    guard. The migration then reported complete after assigning the row an
+    arbitrary principal -- the same "a conflict is not an answer" rule the
+    session-owner resolver already applies.
+    """
+    for session in ("s1", "s2"):
+        store.execute(
+            "INSERT INTO messages(session_id, content) VALUES(?, 'x')", (session,)
+        )
+    store.commit()
+    for store_id, in store.execute("SELECT store_id FROM messages").fetchall():
+        store.execute(
+            "INSERT INTO lcm_chunk_meta(chunk_id, store_id, identity_hash)"
+            " VALUES('c1', ?, 'h1')",
+            (store_id,),
+        )
+    store.execute(
+        "INSERT INTO lcm_chunk_vectors(chunk_id, identity_hash, vector)"
+        " VALUES('c1', 'h1', X'00')"
+    )
+    store.commit()
+
+    with pytest.raises(ScopeBackfillIncompleteError) as raised:
+        backfill_scopes(store, _resolver)
+
+    assert "lcm_chunk_vectors" in raised.value.report["failures"]
+    stamped = store.execute(
+        "SELECT access_scope FROM lcm_chunk_vectors"
+    ).fetchone()[0]
+    assert stamped is None, "an arbitrary owner was persisted for a conflicted row"
+
+
+def test_one_source_scope_still_stamps_the_derived_row(
+    store: sqlite3.Connection,
+) -> None:
+    """POSITIVE CONTROL: duplicates that AGREE are not a conflict."""
+    store.execute("INSERT INTO messages(session_id, content) VALUES('s1', 'x')")
+    store.commit()
+    store_id = store.execute("SELECT store_id FROM messages").fetchone()[0]
+    for _ in range(3):
+        store.execute(
+            "INSERT INTO lcm_chunk_meta(chunk_id, store_id, identity_hash)"
+            " VALUES('c1', ?, 'h1')",
+            (store_id,),
+        )
+    store.execute(
+        "INSERT INTO lcm_chunk_vectors(chunk_id, identity_hash, vector)"
+        " VALUES('c1', 'h1', X'00')"
+    )
+    store.commit()
+
+    backfill_scopes(store, _resolver)
+
+    assert store.execute(
+        "SELECT access_scope FROM lcm_chunk_vectors"
+    ).fetchone()[0] == "owner:s1"

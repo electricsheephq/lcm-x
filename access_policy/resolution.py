@@ -48,9 +48,19 @@ def policy_for_engine(
     """
 
     teams_enabled = bool(getattr(engine, TEAMS_ENABLED_ATTR, False))
+    if not teams_enabled:
+        # Short-circuit BEFORE the host callback. ``resolve_mode`` returns
+        # STANDARD_UNMANAGED for teams_enabled=False whatever the context is,
+        # so reading one decides nothing here -- but the read happened
+        # unconditionally, and an accessor that raises during teardown or
+        # partial wiring took the whole unmanaged request down with it. A
+        # default-off installation must not depend on Teams wiring working.
+        return resolve_policy(None, False)
+
     context = policy_access_context(engine)
-    if not teams_enabled or not isinstance(context, AccessContextV1):
-        return resolve_policy(context, teams_enabled)
+    audit_sink = _audit_sink_for_engine(engine)
+    if not isinstance(context, AccessContextV1):
+        return resolve_policy(context, teams_enabled, audit_sink=audit_sink)
 
     status, revisions = _catalog_revisions(engine, context)
     if status is _CatalogLookup.UNREADABLE:
@@ -60,17 +70,21 @@ def policy_for_engine(
         # shape this seam exists to prevent. Note zero is NOT a safe default
         # either: zero is a real revision value, so a context minted at zero
         # would validate against a catalog nobody could read.
-        return FailClosedPolicy(DenialReason.CONTEXT_INVALID)
+        return FailClosedPolicy(
+            DenialReason.CONTEXT_INVALID, audit_sink=audit_sink, context=context
+        )
 
     principal_denial = _catalog_principal_denial(engine, context)
     if principal_denial is not None:
-        return FailClosedPolicy(principal_denial)
+        return FailClosedPolicy(
+            principal_denial, audit_sink=audit_sink, context=context
+        )
 
     return resolve_policy(
         context,
         teams_enabled,
         current_revisions=revisions,
-        audit_sink=_audit_sink_for_engine(engine),
+        audit_sink=audit_sink,
         session_owner=_session_owner_for_engine(engine),
     )
 
@@ -91,21 +105,48 @@ def _catalog_principal_denial(
     ``_catalog_revisions`` treats an existing-but-unreadable catalog as
     inconsistent rather than absent. So an absent principal, a suspended one,
     and one belonging to another tenant all fail closed here.
-    """
 
-    from ..teams.catalog import read_principal
+    BOTH names are checked. The acting principal is not the only one that
+    matters: ``TeamsPolicy.principal_of()`` scopes every row by
+    ``session_owner_principal_id or principal_id``, and only the actor was
+    validated. An active actor in tenant A carrying a session owner naming a
+    principal of tenant B therefore resolved to ``TeamsPolicy`` and authorized
+    rows stamped for B's owner -- the ordinary read path, with no delegation
+    involved, because ``resolve_policy`` validates with no ``required_scope``
+    and the owner/principal comparison in ``OWNERSHIP_CURRENT`` only runs when
+    one is requested.
+    """
 
     store = getattr(engine, "_store", None)
     connection = getattr(store, "connection", None)
     if connection is None:
         return None
+
+    names = [str(context.principal_id)]
+    session_owner = str(context.session_owner_principal_id or "")
+    if session_owner and session_owner != str(context.principal_id):
+        names.append(session_owner)
+    for name in names:
+        denial = _principal_denial(connection, name, str(context.tenant_id))
+        if denial is not None:
+            return denial
+    return None
+
+
+def _principal_denial(
+    connection: object, principal_id: str, tenant_id: str
+) -> DenialReason | None:
+    """The catalog's verdict on ONE principal name."""
+
+    from ..teams.catalog import read_principal
+
     try:
-        principal = read_principal(connection, context.principal_id)
+        principal = read_principal(connection, principal_id)
     except Exception:
         return DenialReason.CONTEXT_INVALID
     if principal is None:
         return DenialReason.CONTEXT_INVALID
-    if principal.tenant_id != str(context.tenant_id):
+    if principal.tenant_id != tenant_id:
         return DenialReason.CONTEXT_INVALID
     if principal.status != "active":
         return DenialReason.CONTEXT_REVOKED
@@ -157,21 +198,43 @@ def _session_owner_for_engine(engine: object):
         owners: set[str] = set()
         readable = 0
         for table, key_column in _OWNER_TABLES:
+            # ABSENT and UNREADABLE are two different answers wearing one
+            # exception. Treating every OperationalError as "this table is not
+            # on this store" meant a partially migrated store -- `messages`
+            # present but without `access_scope` -- was SKIPPED, while an empty
+            # rollup table sibling made `readable` nonzero and answered
+            # "unclaimed" on its behalf. `None` is deliberately permissive, so
+            # that is an ownership check reporting a pass it never ran.
+            try:
+                present = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone()
+            except sqlite3.Error as exc:
+                raise OwnerLookupError(
+                    f"the schema catalog is unreadable for {session_id!r}"
+                ) from exc
+            if present is None:
+                # Genuinely absent. Most stores have no summary_nodes and no
+                # rollup tables, and that absence is not a fault.
+                continue
             try:
                 rows = connection.execute(
                     f'SELECT DISTINCT access_scope FROM "{table}" '
                     f'WHERE "{key_column}" = ? AND access_scope IS NOT NULL',
                     (session_id,),
                 ).fetchall()
-            except sqlite3.OperationalError:
-                # Table or column absent on this store. Counted, not ignored:
-                # if NEITHER table could be read the answer is unknown, not
-                # "unclaimed".
-                continue
+            except sqlite3.Error as exc:
+                # The table EXISTS and could not be read -- a missing column, a
+                # lock, a corrupt page. It may hold the stamp that decides this
+                # session, so no sibling gets to answer for it.
+                raise OwnerLookupError(
+                    f"owner table {table!r} exists but is unreadable for {session_id!r}"
+                ) from exc
             readable += 1
             owners.update(str(row[0]) for row in rows if row[0] is not None)
         if not readable:
-            raise OwnerLookupError(f"no owner table could be read for {session_id!r}")
+            raise OwnerLookupError(f"no owner table exists for {session_id!r}")
         if len(owners) > 1:
             # Rows for one session carrying more than one owner stamp is an
             # inconsistent store, and `LIMIT 1` used to pick one arbitrarily
@@ -280,11 +343,11 @@ def resolve_policy(
     if mode is ResolutionMode.STANDARD_UNMANAGED:
         return TrustedOwnerPolicy(teams_enabled=False)
     if mode is ResolutionMode.FAIL_CLOSED:
-        return FailClosedPolicy(DenialReason.CONTEXT_MISSING)
+        return FailClosedPolicy(DenialReason.CONTEXT_MISSING, audit_sink=audit_sink)
 
     assert mode is ResolutionMode.ENFORCING
     if not isinstance(carrier_context, AccessContextV1):
-        return FailClosedPolicy(DenialReason.CONTEXT_INVALID)
+        return FailClosedPolicy(DenialReason.CONTEXT_INVALID, audit_sink=audit_sink)
     validation = validate(
         carrier_context,
         now=now if now is not None else datetime.now(timezone.utc),
@@ -299,4 +362,10 @@ def resolve_policy(
             carrier_context, audit_sink=audit_sink, session_owner=session_owner
         )
     assert validation.denial_reason is not None
-    return FailClosedPolicy(validation.denial_reason)
+    # The sink and the context travel WITH the denial. This is the branch an
+    # expired, revoked or stale context lands on, and a plain FailClosedPolicy
+    # records it only in memory -- so the durable trail held every
+    # valid-context denial and none of these.
+    return FailClosedPolicy(
+        validation.denial_reason, audit_sink=audit_sink, context=carrier_context
+    )

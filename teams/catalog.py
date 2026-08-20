@@ -162,6 +162,15 @@ _REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
 }
 
 
+class InconsistentCatalogError(RuntimeError):
+    """The catalog holds a tenant's rows but not the state that governs them.
+
+    Distinct from "unknown tenant", which is an ordinary absence with an
+    ordinary answer. This one is a store that cannot be reasoned about, and
+    ``resolution._catalog_revisions`` turns it into a fail-closed policy.
+    """
+
+
 @dataclass(frozen=True)
 class CatalogRevisions:
     """The revisions a context is validated against.
@@ -237,9 +246,16 @@ def verify_teams_catalog(conn: sqlite3.Connection) -> list[str]:
 def read_revisions(conn: sqlite3.Connection, tenant_id: str) -> CatalogRevisions:
     """Return the tenant's current revisions.
 
-    An unknown tenant reads as all-zero rather than raising. A context that
+    An UNKNOWN tenant reads as all-zero rather than raising. A context that
     genuinely belongs to no tenant will fail the ownership stage on its
     principal, which is a more precise answer than a lookup error here.
+
+    A KNOWN tenant with no revision row is a different thing wearing the same
+    absence, and it must not read as zero. Zero is a real revision value, so a
+    tenant whose row was lost to a partial restore or corruption handed every
+    previously revoked context a match again -- undoing every policy,
+    membership and revocation bump ever made, at once. The tenant is known
+    exactly when the catalog still holds principals for it.
     """
 
     row = conn.execute(
@@ -248,6 +264,15 @@ def read_revisions(conn: sqlite3.Connection, tenant_id: str) -> CatalogRevisions
         (tenant_id,),
     ).fetchone()
     if row is None:
+        known = conn.execute(
+            "SELECT 1 FROM lcm_teams_principals WHERE tenant_id = ? LIMIT 1",
+            (str(tenant_id),),
+        ).fetchone()
+        if known is not None:
+            raise InconsistentCatalogError(
+                f"tenant {tenant_id!r} has catalog principals but no revision row; "
+                "reading it as revision zero would revalidate every revoked context"
+            )
         return CatalogRevisions()
     return CatalogRevisions(
         policy_revision=int(row[0] or 0),
@@ -362,6 +387,15 @@ def set_revisions(
     therefore accepted only on initial creation, and a decrease for an existing
     tenant is refused rather than silently clamped -- a control plane sending
     one is out of step with the store and needs to know.
+
+    The refusal is a predicate on the WRITE, not only on the read below. A
+    control plane runs more than one reconciler: worker A could read 5 here,
+    worker B commit 10, and A then overwrite it with 6 unconditionally. The
+    read-then-write pair is not serialized, so the check has to travel with the
+    statement -- ``ON CONFLICT ... DO UPDATE ... WHERE`` re-evaluates the
+    stored row at write time, and a worker that lost the race changes nothing
+    and is told so. The read below stays because it names WHICH counter went
+    backwards, which the write-time predicate cannot.
     """
 
     current = conn.execute(
@@ -387,14 +421,17 @@ def set_revisions(
                 + ", ".join(regressions)
             )
 
-    conn.execute(
+    cursor = conn.execute(
         "INSERT INTO lcm_teams_revisions("
         "tenant_id, policy_revision, membership_revision, revocation_epoch"
         ") VALUES(?, ?, ?, ?) "
         "ON CONFLICT(tenant_id) DO UPDATE SET "
         "policy_revision = excluded.policy_revision, "
         "membership_revision = excluded.membership_revision, "
-        "revocation_epoch = excluded.revocation_epoch",
+        "revocation_epoch = excluded.revocation_epoch "
+        "WHERE excluded.policy_revision >= lcm_teams_revisions.policy_revision "
+        "AND excluded.membership_revision >= lcm_teams_revisions.membership_revision "
+        "AND excluded.revocation_epoch >= lcm_teams_revisions.revocation_epoch",
         (
             tenant_id,
             int(revisions.policy_revision),
@@ -402,6 +439,16 @@ def set_revisions(
             int(revisions.revocation_epoch),
         ),
     )
+    if cursor.rowcount < 1:
+        # The conflict update's predicate was false, which the read above said
+        # it would not be: another worker advanced the counters between the
+        # two statements. Nothing was written -- refuse rather than retry, so
+        # the control plane resolves the disagreement instead of racing again.
+        conn.rollback()
+        raise ValueError(
+            f"revisions for tenant {tenant_id!r} were advanced concurrently; "
+            "this update would have moved them backwards"
+        )
     conn.commit()
 
 
@@ -481,6 +528,17 @@ class Membership:
 PRINCIPAL_STATUSES = ("active", "suspended")
 
 
+# Grants are stored as ONE comma-joined string and read back by splitting on
+# the same character, so the delimiter is not decoration -- it is the only
+# thing separating one capability from the next. A grant name carrying it
+# turns one requested value into several: a control-plane payload asking for
+# `"custom,write"` produced a `write` grant nobody requested, and
+# `authorized_collections(..., grant="write")` then returned the collection.
+#
+# Named once, used by the join and the split alike, so the two cannot drift.
+GRANT_DELIMITER = ","
+
+
 def provision_principal(
     conn: sqlite3.Connection,
     *,
@@ -496,7 +554,16 @@ def provision_principal(
     stored tenant alone, bumped the SUPPLIED tenant's revision, and returned a
     Principal naming a tenant the row does not have. One tenant re-provisioning
     another's principal id therefore reactivated it while reporting success in
-    its own name. A cross-tenant collision is refused instead.
+    its own name. A cross-tenant collision is refused instead -- and refused in
+    the WRITE as well as in the read, because two workers provisioning the same
+    previously-absent id for different tenants both saw "absent" and the loser
+    then updated the winner's row.
+
+    The bump is CONDITIONAL, for the reason ``grant_membership`` records: an
+    unchanged principal is a logical no-op, and bumping ``membership_revision``
+    anyway made every context already issued for the tenant fail revision
+    validation. A desired-state reconciler re-asserting its inventory therefore
+    locked out principals nothing had changed.
     """
 
     if status not in PRINCIPAL_STATUSES:
@@ -507,13 +574,27 @@ def provision_principal(
             f"principal {principal_id!r} belongs to tenant {existing.tenant_id!r}, "
             f"not {tenant_id!r}"
         )
-    conn.execute(
+    if existing is not None and existing.status == status:
+        return Principal(str(principal_id), str(tenant_id), status)
+    cursor = conn.execute(
         "INSERT INTO lcm_teams_principals(principal_id, tenant_id, status,"
         " created_at, updated_at) VALUES(?,?,?,?,?)"
         " ON CONFLICT(principal_id) DO UPDATE SET status=excluded.status,"
-        " updated_at=excluded.updated_at",
+        " updated_at=excluded.updated_at"
+        " WHERE lcm_teams_principals.tenant_id = excluded.tenant_id",
         (str(principal_id), str(tenant_id), status, float(now), float(now)),
     )
+    if cursor.rowcount < 1:
+        # The row exists and is not this tenant's -- it was created between the
+        # read above and this statement. Same refusal as the read's, reached by
+        # the only check that can still be true at write time.
+        conn.rollback()
+        owner = read_principal(conn, principal_id)
+        owner_tenant = owner.tenant_id if owner is not None else "<unreadable>"
+        raise LookupError(
+            f"principal {principal_id!r} belongs to tenant {owner_tenant!r}, "
+            f"not {tenant_id!r}"
+        )
     _bump_revision_uncommitted(conn, str(tenant_id), "membership_revision")
     conn.commit()
     return Principal(str(principal_id), str(tenant_id), status)
@@ -562,6 +643,38 @@ def read_principal(conn: sqlite3.Connection, principal_id: str) -> Principal | N
     return Principal(str(row[0]), str(row[1]), str(row[2])) if row else None
 
 
+def _resolve_collection_conflict(
+    conn: sqlite3.Connection, collection_id: str, tenant_id: str, kind: str
+) -> str:
+    """Decide what an existing row with this id means for this request.
+
+    Only an identical row in the SAME tenant is a replay. A row belonging to
+    another tenant is a collision, and a different kind in this tenant is a
+    conflicting redefinition -- neither is a success.
+    """
+
+    row = conn.execute(
+        "SELECT tenant_id, kind FROM lcm_teams_collections WHERE collection_id = ?",
+        (str(collection_id),),
+    ).fetchone()
+    if row is None:
+        raise LookupError(
+            f"collection {collection_id!r} conflicted but could not be read back"
+        )
+    stored_tenant, stored_kind = str(row[0]), str(row[1])
+    if stored_tenant != str(tenant_id):
+        raise LookupError(
+            f"collection {collection_id!r} belongs to tenant {stored_tenant!r}, "
+            f"not {tenant_id!r}"
+        )
+    if stored_kind != str(kind):
+        raise ValueError(
+            f"collection {collection_id!r} already exists in tenant {tenant_id!r} "
+            f"as kind {stored_kind!r}, not {str(kind)!r}"
+        )
+    return str(collection_id)
+
+
 def create_collection(
     conn: sqlite3.Connection,
     *,
@@ -570,13 +683,29 @@ def create_collection(
     kind: str,
     now: float,
 ) -> str:
+    """Create a collection within ONE tenant. Idempotent for an identical row.
+
+    The tenant is a predicate here too. This was ``INSERT OR IGNORE``, so a
+    collection id already owned by ANOTHER tenant silently skipped the insert
+    and the accessor still reported the id as created for the caller. The
+    management ledger then caches a false success, while the caller's next
+    membership grant fails against a collection it does not own.
+
+    A plain INSERT rather than a pre-read: the primary-key conflict is what
+    detects the collision, so the check cannot be raced past.
+    """
+
     if kind not in ("own", "shared"):
         raise ValueError("kind must be 'own' or 'shared'")
-    conn.execute(
-        "INSERT OR IGNORE INTO lcm_teams_collections(collection_id, tenant_id,"
-        " kind, created_at) VALUES(?,?,?,?)",
-        (str(collection_id), str(tenant_id), kind, float(now)),
-    )
+    try:
+        conn.execute(
+            "INSERT INTO lcm_teams_collections(collection_id, tenant_id,"
+            " kind, created_at) VALUES(?,?,?,?)",
+            (str(collection_id), str(tenant_id), kind, float(now)),
+        )
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        return _resolve_collection_conflict(conn, collection_id, tenant_id, kind)
     conn.commit()
     return str(collection_id)
 
@@ -608,6 +737,12 @@ def grant_membership(
     """
 
     normalized = tuple(sorted({str(g).strip() for g in grants if str(g).strip()}))
+    delimited = tuple(name for name in normalized if GRANT_DELIMITER in name)
+    if delimited:
+        raise ValueError(
+            f"a grant name may not contain {GRANT_DELIMITER!r}, the encoding "
+            f"delimiter -- it would be read back as several grants: {delimited!r}"
+        )
 
     principal = read_principal(conn, principal_id)
     if principal is None or principal.tenant_id != str(tenant_id):
@@ -628,7 +763,7 @@ def grant_membership(
         " WHERE principal_id=? AND collection_id=?",
         (str(principal_id), str(collection_id)),
     ).fetchone()
-    unchanged = existing is not None and str(existing[0]) == ",".join(normalized)
+    unchanged = existing is not None and str(existing[0]) == GRANT_DELIMITER.join(normalized)
     if unchanged:
         return Membership(str(principal_id), str(collection_id), normalized)
 
@@ -636,7 +771,7 @@ def grant_membership(
         "INSERT INTO lcm_teams_memberships(principal_id, collection_id, grants,"
         " created_at) VALUES(?,?,?,?)"
         " ON CONFLICT(principal_id, collection_id) DO UPDATE SET grants=excluded.grants",
-        (str(principal_id), str(collection_id), ",".join(normalized), float(now)),
+        (str(principal_id), str(collection_id), GRANT_DELIMITER.join(normalized), float(now)),
     )
     _bump_revision_uncommitted(conn, str(tenant_id), "membership_revision")
     conn.commit()
@@ -662,6 +797,13 @@ def revoke_membership(
     to another tenant is not this tenant's to revoke, and revoking it while
     bumping the caller's counters is the cross-tenant write the grant path now
     refuses to create.
+
+    And the bumps are CONDITIONAL on the deletion, which is the other half of
+    that predicate. It was added to the DELETE alone, so a foreign or
+    already-gone membership removed nothing and still advanced the supplied
+    tenant's revocation epoch and membership revision -- invalidating every
+    context that tenant had issued for a deletion that never happened. The
+    suspension path already rolls back and refuses on the same condition.
     """
 
     cursor = conn.execute(
@@ -671,11 +813,13 @@ def revoke_membership(
         " )",
         (str(principal_id), str(collection_id), str(tenant_id)),
     )
-    removed = cursor.rowcount > 0
+    if cursor.rowcount < 1:
+        conn.rollback()
+        return False
     _bump_revision_uncommitted(conn, str(tenant_id), "revocation_epoch")
     _bump_revision_uncommitted(conn, str(tenant_id), "membership_revision")
     conn.commit()
-    return removed
+    return True
 
 
 def read_memberships(
@@ -690,7 +834,7 @@ def read_memberships(
         Membership(
             str(r[0]),
             str(r[1]),
-            tuple(g for g in str(r[2]).split(",") if g),
+            tuple(g for g in str(r[2]).split(GRANT_DELIMITER) if g),
         )
         for r in rows
     )

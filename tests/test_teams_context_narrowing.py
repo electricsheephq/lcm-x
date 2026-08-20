@@ -245,3 +245,32 @@ def test_an_unbound_policy_refuses_a_supplied_context(operation: str) -> None:
 
     assert not decision.allowed
     assert decision.denial_reason is DenialReason.CONTEXT_INVALID
+
+
+def test_a_bound_context_with_no_principal_denies_at_the_gates() -> None:
+    """The gates deny; the narrowing is deliberately NOT decided here.
+
+    A context carrying neither a session owner nor a principal produces an
+    empty principal. `resolve_authorized_targets` returns the caller's
+    narrowing unchanged, which the UNBOUND branch would answer with an explicit
+    deny-all -- an asymmetry this slice cannot settle, because whether a
+    consumer reads an empty `access_scope` as "restrict to nothing" or, via a
+    falsy check, as "no restriction" is a call-site decision and no consumer
+    exists yet.
+
+    What is decided is that nothing reaches that path through a gate: both
+    authorization entry points refuse an empty principal outright.
+    """
+    empty = dataclasses.replace(
+        _context(), principal_id="", session_owner_principal_id=""
+    )
+    policy = TeamsPolicy(empty)
+
+    operation = policy.authorize_operation(None, "read", {"session_id": "s"})
+    stored = policy.authorize_stored_scope(
+        None, "read", {"access_scope": "someone-else"}
+    )
+
+    assert not operation.allowed
+    assert operation.denial_reason is DenialReason.CONTEXT_INVALID
+    assert not stored.allowed

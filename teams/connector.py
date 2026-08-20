@@ -227,27 +227,91 @@ class TeamsConnector:
             return None
         return (str(row[0]), str(row[1]), str(row[2]), str(row[3])), row[4]
 
-    def _remember(self, request: ConnectorRequest, data: Mapping[str, Any]) -> None:
+    def _reserve(self, request: ConnectorRequest) -> None:
+        """Claim the request id BEFORE the handler runs, with no result yet.
+
+        The one-effect guarantee cannot be kept by a ledger written afterwards.
+        A handler commits its catalog mutation, the process exits or the ledger
+        write fails before the row lands, and the retry runs the handler a
+        SECOND time -- the guarantee broken by the ordering alone, and the old
+        "losing the ledger row only costs a replay its cached answer" is why
+        that went unnoticed.
+
+        Reserving first inverts the failure. What a crash leaves behind is a
+        row with a NULL ``result_json``, which :meth:`_prior` reads as "a prior
+        attempt was dispatched and never reported", and refuses. And a ledger
+        that cannot be written at all becomes a REFUSAL rather than an
+        untracked effect: if there is no way to record that something happened,
+        it must not happen.
+        """
+
+        self._conn.execute(
+            "INSERT INTO lcm_teams_requests(request_id, payload_digest,"
+            " capability, tenant_id, principal_id, recorded_at, result_json)"
+            " VALUES(?,?,?,?,?,?,NULL)",
+            (
+                str(request.request_id),
+                request.digest(),
+                request.capability.value,
+                str(request.tenant_id or ""),
+                str(request.acting_principal_id or ""),
+                float(self._clock()),
+            ),
+        )
+        self._conn.commit()
+
+    def _release(self, request: ConnectorRequest) -> None:
+        """Give a reservation back when the effect PROVABLY did not happen.
+
+        Called only after the handler raised AND the connection was rolled
+        back, so there is nothing indeterminate about it and the id must stay
+        retryable -- otherwise an ordinary transient failure would burn it. A
+        reservation survives only when nothing here got to run, which is
+        exactly the indeterminate case `_prior` refuses.
+        """
+
         try:
             self._conn.execute(
-                "INSERT OR REPLACE INTO lcm_teams_requests(request_id, payload_digest,"
-                " capability, tenant_id, principal_id, recorded_at, result_json)"
-                " VALUES(?,?,?,?,?,?,?)",
+                "DELETE FROM lcm_teams_requests WHERE tenant_id = ? AND request_id = ?",
+                (str(request.tenant_id or ""), str(request.request_id)),
+            )
+            self._conn.commit()
+        except sqlite3.Error:
+            # A reservation nobody could delete stays, and the id is refused
+            # from now on. That is the safe direction: refusing a retry is
+            # loud, re-running an effect is not.
+            return
+
+    def _remember(self, request: ConnectorRequest, data: Mapping[str, Any]) -> bool:
+        """Complete the reservation with what the handler returned.
+
+        A failure here leaves the reservation standing, so a retry is refused
+        as indeterminate rather than re-running an effect that already
+        happened -- and the connection is rolled back either way, because
+        `record_audit_event` deliberately declines to commit inside a caller's
+        transaction. Leaving one open meant the audit row rode along with it
+        and a later rollback discarded the evidence with the effect.
+        """
+
+        try:
+            self._conn.execute(
+                "UPDATE lcm_teams_requests SET result_json = ?, recorded_at = ?"
+                " WHERE tenant_id = ? AND request_id = ?",
                 (
-                    str(request.request_id),
-                    request.digest(),
-                    request.capability.value,
-                    str(request.tenant_id or ""),
-                    str(request.acting_principal_id or ""),
-                    float(self._clock()),
                     json.dumps(dict(data), sort_keys=True),
+                    float(self._clock()),
+                    str(request.tenant_id or ""),
+                    str(request.request_id),
                 ),
             )
             self._conn.commit()
         except sqlite3.Error:
-            # The effect already happened. Losing the ledger row costs a replay
-            # its cached answer; it must not cost the caller the operation.
-            return
+            try:
+                self._conn.rollback()
+            except sqlite3.Error:
+                pass
+            return False
+        return True
 
     # -- failure cleanup ---------------------------------------------------
 
@@ -327,6 +391,19 @@ class TeamsConnector:
                     FailureClass.CONFLICT,
                     "request_id was already used with a different request",
                 )
+            if stored_result is None:
+                # A reservation with no result: the handler was dispatched and
+                # its outcome was never recorded. Re-running it would break the
+                # one-effect guarantee; replaying it would report a success
+                # nobody observed -- which is what `data={} , replayed=True`
+                # used to do. Refusing is the only honest answer, and it puts a
+                # human in front of an id whose effect is genuinely unknown.
+                self._audit(request, allowed=False, failure=FailureClass.CONFLICT)
+                raise ConnectorError(
+                    FailureClass.CONFLICT,
+                    "a prior attempt with this request_id did not complete; "
+                    "its effect is indeterminate",
+                )
             self._audit(request, allowed=True, failure=None)
             return ConnectorResult(
                 status="ok",
@@ -348,9 +425,25 @@ class TeamsConnector:
             )
 
         try:
+            self._reserve(request)
+        except sqlite3.IntegrityError as exc:
+            # Another worker claimed this id between `_prior` and here. One of
+            # them dispatches; this one is not it.
+            self._discard_partial_handler_writes()
+            self._audit(request, allowed=False, failure=FailureClass.CONFLICT)
+            raise ConnectorError(
+                FailureClass.CONFLICT, "request_id is already in flight"
+            ) from exc
+        except sqlite3.Error as exc:
+            self._discard_partial_handler_writes()
+            self._audit(request, allowed=False, failure=FailureClass.UNAVAILABLE)
+            raise ConnectorError(FailureClass.UNAVAILABLE, "store unavailable") from exc
+
+        try:
             data = handler(self._conn, request)
         except ConnectorError as exc:
             self._discard_partial_handler_writes()
+            self._release(request)
             self._audit(request, allowed=False, failure=exc.failure)
             raise
         except Exception as exc:  # noqa: BLE001 - normalized below, never leaked
@@ -362,6 +455,7 @@ class TeamsConnector:
             # "store unavailable" is the honest message for it; everything else
             # is an unavailable capability rather than a granted one.
             self._discard_partial_handler_writes()
+            self._release(request)
             self._audit(request, allowed=False, failure=FailureClass.UNAVAILABLE)
             message = (
                 "store unavailable"

@@ -125,3 +125,65 @@ def test_every_target_key_resolves_by_owner(key: str) -> None:
 
     assert allowed.allowed, f"{key}: same-owner target should be allowed"
     assert not denied.allowed, f"{key}: cross-owner target must be denied"
+
+
+def test_the_bound_session_is_verified_too_when_a_resolver_exists() -> None:
+    """Matching session IDs is not evidence of ownership.
+
+    The loop skipped the owner check outright when the target equalled
+    `context.session_id`, on the reasoning that a principal owns the session it
+    is bound to. It does not follow: the context is what the HOST asserts, and
+    the stamps are what the store actually holds. A context bound to a session
+    whose persisted rows carry another principal's stamp therefore passed every
+    session-level gate -- reset, end, compaction -- over those rows.
+
+    The unclaimed-new-session allowance is untouched: an unresolved target is
+    still allowed, which is the case a genuinely new bound session hits.
+    """
+    policy = TeamsPolicy(
+        _context(session="session-current"),
+        session_owner=_owner_map({"session-current": "carus"}),
+    )
+
+    decision = policy.authorize_operation(
+        None, "write", {"kind": "session_reset", "session_id": "session-current"}
+    )
+
+    assert not decision.allowed, (
+        "the bound session id was accepted as proof of owning its rows"
+    )
+
+
+def test_the_bound_session_is_still_allowed_when_the_stamps_agree() -> None:
+    """POSITIVE CONTROL: the ordinary case must keep working."""
+    policy = TeamsPolicy(
+        _context(session="session-current"),
+        session_owner=_owner_map({"session-current": "acorn"}),
+    )
+
+    assert policy.authorize_operation(
+        None, "write", {"kind": "session_reset", "session_id": "session-current"}
+    ).allowed
+
+
+def test_the_owner_of_one_session_is_resolved_once_per_policy() -> None:
+    """Verifying the bound session adds a lookup to a HOT path.
+
+    `audit_decision` records that this branch once cost a 48s -> 174s
+    regression from far less, and the bound session is the one nearly every
+    operation names. The resolver is consulted once per session per policy
+    instance, which is the lifetime of a single resolved decision.
+    """
+    calls: list[str] = []
+
+    def counting(session_id: str) -> str | None:
+        calls.append(session_id)
+        return "acorn"
+
+    policy = TeamsPolicy(_context(session="session-current"), session_owner=counting)
+    for _ in range(5):
+        policy.authorize_operation(
+            None, "read", {"kind": "recall", "session_id": "session-current"}
+        )
+
+    assert calls == ["session-current"]
