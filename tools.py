@@ -275,27 +275,81 @@ def _parse_retrieval_excluded_session_ids(
     return excluded, None
 
 
+# Tables whose distinct ``session_id`` values define the eligible retrieval
+# scope. Both carry a ``session_id``-LEADING index (``idx_msg_session_ts`` and
+# ``idx_nodes_session_latest``), which is what makes the skip-scan below an
+# indexed seek rather than a corpus scan. Fixed literals -- never interpolate
+# caller input into the statement.
+_RETRIEVAL_SESSION_SCOPE_TABLES = ("messages", "summary_nodes")
+
+# Loose index scan ("skip scan"): seek once per DISTINCT session_id instead of
+# reading every row and sorting a temp B-tree. Cost is O(sessions * log rows),
+# not O(rows). Measured on 300k messages + 9k summary nodes over 300 sessions:
+# 66.2 ms (SCAN + USE TEMP B-TREE FOR DISTINCT) -> 0.5 ms (SEARCH ... session_id>?).
+_RETRIEVAL_DISTINCT_SESSIONS_SQL = """
+        WITH RECURSIVE distinct_sessions(session_id) AS (
+            SELECT MIN(session_id) FROM {table}
+            UNION ALL
+            SELECT (
+                SELECT MIN(session_id) FROM {table}
+                WHERE session_id > distinct_sessions.session_id
+            )
+            FROM distinct_sessions
+            WHERE distinct_sessions.session_id IS NOT NULL
+        )
+        SELECT session_id FROM distinct_sessions WHERE session_id IS NOT NULL
+"""
+
+
 def _retrieval_candidate_session_ids(
-    engine: "LCMEngine", excluded_session_ids: set[str]
-) -> list[str] | None:
+    engine: "LCMEngine",
+    excluded_session_ids: set[str],
+    *,
+    deadline: float | None = None,
+) -> tuple[list[str] | None, bool]:
+    """Resolve the eligible-session whitelist for a retrieval exclusion set.
+
+    Returns ``(candidate_session_ids, enumeration_timed_out)``. ``None`` means
+    "no exclusions, no whitelist needed"; ``[]`` means "exclusions left no
+    eligible session". The second element is True only when ``deadline`` lapsed
+    mid-enumeration -- callers must fail CLOSED on it (drop the arms that depend
+    on the whitelist), never fall back to ``None``, which would silently
+    discard the caller's hard exclusion filter.
+    """
     if not excluded_session_ids:
-        return None
+        return None, False
     connection = engine._store.connection
     if connection is None:
-        return []
-    rows = connection.execute(
-        """
-        SELECT DISTINCT session_id
-        FROM (
-            SELECT session_id FROM messages
-            UNION ALL
-            SELECT session_id FROM summary_nodes
+        return [], False
+    # An already-lapsed budget fails closed before any DB work: the progress
+    # handler only fires every N opcodes, so a short query could otherwise slip
+    # past an expired deadline purely because it was cheap.
+    if deadline is not None and time.monotonic() >= deadline:
+        return [], True
+    sessions: set[str] = set()
+    # Progress handler == the interrupt the old single-statement scan lacked;
+    # same idiom as the vector prescreen (vector_store), torn down in `finally`.
+    if deadline is not None:
+        connection.set_progress_handler(
+            lambda: 1 if time.monotonic() >= deadline else 0, 1000
         )
-        WHERE session_id NOT IN (SELECT value FROM json_each(?))
-        """,
-        (json.dumps(sorted(excluded_session_ids)),),
-    ).fetchall()
-    return [str(row[0]) for row in rows if row[0] is not None]
+    try:
+        for table in _RETRIEVAL_SESSION_SCOPE_TABLES:
+            rows = connection.execute(
+                _RETRIEVAL_DISTINCT_SESSIONS_SQL.format(table=table)
+            ).fetchall()
+            sessions.update(str(row[0]) for row in rows if row[0] is not None)
+    except sqlite3.OperationalError:
+        if deadline is not None and time.monotonic() >= deadline:
+            return [], True
+        raise
+    finally:
+        if deadline is not None:
+            connection.set_progress_handler(None, 0)
+    # The exclusion difference moves to Python: both ``session_id`` columns are
+    # declared TEXT NOT NULL, so set difference on the stringified values is
+    # exactly the SQL ``NOT IN`` it replaces, without a second pass over rows.
+    return sorted(sessions - excluded_session_ids), False
 
 
 def _parse_strict_int(value: Any, name: str) -> tuple[int | None, str | None]:
@@ -4828,10 +4882,6 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     if include not in _LCM_RECALL_VALID_INCLUDE:
         return json.dumps({"error": "include must be one of: all, summaries, verbatim"})
 
-    candidate_session_ids = _retrieval_candidate_session_ids(
-        engine, excluded_session_ids
-    )
-
     detail = str(args.get("detail") or "snippets").strip().lower()
     if detail not in _LCM_RECALL_VALID_DETAIL:
         return json.dumps({"error": "detail must be one of: snippets, answer_ready"})
@@ -4860,6 +4910,12 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     # (larger) budget rather than lcm_grep's single-arm query deadline (sprint-opt-2).
     timeout_s = max(0.001, float(getattr(engine._config, "recall_query_timeout_s", 8.0)))
     deadline = request_started + timeout_s
+
+    # Resolved under the deadline, not before it: this is DB work, and the
+    # vector arms below consume its result as a hard scope filter.
+    candidate_session_ids, session_scope_timed_out = _retrieval_candidate_session_ids(
+        engine, excluded_session_ids, deadline=deadline
+    )
 
     candidate_limit = min(_LCM_GREP_HYBRID_CANDIDATE_CAP, max(50, limit * 4))
     rerank_window = min(50, max(1, limit * 4))
@@ -4910,7 +4966,17 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     # -- Vector arms. Local/same-model corpora share one query embedding;
     # Voyage's context chunk corpus resolves and embeds with its own model. --
     if run_summary or run_chunk:
-        if candidate_session_ids == []:
+        # Ordered before the empty-scope branch on purpose: a timed-out
+        # enumeration also yields [], and must NOT be reported as the
+        # 'full' coverage of a genuinely empty eligible scope.
+        if session_scope_timed_out:
+            timed_out = True
+            degraded_reasons.append("session exclusion scope resolution timed out")
+            if run_summary:
+                coverage["summary"] = "none"
+            if run_chunk:
+                coverage["chunk"] = "none"
+        elif candidate_session_ids == []:
             if run_summary:
                 arm_hits["summary"] = []
                 coverage["summary"] = "full"

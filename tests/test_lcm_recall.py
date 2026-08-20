@@ -388,6 +388,104 @@ def test_recall_rejects_non_boolean_current_session_exclusion(recall_engine):
     assert payload == {"error": "exclude_current_session must be a boolean"}
 
 
+def test_exclusion_session_scope_never_scans_the_whole_archive(recall_engine):
+    """The eligible-session whitelist resolves by indexed seek, not a corpus scan.
+
+    Both scope tables carry a session_id-leading index, so DISTINCT session_id
+    must come from a skip-scan. A plan that SCANs either table, or sorts a
+    temp B-tree, makes an exclusion cost O(rows) on a large archive.
+    """
+    connection = recall_engine._store.connection
+    for table in lcm_tools._RETRIEVAL_SESSION_SCOPE_TABLES:
+        sql = lcm_tools._RETRIEVAL_DISTINCT_SESSIONS_SQL.format(table=table)
+        plan = " | ".join(
+            str(row[3])
+            for row in connection.execute("EXPLAIN QUERY PLAN " + sql).fetchall()
+        )
+        assert f"SEARCH {table}" in plan, plan
+        assert f"SCAN {table}" not in plan, plan
+        assert "TEMP B-TREE" not in plan, plan
+
+
+def test_exclusion_session_scope_matches_not_in_semantics(recall_engine):
+    """The Python set difference is exactly the SQL NOT IN it replaced."""
+    for session_id in ("session-a", "session-b", "session-c"):
+        recall_engine._store.append(
+            session_id, {"role": "user", "content": "kanban detail"}
+        )
+    _add_summary(
+        recall_engine, "kanban summary", session_id="session-d", created_at=5.0
+    )
+
+    candidates, timed_out = lcm_tools._retrieval_candidate_session_ids(
+        recall_engine, {"session-b", "unknown-session"}
+    )
+
+    assert timed_out is False
+    # session-d is summary-only, so both scope tables must contribute.
+    assert candidates == ["session-a", "session-c", "session-d"]
+
+
+def test_exclusion_session_scope_returns_none_only_without_exclusions(recall_engine):
+    assert lcm_tools._retrieval_candidate_session_ids(recall_engine, set()) == (
+        None,
+        False,
+    )
+
+
+def test_exclusion_session_scope_fails_closed_on_an_expired_deadline(recall_engine):
+    """An interrupted enumeration must never drop the caller's hard filter.
+
+    Returning None here would widen the scope back to the whole archive and
+    silently surface the very sessions the caller excluded.
+    """
+    for session_id in ("session-a", "session-b"):
+        recall_engine._store.append(
+            session_id, {"role": "user", "content": "kanban detail"}
+        )
+
+    candidates, timed_out = lcm_tools._retrieval_candidate_session_ids(
+        recall_engine, {"session-a"}, deadline=time.monotonic() - 1.0
+    )
+
+    assert timed_out is True
+    assert candidates == []
+    assert candidates is not None
+
+
+def test_recall_scope_timeout_is_not_reported_as_a_complete_empty_scope(
+    recall_engine, monkeypatch
+):
+    """A timed-out scope resolution degrades; it never claims 'full' coverage.
+
+    Both a timeout and a genuinely empty eligible scope yield [], so ordering
+    the timeout branch first is what keeps a deadline miss from being read as
+    a complete, authoritative empty answer.
+    """
+    recall_engine._store.append(
+        "session-a", {"role": "user", "content": "kanban dashboard sprint detail"}
+    )
+    monkeypatch.setattr(
+        lcm_tools,
+        "_retrieval_candidate_session_ids",
+        lambda *_args, **_kwargs: ([], True),
+    )
+
+    payload = _recall(
+        recall_engine, monkeypatch, include="all", exclude_session_ids=["session-b"]
+    )
+
+    coverage = payload["provenance"]["coverage"]
+    assert coverage["summary"] == "none"
+    assert coverage["chunk"] == "none"
+    assert payload["timeout"] is True
+    assert payload["degraded"] is True
+    assert (
+        "session exclusion scope resolution timed out"
+        in payload["degraded_reason"]
+    ), payload["degraded_reason"]
+
+
 def test_recall_all_known_sessions_excluded_is_not_degraded(recall_engine, monkeypatch):
     store_id = recall_engine._store.append(
         CURRENT,
