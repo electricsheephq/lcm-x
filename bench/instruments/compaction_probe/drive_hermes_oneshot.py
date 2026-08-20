@@ -53,6 +53,14 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+RUNTIME_CONFIG_PATH: Path | None = None
+RUNTIME_CONFIG_SHA: str | None = None
+
+
+class ConfigDriftError(RuntimeError):
+    """config.yaml changed while a multi-hour run was in flight."""
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -254,6 +262,11 @@ def _invoke(
     timeout boundary easy to mock while preserving fail-closed behavior.
     """
     try:
+        current_sha = sha256_file(RUNTIME_CONFIG_PATH) if RUNTIME_CONFIG_PATH else None
+        if RUNTIME_CONFIG_SHA is not None and current_sha != RUNTIME_CONFIG_SHA:
+            raise ConfigDriftError(
+                f"config.yaml changed mid-run: {current_sha} != {RUNTIME_CONFIG_SHA}"
+            )
         completed = subprocess.run(
             command,
             env=child_env,
@@ -386,12 +399,24 @@ def write_jsonl(path: Path, row: dict[str, Any]) -> None:
 
 def run(args: argparse.Namespace) -> int:
     hermes_home_arg = Path(args.hermes_home).expanduser()
+    if hermes_home_arg.suffix in {".yaml", ".yml"}:
+        # Hermes loads <HERMES_HOME>/config.yaml; accepting a bare config file
+        # would validate one file while launching against whatever config.yaml
+        # its parent happens to hold. Require the home DIRECTORY.
+        sys.stderr.write(
+            "[driver] --hermes-home must be a HERMES_HOME directory, not a "
+            "config file path\n"
+        )
+        return 64
     config_path = (
         hermes_home_arg
         if hermes_home_arg.suffix in {".yaml", ".yml"}
         else hermes_home_arg / "config.yaml"
     )
     hermes_home = config_path.parent
+    global RUNTIME_CONFIG_PATH, RUNTIME_CONFIG_SHA
+    RUNTIME_CONFIG_PATH = config_path
+    RUNTIME_CONFIG_SHA = sha256_file(config_path)
     if not config_path.exists():
         raise ValueError(f"Hermes config not found: {config_path}")
     values = read_config_values(config_path)
