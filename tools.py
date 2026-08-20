@@ -6685,6 +6685,7 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
             max_tokens=max_tokens,
             source_offset=source_offset,
             source_limit=source_limit,
+            session_id=node.session_id,
         )
         result = {
             "node_id": node_id,
