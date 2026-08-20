@@ -211,6 +211,23 @@ class SummaryDAG:
                 value TEXT
             );
         """)
+        # summary_nodes is created HERE, not by the core bootstrap, so the core
+        # scope pass can already have recorded its marker on the store's
+        # connection while this table did not yet exist -- and that marker makes
+        # every later sweep a no-op. Repair the one column with the module's
+        # targeted probe so the additive nullable column really is present on
+        # every database; the rollup invalidation triggers resolve
+        # ``new.access_scope`` at CREATE TRIGGER time and cannot install without
+        # it.
+        #
+        # BEFORE the FTS index is built, deliberately. ``nodes_fts`` is an
+        # external-content fts5 table over summary_nodes, and altering the
+        # content table after this connection has prepared statements against
+        # the vtable makes the first write fail to re-prepare
+        # (SQLITE_SCHEMA / "vtable constructor failed: nodes_fts").
+        from .scope_storage import ensure_scope_columns
+
+        ensure_scope_columns(self._conn, tables=("summary_nodes",))
         ensure_external_content_fts(
             self._conn,
             build_nodes_fts_spec(),
@@ -889,9 +906,10 @@ class SummaryDAG:
 
         The rank is the LAST column of the FTS query's projection, not a fixed
         position: this table is additive, and reading it as "column 12 when the
-        row is longer than twelve" silently returns the first NEW table column
-        instead the moment one lands. That is not an error anywhere -- rank
-        ``None`` just makes relevance and hybrid ordering quietly degrade to
+        row is longer than twelve" silently returned the first NEW table column
+        instead the moment one landed. The additive ``access_scope`` column did
+        exactly that -- every FTS search returned rank ``None``, which is not an
+        error anywhere: relevance and hybrid ordering just quietly degrade to
         recency. Callers that do not project a rank say so by omission.
         """
 

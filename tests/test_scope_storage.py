@@ -16,16 +16,9 @@ from hermes_lcm.rollup_store import RollupStore
 from hermes_lcm.store import MessageStore
 
 
-# scope_storage MIGRATES a store to carry access_scope; the tests below read the
-# migrated shape back through dag/rollup_store, which only grow the column in the
-# call-site slice.  The migration itself, its resumability, its writer guard and
-# its honest-failure paths are all exercised by the tests that remain live.
-_NEEDS_SCHEMA_SLICE = pytest.mark.skip(
-    reason="call-site slice: dag/rollup_store do not carry access_scope yet"
+@pytest.mark.skip(
+    reason="call-site slice: SummaryNode has no access_scope field yet"
 )
-
-
-@_NEEDS_SCHEMA_SLICE
 def test_non_teams_store_keeps_legacy_rows_and_read_shape(tmp_path):
     db_path = tmp_path / "non-teams.db"
     store = MessageStore(db_path)
@@ -171,7 +164,6 @@ def test_unstamped_rows_fail_honestly_on_a_synthetic_store():
         conn.close()
 
 
-@_NEEDS_SCHEMA_SLICE
 def test_unstamped_row_counts_fail_honestly(tmp_path):
     store = MessageStore(tmp_path / "unstamped.db")
     try:
@@ -203,7 +195,6 @@ def bad_writer(conn):
     assert "bad_writer" in writers[0].name
 
 
-@_NEEDS_SCHEMA_SLICE
 def test_rollup_partition_scope_does_not_mask_unstamped_access_scope(tmp_path):
     rollups = RollupStore(tmp_path / "rollup-mutation.db")
     try:
@@ -229,7 +220,6 @@ def test_rollup_partition_scope_does_not_mask_unstamped_access_scope(tmp_path):
         rollups.close()
 
 
-@_NEEDS_SCHEMA_SLICE
 def test_rollup_backfill_stamps_access_scope_without_rewriting_partition(tmp_path):
     rollups = RollupStore(tmp_path / "rollup-backfill.db")
     try:

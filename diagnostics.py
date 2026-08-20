@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .scope_storage import SCOPE_DOCTOR_CHECK
+
 
 DOCTOR_ACTION_SAFE_IGNORE = "safe/ignore"
 DOCTOR_ACTION_INSPECT = "inspect"
@@ -156,6 +158,18 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
         command = "safe to ignore if compaction proceeds normally; inspect lcm_status only if pressure stays high or compaction loops"
         warning_only = True
         rationale = "context pressure is an operating state, not persisted-state corruption"
+    elif name == SCOPE_DOCTOR_CHECK:
+        # The repair text is written by the check itself, next to the statuses
+        # it classifies, so this branch forwards it rather than restating it.
+        repair = detail.get("repair") if isinstance(detail, dict) else None
+        command = str(repair) if repair else (
+            "inspect the reported scope-storage state; back the database up "
+            "before running any Teams enable or disable"
+        )
+        rationale = (
+            "an unresolved Teams enable state makes the store fail closed, and "
+            "resolving it writes to persisted scope attribution"
+        )
     elif name == "cleanup_candidates":
         action = DOCTOR_ACTION_BACKUP_FIRST_CLEANUP
         command = "run `/lcm doctor clean` first; if candidates are expected junk/noise, run `/lcm backup` before `/lcm doctor clean apply`"
