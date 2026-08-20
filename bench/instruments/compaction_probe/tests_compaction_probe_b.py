@@ -753,7 +753,7 @@ def test_drive_codex_subprocess_gets_devnull_stdin_and_turn_timeout(tmp_path, mo
     day = sessions_root / "2026" / "08" / "21"
     day.mkdir(parents=True)
     (day / "rollout-x-t-1.jsonl").write_text(
-        '{"type":"turn_context","payload":{"type":"turn_context","model":"gpt-5.6-sol"}}\n',
+        '{"type":"turn_context","payload":{"turn_id":"t","cwd":"/x","model":"gpt-5.6-sol"}}\n',
         encoding="utf-8",
     )
     args = argparse.Namespace(
@@ -850,7 +850,7 @@ def test_drive_codex_resume_command_pins_model_and_asserts_served_model(tmp_path
     day = sessions_root / "2026" / "08" / "21"
     day.mkdir(parents=True)
     (day / "rollout-2026-08-21T00-00-00-t-1.jsonl").write_text(
-        '{"type":"turn_context","payload":{"type":"turn_context","model":"gpt-5.6-sol"}}\n',
+        '{"type":"turn_context","payload":{"turn_id":"t","cwd":"/x","model":"gpt-5.6-sol"}}\n',
         encoding="utf-8",
     )
     args = argparse.Namespace(

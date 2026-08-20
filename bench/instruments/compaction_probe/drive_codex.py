@@ -172,7 +172,12 @@ def _served_model_from_rollout(session_id: str, sessions_root: Path) -> str | No
                 continue
             for node in _walk(row):
                 if node.get("type") == "turn_context":
-                    value = node.get("model")
+                    # Real rollout shape: {"type":"turn_context","payload":
+                    # {"model": ...}} — the payload carries no inner type.
+                    payload = node.get("payload")
+                    value = node.get("model") or (
+                        payload.get("model") if isinstance(payload, dict) else None
+                    )
                     if isinstance(value, str) and value:
                         served = value
     return served
