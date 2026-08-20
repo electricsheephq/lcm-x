@@ -28,6 +28,8 @@ from hermes_lcm.externalize import (
     externalize_ingest_payload,
     extract_externalized_ref,
     extract_externalized_refs,
+    is_generated_payload_ref_name,
+    maybe_externalize_payload,
     read_externalized_payload_search_prefix,
     reassign_externalized_payloads,
 )
@@ -2446,6 +2448,188 @@ def test_externalized_payload_integrity_scan_keeps_generated_placeholder_in_sour
     encoded = json.dumps(detail)
     for ref in quoted_only_refs:
         assert ref not in encoded
+
+
+def test_externalized_payload_integrity_scan_reports_missing_generated_ref_in_source_context(tmp_path):
+    """A GENERATED placeholder in source-shaped text stays diagnosable once its file is gone.
+
+    Promoting parked refs on payload-file existence alone is the one case that
+    inverts: when a generated placeholder sits inside a fence / backtick span /
+    line-numbered literal AND its backing file has been deleted or GC'd, existence
+    can no longer vouch for it, so the ref would be dropped exactly when recovery is
+    broken and doctor must say so. Generation provenance is readable from the ref
+    name itself -- externalize.py mints every filename as
+    ``{YYYYmmdd}_{HHMMSS}_{stub}_{12-hex digest}_{hex time_ns}.json`` -- so that
+    shape settles the missing case without consulting the filesystem. Hand-written
+    docs refs do not carry it and must stay dropped.
+    """
+    engine = _engine(tmp_path)
+    storage_dir = tmp_path / "externalized"
+    storage_dir.mkdir()
+
+    def placeholder(ref: str) -> str:
+        return (
+            "[Externalized payload: kind=raw_payload; role=assistant; "
+            f"chars=1; bytes=1; ref={ref}]"
+        )
+
+    # Minted by externalize.py's filename contract; asserted against it below.
+    live_generated_ref = "20260719_143000_raw_payload_assistant_0123456789ab_18f3c2d1e0a.json"
+    missing_fenced_ref = "20260719_143001_tool_result_call-abc_1a2b3c4d5e6f_18f3c2d1e0b.json"
+    missing_numbered_ref = "20260719_143002_ingest_payload_content_9f8e7d6c5b4a_18f3c2d1e0c.json"
+    missing_tick_ref = "20260719_143003_raw_payload_assistant_abcdef012345_18f3c2d1e0d.json"
+    missing_generated_refs = (missing_fenced_ref, missing_numbered_ref, missing_tick_ref)
+    # Hand-written docs/example names: no generation provenance, no backing file.
+    quoted_only_refs = ("quoted-fenced-example.json", "docs-tool-call.json")
+
+    (storage_dir / live_generated_ref).write_text(json.dumps({"content": "fixture payload"}))
+    for ref in (*missing_generated_refs, *quoted_only_refs):
+        assert not (storage_dir / ref).exists()
+
+    fenced_content = "\n".join(
+        [
+            "Recovery reference for the deleted payload:",
+            "```",
+            placeholder(missing_fenced_ref),
+            "```",
+            "and a docs example in its own fence:",
+            "```",
+            placeholder(quoted_only_refs[0]),
+            "```",
+        ]
+    )
+    live_fenced_content = "\n".join(
+        [
+            "Still-recoverable output:",
+            "```",
+            placeholder(live_generated_ref),
+            "```",
+        ]
+    )
+    tick_content = f"Recover it with `{placeholder(missing_tick_ref)}` if the file returns."
+    numbered_line_content = "\n".join(
+        [
+            "12:     result = (",
+            f'13:         "{placeholder(missing_numbered_ref)}"',
+            "14:     )",
+            f'15:         "{placeholder(quoted_only_refs[1])}"',
+        ]
+    )
+    for role, row_content in (
+        ("assistant", fenced_content),
+        ("assistant", live_fenced_content),
+        ("assistant", tick_content),
+        ("tool", json.dumps({"content": numbered_line_content})),
+    ):
+        engine._store._conn.execute(
+            """INSERT INTO messages
+               (session_id, source, role, content, tool_call_id, tool_calls, tool_name, timestamp, token_estimate, pinned)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                engine.current_session_id,
+                "test",
+                role,
+                row_content,
+                None,
+                None,
+                None,
+                1.0,
+                1,
+                0,
+            ),
+        )
+    engine._store._conn.commit()
+
+    detail = scan_externalized_payload_integrity(
+        engine._store._conn,
+        engine._config,
+        hermes_home=engine._hermes_home,
+    )
+    doctor_result = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    doctor_detail = next(
+        check["detail"] for check in doctor_result["checks"] if check["check"] == "payload_storage"
+    )
+
+    # The load-bearing assertion: every generated ref whose payload is gone is
+    # reported missing, rather than silently dropped by the source-context filter.
+    assert detail["externalized_payload_refs_missing"] == len(missing_generated_refs)
+    reported_missing = {row["externalized_ref"] for row in detail["missing_externalized_payload_refs"]}
+    assert reported_missing == set(missing_generated_refs)
+    # The live generated ref is still counted and never reported unreferenced.
+    assert detail["externalized_payload_refs_total"] == len(missing_generated_refs) + 1
+    assert detail["externalized_payload_refs_existing"] == 1
+    assert detail["externalized_payload_files_unreferenced"] == 0
+    assert detail["unreferenced_externalized_payload_files"] == []
+    for key in (
+        "externalized_payload_refs_total",
+        "externalized_payload_refs_existing",
+        "externalized_payload_refs_missing",
+        "externalized_payload_files_unreferenced",
+        "missing_externalized_payload_refs",
+        "unreferenced_externalized_payload_files",
+    ):
+        assert doctor_detail[key] == detail[key]
+    # Discriminates in both directions: docs-shaped refs carry no provenance and
+    # no backing file, so they stay out of the scan entirely.
+    encoded = json.dumps(detail)
+    for ref in quoted_only_refs:
+        assert ref not in encoded
+
+
+def test_generated_payload_ref_name_matches_minted_filenames(tmp_path):
+    """The provenance predicate tracks the filenames externalize.py actually mints."""
+    engine = _engine(tmp_path)
+    config = engine._config
+    config.large_output_externalization_enabled = True
+    config.large_output_externalization_threshold_chars = 40
+    long_content = "x" * 5000
+
+    ingest_result = externalize_ingest_payload(
+        long_content,
+        role="assistant",
+        session_id="s1",
+        field_path="content",
+        config=config,
+        hermes_home=str(tmp_path),
+    )
+    assert ingest_result is not None
+    assert is_generated_payload_ref_name(ingest_result["path"].name)
+
+    tool_result = maybe_externalize_payload(
+        long_content + "tool",
+        kind="tool_result",
+        tool_call_id="call_abc",
+        session_id="s1",
+        role="tool",
+        config=config,
+        hermes_home=str(tmp_path),
+        force=True,
+    )
+    assert tool_result is not None
+    assert is_generated_payload_ref_name(tool_result["path"].name)
+
+    raw_result = maybe_externalize_payload(
+        long_content + "raw",
+        kind="raw_payload",
+        session_id="s1",
+        role="assistant",
+        config=config,
+        hermes_home=str(tmp_path),
+        force=True,
+    )
+    assert raw_result is not None
+    assert is_generated_payload_ref_name(raw_result["path"].name)
+
+    # Hand-written docs/example refs carry no generation provenance.
+    for ref in (
+        "docs-placeholder.json",
+        "foreign_payload_ref.json",
+        "tool-result.json",
+        "20260708T120000Z-tool-call-{index}.json",
+        "quoted-fenced-example.json",
+        "20260719_fenced_payload_0123456789ab_abcdef.json",  # no HHMMSS component
+    ):
+        assert not is_generated_payload_ref_name(ref)
 
 
 def test_externalized_payload_integrity_scan_ignores_nested_serialized_diff_literals(tmp_path):

@@ -28,6 +28,7 @@ from .externalize import (
     find_externalized_payload_for_message,
     get_large_output_storage_dir,
     is_externalized_placeholder,
+    is_generated_payload_ref_name,
     load_externalized_payload,
     maybe_externalize_payload,
 )
@@ -1708,7 +1709,8 @@ def _is_incidental_source_placeholder(text: str, start: int) -> bool:
     look identical in isolation. Callers must treat a true result as "suspect",
     not "drop"; see ``_refs_for_externalized_integrity_scan`` and
     ``scan_externalized_payload_integrity``, which settle the question with the
-    robust discriminator (does the referenced payload file exist?).
+    robust discriminators (does the referenced payload file exist, or does the ref
+    name carry externalize.py's minting shape?).
     """
     prefix = _placeholder_line_prefix(text, start)
     if (
@@ -1738,9 +1740,10 @@ def _extract_unescaped_externalized_payload_refs(
 
     A ref whose match sits in quoted-source context is not dropped here: it is
     appended to ``source_context_refs`` (when the caller supplies a list) so the
-    layer that owns ``hermes_home`` can promote it back if a payload file with
-    that name actually exists. With no list supplied the parked refs are simply
-    not returned, preserving the conservative text-only behavior.
+    layer that owns ``hermes_home`` can promote it back when a payload file with
+    that name exists or the name carries externalize.py's minting shape. With no
+    list supplied the parked refs are simply not returned, preserving the
+    conservative text-only behavior.
     """
     refs: list[str] = []
     for pattern in (_INGEST_PLACEHOLDER_RE, _EXTERNALIZED_PAYLOAD_PLACEHOLDER_RE):
@@ -1920,12 +1923,21 @@ def scan_externalized_payload_integrity(conn, config, *, hermes_home: str = "", 
             # The text heuristics cannot tell an ingest-GENERATED placeholder that
             # happens to sit inside a code fence, a backticked span, or a
             # line-numbered excerpt from an incidental quotation of one; assistant
-            # turns routinely wrap real tool output in fences. Payload-file
-            # existence is the robust discriminator and only this layer has it:
-            # a backing file means the ref is live and must stay counted, while a
-            # ref with no file is the quoted-source case the heuristics target.
+            # turns routinely wrap real tool output in fences. Two independent
+            # signals settle a parked ref, and either one is enough:
+            #   1. A backing payload file exists, so the placeholder is live.
+            #   2. The ref name carries externalize.py's minting shape, so LCM
+            #      generated it. This one does not consult the filesystem, which is
+            #      what keeps a generated ref diagnosable after its payload is
+            #      deleted or GC'd -- existence alone would drop the ref precisely
+            #      when recovery is broken and doctor most needs to report it.
+            # A ref with neither signal is the quoted-source case the heuristics
+            # target: hand-written docs examples have no file and no minted shape.
             promoted_refs = [
-                ref for ref in source_context_refs if ref in existing_files and ref not in scanned_refs
+                ref
+                for ref in source_context_refs
+                if ref not in scanned_refs
+                and (ref in existing_files or is_generated_payload_ref_name(ref))
             ]
             for ref in (*scanned_refs, *promoted_refs):
                 referenced_refs.add(ref)
