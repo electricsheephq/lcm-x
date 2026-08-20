@@ -45,3 +45,34 @@ session-notes 2026-08-03 `ama-funnel-decomp/artifacts/` — full per-row classif
 (alfworld CORRECTED json is authoritative), extraction/classification scripts, 60-sample
 readable dumps. Orchestrator verification: episode-141 rows read raw (Step-77→"Step 6.1",
 Step-5→"Phase 7.1" confirmed verbatim).
+
+## 5. CORRECTION (2026-08-21, append-only) — L2's "measurable slice of 152 M3" was a classifier-construction artifact; L2 PARKED
+
+§2-§3 framed the swebench step-index phenomenon as "a measurable slice of 152 M3 misses."
+That framing was wrong, and the error was in this finding's own classifier construction,
+not in the underlying rows:
+
+- F52's recall-grep check tested whether the *retrieved context* contained the gold
+  answer's step index. The retrieved context for these episodes is a PHASE OUTLINE
+  ("Step 6.1", "Phase 7.1") that can never lexically match a raw step index ("Step 77") —
+  so the grep failed on ALL 77 step-indexed misses and the classifier auto-routed every
+  one of them to M1 (retrieval-absence), leaving zero in M3 by construction. The "slice
+  of M3" never existed as measured.
+- Full 243-row re-classification from raw (session-notes 2026-08-21 `l2-subtask0/artifacts/
+  alignment-count.json`, architect-verified against the recovered 2026-08-03 payload):
+  **0 of 152 M3 golds cite a step index.** The flagship episode-141 example is confirmed
+  verbatim but lives in M1 territory.
+- Honest L2 ceilings against the AMA row's 1.54pt A/A′ spread: strict 1q (0.04%), broad
+  18q (0.73%), absolute cap 77q (3.13% — including 2 rows where the model cited the RIGHT
+  step and still scored 0). Under/near the noise floor → unmeasurable, unfundable.
+
+**Disposition:** L2 (step-index provenance through summarization) is **PARKED** as an
+independent lever. The step-index phenomenon folds into L1's retrieval-lever territory
+(one lever family, not two): if step-anchored retrieval (L1) delivers the right
+trajectory steps, the provenance question collapses into presentation. §3's L1 lever and
+its queue position are unaffected.
+
+Lesson (program-level, repeated from F48 §3-CORRECTION class): a classifier whose
+construction can silently route an entire phenomenon into a different bucket must be
+validated against a hand-read sample of the SPECIFIC phenomenon it claims to measure
+before its bucket counts enter a finding.
