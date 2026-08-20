@@ -19,35 +19,32 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+if "agent.context_engine" not in sys.modules:
+    _agent_mod = ModuleType("agent")
+    _agent_mod.__path__ = []
+    _ce_mod = ModuleType("agent.context_engine")
+
+    class _StubContextEngine:
+        def __init__(self, **kwargs):
+            self.compression_count = 0
+            self.last_prompt_tokens = 0
+
+        def get_status(self):
+            return {}
+
+    _ce_mod.ContextEngine = _StubContextEngine
+    sys.modules["agent"] = _agent_mod
+    sys.modules["agent.context_engine"] = _ce_mod
+
+_existing = sys.modules.get("hermes_lcm.engine")
+if _existing is not None and not hasattr(_existing, "LCMEngine"):
+    sys.modules.pop("hermes_lcm.engine", None)
+
 from hermes_lcm.config import LCMConfig
+from hermes_lcm.engine import LCMEngine
 
 
-def _make_engine(tmp_path: Path, *, session_id: str = "model-switch"):
-    # engine.py imports agent.context_engine at module level; provide a
-    # stub here (not at module level, so collection order of other test
-    # files is unaffected), then clear any partial import left by conftest.
-    if "agent.context_engine" not in sys.modules:
-        _agent_mod = ModuleType("agent")
-        _agent_mod.__path__ = []
-        _ce_mod = ModuleType("agent.context_engine")
-
-        class _StubContextEngine:
-            def __init__(self, **kwargs):
-                self.compression_count = 0
-                self.last_prompt_tokens = 0
-
-            def get_status(self):
-                return {}
-
-        _ce_mod.ContextEngine = _StubContextEngine
-        sys.modules["agent"] = _agent_mod
-        sys.modules["agent.context_engine"] = _ce_mod
-
-    _existing = sys.modules.get("hermes_lcm.engine")
-    if _existing is not None and not hasattr(_existing, "LCMEngine"):
-        sys.modules.pop("hermes_lcm.engine", None)
-    from hermes_lcm.engine import LCMEngine
-
+def _make_engine(tmp_path: Path, *, session_id: str = "model-switch") -> LCMEngine:
     config = LCMConfig(
         database_path=str(tmp_path / "lcm.db"),
         large_output_externalization_path=str(tmp_path / "externalized"),

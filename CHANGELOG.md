@@ -1,10 +1,42 @@
 # Changelog
 
-This repo also publishes GitHub Releases. This file is the repo-root release surface for operators who want the recent release arc without leaving the checkout.
+This file is the repository-root version history. LCM-X currently publishes
+version tags but does not have a destination GitHub Release object for RC2.
 
 ## Unreleased
 
-No additional changes yet.
+(nothing yet)
+
+## v0.22.0 - 2026-08-19
+
+- Rename the project-facing documentation to **LCM-X — Lossless Context Memory
+  eXtension** while preserving the compatibility identifiers `hermes-lcm`
+  (plugin/skill/install path) and `lcm` (runtime engine).
+- Point current install, CI, contribution, and tag links at
+  `electricsheephq/lcm-x`; retain upstream links only as labeled provenance.
+- Document the RC2 memory-evaluation evidence separately from the unmerged LCM
+  Teams, RC2 reconciliation, and Codex/whitepaper candidates.
+
+## v0.21.0-rc2 - 2026-08-05
+
+### Changed
+
+- #492 corrects the optional `tiktoken` trajectory-state chunking path to
+  preserve UTF-8 character boundaries while keeping each decoded chunk within
+  its token budget. If the budget cannot contain one complete Unicode
+  character, the path fails explicitly instead of emitting replacement
+  characters.
+
+### Evaluation baseline included in RC2
+
+- RC2 contains the deterministic LongMemEval retrieval harness, the committed
+  500-question FastEmbed result, and the vendored judged-QA adapter described
+  in [`benchmarks/METHODOLOGY.md`](benchmarks/METHODOLOGY.md). These evaluation
+  surfaces landed before RC2; RC2 includes them rather than introducing all of
+  them in the RC2-only delta.
+- The full judged-QA result and recommended Voyage retrieval run remain pending.
+  Retrieval metrics are configuration-specific evidence, not a release,
+  runtime-safety, or customer-readiness claim.
 
 ## v0.21.0-rc1 - 2026-08-03
 
@@ -105,6 +137,6 @@ Release focus: engine isolation, WAL durability, database-path clarity, and star
 
 ## Links
 
-- GitHub Releases: https://github.com/stephenschoettler/hermes-lcm/releases
+- Version tags: https://github.com/electricsheephq/lcm-x/tags
 - Release workflow: [`.github/workflows/release.yml`](.github/workflows/release.yml)
 - Validation expectations: [`CONTRIBUTING.md`](CONTRIBUTING.md)

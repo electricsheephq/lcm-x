@@ -4,7 +4,7 @@ Use this page when you need the exact LCM tool contract or archive-migration not
 
 ## Agent Tools
 
-Hermes-LCM's bundled skill and active recall policy route current-session,
+LCM-X's bundled `hermes-lcm` skill and recall-policy reference route current-session,
 cross-conversation, and time-bounded questions through these tools. Use
 `session_search` for Hermes-tracked history that is not present in `lcm.db`.
 
@@ -19,9 +19,9 @@ Recommended escalation:
   `lcm_evidence_pack`/`lcm_compute`.
 
 `lcm_expand` is known-handle drill-down, not broad first-step discovery. The
-canonical runtime policy is
-`skills/hermes-lcm/references/recall-policy.md` and is injected only while LCM
-is the active context engine.
+canonical policy is `skills/hermes-lcm/references/recall-policy.md`. It is
+distributed as product-owned skill guidance, not injected into user
+`api_content`.
 
 | Tool | Use |
 |------|-----|
@@ -186,6 +186,14 @@ erroring the tool. `lcm_grep`'s hybrid RRF is unaffected: it keeps implicit
 actually applied to the arms that ran are echoed back under
 `provenance.arm_weights`.
 
+`LCM_RERANK_ENABLED=true` optionally lets Voyage reorder the bounded top fused
+window after the scope/recency prior. `LCM_RERANK_MODEL` selects the Voyage
+model (`rerank-2.5-lite` by default; `rerank-2.5` for the quality-oriented
+model). Reranking is deliberately order-only: Voyage's `0..1` relevance values
+are not spliced into the much smaller RRF/composite score scale. Provider,
+network, or deadline failures keep the incoming order and are reported under
+`provenance.rerank`. This stage applies to `lcm_recall`, not `lcm_grep`.
+
 If the summary or chunk arm ran under `coverage='bounded'` (recency-truncated
 candidate scan) or `coverage='full_approx'` (two-stage binary-prescreen KNN,
 see [vector storage scale options](operator-guide.md#vector-storage-scale-options-v3)),
@@ -229,7 +237,10 @@ even when the sources still belong to the previous session.
 `lcm_recent` accepts `today`, `yesterday`, `Nd`, `week`, `month`,
 `date:YYYY-MM-DD`, and `last Nh`. All periods are normalized to UTC `[start,
 end)` windows. Results are newest-first, limited to 200 sections, and bounded to
-the same 20,000-character response ceiling used by the retrieval tools.
+the same 20,000-character response ceiling used by the retrieval tools. The
+current schema supports only the active conversation: omit `scope` to use the
+default, or pass `scope: "conversation"` explicitly. Cross-session/global
+rollups remain future work.
 
 ```json
 {"period": "today"}
@@ -240,7 +251,7 @@ the same 20,000-character response ceiling used by the retrieval tools.
 ```
 
 ```json
-{"period": "date:2026-07-15", "scope": "global"}
+{"period": "date:2026-07-15", "scope": "conversation"}
 ```
 
 When temporal rollups are enabled and `ready` rollups cover the **entire**
@@ -300,7 +311,8 @@ directly with `lcm_expand`.
 
 ### lossless-claw/OpenClaw import utility
 
-`hermes-lcm` includes an opt-in operator script for backfilling raw message rows from a lossless-claw/OpenClaw LCM SQLite database into the local hermes-lcm SQLite store:
+LCM-X includes an opt-in operator script for backfilling raw message rows from
+a lossless-claw/OpenClaw LCM SQLite database into the local LCM-X SQLite store:
 
 ```bash
 python scripts/import_lossless_claw.py \

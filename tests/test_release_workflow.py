@@ -3,7 +3,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
-RELEASE_VERSION = "0.21.0-rc1"
+RELEASE_VERSION = "0.22.0"
 RELEASE_NOTES = REPO_ROOT / ".github" / "release-notes" / f"v{RELEASE_VERSION}.md"
 
 
@@ -39,7 +39,17 @@ def test_release_candidate_identity_surfaces_are_synchronized():
     assert f"hermes-lcm v{RELEASE_VERSION} (15 tools)" in readme
     assert f"hermes-lcm v{RELEASE_VERSION} (15 tools)" in operator_guide
     assert f"## v{RELEASE_VERSION} - " in changelog
-    assert f"v{RELEASE_VERSION}, main, or commit SHA" in bug_report
+    assert f"Exact commit SHA for v{RELEASE_VERSION} or main" in bug_report
+
+
+def test_issue_forms_stay_within_github_element_limit():
+    issue_forms = (REPO_ROOT / ".github" / "ISSUE_TEMPLATE").glob("*.yml")
+    form_bodies = [path.read_text(encoding="utf-8") for path in issue_forms]
+
+    assert form_bodies
+    for body in form_bodies:
+        if "\nbody:\n" in body:
+            assert body.count("\n  - type: ") <= 10
 
 
 def test_upgrade_guide_requires_sqlite_safe_backup_semantics():
@@ -72,9 +82,9 @@ def test_release_candidate_notes_cover_only_the_merged_release_scope():
     notes = RELEASE_NOTES.read_text(encoding="utf-8")
 
     assert notes.startswith(f"# hermes-lcm v{RELEASE_VERSION}\n")
-    assert all(f"#{number}" in notes for number in (361, 436, 440, 446, 447))
+    assert "#492" in notes
     assert "## Highlights" in notes
     assert "## Changes" in notes
     assert "## Contributors" in notes
-    assert "documented harness and corpus" in notes
+    assert "UTF-8 character boundaries" in notes
     assert len(notes.splitlines()) <= 60
