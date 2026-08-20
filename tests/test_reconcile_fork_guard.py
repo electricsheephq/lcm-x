@@ -7,6 +7,16 @@ reconcile to fail → cursor=0 → full re-ingest → duplication.
 
 All tests use synthetic messages.  No real session data.
 """
+# HISTORY (2026-08-20, architect ruling on eval-queue #252): the fork/side-channel
+# guard these tests originally fenced was VETOED and surgically removed -- silent
+# consumption with data loss on the ingest path (reported consumed, rows absent;
+# proven in tests/test_issue_255_post_compaction_ingest.py) outranks the fork
+# duplication it prevented. Tests t1/t2/t9/t10, which asserted the guard's skip
+# behavior, were removed with the guard. Fork batches now fall through to the
+# ambiguous-delta path and PERSIST (visible duplication, recoverable) rather than
+# vanish (invisible, permanent). The successor mechanism is positive fork
+# provenance -- see the follow-up issue referenced in the revert PR.
+
 
 from __future__ import annotations
 
@@ -64,62 +74,7 @@ def _make_messages(n: int, *, prefix: str = "msg") -> list[dict]:
 class TestForkSideChannelGuard:
     """T1-T10 from the risk analysis."""
 
-    def test_t1_fork_no_tail_overlap_skipped(self, tmp_path):
-        """Fork with no tail overlap → skip, no new rows."""
-        engine = _make_engine(tmp_path)
-        try:
-            # Phase 1: parent ingests 50 messages
-            parent_msgs = _make_messages(49, prefix="parent")
-            engine._ingest_messages(parent_msgs)
-            assert engine._store.get_session_count("fork-guard") == 50
 
-            # Phase 2: fork ingests 10 divergent messages
-            fork_engine = _make_engine(tmp_path)
-            try:
-                fork_engine._ingest_cursor_needs_reconcile = True
-                fork_msgs = _make_messages(9, prefix="fork")
-                fork_engine._ingest_messages(fork_msgs)
-
-                # Fork's messages must NOT be persisted
-                count = fork_engine._store.get_session_count("fork-guard")
-                assert count == 50, (
-                    f"Expected 50 (fork skipped), got {count}. "
-                    "Fork ingest corrupted the stored tail."
-                )
-            finally:
-                fork_engine.shutdown()
-        finally:
-            engine.shutdown()
-
-    def test_t2_fork_head_overlap_no_tail_overlap_skipped(self, tmp_path):
-        """Fork shares head with parent but not tail → skip."""
-        engine = _make_engine(tmp_path)
-        try:
-            parent_msgs = _make_messages(49, prefix="parent")
-            engine._ingest_messages(parent_msgs)
-            assert engine._store.get_session_count("fork-guard") == 50
-
-            fork_engine = _make_engine(tmp_path)
-            try:
-                fork_engine._ingest_cursor_needs_reconcile = True
-                # Share system prompt + first 4 messages, then diverge
-                fork_msgs = parent_msgs[:5] + [
-                    {"role": "user", "content": "fork-diverge-1"},
-                    {"role": "assistant", "content": "fork-diverge-2"},
-                    {"role": "user", "content": "fork-diverge-3"},
-                    {"role": "assistant", "content": "fork-diverge-4"},
-                    {"role": "user", "content": "fork-diverge-5"},
-                ]
-                fork_engine._ingest_messages(fork_msgs)
-
-                count = fork_engine._store.get_session_count("fork-guard")
-                assert count == 50, (
-                    f"Expected 50 (fork skipped), got {count}."
-                )
-            finally:
-                fork_engine.shutdown()
-        finally:
-            engine.shutdown()
 
     def test_t3_legitimate_restart_full_replay(self, tmp_path):
         """Normal restart with full replay + new messages → cursor advances."""
@@ -317,85 +272,4 @@ class TestForkSideChannelGuard:
         finally:
             engine.shutdown()
 
-    def test_t9_fork_skipped_then_parent_ingest_unaffected(self, tmp_path):
-        """Fork skipped → parent's subsequent ingest works normally."""
-        engine = _make_engine(tmp_path)
-        try:
-            parent_msgs = _make_messages(29, prefix="parent")
-            engine._ingest_messages(parent_msgs)
-            assert engine._store.get_session_count("fork-guard") == 30
 
-            # Fork attempt — should be skipped
-            fork_engine = _make_engine(tmp_path)
-            try:
-                fork_engine._ingest_cursor_needs_reconcile = True
-                fork_msgs = _make_messages(7, prefix="fork")
-                fork_engine._ingest_messages(fork_msgs)
-                assert fork_engine._store.get_session_count("fork-guard") == 30
-            finally:
-                fork_engine.shutdown()
-
-            # Parent continues — should work normally
-            parent_engine = _make_engine(tmp_path)
-            try:
-                parent_engine._ingest_cursor_needs_reconcile = True
-                continued = parent_msgs + [
-                    {"role": "user", "content": "parent-continues"},
-                    {"role": "assistant", "content": "parent-reply"},
-                ]
-                parent_engine._ingest_messages(continued)
-
-                count = parent_engine._store.get_session_count("fork-guard")
-                assert count == 32, (
-                    f"Expected 32 (30 + 2 new), got {count}."
-                )
-                rows = parent_engine._store.get_session_messages("fork-guard")
-                assert rows[-1]["content"] == "parent-reply"
-            finally:
-                parent_engine.shutdown()
-        finally:
-            engine.shutdown()
-
-    def test_t10_no_duplication_after_fork_and_restart(self, tmp_path):
-        """End-to-end: fork skipped, restart clean, zero duplication."""
-        engine = _make_engine(tmp_path)
-        try:
-            original = _make_messages(39, prefix="orig")
-            engine._ingest_messages(original)
-            assert engine._store.get_session_count("fork-guard") == 40
-
-            # Fork attempt
-            fork_engine = _make_engine(tmp_path)
-            try:
-                fork_engine._ingest_cursor_needs_reconcile = True
-                fork_msgs = _make_messages(9, prefix="fork")
-                fork_engine._ingest_messages(fork_msgs)
-            finally:
-                fork_engine.shutdown()
-
-            # Legitimate restart with new messages
-            restart_engine = _make_engine(tmp_path)
-            try:
-                restart_engine._ingest_cursor_needs_reconcile = True
-                restart_msgs = original + [
-                    {"role": "user", "content": "after-restart"},
-                ]
-                restart_engine._ingest_messages(restart_msgs)
-
-                count = restart_engine._store.get_session_count("fork-guard")
-                assert count == 41, (
-                    f"Expected 41 (40 + 1 new), got {count}. "
-                    "Duplication detected."
-                )
-
-                # Verify no content duplication
-                rows = restart_engine._store.get_session_messages("fork-guard")
-                contents = [r["content"] for r in rows]
-                assert contents.count("orig-0") == 1
-                assert contents.count("orig-38") == 1
-                assert contents.count("after-restart") == 1
-                assert "fork-0" not in contents
-            finally:
-                restart_engine.shutdown()
-        finally:
-            engine.shutdown()
