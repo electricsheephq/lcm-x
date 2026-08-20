@@ -18,6 +18,7 @@ def _load_module(name: str, filename: str):
 
 
 drive_hermes = _load_module("compaction_probe_drive_hermes", "drive_hermes.py")
+drive_hermes_acp = _load_module("compaction_probe_drive_hermes_acp", "drive_hermes_acp.py")
 report_pilot = _load_module("compaction_probe_report_pilot", "report_pilot.py")
 score_probes = _load_module("compaction_probe_score_probes", "score_probes.py")
 
@@ -27,6 +28,68 @@ def _jsonl(path: Path, rows: list[object]) -> None:
         "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
         encoding="utf-8",
     )
+
+
+def test_acp_driver_protocol_framing_and_agent_chunk_extraction():
+    wire = drive_hermes_acp.jsonrpc_request(
+        7,
+        "session/prompt",
+        {
+            "sessionId": "session-1",
+            "prompt": [{"type": "text", "text": "hello"}],
+        },
+    )
+    assert wire.endswith(b"\n")
+    assert json.loads(wire) == {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "session/prompt",
+        "params": {
+            "sessionId": "session-1",
+            "prompt": [{"type": "text", "text": "hello"}],
+        },
+    }
+    update = {
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "session-1",
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "answer"},
+            },
+        },
+    }
+    assert drive_hermes_acp.agent_message_chunk(update) == "answer"
+    update["params"]["update"]["sessionUpdate"] = "tool_call"
+    assert drive_hermes_acp.agent_message_chunk(update) is None
+
+
+def test_acp_driver_plan_construction_preserves_material_then_probes():
+    material = [{"turn": 1, "text": "first"}, {"prompt": "second"}]
+    probes = [{"id": "p1", "question": "recall"}]
+    phases = drive_hermes_acp.build_plan_phases(
+        material, probes, restart_before_probes=False
+    )
+    assert phases == [[
+        ("material", material[0]),
+        ("material", material[1]),
+        ("probe", probes[0]),
+    ]]
+    assert drive_hermes_acp.row_text(material[0]) == "first"
+    assert drive_hermes_acp.row_text(probes[0]) == "recall"
+
+
+def test_acp_driver_restart_mode_creates_probe_session_boundary():
+    material = [{"text": "material"}]
+    probes = [{"text": "probe"}]
+    phases = drive_hermes_acp.build_plan_phases(
+        material, probes, restart_before_probes=True
+    )
+    assert phases == [[("material", material[0])], [("probe", probes[0])]]
+    assert drive_hermes_acp.build_plan_phases(
+        [], probes, restart_before_probes=True
+    ) == [[("probe", probes[0])]]
 
 
 def test_score_probes_covers_three_way_unparseable_and_trap_negative(tmp_path):
