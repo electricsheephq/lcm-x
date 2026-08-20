@@ -1710,7 +1710,16 @@ def _context_content_token_count(blocks: list[dict[str, Any]]) -> int:
 def _serialized_context_token_count(blocks: list[dict[str, Any]]) -> int:
     from .tokens import count_tokens
 
-    return count_tokens(json.dumps(blocks, ensure_ascii=False))
+    # Budget against the encoding the caller actually receives. Every
+    # ``lcm_expand_query`` return goes out as ``json.dumps(payload)`` with the
+    # default ``ensure_ascii=True``, which escapes non-ASCII to ``\uXXXX`` (a
+    # surrogate pair, 12 characters, per astral emoji). Counting an
+    # ``ensure_ascii=False`` serialization here under-counts CJK/emoji evidence
+    # by a multiple, so the emitted payload can overrun ``context_max_tokens``
+    # while ``context_tokens`` reports it inside budget. ASCII evidence is
+    # byte-identical under both encodings, so this only tightens the
+    # non-ASCII case.
+    return count_tokens(json.dumps(blocks))
 
 
 class _ExpansionSynthesisError(RuntimeError):

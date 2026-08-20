@@ -27046,6 +27046,55 @@ class TestEngineTools:
         ]
         assert result["raw_matches"][0]["store_id"] == gamma_store_id
 
+    def test_handle_expand_query_evidence_budget_counts_emitted_encoding(self, engine):
+        # `lcm_expand_query` emits every payload as json.dumps(payload) with the
+        # default ensure_ascii=True, so non-ASCII evidence goes out as \uXXXX
+        # escapes (a surrogate pair per astral emoji). Budgeting an
+        # ensure_ascii=False serialization under-counts CJK/emoji evidence by a
+        # multiple: the emitted payload overruns context_max_tokens while
+        # context_tokens claims it is inside budget.
+        engine._store.append(
+            "cjk-session",
+            {
+                "role": "user",
+                "content": "TANUKI " + "日本語の長い会話記録です。🎉🚀 " * 40,
+            },
+        )
+
+        def _evidence(context_max_tokens: int) -> dict:
+            return json.loads(
+                engine.handle_tool_call(
+                    "lcm_expand_query",
+                    {
+                        "prompt": "What mentions TANUKI?",
+                        "query": "TANUKI",
+                        "session_ids": ["cjk-session"],
+                        "output": "evidence",
+                        "context_max_tokens": context_max_tokens,
+                    },
+                )
+            )
+
+        probe = _evidence(100_000)
+        assert probe["evidence"], "probe must admit the non-ASCII evidence block"
+        emitted_tokens = count_tokens(json.dumps(probe["evidence"]))
+        unescaped_tokens = count_tokens(
+            json.dumps(probe["evidence"], ensure_ascii=False)
+        )
+        assert emitted_tokens > unescaped_tokens, "fixture must carry non-ASCII"
+
+        # context_tokens describes what the caller actually receives.
+        assert probe["context_tokens"] == emitted_tokens
+
+        # A budget the unescaped serialization fits under but the emitted one
+        # does not must be enforced against the emitted encoding.
+        budget = (emitted_tokens + unescaped_tokens) // 2
+        assert unescaped_tokens <= budget < emitted_tokens
+        result = _evidence(budget)
+        assert count_tokens(json.dumps(result["evidence"])) <= budget
+        assert result["context_tokens"] <= budget
+        assert result["context_truncated"] is True
+
     def test_handle_expand_query_rejects_more_than_twenty_session_ids(self, engine):
         result = json.loads(
             engine.handle_tool_call(
