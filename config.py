@@ -175,6 +175,12 @@ def _load_hermes_config_yaml() -> dict[str, Any]:
             continue
         indent = len(line) - len(line.lstrip(" \t"))
         key, raw_value = line.strip().split(":", 1)
+        # Unquote the key as well as the value below. PyYAML resolves `"": 0.5`
+        # to an empty-string key, which callers reject; without this the
+        # fallback keeps the literal two-character key `""` and the entry
+        # survives. That divergence only appears where PyYAML is absent, so it
+        # passes locally and fails in CI.
+        key = key.strip().strip("'\"")
         while stack and indent <= stack[-1][0]:
             stack.pop()
         parent = stack[-1][1] if stack else root
@@ -199,7 +205,7 @@ def _load_hermes_config_yaml() -> dict[str, Any]:
     return root
 
 
-_SUPPORTED_LCM_CONFIG_YAML_KEYS = {"context_threshold"}
+_SUPPORTED_LCM_CONFIG_YAML_KEYS = {"context_threshold", "model_thresholds"}
 
 
 def _ignored_lcm_config_yaml_keys(cfg: dict[str, Any] | None = None) -> list[str]:
@@ -228,6 +234,65 @@ def _hermes_compression_threshold(default: float) -> float:
     """
     value, _source = _hermes_compression_threshold_with_source(default)
     return value
+
+
+def _load_model_thresholds_from_yaml() -> dict[str, float]:
+    """Read ``lcm.model_thresholds`` from config.yaml.
+
+    Returns a dict mapping model-name substrings to threshold fractions.
+    Empty dict if not set or invalid.
+    """
+    cfg = _load_hermes_config_yaml()
+    try:
+        lcm_section = cfg.get("lcm") or {}
+        if not isinstance(lcm_section, dict):
+            return {}
+        raw = lcm_section.get("model_thresholds")
+        if not isinstance(raw, dict):
+            return {}
+        result: dict[str, float] = {}
+        for key, val in raw.items():
+            normalized_key = str(key).strip()
+            if not normalized_key or isinstance(val, bool):
+                continue
+            if isinstance(val, (int, float)):
+                threshold = float(val)
+                if _is_valid_context_threshold(threshold):
+                    result[normalized_key] = threshold
+        return result
+    except Exception:
+        return {}
+
+
+def _is_valid_context_threshold(value: float) -> bool:
+    return (
+        value == value
+        and value not in (float("inf"), float("-inf"))
+        and 0.0 < value <= 1.0
+    )
+
+
+def _parse_model_thresholds_env(raw: str) -> dict[str, float]:
+    """Parse ``LCM_MODEL_THRESHOLDS`` env var.
+
+    Format: ``"glm-5.2:0.70,glm-5.2-1M:0.25"``
+    """
+    result: dict[str, float] = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if ":" not in pair:
+            continue
+        key, _, val = pair.rpartition(":")
+        key = key.strip()
+        if not key:
+            continue
+        try:
+            threshold = float(val.strip())
+        except ValueError:
+            continue
+        if _is_valid_context_threshold(threshold):
+            result[key] = threshold
+    return result
 
 
 def _hermes_compression_threshold_with_source(default: float) -> tuple[float, str]:
@@ -311,6 +376,12 @@ class _EnvFieldSpec:
 ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("fresh_tail_count", "LCM_FRESH_TAIL_COUNT", int),
     _EnvFieldSpec("fresh_tail_max_tokens", "LCM_FRESH_TAIL_MAX_TOKENS", int),
+    _EnvFieldSpec("fresh_tail_pressure_yield_enabled", "LCM_FRESH_TAIL_PRESSURE_YIELD_ENABLED", bool),
+    _EnvFieldSpec(
+        "fresh_tail_pressure_yield_min_observations",
+        "LCM_FRESH_TAIL_PRESSURE_YIELD_MIN_OBSERVATIONS",
+        int,
+    ),
     _EnvFieldSpec("leaf_chunk_tokens", "LCM_LEAF_CHUNK_TOKENS", int),
     _EnvFieldSpec("context_threshold", "LCM_CONTEXT_THRESHOLD", float),
     _EnvFieldSpec("incremental_max_depth", "LCM_INCREMENTAL_MAX_DEPTH", int),
@@ -371,6 +442,9 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("database_path", "LCM_DATABASE_PATH", str),
     _EnvFieldSpec("embeddings_enabled", "LCM_EMBEDDINGS_ENABLED", bool),
     _EnvFieldSpec("rerank_enabled", "LCM_RERANK_ENABLED", bool),
+    _EnvFieldSpec("rerank_model", "LCM_RERANK_MODEL", str),
+    _EnvFieldSpec("rerank_window_limit", "LCM_RERANK_WINDOW_LIMIT", int),
+    _EnvFieldSpec("rerank_margin", "LCM_RERANK_MARGIN", float),
     _EnvFieldSpec("recall_scan_rows", "LCM_RECALL_SCAN_ROWS", int),
     _EnvFieldSpec("recall_scan_max_rows", "LCM_RECALL_SCAN_MAX_ROWS", int),
     _EnvFieldSpec("recall_scan_budget_s", "LCM_RECALL_SCAN_BUDGET_S", float),
@@ -392,6 +466,12 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("embedding_model", "LCM_EMBEDDING_MODEL", str),
     _EnvFieldSpec("embedding_content_policy", "LCM_EMBED_CONTENT_POLICY", str),
     _EnvFieldSpec("ollama_base_url", "LCM_OLLAMA_BASE_URL", str),
+    _EnvFieldSpec(
+        "embedding_base_url", "LCM_EMBEDDING_BASE_URL", str
+    ),
+    _EnvFieldSpec(
+        "embedding_api_key_env", "LCM_EMBEDDING_API_KEY_ENV", str
+    ),
     _EnvFieldSpec("embedding_query_timeout_s", "LCM_EMBEDDING_QUERY_TIMEOUT_S", float),
     _EnvFieldSpec("recall_query_timeout_s", "LCM_RECALL_QUERY_TIMEOUT_S", float),
     _EnvFieldSpec("embedding_backfill_timeout_s", "LCM_EMBEDDING_BACKFILL_TIMEOUT_S", float),
@@ -449,12 +529,31 @@ class LCMConfig:
     fresh_tail_count: int = 32
     # Optional token cap for the protected suffix (0 = disabled)
     fresh_tail_max_tokens: int = 0
+    # Let the count-protected tail yield to a derived token bound when the
+    # host reports sustained over-threshold pressure and the tail is the only
+    # reason compaction cannot make progress. Fires only in a state that
+    # otherwise ends at the provider hard limit (see #441).
+    fresh_tail_pressure_yield_enabled: bool = True
+    # How many consecutive blocked entry-point invocations (preflight or
+    # compress observing over-threshold pressure with the tail as the only
+    # blocker) it takes before the yield arms. This is what "sustained" means:
+    # below this count fresh_tail_count stays a hard suffix. 1 yields on the
+    # first blocked observation; the evidence streak resets whenever pressure
+    # drops below threshold, a compaction pass succeeds, or the session resets.
+    fresh_tail_pressure_yield_min_observations: int = 3
 
     # -- Compaction thresholds ---
     # Max source tokens in a leaf chunk before summarization triggers
     leaf_chunk_tokens: int = 20_000
     # Fraction of context window that triggers compaction (0.0–1.0)
     context_threshold: float = 0.35
+    # Per-model threshold overrides. Keys are matched as substrings against
+    # the model name (longest match wins). When a key matches, its value
+    # replaces context_threshold for that model. Loaded from
+    # ``lcm.model_thresholds`` in config.yaml or ``LCM_MODEL_THRESHOLDS``
+    # env var ("key1:0.25,key2:0.70"). Empty dict = use context_threshold
+    # for all models.
+    model_thresholds: dict[str, float] = field(default_factory=dict)
     # Mirror Hermes Agent's Codex gpt-5.5 route-specific threshold auto-raise
     # when LCM is inheriting the host compression threshold. Explicit LCM
     # threshold overrides remain authoritative.
@@ -605,10 +704,23 @@ class LCMConfig:
 
     # -- Embeddings (default-off until a provider/model are configured) ---
     embeddings_enabled: bool = False
-    # lcm_recall cross-encoder rerank stage (voyage rerank-2.5-lite over the top
-    # fused candidates). Default-off: recall ships value on RRF order alone, and
-    # rerank is one extra billable API call the operator opts into.
+    # lcm_recall cross-encoder rerank stage over the top fused candidates.
+    # Default-off: recall ships value on RRF order alone, and rerank is one extra
+    # billable API call the operator opts into. The lite default preserves the
+    # established latency/cost posture; operators may explicitly select Voyage's
+    # quality-oriented rerank-2.5 model.
     rerank_enabled: bool = False
+    # Voyage rerank model for the lcm_recall rerank stage. The default equals
+    # the provider-side literal, so unset == historical behavior byte-for-byte;
+    # a non-default value is a NEW declared config owing its own A/A' run
+    # (architect ruling, eval-queue #252).
+    rerank_model: str = "rerank-2.5-lite"
+    # Optional product clamp for the lcm_recall rerank window. Zero preserves
+    # the historical ``min(50, max(1, limit * 4))`` window byte-for-byte.
+    rerank_window_limit: int = 0
+    # Optional rank-1 margin gate for the lcm_recall rerank stage. Zero
+    # preserves the historical rerank ordering byte-for-byte.
+    rerank_margin: float = 0.0
     embedding_bounded_scan_rows: int = 2_000
     # Vector storage dtype for NEWLY-registered embedding profiles: float32
     # (default; a stock install keeps summary vectors byte-identical) or int8
@@ -676,12 +788,11 @@ class LCMConfig:
     # otherwise have to lcm_recall by hand. Default-off => byte-identical
     # assembly; when disabled the whole path is skipped before any work.
     proactive_recall_enabled: bool = False
-    # Relevance floor on the lcm_recall composite score. Two regimes:
-    #  - rerank OFF (default): the score is RRF-scale (~0.014-0.05); a single
-    #    top-ranked arm hit is ~0.016, so this floor mainly drops ancient or
-    #    low-ranked hits. The default keeps fresh top-of-arm hits.
-    #  - rerank ON: a cross-encoder relevance in [0,1] dominates the score;
-    #    raise this floor (e.g. ~0.3) for a true semantic gate.
+    # Relevance floor on lcm_recall's RRF/composite score (~0.014-0.05); a single
+    # top-ranked arm hit is ~0.016, so this floor mainly drops ancient or
+    # low-ranked hits. Reranking only reorders the bounded candidate window and
+    # deliberately does not replace this score with Voyage's incompatible 0..1
+    # relevance scale, so this threshold keeps the same meaning in both modes.
     proactive_recall_min_score: float = 0.01
     # Hard token budget for the single injected "relevant memories" block.
     proactive_recall_budget_tokens: int = 500
@@ -710,6 +821,8 @@ class LCMConfig:
     # default in the chunker's normalize_content_policy.
     embedding_content_policy: str = "conversational"
     ollama_base_url: str = "http://localhost:11434"
+    embedding_base_url: str = ""
+    embedding_api_key_env: str = "LCM_EMBEDDING_API_KEY"
     embedding_query_timeout_s: float = 3.0
     # Dedicated deadline for lcm_recall. It fans out three sequential arms (FTS +
     # summary KNN + chunk KNN) plus fusion, hydration, and an optional rerank, so
@@ -812,6 +925,13 @@ class LCMConfig:
             default_source=context_source,
         )
         _record("context_threshold", source, warning)
+        # Per-model threshold overrides: load from lcm.model_thresholds in
+        # config.yaml, then LCM_MODEL_THRESHOLDS env var (comma-separated
+        # key:value pairs). Env overrides config.yaml.
+        c.model_thresholds = _load_model_thresholds_from_yaml()
+        _raw_env_thresholds = os.environ.get("LCM_MODEL_THRESHOLDS")
+        if _raw_env_thresholds is not None:
+            c.model_thresholds = _parse_model_thresholds_env(_raw_env_thresholds)
         c.codex_gpt55_autoraise_enabled, source = _hermes_codex_gpt55_autoraise_with_source(
             c.codex_gpt55_autoraise_enabled
         )

@@ -1,6 +1,7 @@
 # Configuration and activation
 
-Hermes-LCM is a general Hermes plugin and a context engine. Both identities must be active:
+LCM-X is a general Hermes plugin and a context engine. Its compatibility
+identifiers must both be active:
 
 ```yaml
 plugins:

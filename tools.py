@@ -192,6 +192,16 @@ def _truncate_text_to_token_budget(text: str, max_tokens: int) -> tuple[str, boo
     return best, True
 
 
+def _coerce_query_arg(value: Any) -> str:
+    """Coerce a tool ``query`` argument to a stripped string.
+
+    A model can emit ``{"query": null}`` or a bare number. Only ``None`` means
+    "no query" -- a falsy number such as ``0`` is a legitimate search term, so
+    this cannot collapse to ``value or ""``.
+    """
+    return "" if value is None else str(value).strip()
+
+
 def _parse_int_value(value: Any, default: int) -> int:
     try:
         return int(value)
@@ -2159,6 +2169,17 @@ def _build_expand_query_evidence(
     return evidence
 
 
+class _ExpansionSynthesisError(RuntimeError):
+    """Raised when the expansion aux-LLM call returns an unusable response.
+
+    ``call_llm`` can hand back an error-shaped or partial object whose
+    ``choices`` is missing, ``None``, or otherwise non-subscriptable. Surfacing
+    that as a typed error lets ``lcm_expand_query`` degrade the same way it
+    already degrades on a synthesis timeout, instead of leaking an opaque
+    ``TypeError``/``AttributeError`` out of the tool call.
+    """
+
+
 def _synthesize_expansion_answer(
     *,
     prompt: str,
@@ -2190,7 +2211,26 @@ def _synthesize_expansion_answer(
     }
     apply_lcm_model_route(call_kwargs, model)
     response = call_llm(**call_kwargs)
-    content = response.choices[0].message.content
+    # ``call_llm`` can return an error-shaped or partial object (e.g. when the
+    # auxiliary lane collides with the foreground model's own in-flight calls),
+    # in which case ``choices`` may be absent, ``None``, empty, or a
+    # non-subscriptable sentinel. Guard the access so an unusable response
+    # degrades cleanly at the call site instead of raising an opaque
+    # ``TypeError``/``AttributeError`` that kills the whole expand call.
+    choices = getattr(response, "choices", None)
+    first = None
+    if choices is not None:
+        try:
+            first = choices[0]
+        except (TypeError, IndexError, KeyError):
+            first = None
+    if first is None:
+        raise _ExpansionSynthesisError(
+            "expansion synthesis returned no usable choices "
+            f"(response type={type(response).__name__})"
+        )
+    message = getattr(first, "message", None)
+    content = getattr(message, "content", None)
     if not isinstance(content, str):
         content = str(content) if content else ""
     from .escalation import _strip_reasoning_blocks
@@ -2848,7 +2888,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     if engine is None:
         return json.dumps({"error": "LCM engine not initialized"})
 
-    query = args.get("query", "").strip()
+    query = _coerce_query_arg(args.get("query"))
     if not query:
         return json.dumps({"error": "No query provided"})
 
@@ -3537,7 +3577,7 @@ def _lcm_grep_semantic(
     mode = str(args.get("mode") or "semantic").lower()
     if time.monotonic() >= deadline:
         return _lcm_grep_deadline_error(mode, "semantic_entry")
-    query = str(args.get("query", "")).strip()
+    query = _coerce_query_arg(args.get("query"))
     if not query:
         return {"error": "No query provided"}
 
@@ -5001,7 +5041,7 @@ def _lcm_recall_rerank(
     window: int,
     deadline: float,
     config: Any,
-) -> tuple[list[dict[str, Any]], str]:
+) -> tuple[list[dict[str, Any]], str, list[list[Any]]]:
     """Optionally REORDER the top ``window`` fused candidates in ONE API call.
 
     Default OFF. This is a pure rank-reorder WITHIN the window: the reranker's
@@ -5016,16 +5056,16 @@ def _lcm_recall_rerank(
     order with a ``skipped: <reason>`` status.
     """
     if not bool(getattr(config, "rerank_enabled", False)):
-        return ordered, "disabled"
+        return ordered, "disabled", []
     if (
         provider is None
         or getattr(provider, "provider_id", "") != "voyage"
         or not hasattr(provider, "rerank")
     ):
-        return ordered, "skipped: rerank requires the voyage provider"
+        return ordered, "skipped: rerank requires the voyage provider", []
     head = ordered[:window]
     if not head:
-        return ordered, "skipped: no candidates to rerank"
+        return ordered, "skipped: no candidates to rerank", []
     documents = [str(entry["hit"].get("snippet") or "") for entry in head]
     try:
         ranked = _run_within_deadline(
@@ -5034,25 +5074,93 @@ def _lcm_recall_rerank(
                 documents,
                 top_k=len(documents),
                 timeout=max(0.001, deadline - time.monotonic()),
+                model=(
+                    str(getattr(config, "rerank_model", "") or "").strip()
+                    or "rerank-2.5-lite"
+                ),
             ),
             remaining_s=deadline - time.monotonic(),
             name="lcm-recall-rerank",
         )
     except Exception as exc:  # noqa: BLE001 - any failure => skip rerank
-        return ordered, f"skipped: {exc}"
+        return ordered, f"skipped: {exc}", []
     if not ranked:
-        return ordered, "skipped: empty rerank result"
+        return ordered, "skipped: empty rerank result", []
+
+    rerank_margin = float(getattr(config, "rerank_margin", 0.0) or 0.0)
+    if rerank_margin <= 0:
+        # This is the historical rerank path. Keep it structurally unchanged for
+        # rerank_margin == 0.0 so the default output ordering remains byte-identical.
+        rerank_scores = [
+            [int(index), head[index]["hit"].get("session_id"), float(relevance)]
+            for index, relevance in ranked
+            if 0 <= index < len(head)
+        ]
+        reordered: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        for index, _relevance in ranked:
+            if 0 <= index < len(head) and index not in seen:
+                reordered.append(head[index])
+                seen.add(index)
+        for index, entry in enumerate(head):
+            if index not in seen:
+                reordered.append(entry)
+        reordered.extend(ordered[window:])
+        return reordered, "applied", rerank_scores
+
+    # Keep score telemetry in provider order, before the positive-margin gate
+    # changes the resulting candidate order. VoyageProvider already filters
+    # invalid indices; the bounds check also keeps test doubles safe.
+    valid_ranked = [
+        (int(index), float(relevance))
+        for index, relevance in ranked
+        if 0 <= int(index) < len(head)
+    ]
+    rerank_scores = [
+        [index, head[index]["hit"].get("session_id"), relevance]
+        for index, relevance in valid_ranked
+    ]
+
+    # If the provider did not score the incoming incumbent, fail open rather
+    # than guessing its relevance.
+    incumbent_relevance = next(
+        (relevance for index, relevance in valid_ranked if index == 0),
+        None,
+    )
+    if incumbent_relevance is None:
+        return ordered, "skipped: partial rerank result", rerank_scores
+    challenger_index, challenger_relevance = max(
+        valid_ranked,
+        key=lambda item: (item[1], -item[0]),
+    )
+    if (
+        challenger_index == 0
+        or challenger_relevance - incumbent_relevance < rerank_margin
+    ):
+        reordered = [head[0]]
+        seen = {0}
+        for index, _relevance in valid_ranked:
+            if index != 0 and index not in seen:
+                reordered.append(head[index])
+                seen.add(index)
+        for index, entry in enumerate(head):
+            if index not in seen:
+                reordered.append(entry)
+        reordered.extend(ordered[window:])
+        return reordered, "applied: rank1-held", rerank_scores
+
+    # The positive-margin override takes exactly the historical rerank order.
     reordered: list[dict[str, Any]] = []
     seen: set[int] = set()
-    for index, _relevance in ranked:
-        if 0 <= index < len(head) and index not in seen:
+    for index, _relevance in valid_ranked:
+        if index not in seen:
             reordered.append(head[index])
             seen.add(index)
     for index, entry in enumerate(head):
         if index not in seen:
             reordered.append(entry)
     reordered.extend(ordered[window:])
-    return reordered, "applied"
+    return reordered, "applied", rerank_scores
 
 
 def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
@@ -5068,7 +5176,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     if engine is None:
         return json.dumps({"error": "LCM engine not initialized"})
 
-    query = str(args.get("query", "")).strip()
+    query = _coerce_query_arg(args.get("query"))
     if not query:
         return json.dumps({"error": "No query provided"})
 
@@ -5120,6 +5228,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
 
     candidate_limit = min(_LCM_GREP_HYBRID_CANDIDATE_CAP, max(50, limit * 4))
     rerank_window = min(50, max(1, limit * 4))
+    rerank_window_limit = int(getattr(engine._config, "rerank_window_limit", 0))
+    if rerank_window_limit > 0:
+        rerank_window = min(rerank_window, rerank_window_limit)
 
     embeddings_enabled = bool(getattr(engine._config, "embeddings_enabled", False))
     # FTS runs for verbatim/all normally, but ALSO whenever embeddings are
@@ -5392,7 +5503,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
 
     # -- Optional rerank stage (default OFF): a pure rank-REORDER within the top
     #    window of the post-prior order (no score splicing onto the RRF scale). --
-    ordered, rerank_status = _lcm_recall_rerank(
+    ordered, rerank_status, rerank_scores = _lcm_recall_rerank(
         provider, query, ordered, window=rerank_window, deadline=deadline, config=engine._config
     )
 
@@ -5614,6 +5725,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         },
         "degraded": degraded,
     }
+    if bool(getattr(engine._config, "rerank_enabled", False)) and rerank_scores:
+        response["provenance"]["rerank_scores"] = rerank_scores
     if degraded:
         response["degraded_reason"] = "; ".join(dict.fromkeys(degraded_reasons))
     if timed_out:
@@ -6014,7 +6127,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps({"error": max_results_error})
     max_results = max(1, int(max_results or 5))
 
-    query = str(args.get("query") or "").strip()
+    query = _coerce_query_arg(args.get("query"))
     raw_node_ids = args.get("node_ids") or []
 
     nodes = []
@@ -6231,6 +6344,12 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             f"lcm_expand_query synthesis timed out after {timeout:.3g}s",
             include_timeout=True,
         )
+    except _ExpansionSynthesisError as exc:
+        # Unusable aux-LLM response. Degrade the same way a timeout does: the
+        # caller still receives the node/raw matches it asked for, only the
+        # synthesized prose answer is unavailable.
+        logger.warning("LCM expand_query synthesis failed: %s", exc)
+        return _degraded_payload(f"lcm_expand_query synthesis unavailable: {exc}")
 
     answer = str(answer).strip() if answer is not None else ""
     if not answer:
