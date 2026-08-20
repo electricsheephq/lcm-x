@@ -141,14 +141,26 @@ def _session_owner_for_engine(engine: object):
     if connection is None:
         return None
 
+    #: (table, session-key column). Rollup tables keep their session partition
+    #: key in ``scope`` and are owner-stamped by the same backfill as the row
+    #: tables — a session whose only remaining rows are rollups must still
+    #: resolve to its owner, or the policy reads it as unclaimed and ALLOWS it.
+    _OWNER_TABLES = (
+        ("messages", "session_id"),
+        ("summary_nodes", "session_id"),
+        ("lcm_rollups", "scope"),
+        ("lcm_rollup_invalidations", "scope"),
+        ("lcm_rollup_state", "scope"),
+    )
+
     def resolve(session_id: str) -> str | None:
         owners: set[str] = set()
         readable = 0
-        for table in ("messages", "summary_nodes"):
+        for table, key_column in _OWNER_TABLES:
             try:
                 rows = connection.execute(
                     f'SELECT DISTINCT access_scope FROM "{table}" '
-                    "WHERE session_id = ? AND access_scope IS NOT NULL",
+                    f'WHERE "{key_column}" = ? AND access_scope IS NOT NULL',
                     (session_id,),
                 ).fetchall()
             except sqlite3.OperationalError:

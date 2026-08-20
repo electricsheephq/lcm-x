@@ -221,3 +221,27 @@ def test_an_owned_target_session_is_still_allowed_end_to_end(
     assert policy.authorize_operation(
         None, "read", {"session_id": "session-mine"}
     ).allowed
+
+
+def test_a_rollup_only_session_resolves_to_its_owner(store: sqlite3.Connection) -> None:
+    """Rollup tables are owner-stamped session data keyed by ``scope``.
+
+    A session whose only remaining rows are rollups (messages pruned or
+    externalized) previously resolved to None — and None is deliberately
+    permissive, so another principal's session-level operation was ALLOWED
+    against it."""
+    store.execute(
+        "CREATE TABLE lcm_rollups ("
+        " rollup_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " scope TEXT NOT NULL,"
+        " access_scope TEXT)"
+    )
+    store.execute(
+        "INSERT INTO lcm_rollups(scope, access_scope) VALUES(?, ?)",
+        ("session-rollup-only", "principal-a"),
+    )
+    store.commit()
+
+    resolve = _session_owner_for_engine(_Engine(store, _context()))
+
+    assert resolve("session-rollup-only") == "principal-a"

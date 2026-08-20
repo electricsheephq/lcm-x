@@ -412,7 +412,19 @@ def compose_scope_resolver(
     def resolve(session_id: str) -> str | None:
         if session_id in named:
             return named[session_id]
-        resolved = owner_for_session(session_id)
+        # The contract this wrapper documents: the host resolver RAISES for
+        # sessions it cannot attribute, and the fallback answers the
+        # remainder. The call must therefore be guarded — an escaping
+        # exception aborted preflight and could leave a direct backfill
+        # partially committed. With no fallback configured the exception
+        # re-raises: aborting BEFORE mutation is the fail-safe, silently
+        # stamping nothing is not.
+        try:
+            resolved = owner_for_session(session_id)
+        except Exception:
+            if default:
+                return default
+            raise
         if resolved is not None and str(resolved).strip():
             return resolved
         return default or None

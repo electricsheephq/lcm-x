@@ -252,3 +252,23 @@ def test_rollup_backfill_stamps_access_scope_without_rewriting_partition(tmp_pat
         assert tuple(row) == ("session-a", "owner:session-a")
     finally:
         rollups.close()
+
+
+def test_compose_resolver_guards_a_raising_host_resolver() -> None:
+    """The wrapper's contract: the host resolver RAISES for unattributable
+    sessions and the fallback answers the remainder. The call must be guarded
+    — an escaping exception aborted preflight and could leave a backfill
+    partially committed. Without a fallback it re-raises (abort BEFORE
+    mutation), never silently answers None."""
+    from hermes_lcm.scope_storage import compose_scope_resolver
+
+    def raising(_session_id: str) -> str:
+        raise LookupError("host cannot attribute this session")
+
+    with_fallback = compose_scope_resolver(raising, fallback_owner="operator")
+    assert with_fallback("session-x") == "operator"
+
+    without_fallback = compose_scope_resolver(raising)
+    import pytest as _pytest
+    with _pytest.raises(LookupError):
+        without_fallback("session-x")

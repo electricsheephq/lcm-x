@@ -119,3 +119,27 @@ def test_owner_lookup_failure_denies_instead_of_allowing() -> None:
     # imported under two aliases, yielding twin enum classes that fail `is`.
     assert decision.denial_reason is not None
     assert decision.denial_reason.value == "context_invalid"
+
+
+def test_empty_collection_narrowing_stays_deny_all_when_resolved_again() -> None:
+    """An explicit empty collection_allowlist is deny-all and must stay so:
+    truthiness-testing it re-widened a layered resolution back to the
+    context's full allowlist — resolving a result could GROW authority."""
+    now = datetime.now(timezone.utc)
+    ctx = AccessContextV1.from_host(
+        authenticated_transport="test", context_id="ctx", request_id="req",
+        source_kind="human", deployment_id="dep", tenant_id="tenant",
+        principal_id="carus", profile_id="carus", profile_incarnation="inc",
+        session_id="session-own", session_owner_principal_id="carus",
+        conversation_id="conv", conversation_lane="lane",
+        read_policy_ref="policy", lease_id="lease",
+        issued_at=now - timedelta(minutes=1), expires_at=now + timedelta(hours=1),
+        grants=("read",), narrowing=("collection:A",),
+    )
+    policy = TeamsPolicy(ctx)
+
+    first = policy.resolve_authorized_targets(None, "read", {"collection_allowlist": ("B",)})
+    assert first.get("collection_allowlist") == ()
+
+    second = policy.resolve_authorized_targets(None, "read", dict(first))
+    assert second.get("collection_allowlist") == ()

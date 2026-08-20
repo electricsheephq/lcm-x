@@ -311,8 +311,13 @@ class TeamsPolicy:
         # dropped.
         allowed = self._collection_allowlist(effective)
         if allowed:
-            requested = requested_narrowing.get("collection_allowlist")
-            if requested:
+            # PRESENCE, not truthiness: an explicit empty tuple is deny-all
+            # (this method's own output for an empty intersection). Treating
+            # it as absent re-widened to the context's full allowlist, making
+            # the resolver non-idempotent — resolving a layered result could
+            # GROW authority.
+            if "collection_allowlist" in requested_narrowing:
+                requested = requested_narrowing.get("collection_allowlist") or ()
                 allowed = allowed & frozenset(str(item) for item in requested)
             narrowed["collection_allowlist"] = tuple(sorted(allowed))
         return narrowed
