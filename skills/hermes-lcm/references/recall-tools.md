@@ -14,6 +14,11 @@ Use for discovery across current-session raw messages and summary nodes.
 - `mode='semantic'` or `'hybrid'` is useful when embeddings are configured; degraded coverage is reported.
 - Broader `session_scope='all'|'session'` is explicit, bounded, raw-message-only archive recovery inside `lcm.db`.
 - Exact role/time/source/conversation filters apply before limiting where supported.
+- If the payload carries `message_search_error`, the raw-message stage crashed and its
+  results are missing: treat any returned results as INCOMPLETE (they come from the other
+  stages only), never as proof of absence. Retry once, or fall back to `lcm_recall` /
+  narrower filters, and disclose the gap if the answer depends on raw-message coverage.
+  (`lcm_recall` already folds the same failure into `coverage.fts: 'none'`.)
 
 Do not treat a short search snippet as sufficient evidence for a detail-heavy answer.
 

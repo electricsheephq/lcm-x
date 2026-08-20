@@ -75,6 +75,8 @@ version tags but does not have a destination GitHub Release object for RC2.
   adaptive retrieval remain opt-in. Review provider/privacy boundaries before
   enabling model- or embedding-backed paths.
 
+- Added nested-default-JSON-bounded, tool-extracted `lcm_expand_query` evidence provenance so successful and degraded answers retain synthesis-context identities, occurrences, paths, and excerpts while explicitly distinguishing locator coverage from unverified replay, semantic entailment, and caller authorization.
+
 ## v0.20.0 - 2026-07-23
 
 Release focus: Lossless-Claw parity plus the merged cross-session recall and temporal retrieval stack.

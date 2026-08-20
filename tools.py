@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import re
@@ -139,10 +140,15 @@ def _require_engine(kwargs: Dict[str, Any]) -> "LCMEngine | None":
     return engine if engine is not None else None
 
 
-def _get_session_node(engine: "LCMEngine", node_id: int, session_id: str | None = None):
-    target_session_id = engine.current_session_id if session_id is None else session_id
+def _get_session_node(
+    engine: "LCMEngine",
+    node_id: int,
+    *,
+    session_id: str | None = None,
+):
+    session_id = engine.current_session_id if session_id is None else session_id
     node = engine._dag.get_node(node_id)
-    if node is None or node.session_id != target_session_id:
+    if node is None or node.session_id != session_id:
         return None
     return node
 
@@ -261,6 +267,123 @@ def _parse_grep_role(value: Any) -> tuple[str | None, str | None]:
     return role, None
 
 
+def _parse_retrieval_excluded_session_ids(
+    args: Dict[str, Any], current_session_id: str
+) -> tuple[set[str], str | None]:
+    exclude_current_session = args.get("exclude_current_session", False)
+    if not isinstance(exclude_current_session, bool):
+        return set(), "exclude_current_session must be a boolean"
+    raw_session_ids = args.get("exclude_session_ids", [])
+    if not isinstance(raw_session_ids, list):
+        return set(), "exclude_session_ids must be an array of strings"
+    excluded: set[str] = set()
+    for value in raw_session_ids:
+        if not isinstance(value, str) or not value.strip():
+            return set(), "exclude_session_ids must contain only non-empty strings"
+        excluded.add(value.strip())
+    if exclude_current_session and current_session_id:
+        excluded.add(current_session_id)
+    return excluded, None
+
+
+# Tables whose distinct ``session_id`` values define the eligible retrieval
+# scope. Both carry a ``session_id``-LEADING index (``idx_msg_session_ts`` and
+# ``idx_nodes_session_latest``), which is what makes the skip-scan below an
+# indexed seek rather than a corpus scan. Fixed literals -- never interpolate
+# caller input into the statement.
+_RETRIEVAL_SESSION_SCOPE_TABLES = ("messages", "summary_nodes")
+
+# Loose index scan ("skip scan"): seek once per DISTINCT session_id instead of
+# reading every row and sorting a temp B-tree. Cost is O(sessions * log rows),
+# not O(rows). Measured on 300k messages + 9k summary nodes over 300 sessions:
+# 66.2 ms (SCAN + USE TEMP B-TREE FOR DISTINCT) -> 0.5 ms (SEARCH ... session_id>?).
+_RETRIEVAL_DISTINCT_SESSIONS_SQL = """
+        WITH RECURSIVE distinct_sessions(session_id) AS (
+            SELECT MIN(session_id) FROM {table}
+            UNION ALL
+            SELECT (
+                SELECT MIN(session_id) FROM {table}
+                WHERE session_id > distinct_sessions.session_id
+            )
+            FROM distinct_sessions
+            WHERE distinct_sessions.session_id IS NOT NULL
+        )
+        SELECT session_id FROM distinct_sessions WHERE session_id IS NOT NULL
+"""
+
+
+def _retrieval_candidate_session_ids(
+    engine: "LCMEngine",
+    excluded_session_ids: set[str],
+    *,
+    deadline: float | None = None,
+) -> tuple[list[str] | None, bool]:
+    """Resolve the eligible-session whitelist for a retrieval exclusion set.
+
+    Returns ``(candidate_session_ids, enumeration_timed_out)``. ``None`` means
+    "no exclusions, no whitelist needed"; ``[]`` means "exclusions left no
+    eligible session". The second element is True only when ``deadline`` lapsed
+    mid-enumeration -- callers must fail CLOSED on it (drop the arms that depend
+    on the whitelist), never fall back to ``None``, which would silently
+    discard the caller's hard exclusion filter.
+    """
+    if not excluded_session_ids:
+        return None, False
+    # Liveness gate only. The enumeration itself runs on its OWN connection
+    # (below); a closed store still means "no eligible session", fail closed.
+    if engine._store.connection is None:
+        return [], False
+    # An already-lapsed budget fails closed before any DB work: the progress
+    # handler only fires every N opcodes, so a short query could otherwise slip
+    # past an expired deadline purely because it was cheap.
+    if deadline is not None and time.monotonic() >= deadline:
+        return [], True
+    sessions: set[str] = set()
+    # A progress handler is CONNECTION-GLOBAL, and ``MessageStore._conn`` is
+    # explicitly shared across threads (opened ``check_same_thread=False``).
+    # Installing this request's deadline there would let it interrupt a
+    # concurrent read/ingest on the same connection, and the `finally` teardown
+    # would clear a concurrent request's handler -- silently disabling ITS
+    # timeout. So the enumeration gets a private read-only connection and owns
+    # its handler alone: the same idiom every other deadline-guarded read path
+    # here uses (``_lcm_recall_summary_sources``, the chunk/summary hydrators in
+    # ``retrieval_core``). Python's sqlite3 exposes no getter for the installed
+    # handler, so save/restore on the shared connection is not expressible.
+    connection: sqlite3.Connection | None = None
+    try:
+        db_path = Path(engine._store.db_path).resolve()
+        connection = sqlite3.connect(
+            f"{db_path.as_uri()}?mode=ro",
+            uri=True,
+            timeout=(
+                5.0
+                if deadline is None
+                else max(0.001, deadline - time.monotonic())
+            ),
+        )
+        connection.execute("PRAGMA query_only=ON")
+        if deadline is not None:
+            connection.set_progress_handler(
+                lambda: 1 if time.monotonic() >= deadline else 0, 1000
+            )
+        for table in _RETRIEVAL_SESSION_SCOPE_TABLES:
+            rows = connection.execute(
+                _RETRIEVAL_DISTINCT_SESSIONS_SQL.format(table=table)
+            ).fetchall()
+            sessions.update(str(row[0]) for row in rows if row[0] is not None)
+    except sqlite3.OperationalError:
+        if deadline is not None and time.monotonic() >= deadline:
+            return [], True
+        raise
+    finally:
+        if connection is not None:
+            connection.close()
+    # The exclusion difference moves to Python: both ``session_id`` columns are
+    # declared TEXT NOT NULL, so set difference on the stringified values is
+    # exactly the SQL ``NOT IN`` it replaces, without a second pass over rows.
+    return sorted(sessions - excluded_session_ids), False
+
+
 def _parse_strict_int(value: Any, name: str) -> tuple[int | None, str | None]:
     try:
         if isinstance(value, bool):
@@ -296,6 +419,20 @@ _LCM_QUERY_STATE_LIMIT_CAP = 50
 _LCM_QUERY_STATE_RESPONSE_CHAR_CAP = 64_000
 _LCM_COMPUTE_RESPONSE_CHAR_CAP = 64_000
 _LCM_RECALL_VALID_INCLUDE = frozenset({"all", "summaries", "verbatim"})
+# A slow first FTS arm must not consume the whole shared recall deadline when a
+# real semantic route is configured. FTS-only/degraded installs keep the full
+# budget; hybrid recall reserves the remainder for provider resolution, vector
+# arms, hydration, fusion, and optional reranking.
+_LCM_RECALL_FTS_MAX_BUDGET_FRACTION = 0.25
+# The vector-corpus preflight guards the budget split above, so its own scan
+# must never be able to spend the request budget it exists to protect: a
+# no-match probe over a large fully-orphaned corpus has to exhaust candidates
+# despite LIMIT 1, and aborting that scan only at the REQUEST deadline would
+# hand FTS an already-expired budget — no arm runs at all. The preflight
+# therefore gets a small independent scan budget; expiry fails open to False,
+# which keeps the full remaining budget with the FTS arm.
+_LCM_RECALL_PREFLIGHT_MAX_BUDGET_S = 0.25
+_LCM_RECALL_PREFLIGHT_BUDGET_FRACTION = 0.1
 _LCM_RECALL_VALID_DETAIL = frozenset({"snippets", "answer_ready"})
 _LCM_RECALL_ANSWER_READY_PER_SESSION_LIMIT = 5
 _LCM_RECALL_ANSWER_READY_EXPANDED_HIT_LIMIT = 8
@@ -1203,9 +1340,11 @@ def _expand_message_sources(
     source_limit: int | None = None,
     content_offset: int = 0,
     hydrate_externalized_content: bool = False,
+    session_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     from .tokens import count_tokens
 
+    session_id = engine.current_session_id if session_id is None else session_id
     total_sources = len(node.source_ids)
     source_offset = min(max(0, source_offset), total_sources)
     remaining_source_count = max(0, total_sources - source_offset)
@@ -1248,7 +1387,7 @@ def _expand_message_sources(
             ref_payload = _get_externalized_payload(
                 engine,
                 ref,
-                allowed_session_ids={engine.current_session_id, stored.get("session_id", "")},
+                allowed_session_ids={session_id, stored.get("session_id", "")},
             )
             if ref_payload is not None and ref_payload.get("kind") != "ingest_payload":
                 externalized = ref_payload
@@ -1265,7 +1404,7 @@ def _expand_message_sources(
             "source_index": source_index,
             "session_id": stored.get("session_id", ""),
             "source": stored.get("source") or "",
-            "from_current_session": stored.get("session_id", "") == engine.current_session_id,
+            "from_current_session": stored.get("session_id", "") == session_id,
             "role": stored["role"],
             "content": sliced["content"],
             "content_chars": sliced["content_chars"],
@@ -1346,9 +1485,11 @@ def _expand_child_nodes(
     *,
     source_offset: int = 0,
     source_limit: int | None = None,
+    session_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     from .tokens import count_tokens
 
+    session_id = engine.current_session_id if session_id is None else session_id
     total_sources = len(node.source_ids)
     source_offset = min(max(0, source_offset), total_sources)
     remaining_source_count = max(0, total_sources - source_offset)
@@ -1360,7 +1501,7 @@ def _expand_child_nodes(
     children: list[tuple[int, Any]] = []
     for relative_index, child_id in enumerate(selected_source_ids):
         child = engine._dag.get_node(child_id)
-        if child is None or child.session_id != node.session_id:
+        if child is None or child.session_id != session_id:
             continue
         children.append((source_offset + relative_index, child))
 
@@ -1435,6 +1576,7 @@ def _collect_descendant_evidence_blocks(
     visited_node_ids: set[int] | None = None,
     source_path: list[dict[str, int]] | None = None,
     remaining_node_visits: list[int] | None = None,
+    session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     if max_tokens <= 0 or node.source_type != "nodes":
         return []
@@ -1448,6 +1590,7 @@ def _collect_descendant_evidence_blocks(
         # walk an unbounded number of nodes while normal deep summaries still
         # reach their leaf evidence.
         remaining_node_visits = [max(64, int(max_tokens) * 4)]
+    session_id = engine.current_session_id if session_id is None else session_id
     if remaining_node_visits[0] <= 0:
         return []
 
@@ -1466,7 +1609,7 @@ def _collect_descendant_evidence_blocks(
         stack.append((current, current_path, current_visited, source_index + 1))
         child_id = current.source_ids[source_index]
         child = engine._dag.get_node(child_id)
-        if child is None or child.session_id != current.session_id:
+        if child is None or child.session_id != session_id:
             continue
         child_node_id = int(child.node_id)
         if child_node_id in current_visited:
@@ -1484,6 +1627,7 @@ def _collect_descendant_evidence_blocks(
                 child,
                 max_tokens=remaining_tokens,
                 hydrate_externalized_content=hydrate_externalized_content,
+                session_id=session_id,
             )
             if messages or pagination.get("has_more"):
                 block = {
@@ -1502,7 +1646,10 @@ def _collect_descendant_evidence_blocks(
 
         if child.source_type == "nodes":
             children, pagination = _expand_child_nodes(
-                engine, child, max_tokens=remaining_tokens
+                engine,
+                child,
+                max_tokens=remaining_tokens,
+                session_id=session_id,
             )
             if children or pagination.get("has_more"):
                 block = {
@@ -1528,9 +1675,11 @@ def _collect_context_blocks_for_node(
     max_tokens: int,
     *,
     hydrate_externalized_content: bool = False,
+    session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     from .tokens import count_tokens
 
+    session_id = engine.current_session_id if session_id is None else session_id
     summary, summary_truncated = _truncate_text_to_token_budget(node.summary, max_tokens)
     blocks: list[dict[str, Any]] = [
         {
@@ -1551,6 +1700,7 @@ def _collect_context_blocks_for_node(
             node,
             max_tokens=remaining_tokens,
             hydrate_externalized_content=hydrate_externalized_content,
+            session_id=session_id,
         )
         if messages or pagination.get("has_more"):
             block = {
@@ -1561,7 +1711,12 @@ def _collect_context_blocks_for_node(
             }
             blocks.append(block)
     elif node.source_type == "nodes":
-        children, pagination = _expand_child_nodes(engine, node, max_tokens=remaining_tokens)
+        children, pagination = _expand_child_nodes(
+            engine,
+            node,
+            max_tokens=remaining_tokens,
+            session_id=session_id,
+        )
         if children or pagination.get("has_more"):
             blocks.append(
                 {
@@ -1580,6 +1735,7 @@ def _collect_context_blocks_for_node(
                     node,
                     max_tokens=descendant_tokens,
                     hydrate_externalized_content=hydrate_externalized_content,
+                    session_id=session_id,
                 )
             )
 
@@ -1707,6 +1863,458 @@ def _context_content_token_count(blocks: list[dict[str, Any]]) -> int:
     return total
 
 
+_EXPAND_QUERY_EVIDENCE_QUOTE_MAX_CHARS = 500
+_EXPAND_QUERY_EVIDENCE_MAX_ITEMS = 24
+_EXPAND_QUERY_EVIDENCE_MAX_SERIALIZED_CHARS = 10_000
+_EXPAND_QUERY_EVIDENCE_METADATA_MAX_CHARS = 256
+_EXPAND_QUERY_EVIDENCE_SOURCE_PATH_MAX_HOPS = 8
+_EXPAND_QUERY_EVIDENCE_SOURCE_PATH_MAX_PATHS = 8
+
+
+def _expand_query_evidence_serialized_chars(evidence: dict[str, Any]) -> int:
+    """Measure the exact JSON representation used by the tool response."""
+
+    return len(json.dumps(evidence))
+
+
+def _bounded_evidence_text(value: Any) -> tuple[str, dict[str, Any] | None]:
+    """Bound metadata while retaining explicit length and digest disclosure."""
+
+    text = str(value or "")
+    if len(text) <= _EXPAND_QUERY_EVIDENCE_METADATA_MAX_CHARS:
+        return text, None
+    return text[:_EXPAND_QUERY_EVIDENCE_METADATA_MAX_CHARS], {
+        "original_chars": len(text),
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
+
+
+def _normalized_evidence_source_path(
+    value: Any,
+    *,
+    source_path_depth: Any = None,
+    source_path_truncated: Any = None,
+) -> dict[str, Any] | None:
+    if not isinstance(value, (list, tuple)):
+        return None
+    result: list[dict[str, int]] = []
+    for part in value[-_EXPAND_QUERY_EVIDENCE_SOURCE_PATH_MAX_HOPS:]:
+        if not isinstance(part, dict):
+            continue
+        node_id = part.get("node_id")
+        source_index = part.get("source_index")
+        if isinstance(node_id, int) and isinstance(source_index, int):
+            result.append({"node_id": node_id, "source_index": source_index})
+    if not result:
+        return None
+    depth = (
+        source_path_depth
+        if isinstance(source_path_depth, int) and source_path_depth >= len(result)
+        else len(result)
+    )
+    return {
+        "path": result,
+        "depth": depth,
+        "truncated": bool(source_path_truncated or depth > len(result)),
+    }
+
+
+def _evidence_source_path_with_final_edge(
+    block: dict[str, Any],
+    source_index: Any,
+) -> tuple[Any, Any, Any]:
+    """Return a block path extended through its selected child/message edge."""
+
+    source_path = block.get("source_path")
+    path = list(source_path) if isinstance(source_path, (list, tuple)) else []
+    depth = block.get("source_path_depth")
+    if not isinstance(depth, int) or depth < len(path):
+        depth = len(path)
+    node_id = block.get("node_id")
+    if isinstance(node_id, int) and isinstance(source_index, int):
+        path.append({"node_id": node_id, "source_index": source_index})
+        depth += 1
+    return path, depth, block.get("source_path_truncated")
+
+
+def _build_expand_query_evidence(
+    context_blocks: list[dict[str, Any]],
+    *,
+    session_id: str,
+    context_truncated: bool,
+    synthesis_status: str,
+) -> dict[str, Any]:
+    """Return bounded, tool-extracted provenance for expansion synthesis context.
+
+    The bundle identifies excerpts that were actually sent to the auxiliary
+    model. It deliberately does not claim that the resulting answer is
+    semantically entailed by those excerpts.
+    """
+
+    synthesis_status = (
+        synthesis_status
+        if synthesis_status in {"completed", "failed", "not_run"}
+        else "unknown"
+    )
+    candidates: list[dict[str, Any]] = []
+    seen_items: dict[str, dict[str, Any]] = {}
+
+    def put_bounded_text(item: dict[str, Any], field: str, value: Any) -> bool:
+        bounded, truncation = _bounded_evidence_text(value)
+        item[field] = bounded
+        if truncation is not None:
+            item.setdefault("metadata_truncation", {})[field] = truncation
+            return True
+        return False
+
+    def add_candidate(
+        identity: str,
+        item: dict[str, Any],
+        *,
+        source_path: Any = None,
+        source_path_depth: Any = None,
+        source_path_truncated: Any = None,
+    ) -> None:
+        path = _normalized_evidence_source_path(
+            source_path,
+            source_path_depth=source_path_depth,
+            source_path_truncated=source_path_truncated,
+        )
+        existing = seen_items.get(identity)
+        if existing is not None:
+            existing["context_occurrence_count"] += 1
+            source_paths = existing.setdefault("source_paths", [])
+            if path and path not in source_paths:
+                if len(source_paths) < _EXPAND_QUERY_EVIDENCE_SOURCE_PATH_MAX_PATHS:
+                    source_paths.append(path)
+                else:
+                    existing["source_paths_truncated"] = True
+            return
+        put_bounded_text(item, "evidence_id", identity)
+        item["context_occurrence_count"] = 1
+        if path:
+            item["source_paths"] = [path]
+        seen_items[identity] = item
+        candidates.append(item)
+
+    def quote_payload(content: Any) -> dict[str, Any]:
+        quote = str(content or "")
+        return {
+            "quote": quote[:_EXPAND_QUERY_EVIDENCE_QUOTE_MAX_CHARS],
+            "quote_chars_before_provenance_cap": len(quote),
+            "quote_truncated_by_provenance_cap": len(quote)
+            > _EXPAND_QUERY_EVIDENCE_QUOTE_MAX_CHARS,
+        }
+
+    for block_index, block in enumerate(context_blocks):
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+
+        if block_type == "summary":
+            node_id = block.get("node_id")
+            identity = (
+                f"node:{node_id}"
+                if isinstance(node_id, int)
+                else f"context:{block_index}:summary"
+            )
+            item: dict[str, Any] = {
+                "source_type": "summary",
+                "node_id": node_id if isinstance(node_id, int) else None,
+                "locator_present": isinstance(node_id, int),
+                "locator_replay_status": "unverified" if isinstance(node_id, int) else "not_available",
+                **quote_payload(block.get("summary")),
+            }
+            put_bounded_text(item, "session_id", block.get("session_id") or session_id)
+            if isinstance(node_id, int):
+                item["expand_args"] = {"node_id": node_id}
+            add_candidate(
+                identity,
+                item,
+                source_path=block.get("source_path"),
+                source_path_depth=block.get("source_path_depth"),
+                source_path_truncated=block.get("source_path_truncated"),
+            )
+
+        if block_type in {"child_nodes", "descendant_child_nodes"}:
+            for child_index, child in enumerate(block.get("children", []) or []):
+                if not isinstance(child, dict):
+                    continue
+                node_id = child.get("node_id")
+                identity = (
+                    f"node:{node_id}"
+                    if isinstance(node_id, int)
+                    else f"context:{block_index}:child:{child_index}"
+                )
+                item = {
+                    "source_type": "summary",
+                    "node_id": node_id if isinstance(node_id, int) else None,
+                    "parent_node_id": (
+                        block.get("node_id")
+                        if isinstance(block.get("node_id"), int)
+                        else None
+                    ),
+                    "source_index": (
+                        child.get("source_index")
+                        if isinstance(child.get("source_index"), int)
+                        else None
+                    ),
+                    "locator_present": isinstance(node_id, int),
+                    "locator_replay_status": "unverified" if isinstance(node_id, int) else "not_available",
+                    **quote_payload(child.get("summary")),
+                }
+                put_bounded_text(
+                    item,
+                    "session_id",
+                    child.get("session_id") or block.get("session_id") or session_id,
+                )
+                if isinstance(node_id, int):
+                    item["expand_args"] = {"node_id": node_id}
+                source_path, source_path_depth, source_path_truncated = (
+                    _evidence_source_path_with_final_edge(
+                        block,
+                        child.get("source_index"),
+                    )
+                )
+                add_candidate(
+                    identity,
+                    item,
+                    source_path=source_path,
+                    source_path_depth=source_path_depth,
+                    source_path_truncated=source_path_truncated,
+                )
+
+        if block_type not in {"messages", "child_messages", "raw_messages"}:
+            continue
+        for message_index, message in enumerate(block.get("messages", []) or []):
+            if not isinstance(message, dict):
+                continue
+            store_id = message.get("store_id")
+            content_offset = message.get("content_offset")
+            if not isinstance(content_offset, int) or content_offset < 0:
+                content_offset = 0
+            content_source = str(message.get("content_source") or "message")
+            externalized = message.get("externalized") or {}
+            externalized_ref = externalized.get("ref") if isinstance(externalized, dict) else None
+            if content_source == "externalized_payload" and externalized_ref:
+                identity = f"externalized:{externalized_ref}:{content_offset}"
+                source_type = "externalized_payload"
+            elif isinstance(store_id, int):
+                identity = f"store:{store_id}:{content_offset}:{content_source}"
+                source_type = "raw_message"
+            else:
+                identity = f"context:{block_index}:message:{message_index}"
+                source_type = "raw_message"
+
+            item = {
+                "source_type": source_type,
+                "store_id": store_id if isinstance(store_id, int) else None,
+                "node_id": (
+                    block.get("node_id")
+                    if isinstance(block.get("node_id"), int)
+                    else None
+                ),
+                "parent_node_id": (
+                    block.get("parent_node_id")
+                    if isinstance(block.get("parent_node_id"), int)
+                    else None
+                ),
+                "source_index": (
+                    message.get("source_index")
+                    if isinstance(message.get("source_index"), int)
+                    else None
+                ),
+                "content_offset": content_offset,
+                **quote_payload(message.get("content")),
+            }
+            put_bounded_text(item, "session_id", message.get("session_id") or "")
+            put_bounded_text(item, "source", message.get("source") or "")
+            put_bounded_text(item, "role", message.get("role"))
+            put_bounded_text(item, "content_source", content_source)
+            ref_truncated = put_bounded_text(item, "externalized_ref", externalized_ref)
+            if content_source == "externalized_payload":
+                if externalized_ref and not ref_truncated:
+                    item["expand_args"] = {
+                        "externalized_ref": str(externalized_ref),
+                        "content_offset": content_offset,
+                    }
+            elif isinstance(store_id, int):
+                item["expand_args"] = {"store_id": store_id, "content_offset": content_offset}
+            item["locator_present"] = "expand_args" in item
+            item["locator_replay_status"] = (
+                "unverified" if item["locator_present"] else "not_available"
+            )
+            source_path = block.get("source_path")
+            source_path_depth = block.get("source_path_depth")
+            source_path_truncated = block.get("source_path_truncated")
+            if block_type in {"messages", "child_messages"}:
+                source_path, source_path_depth, source_path_truncated = (
+                    _evidence_source_path_with_final_edge(
+                        block,
+                        message.get("source_index"),
+                    )
+                )
+            add_candidate(
+                identity,
+                item,
+                source_path=source_path,
+                source_path_depth=source_path_depth,
+                source_path_truncated=source_path_truncated,
+            )
+
+            # Externalized/hydrated context blocks can contain both the text
+            # exposed as ``content`` and the durable transcript representation
+            # exposed as ``transcript_content``. Both fields are serialized into
+            # the auxiliary model prompt, so traceability cannot be called
+            # complete unless both are represented when they differ.
+            transcript_content = message.get("transcript_content")
+            if transcript_content is not None and str(transcript_content) != str(
+                message.get("content") or ""
+            ):
+                transcript_identity = (
+                    f"store:{store_id}:0:transcript_content"
+                    if isinstance(store_id, int)
+                    else f"context:{block_index}:message:{message_index}:transcript_content"
+                )
+                transcript_item = {
+                    "source_type": "raw_message",
+                    "store_id": store_id if isinstance(store_id, int) else None,
+                    "node_id": (
+                        block.get("node_id")
+                        if isinstance(block.get("node_id"), int)
+                        else None
+                    ),
+                    "parent_node_id": (
+                        block.get("parent_node_id")
+                        if isinstance(block.get("parent_node_id"), int)
+                        else None
+                    ),
+                    "source_index": (
+                        message.get("source_index")
+                        if isinstance(message.get("source_index"), int)
+                        else None
+                    ),
+                    "content_offset": 0,
+                    "locator_present": isinstance(store_id, int),
+                    "locator_replay_status": "unverified" if isinstance(store_id, int) else "not_available",
+                    **quote_payload(transcript_content),
+                }
+                put_bounded_text(transcript_item, "session_id", message.get("session_id") or "")
+                put_bounded_text(transcript_item, "source", message.get("source") or "")
+                put_bounded_text(transcript_item, "role", message.get("role"))
+                put_bounded_text(transcript_item, "content_source", "transcript_content")
+                if isinstance(store_id, int):
+                    transcript_item["expand_args"] = {
+                        "store_id": store_id,
+                        "content_offset": 0,
+                    }
+                add_candidate(
+                    transcript_identity,
+                    transcript_item,
+                    source_path=source_path,
+                    source_path_depth=source_path_depth,
+                    source_path_truncated=source_path_truncated,
+                )
+
+    items = candidates[:_EXPAND_QUERY_EVIDENCE_MAX_ITEMS]
+    bounded_scope_session, scope_truncation = _bounded_evidence_text(session_id)
+    retrieval_scope: dict[str, Any] = {
+        "kind": "current_session",
+        "session_ids": [bounded_scope_session],
+    }
+    if scope_truncation is not None:
+        retrieval_scope["metadata_truncation"] = {"session_ids[0]": scope_truncation}
+    evidence = {
+        "retrieval_scope": retrieval_scope,
+        "identifiers_are_authority": False,
+        "locator_replay_safety": "not_guaranteed",
+        "synthesis_status": synthesis_status,
+        "semantic_entailment": "not_verified" if synthesis_status == "completed" else "not_applicable",
+        "quote_origin": "tool_extracted_from_synthesis_context",
+        "context_truncated": bool(context_truncated),
+        "context_unique_item_count": len(candidates),
+        "context_occurrence_count": sum(
+            int(item.get("context_occurrence_count") or 1) for item in candidates
+        ),
+        "serialized_char_limit": _EXPAND_QUERY_EVIDENCE_MAX_SERIALIZED_CHARS,
+        "serialization": {
+            "scope": "evidence_provenance_only",
+            "json_ensure_ascii": True,
+        },
+        "quote_max_chars": _EXPAND_QUERY_EVIDENCE_QUOTE_MAX_CHARS,
+        "items": items,
+    }
+
+    def refresh_bounds() -> None:
+        items_truncated = len(items) < len(candidates)
+        located_items = sum(1 for item in items if item.get("locator_present"))
+        if not candidates:
+            locator_coverage = "none"
+        elif items_truncated or located_items < len(candidates):
+            locator_coverage = "partial"
+        else:
+            locator_coverage = "complete"
+        evidence["locator_coverage"] = locator_coverage
+        evidence["items_truncated"] = items_truncated
+        evidence["quotes_truncated_by_provenance_cap"] = sum(
+            1 for item in items if item.get("quote_truncated_by_provenance_cap")
+        )
+        evidence["metadata_truncated"] = bool(
+            retrieval_scope.get("metadata_truncation")
+            or any(item.get("metadata_truncation") for item in items)
+        )
+
+    refresh_bounds()
+    while (
+        items
+        and _expand_query_evidence_serialized_chars(evidence)
+        > _EXPAND_QUERY_EVIDENCE_MAX_SERIALIZED_CHARS
+    ):
+        items.pop()
+        refresh_bounds()
+    if (
+        _expand_query_evidence_serialized_chars(evidence)
+        > _EXPAND_QUERY_EVIDENCE_MAX_SERIALIZED_CHARS
+    ):
+        # Bounded metadata makes this unreachable under normal inputs. Keep a
+        # compact fail-safe so even a pathological fixed envelope cannot violate
+        # the public nested-object contract.
+        evidence = {
+            "retrieval_scope": {
+                "kind": "current_session",
+                "session_ids": [],
+                "session_id_sha256": hashlib.sha256(
+                    str(session_id or "").encode("utf-8")
+                ).hexdigest(),
+                "session_id_omitted_due_to_size": True,
+            },
+            "identifiers_are_authority": False,
+            "locator_replay_safety": "not_guaranteed",
+            "synthesis_status": synthesis_status,
+            "semantic_entailment": (
+                "not_verified" if synthesis_status == "completed" else "not_applicable"
+            ),
+            "quote_origin": "tool_extracted_from_synthesis_context",
+            "context_truncated": bool(context_truncated),
+            "context_unique_item_count": len(candidates),
+            "context_occurrence_count": sum(
+                int(item.get("context_occurrence_count") or 1) for item in candidates
+            ),
+            "serialized_char_limit": _EXPAND_QUERY_EVIDENCE_MAX_SERIALIZED_CHARS,
+            "serialization": {
+                "scope": "evidence_provenance_only",
+                "json_ensure_ascii": True,
+            },
+            "quote_max_chars": _EXPAND_QUERY_EVIDENCE_QUOTE_MAX_CHARS,
+            "locator_coverage": "none" if not candidates else "partial",
+            "items_truncated": bool(candidates),
+            "quotes_truncated_by_provenance_cap": 0,
+            "metadata_truncated": True,
+            "fixed_envelope_compacted": True,
+            "items": [],
+        }
+    return evidence
+
 def _serialized_context_token_count(blocks: list[dict[str, Any]]) -> int:
     from .tokens import count_tokens
 
@@ -1738,10 +2346,12 @@ def _synthesize_expansion_answer(
     prompt: str,
     context_blocks: list[dict[str, Any]],
     model: str,
+    reasoning_effort: str = "",
     max_tokens: int,
     timeout: float,
 ) -> str:
     from agent.auxiliary_client import call_llm
+    from .model_routing import apply_lcm_reasoning_effort
 
     system_prompt = (
         "You answer questions using expanded LCM retrieval context. "
@@ -1763,6 +2373,7 @@ def _synthesize_expansion_answer(
         "timeout": timeout,
     }
     apply_lcm_model_route(call_kwargs, model)
+    apply_lcm_reasoning_effort(call_kwargs, reasoning_effort)
     response = call_llm(**call_kwargs)
     # ``call_llm`` can return an error-shaped or partial object (e.g. when the
     # auxiliary lane collides with the foreground model's own in-flight calls),
@@ -2556,9 +3167,14 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
 
     current_session_id = engine.current_session_id
     has_current_session = bool(current_session_id)
+    excluded_session_ids = set(args.get("_excluded_session_ids") or ())
     results: list[Dict[str, Any]] = []
+    message_search_error: str | None = None
 
-    if content_scope in {"history", "both"}:
+    if (
+        content_scope in {"history", "both"}
+        and search_session_id not in excluded_session_ids
+    ):
         try:
             msg_hits = engine._store.search(
                 query,
@@ -2570,8 +3186,11 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 role=role,
                 time_from=time_from,
                 time_to=time_to,
+                exclude_session_ids=excluded_session_ids,
             )
             for hit in msg_hits:
+                if hit.get("session_id") in excluded_session_ids:
+                    continue
                 results.append(
                     _shape_message_hit(
                         hit,
@@ -2580,6 +3199,13 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                     )
                 )
         except Exception as exc:
+            # Grep degrades to whatever the other stages produce, but the
+            # failure must reach the PAYLOAD, not just the log: lcm_recall's
+            # FTS arm consumes only these message rows, so a swallowed crash
+            # here previously reported coverage.fts='ok' with zero hits --
+            # on an FTS-only install that made a crashed search arm
+            # indistinguishable from an empty corpus (#256).
+            message_search_error = str(exc) or type(exc).__name__
             logger.warning("Message search failed: %s", exc)
 
     # Summary-node search is intentionally current-session only. Cross-session
@@ -2587,7 +3213,12 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
     # contract would push this tool toward a memory-system shape rather than
     # a plugin-local archive search. Raw-message hits remain expandable across
     # sessions via lcm_expand(store_id=...).
-    if content_scope in {"history", "both"} and session_scope == "current" and not raw_message_filter_active:
+    if (
+        content_scope in {"history", "both"}
+        and session_scope == "current"
+        and not raw_message_filter_active
+        and search_session_id not in excluded_session_ids
+    ):
         try:
             node_hits = engine._dag.search(
                 query,
@@ -2597,6 +3228,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 source=source,
             )
             for node in node_hits:
+                if node.session_id in excluded_session_ids:
+                    continue
                 results.append(_shape_summary_hit(node))
         except Exception as exc:
             logger.warning("Node search failed: %s", exc)
@@ -2610,7 +3243,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         # rather than leak unscoped payloads. Source remains valid for summary
         # search above, so it intentionally does not affect summary omission.
         externalized_results_omitted = True
-    elif searches_externalized:
+    elif searches_externalized and current_session_id not in excluded_session_ids:
         try:
             storage_dir = get_large_output_storage_dir(
                 engine._config,
@@ -2839,6 +3472,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         response["externalized_refs"] = externalized_refs
     if externalized_scan is not None:
         response["externalized_scan"] = externalized_scan
+    if message_search_error is not None:
+        response["message_search_error"] = message_search_error
     return json.dumps(response)
 
 
@@ -3128,6 +3763,7 @@ def _lcm_grep_semantic(
     allow_fallback: bool = True,
 ) -> dict[str, Any]:
     mode = str(args.get("mode") or "semantic").lower()
+    excluded_session_ids = set(args.get("_excluded_session_ids") or ())
     if time.monotonic() >= deadline:
         return _lcm_grep_deadline_error(mode, "semantic_entry")
     query = _coerce_query_arg(args.get("query"))
@@ -3250,8 +3886,37 @@ def _lcm_grep_semantic(
     knn_conversation_ids = _resolve_semantic_conversation_scope(
         engine, search_session_id=search_session_id, conversation_id=conversation_id
     )
+    if excluded_session_ids:
+        knn_conversation_ids = [
+            session_id
+            for session_id in knn_conversation_ids or []
+            if session_id not in excluded_session_ids
+        ]
     if time.monotonic() >= deadline:
         return _lcm_grep_deadline_error(mode, "scope_resolution")
+    if knn_conversation_ids == []:
+        response: dict[str, Any] = {
+            "query": query,
+            "mode": "semantic",
+            "sort": normalize_search_sort(args.get("sort")),
+            "session_scope": session_scope,
+            "source": source,
+            "conversation_id": conversation_id,
+            "limit": limit,
+            "total_results": 0,
+            "results": [],
+            "coverage": "full",
+            "degraded_to_fts": False,
+        }
+        if requested_limit > _LCM_GREP_HARD_LIMIT_CAP:
+            response["limit_clamped_from"] = requested_limit
+        if requested_session_scope not in _LCM_GREP_VALID_SCOPES:
+            response["ignored_session_scope"] = requested_session_scope
+            response["scope_note"] = (
+                "Unsupported session_scope; stayed on current. "
+                "Valid values: current, all, session."
+            )
+        return response
 
     try:
         provider = _run_within_deadline(
@@ -3341,9 +4006,13 @@ def _lcm_grep_semantic(
     current_session_id = engine.current_session_id
     has_current_session = bool(current_session_id)
     results: list[dict[str, Any]] = []
+    excluded_candidates = False
     for node, score in hydrated_nodes:
         if time.monotonic() >= deadline:
             return _lcm_grep_deadline_error(mode, "result_resolution")
+        if node.session_id in excluded_session_ids:
+            excluded_candidates = True
+            continue
         # conversation/role/source/time filters are enforced inside knn() before
         # the top-k cap, so no eligible lower-ranked vector was dropped for an
         # ineligible top hit; nothing further to post-filter here.
@@ -3368,7 +4037,7 @@ def _lcm_grep_semantic(
         if len(results) >= knn_limit:
             break
 
-    if not results:
+    if not results and not excluded_candidates:
         return degraded("semantic vector candidates could not be resolved")
 
     response: dict[str, Any] = {
@@ -3530,12 +4199,19 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
     """Search LCM history using full-text, semantic, or RRF hybrid retrieval."""
     request_started = time.monotonic()
     mode = str(args.get("mode") or "full_text").strip().lower()
-    if mode == "full_text":
-        return _lcm_grep_full_text(args, **kwargs)
-
     engine = _require_engine(kwargs)
     if engine is None:
         return json.dumps({"error": "LCM engine not initialized"})
+    excluded_session_ids, exclusions_error = _parse_retrieval_excluded_session_ids(
+        args, engine.current_session_id
+    )
+    if exclusions_error:
+        return json.dumps({"error": exclusions_error})
+    parsed_args = dict(args)
+    parsed_args["_excluded_session_ids"] = excluded_session_ids
+    if mode == "full_text":
+        return _lcm_grep_full_text(parsed_args, **kwargs)
+
     timeout_s = max(
         0.001,
         float(getattr(engine._config, "embedding_query_timeout_s", 3.0)),
@@ -3544,9 +4220,9 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
     if time.monotonic() >= deadline:
         return json.dumps(_lcm_grep_deadline_error(mode, "tool_entry"))
     if mode == "semantic":
-        return json.dumps(_lcm_grep_semantic(args, engine=engine, deadline=deadline))
+        return json.dumps(_lcm_grep_semantic(parsed_args, engine=engine, deadline=deadline))
     if mode == "hybrid":
-        return json.dumps(_lcm_grep_hybrid(args, engine=engine, deadline=deadline))
+        return json.dumps(_lcm_grep_hybrid(parsed_args, engine=engine, deadline=deadline))
     return json.dumps({
         "error": "mode must be one of: full_text, semantic, hybrid",
     })
@@ -4275,15 +4951,21 @@ def _lcm_recall_approx_reason(arm: str) -> str:
 
 
 def _lcm_recall_fts_arm(
-    engine: "LCMEngine", query: str, *, candidate_limit: int, deadline: float
+    engine: "LCMEngine",
+    query: str,
+    *,
+    candidate_limit: int,
+    deadline: float,
+    excluded_session_ids: set[str],
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-    """FTS arm: raw messages across ALL sessions (no conversation filter)."""
+    """FTS arm: raw messages across all eligible sessions."""
     payload = _lcm_grep_full_text_with_deadline(
         {
             "query": query,
             "mode": "recall",
             "session_scope": "all",
             "limit": candidate_limit,
+            "_excluded_session_ids": excluded_session_ids,
         },
         engine=engine,
         deadline=deadline,
@@ -4291,6 +4973,13 @@ def _lcm_recall_fts_arm(
     )
     if "error" in payload:
         return [], payload
+    # Grep survives a message-search crash on its other stages, but THIS arm
+    # consumes only the message rows -- a disclosed crash means the arm
+    # produced nothing, which must surface as coverage 'none', never as an
+    # 'ok' empty result indistinguishable from an empty corpus (#256).
+    message_search_error = payload.get("message_search_error")
+    if message_search_error:
+        return [], {"error": f"full-text message search failed: {message_search_error}"}
     hits: list[dict[str, Any]] = []
     for row in payload.get("results", []):
         store_id = row.get("store_id")
@@ -4468,9 +5157,10 @@ def _lcm_recall_summary_arm(
     candidate_limit: int,
     lead_limit: int,
     deadline: float,
+    candidate_session_ids: list[str] | None,
     reference_strict: bool = False,
 ) -> tuple[list[dict[str, Any]], str, int | None, int | None, list[dict[str, Any]]]:
-    """Summary KNN arm: embedded summaries across ALL sessions (no filter)."""
+    """Summary KNN arm: embedded summaries across all eligible sessions."""
     knn_results = _run_within_deadline(
         lambda: run_knn(
             engine,
@@ -4480,7 +5170,7 @@ def _lcm_recall_summary_arm(
             deadline=deadline,
             since=None,
             until=None,
-            conversation_ids=None,
+            conversation_ids=candidate_session_ids,
             source=None,
             vector_store_cls=VectorStore,
             scan_rows=max(1, int(getattr(engine._config, "recall_scan_rows", 25_000))),
@@ -4542,8 +5232,9 @@ def _lcm_recall_chunk_arm(
     provider: Any,
     candidate_limit: int,
     deadline: float,
-) -> tuple[list[dict[str, Any]], str]:
-    """Chunk KNN arm: verbatim chunk vectors across ALL sessions (no filter)."""
+    candidate_session_ids: list[str] | None,
+) -> tuple[list[dict[str, Any]], str, int | None, int | None]:
+    """Chunk KNN arm: verbatim chunk vectors across all eligible sessions."""
     knn_results = _run_within_deadline(
         lambda: run_chunk_knn(
             engine,
@@ -4553,7 +5244,7 @@ def _lcm_recall_chunk_arm(
             deadline=deadline,
             since=None,
             until=None,
-            conversation_ids=None,
+            conversation_ids=candidate_session_ids,
             source=None,
             vector_store_cls=VectorStore,
             scan_rows=max(1, int(getattr(engine._config, "recall_scan_rows", 25_000))),
@@ -4716,13 +5407,207 @@ def _lcm_recall_rerank(
     return reordered, "applied", rerank_scores
 
 
+def _lcm_recall_preflight_scan_deadline(now: float, deadline: float) -> float:
+    """Derive the corpus preflight's independent scan deadline.
+
+    Bounded by a small absolute cap and a fraction of the remaining request
+    budget, and never past the request deadline itself. A preflight that hits
+    this bound returns False (fail-open), leaving the full remaining budget
+    with the FTS arm instead of starving every arm at once.
+    """
+    remaining = max(0.0, deadline - now)
+    return min(
+        deadline,
+        now
+        + min(
+            _LCM_RECALL_PREFLIGHT_MAX_BUDGET_S,
+            max(0.001, remaining * _LCM_RECALL_PREFLIGHT_BUDGET_FRACTION),
+        ),
+    )
+
+
+def _lcm_recall_has_usable_vector_corpus(
+    engine: "LCMEngine",
+    *,
+    run_summary: bool,
+    run_chunk: bool,
+    provider_name: str,
+    model_name: str,
+    excluded_session_ids: set[str],
+    deadline: float,
+) -> bool:
+    """Return whether a requested semantic arm has vectors for its selected profile.
+
+    This read-only preflight mirrors ``VectorStore`` profile ordering and requires
+    a live metadata+vector pair whose SOURCE ROW is still present -- the same
+    liveness predicate the real scans apply (``summary_nodes`` for the summary
+    arm, ``messages`` for the chunk arm). Merely configuring embeddings,
+    registering an empty profile, or leaving orphaned vectors behind a
+    best-effort purge therefore cannot shorten the only usable FTS fallback.
+    Missing or partial optional schema fails closed without materializing
+    feature tables.
+
+    Session eligibility is part of the real scans' predicate too: the vector
+    arms consume ``candidate_session_ids`` as a hard scope filter, so a corpus
+    whose only live pairs sit in EXCLUDED sessions is not a semantic route for
+    this request. Both source joins therefore carry the same exclusion
+    predicate (``NOT IN`` over the request's exclusion set is equivalent to the
+    whitelist for an existence probe: every source row's session is enumerated
+    by the scope tables, so eligible == not excluded).
+    """
+    provider_name = str(provider_name or "").strip().lower()
+    # Profiles are registered under ``provider.provider_id`` (command.py warmup),
+    # never under the operator's config spelling, so EVERY alias
+    # ``resolve_provider`` accepts must collapse to the same canonical ID here.
+    # An alias left unmapped makes the preflight miss a real corpus, the cap
+    # never engages, and a slow FTS scan can still starve the valid vector arm --
+    # the exact starvation this preflight exists to prevent. The authority for
+    # these sets is embedding_provider.py:1965-1985 (voyage/voyageai,
+    # fastembed/fast-embed, openai-compatible/openai/siliconflow); ollama has no
+    # alias. Adding an alias there requires adding it here.
+    provider_name = {
+        "voyageai": "voyage",
+        "fast-embed": "fastembed",
+        "openai": "openai-compatible",
+        "siliconflow": "openai-compatible",
+    }.get(provider_name, provider_name)
+    model_name = str(model_name or "").strip()
+    if not provider_name or not model_name or time.monotonic() >= deadline:
+        return False
+    scan_deadline = _lcm_recall_preflight_scan_deadline(time.monotonic(), deadline)
+
+    conn: sqlite3.Connection | None = None
+    try:
+        db_path = Path(engine._store.db_path).resolve()
+        remaining_s = max(0.001, scan_deadline - time.monotonic())
+        conn = sqlite3.connect(
+            f"{db_path.as_uri()}?mode=ro",
+            uri=True,
+            timeout=min(0.05, remaining_s),
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.set_progress_handler(
+            lambda: 1 if time.monotonic() >= scan_deadline else 0,
+            1000,
+        )
+
+        def table_columns(table: str) -> set[str]:
+            return {
+                str(row[1])
+                for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+
+        exclusion_where = ""
+        exclusion_params: tuple[str, ...] = ()
+        if excluded_session_ids:
+            exclusion_params = tuple(sorted(excluded_session_ids))
+            placeholders = ",".join("?" for _ in exclusion_params)
+            exclusion_where = f" AND src.session_id NOT IN ({placeholders})"
+
+        def corpus_has_vectors(
+            *,
+            task: str,
+            selected_model: str,
+            meta_table: str,
+            vector_table: str,
+            id_column: str,
+            source_join: str,
+            source_where: str = "",
+        ) -> bool:
+            # The progress handler only fires every 1000 VM ops, so a probe
+            # that starts after scan expiry could still slip through whole;
+            # this check makes the scan budget binding regardless of handler
+            # granularity.
+            if time.monotonic() >= scan_deadline:
+                return False
+            profile = conn.execute(
+                """
+                SELECT identity_hash
+                FROM lcm_embedding_profile
+                WHERE model_name = ? AND provider = ? AND task = ?
+                ORDER BY (active = 1 AND archived_at IS NULL) DESC,
+                         registered_at DESC, identity_hash DESC
+                LIMIT 1
+                """,
+                (selected_model, provider_name, task),
+            ).fetchone()
+            if profile is None:
+                return False
+            identity_hash = str(profile["identity_hash"])
+            row = conn.execute(
+                f"""
+                SELECT 1
+                FROM {meta_table} m
+                JOIN {vector_table} v
+                  ON v.{id_column} = m.{id_column}
+                 AND v.identity_hash = m.identity_hash
+                {source_join}
+                WHERE m.identity_hash = ? AND m.archived = 0{source_where}{exclusion_where}
+                LIMIT 1
+                """,
+                (identity_hash, *exclusion_params),
+            ).fetchone()
+            return row is not None
+
+        # A metadata+vector pair is NOT a usable corpus on its own: both real
+        # scans INNER-join the source row, so a vector whose source is gone (or,
+        # for summaries, suppressed) scores nothing. That state is reachable and
+        # supported on both arms -- ``_purge_embeddings_for_nodes``
+        # (engine.py:4116-4147) and ``_archive_chunks_for_messages``
+        # (engine.py:4149-4183) both swallow failures on purpose, the former
+        # precisely because "the summary_nodes join still keeps orphaned vectors
+        # out of ranking". Without these joins such an orphan reports a semantic
+        # route, cuts FTS to a quarter of the budget, and leaves the request with
+        # no arm that can return anything. Authority for the predicates:
+        # vector_store.py:1414 + 1892 with suppressed_at at 1395/1713/1872
+        # (summary), vector_store.py:1839 + 2647 (chunk).
+        if run_summary:
+            # Legacy databases predate ``suppressed_at``; the real scan gates the
+            # clause on the column existing, so this one does too.
+            summary_where = (
+                " AND src.suppressed_at IS NULL"
+                if "suppressed_at" in table_columns("summary_nodes")
+                else ""
+            )
+            if corpus_has_vectors(
+                task="summary",
+                selected_model=model_name,
+                meta_table="lcm_embedding_meta",
+                vector_table="lcm_embedding_vectors",
+                id_column="embedded_id",
+                source_join=(
+                    "JOIN summary_nodes src "
+                    "ON src.node_id = CAST(m.embedded_id AS INTEGER)"
+                ),
+                source_where=summary_where,
+            ):
+                return True
+        if run_chunk and corpus_has_vectors(
+            task="chunk",
+            selected_model=default_chunk_model(provider_name, model_name),
+            meta_table="lcm_chunk_meta",
+            vector_table="lcm_chunk_vectors",
+            id_column="chunk_id",
+            source_join="JOIN messages src ON src.store_id = m.store_id",
+        ):
+            return True
+        return False
+    except (OSError, ValueError, sqlite3.Error):
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     """Search the agent's entire memory (all conversations, all time) by meaning.
 
     Fuses three arms over the whole local database — FTS raw messages, embedded
     summary KNN, and verbatim chunk KNN — with RRF, then applies a soft
     scope/recency prior and (optionally) a cross-encoder rerank. The current
-    conversation is only ever a ranking BOOST, never a hard filter.
+    conversation is a ranking boost by default; explicit session exclusions are
+    hard filters applied before fusion.
     """
     request_started = time.monotonic()
     engine = _require_engine(kwargs)
@@ -4732,6 +5617,12 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     query = _coerce_query_arg(args.get("query"))
     if not query:
         return json.dumps({"error": "No query provided"})
+
+    excluded_session_ids, exclusions_error = _parse_retrieval_excluded_session_ids(
+        args, engine.current_session_id
+    )
+    if exclusions_error:
+        return json.dumps({"error": exclusions_error})
 
     parsed_limit = _parse_int_value(args.get("limit", _LCM_RECALL_DEFAULT_LIMIT), _LCM_RECALL_DEFAULT_LIMIT)
     if parsed_limit <= 0:
@@ -4779,6 +5670,12 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     timeout_s = max(0.001, float(getattr(engine._config, "recall_query_timeout_s", 8.0)))
     deadline = request_started + timeout_s
 
+    # Resolved under the deadline, not before it: this is DB work, and the
+    # vector arms below consume its result as a hard scope filter.
+    candidate_session_ids, session_scope_timed_out = _retrieval_candidate_session_ids(
+        engine, excluded_session_ids, deadline=deadline
+    )
+
     candidate_limit = min(_LCM_GREP_HYBRID_CANDIDATE_CAP, max(50, limit * 4))
     rerank_window = min(50, max(1, limit * 4))
     rerank_window_limit = int(getattr(engine._config, "rerank_window_limit", 0))
@@ -4804,19 +5701,87 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     embedding_query_metrics: list[dict[str, Any]] = []
     timed_out = False
     provider: Any = None
+    provider_override = str(kwargs.get("provider_override") or "").strip()
 
     # -- FTS arm (the default-on value: works with embeddings disabled) --
     if run_fts:
+        fts_deadline = deadline
+        fts_sub_budget_applied = False
+        configured_provider = provider_override or str(
+            getattr(engine._config, "embedding_provider", "") or ""
+        ).strip()
+        configured_model = str(
+            getattr(engine._config, "embedding_model", "") or ""
+        ).strip()
+        semantic_available = (
+            embeddings_enabled
+            and (run_summary or run_chunk)
+            # A timed-out scope resolution drops the vector arms (fail closed)
+            # and an empty whitelist leaves them nothing eligible to return;
+            # in both states FTS is the only arm that can produce hits, so the
+            # sub-budget cap must not engage.
+            and not session_scope_timed_out
+            and candidate_session_ids != []
+            and _lcm_recall_has_usable_vector_corpus(
+                engine,
+                run_summary=run_summary,
+                run_chunk=run_chunk,
+                provider_name=configured_provider,
+                model_name=configured_model,
+                excluded_session_ids=excluded_session_ids,
+                deadline=deadline,
+            )
+        )
+        if semantic_available:
+            now = time.monotonic()
+            remaining_s = max(0.0, deadline - now)
+            fts_budget_s = min(
+                remaining_s,
+                max(0.001, remaining_s * _LCM_RECALL_FTS_MAX_BUDGET_FRACTION),
+            )
+            fts_deadline = now + fts_budget_s
+            fts_sub_budget_applied = fts_deadline < deadline
         try:
             hits, fts_error = _lcm_recall_fts_arm(
-                engine, query, candidate_limit=candidate_limit, deadline=deadline
+                engine,
+                query,
+                candidate_limit=candidate_limit,
+                deadline=fts_deadline,
+                excluded_session_ids=excluded_session_ids,
             )
         except (_WorkerCapacityError, TimeoutError) as exc:
             hits, fts_error = [], {"error": str(exc)}
         if fts_error is not None:
             coverage["fts"] = "none"
-            degraded_reasons.append("full-text arm unavailable")
-            timed_out = timed_out or bool(fts_error.get("timeout"))
+            # The sub-budget above is a DELIBERATE cap, so its expiry is not
+            # budget exhaustion: the request still has time left and the vector
+            # arms are about to spend it. Reporting it as the request-level
+            # ``timeout`` would tell the agent its whole recall was cut short
+            # when in fact only this arm was fenced -- an assertion the run
+            # itself refutes. It degrades as missing FTS coverage instead
+            # (coverage stays in the none/ok vocabulary, with its own reason),
+            # and a genuine request-deadline overrun still falls through to the
+            # exhaustion branch below.
+            # ``timeout``-shaped errors are not all deadline expiries: worker
+            # saturation returns the same shape (``_run_within_deadline``
+            # raises ``_WorkerCapacityError``; ``_lcm_grep_full_text_with_
+            # deadline`` converts both causes to the deadline payload). The
+            # cap may only take credit when the sub-deadline actually elapsed
+            # -- otherwise an arm that never ran would be reported as
+            # deliberately fenced.
+            capped_expiry = (
+                fts_sub_budget_applied
+                and bool(fts_error.get("timeout"))
+                and time.monotonic() >= fts_deadline
+                and time.monotonic() < deadline
+            )
+            if capped_expiry:
+                degraded_reasons.append(
+                    "full-text arm capped to preserve semantic recall budget"
+                )
+            else:
+                degraded_reasons.append("full-text arm unavailable")
+                timed_out = timed_out or bool(fts_error.get("timeout"))
         else:
             arm_hits["fts"] = hits
             coverage["fts"] = "ok"
@@ -4824,7 +5789,24 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     # -- Vector arms. Local/same-model corpora share one query embedding;
     # Voyage's context chunk corpus resolves and embeds with its own model. --
     if run_summary or run_chunk:
-        if not embeddings_enabled:
+        # Ordered before the empty-scope branch on purpose: a timed-out
+        # enumeration also yields [], and must NOT be reported as the
+        # 'full' coverage of a genuinely empty eligible scope.
+        if session_scope_timed_out:
+            timed_out = True
+            degraded_reasons.append("session exclusion scope resolution timed out")
+            if run_summary:
+                coverage["summary"] = "none"
+            if run_chunk:
+                coverage["chunk"] = "none"
+        elif candidate_session_ids == []:
+            if run_summary:
+                arm_hits["summary"] = []
+                coverage["summary"] = "full"
+            if run_chunk:
+                arm_hits["chunk"] = []
+                coverage["chunk"] = "full"
+        elif not embeddings_enabled:
             degraded_reasons.append("semantic retrieval is disabled")
             if run_summary:
                 coverage["summary"] = "disabled"
@@ -4836,7 +5818,6 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             query_vector: list[float] | None = None
             chunk_provider: Any = None
             chunk_query_vector: list[float] | None = None
-            provider_override = kwargs.get("provider_override")
             try:
                 provider = _run_within_deadline(
                     lambda: _resolve_recall_provider(
@@ -4913,6 +5894,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                             candidate_limit=candidate_limit,
                             lead_limit=limit,
                             deadline=deadline,
+                            candidate_session_ids=candidate_session_ids,
                             reference_strict=reference_strict,
                         )
                         arm_hits["summary"] = hits
@@ -4942,6 +5924,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                             provider=chunk_provider,
                             candidate_limit=candidate_limit,
                             deadline=deadline,
+                            candidate_session_ids=candidate_session_ids,
                         )
                         arm_hits["chunk"] = hits
                         coverage["chunk"] = cov
@@ -5433,7 +6416,7 @@ def lcm_describe(args: Dict[str, Any], **kwargs) -> str:
         session_id = engine.current_session_id
 
     if node_id is not None:
-        node = _get_session_node(engine, node_id, session_id)
+        node = _get_session_node(engine, node_id, session_id=session_id)
         if node is None:
             scope = (
                 f"session {session_id}" if session_id_explicit else "current session"
@@ -5670,7 +6653,7 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
 
     assert raw_node_id_arg is not None
     node_id = raw_node_id_arg
-    node = _get_session_node(engine, node_id, session_id)
+    node = _get_session_node(engine, node_id, session_id=session_id)
     if node is None:
         scope = f"session {session_id}" if session_id_explicit else "current session"
         return json.dumps({"error": f"Node {node_id} not found in {scope}"})
@@ -5726,6 +6709,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
     engine = _require_engine(kwargs)
     if engine is None:
         return json.dumps({"error": "LCM engine not initialized"})
+    session_id = engine.current_session_id
 
     prompt = str(args.get("prompt") or "").strip()
     if not prompt:
@@ -5864,6 +6848,12 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
                 "node_ids": [],
                 "matches": [],
                 "raw_matches": [],
+                "evidence_provenance": _build_expand_query_evidence(
+                    [],
+                    session_id=session_id,
+                    context_truncated=False,
+                    synthesis_status="not_run",
+                ),
             }
         )
 
@@ -5882,6 +6872,7 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             hydrate_externalized_content=(
                 not session_ids_explicit or node.session_id == engine.current_session_id
             ),
+            session_id=node.session_id,
         )
         if session_ids_explicit:
             for block in node_blocks:
@@ -6096,6 +7087,12 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             "node_ids": node_ids,
             "matches": matches,
             "raw_matches": raw_matches,
+            "evidence_provenance": _build_expand_query_evidence(
+                context_blocks,
+                session_id=session_id,
+                context_truncated=context_truncated,
+                synthesis_status="failed",
+            ),
         }
         if include_timeout:
             payload["timeout_seconds"] = timeout
@@ -6104,13 +7101,16 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
     model = engine._config.expansion_model or engine._config.summary_model or ""
     timeout = engine._config.expansion_timeout_ms / 1000
     try:
-        answer = _synthesize_expansion_answer(
-            prompt=prompt,
-            context_blocks=context_blocks,
-            model=model,
-            max_tokens=max_tokens,
-            timeout=timeout,
-        )
+        synthesize_kwargs = {
+            "prompt": prompt,
+            "context_blocks": context_blocks,
+            "model": model,
+            "max_tokens": max_tokens,
+            "timeout": timeout,
+        }
+        if engine._config.expansion_reasoning_effort:
+            synthesize_kwargs["reasoning_effort"] = engine._config.expansion_reasoning_effort
+        answer = _synthesize_expansion_answer(**synthesize_kwargs)
     except TimeoutError:
         logger.warning("LCM expand_query synthesis timed out after %.3fs", timeout)
         return _degraded_payload(
@@ -6142,6 +7142,12 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             "node_ids": node_ids,
             "matches": matches,
             "raw_matches": raw_matches,
+            "evidence_provenance": _build_expand_query_evidence(
+                context_blocks,
+                session_id=session_id,
+                context_truncated=context_truncated,
+                synthesis_status="completed",
+            ),
         }
     )
 
@@ -6828,6 +7834,10 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
     return json.dumps({
         "session_id": session_id,
         "compression_count": engine.compression_count,
+        "total_compactions": full_status.get("total_compactions", 0),
+        "total_compactions_scope": full_status.get(
+            "total_compactions_scope", "current_conversation"
+        ),
         "last_compression_status": full_status.get("last_compression_status", "idle"),
         "last_compression_noop_reason": full_status.get("last_compression_noop_reason", ""),
         "threshold_full_sweep": full_status.get("threshold_full_sweep"),
@@ -6882,11 +7892,13 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
             "max_depth": engine._config.incremental_max_depth,
             "condensation_fanin": engine._config.condensation_fanin,
             "summary_model": engine._config.summary_model or "(auxiliary)",
+            "summary_reasoning_effort": engine._config.summary_reasoning_effort or "(task default)",
             "summary_timeout_ms": engine._config.summary_timeout_ms,
             "summary_spend_max_calls": engine._config.summary_spend_max_calls,
             "summary_spend_window_seconds": engine._config.summary_spend_window_seconds,
             "summary_spend_backoff_seconds": engine._config.summary_spend_backoff_seconds,
             "expansion_model": engine._config.expansion_model or "(summary model)",
+            "expansion_reasoning_effort": engine._config.expansion_reasoning_effort or "(task default)",
         },
         "proactive_recall": {
             "enabled": bool(getattr(engine._config, "proactive_recall_enabled", False)),

@@ -6,6 +6,8 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from .config import _normalize_reasoning_effort
+
 logger = logging.getLogger(__name__)
 
 
@@ -102,3 +104,26 @@ def apply_lcm_model_route(call_kwargs: dict, model: str | None) -> None:
             route.provider or "(task default)",
             route.model,
         )
+
+
+def apply_lcm_reasoning_effort(call_kwargs: dict, effort: str | None) -> None:
+    """Apply an LCM-specific reasoning-effort override to auxiliary kwargs.
+
+    Unsupported values are ignored so the request falls back to the task/provider
+    default. ``LCMConfig`` already normalizes and reports configured values; this
+    only guards direct callers, and a bad one must not fail a live summary or
+    expansion call.
+    """
+    raw = effort or ""
+    normalized = _normalize_reasoning_effort(raw)
+    if not normalized:
+        if raw.strip():
+            logger.warning(
+                "unsupported LCM reasoning effort %r ignored; using the task/provider default",
+                raw,
+            )
+        return
+    if normalized == "none":
+        call_kwargs["reasoning_config"] = {"enabled": False, "effort": "none"}
+    else:
+        call_kwargs["reasoning_config"] = {"effort": normalized}

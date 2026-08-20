@@ -30,8 +30,8 @@ arguments documented below.
 
 | Tool | Use |
 |------|-----|
-| `lcm_grep` | Search current-session raw messages and summaries. `mode='full_text'` is the byte-compatible default; `mode='semantic'` searches embedded summaries; `mode='hybrid'` combines full-text and semantic ranks with RRF. Opt into `content_scope='externalized'` or `'both'` for bounded literal search over recoverable payload prefixes owned by the active session. Opt into `session_scope='all'` or `session_scope='session'` (with `session_id`) for bounded archive recovery over rows already present in `lcm.db`, including externally backfilled rows that may carry source strings such as `openclaw-lcm:*`; broader scopes return raw-message hits only in full-text mode and cannot search externalized payloads. Raw-message filters `role`, `time_from`, `time_to`, `source`, and `conversation_id` are pushed into the full-text query; when any is supplied, externalized payload results are omitted, and summary hits are omitted for the role/time filters so the filter contract stays exact. Use `session_search` for earlier separate sessions or broad cross-session recall. |
-| `lcm_recall` | Search the agent's entire memory across ALL conversations and all time by meaning. Runs three arms over the whole local database — full-text raw messages, embedded summary KNN, and verbatim chunk KNN (all cross-session, no filter) — fuses them with RRF, dedupes chunk hits against FTS by `store_id`, and applies a soft prior `final_score = rank_score × (1 + scope_bias × is_current_conversation) × recency_boost(half_life=30d, floor 0.5)`. `scope_bias` (0..1, default 0.5) and recency are ranking BOOSTS, never filters. `include` selects `all`/`summaries`/`verbatim`. An optional voyage `rerank-2.5-lite` stage (`LCM_RERANK_ENABLED`, default off) reorders the top window of candidates AFTER the scope/recency prior, as a pure rank-reorder (voyage relevance is never spliced onto the RRF scale); any failure skips silently to RRF order. When embeddings are disabled or the vector corpora are empty the tool degrades to the full-text arm — including for `include='summaries'`, whose only vector arm is dead in that state, so a summaries request still returns full-text hits rather than nothing. Each hit carries an `expand_hint`: verbatim excerpts get `lcm_expand(store_id=..., content_offset=...)`, current-session summary hits get `lcm_expand(node_id=...)`, and cross-session summary hits get `lcm_expand(node_id=..., session_id=...)`. Use `lcm_grep(mode='full_text')` for exact text in a known range and `lcm_load_session` for full transcripts. |
+| `lcm_grep` | Search current-session raw messages and summaries. `mode='full_text'` is the byte-compatible default; `mode='semantic'` searches embedded summaries; `mode='hybrid'` combines full-text and semantic ranks with RRF. Set `exclude_current_session=true` or pass `exclude_session_ids` to remove sessions before candidate caps, fusion, and final ranking. Opt into `content_scope='externalized'` or `'both'` for bounded literal search over recoverable payload prefixes owned by the active session. Opt into `session_scope='all'` or `session_scope='session'` (with `session_id`) for bounded archive recovery over rows already present in `lcm.db`, including externally backfilled rows that may carry source strings such as `openclaw-lcm:*`; broader scopes return raw-message hits only in full-text mode and cannot search externalized payloads. Raw-message filters `role`, `time_from`, `time_to`, `source`, and `conversation_id` are pushed into the full-text query; when any is supplied, externalized payload results are omitted, and summary hits are omitted for the role/time filters so the filter contract stays exact. Use `session_search` for earlier separate sessions or broad cross-session recall. |
+| `lcm_recall` | Search the agent's entire memory across ALL conversations and all time by meaning. Runs three arms over the whole local database — full-text raw messages, embedded summary KNN, and verbatim chunk KNN — removes sessions selected by `exclude_current_session` or `exclude_session_ids`, then fuses the remaining candidates with RRF, dedupes chunk hits against FTS by `store_id`, and applies a soft prior `final_score = rank_score × (1 + scope_bias × is_current_conversation) × recency_boost(half_life=30d, floor 0.5)`. `scope_bias` (0..1, default 0.5) and recency are ranking BOOSTS, never filters. `include` selects `all`/`summaries`/`verbatim`. An optional voyage `rerank-2.5-lite` stage (`LCM_RERANK_ENABLED`, default off) reorders the top window of candidates AFTER the scope/recency prior, as a pure rank-reorder (voyage relevance is never spliced onto the RRF scale); any failure skips silently to RRF order. When embeddings are disabled or the vector corpora are empty the tool degrades to the full-text arm — including for `include='summaries'`, whose only vector arm is dead in that state, so a summaries request still returns full-text hits rather than nothing. Each hit carries an `expand_hint`: verbatim excerpts get `lcm_expand(store_id=..., content_offset=...)`, current-session summary hits get `lcm_expand(node_id=...)`, and cross-session summary hits get `lcm_expand(node_id=..., session_id=...)`. Use `lcm_grep(mode='full_text')` for exact text in a known range and `lcm_load_session` for full transcripts. |
 | `lcm_query_state` | Query the feature-flagged same-DB V4 assertion sidecar by canonical subject, optional predicate/kind/scope/speaker, and optional as-of boundary. Returns typed lifecycle state with exact message store IDs, character spans, hashes, and quotes. It preserves unresolved conflicts and never treats recency alone as supersession. |
 | `lcm_compute` | Execute a question-derived, provider-neutral date/count/sum/difference/order/latest-state operation over exact raw spans or assertion IDs. Values, units, labels, keys, dates, operand order, completeness, and final wording are validated; unsupported or ambiguous inputs return an evidence-only fallback. |
 | `lcm_compile_evidence` | Turn one bounded semantic proposal into an exact-source-grounded evidence brief. The proposal may name facets and operands, but product code validates refs, quotes, spans, entities, dates, values, units, distinct keys, roles, and sources; finite coverage is never accepted from the proposal alone. |
@@ -39,9 +39,9 @@ arguments documented below.
 | `lcm_retrieve` | With `LCM_ADAPTIVE_RETRIEVAL_ENABLED=true`, coordinate one bounded retrieval episode inside the existing answerer turn. Named evidence requirements close only against exact observed refs; at most three calls to `lcm_recall`, `lcm_recent`, `lcm_query_state`, `lcm_load_session`, or `lcm_expand` are allowed. Warm reuse validates exact positive dependencies and the corpus coverage watermark. Final prose is never cached. |
 | `lcm_recent` | Retrieve recent summaries with natural UTC periods. Ready temporal rollups are preferred; missing, stale, disabled, and sub-day windows transparently use leaf summaries instead. |
 | `lcm_load_session` | Load one ordered raw-message transcript page for an explicit `session_id`. This is not search: it returns raw rows in `store_id` order, bounded by `limit`, with per-message content bounded by `max_content_chars`, and continues with `after_store_id` from `next_cursor`. Set `include_exact_ref=true` when rows will feed exact citation or computation; the default response stays byte-compatible. |
-| `lcm_describe` | Inspect the current-session DAG by default, or pass `session_id` to inspect a known node/DAG in another LCM session; a node must belong to the requested session. Previews an `externalized_ref` without loading full content; `externalized_ref` remains current-session only. |
+| `lcm_describe` | Inspect the current-session DAG by default, or pass `session_id` to inspect a known node/DAG in another LCM session; a node must belong to the requested session. Previews an `externalized_ref` without loading full content; `externalized_ref` remains current-session only and cannot be combined with `session_id`. |
 | `lcm_expand` | Recover source messages, child summaries, or externalized payloads with pagination. `node_id` lookup defaults to the current session; cross-session DAG expansion requires a matching explicit `session_id` (rejected in the other two modes). Use `store_id` to fetch a single raw message regardless of session, suitable for drilling into a cross-session `lcm_grep` result; in `store_id` mode, `include_exact_ref=true` adds the exact returned slice without changing default bytes. `externalized_ref` remains current-session only. |
-| `lcm_expand_query` | Retrieve from the active session by default or up to 20 explicit `session_ids`. `output='answer'` runs bounded synthesis; `output='evidence'` returns bounded serialized context without an LLM call. |
+| `lcm_expand_query` | Retrieve from the active session by default or up to 20 explicit `session_ids`. `output='answer'` runs bounded synthesis; `output='evidence'` returns bounded serialized context without an LLM call. Responses include bounded, tool-extracted `evidence_provenance` for the context supplied to synthesis. |
 | `lcm_status` | Show runtime health, context pressure, config, source lineage, and lifecycle stats. |
 | `lcm_inspect` | Read-only operator inventory for current-session lineage, message/frontier metadata, fresh tail, externalized refs/readability, compaction skip/no-op reasons, and matched ignore/stateless patterns. It returns metadata only; use `lcm_load_session`/`lcm_expand` when you need content. |
 | `lcm_doctor` | Run database, FTS, lifecycle, config, and context-pressure diagnostics. |
@@ -84,6 +84,12 @@ then verified by the pure engine. Enabling adaptive retrieval also binds the
 same-`lcm.db` query-view store. Warm views reuse evidence and immutable
 computation traces only when typed intent, requirement cardinality, exact source
 dependencies, and negative-space coverage still match.
+
+`lcm_grep` and `lcm_recall` accept `exclude_current_session=false` and
+`exclude_session_ids=[]`. The defaults preserve existing results. When enabled,
+the tools remove matching session ids before candidate caps, fusion, and final
+ranking. Excluding the only session selected by `session_scope='current'` or
+`'session'` returns a normal bounded response with no results.
 
 Within the current session, `source` filters raw rows directly and filters
 summary nodes by descendant raw-message source lineage. `unknown` is a real
@@ -273,6 +279,68 @@ rollups remain future work.
 ```json
 {"period": "date:2026-07-15", "scope": "conversation"}
 ```
+
+### `lcm_expand_query` evidence provenance
+
+Every successful, no-match, or structured degraded `lcm_expand_query` response
+includes an additive `evidence_provenance` object. On paths that run or attempt
+synthesis, the tool builds it from the exact bounded context blocks supplied to
+the auxiliary model; no-match returns an explicit empty bundle. It is not
+generated by that model.
+
+The bundle includes up to 24 unique summary, raw-message, and externalized-
+payload identities in deterministic first-seen context order. Repeated identities
+retain `context_occurrence_count` and up to eight distinct source-path records.
+Each record preserves up to eight production-shaped `{node_id, source_index}`
+hops plus the producer's original `depth` and `truncated` state, rather than
+silently discarding recursive occurrence information.
+
+The nested object is capped at 10,000 characters using the same default
+`json.dumps` representation used by the final tool response (`ensure_ascii=true`).
+The cap applies to `evidence_provenance` only, not to the complete
+`lcm_expand_query` response. Whole trailing items are removed until the nested
+object fits. String metadata is capped at 256 characters; any shortening reports
+the original character count and SHA-256 digest. A compact fixed-envelope
+fallback preserves the limit for pathological inputs.
+
+Each quote is capped at 500 characters. `quote_chars_before_provenance_cap` is
+the length of the context representation before this 500-character provenance
+cap—not necessarily the durable source's original length if retrieval already
+sliced it. `quote_truncated_by_provenance_cap` describes only this provenance
+cap; `context_truncated` separately describes synthesis-budget omission.
+
+Items retain available bounded node/store/ref, session, source, role,
+content-offset, occurrence/path, and direct `lcm_expand` arguments. If hydrated
+content differs from its durable `transcript_content`, both representations are
+recorded because both were visible in the synthesis context.
+
+Response-level and item-level fields separate four claims:
+
+- `locator_coverage` says whether every unique bounded synthesis-context identity
+  has locator arguments present (`none`, `partial`, or `complete`); it does not
+  claim those locators still resolve;
+- `locator_replay_status` is `unverified` when locator arguments are present and
+  `not_available` otherwise;
+- `semantic_entailment` is `not_verified` for a completed answer and
+  `not_applicable` when synthesis did not run or failed;
+- `identifiers_are_authority` is always `false`: node/store/session identifiers
+  locate evidence but do not authenticate a caller or grant access.
+
+`locator_replay_safety` is `not_guaranteed`: current scalar node/store/ref and
+offset locators do not provide durable staleness, revision, or database-generation
+detection. Locator presence is therefore not proof of exact replay.
+
+This PR adds no authorization mechanism. `node_id` and `externalized_ref` retain
+their current-session checks; `store_id` remains an intentional cross-session
+locator. Hosts/callers must authorize every expansion before invoking it and must
+not treat identifiers as capabilities.
+
+The provenance layer does not claim that a fluent answer is correct, that it
+resolved contradictory sources, or that every answer clause is supported.
+Existing top-level answer, match, pagination, and degraded-response fields are
+unchanged. Unknown-field-tolerant callers remain compatible; strict response
+schemas and fixed-size logging/gateway consumers must be updated for the new
+nested object.
 
 When temporal rollups are enabled and `ready` rollups cover the **entire**
 requested window, the response includes their ids and `ready` status in

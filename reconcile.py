@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -53,6 +54,46 @@ logger = logging.getLogger(__name__)
 _PRESERVED_OBJECTIVE_CONTEXT_PREFIX = "[Current user objective preserved from compacted history]"
 _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across context compression]"
 _MODEL_SWITCH_NOTIFICATION_PREFIX = "[Note: model was just switched from "
+# When the user sends a message mid-turn (/steer), the host appends it to a
+# tool result already sitting in the message list, wrapped in this block
+# (hermes-agent agent/prompt_builder.py:685 format_steer_marker; appended in
+# place at agent/agent_runtime_helpers.py:3983 and
+# agent/conversation_loop.py:1723).  The stored row and the replayed row can
+# therefore differ by exactly this block, in EITHER direction, so the block is
+# stripped from the replay identity to keep matching stable across the split.
+#
+# The strip is only sound when the block's text is ALREADY durable.  The host
+# never removes the marker once appended (no strip site exists in the host) and
+# persists the mutated list verbatim (run_agent.py:_persist_session ->
+# _flush_messages_to_session_db), so the live direction is "stored WITHOUT,
+# replayed WITH": a steer appended to a tool row LCM had already ingested.
+# Stripping that unconditionally lets reconciliation advance past the enriched
+# row, and the user's out-of-band text — a genuine instruction, per the host's
+# own STEER_CHANNEL_NOTE — never reaches the store.  So the incoming side is
+# stripped only against proof that the block is already persisted; without that
+# proof the row stays distinct and is re-ingested (duplicate-over-loss, which is
+# this engine's standing direction on the reconcile path).
+#
+# That proof must be bound to the OCCURRENCE, not to the block text.  The marker
+# header is a static constant (hermes-agent agent/prompt_builder.py:675
+# STEER_MARKER_OPEN — no timestamp, no sequence, no id), so a user who repeats an
+# instruction verbatim produces byte-identical blocks on different tool rows.
+# Proving durability from the text alone lets the first occurrence vouch for the
+# second, which collapses the second enriched row onto its stored pre-steer copy
+# and drops the repeat — the same loss this gate exists to prevent, one row over.
+# So the proof requires the store to hold THIS row already carrying the block,
+# and it counts occurrences: the same steer repeated while ONE tool result is
+# active appends two byte-identical blocks to that row, so a membership test
+# would let the single stored copy vouch for both and lose the second.
+_OOB_MESSAGE_BLOCK_RE = re.compile(
+    r"\[OUT-OF-BAND USER MESSAGE[^\]]*\].*?\[/OUT-OF-BAND USER MESSAGE\]",
+    re.DOTALL,
+)
+_OOB_MESSAGE_BLOCK_MARKER = "[OUT-OF-BAND USER MESSAGE"
+# Bound on the durable tail scanned for out-of-band block proof.  A miss is the
+# safe direction (no strip -> the row is re-ingested), so the bound only costs
+# a duplicate on pathologically long sessions.
+_OOB_DURABILITY_SCAN_LIMIT = 512
 
 # Replay-proof metadata namespaces. Both are session-scoped, versioned, bounded
 # and best-effort. They are kept strictly separate so provenance controls
@@ -101,6 +142,124 @@ class ReconcileMixin:
             return json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         except (TypeError, ValueError):
             return str(tool_calls)
+
+    def _out_of_band_blocks_are_durable_for_row(
+        self,
+        *,
+        tool_call_id: str,
+        stripped: str,
+        blocks: tuple[str, ...],
+    ) -> bool:
+        """True when this session's store already holds THIS row with these blocks.
+
+        Proof that stripping is identity-transparent: the store's copy of this
+        very row already carries the user's mid-turn text, so collapsing the
+        incoming row onto it loses nothing.  The proof is bound to a UNIQUE ROW
+        IDENTITY and occurrence-bound within it — a stored row qualifies only
+        when it shares this row's ``tool_call_id``, carries at least as many
+        copies of every block being stripped, and reduces to the same content
+        once its own blocks are removed.  Matching on (payload, block) alone is
+        not enough: the marker header is a static host constant, so a repeated
+        /steer produces byte-identical blocks and an earlier row — or an earlier
+        occurrence on THIS row — would vouch for a later one (see the module
+        note on _OOB_MESSAGE_BLOCK_RE).
+
+        Only positives are memoised — a negative must stay re-checkable, because
+        the very next ingest is what makes the row durable.  Every failure path
+        returns False (no strip), which is the duplicate-over-loss direction.
+        """
+        if not blocks:
+            return True
+        # No unique row identity, no proof.  Callers default a missing
+        # ``tool_call_id`` to "", so every ID-less row collapses onto that one
+        # key: an earlier ID-less row reducing to the same payload would satisfy
+        # the occurrence check for a block arriving fresh on a LATER ID-less row,
+        # strip it, collapse that row onto its stored pre-steer copy, and advance
+        # the cursor past the only copy of the user's instruction.  Fail closed —
+        # the cost is a duplicate, the alternative is silent loss.
+        if not tool_call_id:
+            return False
+        session_id = str(getattr(self, "_session_id", "") or "")
+        store = getattr(self, "_store", None)
+        if not session_id or store is None:
+            return False
+        cache = getattr(self, "_out_of_band_durable_rows", None)
+        if cache is None:
+            cache = set()
+            self._out_of_band_durable_rows = cache
+        # Digest the row identity rather than holding whole tool outputs: the
+        # memo only needs to answer "proven before?", and a positive is permanent.
+        key = hashlib.sha256(
+            "\x00".join((session_id, tool_call_id, stripped, *blocks)).encode("utf-8")
+        ).hexdigest()
+        if key in cache:
+            return True
+        try:
+            rows = store.get_session_tail(session_id, limit=_OOB_DURABILITY_SCAN_LIMIT)
+        except Exception:
+            return False
+        for row in rows or ():
+            if str(row.get("tool_call_id") or "") != tool_call_id:
+                continue
+            stored_content = normalize_content_value(row.get("content")) or ""
+            if _OOB_MESSAGE_BLOCK_MARKER not in stored_content:
+                continue
+            # Count-aware, not membership: the same /steer sent twice while one
+            # tool result is active appends two byte-identical blocks, and a
+            # containment test would let the single stored occurrence vouch for
+            # both.  The stored row proves an occurrence only when it carries at
+            # least as many copies of that block as are being stripped; a
+            # surplus incoming copy is new user text and keeps the row distinct.
+            stored_counts = Counter(_OOB_MESSAGE_BLOCK_RE.findall(stored_content))
+            if any(
+                stored_counts[block] < count for block, count in Counter(blocks).items()
+            ):
+                continue
+            if _OOB_MESSAGE_BLOCK_RE.sub("", stored_content).rstrip() != stripped:
+                continue
+            cache.add(key)
+            return True
+        return False
+
+    def _strip_out_of_band_blocks_for_identity(
+        self,
+        content: str,
+        *,
+        stored_row: bool,
+        tool_call_id: str = "",
+    ) -> str:
+        """Remove out-of-band user blocks from a replay identity when sound.
+
+        Stripping is sound only for a row with a unique identity — its
+        ``tool_call_id``.  A stored row carrying one is always safe to strip: it
+        IS the durable copy.  An incoming row carrying one is stripped only when
+        the store already holds THAT row with these same blocks; a block the
+        store has never seen at that position is real user content arriving for
+        the first time and must keep the row distinct so it gets ingested.
+
+        A row with no ``tool_call_id`` is stripped on NEITHER side.  Suppressing
+        the strip only on the incoming side would leave such a row permanently
+        unreconcilable — the stored copy would reduce to its pre-steer text while
+        every replay kept the block — so each turn would mismatch and re-ingest
+        the whole session.  Keeping the block on both sides converges instead:
+        identical rows match, and a row whose stored copy predates the block
+        still differs from it, so the new instruction is ingested.
+        """
+        if _OOB_MESSAGE_BLOCK_MARKER not in content:
+            return content
+        if not tool_call_id:
+            return content
+        stripped = _OOB_MESSAGE_BLOCK_RE.sub("", content).rstrip()
+        if stored_row:
+            return stripped
+        blocks = tuple(_OOB_MESSAGE_BLOCK_RE.findall(content))
+        if not blocks or not self._out_of_band_blocks_are_durable_for_row(
+            tool_call_id=tool_call_id,
+            stripped=stripped,
+            blocks=blocks,
+        ):
+            return content
+        return stripped
 
     def _has_durable_persisted_output_replay_identity(self, msg: Dict[str, Any]) -> bool:
         role = str(msg.get("role") or "unknown")
@@ -162,6 +321,17 @@ class ReconcileMixin:
             _bracket_end = content.find("]")
             if _bracket_end != -1:
                 content = content[_bracket_end + 1:].lstrip("\n")
+        # Out-of-band user messages appended mid-turn are delivery scaffolding
+        # ONLY once THIS row is durable with them: the stored row carries them
+        # and the replayed row does not, or vice versa.  Stripping a block this
+        # row's stored copy has never carried would collapse a genuine new user
+        # instruction onto an older row and drop it — see the module note on
+        # _OOB_MESSAGE_BLOCK_RE.
+        content = self._strip_out_of_band_blocks_for_identity(
+            content,
+            stored_row=stored_row,
+            tool_call_id=str(msg.get("tool_call_id") or ""),
+        )
         if (
             role == "tool"
             and _is_hermes_persisted_output_marker(content)

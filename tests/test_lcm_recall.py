@@ -16,40 +16,14 @@ from types import SimpleNamespace
 import pytest
 
 import hermes_lcm.tools as lcm_tools
+import hermes_lcm.vector_store as vector_store_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, SummaryNode
+from hermes_lcm.embedding_provider import resolve_provider as real_resolve_provider
 from hermes_lcm.store import MessageStore
 from hermes_lcm.vector_store import EmbeddingIdentity, VectorStore
 
 CURRENT = "session-cur"
-
-
-def test_cross_session_summary_hint_targets_explicit_node_expansion():
-    hint = lcm_tools._lcm_recall_summary_expand_hint(
-        {
-            "node_id": 42,
-            "session_id": "archived-session",
-            "from_current_session": False,
-        }
-    )
-
-    assert hint == "lcm_expand(node_id=42, session_id='archived-session')"
-
-
-def test_cross_session_summary_hint_quotes_hostile_session_ids():
-    """An imported session ID may carry quotes/backslashes; the advertised
-    handle must round-trip through lcm_expand's parser, so the hint uses !r
-    quoting via _session_expand_hint instead of raw interpolation."""
-    hostile = "o'brien\\import"
-    hint = lcm_tools._lcm_recall_summary_expand_hint(
-        {
-            "node_id": 7,
-            "session_id": hostile,
-            "from_current_session": False,
-        }
-    )
-
-    assert hint == f"lcm_expand(node_id=7, session_id={hostile!r})"
 
 
 class MockProvider:
@@ -118,13 +92,13 @@ def _add_summary(
     )
 
 
-def _seed_summary_vectors(engine, rows, *, provider="mock"):
+def _seed_summary_vectors(engine, rows, *, provider="mock", model="mock-model"):
     store = VectorStore(engine._store.db_path, config=engine._config)
     try:
-        store.register_profile("mock-model", provider, 2)
-        identity = store.capture_identity("mock-model", provider=provider)
+        store.register_profile(model, provider, 2)
+        identity = store.capture_identity(model, provider=provider)
         for node_id, vector in rows:
-            store.record_embedding(str(node_id), "summary", "mock-model", vector, identity=identity)
+            store.record_embedding(str(node_id), "summary", model, vector, identity=identity)
     finally:
         store.close()
 
@@ -153,6 +127,17 @@ def _seed_chunk_vectors(engine, rows):
             )
     finally:
         store.close()
+
+
+def _freeze_vector_store_clock(monkeypatch, clock):
+    """Put the vector store on the same synthetic clock as the tool.
+
+    The recall budget is one absolute deadline read by both ``tools`` and the
+    store's full-corpus scan. Freezing only the tool's clock leaves the store on
+    real time, so it sees the synthetic deadline as already expired and reports
+    ``coverage='bounded'`` before scoring a single batch.
+    """
+    monkeypatch.setattr(vector_store_module, "_monotonic", lambda: clock[0])
 
 
 def _recall(engine, monkeypatch, provider=None, **args):
@@ -280,6 +265,366 @@ def test_summary_hit_carries_direct_source_store_id(recall_engine, monkeypatch):
     hit = next(hit for hit in payload["hits"] if hit["node_id"] == node_id)
     assert hit["kind"] == "summary"
     assert hit["store_id"] == store_id
+
+
+def test_recall_excludes_sessions_from_lexical_summary_and_chunk_candidates(
+    recall_engine, monkeypatch
+):
+    for session_id in (CURRENT, "session-a", "session-b"):
+        store_id = recall_engine._store.append(
+            session_id,
+            {"role": "user", "content": "kanban dashboard sprint retained detail"},
+        )
+        node_id = _add_summary(
+            recall_engine,
+            "kanban dashboard sprint retained summary",
+            session_id=session_id,
+            created_at=5.0,
+        )
+        _seed_summary_vectors(recall_engine, [(node_id, [1.0, 0.0])])
+        _seed_chunk_vectors(recall_engine, [(store_id, 0, 0, 39, [1.0, 0.0])])
+
+    payload = _recall(
+        recall_engine,
+        monkeypatch,
+        include="all",
+        scope_bias=0.0,
+        limit=25,
+        exclude_current_session=True,
+        exclude_session_ids=["session-a"],
+    )
+
+    assert payload["hits"]
+    assert {hit["session_id"] for hit in payload["hits"]} == {"session-b"}
+    assert {arm for hit in payload["hits"] for arm in hit["arms"]} == {
+        "fts",
+        "summary",
+        "chunk",
+    }
+
+
+def test_recall_rejects_non_list_session_exclusions(recall_engine):
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "kanban", "exclude_session_ids": "session-a"},
+            engine=recall_engine,
+        )
+    )
+
+    assert payload == {"error": "exclude_session_ids must be an array of strings"}
+
+
+@pytest.mark.parametrize("invalid_id", ["", "   ", 7, None])
+def test_recall_rejects_invalid_session_exclusion_entries(recall_engine, invalid_id):
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "kanban", "exclude_session_ids": [invalid_id]},
+            engine=recall_engine,
+        )
+    )
+
+    assert payload == {
+        "error": "exclude_session_ids must contain only non-empty strings"
+    }
+
+
+def test_recall_excludes_sessions_before_the_summary_candidate_cap(
+    recall_engine, monkeypatch
+):
+    vectors = []
+    for index in range(50):
+        node_id = _add_summary(
+            recall_engine,
+            f"crowding summary {index}",
+            session_id="crowding-session",
+            created_at=float(index + 2),
+        )
+        vectors.append((node_id, [1.0, 0.0]))
+    kept = _add_summary(
+        recall_engine,
+        "eligible lower-ranked summary",
+        session_id="kept-session",
+        created_at=1.0,
+    )
+    vectors.append((kept, [0.5, 0.8660254]))
+    _seed_summary_vectors(recall_engine, vectors)
+
+    payload = _recall(
+        recall_engine,
+        monkeypatch,
+        include="summaries",
+        scope_bias=0.0,
+        limit=1,
+        exclude_session_ids=["crowding-session"],
+    )
+
+    assert [hit["node_id"] for hit in payload["hits"]] == [kept]
+
+
+def test_recall_excludes_sessions_before_the_chunk_candidate_cap(
+    recall_engine, monkeypatch
+):
+    vectors = []
+    for index in range(50):
+        store_id = recall_engine._store.append(
+            "crowding-session",
+            {"role": "user", "content": f"unrelated crowding chunk {index}"},
+        )
+        vectors.append((store_id, 0, 0, 20, [1.0, 0.0]))
+    kept = recall_engine._store.append(
+        "kept-session",
+        {"role": "user", "content": "eligible lower-ranked chunk"},
+    )
+    vectors.append((kept, 0, 0, 20, [0.5, 0.8660254]))
+    _seed_chunk_vectors(recall_engine, vectors)
+
+    payload = _recall(
+        recall_engine,
+        monkeypatch,
+        include="verbatim",
+        scope_bias=0.0,
+        limit=1,
+        exclude_session_ids=["crowding-session"],
+    )
+
+    assert [hit["store_id"] for hit in payload["hits"]] == [kept]
+
+
+def test_recall_rejects_non_boolean_current_session_exclusion(recall_engine):
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "kanban", "exclude_current_session": "false"},
+            engine=recall_engine,
+        )
+    )
+
+    assert payload == {"error": "exclude_current_session must be a boolean"}
+
+
+def test_exclusion_session_scope_never_scans_the_whole_archive(recall_engine):
+    """The eligible-session whitelist resolves by indexed seek, not a corpus scan.
+
+    Both scope tables carry a session_id-leading index, so DISTINCT session_id
+    must come from a skip-scan. A plan that SCANs either table, or sorts a
+    temp B-tree, makes an exclusion cost O(rows) on a large archive.
+    """
+    connection = recall_engine._store.connection
+    for table in lcm_tools._RETRIEVAL_SESSION_SCOPE_TABLES:
+        sql = lcm_tools._RETRIEVAL_DISTINCT_SESSIONS_SQL.format(table=table)
+        plan = " | ".join(
+            str(row[3])
+            for row in connection.execute("EXPLAIN QUERY PLAN " + sql).fetchall()
+        )
+        assert f"SEARCH {table}" in plan, plan
+        assert f"SCAN {table}" not in plan, plan
+        assert "TEMP B-TREE" not in plan, plan
+
+
+def test_exclusion_session_scope_matches_not_in_semantics(recall_engine):
+    """The Python set difference is exactly the SQL NOT IN it replaced."""
+    for session_id in ("session-a", "session-b", "session-c"):
+        recall_engine._store.append(
+            session_id, {"role": "user", "content": "kanban detail"}
+        )
+    _add_summary(
+        recall_engine, "kanban summary", session_id="session-d", created_at=5.0
+    )
+
+    candidates, timed_out = lcm_tools._retrieval_candidate_session_ids(
+        recall_engine, {"session-b", "unknown-session"}
+    )
+
+    assert timed_out is False
+    # session-d is summary-only, so both scope tables must contribute.
+    assert candidates == ["session-a", "session-c", "session-d"]
+
+
+def test_exclusion_session_scope_returns_none_only_without_exclusions(recall_engine):
+    assert lcm_tools._retrieval_candidate_session_ids(recall_engine, set()) == (
+        None,
+        False,
+    )
+
+
+def test_exclusion_session_scope_fails_closed_on_an_expired_deadline(recall_engine):
+    """An interrupted enumeration must never drop the caller's hard filter.
+
+    Returning None here would widen the scope back to the whole archive and
+    silently surface the very sessions the caller excluded.
+    """
+    for session_id in ("session-a", "session-b"):
+        recall_engine._store.append(
+            session_id, {"role": "user", "content": "kanban detail"}
+        )
+
+    candidates, timed_out = lcm_tools._retrieval_candidate_session_ids(
+        recall_engine, {"session-a"}, deadline=time.monotonic() - 1.0
+    )
+
+    assert timed_out is True
+    assert candidates == []
+    assert candidates is not None
+
+
+def test_exclusion_scope_does_not_share_a_deadline_with_a_concurrent_operation(
+    recall_engine,
+):
+    """Two interleaved ops on one engine must not share progress-handler state.
+
+    ``MessageStore._conn`` is opened ``check_same_thread=False`` and is shared
+    across threads, and a SQLite progress handler is CONNECTION-global. If the
+    exclusion enumeration installed its handler there, (a) it would execute its
+    own statements under a concurrent operation's already-lapsed deadline and
+    take a spurious SQLITE_INTERRUPT, and (b) its teardown would clear that
+    concurrent operation's handler, silently disabling the other request's
+    timeout. Both arms below are on the SHARED connection; the enumeration must
+    be invisible to it.
+    """
+    for session_id in ("session-a", "session-b"):
+        recall_engine._store.append(
+            session_id, {"role": "user", "content": "kanban detail"}
+        )
+    shared = recall_engine._store.connection
+
+    # Concurrent operation B owns the shared connection's progress handler, and
+    # its budget has already lapsed (it will interrupt the next statement run
+    # on that connection).
+    ticks: list[int] = []
+    b_expired = [True]
+
+    def operation_b_handler() -> int:
+        ticks.append(1)
+        return 1 if b_expired[0] else 0
+
+    shared.set_progress_handler(operation_b_handler, 1)
+    try:
+        # Arm (a): operation A runs with no deadline of its own. It must not
+        # inherit B's lapsed deadline, so it must not touch the shared
+        # connection at all.
+        candidates, timed_out = lcm_tools._retrieval_candidate_session_ids(
+            recall_engine, {"session-b"}
+        )
+        assert timed_out is False
+        assert candidates == ["session-a"]
+        assert ticks == [], "enumeration ran a statement under operation B's handler"
+
+        # Arm (b): operation A runs under its own (live) deadline. Its teardown
+        # must leave B's handler installed and still firing.
+        candidates, timed_out = lcm_tools._retrieval_candidate_session_ids(
+            recall_engine, {"session-b"}, deadline=time.monotonic() + 30.0
+        )
+        assert timed_out is False
+        assert candidates == ["session-a"]
+        assert ticks == [], "enumeration ran a statement under operation B's handler"
+
+        b_expired[0] = False
+        shared.execute("SELECT COUNT(*) FROM messages").fetchall()
+        assert ticks, "the enumeration cleared operation B's progress handler"
+    finally:
+        shared.set_progress_handler(None, 0)
+
+
+def test_recall_scope_timeout_is_not_reported_as_a_complete_empty_scope(
+    recall_engine, monkeypatch
+):
+    """A timed-out scope resolution degrades; it never claims 'full' coverage.
+
+    Both a timeout and a genuinely empty eligible scope yield [], so ordering
+    the timeout branch first is what keeps a deadline miss from being read as
+    a complete, authoritative empty answer.
+    """
+    recall_engine._store.append(
+        "session-a", {"role": "user", "content": "kanban dashboard sprint detail"}
+    )
+    monkeypatch.setattr(
+        lcm_tools,
+        "_retrieval_candidate_session_ids",
+        lambda *_args, **_kwargs: ([], True),
+    )
+
+    payload = _recall(
+        recall_engine, monkeypatch, include="all", exclude_session_ids=["session-b"]
+    )
+
+    coverage = payload["provenance"]["coverage"]
+    assert coverage["summary"] == "none"
+    assert coverage["chunk"] == "none"
+    assert payload["timeout"] is True
+    assert payload["degraded"] is True
+    assert (
+        "session exclusion scope resolution timed out"
+        in payload["degraded_reason"]
+    ), payload["degraded_reason"]
+
+
+def test_recall_all_known_sessions_excluded_is_not_degraded(recall_engine, monkeypatch):
+    store_id = recall_engine._store.append(
+        CURRENT,
+        {"role": "user", "content": "kanban dashboard sprint detail"},
+    )
+    node_id = _add_summary(
+        recall_engine,
+        "kanban dashboard sprint summary",
+        session_id=CURRENT,
+        created_at=5.0,
+    )
+    _seed_summary_vectors(recall_engine, [(node_id, [1.0, 0.0])])
+    _seed_chunk_vectors(recall_engine, [(store_id, 0, 0, 30, [1.0, 0.0])])
+
+    payload = _recall(
+        recall_engine,
+        monkeypatch,
+        include="all",
+        exclude_current_session=True,
+    )
+
+    assert payload["hits"] == []
+    assert payload["degraded"] is False
+
+
+def test_recall_exclusions_hold_through_reference_strict_answer_ready(
+    recall_engine, monkeypatch
+):
+    """Exclusions are enforced at the summary KNN, so the strict path inherits them.
+
+    ``detail='answer_ready'`` with reference-strict delivery does not hand out
+    summary nodes: it carries their relevance onto the nodes' SOURCE MESSAGES.
+    The exclusion set is applied one step earlier, as the candidate session list
+    the summary/chunk KNN scans, so no excluded session can reach that expansion
+    -- this pins that seam between the two mechanisms.
+    """
+    for session_id in (CURRENT, "session-a", "session-b"):
+        store_id = recall_engine._store.append(
+            session_id,
+            {"role": "user", "content": "kanban dashboard sprint retained detail"},
+        )
+        node_id = _add_summary(
+            recall_engine,
+            "kanban dashboard sprint retained summary",
+            session_id=session_id,
+            created_at=5.0,
+            source_ids=[store_id],
+        )
+        _seed_summary_vectors(recall_engine, [(node_id, [1.0, 0.0])])
+        _seed_chunk_vectors(recall_engine, [(store_id, 0, 0, 39, [1.0, 0.0])])
+
+    assert getattr(recall_engine._config, "recall_reference_strict", True) is True
+
+    payload = _recall(
+        recall_engine,
+        monkeypatch,
+        include="all",
+        scope_bias=0.0,
+        limit=25,
+        detail="answer_ready",
+        exclude_current_session=True,
+        exclude_session_ids=["session-a"],
+    )
+
+    assert payload["hits"]
+    assert {hit["session_id"] for hit in payload["hits"]} == {"session-b"}
+    leads = payload["provenance"]["answer_ready"].get("summary_leads", [])
+    assert {lead["session_id"] for lead in leads} <= {"session-b"}
 
 
 def test_scope_bias_boosts_current_conversation_without_filtering(recall_engine, monkeypatch):
@@ -1330,6 +1675,738 @@ def test_recall_uses_recall_timeout_budget(recall_engine, monkeypatch):
     payload = _recall(recall_engine, monkeypatch, include="verbatim", limit=5)
     assert payload.get("timeout") is not True
     assert payload["hits"]
+
+
+def test_slow_fts_arm_cannot_starve_semantic_recall_and_rerank(recall_engine, monkeypatch):
+    """A slow first arm degrades alone instead of consuming the whole recall budget."""
+    recall_engine._config.recall_query_timeout_s = 8.0
+    recall_engine._config.embedding_provider = "voyage"
+    recall_engine._config.embedding_model = "voyage-4-large"
+    recall_engine._config.rerank_enabled = True
+    node = _add_summary(
+        recall_engine,
+        "semantic result survives slow full-text search",
+        session_id="session-a",
+        created_at=1.0,
+    )
+    _seed_summary_vectors(
+        recall_engine,
+        [(node, [1.0, 0.0])],
+        provider="voyage",
+        model="voyage-4-large",
+    )
+
+    clock = [100.0]
+    captured: dict[str, float] = {}
+
+    class VoyageProvider(MockProvider):
+        provider_id = "voyage"
+        model_id = "voyage-4-large"
+
+        def rerank(self, _query, documents, *, top_k=None, timeout, model="rerank-2.5-lite"):
+            return [(index, 1.0) for index, _document in enumerate(documents)]
+
+    provider = VoyageProvider()
+
+    def slow_fts(_engine, _query, *, candidate_limit, deadline, excluded_session_ids):
+        del candidate_limit
+        captured["fts_deadline"] = deadline
+        clock[0] = deadline
+        return [], {"error": "full-text deadline exhausted", "timeout": True}
+
+    def summary_arm(_engine, **_kwargs):
+        return (
+            [
+                {
+                    "kind": "summary",
+                    "node_id": 1,
+                    "session_id": "session-a",
+                    "timestamp": 1.0,
+                    "snippet": "semantic result survives slow full-text search",
+                    "from_current_session": False,
+                    "expand_hint": "lcm_expand(node_id=1)",
+                }
+            ],
+            "full",
+            1,
+            1,
+            [],
+        )
+
+    monkeypatch.setattr(lcm_tools.time, "monotonic", lambda: clock[0])
+    _freeze_vector_store_clock(monkeypatch, clock)
+    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: provider)
+    monkeypatch.setattr(lcm_tools, "_resolve_recall_chunk_provider", lambda *_a, **_k: provider)
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_fts_arm", slow_fts)
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_summary_arm", summary_arm)
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_chunk_arm", lambda *_a, **_k: ([], "none", 0, 0))
+
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "semantic deadline fairness", "include": "all", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    assert captured["fts_deadline"] < 108.0
+    assert payload["provenance"]["arms_run"] == ["summary"]
+    assert payload["provenance"]["coverage"] == {
+        "fts": "none",
+        "summary": "full",
+        "chunk": "none",
+    }
+    assert payload["provenance"]["rerank"] == "applied"
+    assert payload["hits"][0]["node_id"] == 1
+    assert payload["degraded"] is True
+    # The arm-local cap is deliberate, so its expiry degrades FTS coverage and
+    # names itself in degraded_reason -- it never claims the REQUEST budget was
+    # exhausted, which this run (semantic arm + rerank both completed) refutes.
+    assert payload.get("timeout") is not True
+    assert "full-text arm capped to preserve semantic recall budget" in [
+        reason.strip() for reason in payload["degraded_reason"].split(";")
+    ]
+    assert "full-text arm unavailable" not in payload["degraded_reason"]
+
+
+def test_capped_fts_expiry_reports_coverage_not_request_timeout(
+    recall_engine, monkeypatch
+):
+    """REGRESSION: a slow FTS arm fenced by the sub-budget, with the semantic arm
+    then succeeding inside the SAME request, must not report request-level
+    ``timeout``.
+
+    ``timeout`` is an agent-visible assertion that the recall budget ran out. A
+    deliberate arm-local cap that expires while the request still has ~75% of
+    its budget left -- and while the summary arm goes on to return hits with
+    that budget -- did not exhaust anything. The honest disclosure is the FTS
+    coverage vocabulary (``none``) plus a degraded_reason naming the cap.
+    """
+    recall_engine._config.recall_query_timeout_s = 8.0
+    recall_engine._config.embedding_provider = "voyage"
+    recall_engine._config.embedding_model = "voyage-4-large"
+    node = _add_summary(
+        recall_engine,
+        "semantic hit lands while full-text is fenced",
+        session_id="session-a",
+        created_at=1.0,
+    )
+    _seed_summary_vectors(
+        recall_engine,
+        [(node, [1.0, 0.0])],
+        provider="voyage",
+        model="voyage-4-large",
+    )
+
+    clock = [100.0]
+    captured: dict[str, float] = {}
+
+    provider = MockProvider()
+    provider.provider_id = "voyage"
+    provider.model_id = "voyage-4-large"
+
+    def slow_fts(_engine, _query, *, candidate_limit, deadline, excluded_session_ids):
+        del candidate_limit
+        captured["fts_deadline"] = deadline
+        # Burn exactly the arm's sub-budget, nothing of the rest.
+        clock[0] = deadline
+        return [], {
+            "error": "lcm_grep request deadline exceeded",
+            "mode": "recall",
+            "timeout": True,
+            "timeout_stage": "full_text",
+        }
+
+    def summary_arm(_engine, **_kwargs):
+        return (
+            [
+                {
+                    "kind": "summary",
+                    "node_id": node,
+                    "session_id": "session-a",
+                    "timestamp": 1.0,
+                    "snippet": "semantic hit lands while full-text is fenced",
+                    "from_current_session": False,
+                    "expand_hint": f"lcm_expand(node_id={node})",
+                }
+            ],
+            "full",
+            1,
+            1,
+            [],
+        )
+
+    monkeypatch.setattr(lcm_tools.time, "monotonic", lambda: clock[0])
+    _freeze_vector_store_clock(monkeypatch, clock)
+    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: provider)
+    monkeypatch.setattr(
+        lcm_tools, "_resolve_recall_chunk_provider", lambda *_a, **_k: provider
+    )
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_fts_arm", slow_fts)
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_summary_arm", summary_arm)
+    monkeypatch.setattr(
+        lcm_tools, "_lcm_recall_chunk_arm", lambda *_a, **_k: ([], "none", 0, 0)
+    )
+
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "capped arm disclosure", "include": "all", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    # The cap really did fire, and it really did expire.
+    assert captured["fts_deadline"] == 102.0
+    assert payload["provenance"]["coverage"]["fts"] == "none"
+    # ... yet the request had budget left and spent it on the semantic arm.
+    assert payload["provenance"]["arms_run"] == ["summary"]
+    assert payload["provenance"]["coverage"]["summary"] == "full"
+    assert payload["hits"][0]["node_id"] == node
+    # So the payload must NOT assert budget exhaustion.
+    assert payload.get("timeout") is not True
+    assert payload["degraded"] is True
+    assert "full-text arm capped to preserve semantic recall budget" in [
+        reason.strip() for reason in payload["degraded_reason"].split(";")
+    ]
+    assert "full-text arm unavailable" not in payload["degraded_reason"]
+
+
+def test_uncapped_fts_timeout_still_reports_request_timeout(
+    recall_engine, monkeypatch
+):
+    """The cap-aware suppression above is gated on the cap, not on FTS timeouts.
+
+    With no usable vector corpus the arm keeps the FULL request deadline, so an
+    FTS timeout there IS request-budget exhaustion and must still surface as
+    ``timeout``. Without this, the fix would silently swallow real timeouts.
+    """
+    recall_engine._config.recall_query_timeout_s = 8.0
+    recall_engine._config.embedding_provider = "voyage"
+    recall_engine._config.embedding_model = "voyage-4-large"
+
+    clock = [100.0]
+    captured: dict[str, float] = {}
+
+    def timing_out_fts(_engine, _query, *, candidate_limit, deadline, excluded_session_ids):
+        del candidate_limit
+        captured["fts_deadline"] = deadline
+        return [], {
+            "error": "lcm_grep request deadline exceeded",
+            "mode": "recall",
+            "timeout": True,
+            "timeout_stage": "full_text",
+        }
+
+    monkeypatch.setattr(lcm_tools.time, "monotonic", lambda: clock[0])
+    _freeze_vector_store_clock(monkeypatch, clock)
+    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: MockProvider())
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_fts_arm", timing_out_fts)
+
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "uncapped timeout", "include": "all", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    assert captured["fts_deadline"] == 108.0
+    assert payload["provenance"]["coverage"]["fts"] == "none"
+    assert payload["timeout"] is True
+    assert "full-text arm unavailable" in payload["degraded_reason"]
+
+
+# Every non-canonical spelling ``resolve_provider`` accepts, paired with the
+# ``provider_id`` warmup registers its profiles under. ``ollama`` has no alias.
+_PROVIDER_ALIAS_PAIRS = [
+    ("voyageai", "voyage"),
+    ("fast-embed", "fastembed"),
+    ("openai", "openai-compatible"),
+    ("siliconflow", "openai-compatible"),
+]
+
+
+@pytest.mark.parametrize(("configured_provider", "canonical_provider"), _PROVIDER_ALIAS_PAIRS)
+def test_provider_alias_resolves_to_its_canonical_provider_id(
+    tmp_path, configured_provider, canonical_provider
+):
+    """The alias table above is what ``resolve_provider`` actually does.
+
+    The recall preflight maps config spellings to canonical IDs by hand, so this
+    pins the pairing to the resolver rather than to a remembered constant: an
+    alias whose provider_id changes upstream fails here instead of silently
+    disabling the FTS cap for that provider.
+    """
+    config = LCMConfig(
+        database_path=str(tmp_path / "alias.db"),
+        embeddings_enabled=True,
+        embedding_provider=configured_provider,
+        embedding_model="alias-model",
+        embedding_base_url="http://localhost:8080/v1",
+    )
+    assert real_resolve_provider(config).provider_id == canonical_provider
+
+
+@pytest.mark.parametrize(("configured_provider", "canonical_provider"), _PROVIDER_ALIAS_PAIRS)
+def test_provider_alias_uses_existing_vector_corpus_for_fts_fairness(
+    recall_engine,
+    monkeypatch,
+    configured_provider,
+    canonical_provider,
+):
+    """Supported provider aliases select the same corpus as provider resolution."""
+    recall_engine._config.recall_query_timeout_s = 8.0
+    recall_engine._config.embedding_provider = configured_provider
+    node = _add_summary(
+        recall_engine,
+        "semantic result behind the provider alias",
+        session_id="session-a",
+        created_at=1.0,
+    )
+    _seed_summary_vectors(
+        recall_engine,
+        [(node, [1.0, 0.0])],
+        provider=canonical_provider,
+    )
+
+    provider = MockProvider()
+    provider.provider_id = canonical_provider
+    clock = [100.0]
+    captured: dict[str, float] = {}
+
+    def fts_arm(_engine, _query, *, candidate_limit, deadline, excluded_session_ids):
+        del candidate_limit
+        captured["fts_deadline"] = deadline
+        return [], None
+
+    monkeypatch.setattr(lcm_tools.time, "monotonic", lambda: clock[0])
+    _freeze_vector_store_clock(monkeypatch, clock)
+    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: provider)
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_fts_arm", fts_arm)
+
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "provider alias", "include": "all", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    assert captured["fts_deadline"] == 102.0
+    assert payload["provenance"]["coverage"]["summary"] == "full"
+    assert payload["hits"][0]["node_id"] == node
+
+
+def test_preflight_scan_deadline_is_bounded():
+    """The corpus preflight gets a small independent scan budget.
+
+    A no-match probe over a fully-orphaned corpus must exhaust candidates
+    despite ``LIMIT 1``; aborting it only at the REQUEST deadline would hand
+    the FTS arm an already-expired budget -- the preflight would starve the
+    very request it exists to protect. The scan deadline is therefore bounded
+    by a small absolute cap, a fraction of the remaining budget, and the
+    request deadline itself.
+    """
+    # Long request: the absolute cap binds.
+    assert lcm_tools._lcm_recall_preflight_scan_deadline(100.0, 200.0) == pytest.approx(
+        100.0 + lcm_tools._LCM_RECALL_PREFLIGHT_MAX_BUDGET_S
+    )
+    # Short request: the fractional bound binds.
+    assert lcm_tools._lcm_recall_preflight_scan_deadline(100.0, 101.0) == pytest.approx(
+        100.0 + 1.0 * lcm_tools._LCM_RECALL_PREFLIGHT_BUDGET_FRACTION
+    )
+    # Nearly-expired request: never extends past the request deadline.
+    assert (
+        lcm_tools._lcm_recall_preflight_scan_deadline(100.0, 100.0005) == 100.0005
+    )
+    # Already-expired request: scan is born expired, preflight fails open fast.
+    assert lcm_tools._lcm_recall_preflight_scan_deadline(100.0, 99.0) <= 100.0
+
+
+def test_preflight_scan_expiry_fails_open_to_full_fts_budget(
+    recall_engine, monkeypatch
+):
+    """An expired preflight scan keeps the FULL budget with the FTS arm.
+
+    Same live corpus as
+    ``test_provider_alias_uses_existing_vector_corpus_for_fts_fairness`` (the
+    engaged-cap control at 102.0): when the preflight's scan budget expires the
+    preflight reports no semantic route, so FTS keeps the entire request budget
+    (fail-open) -- and the semantic arms themselves still run and score, so the
+    only cost of the expiry is the missing cap, never lost recall.
+    """
+    recall_engine._config.recall_query_timeout_s = 8.0
+    node = _add_summary(
+        recall_engine,
+        "semantic result behind an expired preflight scan",
+        session_id="session-a",
+        created_at=1.0,
+    )
+    _seed_summary_vectors(recall_engine, [(node, [1.0, 0.0])])
+
+    clock = [100.0]
+    captured = _capture_fts_deadline(monkeypatch, clock)
+    monkeypatch.setattr(
+        lcm_tools,
+        "_lcm_recall_preflight_scan_deadline",
+        lambda now, deadline: now,
+    )
+
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "expired preflight", "include": "all", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    assert captured["fts_deadline"] == 108.0
+    assert payload["provenance"]["coverage"]["summary"] == "full"
+    assert payload["hits"][0]["node_id"] == node
+
+
+def test_excluded_summary_vectors_do_not_cap_the_fts_arm(recall_engine, monkeypatch):
+    """Session eligibility is part of the scans' predicate, so the preflight mirrors it.
+
+    The vector arms consume ``candidate_session_ids`` as a hard scope filter, so
+    a corpus whose only live summary vectors sit in an EXCLUDED session cannot
+    return an eligible semantic hit. Capping FTS on its account would shorten
+    the only arm able to reach the eligible session's content.
+    """
+    recall_engine._config.recall_query_timeout_s = 8.0
+    node = _add_summary(
+        recall_engine,
+        "summary vector living in the excluded session",
+        session_id="session-a",
+        created_at=1.0,
+    )
+    _seed_summary_vectors(recall_engine, [(node, [1.0, 0.0])])
+    # Eligible FTS-only content keeps the candidate whitelist non-empty, so the
+    # preflight's exclusion predicate itself is what must decline the corpus.
+    recall_engine._store.append(
+        "session-b", {"role": "user", "content": "eligible fts-only content"}
+    )
+
+    captured = _capture_fts_deadline(monkeypatch, [100.0])
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {
+                "query": "excluded summary corpus",
+                "include": "all",
+                "limit": 5,
+                "exclude_session_ids": ["session-a"],
+            },
+            engine=recall_engine,
+        )
+    )
+
+    assert captured["fts_deadline"] == 108.0
+    assert all(hit.get("node_id") != node for hit in payload["hits"])
+
+
+def test_excluded_chunk_vectors_do_not_cap_the_fts_arm(recall_engine, monkeypatch):
+    """Same fence on the chunk arm: its scan is scoped to eligible sessions."""
+    recall_engine._config.recall_query_timeout_s = 8.0
+    store_id = recall_engine._store.append(
+        "session-a", {"role": "user", "content": "chunk vector in excluded session"}
+    )
+    _seed_chunk_vectors(recall_engine, [(store_id, 0, 0, 20, [1.0, 0.0])])
+    recall_engine._store.append(
+        "session-b", {"role": "user", "content": "eligible fts-only content"}
+    )
+
+    captured = _capture_fts_deadline(monkeypatch, [100.0])
+    json.loads(
+        lcm_tools.lcm_recall(
+            {
+                "query": "excluded chunk corpus",
+                "include": "verbatim",
+                "limit": 5,
+                "exclude_session_ids": ["session-a"],
+            },
+            engine=recall_engine,
+        )
+    )
+
+    assert captured["fts_deadline"] == 108.0
+
+
+def test_worker_saturation_is_not_reported_as_the_fts_cap(recall_engine, monkeypatch):
+    """A saturated worker pool returns the deadline-shaped payload without the
+    arm ever running, so it must not be reported as the deliberate cap firing.
+
+    ``_run_within_deadline`` raises ``_WorkerCapacityError`` when all slots are
+    busy and ``_lcm_grep_full_text_with_deadline`` converts that to the same
+    ``timeout: True`` payload as a real expiry. The cap may only take credit
+    when the sub-deadline actually elapsed; here the clock never advances, so
+    the honest disclosure is "unavailable", not "capped to preserve semantic
+    recall budget".
+    """
+    recall_engine._config.recall_query_timeout_s = 8.0
+    node = _add_summary(
+        recall_engine,
+        "live corpus while the fts worker pool is saturated",
+        session_id="session-a",
+        created_at=1.0,
+    )
+    _seed_summary_vectors(recall_engine, [(node, [1.0, 0.0])])
+
+    clock = [100.0]
+
+    def saturated_fts(_engine, _query, *, candidate_limit, deadline, excluded_session_ids):
+        del candidate_limit, deadline, excluded_session_ids
+        # No clock advance: the arm never acquired a worker slot.
+        return [], {
+            "error": "lcm_grep request deadline exceeded",
+            "mode": "recall",
+            "timeout": True,
+            "timeout_stage": "full_text",
+        }
+
+    monkeypatch.setattr(lcm_tools.time, "monotonic", lambda: clock[0])
+    _freeze_vector_store_clock(monkeypatch, clock)
+    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: MockProvider())
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_fts_arm", saturated_fts)
+
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "saturated workers", "include": "all", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    assert payload["provenance"]["coverage"]["fts"] == "none"
+    reasons = [r.strip() for r in payload["degraded_reason"].split(";")]
+    assert "full-text arm unavailable" in reasons
+    assert "full-text arm capped to preserve semantic recall budget" not in reasons
+
+
+def test_scope_resolution_timeout_does_not_cap_the_fts_arm(recall_engine, monkeypatch):
+    """A timed-out scope resolution drops the vector arms, so it must not cap FTS.
+
+    ``_retrieval_candidate_session_ids`` failing closed means the semantic arms
+    deliver nothing this request; FTS is the only arm left and keeps the full
+    budget.
+    """
+    recall_engine._config.recall_query_timeout_s = 8.0
+    node = _add_summary(
+        recall_engine,
+        "live corpus behind a timed-out scope resolution",
+        session_id="session-a",
+        created_at=1.0,
+    )
+    _seed_summary_vectors(recall_engine, [(node, [1.0, 0.0])])
+
+    captured = _capture_fts_deadline(monkeypatch, [100.0])
+    monkeypatch.setattr(
+        lcm_tools,
+        "_retrieval_candidate_session_ids",
+        lambda _engine, _excluded, *, deadline=None: ([], True),
+    )
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {
+                "query": "timed out scope",
+                "include": "all",
+                "limit": 5,
+                "exclude_session_ids": ["session-zz"],
+            },
+            engine=recall_engine,
+        )
+    )
+
+    assert captured["fts_deadline"] == 108.0
+    assert payload["provenance"]["coverage"]["summary"] == "none"
+
+
+@pytest.mark.parametrize(
+    ("embeddings_enabled", "provider_name", "model_name"),
+    [
+        (False, "voyage", "voyage-4-large"),
+        (True, "", ""),
+    ],
+)
+def test_fts_fallback_keeps_full_recall_budget_without_semantic_route(
+    recall_engine,
+    monkeypatch,
+    embeddings_enabled,
+    provider_name,
+    model_name,
+):
+    recall_engine._config.recall_query_timeout_s = 8.0
+    recall_engine._config.embeddings_enabled = embeddings_enabled
+    recall_engine._config.embedding_provider = provider_name
+    recall_engine._config.embedding_model = model_name
+
+    clock = [100.0]
+    captured: dict[str, float] = {}
+
+    def fts_arm(_engine, _query, *, candidate_limit, deadline, excluded_session_ids):
+        del candidate_limit
+        captured["fts_deadline"] = deadline
+        return [], None
+
+    monkeypatch.setattr(lcm_tools.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: None)
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_fts_arm", fts_arm)
+
+    json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "fts fallback budget", "include": "all", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    assert captured["fts_deadline"] == 108.0
+
+
+def test_fts_keeps_full_budget_when_requested_vector_corpus_is_unbackfilled(
+    recall_engine,
+    monkeypatch,
+):
+    """Configured embeddings without requested vectors are still an FTS-only route."""
+    recall_engine._config.recall_query_timeout_s = 8.0
+
+    clock = [100.0]
+    captured: dict[str, float] = {}
+
+    def fts_arm(_engine, _query, *, candidate_limit, deadline, excluded_session_ids):
+        del candidate_limit
+        captured["fts_deadline"] = deadline
+        return [], None
+
+    monkeypatch.setattr(lcm_tools.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: MockProvider())
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_fts_arm", fts_arm)
+
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "fts fallback budget", "include": "verbatim", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    assert captured["fts_deadline"] == 108.0
+    assert payload["provenance"]["coverage"]["chunk"] == "none"
+
+
+def _capture_fts_deadline(monkeypatch, clock):
+    """Freeze both clocks, stub the FTS arm, and report the deadline it was given."""
+    captured: dict[str, float] = {}
+
+    def fts_arm(_engine, _query, *, candidate_limit, deadline, excluded_session_ids):
+        del candidate_limit
+        captured["fts_deadline"] = deadline
+        return [], None
+
+    monkeypatch.setattr(lcm_tools.time, "monotonic", lambda: clock[0])
+    _freeze_vector_store_clock(monkeypatch, clock)
+    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: MockProvider())
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_fts_arm", fts_arm)
+    return captured
+
+
+def test_orphaned_summary_vectors_do_not_cap_the_fts_arm(recall_engine, monkeypatch):
+    """A vector whose ``summary_nodes`` row is gone is not a semantic route.
+
+    ``LCMEngine._purge_embeddings_for_nodes`` swallows purge failures ON PURPOSE
+    (engine.py:4116-4136 -- "the summary_nodes join still keeps orphaned vectors
+    out of ranking"), so deleted-node + surviving-vector is a supported state.
+    The real summary scan inner-joins ``summary_nodes``
+    (vector_store.py:1414/1892), so the orphan scores nothing. Capping FTS to 25%
+    on its account would leave the request with NO arm that can return anything:
+    a recoverable slow-FTS run turned into an empty one.
+
+    The live-node control is
+    ``test_provider_alias_uses_existing_vector_corpus_for_fts_fairness``, which
+    pins the same corpus at the capped 102.0 deadline.
+    """
+    recall_engine._config.recall_query_timeout_s = 8.0
+    node = _add_summary(
+        recall_engine,
+        "summary behind an orphaned vector",
+        session_id="session-a",
+        created_at=1.0,
+    )
+    _seed_summary_vectors(recall_engine, [(node, [1.0, 0.0])])
+    # The deletion path engine.py takes on session reset, WITHOUT the
+    # best-effort embedding purge -- i.e. the purge that was allowed to fail.
+    assert recall_engine._dag.delete_session_nodes("session-a") == 1
+
+    captured = _capture_fts_deadline(monkeypatch, [100.0])
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "orphaned summary corpus", "include": "all", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    # Full 8s budget, not the 25% cap (102.0).
+    assert captured["fts_deadline"] == 108.0
+    # ...and the semantic arm really did produce nothing, which is exactly why
+    # the cap would have been unrecoverable rather than merely conservative.
+    assert payload["provenance"]["coverage"]["summary"] == "none"
+    assert payload["hits"] == []
+
+
+def test_orphaned_chunk_vectors_do_not_cap_the_fts_arm(recall_engine, monkeypatch):
+    """Same fence on the chunk arm: its scan inner-joins ``messages``.
+
+    ``MessageStore.delete_session_messages`` (store.py:554-563) drops rows
+    without touching ``lcm_chunk_meta``, so chunk vectors outlive their source
+    message. The bounded and full-corpus chunk scans both require the message row
+    (vector_store.py:1839/2647), so those vectors cannot answer either.
+    """
+    recall_engine._config.recall_query_timeout_s = 8.0
+    store_id = recall_engine._store.append(
+        CURRENT, {"role": "user", "content": "kanban dashboard sprint chunk"}
+    )
+    _seed_chunk_vectors(recall_engine, [(store_id, 0, 0, 20, [1.0, 0.0])])
+    assert recall_engine._store.delete_session_messages(CURRENT) == 1
+
+    captured = _capture_fts_deadline(monkeypatch, [100.0])
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "orphaned chunk corpus", "include": "verbatim", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    assert captured["fts_deadline"] == 108.0
+    assert payload["provenance"]["coverage"]["chunk"] == "none"
+    assert payload["hits"] == []
+
+
+def test_suppressed_summary_corpus_does_not_cap_the_fts_arm(recall_engine, monkeypatch):
+    """Suppression is the scan's other liveness filter, so the preflight honors it.
+
+    ``vector_store.py:1395-1396`` (and 1713/1872) drop suppressed nodes from every
+    summary scan when the column exists. A corpus whose only vectors sit on
+    suppressed nodes therefore returns nothing, so it must not shorten FTS either.
+    """
+    recall_engine._config.recall_query_timeout_s = 8.0
+    node = _add_summary(
+        recall_engine,
+        "suppressed summary with a live vector",
+        session_id="session-a",
+        created_at=1.0,
+    )
+    _seed_summary_vectors(recall_engine, [(node, [1.0, 0.0])])
+    conn = recall_engine._dag.connection
+    conn.execute("ALTER TABLE summary_nodes ADD COLUMN suppressed_at TEXT")
+    conn.execute(
+        "UPDATE summary_nodes SET suppressed_at = '2026-08-20' WHERE node_id = ?",
+        (node,),
+    )
+    conn.commit()
+
+    captured = _capture_fts_deadline(monkeypatch, [100.0])
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "suppressed summary corpus", "include": "all", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    assert captured["fts_deadline"] == 108.0
+    assert payload["provenance"]["coverage"]["summary"] == "none"
+    assert payload["hits"] == []
 
 
 def test_bounded_chunk_coverage_surfaces_as_degraded(recall_engine, monkeypatch):
@@ -3122,6 +4199,61 @@ def test_recall_fts_finds_oldest_matching_message_beyond_candidate_window(
     assert payload["hits"][0]["store_id"] == oldest
 
 
+def test_crashed_message_search_is_not_reported_as_ok_coverage(
+    recall_engine, monkeypatch
+):
+    """A crashed FTS message search must surface as coverage 'none', not 'ok'.
+
+    ``_lcm_grep_full_text`` deliberately degrades on a message-search crash
+    (grep's other stages may still produce results), but the recall FTS arm
+    consumes ONLY the message rows -- so before the disclosure existed, the
+    crash was logged and swallowed, and recall reported ``coverage.fts: 'ok'``
+    with zero hits. On an FTS-only install (embeddings disabled) that made a
+    crashed search arm indistinguishable from an empty corpus (#256; the
+    assertion ports the intent of #191's excluded coverage test to main's
+    none/ok vocabulary).
+    """
+    recall_engine._config.embeddings_enabled = False
+
+    def raising_search(*_a, **_k):
+        raise RuntimeError("simulated FTS crash")
+
+    # Instance-level patch: survives the shallow copy.copy(engine._store)
+    # inside _lcm_grep_full_text_with_deadline's worker.
+    recall_engine._store.search = raising_search
+
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "anything", "include": "verbatim", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    assert payload["provenance"]["coverage"]["fts"] == "none"
+    assert "full-text arm unavailable" in [
+        reason.strip() for reason in payload["degraded_reason"].split(";")
+    ]
+    assert payload["hits"] == []
+
+
+def test_grep_payload_discloses_message_search_crash(recall_engine):
+    """The grep payload itself carries the crash, not only the process log."""
+    def raising_search(*_a, **_k):
+        raise RuntimeError("simulated FTS crash")
+
+    recall_engine._store.search = raising_search
+
+    payload = json.loads(
+        lcm_tools._lcm_grep_full_text(
+            {"query": "anything", "session_scope": "all", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    assert "error" not in payload  # grep still degrades, it does not fail
+    assert payload["message_search_error"] == "simulated FTS crash"
+
+
 def test_describe_rejects_externalized_ref_with_session_id(recall_engine):
     """An explicit session_id alongside externalized_ref was silently ignored,
     so current-session payload content could be misattributed to the requested
@@ -3134,3 +4266,31 @@ def test_describe_rejects_externalized_ref_with_session_id(recall_engine):
     )
 
     assert "cannot be combined with session_id" in payload["error"]
+
+
+def test_cross_session_summary_hint_targets_explicit_node_expansion():
+    hint = lcm_tools._lcm_recall_summary_expand_hint(
+        {
+            "node_id": 42,
+            "session_id": "archived-session",
+            "from_current_session": False,
+        }
+    )
+
+    assert hint == "lcm_expand(node_id=42, session_id='archived-session')"
+
+
+def test_cross_session_summary_hint_quotes_hostile_session_ids():
+    """An imported session ID may carry quotes/backslashes; the advertised
+    handle must round-trip through lcm_expand's parser, so the hint uses !r
+    quoting via _session_expand_hint instead of raw interpolation."""
+    hostile = "o'brien\\import"
+    hint = lcm_tools._lcm_recall_summary_expand_hint(
+        {
+            "node_id": 7,
+            "session_id": hostile,
+            "from_current_session": False,
+        }
+    )
+
+    assert hint == f"lcm_expand(node_id=7, session_id={hostile!r})"

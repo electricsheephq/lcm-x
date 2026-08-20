@@ -22,6 +22,14 @@ _CODEX_OAUTH_CONTEXT_CAPS: dict[str, int] = {
     "gpt-5.3-codex-spark": 128_000,
     "gpt-5.3-codex": 272_000,
     "gpt-5.2-codex": 272_000,
+    # ⚠ RETIREMENT (owner-verified 2026-08-20): gpt-5.4 and gpt-5.4-mini leave
+    # Codex for ChatGPT-signed-in sessions on 2026-08-31 — the auth mode our
+    # users run. Nothing may DEFAULT to a 5.4 slug past that date (verified: no
+    # code default exists). For the record, the owner-verified real windows are
+    # gpt-5.4 = 1,050,000 (experimental 1M, changelog 2026-03-05) and
+    # gpt-5.4-mini = 400,000; the conservative enforcement values below are
+    # deliberately left as-is for the remaining days — they can only under-use
+    # a window, never overflow one, and the slugs retire before tuning matters.
     "gpt-5.4-mini": 272_000,
     "gpt-5.5": 272_000,
     "gpt-5.4": 272_000,

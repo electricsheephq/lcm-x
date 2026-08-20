@@ -17,7 +17,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Collection, Dict, List, Optional
 
 from .db_bootstrap import (
     ExternalContentFtsSpec,
@@ -49,7 +49,10 @@ from .search_query import (
     should_apply_directness_rank_adjustment,
 )
 from .message_content import normalize_content_value as _normalize_content_value
-from .sqlite_util import _run_sqlite_write_with_snapshot_retry
+from .sqlite_util import (
+    _run_sqlite_write_with_snapshot_retry,
+    _temporary_sqlite_busy_timeout,
+)
 from .tokens import count_message_tokens
 
 logger = logging.getLogger(__name__)
@@ -1124,6 +1127,138 @@ class MessageStore:
             return None
         return data if isinstance(data, dict) else None
 
+    def increment_compaction_telemetry(
+        self,
+        conversation_id: str,
+        increment: int,
+        updates: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically increment and update one conversation's telemetry record."""
+        if not conversation_id:
+            return None
+        if isinstance(increment, bool) or not isinstance(increment, int) or increment < 0:
+            raise ValueError("compaction telemetry increment must be a non-negative integer")
+        conn = self._conn
+        if conn is None:
+            return None
+
+        key = self._compaction_telemetry_key(conversation_id)
+        with self._write_lock:
+            try:
+                # Separate MessageStore instances have separate Python locks.
+                # Acquire SQLite's write reservation before reading so this
+                # read-modify-write serializes across every connection. This is
+                # best-effort telemetry on the completed-compaction hot path, so
+                # permit only a tightly bounded overlap before skipping instead
+                # of inheriting the connection's 30s wait.
+                with _temporary_sqlite_busy_timeout([conn], 100):
+                    conn.execute("BEGIN IMMEDIATE")
+                    row = conn.execute(
+                        "SELECT value FROM metadata WHERE key = ?",
+                        (key,),
+                    ).fetchone()
+                    try:
+                        existing = json.loads(str(row[0])) if row and row[0] else {}
+                    except (ValueError, TypeError):
+                        existing = {}
+                    if not isinstance(existing, dict):
+                        existing = {}
+
+                # Per-runtime high-water marks make a committed increment
+                # idempotent when its caller observes an ambiguous exception.
+                # Retain enough recent epochs for overlapping runtimes without
+                # allowing this diagnostic metadata row to grow forever.
+                watermarks = []
+                raw_watermarks = existing.get("counter_epoch_watermarks", [])
+                if isinstance(raw_watermarks, list):
+                    watermarks = [
+                        item
+                        for item in raw_watermarks
+                        if (
+                            isinstance(item, list)
+                            and len(item) == 2
+                            and isinstance(item[0], str)
+                            and item[0]
+                            and isinstance(item[1], int)
+                            and not isinstance(item[1], bool)
+                            and item[1] >= 0
+                        )
+                    ]
+                effective_increment = increment
+                counter_epoch = updates.get("counter_epoch")
+                target_count = updates.get("compression_count_at_record")
+                if (
+                    isinstance(counter_epoch, str)
+                    and counter_epoch
+                    and isinstance(target_count, int)
+                    and not isinstance(target_count, bool)
+                    and target_count >= 0
+                ):
+                    prior_count = next(
+                        (item[1] for item in watermarks if item[0] == counter_epoch),
+                        0,
+                    )
+                    effective_increment = max(0, target_count - prior_count)
+                    watermarks = [item for item in watermarks if item[0] != counter_epoch]
+                    watermarks.append([counter_epoch, max(prior_count, target_count)])
+                    watermarks = watermarks[-64:]
+
+                current_total = existing.get("total_compactions", 0)
+                if (
+                    isinstance(current_total, bool)
+                    or not isinstance(current_total, int)
+                    or current_total < 0
+                ):
+                    current_total = 0
+                # A zero-delta snapshot whose `updates` were computed from a read
+                # taken BEFORE this transaction can arrive after another runtime
+                # durably recorded a compaction. Its own total is then behind the
+                # committed one, which is the signal that its compaction-sensitive
+                # fields are stale: merging them unconditionally would overwrite
+                # the newly durable compaction metadata with pre-compaction values.
+                proposed_total = updates.get("total_compactions", current_total)
+                if (
+                    isinstance(proposed_total, bool)
+                    or not isinstance(proposed_total, int)
+                    or proposed_total < 0
+                ):
+                    proposed_total = current_total
+                stale_across_compaction = (
+                    effective_increment == 0 and proposed_total < current_total
+                )
+                record = dict(existing)
+                if stale_across_compaction:
+                    compaction_sensitive = {
+                        "turns_since_leaf_compaction",
+                        "peak_prompt_tokens_since_leaf_compaction",
+                        "last_leaf_compaction_at",
+                        "last_compaction_duration_ms",
+                    }
+                    record.update(
+                        (field, value)
+                        for field, value in updates.items()
+                        if field not in compaction_sensitive
+                    )
+                else:
+                    record.update(updates)
+                record["conversation_id"] = conversation_id
+                record["counter_epoch_watermarks"] = watermarks
+                record["total_compactions"] = current_total + effective_increment
+                conn.execute(
+                    """
+                    INSERT INTO metadata(key, value)
+                    VALUES(?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (key, json.dumps(record, sort_keys=True)),
+                )
+                conn.commit()
+                return record
+            except Exception:
+                if conn.in_transaction:
+                    conn.rollback()
+                raise
+
     def write_compaction_telemetry(self, conversation_id: str, record: Dict[str, Any]) -> None:
         """Upsert the per-conversation compaction-telemetry record.
 
@@ -1147,6 +1282,7 @@ class MessageStore:
                role: str | None = None,
                time_from: float | None = None,
                time_to: float | None = None,
+               exclude_session_ids: Collection[str] | None = None,
                allow_operators: bool = False) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
@@ -1158,6 +1294,7 @@ class MessageStore:
         - ``source='unknown'`` means the explicit unknown-source bucket, with
           legacy blank-source rows treated as equivalent for back-compat
         - ``conversation_id`` limits rows to one gateway conversation/session key
+        - ``exclude_session_ids`` removes sessions before candidate limits apply
         - ``allow_operators`` marks a query the CALLER composed as FTS5 syntax,
           keeping its bare AND/OR/NOT/NEAR. Never set it for user or agent text
         """
@@ -1179,6 +1316,7 @@ class MessageStore:
                 role=role,
                 time_from=time_from,
                 time_to=time_to,
+                exclude_session_ids=exclude_session_ids,
             )
 
         order_by = _build_search_order_by(
@@ -1202,6 +1340,11 @@ class MessageStore:
                 if session_id is not None:
                     where.append("m.session_id = ?")
                     args.append(session_id)
+                if exclude_session_ids:
+                    where.append(
+                        "m.session_id NOT IN (SELECT value FROM json_each(?))"
+                    )
+                    args.append(json.dumps(list(exclude_session_ids)))
                 if source_clause:
                     where.append(source_clause)
                     args.extend(source_args)
@@ -1243,6 +1386,7 @@ class MessageStore:
                     role=role,
                     time_from=time_from,
                     time_to=time_to,
+                    exclude_session_ids=exclude_session_ids,
                 )
 
             raw_primary_values: list[float] = []
@@ -1283,7 +1427,8 @@ class MessageStore:
                      conversation_id: str | None = None,
                      role: str | None = None,
                      time_from: float | None = None,
-                     time_to: float | None = None) -> List[Dict[str, Any]]:
+                     time_to: float | None = None,
+                     exclude_session_ids: Collection[str] | None = None) -> List[Dict[str, Any]]:
         # LIKE keeps every character the index cannot spell (emoji, punctuation)
         # because substring matching is the only way to find those rows.
         safe_query = sanitize_like_query(query)
@@ -1298,6 +1443,9 @@ class MessageStore:
         if session_id is not None:
             where.append("session_id = ?")
             args.append(session_id)
+        if exclude_session_ids:
+            where.append("session_id NOT IN (SELECT value FROM json_each(?))")
+            args.append(json.dumps(list(exclude_session_ids)))
         source_clause, source_args = _source_filter_clause("source", source)
         if source_clause:
             where.append(source_clause)
