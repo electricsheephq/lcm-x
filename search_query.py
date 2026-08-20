@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from typing import List
+import unicodedata
+from typing import Callable, List
 
 _CJK_RE = re.compile(
     r"["
@@ -26,16 +27,109 @@ _BOOLEAN_OPERATORS = {"AND", "OR", "NOT", "NEAR"}
 _RISKY_FTS_TOKEN_RE = re.compile(r"[A-Za-z0-9][\-:/][A-Za-z0-9]")
 _SPLIT_PUNCT_RE = re.compile(r"[-:/]+")
 _STRIP_EDGE_PUNCT = "\"'()[]{}.,;"
-# Characters that are special in FTS5 query syntax
+# Characters that are special in FTS5 QUERY SYNTAX (as opposed to characters
+# FTS5 simply cannot spell in a bareword). Only these have to go on the LIKE
+# path, which has no query grammar of its own.
 _FTS5_SPECIAL_CHARS = frozenset('"()*^-:{}.')
 
 
-def _sanitize_unquoted_fts5_fragment(text: str) -> str:
-    return "".join(" " if char in _FTS5_SPECIAL_CHARS else char for char in text)
+def _like_safe_char(char: str) -> str:
+    """Map one unquoted character to its LIKE-safe form.
+
+    LIKE is a substring match, so the only thing it needs removed is the
+    operator punctuation a user typed FOR the index (quoted phrases, prefix
+    ``*``). Everything else is signal it can match on — emoji above all, which
+    the FTS term form must drop because unicode61 does not index it, and which
+    LIKE is therefore the ONLY way to find.
+    """
+    return " " if char in _FTS5_SPECIAL_CHARS else char
 
 
-def sanitize_fts5_query(query: str) -> str:
-    """Strip FTS5 syntax operators while preserving balanced phrase quotes."""
+def _fts5_safe_char(char: str) -> str:
+    """Map one unquoted character to its FTS5 bareword-safe form.
+
+    An FTS5 bareword accepts only alphanumerics; every other character is
+    either query syntax (``"()*^-:{}.``), a string delimiter (``'``), or a
+    plain syntax error (``? , & $ ! % = < ;`` ...). A raw natural-language
+    question therefore fails ``MATCH`` outright and used to fall through to the
+    LIKE full-scan, which blows the recall deadline at scale and returns
+    nothing (F31 §3). Substituting a separator instead lets a question reach
+    the index in its term form; the default unicode61 tokenizer splits the
+    INDEXED text on exactly the same boundary, so no term is lost by the
+    substitution.
+
+    ``str.isalnum()`` alone is NOT that boundary: a combining mark is not
+    alphanumeric, so a decomposed ``naïve`` (``nai`` + U+0308) split into
+    ``nai ve`` while unicode61 indexes the word as ``naive`` — zero rows where
+    the raw query matched. Marks therefore stay inside the token, and
+    ``sanitize_fts5_query`` composes the query first.
+    """
+    if char.isalnum() or char.isspace():
+        return char
+    return char if unicodedata.category(char).startswith("M") else " "
+
+
+def _lower_operator_tokens(text: str) -> str:
+    return " ".join(
+        token.lower() if token in _BOOLEAN_OPERATORS else token
+        for token in text.split(" ")
+    )
+
+
+def _neutralize_bare_operators(sanitized: str) -> str:
+    """Lowercase bare AND/OR/NOT/NEAR outside quoted phrases.
+
+    FTS5 operators are only operators in UPPERCASE, so lowercasing turns them
+    back into ordinary barewords. Without this a raw question SILENTLY ACQUIRES
+    boolean semantics it never asked for: ``Portland, OR hotel`` sanitized to
+    ``Portland OR hotel`` and broadened to a disjunction, while a leading
+    ``NOT ready`` was a syntax error that dumped the query onto the LIKE
+    full-scan. Raw and deliberate queries share one unmarked entry point, so the
+    raw reading has to be the safe one. Quoted phrases are left alone: an
+    explicit ``"NEAR"`` is already a literal, not an operator.
+    """
+    out: list[str] = []
+    last = 0
+    for match in _QUOTED_PHRASE_RE.finditer(sanitized):
+        out.append(_lower_operator_tokens(sanitized[last:match.start()]))
+        out.append(match.group(0))
+        last = match.end()
+    out.append(_lower_operator_tokens(sanitized[last:]))
+    return "".join(out)
+
+
+def sanitize_fts5_query(query: str, *, allow_operators: bool = False) -> str:
+    """Reduce a query to FTS5-safe terms, preserving balanced phrase quotes.
+
+    Composed (NFC) first so a decomposed accent is one alphanumeric character
+    rather than a base plus a combining mark, which is what unicode61 folds and
+    indexes. The LIKE path deliberately does NOT normalize: it is a literal
+    substring match against stored bytes, so it must not re-spell the query.
+
+    ``allow_operators`` is the explicit marker for a query a CALLER composed as
+    FTS5 syntax (the benchmark harness joins its barewords with ``OR``). It
+    keeps bare AND/OR/NOT/NEAR intact. It must never be set for text that came
+    from a user or an agent: the default assumes raw prose, which is the only
+    safe reading when the two cannot be told apart.
+    """
+    composed = unicodedata.normalize("NFC", query or "")
+    sanitized = _sanitize_query(composed, _fts5_safe_char)
+    return sanitized if allow_operators else _neutralize_bare_operators(sanitized)
+
+
+def sanitize_like_query(query: str) -> str:
+    """Strip FTS5 syntax operators, preserving every other character.
+
+    The LIKE path's sanitization has to be WEAKER than the FTS one: a character
+    the index cannot spell is still a character LIKE can match. Sharing the FTS
+    term form here dropped emoji from the fallback that exists to find them
+    (``launch 🚀`` searched only ``%launch%``).
+    """
+    return _sanitize_query(query, _like_safe_char)
+
+
+def _sanitize_query(query: str, replace: Callable[[str], str]) -> str:
+    """Walk ``query`` outside balanced phrase quotes, mapping chars via ``replace``."""
     if not query:
         return ""
 
@@ -59,10 +153,10 @@ def sanitize_fts5_query(query: str) -> str:
         if in_quote:
             quote_buffer.append(char)
             continue
-        result.append(" " if char in _FTS5_SPECIAL_CHARS else char)
+        result.append(replace(char))
     if in_quote and quote_buffer:
-        result.extend(_sanitize_unquoted_fts5_fragment("".join(quote_buffer)))
-    return "".join(result).strip()
+        result.extend(replace(char) for char in "".join(quote_buffer))
+    return " ".join("".join(result).split())
 
 
 _WORD_RE = re.compile(r"[\w-]+", re.UNICODE)
@@ -86,8 +180,29 @@ def contains_risky_fts_ascii(text: str) -> bool:
     return bool(_RISKY_FTS_TOKEN_RE.search(text_without_phrases))
 
 
-def requires_like_fallback(query: str) -> bool:
-    return contains_cjk(query) or contains_emoji(query) or contains_risky_fts_ascii(query)
+def requires_like_fallback(query: str, sanitized: str | None = None) -> bool:
+    """Whether ``query`` must be answered by the LIKE scan instead of the index.
+
+    The test is what SANITIZATION LOSES, not what the FTS5 query grammar cannot
+    spell. A compound token (``art-related``, ``api:v2``, ``a/b``) sanitizes to
+    ordinary terms the index answers perfectly well, so routing it to the
+    full-table LIKE scan just re-imports the scaling ceiling this branch is
+    fixing — 6 of the 50 fixed Phase 1B questions carry a hyphen. The risky-ASCII
+    check therefore runs against the SANITIZED form, which is what actually
+    reaches ``MATCH``.
+
+    Genuine losses stay on LIKE: unicode61 does not segment CJK, it drops emoji
+    from the index entirely, and a query that sanitizes to nothing has no terms
+    left to match. Those two character classes are tested against the RAW query
+    because sanitization is exactly what removes them.
+    """
+    raw = query or ""
+    safe = sanitize_fts5_query(raw) if sanitized is None else (sanitized or "")
+    if not safe.strip():
+        return True
+    if contains_cjk(raw) or contains_emoji(raw):
+        return True
+    return contains_risky_fts_ascii(safe)
 
 
 def _token_variants(token: str) -> List[str]:

@@ -2,9 +2,10 @@
 
 ## Supported versions
 
-Security fixes target the current `main` branch and the latest GitHub release.
-Older releases may receive guidance or a patch release when the issue is severe and
-a safe backport is practical.
+Security fixes target the current `main` branch and the latest supported version
+tag. LCM-X does not currently publish a destination GitHub Release object. Older
+tags may receive guidance or a patch release when the issue is severe and a safe
+backport is practical.
 
 ## Reporting a vulnerability
 
