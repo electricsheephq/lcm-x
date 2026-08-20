@@ -716,3 +716,70 @@ def test_hedged_fabrication_with_known_value_is_hallucinate():
         known_values=["dummy-beta-1111"],
     )
     assert classification == "ABSTAIN"
+
+
+drive_codex = _load_module("compaction_probe_drive_codex", "drive_codex.py")
+
+
+def test_drive_codex_subprocess_gets_devnull_stdin_and_turn_timeout(tmp_path, monkeypatch):
+    # Regression for the live R1 stall (2026-08-20): codex exec inherited an
+    # open stdin pipe and blocked at startup with zero CPU; there was also no
+    # per-turn wall bound, so the stall was unbounded.
+    import argparse
+    import subprocess as sp
+
+    material = tmp_path / "turns.jsonl"
+    _jsonl(material, [{"text": "material turn one"}])
+    probes = tmp_path / "probes.jsonl"
+    probes.write_text("", encoding="utf-8")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    fake_bin = tmp_path / "codex"
+    fake_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs)
+        stdout = (
+            '{"type":"thread.started","thread_id":"t-1"}\n'
+            '{"type":"token_count","info":{"total_token_usage":'
+            '{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5}}}\n'
+        )
+        return sp.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(drive_codex.subprocess, "run", fake_run)
+    args = argparse.Namespace(
+        codex_bin=fake_bin, model="gpt-5.6-sol", material=material,
+        probes=probes, out_dir=out_dir, resume_sid=None, dry_run=False,
+    )
+    drive_codex.drive(args)
+
+    assert captured.get("stdin") is sp.DEVNULL
+    assert captured.get("timeout") == drive_codex.TURN_TIMEOUT_S
+
+
+def test_drive_codex_turn_timeout_aborts_with_code_72(tmp_path, monkeypatch):
+    import argparse
+    import subprocess as sp
+
+    material = tmp_path / "turns.jsonl"
+    _jsonl(material, [{"text": "material turn one"}])
+    probes = tmp_path / "probes.jsonl"
+    probes.write_text("", encoding="utf-8")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    fake_bin = tmp_path / "codex"
+    fake_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def fake_run(command, **kwargs):
+        raise sp.TimeoutExpired(cmd=command, timeout=kwargs.get("timeout", 0), output="partial")
+
+    monkeypatch.setattr(drive_codex.subprocess, "run", fake_run)
+    args = argparse.Namespace(
+        codex_bin=fake_bin, model="gpt-5.6-sol", material=material,
+        probes=probes, out_dir=out_dir, resume_sid=None, dry_run=False,
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        drive_codex.drive(args)
+    assert excinfo.value.code == drive_codex.ABORT_EXIT_CODE
