@@ -1637,6 +1637,11 @@ def _collect_raw_match_context_block(
         matches.append(
             {
                 "store_id": store_id,
+                # Session ownership travels with the match, not just with the
+                # context-block message. `lcm_expand_query(output='answer')`
+                # returns no context blocks, so for a cross-session raw-only
+                # hit this is the caller's only provenance channel.
+                "session_id": row.get("session_id") or "",
                 "role": row.get("role"),
                 "snippet": row.get("snippet") or content[:300],
                 "search_rank": row.get("search_rank"),

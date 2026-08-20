@@ -26977,6 +26977,75 @@ class TestEngineTools:
         assert "NEEDLE historical raw evidence" in serialized_context
         assert "NEEDLE excluded raw evidence" not in serialized_context
 
+    def test_handle_expand_query_raw_matches_carry_session_ownership(
+        self, engine, monkeypatch
+    ):
+        # Cross-session hits that match only raw messages: `matches` is empty
+        # because no summary node matches, and the `answer` output returns no
+        # context blocks, so `raw_matches` is the caller's only channel for
+        # session ownership. Losing it here loses provenance entirely.
+        alpha_store_id = engine._store.append(
+            "alpha-session",
+            {"role": "user", "content": "KRYPTONITE alpha raw evidence"},
+        )
+        beta_store_id = engine._store.append(
+            "beta-session",
+            {"role": "user", "content": "KRYPTONITE beta raw evidence"},
+        )
+
+        monkeypatch.setattr(
+            lcm_tools,
+            "_synthesize_expansion_answer",
+            lambda **kwargs: "cross-session raw answer",
+        )
+
+        result = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "prompt": "Which sessions mention KRYPTONITE?",
+                    "query": "KRYPTONITE",
+                    "session_ids": ["alpha-session", "beta-session"],
+                    "context_max_tokens": 1000,
+                },
+            )
+        )
+
+        assert result["answer"] == "cross-session raw answer"
+        assert result["matches"] == []
+        assert {
+            match["store_id"]: match["session_id"] for match in result["raw_matches"]
+        } == {
+            alpha_store_id: "alpha-session",
+            beta_store_id: "beta-session",
+        }
+
+    def test_handle_expand_query_evidence_raw_matches_carry_session_ownership(
+        self, engine
+    ):
+        gamma_store_id = engine._store.append(
+            "gamma-session",
+            {"role": "user", "content": "OBSIDIAN gamma raw evidence"},
+        )
+
+        result = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "prompt": "Which session mentions OBSIDIAN?",
+                    "query": "OBSIDIAN",
+                    "session_ids": ["gamma-session"],
+                    "output": "evidence",
+                    "context_max_tokens": 1000,
+                },
+            )
+        )
+
+        assert [match["session_id"] for match in result["raw_matches"]] == [
+            "gamma-session"
+        ]
+        assert result["raw_matches"][0]["store_id"] == gamma_store_id
+
     def test_handle_expand_query_rejects_more_than_twenty_session_ids(self, engine):
         result = json.loads(
             engine.handle_tool_call(
