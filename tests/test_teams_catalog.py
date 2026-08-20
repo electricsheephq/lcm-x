@@ -19,11 +19,6 @@ from hermes_lcm.teams import catalog
 # db_bootstrap's family allowlist and its repairable-store classification are
 # call-site surfaces: the catalog creates its own tables here, and db_bootstrap
 # learns the `lcm_teams` prefix in the slice that wires it in.
-_NEEDS_DB_BOOTSTRAP = pytest.mark.skip(
-    reason="call-site slice: db_bootstrap does not know the lcm_teams family yet"
-)
-
-
 @pytest.fixture()
 def store(tmp_path) -> sqlite3.Connection:
     conn = sqlite3.connect(tmp_path / "lcm.db")
@@ -94,7 +89,6 @@ def test_every_table_carries_the_allowlisted_family_prefix() -> None:
     assert all(name.startswith("lcm_teams") for name in catalog.TEAMS_TABLES)
 
 
-@_NEEDS_DB_BOOTSTRAP
 def test_the_family_prefix_is_in_the_repair_allowlist() -> None:
     """The half that genuinely needs db_bootstrap."""
     assert "lcm_teams" in db_bootstrap._KNOWN_FEATURE_TABLE_PREFIXES
@@ -146,7 +140,6 @@ def test_an_unknown_revision_field_is_refused(store: sqlite3.Connection) -> None
         catalog.bump_revision(store, "tenant-1", "revocation_epoch = 0 --")
 
 
-@_NEEDS_DB_BOOTSTRAP
 def test_a_teams_store_is_still_classified_as_repairable(
     store: sqlite3.Connection,
 ) -> None:

@@ -36,6 +36,7 @@ from .db_bootstrap import (
     inspect_lcm_schema_health,
     load_integrity_failed,
 )
+from .scope_storage import SCOPE_DOCTOR_CHECK, doctor_scope_check
 from .extraction import sanitize_pre_compaction_content
 from .ingest_protection import (
     externalized_payload_stats,
@@ -8111,6 +8112,19 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     except Exception as e:
         checks.append({
             "check": "schema_core_tables",
+            "status": "fail",
+            "detail": str(e),
+        })
+
+    # Teams scope storage: additive access_scope columns are on every database,
+    # so the state they can be in is worth a check even while Teams is dormant.
+    # A single stray stamp with no recorded decision makes the store fail closed
+    # and refuse ALL work, and nothing else in the doctor names that state.
+    try:
+        checks.append(doctor_scope_check(engine._store.connection))
+    except Exception as e:
+        checks.append({
+            "check": SCOPE_DOCTOR_CHECK,
             "status": "fail",
             "detail": str(e),
         })
