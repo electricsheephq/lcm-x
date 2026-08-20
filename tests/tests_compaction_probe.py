@@ -96,7 +96,11 @@ def test_drive_codex_dry_run_echoes_exact_command_shapes(tmp_path, capsys):
     ) == 0
     lines = capsys.readouterr().out.splitlines()
     assert lines[0].endswith("exec --json -m gpt-5.6-sol --skip-git-repo-check 'material text'")
-    assert lines[1].endswith("exec resume '<THREAD_ID>' --json --skip-git-repo-check 'probe text'")
+    # resume now pins -m (the R4 model-fallback fix): without it, resumed
+    # turns silently serve the account default model.
+    assert lines[1].endswith(
+        "exec resume '<THREAD_ID>' --json -m gpt-5.6-sol --skip-git-repo-check 'probe text'"
+    )
     assert all("--ephemeral" not in line for line in lines)
     manifest = json.loads((out_dir / "run.manifest.json").read_text())
     assert manifest["sid"] is None
