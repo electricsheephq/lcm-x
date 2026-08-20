@@ -369,11 +369,31 @@ def _lcm_config_string_with_source(env_name: str, yaml_key: str, default: str) -
 _SUPPORTED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 
 
-def _validate_reasoning_effort(value: str, field_name: str) -> str:
+def _normalize_reasoning_effort(value: str) -> str:
+    """Return a supported reasoning-effort token, or "" when unset/unsupported."""
     normalized = value.strip().lower()
-    if normalized and normalized not in _SUPPORTED_REASONING_EFFORTS:
-        raise ValueError(f"unsupported {field_name} reasoning effort: {value!r}")
-    return normalized
+    return normalized if normalized in _SUPPORTED_REASONING_EFFORTS else ""
+
+
+def _lcm_reasoning_effort_with_source(
+    env_name: str, yaml_key: str, default: str
+) -> tuple[str, str, str | None]:
+    """Resolve a reasoning-effort setting, ignoring unsupported values.
+
+    An unsupported configured value falls back to the safe default (empty = the
+    task/provider default) and reports a warning that ``/lcm doctor`` and
+    ``lcm_status`` surface, rather than failing the whole config load over one
+    misspelled setting.
+    """
+    raw, source = _lcm_config_string_with_source(env_name, yaml_key, default)
+    if raw.strip() and not _normalize_reasoning_effort(raw):
+        logger.warning(
+            "unsupported %s=%r ignored; using the task/provider reasoning default",
+            yaml_key,
+            raw,
+        )
+        return default, "default", f"invalid {yaml_key}={raw!r} ignored"
+    return _normalize_reasoning_effort(raw), source, None
 
 
 def _hermes_codex_gpt55_autoraise_with_source(default: bool) -> tuple[bool, str]:
@@ -986,20 +1006,14 @@ class LCMConfig:
             c.summary_spend_backoff_seconds,
         )
         _record("summary_spend_backoff_seconds", source, warning)
-        c.summary_reasoning_effort, source = _lcm_config_string_with_source(
+        c.summary_reasoning_effort, source, warning = _lcm_reasoning_effort_with_source(
             "LCM_SUMMARY_REASONING_EFFORT", "summary_reasoning_effort", c.summary_reasoning_effort
         )
-        c.summary_reasoning_effort = _validate_reasoning_effort(
-            c.summary_reasoning_effort, "summary"
-        )
-        _record("summary_reasoning_effort", source)
-        c.expansion_reasoning_effort, source = _lcm_config_string_with_source(
+        _record("summary_reasoning_effort", source, warning)
+        c.expansion_reasoning_effort, source, warning = _lcm_reasoning_effort_with_source(
             "LCM_EXPANSION_REASONING_EFFORT", "expansion_reasoning_effort", c.expansion_reasoning_effort
         )
-        c.expansion_reasoning_effort = _validate_reasoning_effort(
-            c.expansion_reasoning_effort, "expansion"
-        )
-        _record("expansion_reasoning_effort", source)
+        _record("expansion_reasoning_effort", source, warning)
         summary_timeout_default, summary_timeout_source = _hermes_auxiliary_compression_timeout_ms_with_source(
             c.summary_timeout_ms
         )
