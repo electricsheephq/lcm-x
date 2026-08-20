@@ -1,0 +1,145 @@
+"""Tests that ask the REAL policy, not a stub that was told to deny.
+
+Every defect the status audit found shared one cause: the test that certified
+the behaviour never exercised `TeamsPolicy`. `test_teams_apply_mode_gates`
+injected a `_DenyingPolicy`, so it proved the gate PROPAGATES a denial and said
+nothing about whether the real policy PRODUCES one -- and it did not. The gate
+ran, allowed every principal, and its test stayed green.
+
+These tests take no policy argument. If TeamsPolicy stops denying, they fail.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from hermes_lcm.access_context.model import AccessContextV1
+from hermes_lcm.access_policy import TeamsPolicy
+
+
+def _context(principal: str = "carus") -> AccessContextV1:
+    now = datetime.now(timezone.utc)
+    return AccessContextV1.from_host(
+        authenticated_transport="test", context_id="ctx", request_id="req",
+        source_kind="human", deployment_id="dep", tenant_id="tenant",
+        principal_id=principal, profile_id=principal, profile_incarnation="inc",
+        session_id="session-own", session_owner_principal_id=principal,
+        conversation_id="conv", conversation_lane="lane",
+        read_policy_ref="policy", lease_id="lease",
+        issued_at=now - timedelta(minutes=1), expires_at=now + timedelta(hours=1),
+    )
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["backup", "assertions_rebuild", "embedding_backfill", "chunk_backfill"],
+)
+def test_the_real_policy_denies_every_store_wide_operation(kind: str) -> None:
+    """These rebuild or copy state spanning EVERY principal.
+
+    The exact scope `command.py:_authorize_apply_mutation` builds -- no session,
+    no partition, no target. It carries nothing the owner-of-target loop can
+    compare, so unless the kind is recognised as store-wide the policy falls
+    through to allow(). It did, for three of these four.
+    """
+    policy = TeamsPolicy(_context())
+
+    decision = policy.authorize_operation(
+        None, "owner_only",
+        {"kind": kind, "entry_point": "x", "required_scope": "owner_only"},
+    )
+
+    assert not decision.allowed, f"{kind} was permitted to a principal"
+
+
+def test_a_scope_with_no_recognisable_target_is_the_dangerous_shape() -> None:
+    """Documents the fall-through that made the gates inert.
+
+    An unrecognised `kind` with no target keys still reaches allow(). That is
+    deliberate -- most operations are not store-wide -- but it means adding a
+    new store-wide operation REQUIRES adding it to _STORE_WIDE_KINDS, and
+    forgetting is silent. This test exists so that trade-off is visible rather
+    than discovered.
+    """
+    policy = TeamsPolicy(_context())
+    decision = policy.authorize_operation(
+        None, "write", {"kind": "some_future_operation", "entry_point": "y"}
+    )
+    assert decision.allowed, (
+        "if this ever fails the fall-through changed -- re-read whether every "
+        "store-wide operation is now enumerated"
+    )
+
+
+def test_every_store_wide_kind_the_command_layer_uses_is_enumerated() -> None:
+    """Bind the two lists together so they cannot drift apart.
+
+    The gates were inert precisely because command.py used kinds the policy had
+    never heard of.
+    """
+    import inspect
+    import re
+
+    from hermes_lcm import command as command_module
+    from hermes_lcm.access_policy.teams_policy import _STORE_WIDE_KINDS
+
+    used = set()
+    for name in (
+        "_assertions_rebuild_text",
+        "_embedding_backfill_summary_text",
+        "_chunk_backfill_text",
+    ):
+        source = inspect.getsource(getattr(command_module, name))
+        used.update(re.findall(r'kind="([a-z_]+)"', source))
+
+    missing = used - set(_STORE_WIDE_KINDS)
+    assert not missing, (
+        f"command.py gates on kinds the policy does not treat as store-wide: "
+        f"{sorted(missing)} -- those gates are inert"
+    )
+
+
+def test_owner_lookup_failure_denies_instead_of_allowing() -> None:
+    """An exception in the owner lookup must fail CLOSED (#68), not read as
+    'unclaimed'. Before the fix, a raising session_owner collapsed to None,
+    None read as unclaimed, and another principal's target was ALLOWED."""
+
+    def raising_owner(_session_id: str) -> str:
+        raise RuntimeError("owner store unreadable")
+
+    policy = TeamsPolicy(_context(), session_owner=raising_owner)
+    decision = policy.authorize_operation(
+        None, "read", {"session_id": "someone-elses-session"}
+    )
+
+    assert not decision.allowed
+    # Compared by value: under full-suite ordering the denials module can be
+    # imported under two aliases, yielding twin enum classes that fail `is`.
+    assert decision.denial_reason is not None
+    assert decision.denial_reason.value == "context_invalid"
+
+
+def test_empty_collection_narrowing_stays_deny_all_when_resolved_again() -> None:
+    """An explicit empty collection_allowlist is deny-all and must stay so:
+    truthiness-testing it re-widened a layered resolution back to the
+    context's full allowlist — resolving a result could GROW authority."""
+    now = datetime.now(timezone.utc)
+    ctx = AccessContextV1.from_host(
+        authenticated_transport="test", context_id="ctx", request_id="req",
+        source_kind="human", deployment_id="dep", tenant_id="tenant",
+        principal_id="carus", profile_id="carus", profile_incarnation="inc",
+        session_id="session-own", session_owner_principal_id="carus",
+        conversation_id="conv", conversation_lane="lane",
+        read_policy_ref="policy", lease_id="lease",
+        issued_at=now - timedelta(minutes=1), expires_at=now + timedelta(hours=1),
+        grants=("read",), narrowing=("collection:A",),
+    )
+    policy = TeamsPolicy(ctx)
+
+    first = policy.resolve_authorized_targets(None, "read", {"collection_allowlist": ("B",)})
+    assert first.get("collection_allowlist") == ()
+
+    second = policy.resolve_authorized_targets(None, "read", dict(first))
+    assert second.get("collection_allowlist") == ()
