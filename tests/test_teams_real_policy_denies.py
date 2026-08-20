@@ -115,5 +115,7 @@ def test_owner_lookup_failure_denies_instead_of_allowing() -> None:
     )
 
     assert not decision.allowed
-    from hermes_lcm.access_context.denials import DenialReason
-    assert decision.denial_reason is DenialReason.CONTEXT_INVALID
+    # Compared by value: under full-suite ordering the denials module can be
+    # imported under two aliases, yielding twin enum classes that fail `is`.
+    assert decision.denial_reason is not None
+    assert decision.denial_reason.value == "context_invalid"
