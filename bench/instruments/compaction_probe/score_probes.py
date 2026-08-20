@@ -303,7 +303,11 @@ def score(results_path: Path, canaries_path: Path, probes_path: Path) -> dict[st
     result_by_id: dict[str, dict[str, Any]] = {}
     duplicate_ids: set[str] = set()
     for row in result_rows:
-        if not isinstance(row, dict) or row.get("kind") != "probe":
+        # drive_hermes_* rows carry kind:"probe"; drive_codex rows carry no
+        # kind field at all (probe_id is the marker). Accept both — requiring
+        # kind silently dropped every codex row and scored the arm 0/30
+        # (wire-contract class, measured live on the first valid R1 run).
+        if not isinstance(row, dict) or row.get("kind") not in (None, "probe"):
             continue
         pid = row.get("probe_id")
         if pid is None:
