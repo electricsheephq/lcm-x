@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -68,8 +69,8 @@ _SESSION_END_REPLAY_METADATA_PREFIX = "session_end_replay_snapshot_digests"
 
 
 def _contains_identity_window(
-    haystack: list[tuple[str, str, str, str]],
-    needle: list[tuple[str, str, str, str]],
+    haystack: list[tuple[str, str, str, str, str]],
+    needle: list[tuple[str, str, str, str, str]],
 ) -> bool:
     """True when ``needle`` appears as a contiguous exact window in ``haystack``.
 
@@ -87,11 +88,11 @@ def _contains_identity_window(
     )
 
 
-def _has_lossy_redacted_identity(identity: tuple[str, str, str, str]) -> bool:
+def _has_lossy_redacted_identity(identity: tuple[str, str, str, str, str]) -> bool:
     """True when redaction collapsed any matched half of a replay identity.
 
-    A replay identity is ``(role, content, tool_call_id, tool_calls)``. Two of
-    those four are model-authored payloads that
+    A replay identity is ``(role, content, tool_call_id, tool_calls,
+    tool_name)``. Two of those five are model-authored payloads that
     ``_redact_active_replay_messages`` rewrites -- it redacts ``tool_calls``
     exactly as it redacts ``content`` -- and a ``password_assignment``
     placeholder deliberately omits the sha256 digest, so distinct same-length
@@ -176,7 +177,7 @@ class ReconcileMixin:
                 return False
         return True
 
-    def _message_replay_identity(self, msg: Dict[str, Any], *, stored_row: bool = False) -> tuple[str, str, str, str]:
+    def _message_replay_identity(self, msg: Dict[str, Any], *, stored_row: bool = False) -> tuple[str, str, str, str, str]:
         role = str(msg.get("role") or "unknown")
         content = normalize_content_value(msg.get("content")) or ""
         # Strip volatile compaction scaffolding suffixes so identity matching
@@ -307,11 +308,29 @@ class ReconcileMixin:
             if payload is not None and isinstance(payload.get("content"), str):
                 content = payload["content"]
         tool_calls_identity = self._stable_tool_calls_identity(tool_calls)
+        # WHICH TOOL RAN is part of a tool row's identity. A tool result
+        # carries no ``tool_calls``, so without the name the only distinguishing
+        # components are the content and the ``tool_call_id`` -- and LCM does
+        # not get to assume an id is minted once (see ``stored_tool_identities``
+        # below). A host that re-issues an id for a DIFFERENT tool returning the
+        # same innocuous result would otherwise exact-match a durable window and
+        # the new invocation would be skipped as replay. The store persists the
+        # name in ``messages.tool_name`` and hosts send it under the same key, so
+        # both sides of every comparison carry it; ``name`` is accepted too
+        # because that is how ``MessageStore.to_openai_msg`` spells it when a
+        # durable row goes back out to the host. Restricted to tool rows:
+        # ``name`` on other roles is a participant label, not an execution
+        # identity.
+        # Pinned by ``test_tool_window_replay_requires_tool_identity``.
+        tool_name_identity = (
+            str(msg.get("tool_name") or msg.get("name") or "") if role == "tool" else ""
+        )
         return (
             role,
             content,
             str(msg.get("tool_call_id") or ""),
             tool_calls_identity,
+            tool_name_identity,
         )
 
     def _replay_snapshot_digest(
@@ -473,8 +492,8 @@ class ReconcileMixin:
 
     @staticmethod
     def _matches_store_tail_suffix(
-        stored_tail: list[tuple[str, str, str, str]],
-        candidate_prefix: list[tuple[str, str, str, str]],
+        stored_tail: list[tuple[str, str, str, str, str]],
+        candidate_prefix: list[tuple[str, str, str, str, str]],
     ) -> bool:
         if not candidate_prefix:
             return True
@@ -484,9 +503,9 @@ class ReconcileMixin:
 
     @staticmethod
     def _strip_inline_persisted_output_generation_identity(
-        identity: tuple[str, str, str, str],
-    ) -> tuple[str, str, str, str]:
-        role, content, tool_call_id, tool_calls = identity
+        identity: tuple[str, str, str, str, str],
+    ) -> tuple[str, str, str, str, str]:
+        role, content, tool_call_id, tool_calls, tool_name = identity
         if role != "tool" or not isinstance(content, str):
             return identity
         stripped = re.sub(
@@ -495,7 +514,7 @@ class ReconcileMixin:
             "\n",
             content,
         )
-        return (role, stripped, tool_call_id, tool_calls)
+        return (role, stripped, tool_call_id, tool_calls, tool_name)
 
     def _stored_row_has_durable_persisted_output_marker(self, row: Dict[str, Any]) -> bool:
         if str(row.get("role") or "") != "tool":
@@ -512,22 +531,28 @@ class ReconcileMixin:
 
     @staticmethod
     def _persisted_output_durable_wildcard_identity(
-        identity: tuple[str, str, str, str],
-    ) -> tuple[str, str, str, str]:
-        role, _content, tool_call_id, tool_calls = identity
-        return (role, "[LCM persisted-output durable replay]", tool_call_id, tool_calls)
+        identity: tuple[str, str, str, str, str],
+    ) -> tuple[str, str, str, str, str]:
+        role, _content, tool_call_id, tool_calls, tool_name = identity
+        return (
+            role,
+            "[LCM persisted-output durable replay]",
+            tool_call_id,
+            tool_calls,
+            tool_name,
+        )
 
     def _matches_persisted_output_durable_full_replay(
         self,
         candidate_messages: list[Dict[str, Any]],
-        candidate_prefix: list[tuple[str, str, str, str]],
-        stored_tail: list[tuple[str, str, str, str]],
+        candidate_prefix: list[tuple[str, str, str, str, str]],
+        stored_tail: list[tuple[str, str, str, str, str]],
         stored_tail_rows: list[Dict[str, Any]] | None,
     ) -> bool:
         if not stored_tail_rows or len(candidate_prefix) != len(stored_tail) or len(candidate_messages) != len(candidate_prefix):
             return False
-        transformed_candidate: list[tuple[str, str, str, str]] = []
-        transformed_stored: list[tuple[str, str, str, str]] = []
+        transformed_candidate: list[tuple[str, str, str, str, str]] = []
+        transformed_stored: list[tuple[str, str, str, str, str]] = []
         saw_persisted_output = False
         for candidate_msg, candidate_identity, stored_identity, stored_row in zip(
             candidate_messages,
@@ -578,9 +603,9 @@ class ReconcileMixin:
     @classmethod
     def _active_cleanup_replay_identity(
         cls,
-        identity: tuple[str, str, str, str],
-    ) -> tuple[str, str, str, str] | None:
-        role, content, tool_call_id, tool_calls = identity
+        identity: tuple[str, str, str, str, str],
+    ) -> tuple[str, str, str, str, str] | None:
+        role, content, tool_call_id, tool_calls, tool_name = identity
         if role != "assistant":
             return identity
         msg: dict[str, Any] = {
@@ -601,11 +626,12 @@ class ReconcileMixin:
             normalize_content_value(cleaned.get("content")) or "",
             tool_call_id,
             tool_calls,
+            tool_name,
         )
 
     @staticmethod
-    def _is_quarantined_assistant_replay_identity(identity: tuple[str, str, str, str]) -> bool:
-        role, content, _tool_call_id, _tool_calls = identity
+    def _is_quarantined_assistant_replay_identity(identity: tuple[str, str, str, str, str]) -> bool:
+        role, content, _tool_call_id, _tool_calls, _tool_name = identity
         if role != "assistant":
             return False
         text = str(content or "").strip()
@@ -632,15 +658,15 @@ class ReconcileMixin:
 
     def _stored_tail_for_sanitized_active_replay(
         self,
-        stored_tail: list[tuple[str, str, str, str]],
-    ) -> list[tuple[str, str, str, str]]:
+        stored_tail: list[tuple[str, str, str, str, str]],
+    ) -> list[tuple[str, str, str, str, str]]:
         """Mirror active-context cleanup for restart replay reconciliation.
 
         Raw storage remains lossless. This view is used only to reconcile a
         restarted process when the host replays sanitized active context where
         assistant rows may be removed or have internal content stripped.
         """
-        sanitized_tail: list[tuple[str, str, str, str]] = []
+        sanitized_tail: list[tuple[str, str, str, str, str]] = []
         for identity in stored_tail:
             cleaned_identity = self._active_cleanup_replay_identity(identity)
             if cleaned_identity is not None:
@@ -650,7 +676,7 @@ class ReconcileMixin:
     def _find_reconciled_cursor_for_store_tail(
         self,
         messages: List[Dict[str, Any]],
-        stored_tail: list[tuple[str, str, str, str]],
+        stored_tail: list[tuple[str, str, str, str, str]],
         *,
         stored_tail_rows: list[Dict[str, Any]] | None = None,
         allow_empty_prefix: bool,
@@ -664,7 +690,7 @@ class ReconcileMixin:
 
         def active_identity(
             message: Dict[str, Any],
-        ) -> tuple[str, str, str, str]:
+        ) -> tuple[str, str, str, str, str]:
             return active_lineage_identities.get(
                 id(message),
                 self._message_replay_identity(message),
@@ -675,7 +701,7 @@ class ReconcileMixin:
         sanitized_tail_collapsed = len(sanitized_replay_tail) < len(stored_tail)
         boundary_messages = list(stored_tail_rows or [])
         if not boundary_messages:
-            for role, content, tool_call_id, tool_calls in stored_tail:
+            for role, content, tool_call_id, tool_calls, tool_name in stored_tail:
                 try:
                     decoded_tool_calls = json.loads(tool_calls) if tool_calls else []
                 except (TypeError, ValueError, json.JSONDecodeError):
@@ -685,6 +711,7 @@ class ReconcileMixin:
                     "content": content,
                     "tool_call_id": tool_call_id,
                     "tool_calls": decoded_tool_calls,
+                    "tool_name": tool_name,
                 })
         effective_fresh_tail_count = self._fresh_tail_boundary(boundary_messages).count
         # Engine-assembled compacted-snapshot proof is always eligible. The
@@ -1234,7 +1261,7 @@ class ReconcileMixin:
     def _effective_replay_identities(
         self,
         messages: List[Dict[str, Any]],
-    ) -> list[tuple[str, str, str, str]]:
+    ) -> list[tuple[str, str, str, str, str]]:
         active_lineage_identities = self._active_folded_tail_identity_overrides(
             messages
         )
@@ -1250,9 +1277,9 @@ class ReconcileMixin:
 
     def _is_suspicious_stale_no_overlap_snapshot(
         self,
-        incoming_identities: list[tuple[str, str, str, str]],
-        stored_tail: list[tuple[str, str, str, str]],
-        stored_head: list[tuple[str, str, str, str]],
+        incoming_identities: list[tuple[str, str, str, str, str]],
+        stored_tail: list[tuple[str, str, str, str, str]],
+        stored_head: list[tuple[str, str, str, str, str]],
     ) -> bool:
         """Return true for short stale snapshots with no durable-tail overlap.
 
@@ -1442,6 +1469,19 @@ class ReconcileMixin:
         the durable set and the candidate rows -- so neither side can supply
         the collapsed half of a match. Pinned by ``test_lossy_redacted_pair_``
         ``after_reconciled_prefix_is_persisted_not_replayed``.
+
+        The durable side is a MULTISET, not a set, and every marked segment
+        CONSUMES the identities it matched. A reused ``tool_call_id`` is
+        permitted (see ``stored_tool_identities``), so N identical candidate
+        invocations -- a side-effecting tool called twice, both returning "ok"
+        -- are not all proven by the K<N copies the store actually holds. Set
+        membership dropped every copy; the counter drops exactly K and lets the
+        surplus persist (#259: visible duplication beats silent loss; the #203
+        out-of-band fix bounds the same way). Consumption is atomic per
+        segment: the assistant and all of its matched results are debited
+        together, and a segment that cannot fully cover its needs debits
+        nothing. Pinned by ``test_repeated_identical_tool_invocation_is_``
+        ``persisted_not_replayed``.
         """
         if not self._session_id or cursor >= len(messages):
             return set()
@@ -1450,7 +1490,7 @@ class ReconcileMixin:
             return set()
         tail_limit = min(max(len(messages) * 4, 64), session_count)
         stored_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
-        stored_identities = {
+        stored_identity_counts = Counter(
             identity
             for identity in (
                 self._message_replay_identity(row, stored_row=True)
@@ -1458,7 +1498,7 @@ class ReconcileMixin:
                 if not self._matches_ignore_message_patterns(row, stored_row=True)
             )
             if not _has_lossy_redacted_identity(identity)
-        }
+        )
         replayed: set[int] = set()
         index = max(0, cursor)
         while index < len(messages):
@@ -1476,6 +1516,10 @@ class ReconcileMixin:
                 if isinstance(call, dict) and str(call.get("id") or "")
             }
             result_indexes: dict[str, int] = {}
+            # What this segment would consume from the durable multiset: its
+            # assistant plus one occurrence per matched result.
+            segment_needs: Counter[tuple[str, str, str, str, str]] = Counter()
+            segment_needs[assistant_identity] += 1
             probe = index + 1
             while probe < len(messages) and str(messages[probe].get("role") or "") == "tool":
                 result = messages[probe]
@@ -1486,15 +1530,20 @@ class ReconcileMixin:
                     tool_call_id in call_ids
                     and not _is_hermes_persisted_output_marker(content)
                     and not _has_lossy_redacted_identity(result_identity)
-                    and result_identity in stored_identities
+                    and result_identity in stored_identity_counts
                 ):
                     result_indexes[tool_call_id] = probe
+                    segment_needs[result_identity] += 1
                 probe += 1
             if (
                 call_ids
-                and assistant_identity in stored_identities
                 and call_ids.issubset(result_indexes)
+                and all(
+                    stored_identity_counts[identity] >= needed
+                    for identity, needed in segment_needs.items()
+                )
             ):
+                stored_identity_counts.subtract(segment_needs)
                 replayed.add(index)
                 replayed.update(result_indexes.values())
             index = max(index + 1, probe)
@@ -1650,7 +1699,7 @@ class ReconcileMixin:
     def _active_folded_tail_identity_overrides(
         self,
         messages: List[Dict[str, Any]],
-    ) -> dict[int, tuple[str, str, str, str]]:
+    ) -> dict[int, tuple[str, str, str, str, str]]:
         """Return exact active-to-source identity overrides for one durable fold."""
         folded_lineage = self._load_folded_tail_lineage(messages)
         if folded_lineage is None:
@@ -1741,7 +1790,7 @@ class ReconcileMixin:
 
         def active_lineage_identity(
             message: Dict[str, Any],
-        ) -> tuple[str, str, str, str]:
+        ) -> tuple[str, str, str, str, str]:
             return active_lineage_identities.get(
                 id(message),
                 self._message_replay_identity(message),

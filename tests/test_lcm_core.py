@@ -4944,6 +4944,68 @@ class TestAssemblyBudgetSelection:
         assert [row["tool_call_id"] for row in rows].count("call_stale_window_anchor") == 1
         assert rows[-1]["content"] == "new user after stale window"
 
+    def test_tool_window_replay_requires_tool_identity(self, tmp_path, monkeypatch):
+        """A different tool reusing a call id is not a replayed window.
+
+        ``matches_tool_anchored_stale_window`` advances the cursor over a
+        contiguous durable window, and a tool row's replay identity is
+        ``(role, content, tool_call_id, tool_calls)`` -- for a tool result
+        ``tool_calls`` is empty, so WHICH TOOL RAN is nowhere in the tuple. A
+        host that re-issues an id for a different tool that happens to return
+        the same innocuous result then matches the durable window and the new
+        invocation is silently dropped. The tool name is durable on both sides
+        (``messages.tool_name``), so it belongs in the identity.
+        """
+        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=450)
+        tool_call = {
+            "id": "call_shared_id_anchor",
+            "type": "function",
+            "function": {"name": "search_files", "arguments": "{}"},
+        }
+        engine._ingest_messages([
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "historical objective"},
+            {"role": "assistant", "content": "", "tool_calls": [tool_call]},
+            {
+                "role": "tool",
+                "tool_call_id": "call_shared_id_anchor",
+                "tool_name": "search_files",
+                "content": "ok",
+            },
+            {"role": "assistant", "content": "durable answer"},
+            {"role": "user", "content": "intervening durable user"},
+            {"role": "assistant", "content": "intervening durable answer"},
+        ])
+        original_count = engine._store.get_session_count("assembly-session")
+
+        from hermes_lcm.engine import LCMEngine
+
+        replay = LCMEngine(config=engine._config, hermes_home=str(tmp_path / "hermes"))
+        replay._session_id = "assembly-session"
+        replay._ingest_cursor_needs_reconcile = True
+        # Same id, same result content, DIFFERENT tool: a genuinely new,
+        # side-effecting invocation that must not be mistaken for the durable
+        # ``search_files`` window.
+        replay._ingest_messages([
+            {
+                "role": "tool",
+                "tool_call_id": "call_shared_id_anchor",
+                "tool_name": "delete_files",
+                "content": "ok",
+            },
+            {"role": "user", "content": "new user after different tool"},
+        ])
+
+        rows = replay._store.get_session_messages("assembly-session")
+        assert len(rows) == original_count + 2
+        tool_names = [
+            row.get("tool_name")
+            for row in rows
+            if row["tool_call_id"] == "call_shared_id_anchor"
+        ]
+        assert tool_names == ["search_files", "delete_files"]
+        assert rows[-1]["content"] == "new user after different tool"
+
     def test_tool_result_anchored_noncontiguous_replay_preserves_changed_assistant_rows(self, tmp_path, monkeypatch):
         engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=450)
         tool_call = {
@@ -5316,6 +5378,95 @@ class TestAssemblyBudgetSelection:
         assert [row["tool_call_id"] for row in rows].count("call_post_cursor_lossy_anchor") == 2
         assert "new assistant after replayed prefix" in contents
         assert rows[-1]["content"] == "new user after post-cursor lossy pair"
+
+    def test_repeated_identical_tool_invocation_is_persisted_not_replayed(
+        self, tmp_path, monkeypatch
+    ):
+        """The post-cursor segment filter must be occurrence-bounded.
+
+        ``_replayed_tool_segment_indexes_after_cursor`` matched candidate
+        segments against a SET of durable identities, so N identical candidate
+        invocations were all dropped even when the durable tail held only K<N
+        copies. A reused ``tool_call_id`` is explicitly permitted, so a
+        side-effecting tool called twice in a row -- same arguments, same "ok"
+        result -- lost its second execution. The durable side is a multiset and
+        each matched segment consumes its identities, so only the copies the
+        store can actually account for are treated as replay (#259: visible
+        duplication beats silent loss).
+        """
+        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=450)
+        prefix_call = {
+            "id": "call_repeat_prefix_anchor",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{}"},
+        }
+        repeated_call = {
+            "id": "call_repeated_invocation_anchor",
+            "type": "function",
+            "function": {"name": "send_email", "arguments": "{}"},
+        }
+        repeated_segment = [
+            {"role": "assistant", "content": "", "tool_calls": [repeated_call]},
+            {
+                "role": "tool",
+                "tool_call_id": "call_repeated_invocation_anchor",
+                "tool_name": "send_email",
+                "content": "ok",
+            },
+        ]
+        replayed_prefix = [
+            {"role": "assistant", "content": "", "tool_calls": [prefix_call]},
+            {
+                "role": "tool",
+                "tool_call_id": "call_repeat_prefix_anchor",
+                "tool_name": "read_file",
+                "content": "durable prefix result",
+            },
+        ]
+        engine._ingest_messages([
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "historical objective"},
+            *replayed_prefix,
+            # The durable tail holds exactly ONE send_email execution.
+            *repeated_segment,
+            {"role": "assistant", "content": "durable answer"},
+        ])
+        original_count = engine._store.get_session_count("assembly-session")
+        durable_rows = engine._store.get_session_messages("assembly-session")
+        # Precondition: one durable copy, so a two-copy candidate is provably
+        # one more execution than the store can account for.
+        assert [
+            row["tool_call_id"] for row in durable_rows
+        ].count("call_repeated_invocation_anchor") == 1
+
+        from hermes_lcm.engine import LCMEngine
+
+        replay = LCMEngine(config=engine._config, hermes_home=str(tmp_path / "hermes"))
+        replay._session_id = "assembly-session"
+        replay._ingest_cursor_needs_reconcile = True
+        # [replayed pair, new assistant, send_email x2, new user]: the
+        # reconciled prefix moves the cursor past the first pair, and the
+        # post-cursor helper then sees two identical send_email segments
+        # against one durable copy.
+        replay._ingest_messages([
+            *replayed_prefix,
+            {"role": "assistant", "content": "new assistant after replayed prefix"},
+            *repeated_segment,
+            *repeated_segment,
+            {"role": "user", "content": "new user after repeated invocation"},
+        ])
+
+        rows = replay._store.get_session_messages("assembly-session")
+        contents = [row["content"] for row in rows]
+        # One send_email segment is accounted for by the durable copy; the
+        # second is a genuinely new execution and persists with its issuing
+        # assistant (2 rows), alongside the new assistant and the new user.
+        assert [
+            row["tool_call_id"] for row in rows
+        ].count("call_repeated_invocation_anchor") == 2
+        assert len(rows) == original_count + 4
+        assert "new assistant after replayed prefix" in contents
+        assert rows[-1]["content"] == "new user after repeated invocation"
 
     def test_tool_anchored_stale_replay_does_not_consume_new_assistant_after_tool(self, tmp_path, monkeypatch):
         engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=450)

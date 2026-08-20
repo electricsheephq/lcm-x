@@ -4970,9 +4970,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         return durable_content is not None
 
     @classmethod
-    def _is_active_context_droppable_identity(cls, identity: tuple[str, str, str, str]) -> bool:
+    def _is_active_context_droppable_identity(cls, identity: tuple[str, str, str, str, str]) -> bool:
         """Return true for durable rows sanitized out of active replay only."""
-        role, content, _tool_call_id, tool_calls = identity
+        role, content, _tool_call_id, tool_calls, _tool_name = identity
         if role != "assistant" or tool_calls:
             return False
         return _should_drop_active_assistant_message({
