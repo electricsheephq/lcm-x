@@ -104,6 +104,15 @@ def _spawn_message_store_worker(db_path, start_barrier, repair_barrier, queue, w
         )
         queue.put({"ok": True, "worker": worker, "ids": ids})
     except BaseException as exc:  # pragma: no cover - exercised in child
+        # MessageStore(...) does schema writes BEFORE the patched structural
+        # check, so a worker can die without ever reaching repair_barrier. Abort
+        # the barrier so the survivors fail immediately instead of blocking the
+        # full 30s timeout and burying this — the first, real — error behind five
+        # BrokenBarrierError results.
+        try:
+            repair_barrier.abort()
+        except BaseException:
+            pass
         queue.put(
             {
                 "ok": False,
@@ -531,6 +540,90 @@ def test_explicit_repair_rebuilds_same_count_corruption_with_missing_triggers(tm
     conn.close()
 
 
+def _drift_index_behind_missing_triggers(conn, spec):
+    """Drop every trigger, then edit content so the row count is unchanged.
+
+    Leaves the index structurally sound (`_fts_needs_rebuild_structural` False)
+    but semantically stale — drift only the deep FTS5 integrity-check can see.
+    """
+    ensure_external_content_fts(conn, spec)
+    for trigger_sql in spec.trigger_sqls:
+        trigger_name = db_bootstrap._extract_trigger_name(trigger_sql)
+        assert trigger_name is not None
+        conn.execute(f"DROP TRIGGER {db_bootstrap.quote_sql_identifier(trigger_name)}")
+    conn.execute(
+        "UPDATE messages SET content = 'completely different searchable text' WHERE store_id = 1"
+    )
+    conn.commit()
+    assert db_bootstrap._fts_needs_rebuild_structural(conn, spec) is False
+    assert db_bootstrap._fts_missing_triggers(conn, spec) is True
+    assert db_bootstrap.check_external_content_fts_integrity(conn, spec)["status"] == "fail"
+
+
+def test_throttled_startup_with_missing_triggers_still_rebuilds_same_count_drift(
+    tmp_path, monkeypatch
+):
+    """A trigger-only defect must not let throttled startup skip the deep check.
+
+    `_fts_needs_rebuild_structural` cannot see same-row-count token drift, so
+    gating the deep check on "any structural repair needed" would recreate the
+    triggers, report success, and leave the index stale. Kill-switch lane: the
+    synchronous check must still run and rebuild.
+    """
+    from hermes_lcm.store import build_message_fts_spec
+
+    monkeypatch.setenv(INTERVAL_ENV, "0")
+    monkeypatch.setenv("LCM_FTS_INTEGRITY_BACKGROUND", "false")
+    conn = _make_conn(tmp_path)
+    spec = build_message_fts_spec()
+    _drift_index_behind_missing_triggers(conn, spec)
+
+    repaired = db_bootstrap.repair_external_content_fts(conn, spec, throttle=True)
+
+    assert repaired["rebuilt"] is True
+    assert repaired["triggers_recreated"] is True
+    assert db_bootstrap._fts_missing_triggers(conn, spec) is False
+    assert db_bootstrap.check_external_content_fts_integrity(conn, spec)["status"] == "pass"
+    conn.close()
+
+
+def test_throttled_startup_with_missing_triggers_still_dispatches_background_scan(
+    tmp_path, monkeypatch
+):
+    """Default lane: the trigger-only defect must still reach the background scan.
+
+    Without this the corruption is never observed at all — no rebuild, no
+    dispatch, and no `fts_integrity_failed` flag for `/lcm doctor` to surface.
+    """
+    from hermes_lcm.store import build_message_fts_spec
+
+    monkeypatch.setenv(INTERVAL_ENV, "0")
+    monkeypatch.delenv("LCM_FTS_INTEGRITY_BACKGROUND", raising=False)  # default: on
+    conn = _make_conn(tmp_path)
+    spec = build_message_fts_spec()
+    _drift_index_behind_missing_triggers(conn, spec)
+
+    dispatched = []
+    real_dispatch = db_bootstrap._dispatch_background_integrity_scan
+
+    def spy(conn_arg, spec_arg, *, now=None):
+        dispatched.append(spec_arg.table_name)
+        return real_dispatch(conn_arg, spec_arg, now=now)
+
+    monkeypatch.setattr(db_bootstrap, "_dispatch_background_integrity_scan", spy)
+    repaired = db_bootstrap.repair_external_content_fts(conn, spec, throttle=True)
+    db_bootstrap.join_background_integrity_scans(timeout=30)
+
+    assert dispatched == [spec.table_name]
+    assert repaired["triggers_recreated"] is True
+    verify = sqlite3.connect(_db_file(tmp_path))
+    try:
+        assert db_bootstrap.load_integrity_failed(verify, spec) is not None
+    finally:
+        verify.close()
+    conn.close()
+
+
 def test_repair_without_rebuild_still_clears_integrity_failed_flag(tmp_path, monkeypatch):
     """Even a no-op repair (nothing to rebuild) clears a stale corruption flag."""
     monkeypatch.setenv(INTERVAL_ENV, "24")
@@ -619,6 +712,39 @@ def test_integrity_check_lock_error_is_unchecked_not_corruption(tmp_path, monkey
     fake = _RaisingConn(conn, sqlite3.OperationalError("database is locked"))
     result = db_bootstrap.check_external_content_fts_integrity(fake, spec)
     assert result["status"] == "unchecked"
+    conn.close()
+
+
+def test_integrity_check_structural_lock_is_unchecked_not_corruption(
+    tmp_path, monkeypatch
+):
+    """The same rule applies to the STRUCTURAL probe, which now re-raises locks.
+
+    `_fts_needs_rebuild_structural` runs before the savepoint branch, so an
+    escaping lock error would otherwise surface as a doctor `fail` (tools.py
+    turns any exception here into status 'fail') and cost the background scan
+    its 'unchecked' result.
+    """
+    conn = _make_conn(tmp_path)
+    spec = _spec()
+    ensure_external_content_fts(conn, spec)
+
+    def raise_lock(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(db_bootstrap, "_fts_needs_rebuild_structural", raise_lock)
+    result = db_bootstrap.check_external_content_fts_integrity(conn, spec)
+    assert result["status"] == "unchecked"
+    assert "locked" in result["detail"]
+
+    # A non-lock DatabaseError must still propagate: the containment above is
+    # scoped to lock contention, not a blanket swallow of the structural probe.
+    def raise_other(*_args, **_kwargs):
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(db_bootstrap, "_fts_needs_rebuild_structural", raise_other)
+    with pytest.raises(sqlite3.DatabaseError, match="malformed"):
+        db_bootstrap.check_external_content_fts_integrity(conn, spec)
     conn.close()
 
 

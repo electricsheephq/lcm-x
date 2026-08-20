@@ -2851,8 +2851,20 @@ def check_external_content_fts_integrity(
     behind on the shared connection.
     """
 
-    if _fts_needs_rebuild_structural(conn, spec):
-        return {"status": "fail", "detail": "structural repair needed"}
+    try:
+        if _fts_needs_rebuild_structural(conn, spec):
+            return {"status": "fail", "detail": "structural repair needed"}
+    except sqlite3.DatabaseError as exc:
+        # The structural probe re-raises lock contention rather than reporting it
+        # as corruption. This is a read-only DIAGNOSTIC boundary, so apply the
+        # same rule the savepoint branch below already applies: a busy/locked
+        # snapshot is 'unchecked', never 'fail'. Without this the background scan
+        # loses its result and `/lcm doctor` reports a transient lock as FTS
+        # corruption. Repair paths keep the raise: they reach
+        # `_fts_needs_rebuild_structural` directly, not through here.
+        if not _is_sqlite_lock_error(exc):
+            raise
+        return {"status": "unchecked", "detail": str(exc)}
 
     savepoint = f"lcm_fts_integrity_{spec.table_name}"
     savepoint_sql = quote_sql_identifier(savepoint)
@@ -3063,9 +3075,15 @@ def repair_external_content_fts(
 ) -> dict[str, bool]:
     rebuilt = False
     degraded = False
-    structural_repair_needed = external_content_fts_needs_repair(conn, spec)
+    # Only a full structural REBUILD subsumes the deep check, so only that case
+    # may skip it on the cheap startup path. A trigger-only defect must NOT skip
+    # it: `_fts_needs_rebuild_structural` cannot see same-row-count token drift,
+    # so skipping there would recreate the triggers, report success, and leave
+    # the stale index in place with no background integrity scan dispatched and
+    # (with background scans disabled) no synchronous rebuild either.
+    structural_rebuild_needed = _fts_needs_rebuild_structural(conn, spec)
     deep_repair_needed = False
-    if not structural_repair_needed or not throttle:
+    if not structural_rebuild_needed or not throttle:
         # Preserve the cheap startup path and its background integrity-scan
         # behavior. Explicit repair remains unthrottled even when a structural
         # trigger repair is also needed, so same-row-count index drift is not
@@ -3104,11 +3122,12 @@ def repair_external_content_fts(
                 conn, spec, now=now, throttle=False
             )
         if owner_rebuild_needed:
-            db_path = conn.execute("PRAGMA database_list").fetchone()
-            low_disk = False
-            if db_path:
-                db_file = db_path[2]
-                low_disk = bool(db_file and not _check_disk_space(db_file))
+            # Use the shared helper: it selects the row whose schema is 'main'
+            # (an ATTACHed schema can otherwise come first), length-checks the
+            # row, and contains a PRAGMA failure instead of letting it abort the
+            # repair transaction we currently own.
+            db_file = _database_path_for_connection(conn)
+            low_disk = bool(db_file and not _check_disk_space(db_file))
             if low_disk:
                 logger.warning(
                     "Low disk space for FTS rebuild of '%s' (%d MB needed), degrading to LIKE search",
