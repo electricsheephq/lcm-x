@@ -749,9 +749,17 @@ def test_drive_codex_subprocess_gets_devnull_stdin_and_turn_timeout(tmp_path, mo
         return sp.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(drive_codex.subprocess, "run", fake_run)
+    sessions_root = tmp_path / "sessions"
+    day = sessions_root / "2026" / "08" / "21"
+    day.mkdir(parents=True)
+    (day / "rollout-x-t-1.jsonl").write_text(
+        '{"type":"turn_context","payload":{"type":"turn_context","model":"gpt-5.6-sol"}}\n',
+        encoding="utf-8",
+    )
     args = argparse.Namespace(
         codex_bin=fake_bin, model="gpt-5.6-sol", material=material,
         probes=probes, out_dir=out_dir, resume_sid=None, dry_run=False,
+        sessions_root=sessions_root,
     )
     drive_codex.drive(args)
 
@@ -779,6 +787,7 @@ def test_drive_codex_turn_timeout_aborts_with_code_72(tmp_path, monkeypatch):
     args = argparse.Namespace(
         codex_bin=fake_bin, model="gpt-5.6-sol", material=material,
         probes=probes, out_dir=out_dir, resume_sid=None, dry_run=False,
+        sessions_root=tmp_path / "sessions",
     )
     with pytest.raises(SystemExit) as excinfo:
         drive_codex.drive(args)
@@ -832,16 +841,27 @@ def test_drive_codex_resume_command_pins_model_and_asserts_served_model(tmp_path
     fake_bin.write_text("#!/bin/sh\n", encoding="utf-8")
 
     def fake_run(command, **kwargs):
-        stdout = (
-            '{"type":"thread.started","thread_id":"t-1"}\n'
-            '{"type":"turn_context","model":"gpt-5.6-sol","model_context_window":258400}\n'
-        )
+        # Real 0.148.0 --json stdout: public events only, NO turn_context.
+        stdout = '{"type":"thread.started","thread_id":"t-1"}\n'
         return sp.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(drive_codex.subprocess, "run", fake_run)
+    sessions_root = tmp_path / "sessions"
+    day = sessions_root / "2026" / "08" / "21"
+    day.mkdir(parents=True)
+    (day / "rollout-2026-08-21T00-00-00-t-1.jsonl").write_text(
+        '{"type":"turn_context","payload":{"type":"turn_context","model":"gpt-5.6-sol"}}\n',
+        encoding="utf-8",
+    )
     args = argparse.Namespace(
         codex_bin=fake_bin, model="gpt-5.4", material=material,
         probes=probes, out_dir=out_dir, resume_sid=None, dry_run=False,
+        sessions_root=sessions_root,
     )
     with pytest.raises(RuntimeError, match="model drift"):
+        drive_codex.drive(args)
+
+    # FAIL-CLOSED: no rollout found -> undeterminable -> hard error.
+    (day / "rollout-2026-08-21T00-00-00-t-1.jsonl").unlink()
+    with pytest.raises(RuntimeError, match="fail-closed"):
         drive_codex.drive(args)
