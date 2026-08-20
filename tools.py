@@ -1344,7 +1344,12 @@ def _expand_message_sources(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     from .tokens import count_tokens
 
-    session_id = engine.current_session_id if session_id is None else session_id
+    # ``session_id`` selects the lookup scope: which session owns these rows and
+    # may hydrate their externalized payloads. ``from_current_session`` answers a
+    # separate question — whether a row belongs to the ACTIVE session — so a
+    # cross-session expansion must not advertise archived rows as current.
+    current_session_id = engine.current_session_id
+    session_id = current_session_id if session_id is None else session_id
     total_sources = len(node.source_ids)
     source_offset = min(max(0, source_offset), total_sources)
     remaining_source_count = max(0, total_sources - source_offset)
@@ -1404,7 +1409,8 @@ def _expand_message_sources(
             "source_index": source_index,
             "session_id": stored.get("session_id", ""),
             "source": stored.get("source") or "",
-            "from_current_session": stored.get("session_id", "") == session_id,
+            "from_current_session": bool(current_session_id)
+            and stored.get("session_id", "") == current_session_id,
             "role": stored["role"],
             "content": sliced["content"],
             "content_chars": sliced["content_chars"],
@@ -1823,6 +1829,36 @@ def _collect_raw_match_context_block(
     return block, matches
 
 
+def _raw_match_cursor_block(raw_block: dict[str, Any]) -> dict[str, Any] | None:
+    """Return a content-free ``raw_messages`` block preserving the raw cursor.
+
+    A raw block dropped for budget reasons leaves matched messages unreturned.
+    The caller still needs a handle to continue into them, so the first omitted
+    ``store_id`` survives without any of the content that blew the budget.
+    """
+    pagination = raw_block.get("pagination") or {}
+    next_store_id = next(
+        (
+            message.get("store_id")
+            for message in raw_block.get("messages") or []
+            if isinstance(message.get("store_id"), int)
+        ),
+        pagination.get("next_store_id"),
+    )
+    if not isinstance(next_store_id, int):
+        return None
+    return {
+        "type": "raw_messages",
+        "messages": [],
+        "pagination": {
+            "has_more": True,
+            "returned_sources": 0,
+            "total_sources": pagination.get("total_sources", 0),
+            "next_store_id": next_store_id,
+        },
+    }
+
+
 def _collect_store_ids_from_context_blocks(blocks: list[dict[str, Any]]) -> set[int]:
     store_ids: set[int] = set()
     for block in blocks:
@@ -1943,12 +1979,19 @@ def _build_expand_query_evidence(
     session_id: str,
     context_truncated: bool,
     synthesis_status: str,
+    session_ids: list[str] | None = None,
+    scope_kind: str = "current_session",
 ) -> dict[str, Any]:
     """Return bounded, tool-extracted provenance for expansion synthesis context.
 
     The bundle identifies excerpts that were actually sent to the auxiliary
     model. It deliberately does not claim that the resulting answer is
     semantically entailed by those excerpts.
+
+    ``session_id`` is the ACTIVE session: it is the per-item attribution
+    fallback and decides whether a summary locator needs an explicit session.
+    ``session_ids``/``scope_kind`` describe the sessions actually searched, which
+    for an explicit cross-session retrieval is not the active session alone.
     """
 
     synthesis_status = (
@@ -1997,6 +2040,20 @@ def _build_expand_query_evidence(
         seen_items[identity] = item
         candidates.append(item)
 
+    def summary_expand_args(node_id: int, item: dict[str, Any]) -> dict[str, Any]:
+        # Mirrors `_lcm_recall_summary_expand_hint`: a summary locator carries
+        # its session only when the node is not the active session's, because a
+        # bare node_id replays against whatever session is active now.
+        expand_args: dict[str, Any] = {"node_id": node_id}
+        item_session_id = item.get("session_id") or ""
+        if (
+            item_session_id
+            and item_session_id != session_id
+            and "session_id" not in (item.get("metadata_truncation") or {})
+        ):
+            expand_args["session_id"] = item_session_id
+        return expand_args
+
     def quote_payload(content: Any) -> dict[str, Any]:
         quote = str(content or "")
         return {
@@ -2027,7 +2084,7 @@ def _build_expand_query_evidence(
             }
             put_bounded_text(item, "session_id", block.get("session_id") or session_id)
             if isinstance(node_id, int):
-                item["expand_args"] = {"node_id": node_id}
+                item["expand_args"] = summary_expand_args(node_id, item)
             add_candidate(
                 identity,
                 item,
@@ -2069,7 +2126,7 @@ def _build_expand_query_evidence(
                     child.get("session_id") or block.get("session_id") or session_id,
                 )
                 if isinstance(node_id, int):
-                    item["expand_args"] = {"node_id": node_id}
+                    item["expand_args"] = summary_expand_args(node_id, item)
                 source_path, source_path_depth, source_path_truncated = (
                     _evidence_source_path_with_final_edge(
                         block,
@@ -2217,13 +2274,23 @@ def _build_expand_query_evidence(
                 )
 
     items = candidates[:_EXPAND_QUERY_EVIDENCE_MAX_ITEMS]
-    bounded_scope_session, scope_truncation = _bounded_evidence_text(session_id)
+    scope_kind = (
+        scope_kind if scope_kind in {"current_session", "explicit_sessions"} else "unknown"
+    )
+    scope_sessions = list(session_ids) if session_ids else [session_id]
+    bounded_scope_sessions: list[str] = []
+    scope_truncations: dict[str, Any] = {}
+    for scope_index, scope_session in enumerate(scope_sessions):
+        bounded_scope_session, scope_truncation = _bounded_evidence_text(scope_session)
+        bounded_scope_sessions.append(bounded_scope_session)
+        if scope_truncation is not None:
+            scope_truncations[f"session_ids[{scope_index}]"] = scope_truncation
     retrieval_scope: dict[str, Any] = {
-        "kind": "current_session",
-        "session_ids": [bounded_scope_session],
+        "kind": scope_kind,
+        "session_ids": bounded_scope_sessions,
     }
-    if scope_truncation is not None:
-        retrieval_scope["metadata_truncation"] = {"session_ids[0]": scope_truncation}
+    if scope_truncations:
+        retrieval_scope["metadata_truncation"] = scope_truncations
     evidence = {
         "retrieval_scope": retrieval_scope,
         "identifiers_are_authority": False,
@@ -2281,10 +2348,12 @@ def _build_expand_query_evidence(
         # the public nested-object contract.
         evidence = {
             "retrieval_scope": {
-                "kind": "current_session",
+                "kind": scope_kind,
                 "session_ids": [],
                 "session_id_sha256": hashlib.sha256(
-                    str(session_id or "").encode("utf-8")
+                    "\n".join(str(scope or "") for scope in scope_sessions).encode(
+                        "utf-8"
+                    )
                 ).hexdigest(),
                 "session_id_omitted_due_to_size": True,
             },
@@ -6742,6 +6811,14 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             if session_id not in session_ids:
                 session_ids.append(session_id)
 
+    # `session_id` is reused as a loop variable below, so provenance reads the
+    # active session from the engine: an explicit cross-session retrieval must
+    # not be described as the last session the search happened to visit.
+    active_session_id = engine.current_session_id
+    evidence_scope_kind = (
+        "explicit_sessions" if session_ids_explicit else "current_session"
+    )
+
     def _parse_int_arg(name: str, default: int) -> tuple[int | None, str | None]:
         raw_value = args.get(name, default)
         try:
@@ -6851,7 +6928,9 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
                 "raw_matches": [],
                 "evidence_provenance": _build_expand_query_evidence(
                     [],
-                    session_id=session_id,
+                    session_id=active_session_id,
+                    session_ids=session_ids,
+                    scope_kind=evidence_scope_kind,
                     context_truncated=False,
                     synthesis_status="not_run",
                 ),
@@ -6894,7 +6973,12 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             context_budget_used += _context_content_token_count(node_blocks)
 
     raw_matches: list[dict[str, Any]] = []
-    if raw_results and context_budget_used < context_max_tokens:
+    # Summaries can consume the whole budget while distinct raw messages still
+    # matched. Those hits are then omitted from the context, but the caller
+    # still needs a cursor into them, so the raw block is always collected — at
+    # a zero budget it carries no content and only the ``next_store_id`` handle.
+    raw_cursor_block: dict[str, Any] | None = None
+    if raw_results:
         seen_store_ids = _collect_store_ids_from_context_blocks(context_blocks)
         remaining_context_tokens = max(0, context_max_tokens - context_budget_used)
         raw_block, raw_matches = _collect_raw_match_context_block(
@@ -6913,14 +6997,16 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
                     context_budget_used = candidate_tokens
                 else:
                     context_budget_truncated = True
+                    raw_cursor_block = _raw_match_cursor_block(raw_block)
             else:
                 context_blocks.append(raw_block)
                 context_budget_used += _context_content_token_count([raw_block])
-    elif raw_results:
-        context_budget_truncated = True
 
     context_pagination = []
-    for block in context_blocks:
+    pagination_blocks = context_blocks
+    if raw_cursor_block is not None:
+        pagination_blocks = [*context_blocks, raw_cursor_block]
+    for block in pagination_blocks:
         if not isinstance(block, dict):
             continue
         block_type = block.get("type")
@@ -7090,7 +7176,9 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             "raw_matches": raw_matches,
             "evidence_provenance": _build_expand_query_evidence(
                 context_blocks,
-                session_id=session_id,
+                session_id=active_session_id,
+                session_ids=session_ids,
+                scope_kind=evidence_scope_kind,
                 context_truncated=context_truncated,
                 synthesis_status="failed",
             ),
@@ -7145,7 +7233,9 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
             "raw_matches": raw_matches,
             "evidence_provenance": _build_expand_query_evidence(
                 context_blocks,
-                session_id=session_id,
+                session_id=active_session_id,
+                session_ids=session_ids,
+                scope_kind=evidence_scope_kind,
                 context_truncated=context_truncated,
                 synthesis_status="completed",
             ),

@@ -27396,6 +27396,210 @@ class TestEngineTools:
 
         assert result["error"] == "output must be one of: answer, evidence"
 
+    def test_handle_expand_query_keeps_raw_cursor_when_summaries_exhaust_budget(
+        self, engine, monkeypatch
+    ):
+        # Summaries can consume the whole context budget while distinct raw
+        # messages still matched. Dropping the raw arm silently strands those
+        # hits: `context_truncated` alone gives the caller no handle to
+        # continue into them, so the raw-message cursor must survive even when
+        # no raw content fits.
+        raw_store_id = engine._store.append(
+            "old-session",
+            {"role": "user", "content": "SENTINEL raw hit that must stay reachable"},
+        )
+        engine._dag.add_node(
+            SummaryNode(
+                session_id="old-session",
+                depth=0,
+                summary="SENTINEL " + "summary padding " * 200,
+                token_count=400,
+                source_token_count=400,
+                source_ids=[],
+                source_type="messages",
+                created_at=1,
+            )
+        )
+
+        monkeypatch.setattr(
+            lcm_tools, "_synthesize_expansion_answer", lambda **kwargs: "answer"
+        )
+        result = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "prompt": "What is SENTINEL?",
+                    "query": "SENTINEL",
+                    "session_ids": ["old-session"],
+                    "context_max_tokens": 12,
+                },
+            )
+        )
+
+        assert result["context_truncated"] is True
+        raw_entry = next(
+            (
+                item
+                for item in result["context_pagination"]
+                if item.get("type") == "raw_messages"
+            ),
+            None,
+        )
+        assert raw_entry is not None
+        assert raw_entry["pagination"]["next_store_id"] == raw_store_id
+        assert raw_entry["expand_args"] == {"store_id": raw_store_id}
+
+    def test_handle_expand_query_evidence_keeps_raw_cursor_when_block_is_dropped(
+        self, engine
+    ):
+        # Evidence output drops a raw block that will not fit the serialized
+        # budget. The omitted hits still need a continuation handle.
+        raw_store_id = engine._store.append(
+            "old-session",
+            {"role": "user", "content": "OBELISK raw hit that must stay reachable"},
+        )
+
+        result = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "prompt": "What is OBELISK?",
+                    "query": "OBELISK",
+                    "session_ids": ["old-session"],
+                    "output": "evidence",
+                    "context_max_tokens": 1,
+                },
+            )
+        )
+
+        assert result["evidence"] == []
+        assert result["context_truncated"] is True
+        raw_entry = next(
+            (
+                item
+                for item in result["context_pagination"]
+                if item.get("type") == "raw_messages"
+            ),
+            None,
+        )
+        assert raw_entry is not None
+        assert raw_entry["expand_args"] == {"store_id": raw_store_id}
+
+    def test_handle_expand_query_answer_provenance_reports_explicit_sessions(
+        self, engine, monkeypatch
+    ):
+        # A multi-session answer must not describe its retrieval scope as the
+        # current session, and its summary locators must replay against the
+        # session the node came from rather than the active one.
+        historical_node_id = engine._dag.add_node(
+            SummaryNode(
+                session_id="old-session",
+                depth=0,
+                summary="ZIRCON historical summary",
+                token_count=5,
+                source_token_count=5,
+                source_ids=[],
+                source_type="messages",
+                created_at=1,
+            )
+        )
+        current_node_id = engine._dag.add_node(
+            SummaryNode(
+                session_id="test-session",
+                depth=0,
+                summary="ZIRCON current summary",
+                token_count=5,
+                source_token_count=5,
+                source_ids=[],
+                source_type="messages",
+                created_at=2,
+            )
+        )
+
+        monkeypatch.setattr(
+            lcm_tools,
+            "_synthesize_expansion_answer",
+            lambda **kwargs: "cross-session answer",
+        )
+        result = json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "prompt": "What is ZIRCON?",
+                    "query": "ZIRCON",
+                    "session_ids": ["old-session", "test-session"],
+                    "context_max_tokens": 2000,
+                },
+            )
+        )
+
+        scope = result["evidence_provenance"]["retrieval_scope"]
+        assert scope["kind"] == "explicit_sessions"
+        assert scope["session_ids"] == ["old-session", "test-session"]
+        items = {
+            item["node_id"]: item
+            for item in result["evidence_provenance"]["items"]
+            if item["source_type"] == "summary"
+        }
+        assert items[historical_node_id]["session_id"] == "old-session"
+        assert items[historical_node_id]["expand_args"] == {
+            "node_id": historical_node_id,
+            "session_id": "old-session",
+        }
+        assert items[current_node_id]["session_id"] == "test-session"
+        assert items[current_node_id]["expand_args"] == {"node_id": current_node_id}
+
+    def test_handle_expand_query_marks_historical_messages_as_not_current(
+        self, engine, monkeypatch
+    ):
+        # Threading the node's session into child expansion selects the lookup
+        # scope. `from_current_session` still describes the ACTIVE session, so
+        # archived rows must not be advertised as current.
+        store_id = engine._store.append(
+            "old-session",
+            {"role": "user", "content": "TOPAZ historical raw evidence"},
+        )
+        node_id = engine._dag.add_node(
+            SummaryNode(
+                session_id="old-session",
+                depth=0,
+                summary="TOPAZ historical summary",
+                token_count=5,
+                source_token_count=5,
+                source_ids=[store_id],
+                source_type="messages",
+                created_at=1,
+            )
+        )
+
+        captured = {}
+
+        def fake_synthesize(**kwargs):
+            captured["context_blocks"] = kwargs["context_blocks"]
+            return "historical answer"
+
+        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        json.loads(
+            engine.handle_tool_call(
+                "lcm_expand_query",
+                {
+                    "prompt": "What is TOPAZ?",
+                    "node_ids": [node_id],
+                    "session_ids": ["old-session"],
+                    "context_max_tokens": 2000,
+                },
+            )
+        )
+
+        message_block = next(
+            block
+            for block in captured["context_blocks"]
+            if block.get("type") == "messages"
+        )
+        assert message_block["messages"][0]["store_id"] == store_id
+        assert message_block["messages"][0]["session_id"] == "old-session"
+        assert message_block["messages"][0]["from_current_session"] is False
+
 
 class TestHandleGrepCrossSession:
     """Cross-session search via session_scope=all|session and the new filters."""
