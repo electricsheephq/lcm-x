@@ -1397,7 +1397,160 @@ def test_slow_fts_arm_cannot_starve_semantic_recall_and_rerank(recall_engine, mo
     assert payload["provenance"]["rerank"] == "applied"
     assert payload["hits"][0]["node_id"] == 1
     assert payload["degraded"] is True
+    # The arm-local cap is deliberate, so its expiry degrades FTS coverage and
+    # names itself in degraded_reason -- it never claims the REQUEST budget was
+    # exhausted, which this run (semantic arm + rerank both completed) refutes.
+    assert payload.get("timeout") is not True
+    assert "full-text arm capped to preserve semantic recall budget" in [
+        reason.strip() for reason in payload["degraded_reason"].split(";")
+    ]
+    assert "full-text arm unavailable" not in payload["degraded_reason"]
+
+
+def test_capped_fts_expiry_reports_coverage_not_request_timeout(
+    recall_engine, monkeypatch
+):
+    """REGRESSION: a slow FTS arm fenced by the sub-budget, with the semantic arm
+    then succeeding inside the SAME request, must not report request-level
+    ``timeout``.
+
+    ``timeout`` is an agent-visible assertion that the recall budget ran out. A
+    deliberate arm-local cap that expires while the request still has ~75% of
+    its budget left -- and while the summary arm goes on to return hits with
+    that budget -- did not exhaust anything. The honest disclosure is the FTS
+    coverage vocabulary (``none``) plus a degraded_reason naming the cap.
+    """
+    recall_engine._config.recall_query_timeout_s = 8.0
+    recall_engine._config.embedding_provider = "voyage"
+    recall_engine._config.embedding_model = "voyage-4-large"
+    node = _add_summary(
+        recall_engine,
+        "semantic hit lands while full-text is fenced",
+        session_id="session-a",
+        created_at=1.0,
+    )
+    _seed_summary_vectors(
+        recall_engine,
+        [(node, [1.0, 0.0])],
+        provider="voyage",
+        model="voyage-4-large",
+    )
+
+    clock = [100.0]
+    captured: dict[str, float] = {}
+
+    provider = MockProvider()
+    provider.provider_id = "voyage"
+    provider.model_id = "voyage-4-large"
+
+    def slow_fts(_engine, _query, *, candidate_limit, deadline):
+        del candidate_limit
+        captured["fts_deadline"] = deadline
+        # Burn exactly the arm's sub-budget, nothing of the rest.
+        clock[0] = deadline
+        return [], {
+            "error": "lcm_grep request deadline exceeded",
+            "mode": "recall",
+            "timeout": True,
+            "timeout_stage": "full_text",
+        }
+
+    def summary_arm(_engine, **_kwargs):
+        return (
+            [
+                {
+                    "kind": "summary",
+                    "node_id": node,
+                    "session_id": "session-a",
+                    "timestamp": 1.0,
+                    "snippet": "semantic hit lands while full-text is fenced",
+                    "from_current_session": False,
+                    "expand_hint": f"lcm_expand(node_id={node})",
+                }
+            ],
+            "full",
+            1,
+            1,
+            [],
+        )
+
+    monkeypatch.setattr(lcm_tools.time, "monotonic", lambda: clock[0])
+    _freeze_vector_store_clock(monkeypatch, clock)
+    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: provider)
+    monkeypatch.setattr(
+        lcm_tools, "_resolve_recall_chunk_provider", lambda *_a, **_k: provider
+    )
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_fts_arm", slow_fts)
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_summary_arm", summary_arm)
+    monkeypatch.setattr(
+        lcm_tools, "_lcm_recall_chunk_arm", lambda *_a, **_k: ([], "none", 0, 0)
+    )
+
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "capped arm disclosure", "include": "all", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    # The cap really did fire, and it really did expire.
+    assert captured["fts_deadline"] == 102.0
+    assert payload["provenance"]["coverage"]["fts"] == "none"
+    # ... yet the request had budget left and spent it on the semantic arm.
+    assert payload["provenance"]["arms_run"] == ["summary"]
+    assert payload["provenance"]["coverage"]["summary"] == "full"
+    assert payload["hits"][0]["node_id"] == node
+    # So the payload must NOT assert budget exhaustion.
+    assert payload.get("timeout") is not True
+    assert payload["degraded"] is True
+    assert "full-text arm capped to preserve semantic recall budget" in [
+        reason.strip() for reason in payload["degraded_reason"].split(";")
+    ]
+    assert "full-text arm unavailable" not in payload["degraded_reason"]
+
+
+def test_uncapped_fts_timeout_still_reports_request_timeout(
+    recall_engine, monkeypatch
+):
+    """The cap-aware suppression above is gated on the cap, not on FTS timeouts.
+
+    With no usable vector corpus the arm keeps the FULL request deadline, so an
+    FTS timeout there IS request-budget exhaustion and must still surface as
+    ``timeout``. Without this, the fix would silently swallow real timeouts.
+    """
+    recall_engine._config.recall_query_timeout_s = 8.0
+    recall_engine._config.embedding_provider = "voyage"
+    recall_engine._config.embedding_model = "voyage-4-large"
+
+    clock = [100.0]
+    captured: dict[str, float] = {}
+
+    def timing_out_fts(_engine, _query, *, candidate_limit, deadline):
+        del candidate_limit
+        captured["fts_deadline"] = deadline
+        return [], {
+            "error": "lcm_grep request deadline exceeded",
+            "mode": "recall",
+            "timeout": True,
+            "timeout_stage": "full_text",
+        }
+
+    monkeypatch.setattr(lcm_tools.time, "monotonic", lambda: clock[0])
+    _freeze_vector_store_clock(monkeypatch, clock)
+    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: MockProvider())
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_fts_arm", timing_out_fts)
+
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "uncapped timeout", "include": "all", "limit": 5},
+            engine=recall_engine,
+        )
+    )
+
+    assert captured["fts_deadline"] == 108.0
+    assert payload["provenance"]["coverage"]["fts"] == "none"
     assert payload["timeout"] is True
+    assert "full-text arm unavailable" in payload["degraded_reason"]
 
 
 @pytest.mark.parametrize(

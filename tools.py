@@ -4881,6 +4881,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     # -- FTS arm (the default-on value: works with embeddings disabled) --
     if run_fts:
         fts_deadline = deadline
+        fts_sub_budget_applied = False
         configured_provider = provider_override or str(
             getattr(engine._config, "embedding_provider", "") or ""
         ).strip()
@@ -4907,6 +4908,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 max(0.001, remaining_s * _LCM_RECALL_FTS_MAX_BUDGET_FRACTION),
             )
             fts_deadline = now + fts_budget_s
+            fts_sub_budget_applied = fts_deadline < deadline
         try:
             hits, fts_error = _lcm_recall_fts_arm(
                 engine, query, candidate_limit=candidate_limit, deadline=fts_deadline
@@ -4915,8 +4917,27 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             hits, fts_error = [], {"error": str(exc)}
         if fts_error is not None:
             coverage["fts"] = "none"
-            degraded_reasons.append("full-text arm unavailable")
-            timed_out = timed_out or bool(fts_error.get("timeout"))
+            # The sub-budget above is a DELIBERATE cap, so its expiry is not
+            # budget exhaustion: the request still has time left and the vector
+            # arms are about to spend it. Reporting it as the request-level
+            # ``timeout`` would tell the agent its whole recall was cut short
+            # when in fact only this arm was fenced -- an assertion the run
+            # itself refutes. It degrades as missing FTS coverage instead
+            # (coverage stays in the none/ok vocabulary, with its own reason),
+            # and a genuine request-deadline overrun still falls through to the
+            # exhaustion branch below.
+            capped_expiry = (
+                fts_sub_budget_applied
+                and bool(fts_error.get("timeout"))
+                and time.monotonic() < deadline
+            )
+            if capped_expiry:
+                degraded_reasons.append(
+                    "full-text arm capped to preserve semantic recall budget"
+                )
+            else:
+                degraded_reasons.append("full-text arm unavailable")
+                timed_out = timed_out or bool(fts_error.get("timeout"))
         else:
             arm_hits["fts"] = hits
             coverage["fts"] = "ok"
