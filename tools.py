@@ -318,8 +318,9 @@ def _retrieval_candidate_session_ids(
     """
     if not excluded_session_ids:
         return None, False
-    connection = engine._store.connection
-    if connection is None:
+    # Liveness gate only. The enumeration itself runs on its OWN connection
+    # (below); a closed store still means "no eligible session", fail closed.
+    if engine._store.connection is None:
         return [], False
     # An already-lapsed budget fails closed before any DB work: the progress
     # handler only fires every N opcodes, so a short query could otherwise slip
@@ -327,13 +328,33 @@ def _retrieval_candidate_session_ids(
     if deadline is not None and time.monotonic() >= deadline:
         return [], True
     sessions: set[str] = set()
-    # Progress handler == the interrupt the old single-statement scan lacked;
-    # same idiom as the vector prescreen (vector_store), torn down in `finally`.
-    if deadline is not None:
-        connection.set_progress_handler(
-            lambda: 1 if time.monotonic() >= deadline else 0, 1000
-        )
+    # A progress handler is CONNECTION-GLOBAL, and ``MessageStore._conn`` is
+    # explicitly shared across threads (opened ``check_same_thread=False``).
+    # Installing this request's deadline there would let it interrupt a
+    # concurrent read/ingest on the same connection, and the `finally` teardown
+    # would clear a concurrent request's handler -- silently disabling ITS
+    # timeout. So the enumeration gets a private read-only connection and owns
+    # its handler alone: the same idiom every other deadline-guarded read path
+    # here uses (``_lcm_recall_summary_sources``, the chunk/summary hydrators in
+    # ``retrieval_core``). Python's sqlite3 exposes no getter for the installed
+    # handler, so save/restore on the shared connection is not expressible.
+    connection: sqlite3.Connection | None = None
     try:
+        db_path = Path(engine._store.db_path).resolve()
+        connection = sqlite3.connect(
+            f"{db_path.as_uri()}?mode=ro",
+            uri=True,
+            timeout=(
+                5.0
+                if deadline is None
+                else max(0.001, deadline - time.monotonic())
+            ),
+        )
+        connection.execute("PRAGMA query_only=ON")
+        if deadline is not None:
+            connection.set_progress_handler(
+                lambda: 1 if time.monotonic() >= deadline else 0, 1000
+            )
         for table in _RETRIEVAL_SESSION_SCOPE_TABLES:
             rows = connection.execute(
                 _RETRIEVAL_DISTINCT_SESSIONS_SQL.format(table=table)
@@ -344,8 +365,8 @@ def _retrieval_candidate_session_ids(
             return [], True
         raise
     finally:
-        if deadline is not None:
-            connection.set_progress_handler(None, 0)
+        if connection is not None:
+            connection.close()
     # The exclusion difference moves to Python: both ``session_id`` columns are
     # declared TEXT NOT NULL, so set difference on the stringified values is
     # exactly the SQL ``NOT IN`` it replaces, without a second pass over rows.

@@ -453,6 +453,64 @@ def test_exclusion_session_scope_fails_closed_on_an_expired_deadline(recall_engi
     assert candidates is not None
 
 
+def test_exclusion_scope_does_not_share_a_deadline_with_a_concurrent_operation(
+    recall_engine,
+):
+    """Two interleaved ops on one engine must not share progress-handler state.
+
+    ``MessageStore._conn`` is opened ``check_same_thread=False`` and is shared
+    across threads, and a SQLite progress handler is CONNECTION-global. If the
+    exclusion enumeration installed its handler there, (a) it would execute its
+    own statements under a concurrent operation's already-lapsed deadline and
+    take a spurious SQLITE_INTERRUPT, and (b) its teardown would clear that
+    concurrent operation's handler, silently disabling the other request's
+    timeout. Both arms below are on the SHARED connection; the enumeration must
+    be invisible to it.
+    """
+    for session_id in ("session-a", "session-b"):
+        recall_engine._store.append(
+            session_id, {"role": "user", "content": "kanban detail"}
+        )
+    shared = recall_engine._store.connection
+
+    # Concurrent operation B owns the shared connection's progress handler, and
+    # its budget has already lapsed (it will interrupt the next statement run
+    # on that connection).
+    ticks: list[int] = []
+    b_expired = [True]
+
+    def operation_b_handler() -> int:
+        ticks.append(1)
+        return 1 if b_expired[0] else 0
+
+    shared.set_progress_handler(operation_b_handler, 1)
+    try:
+        # Arm (a): operation A runs with no deadline of its own. It must not
+        # inherit B's lapsed deadline, so it must not touch the shared
+        # connection at all.
+        candidates, timed_out = lcm_tools._retrieval_candidate_session_ids(
+            recall_engine, {"session-b"}
+        )
+        assert timed_out is False
+        assert candidates == ["session-a"]
+        assert ticks == [], "enumeration ran a statement under operation B's handler"
+
+        # Arm (b): operation A runs under its own (live) deadline. Its teardown
+        # must leave B's handler installed and still firing.
+        candidates, timed_out = lcm_tools._retrieval_candidate_session_ids(
+            recall_engine, {"session-b"}, deadline=time.monotonic() + 30.0
+        )
+        assert timed_out is False
+        assert candidates == ["session-a"]
+        assert ticks == [], "enumeration ran a statement under operation B's handler"
+
+        b_expired[0] = False
+        shared.execute("SELECT COUNT(*) FROM messages").fetchall()
+        assert ticks, "the enumeration cleared operation B's progress handler"
+    finally:
+        shared.set_progress_handler(None, 0)
+
+
 def test_recall_scope_timeout_is_not_reported_as_a_complete_empty_scope(
     recall_engine, monkeypatch
 ):
