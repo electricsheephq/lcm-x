@@ -22,6 +22,12 @@ def _isolate_auto_focus_storage(tmp_path, monkeypatch):
     """Give every default-constructed engine its own SQLite database."""
     hermes_home = tmp_path / "hermes-home"
     database_path = hermes_home / "lcm.db"
+    for name in (
+        "HERMES_PROFILE",
+        "LCM_HERMES_BASE_DIR",
+        "LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.setenv("LCM_DATABASE_PATH", str(database_path))
     return database_path
