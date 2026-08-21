@@ -176,7 +176,12 @@ def test_validate_release_routes_cache_artifacts_outside_checkout():
     assert "TMPDIR=\"$OUTPUT_DIR/tmp\"" in validate_script
     assert "XDG_CACHE_HOME=\"$OUTPUT_DIR/cache\"" in validate_script
     assert "RUFF_CACHE_DIR=\"$OUTPUT_DIR/ruff-cache\"" in validate_script
-    assert "PYTEST_ADDOPTS=\"-p no:cacheprovider" in validate_script
+    assert "PYTEST_BASETEMP=\"$OUTPUT_DIR/pytest-basetemp\"" in validate_script
+    assert (
+        'PYTEST_ADDOPTS="-p no:cacheprovider --basetemp=\\"$PYTEST_BASETEMP\\""'
+        in validate_script
+    )
+    assert '${PYTEST_ADDOPTS:-}' not in validate_script
     assert "dirty_start=\"$(git status --short" in validate_script
     assert "dirty_end=\"$(git status --short" in validate_script
     assert "validation changed git status" in validate_script
@@ -186,6 +191,85 @@ def test_validate_release_routes_cache_artifacts_outside_checkout():
     assert "run_gate \"pytest full\" run_pytest" in validate_script
     assert "run_low_fd_pytest" in validate_script
     assert "ulimit -n 1024 &&" not in validate_script
+
+
+def test_validate_release_rejects_inherited_pytest_basetemp_escape(tmp_path):
+    repo_root = Path(__file__).resolve().parent.parent
+    source_script = repo_root / "scripts" / "validate_release.sh"
+
+    repo = tmp_path / "repo"
+    scripts_dir = repo / "scripts"
+    scripts_dir.mkdir(parents=True)
+    shutil.copy2(source_script, scripts_dir / "validate_release.sh")
+    for script_name in ("install.sh", "update.sh"):
+        script_path = scripts_dir / script_name
+        script_path.write_text("#!/usr/bin/env bash\nset -euo pipefail\n", encoding="utf-8")
+
+    env_log = tmp_path / "python-env.log"
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "if [[ -n \"${LCM_DATABASE_PATH:-}\" ]]; then\n"
+        "  printf '%s\\n' \"${PYTEST_ADDOPTS:-}\" >> \"$VALIDATION_ENV_LOG\"\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o700)
+
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Hermes Test"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "hermes-test@example.invalid"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "fixture"], cwd=repo, check=True, capture_output=True
+    )
+
+    hostile_basetemp = tmp_path / "outside-validation"
+    hostile_basetemp.mkdir()
+    sentinel = hostile_basetemp / "sentinel"
+    sentinel.write_text("must survive\n", encoding="utf-8")
+    output_dir = tmp_path / "validation-output"
+    env = {
+        **os.environ,
+        "PYTHON": str(fake_python),
+        "PYTEST_ADDOPTS": f"--basetemp={hostile_basetemp}",
+        "VALIDATION_ENV_LOG": str(env_log),
+    }
+    env.pop("LCM_DATABASE_PATH", None)
+
+    result = subprocess.run(
+        ["bash", "scripts/validate_release.sh", "--output", str(output_dir)],
+        cwd=repo,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert sentinel.read_text(encoding="utf-8") == "must survive\n"
+    effective_options = env_log.read_text(encoding="utf-8").splitlines()
+    assert effective_options
+    expected_basetemp = output_dir / "pytest-basetemp"
+    assert all(str(hostile_basetemp) not in options for options in effective_options)
+    assert all(
+        options == f'-p no:cacheprovider --basetemp="{expected_basetemp}"'
+        for options in effective_options
+    )
+    assert f"pytest_basetemp: {expected_basetemp}" in (
+        output_dir / "validation-checklist.md"
+    ).read_text(encoding="utf-8")
 
 
 def test_validate_release_checks_committed_pr_diff_against_origin_main(tmp_path):
