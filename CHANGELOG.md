@@ -7,6 +7,13 @@ version tags but does not have a destination GitHub Release object for RC2.
 
 (nothing yet)
 
+## v0.23.0-rc2 - 2026-08-22
+
+Isolation-only release-control candidate. RC2 keeps RC1's runtime and schema behavior,
+while #325 makes offline release validation ignore inherited live-profile storage and
+use private output-local databases, payloads, temporary files, and caches. The two
+previously leaking test modules now use per-test databases. RC1 remains immutable.
+
 ## v0.23.0-rc1 - 2026-08-21
 
 The correctness batch: 17 product PRs, each adversarially reviewed with RED/GREEN receipts;
