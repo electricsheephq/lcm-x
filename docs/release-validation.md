@@ -17,7 +17,7 @@ Prerequisites:
 - The benchmark and stress gates are standalone-checkout safe: they provide the minimal Hermes Agent `ContextEngine` base class needed for deterministic local validation when Hermes Agent is not importable.
 - On a PR branch with `origin/main` available, the whitespace/conflict-marker gate checks `origin/main...HEAD` instead of only uncommitted working-tree changes, then also checks the local working tree and staged diff. Override with `LCM_RELEASE_DIFF_BASE=<rev-or-range>` when validating against another base. If no changed `origin/main...HEAD` range is available but `HEAD` has a parent, the gate checks `HEAD^...HEAD` so a detached release checkout still validates the committed release diff.
 - Validation clears inherited `HERMES_PROFILE`, `LCM_HERMES_BASE_DIR`, and `LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH`, then replaces inherited `HERMES_HOME` and `LCM_DATABASE_PATH` storage selection. It binds a fresh `<output>/hermes-home/lcm.db`, contains default and per-test externalized payloads plus temporary/cache files under the output directory, and never needs a developer's real Hermes database. Clearing global payload/base overrides lets tests create their own nested sandbox homes without escaping the validation output.
-- Python validation runs with `PYTHONPYCACHEPREFIX` under the output directory and pytest cache disabled, then records git status before and after validation so release runs do not silently dirty the checkout.
+- Python validation runs with `PYTHONPYCACHEPREFIX` and pytest's `--basetemp` under the output directory. It discards inherited `PYTEST_ADDOPTS` so caller-selected pytest paths or plugins cannot escape the validation packet, disables pytest's cache provider, and records git status before and after validation so release runs do not silently dirty the checkout.
 - The low-file-descriptor full gate lowers the limit to 1024 only when the current shell allows it; locked-down hosts keep their existing lower limit instead of failing before pytest starts.
 
 ```bash
@@ -55,7 +55,7 @@ Important files:
 - `logs/*.log` — stdout/stderr for each validation command
 - `pycache/` — validation-time Python bytecode cache redirected away from the source tree
 - `hermes-home/lcm.db` — isolated validation-only LCM storage; never a live profile database
-- `hermes-home/lcm-large-outputs/`, `tmp/`, `cache/`, and `ruff-cache/` — other generated validation state
+- `hermes-home/lcm-large-outputs/`, `pytest-basetemp/`, `tmp/`, `cache/`, and `ruff-cache/` — other generated validation state
 - `benchmark-smoke/summary.json` and `benchmark-smoke/metrics.jsonl` — deterministic benchmark artifacts
 - `stress-smoke/stress-summary.md` and `stress-smoke/results/stress-results.json` — deterministic stress artifacts
 

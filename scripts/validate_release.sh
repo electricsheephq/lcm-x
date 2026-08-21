@@ -120,11 +120,8 @@ export TMPDIR="$OUTPUT_DIR/tmp"
 export XDG_CACHE_HOME="$OUTPUT_DIR/cache"
 export RUFF_CACHE_DIR="$OUTPUT_DIR/ruff-cache"
 export PYTHONPYCACHEPREFIX="$OUTPUT_DIR/pycache"
-if [[ -n "${PYTEST_ADDOPTS:-}" ]]; then
-  export PYTEST_ADDOPTS="-p no:cacheprovider $PYTEST_ADDOPTS"
-else
-  export PYTEST_ADDOPTS="-p no:cacheprovider"
-fi
+export PYTEST_BASETEMP="$OUTPUT_DIR/pytest-basetemp"
+export PYTEST_ADDOPTS="-p no:cacheprovider --basetemp=\"$PYTEST_BASETEMP\""
 
 cd "$REPO_ROOT"
 
@@ -150,6 +147,7 @@ cat > "$CHECKLIST" <<EOF
 - output_dir: $OUTPUT_DIR
 - hermes_home: $HERMES_HOME
 - lcm_database_path: $LCM_DATABASE_PATH
+- pytest_basetemp: $PYTEST_BASETEMP
 - provider_network_side_effects: none expected
 - live_profile_mutations: none expected
 
