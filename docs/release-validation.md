@@ -2,9 +2,11 @@
 
 Use `scripts/validate_release.sh` as the local release-confidence lane before
 tagging or publishing LCM-X. The script is offline by default: it does not call
-model providers, does not mutate live Hermes config, routes Python bytecode/cache
-artifacts under the validation output directory, and writes validation artifacts
-under a fresh output directory.
+model providers, does not mutate live Hermes config, forces `HERMES_HOME`,
+`LCM_DATABASE_PATH`, externalized payloads, temporary files, and caches below a
+fresh validation output directory, and writes all validation artifacts there.
+The validator creates that packet with private owner-only permissions (`0700`
+directories and `0600` regular files, subject to executable bits).
 
 ## Command
 
@@ -14,6 +16,7 @@ Prerequisites:
 - Use a Python environment with `pytest` installed. If `python` on `PATH` is not the intended interpreter, set `PYTHON=/path/to/python`.
 - The benchmark and stress gates are standalone-checkout safe: they provide the minimal Hermes Agent `ContextEngine` base class needed for deterministic local validation when Hermes Agent is not importable.
 - On a PR branch with `origin/main` available, the whitespace/conflict-marker gate checks `origin/main...HEAD` instead of only uncommitted working-tree changes, then also checks the local working tree and staged diff. Override with `LCM_RELEASE_DIFF_BASE=<rev-or-range>` when validating against another base. If no changed `origin/main...HEAD` range is available but `HEAD` has a parent, the gate checks `HEAD^...HEAD` so a detached release checkout still validates the committed release diff.
+- Validation clears inherited `HERMES_PROFILE`, `LCM_HERMES_BASE_DIR`, and `LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH`, then replaces inherited `HERMES_HOME` and `LCM_DATABASE_PATH` storage selection. It binds a fresh `<output>/hermes-home/lcm.db`, contains default and per-test externalized payloads plus temporary/cache files under the output directory, and never needs a developer's real Hermes database. Clearing global payload/base overrides lets tests create their own nested sandbox homes without escaping the validation output.
 - Python validation runs with `PYTHONPYCACHEPREFIX` under the output directory and pytest cache disabled, then records git status before and after validation so release runs do not silently dirty the checkout.
 - The low-file-descriptor full gate lowers the limit to 1024 only when the current shell allows it; locked-down hosts keep their existing lower limit instead of failing before pytest starts.
 
@@ -51,6 +54,8 @@ Important files:
 - `validation-checklist.md` — scrubbed operator checklist, command summary, and before/after git status
 - `logs/*.log` — stdout/stderr for each validation command
 - `pycache/` — validation-time Python bytecode cache redirected away from the source tree
+- `hermes-home/lcm.db` — isolated validation-only LCM storage; never a live profile database
+- `hermes-home/lcm-large-outputs/`, `tmp/`, `cache/`, and `ruff-cache/` — other generated validation state
 - `benchmark-smoke/summary.json` and `benchmark-smoke/metrics.jsonl` — deterministic benchmark artifacts
 - `stress-smoke/stress-summary.md` and `stress-smoke/results/stress-results.json` — deterministic stress artifacts
 
