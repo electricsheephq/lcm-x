@@ -165,7 +165,17 @@ def test_validate_release_routes_cache_artifacts_outside_checkout():
     repo_root = Path(__file__).resolve().parent.parent
     validate_script = (repo_root / "scripts" / "validate_release.sh").read_text(encoding="utf-8")
 
+    assert validate_script.startswith("#!/usr/bin/env bash\nset -euo pipefail\numask 077\n")
     assert "PYTHONPYCACHEPREFIX=\"$OUTPUT_DIR/pycache\"" in validate_script
+    assert (
+        "unset HERMES_PROFILE LCM_HERMES_BASE_DIR LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH"
+        in validate_script
+    )
+    assert "HERMES_HOME=\"$OUTPUT_DIR/hermes-home\"" in validate_script
+    assert "LCM_DATABASE_PATH=\"$HERMES_HOME/lcm.db\"" in validate_script
+    assert "TMPDIR=\"$OUTPUT_DIR/tmp\"" in validate_script
+    assert "XDG_CACHE_HOME=\"$OUTPUT_DIR/cache\"" in validate_script
+    assert "RUFF_CACHE_DIR=\"$OUTPUT_DIR/ruff-cache\"" in validate_script
     assert "PYTEST_ADDOPTS=\"-p no:cacheprovider" in validate_script
     assert "dirty_start=\"$(git status --short" in validate_script
     assert "dirty_end=\"$(git status --short" in validate_script
