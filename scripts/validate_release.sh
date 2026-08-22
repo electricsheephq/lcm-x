@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -107,12 +108,20 @@ OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 CHECKLIST="$OUTPUT_DIR/validation-checklist.md"
 FAILURES=()
 
+mkdir -p \
+  "$OUTPUT_DIR/hermes-home/lcm-large-outputs" \
+  "$OUTPUT_DIR/tmp" \
+  "$OUTPUT_DIR/cache" \
+  "$OUTPUT_DIR/ruff-cache"
+unset HERMES_PROFILE LCM_HERMES_BASE_DIR LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH
+export HERMES_HOME="$OUTPUT_DIR/hermes-home"
+export LCM_DATABASE_PATH="$HERMES_HOME/lcm.db"
+export TMPDIR="$OUTPUT_DIR/tmp"
+export XDG_CACHE_HOME="$OUTPUT_DIR/cache"
+export RUFF_CACHE_DIR="$OUTPUT_DIR/ruff-cache"
 export PYTHONPYCACHEPREFIX="$OUTPUT_DIR/pycache"
-if [[ -n "${PYTEST_ADDOPTS:-}" ]]; then
-  export PYTEST_ADDOPTS="-p no:cacheprovider $PYTEST_ADDOPTS"
-else
-  export PYTEST_ADDOPTS="-p no:cacheprovider"
-fi
+export PYTEST_BASETEMP="$OUTPUT_DIR/pytest-basetemp"
+export PYTEST_ADDOPTS="-p no:cacheprovider --basetemp=\"$PYTEST_BASETEMP\""
 
 cd "$REPO_ROOT"
 
@@ -136,6 +145,9 @@ cat > "$CHECKLIST" <<EOF
 - repo: ${branch:-detached}@${commit:-unknown}
 - diff_check_range: ${DIFF_CHECK_RANGE:-working-tree}
 - output_dir: $OUTPUT_DIR
+- hermes_home: $HERMES_HOME
+- lcm_database_path: $LCM_DATABASE_PATH
+- pytest_basetemp: $PYTEST_BASETEMP
 - provider_network_side_effects: none expected
 - live_profile_mutations: none expected
 

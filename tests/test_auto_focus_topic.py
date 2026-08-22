@@ -10,13 +10,42 @@ Covers:
 - no leakage of configured sensitive values from structured content or bearer-style text
 """
 
+from pathlib import Path
+
+import pytest
+
 from hermes_lcm.engine import LCMEngine
+
+
+@pytest.fixture(autouse=True)
+def _isolate_auto_focus_storage(tmp_path, monkeypatch):
+    """Give every default-constructed engine its own SQLite database."""
+    hermes_home = tmp_path / "hermes-home"
+    database_path = hermes_home / "lcm.db"
+    for name in (
+        "HERMES_PROFILE",
+        "LCM_HERMES_BASE_DIR",
+        "LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("LCM_DATABASE_PATH", str(database_path))
+    return database_path
 
 
 class TestDeriveAutoFocusTopic:
     """Tests for LCMEngine._derive_auto_focus_topic."""
 
     # --- Test 1: derives from latest real user turns ---
+
+    def test_default_engine_uses_per_test_database(self, _isolate_auto_focus_storage):
+        engine = LCMEngine(config=None)
+        try:
+            identity = engine.get_status()["runtime_identity"]
+            assert Path(identity["database_path"]) == _isolate_auto_focus_storage
+            assert identity["database_path_source"] == "config.database_path"
+        finally:
+            engine.shutdown()
 
     def test_derives_from_latest_user_turns(self, tmp_path):
         engine = LCMEngine(config=None)
