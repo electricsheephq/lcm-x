@@ -7,6 +7,15 @@ version tags but does not have a destination GitHub Release object for RC2.
 
 (nothing yet)
 
+## v0.23.0 - 2026-08-23
+
+Stable promotion of the accepted isolation-only RC2 candidate. Runtime and schema behavior
+are byte-identical to `v0.23.0-rc2`; this delta changes release identity, curated notes,
+documentation examples, and matching test expectations only. Eva's copied-state canary,
+15-tool/provider/restart acceptance, rollback, and 0-hour live acceptance passed. The owner
+waived only the remaining 72-hour wait for the Eva program; fleet, customer, and Teams
+readiness remain out of scope.
+
 ## v0.23.0-rc2 - 2026-08-22
 
 Isolation-only release-control candidate. RC2 keeps RC1's runtime and schema behavior,
