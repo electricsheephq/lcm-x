@@ -6,6 +6,24 @@ import logging
 import sys
 from pathlib import Path
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_host_capability_storage(tmp_path, monkeypatch):
+    """Keep every plugin registration on a per-test SQLite database."""
+    hermes_home = tmp_path / "hermes-home"
+    database_path = hermes_home / "lcm.db"
+    for name in (
+        "HERMES_PROFILE",
+        "LCM_HERMES_BASE_DIR",
+        "LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("LCM_DATABASE_PATH", str(database_path))
+    return database_path
+
 
 EXPECTED_LCM_TOOLS = {
     "lcm_grep",
@@ -85,6 +103,25 @@ class TestHostCapabilityDetection:
 
 class TestRegistrationGating:
     """Verify register() skips ctx.register_tool unless messages forwarding is explicit."""
+
+    def test_registration_uses_per_test_database(self, _isolate_host_capability_storage):
+        module = _load_plugin_module("hermes_lcm_gating_storage")
+
+        class _Ctx:
+            def __init__(self):
+                self.engine = None
+
+            def register_context_engine(self, engine):
+                self.engine = engine
+
+        ctx = _Ctx()
+        module.register(ctx)
+        try:
+            identity = ctx.engine.get_status()["runtime_identity"]
+            assert Path(identity["database_path"]) == _isolate_host_capability_storage
+            assert identity["database_path_source"] == "config.database_path"
+        finally:
+            ctx.engine.shutdown()
 
     def test_skips_register_tool_without_explicit_message_forwarding(self):
         module = _load_plugin_module("hermes_lcm_gating_skip")
