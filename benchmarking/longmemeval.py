@@ -88,6 +88,7 @@ _FUNNEL_KINDS = frozenset({"message_excerpt", "chunk", "summary"})
 _FUNNEL_COVERAGE = frozenset({"ok", "full", "full_approx", "bounded", "none", "disabled"})
 _STABLE_PRODUCT_SHA = "81d8d41197dddc4c09b57097f4955ebae32366a9"
 _DELIVERY_BASE_SHA = "3d4fbb4c979dc09aef0b831bb50d928e0e18d68f"
+_REGISTERED_SAMPLE_SEED = 20260802
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _IJSON_MIN_VERSION = (3, 2)
 
@@ -1631,7 +1632,7 @@ def _funnel_header(
     *, provider: str, model: str, dim: int, expected_dim: int | None,
     dataset_label: str, source_sha256: str | None, manifest_sha256: str | None,
     embeddings_enabled: bool, rerank: bool, recall_rerank: bool,
-    reuse_db_template: bool, seed: int = 0,
+    reuse_db_template: bool, seed: int = _REGISTERED_SAMPLE_SEED,
 ) -> dict[str, Any]:
     def tree_hash(names: tuple[str, ...]) -> str:
         digest = hashlib.sha256()

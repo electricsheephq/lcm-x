@@ -11,9 +11,10 @@ at private customer or live Eva data.
 - Registered product: `v0.23.1@81d8d41197dddc4c09b57097f4955ebae32366a9`.
 - Delivery base: `main@3d4fbb4c979dc09aef0b831bb50d928e0e18d68f`.
 - Instrument: schema v1, `--dump-retrieval-funnel PATH`, `--expected-dim 1024`.
-- Dataset: pinned 500-question LongMemEval V1-M public corpus and a registered
-  seeded-random 95-question subset drawn from its 470 scored questions. Record
-  the source, prepared-manifest, and subset-manifest digests before inspection.
+- Dataset: pinned 500-question LongMemEval V1-M public corpus and the registered
+  100-question subset selected with seed `20260802` (95 scored questions and
+  five abstention cases). Record the source, prepared-manifest, and
+  subset-manifest digests before inspection.
 - Provider/model, cache state/key, environment, config, seed, weights, and
   top-k are frozen in the sidecar header.
 - Retrieval configuration: `voyage-4-large`, 1024-dimensional float32,
@@ -24,11 +25,12 @@ at private customer or live Eva data.
 
 1. Estimate billable tokens using the current official Voyage price. Stop
    before a provider call if the full registered run could exceed USD 10.
-2. Run a seeded-random smoke from the registered subset. First-N selection is
-   invalid.
-3. Run the same registered 95 scored questions twice (A/A-prime) from an
-   immutable cache. After normalizing generated/timing fields, IDs, ranks,
-   metrics, counts, and configuration hashes must be byte-identical.
+2. Run a seeded-random smoke from the registered seed-`20260802` subset.
+   First-N selection is invalid.
+3. Run the same registered 100-question subset twice (A/A-prime) from an
+   immutable cache and score its 95 answerable questions. After normalizing
+   generated/timing fields, IDs, ranks, metrics, counts, and configuration
+   hashes must be byte-identical.
 4. If A/A-prime is accepted, run all 500 questions (470 scored plus 30
    abstention cases) with the same frozen manifests and configuration.
 5. Preserve the JSONL sidecar, checkpoint, metrics, markdown, and manifests in
@@ -45,7 +47,7 @@ python scripts/lcm_longmemeval.py run \
   --expected-dim 1024
 ```
 
-The 95-question A/A-prime uses its registered prepared subset directly; it
+The 100-question A/A-prime uses its registered prepared subset directly; it
 must not be produced with `--limit`, because that would select the first N
 questions instead of the seeded sample.
 

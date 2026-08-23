@@ -772,6 +772,7 @@ def test_retrieval_funnel_combined_flags_is_content_free_and_reference_valid(tmp
     assert len(lines) == 2
     header = json.loads(lines[0])["__retrieval_funnel_header__"]
     assert header["registered_product_sha"]
+    assert header["seed"] == 20260802
     assert header["current_tree_hashes"]["installer_script"]
     row = json.loads(lines[1])
     assert row["reference_valid"] is True
