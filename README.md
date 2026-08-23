@@ -443,7 +443,7 @@ moved back to that assistant even when doing so exceeds a configured bound.
 | `LCM_IGNORE_SESSION_PATTERNS` | empty | Comma-separated session globs excluded from LCM storage |
 | `LCM_STATELESS_SESSION_PATTERNS` | empty | Comma-separated session globs kept read-only |
 | `LCM_IGNORE_MESSAGE_PATTERNS` | empty | Comma-separated regex patterns; matching message content is excluded from LCM storage |
-| `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | Opt in to deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads |
+| `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | Opt in to deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads. Known cloud embedding providers also require this enabled with a nonempty known policy before warmup, backfill, or semantic-query dispatch |
 | `LCM_SENSITIVE_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Comma-separated named sensitive pattern catalog entries to apply when redaction is enabled |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `false` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS` | `12000` | Externalization threshold for normalized payload text |
@@ -499,6 +499,15 @@ truncated SHA-256 digest for correlation. `password_assignment` placeholders omi
 the digest to avoid making password-like values easier to dictionary-check.
 `lcm_status`, `lcm_inspect`, and `lcm_doctor` expose the enabled state, configured pattern names,
 unknown names, source, and placeholder format without exposing raw secret values.
+
+Cloud embeddings add a separate provider-input-only privacy transform. It does
+not rewrite historical SQLite, FTS, summary, or payload data. Before cloud
+warmup, summary/chunk backfill, or semantic-query dispatch, LCM requires an
+enabled, nonempty, known policy; transforms matching provider input to
+pattern-only placeholders; rejects residual matches; and binds the transform
+version plus active-pattern-name hash into the vector profile revision. Policy
+drift refuses dispatch until `/lcm embed warmup` registers the new identity.
+Local FastEmbed and Ollama calls do not require this cloud gate.
 
 ### Threshold ownership
 
