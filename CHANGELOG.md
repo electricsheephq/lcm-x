@@ -7,6 +7,16 @@ version tags but does not have a destination GitHub Release object for RC2.
 
 (nothing yet)
 
+## v0.23.1 - 2026-08-24
+
+Stable metadata-only promotion of `v0.23.1-rc1`. Runtime and schema bytes are unchanged from
+the accepted candidate. The release makes hosted summary embeddings fail closed unless their
+sensitive-pattern policy is enabled, recognized, current, nonempty, and residual-clean;
+provider input uses pattern-only placeholders, and vector identity includes the active privacy
+policy revision. Eva's immutable-donor fake and real Voyage backfills, 15-tool acceptance,
+restart/replay checks, copied-state rollback, and bounded live RC acceptance passed. Fleet,
+customer, Teams, and live local-model readiness remain out of scope.
+
 ## v0.23.1-rc1 - 2026-08-23
 
 Privacy-only release candidate for hosted summary embeddings. Cloud warmup, summary and

@@ -4,7 +4,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 RELEASE_VERSION = "0.23.1"
-RELEASE_TAG = "v0.23.1-rc1"
+RELEASE_TAG = "v0.23.1"
 RELEASE_NOTES = REPO_ROOT / ".github" / "release-notes" / f"{RELEASE_TAG}.md"
 
 
@@ -25,7 +25,7 @@ def test_release_workflow_marks_rc_tags_as_prereleases_not_latest():
     assert "draft: false" in workflow
 
 
-def test_release_candidate_identity_surfaces_are_synchronized():
+def test_release_identity_surfaces_are_synchronized():
     manifest = (REPO_ROOT / "plugin.yaml").read_text(encoding="utf-8")
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     operator_guide = (REPO_ROOT / "docs" / "operator-guide.md").read_text(
@@ -79,7 +79,7 @@ def test_preanswer_guide_discloses_inherited_embedding_provider_behavior():
     assert "Pre-answer evidence alone remains provider-free." not in operator_guide
 
 
-def test_release_candidate_notes_cover_only_the_merged_release_scope():
+def test_release_notes_cover_only_the_merged_release_scope():
     notes = RELEASE_NOTES.read_text(encoding="utf-8")
 
     assert notes.startswith(f"# hermes-lcm {RELEASE_TAG}\n")
