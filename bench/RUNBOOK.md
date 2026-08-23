@@ -78,6 +78,31 @@ protocol 3 must record the provider/benchmark/answerer/judge pins used.
    final score. A run whose summary cannot show `attempts == total questions` did not actually exercise
    retrieval for every question and its score should be treated as suspect until that gap is explained.
 
+### Retrieval-provenance sidecar (registered v1)
+
+The benchmark-only provenance sidecar is opt-in and content-free. It records shipped `lcm_recall`
+ids/ranks, arm coverage, safe fallback reason codes, embedding accounting, and reference validation;
+it never records prompts, queries, answers, snippets, message content, or provider payloads. Use a
+public or scrubbed hosted corpus only, and keep the sidecar with the run manifest rather than treating
+it as product/runtime telemetry.
+
+```bash
+python scripts/lcm_longmemeval.py run \
+  --prepared-dir /path/to/public-or-scrubbed-prepared \
+  --output $RUN_ROOT \
+  --provider voyage --model voyage-context-3 \
+  --dump-retrieval-funnel $RUN_ROOT/retrieval-funnel.jsonl \
+  --expected-dim 1024
+```
+
+The design is registered as a 95-question smoke gate followed by the 500-question LongMemEval_S
+run. Freeze dataset/prepared manifests, provider/model, cache, config, seed, weights, and top-k
+before either run. The header binds the registered stable product identity and base separately from
+the instrument hash and scoped current-tree hashes. A dimension mismatch, unknown fallback reason,
+invalid shipped reference, foreign sidecar, or torn ownership boundary fails closed before a new
+sidecar row is written. Both flags are default-off; existing reports and candidate dumps remain the
+control output.
+
 ## (c) Running the official protocol
 
 The official LongMemEval-V2 harness needs (i) a reader model, (ii) optionally a judge model for

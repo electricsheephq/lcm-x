@@ -82,6 +82,12 @@ PER_QUESTION_CHECKPOINT_FILENAME = "per_question_checkpoint.jsonl"
 _CHECKPOINT_HEADER_KEY = "__checkpoint_header__"
 _DUMP_HEADER_KEY = "__dump_header__"
 _CANDIDATE_DUMP_TOP_K = 10
+_FUNNEL_HEADER_KEY = "__retrieval_funnel_header__"
+_FUNNEL_SCHEMA_VERSION = 1
+_FUNNEL_KINDS = frozenset({"message_excerpt", "chunk", "summary"})
+_FUNNEL_COVERAGE = frozenset({"ok", "full", "full_approx", "bounded", "none", "disabled"})
+_STABLE_PRODUCT_SHA = "81d8d41197dddc4c09b57097f4955ebae32366a9"
+_DELIVERY_BASE_SHA = "3d4fbb4c979dc09aef0b831bb50d928e0e18d68f"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _IJSON_MIN_VERSION = (3, 2)
 
@@ -1494,7 +1500,8 @@ def production_recall_hits(
     embeddings_enabled: bool,
     limit: int,
     return_status: bool = False,
-) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], str, list[list[Any]]]:
+    return_payload: bool = False,
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], str, list[list[Any]]] | tuple[list[dict[str, Any]], dict[str, Any]] | tuple[list[dict[str, Any]], str, list[list[Any]], dict[str, Any]]:
     """Invoke the REAL ``tools.lcm_recall`` against this question's temp store.
 
     This is the tool users call: weighted RRF over the FTS + summary + chunk arms
@@ -1527,14 +1534,253 @@ def production_recall_hits(
     )
     hits = list(payload.get("hits", []))
     if not return_status:
-        return hits
+        return (hits, payload) if return_payload else hits
     status = payload.get("provenance", {}).get("rerank")
     if not isinstance(status, str) or not status:
         raise ValueError("lcm_recall response is missing provenance.rerank status")
     scores = payload.get("provenance", {}).get("rerank_scores", [])
     if not isinstance(scores, list):
         raise ValueError("lcm_recall response has invalid provenance.rerank_scores")
-    return hits, status, scores
+    return (hits, status, scores, payload) if return_payload else (hits, status, scores)
+
+
+def _funnel_reason(payload: dict[str, Any]) -> list[str]:
+    raw = payload.get("degraded_reason")
+    if payload.get("degraded") and raw is None:
+        raise ValueError("unknown fallback reason")
+    if raw is None:
+        return ["request_timeout"] if payload.get("timeout") else []
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("unknown fallback reason")
+    prefixes = {
+        "semantic retrieval is disabled": "semantic_disabled",
+        "full-text arm capped": "fts_budget_capped",
+        "full-text arm unavailable": "fts_unavailable",
+        "embedding provider": "provider_unavailable",
+        "semantic vector search failed": "semantic_vector_failed",
+        "semantic arm failed": "semantic_arm_failed",
+        "query embedding failed": "query_embedding_failed",
+        "chunk query embedding failed": "chunk_query_embedding_failed",
+        "summary vectors are unavailable": "summary_vectors_unavailable",
+        "chunk vectors are unavailable": "chunk_vectors_unavailable",
+        "summary arm coverage bounded": "summary_coverage_bounded",
+        "chunk arm coverage bounded": "chunk_coverage_bounded",
+        "summary arm coverage full_approx": "summary_coverage_approx",
+        "chunk arm coverage full_approx": "chunk_coverage_approx",
+        "session exclusion scope resolution timed out": "scope_timeout",
+    }
+    codes: list[str] = []
+    for reason in (part.strip() for part in raw.split(";")):
+        code = next((value for key, value in prefixes.items() if reason.startswith(key)), None)
+        if code is None:
+            raise ValueError("unknown fallback reason")
+        codes.append(code)
+    return list(dict.fromkeys(codes))
+
+
+def _funnel_hit(hit: dict[str, Any], rank: int) -> dict[str, Any]:
+    if not isinstance(hit, dict):
+        raise ValueError("invalid retrieval funnel reference")
+    kind = hit.get("kind")
+    if kind not in _FUNNEL_KINDS or not isinstance(hit.get("session_id"), str):
+        raise ValueError("invalid retrieval funnel reference")
+    result: dict[str, Any] = {"rank": rank, "kind": kind, "session_id": hit["session_id"]}
+    for key in ("store_id", "node_id"):
+        if hit.get(key) is not None:
+            try:
+                result[key] = int(hit[key])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("invalid retrieval funnel reference") from exc
+    if isinstance(hit.get("arms"), list):
+        if not all(isinstance(arm, str) for arm in hit["arms"]):
+            raise ValueError("invalid retrieval funnel arms")
+        result["arms"] = sorted(set(hit["arms"]))
+    return result
+
+
+def _validate_funnel_hit(hit: dict[str, Any], *, store, dag) -> None:
+    session = hit["session_id"]
+    if hit["kind"] in {"message_excerpt", "chunk"}:
+        store_id = hit.get("store_id")
+        if not isinstance(store_id, int) or store_id <= 0:
+            raise ValueError("invalid retrieval funnel store_id")
+        row = store._conn.execute(
+            "SELECT session_id FROM messages WHERE store_id = ?", (store_id,)
+        ).fetchone()
+        if row is None or str(row[0]) != session:
+            raise ValueError("retrieval funnel store_id/session mismatch")
+    else:
+        node_id = hit.get("node_id")
+        if not isinstance(node_id, int) or node_id <= 0:
+            raise ValueError("invalid retrieval funnel node_id")
+        row = dag._conn.execute(
+            "SELECT session_id FROM summary_nodes WHERE node_id = ?", (node_id,)
+        ).fetchone()
+        if row is None or str(row[0]) != session:
+            raise ValueError("retrieval funnel node_id/session mismatch")
+        if hit.get("store_id") is not None:
+            store_id = hit["store_id"]
+            row = store._conn.execute(
+                "SELECT session_id FROM messages WHERE store_id = ?", (store_id,)
+            ).fetchone()
+            if row is None or str(row[0]) != session:
+                raise ValueError("retrieval funnel summary store_id/session mismatch")
+
+
+def _funnel_header(
+    *, provider: str, model: str, dim: int, expected_dim: int | None,
+    dataset_label: str, source_sha256: str | None, manifest_sha256: str | None,
+    embeddings_enabled: bool, rerank: bool, recall_rerank: bool,
+    reuse_db_template: bool, seed: int = 0,
+) -> dict[str, Any]:
+    def tree_hash(names: tuple[str, ...]) -> str:
+        digest = hashlib.sha256()
+        for name in names:
+            path = _REPO_ROOT / name
+            digest.update(name.encode())
+            digest.update(path.read_bytes() if path.is_file() else b"<missing>")
+        return digest.hexdigest()
+    return {
+        _FUNNEL_HEADER_KEY: {
+            "schema_version": _FUNNEL_SCHEMA_VERSION,
+            "registered_product_sha": _STABLE_PRODUCT_SHA,
+            "delivery_base_sha": _DELIVERY_BASE_SHA,
+            "current_tree_hashes": {
+                "runtime_allowlist": tree_hash(("tools.py", "store.py", "dag.py", "vector_store.py")),
+                "plugin_manifest": tree_hash(("plugin.yaml",)),
+                "installer_script": tree_hash(("scripts/install.sh",)),
+            },
+            "instrument": {
+                "name": "retrieval-provenance-v1",
+                "file_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            },
+            "dataset": {"label": dataset_label, "source_sha256": source_sha256, "manifest_sha256": manifest_sha256},
+            "provider": {"name": provider, "model": model, "reported_dim": dim, "expected_dim": expected_dim},
+            "cache": {"enabled": bool(os.environ.get(EMBED_CACHE_ENV, "").strip()), "key": "provider:model:content_sha256"},
+            "environment": {"python": f"{sys.version_info.major}.{sys.version_info.minor}"},
+            "config": {"embeddings_enabled": embeddings_enabled, "rerank": rerank, "recall_rerank": recall_rerank, "reuse_db_template": reuse_db_template},
+            "seed": seed,
+            "weights": {"fts": 0.5, "summary": 1.0, "chunk": 1.0},
+            "top_k": _CANDIDATE_DUMP_TOP_K,
+            "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+    }
+
+
+def _funnel_record(question: Question, scored: dict[str, Any], *, store, dag) -> dict[str, Any]:
+    payload = scored.pop("_retrieval_payload", None)
+    rankings = scored.get("_candidate_rankings")
+    if not isinstance(payload, dict) or not isinstance(rankings, dict):
+        raise ValueError("retrieval funnel observation is incomplete")
+    raw_hits = payload.get("hits", [])
+    if not isinstance(raw_hits, list):
+        raise ValueError("retrieval funnel response has invalid hits")
+    hits = [_funnel_hit(hit, rank) for rank, hit in enumerate(raw_hits, 1)]
+    for hit in hits:
+        _validate_funnel_hit(hit, store=store, dag=dag)
+    coverage = payload.get("provenance", {}).get("coverage", {})
+    if not isinstance(coverage, dict) or any(value not in _FUNNEL_COVERAGE for value in coverage.values()):
+        raise ValueError("unknown retrieval funnel coverage")
+    metrics = payload.get("metrics", {})
+    embedding = {
+        "query_calls": int(metrics.get("embedding_query_calls", 0)),
+        "query_tokens": int(metrics.get("embedding_query_tokens", 0)),
+        "tokens_complete": bool(metrics.get("embedding_query_tokens_complete", False)),
+    }
+    arms: dict[str, Any] = {}
+    if set(rankings) != set(ARMS):
+        raise ValueError("retrieval funnel rankings are incomplete")
+    for arm in ARMS:
+        sessions = rankings.get(arm, {}).get("sessions", [])
+        arms[arm] = {"count": len(sessions), "session_ids": [{"rank": i, "id": sid} for i, sid in enumerate(sessions, 1)]}
+    return {
+        "question_id": question.question_id,
+        "gold_session_ids": sorted(evidence_sessions(question)),
+        "arms": arms,
+        "shipped": {"count": len(hits), "candidates": hits},
+        "coverage": dict(coverage),
+        "degraded": bool(payload.get("degraded", False)),
+        "reason_codes": _funnel_reason(payload),
+        "embedding": embedding,
+        "counts": {"shipped": len(hits)},
+        "reference_valid": True,
+        "timing": {"ingest_ms": scored.get("ingest_ms", 0.0), "recall_ms": scored.get("lcm_recall", {}).get("latency_ms", 0.0)},
+    }
+
+
+def _funnel_empty_record(question: Question) -> dict[str, Any]:
+    return {
+        "question_id": question.question_id,
+        "gold_session_ids": [],
+        "arms": {arm: {"count": 0, "session_ids": []} for arm in ARMS},
+        "shipped": {"count": 0, "candidates": []},
+        "coverage": {}, "degraded": False, "reason_codes": [], "embedding": {"query_calls": 0, "query_tokens": 0, "tokens_complete": False},
+        "counts": {"shipped": 0}, "reference_valid": True, "timing": {"ingest_ms": 0.0, "recall_ms": 0.0},
+    }
+
+def _assert_funnel_safe(value: Any) -> None:
+    forbidden = {"content", "snippet", "query", "prompt", "answer", "text", "transcript", "raw_text"}
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_text = str(key).lower()
+            if key_text in forbidden or any(token in key_text for token in ("content", "snippet", "transcript", "prompt")):
+                raise ValueError("retrieval funnel contains raw-text key")
+            _assert_funnel_safe(child)
+    elif isinstance(value, list):
+        for child in value:
+            _assert_funnel_safe(child)
+
+
+def _prepare_funnel(path: Path, header: dict[str, Any]) -> set[str]:
+    if not path.exists() or path.stat().st_size == 0:
+        return set()
+    raw = path.read_bytes()
+    if b"\n" not in raw:
+        raise ValueError("retrieval funnel ownership is unproven")
+    lines = raw.splitlines(keepends=True)
+    try:
+        actual = json.loads(lines[0])
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid retrieval funnel header") from exc
+    if not isinstance(actual, dict) or _FUNNEL_HEADER_KEY not in actual:
+        raise ValueError("retrieval funnel header is missing")
+    _assert_funnel_safe(actual)
+    expected = header[_FUNNEL_HEADER_KEY]
+    actual_bindings = dict(actual.get(_FUNNEL_HEADER_KEY, {}))
+    actual_bindings.pop("generated_at_utc", None)
+    expected_bindings = dict(expected)
+    expected_bindings.pop("generated_at_utc", None)
+    if actual_bindings != expected_bindings:
+        raise ValueError("retrieval funnel configuration mismatch")
+    seen: set[str] = set()
+    offset = len(lines[0])
+    for index, line in enumerate(lines[1:], 1):
+        try:
+            row = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            if index != len(lines) - 1 or line.endswith(b"\n"):
+                raise ValueError("invalid retrieval funnel JSON") from exc
+            with path.open("r+b") as handle:
+                handle.truncate(offset)
+                handle.flush()
+                os.fsync(handle.fileno())
+            break
+        _assert_funnel_safe(row)
+        if not isinstance(row, dict) or row.get("reference_valid") is not True:
+            raise ValueError("invalid retrieval funnel row")
+        question_id = row.get("question_id")
+        if not isinstance(question_id, str) or question_id in seen:
+            raise ValueError("invalid or duplicate retrieval funnel question_id")
+        seen.add(question_id)
+        offset += len(line)
+    return seen
+
+
+def _write_funnel(handle, row: dict[str, Any]) -> None:
+    _assert_funnel_safe(row)
+    handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+    handle.flush()
+    os.fsync(handle.fileno())
 
 
 def _fuse_tiebreak(item):
@@ -1688,6 +1934,7 @@ def evaluate_question(
     db_template: Path | None = None,
     embedding_batch_size: int | None = None,
     include_rankings: bool = False,
+    include_funnel: bool = False,
 ) -> dict[str, Any]:
     """Ingest one question into a fresh store and score every retrieval arm.
 
@@ -1885,18 +2132,26 @@ def evaluate_question(
         # 25-hit ceiling). Its hits carry session_id directly (session ranking) and
         # store_id/node_id for turn projection. Its turn keys mix precise verbatim
         # keys with (session, None) summary markers, so it carries the asterisk.
+        recall_payload: dict[str, Any] | None = None
         recall_result, recall_ms = _timed(
             lambda: production_recall_hits(
                 question, config, store, dag, provider_embedder,
                 provider_name=provider_name, tmp_dir=tmp_dir,
                 embeddings_enabled=embeddings_enabled, limit=fetch,
                 return_status=recall_rerank,
+                return_payload=include_funnel,
             )
         )
         if recall_rerank:
-            recall_raw, recall_rerank_status, recall_rerank_scores = recall_result
+            if include_funnel:
+                recall_raw, recall_rerank_status, recall_rerank_scores, recall_payload = recall_result
+            else:
+                recall_raw, recall_rerank_status, recall_rerank_scores = recall_result
         else:
-            recall_raw = recall_result
+            if include_funnel:
+                recall_raw, recall_payload = recall_result
+            else:
+                recall_raw = recall_result
         recall_ranked = recall_hit_sessions(recall_raw)
         recall_turns = recall_hit_turn_keys(recall_raw, store_id_to_turn)
 
@@ -1943,6 +2198,9 @@ def evaluate_question(
                     recall_rerank_scores
                 )
             scored["_candidate_rankings"] = candidate_rankings
+        if include_funnel:
+            scored["_retrieval_payload"] = recall_payload
+            scored["_retrieval_funnel"] = _funnel_record(question, scored, store=store, dag=dag)
         return scored
     finally:
         vector_store.close()
@@ -2469,6 +2727,8 @@ def run_harness(
     manifest_sha256: str | None = None,
     checkpoint_path: Path | None = None,
     dump_candidates_path: Path | None = None,
+    retrieval_funnel_path: Path | None = None,
+    expected_dim: int | None = None,
     resume: bool = False,
     selected_question_ids: Iterable[str] | None = None,
 ) -> dict[str, Any]:
@@ -2590,9 +2850,9 @@ def run_harness(
 
     embedder = None
     db_template: Path | None = None
-    if not fully_completed_resume:
+    if not fully_completed_resume or retrieval_funnel_path is not None:
         embedder = resolve_harness_provider(provider_name, model)
-        if reuse_db_template:
+        if not fully_completed_resume and reuse_db_template:
             _ensure_hermes_lcm_package()
             from hermes_lcm.config import LCMConfig
 
@@ -2606,6 +2866,33 @@ def run_harness(
                     embedding_model=embedder.model_id,
                 ),
             )
+
+    funnel_header = None
+    funnel_seen: set[str] = set()
+    if retrieval_funnel_path is not None:
+        retrieval_funnel_path = Path(retrieval_funnel_path)
+        reported_dim = int(getattr(embedder, "dim", 0))
+        if expected_dim is not None and reported_dim != expected_dim:
+            raise ValueError(
+                f"embedding dimension mismatch: provider reported {reported_dim}, expected {expected_dim}"
+            )
+        funnel_header = _funnel_header(
+            provider=provider_name,
+            model=model,
+            dim=reported_dim,
+            expected_dim=expected_dim,
+            dataset_label=dataset_label,
+            source_sha256=direct_source_sha256 or source_sha256,
+            manifest_sha256=manifest_sha256,
+            embeddings_enabled=bool(embeddings_enabled),
+            rerank=use_rerank,
+            recall_rerank=recall_rerank,
+            reuse_db_template=reuse_db_template,
+        )
+        funnel_seen = _prepare_funnel(retrieval_funnel_path, funnel_header)
+        if resume and completed_question_ids - funnel_seen:
+            missing = sorted(completed_question_ids - funnel_seen)
+            raise ValueError(f"retrieval funnel is missing checkpointed questions: {missing}")
 
     checkpoint_file = None
     if checkpoint_path is not None and not fully_completed_resume:
@@ -2663,6 +2950,8 @@ def run_harness(
             _write_candidate_dump_record(candidate_dump_file, expected_dump_header)
             _fsync_parent_directory(dump_candidates_path)
 
+    funnel_file = None
+
     observed_question_ids: set[str] = set()
     if fully_completed_resume:
         observed_question_ids.update(selected_ids)
@@ -2692,15 +2981,27 @@ def run_harness(
                         recall_rerank_margin=recall_rerank_margin,
                         db_template=db_template,
                         embedding_batch_size=effective_embedding_batch_size,
-                        include_rankings=dump_candidates_path is not None,
+                        include_rankings=(dump_candidates_path is not None or retrieval_funnel_path is not None),
+                        include_funnel=retrieval_funnel_path is not None,
                     )
                 candidate_rankings = None
                 if dump_candidates_path is not None and scored is not None:
-                    candidate_rankings = scored.pop("_candidate_rankings", None)
+                    candidate_rankings = scored.get("_candidate_rankings")
                     if candidate_rankings is None:
                         raise RuntimeError(
                             "candidate dump rankings were not returned for a scored question"
                         )
+                funnel_record = None
+                if retrieval_funnel_path is not None:
+                    funnel_record = (
+                        scored.pop("_retrieval_funnel", None)
+                        if scored is not None
+                        else _funnel_empty_record(question)
+                    )
+                    if funnel_record is None:
+                        raise RuntimeError("retrieval funnel observation was not returned")
+                if scored is not None:
+                    scored.pop("_candidate_rankings", None)
                 record = _question_checkpoint_record(question, scored)
                 scored_delta, abstention_delta = _accumulate_question_checkpoint(
                     record,
@@ -2713,11 +3014,8 @@ def run_harness(
                 scored_count += scored_delta
                 abstention_count += abstention_delta
                 # Sidecar row FIRST, checkpoint second: a crash between the two
-                # re-evaluates the question on resume (its checkpoint record
-                # never landed) and appends a fresh sidecar row. The worst case
-                # is a duplicate sidecar row for one question -- consumers
-                # dedupe by question_id keeping the last -- never a checkpointed
-                # question with a silently missing sidecar row.
+                # re-evaluates the question on resume (its checkpoint record never landed).
+                # A valid sidecar row already present is reused, so retries never duplicate IDs.
                 if candidate_dump_file is not None:
                     _write_candidate_dump_record(
                         candidate_dump_file,
@@ -2727,6 +3025,17 @@ def run_harness(
                             recall_rerank=recall_rerank,
                         ),
                     )
+                if retrieval_funnel_path is not None:
+                    if funnel_file is None:
+                        retrieval_funnel_path.parent.mkdir(parents=True, exist_ok=True)
+                        funnel_empty = not retrieval_funnel_path.exists() or retrieval_funnel_path.stat().st_size == 0
+                        funnel_file = retrieval_funnel_path.open("a", encoding="utf-8")
+                        if funnel_empty:
+                            _write_funnel(funnel_file, funnel_header)
+                            _fsync_parent_directory(retrieval_funnel_path)
+                    if question.question_id not in funnel_seen:
+                        _write_funnel(funnel_file, funnel_record)
+                        funnel_seen.add(question.question_id)
                 if checkpoint_file is not None:
                     _write_checkpoint_record(checkpoint_file, record)
             finally:
@@ -2736,6 +3045,8 @@ def run_harness(
             checkpoint_file.close()
         if candidate_dump_file is not None:
             candidate_dump_file.close()
+        if funnel_file is not None:
+            funnel_file.close()
 
     if resume and observed_question_ids != selected_ids:
         missing = sorted(selected_ids - observed_question_ids)

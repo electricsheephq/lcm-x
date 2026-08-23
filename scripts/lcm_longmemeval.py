@@ -141,6 +141,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "questions skipped by --resume are not dumped.",
     )
     run.add_argument(
+        "--dump-retrieval-funnel",
+        metavar="PATH",
+        help="Write content-free retrieval provenance JSONL to PATH (default off).",
+    )
+    run.add_argument(
+        "--expected-dim",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Require the selected provider to report embedding dimension N.",
+    )
+    run.add_argument(
         "--allow-external-output",
         action="store_true",
         help="Allow --output outside this repository.",
@@ -237,7 +249,8 @@ def _cmd_prepare(args: argparse.Namespace) -> int:
 
 
 def _validated_dump_candidates_path(
-    raw: str | None, *, output_dir: Path, dataset: str | None
+    raw: str | None, *, output_dir: Path, dataset: str | None,
+    option_name: str = "--dump-candidates",
 ) -> Path | None:
     """Reject --dump-candidates targets other run files would clobber or read.
 
@@ -258,7 +271,7 @@ def _validated_dump_candidates_path(
         reserved.add(Path(dataset).resolve())
     if dump_path in reserved:
         raise ValueError(
-            f"--dump-candidates must not alias a run input/output file: {dump_path}"
+            f"{option_name} must not alias a run input/output file: {dump_path}"
         )
     return dump_path
 
@@ -278,6 +291,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         raise SystemExit("--recall-rerank-margin requires --recall-rerank")
     if args.limit is not None and args.limit <= 0:
         raise SystemExit("--limit must be a positive integer")
+    if args.expected_dim is not None and args.expected_dim <= 0:
+        raise SystemExit("--expected-dim must be a positive integer")
     output_dir = _validate_output_path(Path(args.output), allow_external=args.allow_external_output)
     if args.prepared_dir is not None:
         prepared_dir = Path(args.prepared_dir).resolve()
@@ -361,6 +376,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 dump_candidates_path=_validated_dump_candidates_path(
                     args.dump_candidates, output_dir=output_dir, dataset=args.dataset
                 ),
+                retrieval_funnel_path=_validated_dump_candidates_path(
+                    args.dump_retrieval_funnel,
+                    output_dir=output_dir,
+                    dataset=args.dataset,
+                    option_name="--dump-retrieval-funnel",
+                ),
+                expected_dim=args.expected_dim,
                 resume=args.resume,
                 selected_question_ids=selected_question_ids,
             )

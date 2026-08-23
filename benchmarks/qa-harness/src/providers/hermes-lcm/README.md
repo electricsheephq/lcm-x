@@ -30,6 +30,15 @@ same `sys.path` + package-spec bootstrap the repo's own harness uses.
 peeking. `tools.lcm_recall`'s snippet (300 chars/hit, ≤25 hits) is the honest
 single-shot production payload — the adapter does not agentically re-expand hits.
 
+The retrieval-layer provenance companion is registered separately as a
+default-off schema-v1 sidecar. Run the in-tree harness with
+`--dump-retrieval-funnel PATH --expected-dim 1024` for the 95-question smoke
+gate or the 500-question LongMemEval_S run. Use only a public or scrubbed
+hosted corpus: the sidecar exports identifiers/ranks and validated reference
+metadata, never message text, snippets, prompts, queries, answers, provider
+payloads, secrets, or raw configuration. It does not alter this provider,
+bridge protocol, runtime APIs, or QA scoring.
+
 **Session dates:** the plugin's `append_batch` stamps ingest wall-clock time and
 takes no per-message timestamp (and must not be modified), so the
 harness-provided session date — data every provider receives — is preserved in a

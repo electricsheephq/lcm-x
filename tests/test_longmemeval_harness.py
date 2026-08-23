@@ -308,6 +308,22 @@ def test_cli_parses_dump_candidates_path():
     assert args.dump_candidates == "evidence/candidates.jsonl"
 
 
+def test_cli_parses_retrieval_funnel_flags_and_defaults_off():
+    cli = _load_cli()
+    base = cli._parse_args(["run", "--dataset", "x.json", "--output", "out"])
+    assert base.dump_retrieval_funnel is None
+    assert base.expected_dim is None
+    args = cli._parse_args(
+        [
+            "run", "--dataset", "x.json", "--output", "out",
+            "--dump-retrieval-funnel", "evidence/funnel.jsonl",
+            "--expected-dim", "1024",
+        ]
+    )
+    assert args.dump_retrieval_funnel == "evidence/funnel.jsonl"
+    assert args.expected_dim == 1024
+
+
 def test_cli_parses_recall_rerank_flag():
     cli = _load_cli()
     args = cli._parse_args(
@@ -736,6 +752,143 @@ def test_dump_candidates_off_leaves_checkpoint_byte_identical(tmp_path, monkeypa
     assert off_checkpoint.read_bytes() == on_checkpoint.read_bytes()
     assert dump_path.is_file()
     assert "_candidate_rankings" not in on_checkpoint.read_text(encoding="utf-8")
+
+
+def test_retrieval_funnel_combined_flags_is_content_free_and_reference_valid(tmp_path):
+    questions = _synthetic_dataset()[:1]
+    funnel_path = tmp_path / "funnel.jsonl"
+    checkpoint_path = tmp_path / "per_question_checkpoint.jsonl"
+    candidate_path = tmp_path / "candidates.jsonl"
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "tmp",
+        checkpoint_path=checkpoint_path,
+        dump_candidates_path=candidate_path,
+        retrieval_funnel_path=funnel_path,
+    )
+    lines = funnel_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    header = json.loads(lines[0])["__retrieval_funnel_header__"]
+    assert header["registered_product_sha"]
+    assert header["current_tree_hashes"]["installer_script"]
+    row = json.loads(lines[1])
+    assert row["reference_valid"] is True
+    assert set(row["arms"]) == set(ARMS)
+    assert row["shipped"]["count"] == len(row["shipped"]["candidates"])
+    forbidden = {"content", "snippet", "query", "prompt", "answer", "text", "transcript"}
+
+    def assert_safe(value):
+        if isinstance(value, dict):
+            assert not any(str(key).lower() in forbidden for key in value)
+            for child in value.values():
+                assert_safe(child)
+        elif isinstance(value, list):
+            for child in value:
+                assert_safe(child)
+
+    assert_safe(row)
+    assert "_candidate_rankings" not in checkpoint_path.read_text(encoding="utf-8")
+    assert candidate_path.is_file()
+
+
+def test_retrieval_funnel_normalized_rows_are_repeatable_and_resume_repairs_torn_tail(tmp_path):
+    questions = _synthetic_dataset()[:1]
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+    first_checkpoint = tmp_path / "first-checkpoint.jsonl"
+    second_checkpoint = tmp_path / "second-checkpoint.jsonl"
+    run_harness(questions, provider_name="stub", model="", tmp_dir=tmp_path / "a",
+                checkpoint_path=first_checkpoint, retrieval_funnel_path=first)
+    run_harness(questions, provider_name="stub", model="", tmp_dir=tmp_path / "b",
+                checkpoint_path=second_checkpoint, retrieval_funnel_path=second)
+
+    def normalized(path):
+        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        records[0]["__retrieval_funnel_header__"].pop("generated_at_utc", None)
+        records[1].pop("timing", None)
+        return records
+
+    assert normalized(first) == normalized(second)
+    with first.open("a", encoding="utf-8") as handle:
+        handle.write('{"question_id":"torn-tail"')
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "resume",
+        checkpoint_path=first_checkpoint,
+        retrieval_funnel_path=first,
+        resume=True,
+        selected_question_ids=[question.question_id for question in questions],
+    )
+    assert "torn-tail" not in first.read_text(encoding="utf-8")
+
+
+def test_retrieval_funnel_rejects_expected_dim_before_sidecar_write(tmp_path):
+    funnel_path = tmp_path / "funnel.jsonl"
+    with pytest.raises(ValueError, match="dimension mismatch"):
+        run_harness(
+            _synthetic_dataset()[:1],
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / "tmp",
+            retrieval_funnel_path=funnel_path,
+            expected_dim=1024,
+        )
+    assert not funnel_path.exists()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "hits": [],
+            "provenance": {"coverage": {"fts": "ok"}},
+            "metrics": {},
+            "degraded": True,
+            "degraded_reason": "unregistered fallback",
+        },
+        {
+            "hits": [{"kind": "message_excerpt", "store_id": 999999, "session_id": "q0-s-evidence"}],
+            "provenance": {"coverage": {"fts": "ok"}},
+            "metrics": {},
+            "degraded": False,
+        },
+    ],
+)
+def test_retrieval_funnel_rejects_unknown_fallback_or_reference_before_write(tmp_path, monkeypatch, payload):
+    import benchmarking.longmemeval as lme
+
+    def fake_recall(*args, return_payload=False, **kwargs):
+        return (list(payload["hits"]), payload) if return_payload else list(payload["hits"])
+
+    monkeypatch.setattr(lme, "production_recall_hits", fake_recall)
+    funnel_path = tmp_path / "funnel.jsonl"
+    with pytest.raises(ValueError, match="unknown fallback|reference|store_id"):
+        run_harness(
+            _synthetic_dataset()[:1],
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / "tmp",
+            embeddings_enabled=False,
+            retrieval_funnel_path=funnel_path,
+        )
+    assert not funnel_path.exists()
+
+
+def test_retrieval_funnel_rejects_raw_key_without_mutation(tmp_path):
+    funnel_path = tmp_path / "funnel.jsonl"
+    run_harness(_synthetic_dataset()[:1], provider_name="stub", model="", tmp_dir=tmp_path / "run",
+                retrieval_funnel_path=funnel_path)
+    with funnel_path.open("ab") as handle:
+        handle.write(b'{"raw_text":"secret"}\n')
+    foreign = funnel_path.read_bytes()
+    with pytest.raises(ValueError, match="raw-text key"):
+        run_harness(_synthetic_dataset()[:1], provider_name="stub", model="", tmp_dir=tmp_path / "check",
+                    retrieval_funnel_path=funnel_path)
+    assert funnel_path.read_bytes() == foreign
 
 
 def test_recall_rerank_off_leaves_checkpoint_byte_identical(tmp_path, monkeypatch):

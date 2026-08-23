@@ -45,6 +45,26 @@ evidence, computed by the in-tree offline harness
   evidence turn of that session at once — reported markdown flags any arm
   with this coarseness using a trailing `*`.
 
+#### Registered retrieval-provenance sidecar (schema v1)
+
+The optional `--dump-retrieval-funnel PATH --expected-dim 1024` path is a
+benchmark-only, default-off JSONL sidecar. It reuses the ranked candidates
+already computed by the harness and stores only public/scrubbed identifiers,
+ranks, arms, kinds, gold session IDs, coverage, degraded status, safe reason
+codes, embedding accounting, counts, timing, and `reference_valid`. Shipped
+message/chunk `store_id` references and summary `node_id` references are
+validated against the question's session before a row is written. No raw text,
+snippets, prompts, queries, answers, provider payloads, secrets, or config
+values are exported. Hosted runs therefore require a public or scrubbed corpus.
+
+The registered evaluation design is a 95-question smoke run followed by the
+500-question LongMemEval_S run, with manifests, provider/model, cache,
+configuration, seed, weights, and top-k frozen before inspection. The sidecar
+header binds the registered stable product identity/base separately from the
+instrument identity and scoped current-tree hashes; unknown fallback reasons,
+dimension mismatches, invalid references, foreign files, and torn ownership
+boundaries fail closed.
+
 ### Layer 2 — judged QA accuracy
 
 End-task answer correctness through the full ingest → search → answer →

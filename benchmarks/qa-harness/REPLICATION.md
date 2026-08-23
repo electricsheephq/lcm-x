@@ -10,6 +10,19 @@ loaders, UI — that doesn't belong in this repo).
 The harness provider, branch, environment variables, and filesystem paths keep
 the compatibility identifier `hermes-lcm`.
 
+## Retrieval-provenance registration
+
+The companion retrieval harness has an opt-in, default-off schema-v1 sidecar:
+`--dump-retrieval-funnel PATH --expected-dim 1024`. It is separate from this
+answer/judge checkpoint and is intended for the registered 95-question smoke
+run and 500-question LongMemEval_S run. Keep its hosted corpus public or
+scrubbed: the sidecar contains only identifiers/ranks, arm and coverage
+metadata, safe fallback codes, embedding accounting, counts, and validated
+references. It never contains message text, snippets, prompts, queries,
+answers, provider payloads, secrets, or raw configs. The QA adapter still calls
+the production `lcm_recall` path; this sidecar does not change provider APIs,
+runtime behavior, or QA scoring.
+
 ## Harness identity
 
 - Harness repo: [`electricsheephq/memorybench-benchmark-tool`](https://github.com/electricsheephq/memorybench-benchmark-tool),
