@@ -937,6 +937,25 @@ def test_retrieval_funnel_frozen_clock_is_byte_identical(tmp_path, monkeypatch):
     assert first.read_bytes() == second.read_bytes()
 
 
+def test_retrieval_funnel_rejects_incomplete_bound_selection(tmp_path):
+    questions = _synthetic_dataset()[:2]
+    funnel_path = tmp_path / "funnel.jsonl"
+    with pytest.raises(ValueError, match="selected question ids do not match"):
+        run_harness(
+            [questions[0]],
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / "run",
+            retrieval_funnel_path=funnel_path,
+            selected_question_ids=[question.question_id for question in questions],
+        )
+
+    lines = funnel_path.read_text(encoding="utf-8").splitlines()
+    header = json.loads(lines[0])["__retrieval_funnel_header__"]
+    assert header["selected_question_count"] == 2
+    assert len(lines) == 2
+
+
 @pytest.mark.parametrize(
     "payload",
     [

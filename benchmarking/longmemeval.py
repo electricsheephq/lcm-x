@@ -3080,7 +3080,7 @@ def run_harness(
         if funnel_file is not None:
             funnel_file.close()
 
-    if resume and observed_question_ids != selected_ids:
+    if (resume or retrieval_funnel_path is not None) and observed_question_ids != selected_ids:
         missing = sorted(selected_ids - observed_question_ids)
         extra = sorted(observed_question_ids - selected_ids)
         raise ValueError(
