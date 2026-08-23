@@ -291,6 +291,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         raise SystemExit("--recall-rerank-margin requires --recall-rerank")
     if args.limit is not None and args.limit <= 0:
         raise SystemExit("--limit must be a positive integer")
+    if args.limit is not None and args.dump_retrieval_funnel:
+        raise SystemExit("--limit cannot be combined with --dump-retrieval-funnel")
     if args.expected_dim is not None and args.expected_dim <= 0:
         raise SystemExit("--expected-dim must be a positive integer")
     output_dir = _validate_output_path(Path(args.output), allow_external=args.allow_external_output)

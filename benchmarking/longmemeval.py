@@ -1632,7 +1632,8 @@ def _funnel_header(
     *, provider: str, model: str, dim: int, expected_dim: int | None,
     dataset_label: str, source_sha256: str | None, manifest_sha256: str | None,
     embeddings_enabled: bool, rerank: bool, recall_rerank: bool,
-    reuse_db_template: bool, seed: int = _REGISTERED_SAMPLE_SEED,
+    reuse_db_template: bool, selected_question_ids: Sequence[str],
+    seed: int = _REGISTERED_SAMPLE_SEED,
 ) -> dict[str, Any]:
     def tree_hash(names: tuple[str, ...]) -> str:
         digest = hashlib.sha256()
@@ -1641,6 +1642,9 @@ def _funnel_header(
             digest.update(name.encode())
             digest.update(path.read_bytes() if path.is_file() else b"<missing>")
         return digest.hexdigest()
+    selected_digest = hashlib.sha256(
+        json.dumps(list(selected_question_ids), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     return {
         _FUNNEL_HEADER_KEY: {
             "schema_version": _FUNNEL_SCHEMA_VERSION,
@@ -1656,6 +1660,8 @@ def _funnel_header(
                 "file_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             },
             "dataset": {"label": dataset_label, "source_sha256": source_sha256, "manifest_sha256": manifest_sha256},
+            "selected_question_count": len(selected_question_ids),
+            "selected_question_ids_sha256": selected_digest,
             "provider": {"name": provider, "model": model, "reported_dim": dim, "expected_dim": expected_dim},
             "cache": {"enabled": bool(os.environ.get(EMBED_CACHE_ENV, "").strip()), "key": "provider:model:content_sha256"},
             "environment": {"python": f"{sys.version_info.major}.{sys.version_info.minor}"},
@@ -1663,7 +1669,7 @@ def _funnel_header(
             "seed": seed,
             "weights": {"fts": 0.5, "summary": 1.0, "chunk": 1.0},
             "top_k": _CANDIDATE_DUMP_TOP_K,
-            "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time())),
         }
     }
 
@@ -1732,7 +1738,9 @@ def _assert_funnel_safe(value: Any) -> None:
             _assert_funnel_safe(child)
 
 
-def _prepare_funnel(path: Path, header: dict[str, Any]) -> set[str]:
+def _prepare_funnel(
+    path: Path, header: dict[str, Any], *, selected_question_ids: set[str] | None = None
+) -> set[str]:
     if not path.exists() or path.stat().st_size == 0:
         return set()
     raw = path.read_bytes()
@@ -1755,16 +1763,15 @@ def _prepare_funnel(path: Path, header: dict[str, Any]) -> set[str]:
         raise ValueError("retrieval funnel configuration mismatch")
     seen: set[str] = set()
     offset = len(lines[0])
+    torn_offset: int | None = None
     for index, line in enumerate(lines[1:], 1):
+        final_unterminated = index == len(lines) - 1 and not line.endswith(b"\n")
         try:
             row = json.loads(line)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            if index != len(lines) - 1 or line.endswith(b"\n"):
+            if not final_unterminated:
                 raise ValueError("invalid retrieval funnel JSON") from exc
-            with path.open("r+b") as handle:
-                handle.truncate(offset)
-                handle.flush()
-                os.fsync(handle.fileno())
+            torn_offset = offset
             break
         _assert_funnel_safe(row)
         if not isinstance(row, dict) or row.get("reference_valid") is not True:
@@ -1772,8 +1779,20 @@ def _prepare_funnel(path: Path, header: dict[str, Any]) -> set[str]:
         question_id = row.get("question_id")
         if not isinstance(question_id, str) or question_id in seen:
             raise ValueError("invalid or duplicate retrieval funnel question_id")
+        if selected_question_ids is not None and question_id not in selected_question_ids:
+            raise ValueError(
+                f"retrieval funnel question_id {question_id!r} is not in the selected question set"
+            )
+        if final_unterminated:
+            torn_offset = offset
+            break
         seen.add(question_id)
         offset += len(line)
+    if torn_offset is not None:
+        with path.open("r+b") as handle:
+            handle.truncate(torn_offset)
+            handle.flush()
+            os.fsync(handle.fileno())
     return seen
 
 
@@ -2754,9 +2773,16 @@ def run_harness(
             raise ValueError(
                 "selected_question_ids is required to resume a streaming question iterator"
             )
+    if retrieval_funnel_path is not None and selected_question_ids is None:
+        if isinstance(questions, Sequence):
+            selected_question_ids = tuple(question.question_id for question in questions)
+        else:
+            raise ValueError(
+                "selected_question_ids is required for a streaming retrieval funnel run"
+            )
     selected_id_sequence = tuple(selected_question_ids or ())
     selected_ids = set(selected_id_sequence)
-    if resume and len(selected_ids) != len(selected_id_sequence):
+    if (resume or retrieval_funnel_path is not None) and len(selected_ids) != len(selected_id_sequence):
         raise ValueError("selected question ids must be unique when resuming")
 
     if embeddings_enabled is None:
@@ -2889,8 +2915,13 @@ def run_harness(
             rerank=use_rerank,
             recall_rerank=recall_rerank,
             reuse_db_template=reuse_db_template,
+            selected_question_ids=selected_id_sequence,
         )
-        funnel_seen = _prepare_funnel(retrieval_funnel_path, funnel_header)
+        funnel_seen = _prepare_funnel(
+            retrieval_funnel_path,
+            funnel_header,
+            selected_question_ids=selected_ids,
+        )
         if resume and completed_question_ids - funnel_seen:
             missing = sorted(completed_question_ids - funnel_seen)
             raise ValueError(f"retrieval funnel is missing checkpointed questions: {missing}")
@@ -2961,7 +2992,7 @@ def run_harness(
         for question in (() if fully_completed_resume else questions):
             consumed_count += 1
             observed_question_ids.add(question.question_id)
-            if resume and question.question_id not in selected_ids:
+            if (resume or retrieval_funnel_path is not None) and question.question_id not in selected_ids:
                 raise ValueError(
                     f"question_id {question.question_id!r} is not in the selected question set"
                 )

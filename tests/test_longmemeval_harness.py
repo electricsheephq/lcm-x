@@ -8,6 +8,7 @@ proves the ingest -> retrieve -> score plumbing over a real temp LCM store.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 
@@ -773,6 +774,15 @@ def test_retrieval_funnel_combined_flags_is_content_free_and_reference_valid(tmp
     header = json.loads(lines[0])["__retrieval_funnel_header__"]
     assert header["registered_product_sha"]
     assert header["seed"] == 20260802
+    assert header["selected_question_count"] == len(questions)
+    expected_ids_digest = hashlib.sha256(
+        json.dumps(
+            [question.question_id for question in questions],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    assert header["selected_question_ids_sha256"] == expected_ids_digest
     assert header["current_tree_hashes"]["installer_script"]
     row = json.loads(lines[1])
     assert row["reference_valid"] is True
@@ -839,6 +849,92 @@ def test_retrieval_funnel_rejects_expected_dim_before_sidecar_write(tmp_path):
             expected_dim=1024,
         )
     assert not funnel_path.exists()
+
+
+def test_retrieval_funnel_treats_unterminated_final_row_as_torn(tmp_path):
+    questions = _synthetic_dataset()[:1]
+    funnel_path = tmp_path / "funnel.jsonl"
+    checkpoint_path = tmp_path / "per_question_checkpoint.jsonl"
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "run",
+        checkpoint_path=checkpoint_path,
+        retrieval_funnel_path=funnel_path,
+    )
+    funnel_path.write_bytes(funnel_path.read_bytes()[:-1])
+    with pytest.raises(ValueError, match="missing checkpointed questions"):
+        run_harness(
+            questions,
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / "resume",
+            checkpoint_path=checkpoint_path,
+            retrieval_funnel_path=funnel_path,
+            resume=True,
+            selected_question_ids=[questions[0].question_id],
+        )
+    assert len(funnel_path.read_bytes().splitlines()) == 1
+
+
+def test_retrieval_funnel_rejects_existing_row_outside_selection_before_mutation(tmp_path):
+    questions = _synthetic_dataset()[:2]
+    funnel_path = tmp_path / "funnel.jsonl"
+    run_harness(
+        [questions[1]],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "seed",
+        retrieval_funnel_path=funnel_path,
+    )
+    lines = funnel_path.read_text(encoding="utf-8").splitlines()
+    row = json.loads(lines[1])
+    row["question_id"] = questions[0].question_id
+    funnel_path.write_text(
+        lines[0] + "\n" + json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    before = funnel_path.read_bytes()
+    with pytest.raises(ValueError, match="not in the selected question set"):
+        run_harness(
+            [questions[1]],
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / "check",
+            retrieval_funnel_path=funnel_path,
+            selected_question_ids=[questions[1].question_id],
+        )
+    assert funnel_path.read_bytes() == before
+
+
+def test_cli_rejects_limit_with_retrieval_funnel():
+    cli = _load_cli()
+    args = cli._parse_args(
+        [
+            "run", "--dataset", "unused.json", "--output", "out", "--limit", "1",
+            "--dump-retrieval-funnel", "funnel.jsonl",
+        ]
+    )
+    with pytest.raises(SystemExit, match="cannot be combined"):
+        cli._cmd_run(args)
+
+
+def test_retrieval_funnel_frozen_clock_is_byte_identical(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+
+    frozen = 1_735_689_600.0
+    monkeypatch.setattr(lme.time, "time", lambda: frozen)
+    monkeypatch.setattr(lme.time, "monotonic", lambda: frozen)
+    monkeypatch.setattr(lme.time, "perf_counter", lambda: frozen)
+    question = _synthetic_dataset()[:1]
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+    run_harness(question, provider_name="stub", model="", tmp_dir=tmp_path / "a",
+                retrieval_funnel_path=first)
+    run_harness(question, provider_name="stub", model="", tmp_dir=tmp_path / "b",
+                retrieval_funnel_path=second)
+    assert first.read_bytes() == second.read_bytes()
 
 
 @pytest.mark.parametrize(
