@@ -238,7 +238,7 @@ Expected signals:
 - the normal available-skills index includes `hermes-lcm`; current hosts can
   also resolve the explicit plugin-qualified skill `hermes-lcm:hermes-lcm`
 
-Typical output:
+After checking out the exact stable tag, typical output is:
 
 ```text
 Plugins (1):
@@ -247,6 +247,10 @@ Plugins (1):
 Provider Plugins:
   Context Engine: lcm
 ```
+
+An untagged checkout of the reconciled `main` baseline instead reports
+`hermes-lcm v0.23.0-rc1 (15 tools)`; verify the loaded commit before treating
+either string as release proof.
 
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
 `lcm_doctor`, and `/lcm doctor` also report the loaded plugin path and

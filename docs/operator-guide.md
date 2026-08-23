@@ -144,7 +144,7 @@ Expected signals:
 - ordinary skill discovery includes `hermes-lcm`; plugin-qualified explicit
   loading is `hermes-lcm:hermes-lcm` on hosts that support plugin skills
 
-Typical output:
+After following the exact-stable upgrade steps above, typical output is:
 
 ```text
 Plugins (1):
@@ -153,6 +153,10 @@ Plugins (1):
 Provider Plugins:
   Context Engine: lcm
 ```
+
+An untagged checkout of the reconciled `main` baseline instead reports
+`hermes-lcm v0.23.0-rc1 (15 tools)`. Version text alone is not release proof;
+verify the loaded commit and tag.
 
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
 `lcm_doctor`, and `/lcm doctor` also report the loaded plugin path and
