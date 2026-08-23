@@ -115,6 +115,41 @@ def test_provider_transform_removes_secret_metadata_and_canonicalizes_placeholde
     validate_embedding_privacy_dispatch([protected], config, expected_revision=revision)
 
 
+def test_truncated_private_key_is_redacted_before_semantic_cloud_call(tmp_path):
+    config = _config(tmp_path)
+    provider = CaptureProvider()
+    engine = SimpleNamespace(
+        _config=config,
+        _store=SimpleNamespace(db_path=tmp_path / "privacy.db"),
+    )
+    revision = embedding_privacy_revision(config)
+    store = VectorStore(engine._store.db_path, config=config)
+    try:
+        store.register_profile(
+            provider.model_id,
+            provider.provider_id,
+            2,
+            revision=revision,
+        )
+    finally:
+        store.close()
+
+    raw_query = "context before\n-----BEGIN PRIVATE KEY-----\ntruncated material"
+    result = tools_mod._lcm_grep_embed_query(
+        provider,
+        raw_query,
+        engine=engine,
+        task="summary",
+        remaining_s=1.0,
+    )
+
+    assert result == [1.0, 0.0]
+    assert provider.queries == [
+        "context before\n[LCM embedding privacy: name=private_key]"
+    ]
+    assert "truncated material" not in provider.queries[0]
+
+
 def test_semantic_query_makes_zero_cloud_calls_when_policy_disabled(tmp_path):
     config = _config(tmp_path, enabled=False)
     provider = CaptureProvider()
