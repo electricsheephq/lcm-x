@@ -803,7 +803,7 @@ def _embedding_privacy_redact_match(
 
 
 def _embedding_privacy_redact_private_keys(text: str) -> str:
-    """Replace complete PEM private-key blocks with metadata-free placeholders."""
+    """Replace complete or truncated PEM private-key blocks with placeholders."""
     if "private key-----" not in text.lower():
         return text
     parts: list[str] = []
@@ -816,7 +816,9 @@ def _embedding_privacy_redact_private_keys(text: str) -> str:
             break
         end = _PRIVATE_KEY_END_RE.search(text, begin.end())
         if end is None:
-            parts.append(text[cursor:])
+            parts.append(text[cursor:begin.start()])
+            parts.append(_embedding_privacy_placeholder("private_key"))
+            changed = True
             break
         parts.append(text[cursor:begin.start()])
         parts.append(_embedding_privacy_placeholder("private_key"))
