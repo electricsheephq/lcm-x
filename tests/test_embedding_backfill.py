@@ -17,6 +17,7 @@ from hermes_lcm.embedding_provider import (
     ProviderPreDispatchError,
     VoyageError,
 )
+from hermes_lcm.ingest_protection import embedding_privacy_revision
 from hermes_lcm.vector_store import EmbeddingPublishOutcome, VectorStore
 
 
@@ -186,6 +187,14 @@ def test_dry_run_reports_counts_tokens_and_cost_without_calls_or_writes(
     conn.close()
     voyage_engine._config.embedding_provider = "voyage"
     voyage_engine._config.embedding_model = "voyage-4-lite"
+    voyage_engine._config.sensitive_patterns_enabled = True
+    conn = sqlite3.connect(voyage_engine._store.db_path)
+    conn.execute(
+        "UPDATE lcm_embedding_profile SET revision = ?",
+        (embedding_privacy_revision(voyage_engine._config),),
+    )
+    conn.commit()
+    conn.close()
     monkeypatch.setattr(
         command_mod,
         "count_tokens",
@@ -380,9 +389,15 @@ def test_auth_error_aborts_immediately_and_releases_claim(monkeypatch, tmp_path)
 
     provider.provider_id = "voyage"
     engine._config.embedding_provider = "voyage"
+    engine._config.sensitive_patterns_enabled = True
     store = VectorStore(engine._store.db_path, config=engine._config)
     try:
-        store.register_profile("model-a", "voyage", 2)
+        store.register_profile(
+            "model-a",
+            "voyage",
+            2,
+            revision=embedding_privacy_revision(engine._config),
+        )
     finally:
         store.close()
     provider.embed_documents = auth_error

@@ -19,7 +19,7 @@ import stat
 import tempfile
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
 from .externalize import (
     externalize_ingest_payload,
@@ -157,6 +157,16 @@ _UNRECOVERABLE_TRUNCATION_RE = re.compile(
 _HERMES_RESULTS_DIRNAME = "hermes-results"
 _MAX_RECOVERED_PERSISTED_OUTPUT_BYTES = 64 * 1024 * 1024
 _SENSITIVE_PLACEHOLDER_PREFIX = "[LCM sensitive redaction:"
+_EMBEDDING_PRIVACY_PLACEHOLDER_PREFIX = "[LCM embedding privacy:"
+_EMBEDDING_PRIVACY_TRANSFORM_VERSION = "privacy:v1"
+_EMBEDDING_PRIVACY_PLACEHOLDER_RE = re.compile(
+    r"\[LCM (?:sensitive redaction|embedding privacy):\s*"
+    r"name=(?P<name>[a-z0-9_-]+)[^\]]*\]",
+    re.IGNORECASE,
+)
+_EMBEDDING_PRIVACY_CLOUD_PROVIDERS = frozenset(
+    {"voyage", "voyageai", "openai-compatible"}
+)
 _SENSITIVE_PATTERN_CATALOG: dict[str, re.Pattern[str]] = {
     "api_key": re.compile(
         r"(?P<prefix>(?:\\?[\"']?)\b(?:api[_-]?key|api[_-]?token|access[_-]?token|secret[_-]?key|client[_-]?secret)\b\s*(?:\\?[\"']?)\s*[:=]\s*(?:\\?[\"']?))"
@@ -722,6 +732,174 @@ def _configured_sensitive_pattern_names(config) -> tuple[list[str], list[str], l
         elif normalized not in unknown:
             unknown.append(normalized)
     return configured, active, unknown
+
+
+class EmbeddingPrivacyPolicyError(RuntimeError):
+    """Cloud embedding input cannot be proven safe under the active policy."""
+
+
+def embedding_provider_requires_privacy(provider_id: str) -> bool:
+    """Return whether a provider may send embedding input off-machine."""
+    return str(provider_id or "").strip().lower() in _EMBEDDING_PRIVACY_CLOUD_PROVIDERS
+
+
+def embedding_privacy_revision(config) -> str:
+    """Return the canonical identity revision for cloud embedding input.
+
+    The revision deliberately contains only a transform version and a digest of
+    sorted pattern *names*. It never depends on matched text or secret bytes.
+    """
+    if not bool(getattr(config, "sensitive_patterns_enabled", False)):
+        raise EmbeddingPrivacyPolicyError(
+            "cloud embedding privacy requires sensitive-pattern handling to be enabled"
+        )
+    configured, active, unknown = _configured_sensitive_pattern_names(config)
+    if not configured or not active:
+        raise EmbeddingPrivacyPolicyError(
+            "cloud embedding privacy requires a nonempty sensitive-pattern policy"
+        )
+    if unknown:
+        raise EmbeddingPrivacyPolicyError(
+            "cloud embedding privacy policy contains unknown pattern names: "
+            + ", ".join(sorted(unknown))
+        )
+    names = sorted(set(active))
+    digest = hashlib.sha256("\n".join(names).encode("utf-8")).hexdigest()
+    return f"{_EMBEDDING_PRIVACY_TRANSFORM_VERSION}:{digest}"
+
+
+def _embedding_privacy_placeholder(pattern_name: str) -> str:
+    return (
+        f"{_EMBEDDING_PRIVACY_PLACEHOLDER_PREFIX} "
+        f"name={_safe_placeholder_metadata(pattern_name)}]"
+    )
+
+
+def _canonicalize_embedding_privacy_placeholders(text: str) -> str:
+    return _EMBEDDING_PRIVACY_PLACEHOLDER_RE.sub(
+        lambda match: _embedding_privacy_placeholder(
+            str(match.group("name") or "unknown").strip().lower()
+        ),
+        text,
+    )
+
+
+def _embedding_privacy_redact_match(
+    pattern_name: str, match: re.Match[str]
+) -> str:
+    group_names = match.re.groupindex
+    secret_group = None
+    for candidate in ("secret", "secret_quoted", "secret_unquoted"):
+        if candidate in group_names and match.groupdict().get(candidate) is not None:
+            secret_group = candidate
+            break
+    placeholder = _embedding_privacy_placeholder(pattern_name)
+    if secret_group is None:
+        return placeholder
+    relative_start = match.start(secret_group) - match.start(0)
+    relative_end = match.end(secret_group) - match.start(0)
+    full = match.group(0)
+    return full[:relative_start] + placeholder + full[relative_end:]
+
+
+def _embedding_privacy_redact_private_keys(text: str) -> str:
+    """Replace complete PEM private-key blocks with metadata-free placeholders."""
+    if "private key-----" not in text.lower():
+        return text
+    parts: list[str] = []
+    cursor = 0
+    changed = False
+    while True:
+        begin = _PRIVATE_KEY_BEGIN_RE.search(text, cursor)
+        if begin is None:
+            parts.append(text[cursor:])
+            break
+        end = _PRIVATE_KEY_END_RE.search(text, begin.end())
+        if end is None:
+            parts.append(text[cursor:])
+            break
+        parts.append(text[cursor:begin.start()])
+        parts.append(_embedding_privacy_placeholder("private_key"))
+        cursor = end.end()
+        changed = True
+    return "".join(parts) if changed else text
+
+
+def _embedding_privacy_residual_patterns(
+    text: str, active_names: Sequence[str]
+) -> list[str]:
+    residual: list[str] = []
+    for name in active_names:
+        if name == "private_key":
+            if _embedding_privacy_redact_private_keys(text) != text:
+                residual.append(name)
+            continue
+        if _SENSITIVE_PATTERN_CATALOG[name].search(text) is not None:
+            residual.append(name)
+    return residual
+
+
+def protect_embedding_text(
+    text: str,
+    config,
+    *,
+    expected_revision: str | None = None,
+) -> tuple[str, str, bool]:
+    """Return residual-clean provider input without mutating durable source."""
+    revision = embedding_privacy_revision(config)
+    if expected_revision is not None and revision != str(expected_revision):
+        raise EmbeddingPrivacyPolicyError(
+            "cloud embedding privacy policy differs from registered vector identity; "
+            "run `/lcm embed warmup` before dispatch"
+        )
+    original = str(text)
+    protected = _canonicalize_embedding_privacy_placeholders(original)
+    _configured, active, _unknown = _configured_sensitive_pattern_names(config)
+    for name in sorted(set(active)):
+        if name == "private_key":
+            protected = _embedding_privacy_redact_private_keys(protected)
+        else:
+            protected = _SENSITIVE_PATTERN_CATALOG[name].sub(
+                lambda match, pattern_name=name: _embedding_privacy_redact_match(
+                    pattern_name, match
+                ),
+                protected,
+            )
+    residual = _embedding_privacy_residual_patterns(protected, active)
+    if residual:
+        raise EmbeddingPrivacyPolicyError(
+            "cloud embedding privacy residual detector blocked pattern names: "
+            + ", ".join(sorted(set(residual)))
+        )
+    return protected, revision, protected != original
+
+
+def validate_embedding_privacy_dispatch(
+    texts: Sequence[str],
+    config,
+    *,
+    expected_revision: str,
+) -> str:
+    """Revalidate policy identity and exact outbound text before a cloud call."""
+    revision = embedding_privacy_revision(config)
+    if revision != str(expected_revision):
+        raise EmbeddingPrivacyPolicyError(
+            "cloud embedding privacy policy changed before provider dispatch"
+        )
+    _configured, active, _unknown = _configured_sensitive_pattern_names(config)
+    for text in texts:
+        current = str(text)
+        if _canonicalize_embedding_privacy_placeholders(current) != current:
+            raise EmbeddingPrivacyPolicyError(
+                "cloud embedding dispatch contains a noncanonical privacy placeholder"
+            )
+        residual = _embedding_privacy_residual_patterns(current, active)
+        if residual:
+            raise EmbeddingPrivacyPolicyError(
+                "cloud embedding privacy residual detector blocked pattern names: "
+                + ", ".join(sorted(set(residual)))
+            )
+    return revision
 
 
 def _active_sensitive_pattern_names(config) -> list[str]:
