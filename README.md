@@ -240,7 +240,7 @@ Typical output:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm v0.23.0 (15 tools)
+  ✓ hermes-lcm v0.23.1 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm
