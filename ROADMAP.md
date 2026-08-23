@@ -4,7 +4,7 @@ Status: living document, reconciled 2026-08-24. GitHub issue #323 is the canonic
 
 ## What LCM-X is
 
-LCM-X is Lossless Context Memory eXtension: a Hermes-compatible context engine that preserves raw source, builds a recoverable summary DAG, and exposes exact and semantic retrieval with explicit provenance and failure states.
+LCM-X is Lossless Context Memory eXtension: a Hermes-compatible context engine that preserves raw source, builds a recoverable summary DAG, and exposes exact and semantic retrieval with explicit provenance and failure states. The tested host contract includes Hermes Agent v0.16 through its context-engine schema path; no newer unreleased host capability is assumed.
 
 ## Current product baseline
 
@@ -42,15 +42,15 @@ No node may become unreachable. Prompt-sensitive ranking remains default-off unt
 
 ## Track D — Compaction, recovery, and diagnostics
 
-#247 owns the reproduced multi-session `publication_invariant_conflict` defect. #314 is a current-main `needs-repro` semantics issue and must not drive threshold tuning until publication failure is separated from attempt frequency.
+Issue `#247` owns the reproduced multi-session `publication_invariant_conflict` defect. Issue `#314` is a current-main `needs-repro` semantics issue and must not drive threshold tuning until publication failure is separated from attempt frequency.
 
-#36 and #74 retain background-compaction and persistence/recovery architecture. #265 owns degraded semantic/FTS behavior, and #321 owns bounded fast doctor plus explicit deep integrity checks.
+Issues `#36` and `#74` retain background-compaction and persistence/recovery architecture. Issue `#265` owns degraded semantic/FTS behavior, and issue `#321` owns bounded fast doctor plus explicit deep integrity checks.
 
 ## Track E — Deferred privacy and scale work
 
-#334-#337 are accepted deferred privacy/identity/locality contracts. They do not reopen v0.23.1 or enable trajectory embeddings, binary prescreen, cloud reranking, or remote Ollama on Eva.
+Issues `#334`-`#337` are accepted deferred privacy/identity/locality contracts. They do not reopen v0.23.1 or enable trajectory embeddings, binary prescreen, cloud reranking, or remote Ollama on Eva.
 
-#328 is a P4 deterministic telemetry-test follow-up. #342 is the next-release version-policy follow-up.
+Issue `#328` is a P4 deterministic telemetry-test follow-up. Issue `#342` is the next-release version-policy follow-up.
 
 ## Track F — Teams and host integration
 

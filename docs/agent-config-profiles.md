@@ -157,7 +157,9 @@ export LCM_EMBEDDING_BACKFILL_TIMEOUT_S=120
 
 Always dry-run `/lcm embed backfill` first: it reports document counts and
 token estimates with the same eligibility rules apply-mode uses, so the
-estimate is the bill. The cloud privacy transform changes provider input only;
+estimate is a gross-list-price planning estimate, not a billing guarantee.
+Account-specific free tokens and other billing adjustments are not included.
+The cloud privacy transform changes provider input only;
 it never rewrites durable messages, summaries, FTS rows, or payloads. It is a
 configured-pattern boundary rather than a guarantee that every sensitive fact
 has been classified.

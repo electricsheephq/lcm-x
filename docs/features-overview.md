@@ -146,7 +146,7 @@ flowchart LR
 | Cost | Provider pricing | Endpoint-dependent | Local compute | Endpoint-dependent |
 | Setup | API key | Ollama service + model | Optional `fastembed` install; model download at warmup | Base URL, model ID, and configured API-key environment |
 | Quality | Model-dependent frontier service | Model-dependent | Small local baseline | Endpoint/model-dependent |
-| Privacy | Cloud policy required | Locality follows the resolved endpoint contract; remote-endpoint hardening remains #337 | On-machine | Conservatively cloud-gated by the shipped provider identity |
+| Privacy | Cloud policy required | Always treated as trusted/exempt by the shipped code; a remote or forwarded endpoint receives ungated content, with endpoint-aware hardening deferred to #337 | On-machine | Conservatively cloud-gated by the shipped provider identity |
 
 LCM embeds bounded summaries by default rather than raw transcripts. Dry-run a
 backfill to measure the selected corpus and verify current provider pricing

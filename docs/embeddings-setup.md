@@ -93,7 +93,7 @@ timeout/network failure after transport starts is acceptance-ambiguous and is no
 resent.
 
 The shipped Ollama provider assumes the configured endpoint is trusted and does
-not apply the cloud sensitive-pattern or raw-text-consent gates. Keep
+not apply the cloud privacy gates for sensitive patterns or raw-text consent. Keep
 `LCM_OLLAMA_BASE_URL` on a verified local/loopback service. A forwarded,
 container-network, private-network, or remote Ollama endpoint may send text off
 the machine; endpoint-aware locality remains #337.

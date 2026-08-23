@@ -84,14 +84,16 @@ Restart Hermes after updating.
 
 ## Upgrade to v0.23.1
 
-1. While the old runtime is running, run `/lcm backup`. If Hermes or any other
-   SQLite writer may still be running, this is the only supported online backup
-   path.
+1. Resolve the effective database path from `LCM_DATABASE_PATH` or `lcm_status`.
+   While the old runtime is running, enable `LCM_ENABLE_SLASH_COMMAND=true` and
+   run `/lcm backup`. If Hermes or any other SQLite writer may still be running,
+   this is the only supported online backup path.
 2. Alternatively, stop Hermes and every other process that can write the
-   database. After all writers are fully stopped, copy the profile's `lcm.db`
-   plus any existing `lcm.db-wal` and `lcm.db-shm` companions together as one
-   quiescent snapshot. Do not copy these files separately while a writer is
-   live.
+   database. After all writers are fully stopped, copy the configured database
+   plus its matching `-wal` and `-shm` companions together as one quiescent
+   snapshot. For the default path those companions are `lcm.db-wal` and
+   `lcm.db-shm`; a custom database path uses the same suffixes. Do not copy these
+   files separately while a writer is live.
 3. Check out exact stable
    `v0.23.1@81d8d41197dddc4c09b57097f4955ebae32366a9`, update the
    plugin link if needed, and restart Hermes. Verify the SHA rather than trusting
@@ -103,13 +105,16 @@ Restart Hermes after updating.
    `SELECT value FROM metadata WHERE key = 'schema_version';`; the expected
    result is `5`.
 
-No manual core migration, data import, or embedding backfill is required for
-the upgrade itself. Existing v0.20-v0.23 databases remain on core schema
-version 5. Assertion, query-view, trajectory, rollup, and embedding families
-remain additive/default-off and create derived state only when their workflows
-are invoked. If you later enable one of those stores, keep the pre-upgrade cold
-set as the downgrade path rather than mixing old code with newly created
-sidecars.
+No manual core migration or data import is required for the upgrade itself.
+Existing v0.20-v0.23 databases remain on core schema version 5. Existing cloud
+vectors from a pre-v0.23.1, revisionless identity are intentionally ineligible:
+configure the privacy policy, run `/lcm embed warmup`, dry-run the backfill, and
+then run `/lcm embed backfill --apply` to repopulate the privacy-bound identity.
+Until that finishes, semantic coverage is degraded and FTS remains the fallback.
+Assertion, query-view, trajectory, rollup, and embedding families remain
+additive/default-off and create derived state only when their workflows are
+invoked. If you later enable one of those stores, keep the pre-upgrade cold set
+as the downgrade path rather than mixing old code with newly created sidecars.
 
 Cloud embeddings are a separate operator decision. Before warmup, summary or
 chunk backfill, or semantic-query dispatch, enable a nonempty known sensitive
