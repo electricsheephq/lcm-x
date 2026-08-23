@@ -38,12 +38,16 @@ from .db_bootstrap import (
 )
 from .extraction import sanitize_pre_compaction_content
 from .ingest_protection import (
+    EmbeddingPrivacyPolicyError,
+    embedding_provider_requires_privacy,
     externalized_payload_stats,
     extract_ingest_externalized_refs,
+    protect_embedding_text,
     restore_ingest_payload_placeholders,
     scan_externalized_payload_integrity,
     scan_sqlite_payload_risks,
     sensitive_pattern_status,
+    validate_embedding_privacy_dispatch,
 )
 from .model_routing import apply_lcm_model_route
 from .assertion_state import query_assertion_state
@@ -3710,15 +3714,75 @@ def _lcm_grep_full_text_with_deadline(
         }
 
 
+def _lcm_active_embedding_revision(
+    engine: "LCMEngine", provider: Any, *, task: str
+) -> str:
+    db_path = Path(engine._store.db_path).resolve()
+    conn = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)
+    try:
+        row = conn.execute(
+            "SELECT revision FROM lcm_embedding_profile "
+            "WHERE active=1 AND archived_at IS NULL AND task=? "
+            "AND provider=? AND model_name=? "
+            "ORDER BY registered_at DESC, identity_hash DESC LIMIT 1",
+            (
+                str(task),
+                str(getattr(provider, "provider_id", "") or "").strip().lower(),
+                str(getattr(provider, "model_id", "") or "").strip(),
+            ),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise EmbeddingPrivacyPolicyError(
+            f"no active {task} vector identity matches the configured cloud provider; "
+            "run `/lcm embed warmup` before semantic retrieval"
+        )
+    return str(row[0] or "")
+
+
 def _lcm_grep_embed_query(
-    provider: Any, query: str, *, remaining_s: float
+    provider: Any,
+    query: str,
+    *,
+    engine: "LCMEngine | None" = None,
+    task: str = "summary",
+    remaining_s: float,
 ) -> list[float]:
     """Embed one query within the operation's remaining absolute budget."""
+    outbound_query = str(query)
+    privacy_revision: str | None = None
+    if embedding_provider_requires_privacy(
+        str(getattr(provider, "provider_id", "") or "")
+    ):
+        if engine is None:
+            raise EmbeddingPrivacyPolicyError(
+                "cloud semantic query requires an engine-bound privacy identity"
+            )
+        outbound_query, current_revision, _changed = protect_embedding_text(
+            outbound_query,
+            engine._config,
+        )
+        privacy_revision = _lcm_active_embedding_revision(
+            engine, provider, task=task
+        )
+        if current_revision != privacy_revision:
+            raise EmbeddingPrivacyPolicyError(
+                "cloud embedding privacy policy differs from registered vector "
+                "identity; run `/lcm embed warmup` before semantic retrieval"
+            )
+
     def invoke() -> list[float]:
+        if privacy_revision is not None:
+            validate_embedding_privacy_dispatch(
+                [outbound_query],
+                engine._config,
+                expected_revision=privacy_revision,
+            )
         interactive = getattr(provider, "embed_query_interactive", None)
         if callable(interactive):
-            return interactive(query, timeout=max(0.001, remaining_s))
-        return provider.embed_query(query)
+            return interactive(outbound_query, timeout=max(0.001, remaining_s))
+        return provider.embed_query(outbound_query)
 
     vector = _run_within_deadline(
         invoke, remaining_s=remaining_s, name="lcm-query-embed"
@@ -4004,7 +4068,11 @@ def _lcm_grep_semantic(
 
     try:
         query_vector = _lcm_grep_embed_query(
-            provider, query, remaining_s=deadline - time.monotonic()
+            provider,
+            query,
+            engine=engine,
+            task="summary",
+            remaining_s=deadline - time.monotonic(),
         )
     except VoyageError as exc:
         if exc.kind == "auth":
@@ -5901,7 +5969,11 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     degraded_reasons.append("embedding provider is not configured")
                 elif run_summary:
                     query_vector = _lcm_grep_embed_query(
-                        provider, query, remaining_s=deadline - time.monotonic()
+                        provider,
+                        query,
+                        engine=engine,
+                        task="summary",
+                        remaining_s=deadline - time.monotonic(),
                     )
                     embedding_query_metrics.append(
                         _lcm_embedding_query_metric(provider)
@@ -5939,6 +6011,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         chunk_query_vector = _lcm_grep_embed_query(
                             chunk_provider,
                             query,
+                            engine=engine,
+                            task="chunk",
                             remaining_s=deadline - time.monotonic(),
                         )
                         embedding_query_metrics.append(

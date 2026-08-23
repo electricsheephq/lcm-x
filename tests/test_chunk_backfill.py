@@ -9,6 +9,7 @@ import pytest
 import hermes_lcm.command as command_mod
 from hermes_lcm.command import handle_lcm_command
 from hermes_lcm.config import LCMConfig
+from hermes_lcm.ingest_protection import embedding_privacy_revision
 from hermes_lcm.vector_store import VectorStore
 
 
@@ -302,12 +303,19 @@ class TestChunkRawTextConsentGate:
             embeddings_enabled=True,
             embedding_provider="voyage",
             embedding_model="voyage-3",
+            sensitive_patterns_enabled=True,
         )
         engine = SimpleNamespace(_config=config, _store=SimpleNamespace(db_path=db_path))
         _seed_messages(engine, _user_msgs(2), register=False)
         store = VectorStore(db_path, config=config)
         try:
-            store.register_profile("voyage-3", "voyage", 2, task="chunk")
+            store.register_profile(
+                "voyage-3",
+                "voyage",
+                2,
+                revision=embedding_privacy_revision(config),
+                task="chunk",
+            )
         finally:
             store.close()
         return engine
@@ -409,6 +417,7 @@ class TestChunkDryRun:
         engine = _engine(tmp_path)
         engine._config.embedding_provider = "voyage"
         engine._config.embedding_model = "voyage-context-3"
+        engine._config.sensitive_patterns_enabled = True
         _seed_messages(engine, _user_msgs(1), register=False)
         result = handle_lcm_command("embed backfill --corpus chunks", engine)
         assert "model: voyage-context-3" in result
@@ -419,6 +428,7 @@ class TestChunkDryRun:
         engine = _engine(tmp_path)
         engine._config.embedding_provider = "voyage"
         engine._config.embedding_model = "voyage-3"
+        engine._config.sensitive_patterns_enabled = True
         _seed_messages(engine, _user_msgs(1), register=False)
         result = handle_lcm_command("embed backfill --corpus chunks", engine)
         assert "model: voyage-context-4" in result
@@ -595,6 +605,7 @@ class TestChunkContextualizedGrouping:
             embeddings_enabled=True,
             embedding_provider="voyage",
             embedding_model="voyage-context-3",
+            sensitive_patterns_enabled=True,
         )
         engine = SimpleNamespace(
             _config=config, _store=SimpleNamespace(db_path=db_path)
@@ -605,7 +616,13 @@ class TestChunkContextualizedGrouping:
         )
         store = VectorStore(db_path, config=config)
         try:
-            store.register_profile("voyage-context-3", "voyage", 3, task="chunk")
+            store.register_profile(
+                "voyage-context-3",
+                "voyage",
+                3,
+                revision=embedding_privacy_revision(config),
+                task="chunk",
+            )
         finally:
             store.close()
         return engine

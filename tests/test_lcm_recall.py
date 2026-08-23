@@ -20,6 +20,10 @@ import hermes_lcm.vector_store as vector_store_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, SummaryNode
 from hermes_lcm.embedding_provider import resolve_provider as real_resolve_provider
+from hermes_lcm.ingest_protection import (
+    embedding_privacy_revision,
+    embedding_provider_requires_privacy,
+)
 from hermes_lcm.store import MessageStore
 from hermes_lcm.vector_store import EmbeddingIdentity, VectorStore
 
@@ -49,6 +53,7 @@ def recall_engine(tmp_path):
         embedding_provider="mock",
         embedding_model="mock-model",
         embedding_query_timeout_s=2.0,
+        sensitive_patterns_enabled=True,
     )
     store = MessageStore(config.database_path, ingest_protection_config=config)
     dag = SummaryDAG(config.database_path)
@@ -95,7 +100,12 @@ def _add_summary(
 def _seed_summary_vectors(engine, rows, *, provider="mock", model="mock-model"):
     store = VectorStore(engine._store.db_path, config=engine._config)
     try:
-        store.register_profile(model, provider, 2)
+        revision = (
+            embedding_privacy_revision(engine._config)
+            if embedding_provider_requires_privacy(provider)
+            else ""
+        )
+        store.register_profile(model, provider, 2, revision=revision)
         identity = store.capture_identity(model, provider=provider)
         for node_id, vector in rows:
             store.record_embedding(str(node_id), "summary", model, vector, identity=identity)
@@ -141,7 +151,19 @@ def _freeze_vector_store_clock(monkeypatch, clock):
 
 
 def _recall(engine, monkeypatch, provider=None, **args):
-    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: provider or MockProvider())
+    provider = provider or MockProvider()
+    if embedding_provider_requires_privacy(provider.provider_id):
+        store = VectorStore(engine._store.db_path, config=engine._config)
+        try:
+            store.register_profile(
+                provider.model_id,
+                provider.provider_id,
+                2,
+                revision=embedding_privacy_revision(engine._config),
+            )
+        finally:
+            store.close()
+    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: provider)
     payload = json.loads(lcm_tools.lcm_recall({"query": "kanban dashboard sprint", **args}, engine=engine))
     return payload
 
@@ -190,6 +212,17 @@ def test_voyage_chunk_recall_uses_context_model(recall_engine, monkeypatch):
     chunk.model_id = "voyage-context-4"
     recall_engine._config.embedding_provider = "voyage"
     recall_engine._config.embedding_model = "voyage-3"
+    store = VectorStore(recall_engine._store.db_path, config=recall_engine._config)
+    try:
+        store.register_profile(
+            "voyage-context-4",
+            "voyage",
+            2,
+            revision=embedding_privacy_revision(recall_engine._config),
+            task="chunk",
+        )
+    finally:
+        store.close()
 
     def resolve(config):
         return chunk if config.embedding_model == "voyage-context-4" else summary
@@ -891,6 +924,16 @@ def test_rerank_window_limit_clamps_provider_documents(recall_engine, monkeypatc
     recall_engine._config.rerank_enabled = True
     recall_engine._config.embedding_provider = "voyage"
     recall_engine._config.embedding_model = "voyage-3"
+    store = VectorStore(recall_engine._store.db_path, config=recall_engine._config)
+    try:
+        store.register_profile(
+            "mock-model",
+            "voyage",
+            2,
+            revision=embedding_privacy_revision(recall_engine._config),
+        )
+    finally:
+        store.close()
     hits = [
         {
             "kind": "summary",

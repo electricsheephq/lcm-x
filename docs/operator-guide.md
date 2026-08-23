@@ -207,7 +207,7 @@ environment variables:
 | `LCM_IGNORE_SESSION_PATTERNS` | empty | Comma-separated session globs excluded from LCM storage |
 | `LCM_STATELESS_SESSION_PATTERNS` | empty | Comma-separated session globs kept read-only |
 | `LCM_IGNORE_MESSAGE_PATTERNS` | empty | Comma-separated regex patterns; matching message content (plain text, extracted text parts for structured/multimodal content, or normalized JSON fallback when no text parts exist) is excluded from LCM storage |
-| `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | Opt in to deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads |
+| `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | Opt in to deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads. Known cloud embedding providers require it enabled with a nonempty known policy before warmup, backfill, or semantic-query dispatch |
 | `LCM_SENSITIVE_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Comma-separated named sensitive pattern catalog entries to apply when redaction is enabled |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `false` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS` | `12000` | Externalization threshold for normalized payload text |
@@ -377,6 +377,16 @@ truncated SHA-256 digest for correlation. `password_assignment` placeholders omi
 the digest to avoid making password-like values easier to dictionary-check.
 `lcm_status`, `lcm_inspect`, and `lcm_doctor` expose the enabled state, configured pattern names,
 unknown names, source, and placeholder format without exposing raw secret values.
+
+Cloud embedding input has an additional non-persistent privacy transform. It
+canonicalizes historical redaction placeholders, replaces current matches with
+pattern-only placeholders that contain no raw value, length, byte count, or
+secret-derived digest, and rejects any residual detector match before transport.
+The transform version and a digest of sorted active pattern names are stored in
+the vector profile revision. Disabling or changing the policy after warmup
+causes query and backfill dispatch to refuse until a new warmup registers the
+new identity. Durable messages, summaries, FTS rows, and payloads are not
+rewritten by this provider boundary.
 
 ### Cache policy boundary
 
@@ -802,6 +812,8 @@ before applying any work:
 export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=ollama   # voyage or fastembed are also supported
 export LCM_EMBEDDING_MODEL=nomic-embed-text
+# Required for a known cloud provider such as Voyage:
+# export LCM_SENSITIVE_PATTERNS_ENABLED=true
 
 /lcm embed warmup
 /lcm embed backfill
@@ -853,14 +865,15 @@ provider-error, and row-write-error exit paths.
 /lcm embed backfill --corpus both --apply --confirm-raw-text
 ```
 
-**Raw-text consent gate.** Unlike summaries, the chunk corpus sends **raw,
-verbatim message text** — including tool-result and error/traceback content — to
-the embedding provider. When the provider is a cloud provider (e.g. Voyage),
+**Source-derived-text consent gate.** Unlike summaries, the chunk corpus derives
+provider input from **raw, verbatim message text** — including tool-result and
+error/traceback content. The v0.23.1 cloud boundary transforms configured
+sensitive-pattern matches before transport, but it cannot classify every
+possible sensitive fact. When the provider is a cloud provider (e.g. Voyage),
 `--corpus chunks|both --apply` **refuses** unless you also pass
 `--confirm-raw-text`. Local providers (fastembed/ollama) never transmit text
-off-box and are exempt. Note that `LCM_SENSITIVE_PATTERNS_ENABLED` redaction runs
-at **ingest**, so it does not retro-redact history already stored — that older
-raw text is still sent during a chunk backfill. See
+off-box and are exempt. Historical source remains unchanged; only the provider
+input is transformed. See
 [embeddings-setup.md](embeddings-setup.md) for the full discussion.
 
 ### Contextualized chunk grouping

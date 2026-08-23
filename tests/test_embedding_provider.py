@@ -693,6 +693,7 @@ def test_warmup_registers_voyage_context_chunk_profile(monkeypatch, tmp_path):
     engine = _command_engine(tmp_path)
     engine._config.embedding_provider = "voyage"
     engine._config.embedding_model = "voyage-3"
+    engine._config.sensitive_patterns_enabled = True
 
     result = handle_lcm_command("embed warmup", engine)
 
