@@ -74,7 +74,7 @@ model's query-specific encoding (distinct from document encoding) so query/passa
 preserved. When `LCM_EMBEDDINGS_ENABLED=false`, `warmup` is inert: it does not resolve a provider,
 download a model, create embedding tables, or create the configured database.
 
-## Option 3 — Ollama (local daemon)
+## Option 3 — Ollama (trusted local daemon)
 
 If you already run [Ollama](https://ollama.com), use its embeddings endpoint:
 
@@ -91,6 +91,12 @@ Ollama requests set `truncate: false`, so an input that exceeds the model's cont
 rather than being silently truncated to a misleading embedding. As with Voyage, an Ollama
 timeout/network failure after transport starts is acceptance-ambiguous and is not automatically
 resent.
+
+The shipped Ollama provider assumes the configured endpoint is trusted and does
+not apply the cloud sensitive-pattern or raw-text-consent gates. Keep
+`LCM_OLLAMA_BASE_URL` on a verified local/loopback service. A forwarded,
+container-network, private-network, or remote Ollama endpoint may send text off
+the machine; endpoint-aware locality remains #337.
 
 Bulk document embedding uses `LCM_EMBEDDING_BACKFILL_TIMEOUT_S` as its
 per-provider-operation deadline (120 seconds by default) for Voyage, Ollama,
@@ -219,8 +225,10 @@ unless you pass an explicit acknowledgment:
 /lcm embed backfill --corpus chunks --apply --confirm-raw-text
 ```
 
-Local providers (**fastembed**, **ollama**) never transmit text off the machine, so the gate is
-waived for them. Dry runs (no `--apply`) never send anything and never require the flag.
+FastEmbed is in-process, so the gate is waived. Ollama is also exempt in the
+current implementation; that is safe only when its configured endpoint is a
+verified trusted local/loopback service (#337). Dry runs (no `--apply`) never
+send anything and never require the flag.
 
 > **Provider-input boundary.** Durable history is never retro-redacted. The cloud embedding transform
 > applies only to outbound provider input, uses pattern-only placeholders, and binds its policy to the

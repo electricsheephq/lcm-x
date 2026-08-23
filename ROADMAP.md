@@ -1,58 +1,80 @@
 # LCM-X Product Roadmap
 
-Status: living document (owner-ratified structure, 2026-08-19). Detail per track lives in the
-linked trackers and `bench/` docs; this page is the map, not the territory.
+Status: living document, reconciled 2026-08-24. GitHub issue #323 is the canonical work graph; this page explains the durable tracks without duplicating issue lifecycle state.
 
 ## What LCM-X is
-Lossless Context Memory eXtension: agent memory that preserves and retrieves full-fidelity
-context — no lossy one-shot compression — proven by disclosed, reproducible benchmark numbers
-(`bench/scoreboard/`), and deployable as the memory layer for Hermes-class agents.
 
-## Track A — Core runtime hardening
-Continuation of the correctness line (issues #1–#6 class, persistence/retrieval roadmap **#74**,
-cache-parity roadmap **#41**). Definition of done per item: fail-closed tests + no regression on
-the benchmark instrument suite.
+LCM-X is Lossless Context Memory eXtension: a Hermes-compatible context engine that preserves raw source, builds a recoverable summary DAG, and exposes exact and semantic retrieval with explicit provenance and failure states.
 
-## Track B — Teams mode (multi-principal isolated memory) · tracker **#75**
-State: **candidate** — draft PR **#200** (AccessContextV1 + Teams catalog + access policy,
-opt-in, default-OFF, fail-closed). Path to shipped:
-1. Test debt first: the draft carries fixtures but zero teams test modules — a dedicated test
-   suite (isolation invariants, fail-closed denials, catalog lease semantics) is the merge gate.
-2. Review + land in bounded slices (the 174-file draft splits along package seams:
-   access_context → access_policy → teams catalog → engine wiring).
-3. Enablement is a SEPARATE decision from landing (flag stays OFF; a release may carry the code
-   dormant). Host-side identity mapping (ElectricSheep/evaOS) deliberately lives outside this
-   repo — see Track C.
+## Current product baseline
 
-## Track C — Host integrations (evaOS, dashboards)
-The repo exposes the seam (`teams/connector.py`, `lcm_status` for dashboards); host-side wiring
-(evaOS boards, per-employee identity, dashboard widgets) belongs to the host repositories.
-Coordination board: `electricsheephq/evaos-support-control#544`. Non-goal here: credentials or
-provider-specific control planes in-repo.
+Latest stable is `v0.23.1@81d8d41197dddc4c09b57097f4955ebae32366a9`. The source snapshot for this roadmap is `main@3d4fbb4c979dc09aef0b831bb50d928e0e18d68f`.
 
-## Track D — Benchmark program (the evidence engine)
-Docs of record migrated into `bench/` (2026-08-19; see `bench/MIGRATION-NOTE.md`). Goal G0 and
-per-instrument targets: `bench/GOALS-AND-ROADMAP.md`. Banked rows: `bench/scoreboard/`
-(9 rows incl. LongMemEval-V1 91%, V2-agentic 66.1%, LoCoMo 54.6%, AMA 47.3%). Revival order:
-1. **V1-M flagship** (500q medium tier): restart with the checkpoint/resume + embed-cache
-   tooling this repo now carries (port PRs); determinism probe → prewarm → 6 shards (~9–11h).
-   Target ≥90% retrieval row.
-2. **LoCoMo C1** (FTS-ON registered config; pre-declared bands) → **C2** (+ attribution-
-   preserving ingestion, spec + validated numbers in `bench/specs/SPEC-B3-ATTRIBUTION.md`).
-3. **AMA levers** L1 (step-anchored retrieval for templated trajectories) + L2 (step-index
-   provenance) from `bench/FINDING-F52-*` — benchmark-agnostic product improvements.
-Discipline unchanged: registration before spend, A/A′ noise floors, fail-closed accounting,
-append-only corrections (`bench/release-kit/R3/HONESTY-NARRATIVE.md`).
+Stable and main are separate identities. Stable is the product-under-test and installed-runtime baseline; main is the continuing development line. #342 owns main's deferred version-metadata policy.
 
-## Track E — Releases (cadence + discipline)
-First LCM-X release: **v0.22.0** (rebrand + the post-mirror hardening + benchmark tooling;
-Teams labeled candidate, not enabled). Release mechanics: notes file gate + tag →
-`.github/workflows/release.yml`; local `scripts/validate_release.sh --full` before every tag.
-Cadence after v0.22.0: release when a track lands a coherent user-visible unit — never batch
-more than ~6 weeks of change into one cut; every release notes file states what is NOT included
-(candidates, known gaps) with the same care as what is.
+Eva has accepted v0.23.1 with hosted `voyage-4-large`, 1024-dimensional float32 summary vectors under the fail-closed privacy identity. The proof ceiling is Eva only.
 
-## Sequencing (as of 2026-08-19)
-Now: PR #217 (brand) → port PRs → docs/roadmap PR → **v0.22.0** → V1-M restart.
-Next: Teams test suite (B.1) ∥ C1/C2 ∥ AMA levers. Then: Teams landing slices; V2-M first-mover
-row; enablement decisions with the host program.
+## Track A — Exact-stable retrieval provenance
+
+Milestone **v0.23.1 Retrieval Provenance Audit** and #341 are the active finite program.
+
+The default-off benchmark instrument traces public LongMemEval evidence through FTS, summary-vector, and chunk-vector candidate generation, shipped `lcm_recall` fusion, and content-free reference validation. Product and instrument hashes remain separate. #252 owns preregistration, score-sensitive disposition, and the post-merge ledger.
+
+The audit is answer-blind. It may decide `KEEP CURRENT` or establish oracle headroom sufficient to earn a separate fusion-design issue. It does not authorize a product retrieval change.
+
+## Track B — Provider trust and hierarchical context quality
+
+Roadmap ordering remains:
+
+1. #317 and #298 define untrusted retrieved/history presentation; #89 defines current task-state precedence.
+2. #324 supplies bounded timestamp/role/sender provenance.
+3. #318 defines depth-specific differential summary semantics and consumes #89/#324.
+4. #319 defines bounded durable tool-result evidence.
+5. #240 retains local auxiliary summary-envelope compatibility.
+
+Every score-sensitive prompt, summary, selection, or retrieval change requires #252 disposition and a comparable baseline.
+
+## Track C — Bounded active assembly
+
+PR #206 retains the cap/reserve candidate. #320 owns deterministic recency/query-aware frontier selection after the cap contract, with #90/PR #297 newest-user authority preserved.
+
+No node may become unreachable. Prompt-sensitive ranking remains default-off until a separate accepted design proves value against exact-stable provenance and cache/noise gates.
+
+## Track D — Compaction, recovery, and diagnostics
+
+#247 owns the reproduced multi-session `publication_invariant_conflict` defect. #314 is a current-main `needs-repro` semantics issue and must not drive threshold tuning until publication failure is separated from attempt frequency.
+
+#36 and #74 retain background-compaction and persistence/recovery architecture. #265 owns degraded semantic/FTS behavior, and #321 owns bounded fast doctor plus explicit deep integrity checks.
+
+## Track E — Deferred privacy and scale work
+
+#334-#337 are accepted deferred privacy/identity/locality contracts. They do not reopen v0.23.1 or enable trajectory embeddings, binary prescreen, cloud reranking, or remote Ollama on Eva.
+
+#328 is a P4 deterministic telemetry-test follow-up. #342 is the next-release version-policy follow-up.
+
+## Track F — Teams and host integration
+
+Teams remains separate from the current product/evaluation program. Dormant code, pilot enablement, host identity, connector behavior, and customer acceptance keep their own issues and milestones. Default-off code is not proof of safe enablement.
+
+## Release discipline
+
+Release work requires:
+
+- an accepted issue and bounded change;
+- exact-head CI and independent semantic review for the changed risk lane;
+- required non-author code-owner approval and zero unresolved blocker threads;
+- merge commits through normal protection;
+- detached release validation and exact tag/release readback;
+- explicit proof boundaries and rollback ownership.
+
+Never restamp stable from main casually, move an existing tag, bypass the ruleset, or treat a benchmark result as runtime/customer proof.
+
+## Near-term sequence
+
+1. Finish canonical documentation and the default-off instrument through separate protected PRs.
+2. Bind the exact merged instrument to stable v0.23.1 without changing product bytes.
+3. Run seeded smoke, registered 95-question cached A/A-prime, then the full public 500-question audit within the privacy and cost caps.
+4. Record `KEEP CURRENT` or `FUSION DESIGN EARNED`, run the two blind final reviews, and close only the finite audit milestone.
+5. Resume later quality work through the accepted issue/dependency graph rather than an all-features campaign.
+
+Benchmark discipline remains registration before spend, seeded sampling instead of first-N, deterministic A/A-prime noise floors, fail-closed accounting, and append-only corrections.
