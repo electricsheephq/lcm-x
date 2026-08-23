@@ -122,6 +122,11 @@ separate proof planes. The source snapshot used for the current reconciliation
 is `main@3d4fbb4c979dc09aef0b831bb50d928e0e18d68f`; do not describe an
 arbitrary main checkout as the installed stable product.
 
+That exact development baseline still identifies itself as
+`hermes-lcm v0.23.0-rc1 (15 tools)`. The stable tag identifies itself as
+`hermes-lcm v0.23.1 (15 tools)`. This is tracked as a deferred version-policy
+decision rather than being silently restamped by documentation changes.
+
 Eva has accepted exact stable v0.23.1 with hosted `voyage-4-large`,
 1024-dimensional float32 summary vectors under one privacy-bound identity.
 That evidence establishes runtime safety for Eva only, not fleet, customer,
