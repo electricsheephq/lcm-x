@@ -162,10 +162,14 @@ Account-specific free tokens and other billing adjustments are not included.
 The cloud embedding privacy transform changes provider input only and never
 rewrites existing durable messages, summaries, FTS rows, or payloads. The same
 `LCM_SENSITIVE_PATTERNS_ENABLED=true` setting also redacts configured matches
-from future ingest before they reach durable storage, FTS, summaries, active
-replay, or externalized payloads; those matched values are intentionally not
-recoverable from LCM. Both paths are configured-pattern boundaries rather than
-a guarantee that every sensitive fact has been classified.
+from ordinary future ingest before they reach SQLite messages, FTS, summaries,
+active replay, or ordinary externalized ingest payloads; those matched values
+are intentionally not recoverable from those LCM surfaces. One exception is
+repetitive-assistant quarantine: it preserves the original assistant output in
+an externalized payload before redacting the replay copy, so that quarantined
+payload may retain configured matches. Both paths are configured-pattern
+boundaries rather than a guarantee that every sensitive fact has been
+classified.
 
 An existing OpenAI-format embedding service uses the same cloud boundary:
 
