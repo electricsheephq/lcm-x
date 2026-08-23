@@ -159,10 +159,13 @@ Always dry-run `/lcm embed backfill` first: it reports document counts and
 token estimates with the same eligibility rules apply-mode uses, so the
 estimate is a gross-list-price planning estimate, not a billing guarantee.
 Account-specific free tokens and other billing adjustments are not included.
-The cloud privacy transform changes provider input only;
-it never rewrites durable messages, summaries, FTS rows, or payloads. It is a
-configured-pattern boundary rather than a guarantee that every sensitive fact
-has been classified.
+The cloud embedding privacy transform changes provider input only and never
+rewrites existing durable messages, summaries, FTS rows, or payloads. The same
+`LCM_SENSITIVE_PATTERNS_ENABLED=true` setting also redacts configured matches
+from future ingest before they reach durable storage, FTS, summaries, active
+replay, or externalized payloads; those matched values are intentionally not
+recoverable from LCM. Both paths are configured-pattern boundaries rather than
+a guarantee that every sensitive fact has been classified.
 
 An existing OpenAI-format embedding service uses the same cloud boundary:
 
