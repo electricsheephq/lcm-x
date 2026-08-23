@@ -35,7 +35,8 @@ export VOYAGE_API_KEY=...           # from dash.voyageai.com
 export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=voyage
 export LCM_EMBEDDING_MODEL=voyage-4-lite   # or voyage-4 / voyage-4-large
-/lcm embed warmup                   # probes the API, registers model + dimensions
+export LCM_SENSITIVE_PATTERNS_ENABLED=true # required for cloud embedding input
+/lcm embed warmup                   # probes API; registers model, dimensions, privacy revision
 /lcm embed backfill                 # dry run: shows counts + estimated tokens, writes nothing
 /lcm embed backfill --apply         # embeds your history in bounded batches
 ```
@@ -196,20 +197,20 @@ another explicit decision. The command reports the uncertain count and warning b
 rebill. Disable everything with `LCM_EMBEDDINGS_ENABLED=false` — data stays, behavior reverts to
 FTS-only instantly.
 
-## The chunk corpus — raw verbatim text, and the consent gate
+## The chunk corpus — source-derived text, privacy transform, and consent gate
 
 `/lcm embed backfill` has two corpora, selected with `--corpus`:
 
 - `summary` (default) — embeds the generated **summaries** of your history.
-- `chunks` — embeds **raw, verbatim message text**, chunked by `--policy`
+- `chunks` — embeds provider input derived from **raw, verbatim message text**, chunked by `--policy`
   (`conversational` | `heads` | `full`), for verbatim/chunk-KNN recall.
 - `both` — runs the summary backfill, then the chunk backfill, in one command.
 
-The distinction matters for privacy. The summary corpus sends only model-generated summaries to the
-embedding provider. **The chunk corpus sends the raw message bytes** — including tool-result output
-and error/traceback content (the `heads`/`full` policies specifically target error signatures) —
-which is exactly the content most likely to carry secrets. When the provider is a **cloud** provider
-(e.g. Voyage), that raw text leaves this machine.
+The distinction matters for privacy. The summary corpus starts from model-generated summaries; the
+chunk corpus starts from raw message bytes, including tool-result output and error/traceback content.
+For known cloud providers, v0.23.1 applies the configured provider-input privacy transform and
+rejects residual detector matches before transport. This protects configured patterns but cannot
+classify every possible sensitive fact in source-derived chunk text.
 
 Because of this, `--corpus chunks --apply` and `--corpus both --apply` **refuse** on a cloud provider
 unless you pass an explicit acknowledgment:
@@ -221,7 +222,7 @@ unless you pass an explicit acknowledgment:
 Local providers (**fastembed**, **ollama**) never transmit text off the machine, so the gate is
 waived for them. Dry runs (no `--apply`) never send anything and never require the flag.
 
-> **Redaction caveat.** `LCM_SENSITIVE_PATTERNS_ENABLED` redaction runs at **ingest** time, so it
-> only affects text stored *after* it was enabled. Turning it on does **not** retro-redact history
-> already in the store — that older raw text is still what gets sent to the provider during a chunk
-> backfill. Prefer a local provider for the chunk corpus if the history may contain secrets.
+> **Provider-input boundary.** Durable history is never retro-redacted. The cloud embedding transform
+> applies only to outbound provider input, uses pattern-only placeholders, and binds its policy to the
+> vector identity. Prefer a local provider for the chunk corpus when broader source content should not
+> leave the machine even after configured detector matches are removed.

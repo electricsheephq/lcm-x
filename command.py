@@ -31,10 +31,15 @@ from .diagnostics import (
     doctor_guidance_for_checks,
 )
 from .ingest_protection import (
+    EmbeddingPrivacyPolicyError,
+    embedding_privacy_revision,
+    embedding_provider_requires_privacy,
     externalized_payload_stats,
+    protect_embedding_text,
     scan_externalized_payload_integrity,
     scan_sqlite_payload_risks,
     sensitive_pattern_status,
+    validate_embedding_privacy_dispatch,
 )
 from .dag import SummaryDAG, build_nodes_fts_spec
 from .presets import (
@@ -2736,6 +2741,21 @@ def _embedding_warmup_text(engine) -> str:
                 "LCM_EMBEDDING_PROVIDER and LCM_EMBEDDING_MODEL"
             )
 
+        privacy_revision = ""
+        warmup_text = "warmup"
+        if embedding_provider_requires_privacy(provider.provider_id):
+            privacy_revision = embedding_privacy_revision(engine._config)
+            warmup_text, _revision, _changed = protect_embedding_text(
+                warmup_text,
+                engine._config,
+                expected_revision=privacy_revision,
+            )
+            validate_embedding_privacy_dispatch(
+                [warmup_text],
+                engine._config,
+                expected_revision=privacy_revision,
+            )
+
         if provider.provider_id == FastembedProvider.provider_id:
             vector = provider.warmup()
             progress = (
@@ -2743,7 +2763,7 @@ def _embedding_warmup_text(engine) -> str:
             )
             cost_note = "local model; no per-call API charge"
         else:
-            vector = provider.embed_query("warmup")
+            vector = provider.embed_query(warmup_text)
             progress = "probe: complete"
             cost_note = (
                 "API usage may incur provider charges"
@@ -2760,6 +2780,7 @@ def _embedding_warmup_text(engine) -> str:
         chunk_provider = provider
         chunk_dim = dim
         chunk_progress = "shared summary probe"
+        chunk_privacy_revision = privacy_revision
         if chunk_model != provider.model_id:
             chunk_config = dataclasses.replace(
                 engine._config,
@@ -2769,7 +2790,23 @@ def _embedding_warmup_text(engine) -> str:
             chunk_provider = resolve_provider(chunk_config)
             if chunk_provider is None:
                 raise ValueError("chunk embedding provider is not configured")
-            chunk_vector = chunk_provider.embed_query("warmup")
+            chunk_warmup_text = "warmup"
+            chunk_privacy_revision = ""
+            if embedding_provider_requires_privacy(chunk_provider.provider_id):
+                chunk_privacy_revision = embedding_privacy_revision(
+                    engine._config
+                )
+                chunk_warmup_text, _revision, _changed = protect_embedding_text(
+                    chunk_warmup_text,
+                    engine._config,
+                    expected_revision=chunk_privacy_revision,
+                )
+                validate_embedding_privacy_dispatch(
+                    [chunk_warmup_text],
+                    engine._config,
+                    expected_revision=chunk_privacy_revision,
+                )
+            chunk_vector = chunk_provider.embed_query(chunk_warmup_text)
             chunk_dim = len(chunk_vector)
             if chunk_dim < 1:
                 raise ValueError("chunk provider returned an empty warmup embedding")
@@ -2781,12 +2818,14 @@ def _embedding_warmup_text(engine) -> str:
                 provider.model_id,
                 provider.provider_id,
                 store_dim,
+                revision=privacy_revision,
                 dtype=storage_dtype,
             )
             store.register_profile(
                 chunk_provider.model_id,
                 chunk_provider.provider_id,
                 chunk_store_dim,
+                revision=chunk_privacy_revision,
                 dtype=storage_dtype,
                 task="chunk",
             )
@@ -2815,6 +2854,7 @@ def _embedding_warmup_text(engine) -> str:
             f"chunk_dim: {chunk_store_dim}",
             f"chunk_probe: {chunk_progress}",
             f"dtype: {storage_dtype}",
+            f"privacy_revision: {privacy_revision or '(local)'}",
             f"cost_note: {cost_note}",
         ])
     except Exception as exc:
@@ -3661,6 +3701,9 @@ def _embedding_backfill_report(
     corpus: str | None = None,
     policy: str | None = None,
     include_next_hint: bool = True,
+    privacy_revision: str | None = None,
+    privacy_transformed: int = 0,
+    privacy_blocked: int = 0,
 ) -> str:
     header = "LCM embedding backfill" if corpus is None else f"LCM {corpus} backfill"
     lines = [header, f"mode: {mode}"]
@@ -3686,6 +3729,12 @@ def _embedding_backfill_report(
         f"duration_seconds: {duration:.3f}",
         f"tokens_consumed: {consumed_tokens}",
     ]
+    if privacy_revision is not None:
+        lines.extend([
+            f"privacy_revision: {privacy_revision}",
+            f"privacy_transformed: {privacy_transformed}",
+            f"privacy_blocked: {privacy_blocked}",
+        ])
     if stop_reason:
         lines.append(f"stop_reason: {stop_reason}")
     if error:
@@ -3739,6 +3788,60 @@ def _provider_document_batches(provider, texts: list[str], *, before_dispatch):
         indexes=indexes,
         vectors=tuple(tuple(vector) for vector in vectors),
     )
+
+
+def _prepare_embedding_provider_documents(
+    documents: list[tuple[str, str, int]],
+    *,
+    config,
+    provider_name: str,
+    expected_revision: str,
+) -> tuple[list[tuple[str, str, int]], str | None, int, int, str | None]:
+    """Prepare provider-only text and aggregate privacy accounting."""
+    if not embedding_provider_requires_privacy(provider_name):
+        return documents, None, 0, 0, None
+    try:
+        revision = embedding_privacy_revision(config)
+    except EmbeddingPrivacyPolicyError as exc:
+        return [], None, 0, len(documents), str(exc)
+    if revision != str(expected_revision):
+        return (
+            [],
+            revision,
+            0,
+            len(documents),
+            "cloud embedding privacy policy differs from registered vector "
+            "identity; run `/lcm embed warmup` before dispatch",
+        )
+    protected_documents: list[tuple[str, str, int]] = []
+    transformed = 0
+    blocked = 0
+    first_error: str | None = None
+    for embedded_id, text, _tokens in documents:
+        try:
+            protected, _revision, changed = protect_embedding_text(
+                text,
+                config,
+                expected_revision=revision,
+            )
+        except EmbeddingPrivacyPolicyError as exc:
+            blocked += 1
+            if first_error is None:
+                first_error = str(exc)
+            continue
+        transformed += int(changed)
+        protected_documents.append(
+            (embedded_id, protected, count_tokens(protected))
+        )
+    if blocked:
+        return (
+            protected_documents,
+            revision,
+            transformed,
+            blocked,
+            f"cloud embedding privacy blocked {blocked} document(s): {first_error}",
+        )
+    return protected_documents, revision, transformed, 0, None
 
 
 def _provider_chunk_document_batches(
@@ -3844,6 +3947,7 @@ def _embedding_backfill_summary_text(
         identity = str(profile["identity_hash"])
         model = str(profile["model_name"])
         provider_name = str(profile["provider"])
+        profile_revision = str(profile["revision"] or "")
         profile_dtype = str(profile["dtype"] or "float32")
         if expected_dtype is not None and expected_dtype != profile_dtype:
             return "\n".join([
@@ -3882,18 +3986,30 @@ def _embedding_backfill_summary_text(
         return est_tokens, est_cost_tokens, est_batches
 
     if not apply:
-        documents = [
+        raw_documents = [
             (str(row["node_id"]), str(row["summary"]), count_tokens(row["summary"]))
             for row in rows
         ]
+        (
+            documents,
+            privacy_revision,
+            privacy_transformed,
+            privacy_blocked,
+            privacy_error,
+        ) = _prepare_embedding_provider_documents(
+            raw_documents,
+            config=engine._config,
+            provider_name=provider_name,
+            expected_revision=profile_revision,
+        )
         estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(documents)
         return _embedding_backfill_report(
             mode=mode,
-            status="dry-run",
+            status="refused" if privacy_error else "dry-run",
             provider=provider_name,
             model=model,
             pending=pending,
-            selected=len(documents),
+            selected=len(raw_documents),
             estimated_tokens=estimated_tokens,
             estimated_cost_tokens=estimated_cost_tokens,
             estimated_batches=estimated_batches,
@@ -3903,7 +4019,11 @@ def _embedding_backfill_summary_text(
             remaining=pending,
             duration=time.monotonic() - started,
             consumed_tokens=0,
-            include_next_hint=include_next_hint,
+            error=privacy_error,
+            include_next_hint=include_next_hint and privacy_error is None,
+            privacy_revision=privacy_revision,
+            privacy_transformed=privacy_transformed,
+            privacy_blocked=privacy_blocked,
         )
 
     ttl_s = _embedding_backfill_lease_ttl_s()
@@ -3923,6 +4043,9 @@ def _embedding_backfill_summary_text(
     lease_lost = False
     identity_superseded = False
     budget_exhausted = False
+    privacy_revision: str | None = None
+    privacy_transformed = 0
+    privacy_blocked = 0
     try:
         store = VectorStore(db_path, config=engine._config)
         conn = store.connection
@@ -3961,16 +4084,37 @@ def _embedding_backfill_summary_text(
         else:
             pending, rows = _embedding_pending_rows(conn, identity, limit)
             authorized_uncertain_ids = set()
-        documents = [
+        raw_documents = [
             (str(row["node_id"]), str(row["summary"]), count_tokens(row["summary"]))
             for row in rows
         ]
+        (
+            documents,
+            privacy_revision,
+            privacy_transformed,
+            privacy_blocked,
+            privacy_error,
+        ) = _prepare_embedding_provider_documents(
+            raw_documents,
+            config=engine._config,
+            provider_name=provider_name,
+            expected_revision=profile_revision,
+        )
+        if privacy_error is not None:
+            error = privacy_error
+            stop_reason = "privacy_refused"
 
         # Bulk backfill bypasses the interactive per-minute spend guard (it has
         # its own op budget + lease); otherwise a large --apply run trips the
         # 60/min guard mid-way and stalls.
-        provider = resolve_provider(engine._config, for_backfill=True)
-        if provider is None:
+        provider = (
+            None
+            if privacy_error is not None
+            else resolve_provider(engine._config, for_backfill=True)
+        )
+        if privacy_error is not None:
+            pass
+        elif provider is None:
             error = "embedding provider is not configured; run `/lcm embed warmup`"
         elif (
             provider.model_id != model
@@ -4027,6 +4171,15 @@ def _embedding_backfill_summary_text(
                         raise EmbeddingProviderError(
                             "provider dispatched invalid or duplicate document indexes"
                         )
+                    if privacy_revision is not None:
+                        try:
+                            validate_embedding_privacy_dispatch(
+                                [batch[index][1] for index in normalized],
+                                engine._config,
+                                expected_revision=privacy_revision,
+                            )
+                        except EmbeddingPrivacyPolicyError as exc:
+                            raise ProviderPreDispatchError(str(exc)) from exc
                     request_id = uuid.uuid4().hex
                     ids = [batch[index][0] for index in normalized]
                     if _mark_dispatched(
@@ -4235,6 +4388,13 @@ def _embedding_backfill_summary_text(
                     if isinstance(exc, VoyageError) and exc.kind == "auth":
                         error = f"provider authentication failed; {exc}"
                         break
+                    if (
+                        isinstance(exc, ProviderPreDispatchError)
+                        and "cloud embedding privacy" in str(exc).lower()
+                    ):
+                        error = str(exc)
+                        stop_reason = "privacy_refused"
+                        break
     except _BackfillLeaseLost:
         lease_lost = True
         stop_reason = "lease_lost"
@@ -4288,6 +4448,9 @@ def _embedding_backfill_summary_text(
         in_flight=in_flight_count,
         uncertain=uncertain_count,
         stop_reason=stop_reason,
+        privacy_revision=privacy_revision,
+        privacy_transformed=privacy_transformed,
+        privacy_blocked=privacy_blocked,
     )
 
 
@@ -4593,6 +4756,7 @@ def _chunk_backfill_text(
             identity = str(profile["identity_hash"])
             model = str(profile["model_name"])
             provider_name = str(profile["provider"])
+            profile_revision = str(profile["revision"] or "")
             profile_dim = int(profile["dim"])
             profile_dtype = str(profile["dtype"] or "float32")
         else:
@@ -4601,6 +4765,7 @@ def _chunk_backfill_text(
             identity = None
             provider_name = configured_provider
             model = default_chunk_model(configured_provider, configured_model)
+            profile_revision = ""
             profile_dim = 0
             profile_dtype = "float32"
         if (
@@ -4648,10 +4813,35 @@ def _chunk_backfill_text(
         return est_tokens, est_cost_tokens, est_batches
 
     if not apply:
-        estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(rows)
+        expected_privacy_revision = profile_revision
+        if (
+            profile is None
+            and embedding_provider_requires_privacy(provider_name)
+        ):
+            try:
+                expected_privacy_revision = embedding_privacy_revision(
+                    engine._config
+                )
+            except EmbeddingPrivacyPolicyError as exc:
+                return _refused(str(exc))
+        (
+            documents,
+            privacy_revision,
+            privacy_transformed,
+            privacy_blocked,
+            privacy_error,
+        ) = _prepare_embedding_provider_documents(
+            rows,
+            config=engine._config,
+            provider_name=provider_name,
+            expected_revision=expected_privacy_revision,
+        )
+        estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(
+            documents
+        )
         return _embedding_backfill_report(
             mode=mode,
-            status="dry-run",
+            status="refused" if privacy_error else "dry-run",
             provider=provider_name,
             model=model,
             pending=pending,
@@ -4665,9 +4855,13 @@ def _chunk_backfill_text(
             remaining=pending,
             duration=time.monotonic() - started,
             consumed_tokens=0,
+            error=privacy_error,
             corpus="chunks",
             policy=policy,
-            include_next_hint=include_next_hint,
+            include_next_hint=include_next_hint and privacy_error is None,
+            privacy_revision=privacy_revision,
+            privacy_transformed=privacy_transformed,
+            privacy_blocked=privacy_blocked,
         )
 
     # -- apply --
@@ -4685,13 +4879,13 @@ def _chunk_backfill_text(
     # (fastembed/ollama) keep the text on this machine and are exempt (F1).
     if not _is_local_embedding_provider(provider_name) and not confirm_raw_text:
         return _refused(
-            f"the chunk corpus sends RAW, VERBATIM message text — including "
+            f"the chunk corpus derives provider input from RAW, VERBATIM message text — including "
             f"tool-result and error/traceback content that the summary corpus "
             f"never exposes — to the '{provider_name}' cloud embedding provider. "
-            f"Re-run with `--confirm-raw-text` to acknowledge this, or switch to a "
-            f"local provider (fastembed/ollama). Note: LCM_SENSITIVE_PATTERNS_ENABLED "
-            f"redaction runs at INGEST, so text already stored is not "
-            f"retro-redacted before being sent."
+            f"The v0.23.1 provider-input privacy transform removes configured "
+            f"detector matches but cannot classify every possible sensitive fact. "
+            f"Re-run with `--confirm-raw-text` to acknowledge the residual content "
+            f"boundary, or switch to a local provider (fastembed/ollama)."
         )
 
     ttl_s = _embedding_backfill_lease_ttl_s()
@@ -4712,6 +4906,9 @@ def _chunk_backfill_text(
     lease_lost = False
     identity_superseded = False
     budget_exhausted = False
+    privacy_revision: str | None = None
+    privacy_transformed = 0
+    privacy_blocked = 0
     try:
         store = VectorStore(db_path, config=engine._config)
         store.ensure_chunk_schema()
@@ -4750,13 +4947,33 @@ def _chunk_backfill_text(
                 conn, identity, policy, limit
             )
             authorized_uncertain_ids = set()
-        documents = rows
+        (
+            documents,
+            privacy_revision,
+            privacy_transformed,
+            privacy_blocked,
+            privacy_error,
+        ) = _prepare_embedding_provider_documents(
+            rows,
+            config=engine._config,
+            provider_name=provider_name,
+            expected_revision=profile_revision,
+        )
+        if privacy_error is not None:
+            error = privacy_error
+            stop_reason = "privacy_refused"
 
         chunk_provider_config = dataclasses.replace(
             engine._config, embedding_model=model
         )
-        provider = resolve_provider(chunk_provider_config, for_backfill=True)
-        if provider is None:
+        provider = (
+            None
+            if privacy_error is not None
+            else resolve_provider(chunk_provider_config, for_backfill=True)
+        )
+        if privacy_error is not None:
+            pass
+        elif provider is None:
             error = "embedding provider is not configured; run `/lcm embed warmup`"
         elif (
             provider.model_id != model
@@ -4801,6 +5018,15 @@ def _chunk_backfill_text(
                         raise EmbeddingProviderError(
                             "provider dispatched invalid or duplicate document indexes"
                         )
+                    if privacy_revision is not None:
+                        try:
+                            validate_embedding_privacy_dispatch(
+                                [batch[index][1] for index in normalized],
+                                engine._config,
+                                expected_revision=privacy_revision,
+                            )
+                        except EmbeddingPrivacyPolicyError as exc:
+                            raise ProviderPreDispatchError(str(exc)) from exc
                     request_id = uuid.uuid4().hex
                     ids = [batch[index][0] for index in normalized]
                     if _mark_dispatched(
@@ -4980,6 +5206,13 @@ def _chunk_backfill_text(
                     if isinstance(exc, VoyageError) and exc.kind == "auth":
                         error = f"provider authentication failed; {exc}"
                         break
+                    if (
+                        isinstance(exc, ProviderPreDispatchError)
+                        and "cloud embedding privacy" in str(exc).lower()
+                    ):
+                        error = str(exc)
+                        stop_reason = "privacy_refused"
+                        break
     except _BackfillLeaseLost:
         lease_lost = True
         stop_reason = "lease_lost"
@@ -5016,6 +5249,9 @@ def _chunk_backfill_text(
         consumed_tokens=consumed_tokens, error=error, in_flight=in_flight_count,
         uncertain=uncertain_count, stop_reason=stop_reason,
         corpus="chunks", policy=policy,
+        privacy_revision=privacy_revision,
+        privacy_transformed=privacy_transformed,
+        privacy_blocked=privacy_blocked,
     )
 
 
