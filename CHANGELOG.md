@@ -7,6 +7,15 @@ version tags but does not have a destination GitHub Release object for RC2.
 
 (nothing yet)
 
+## v0.23.1-rc1 - 2026-08-23
+
+Privacy-only release candidate for hosted summary embeddings. Cloud warmup, summary and
+chunk backfill, every document sub-dispatch, and semantic-query embedding now require a
+current sensitive-pattern policy, transform provider input with pattern-only placeholders,
+and bind vectors to `privacy:v1:<active-pattern-hash>`. Durable messages, summaries, FTS
+rows, and payloads are unchanged. A late review blocker that allowed truncated private-key
+blocks through the transform was fixed before this candidate.
+
 ## v0.23.0 - 2026-08-23
 
 Stable promotion of the accepted isolation-only RC2 candidate. Runtime and schema behavior
