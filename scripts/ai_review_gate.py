@@ -58,7 +58,7 @@ def _identifier(value: Any) -> bool:
     return isinstance(value, str) and SAFE_ID.fullmatch(value) is not None
 
 
-def _risk(paths: Any) -> str:
+def _risk(paths: Any, labels: Any) -> str:
     if not isinstance(paths, list) or not paths or not all(isinstance(p, str) for p in paths):
         return "unknown"
     if any(
@@ -68,10 +68,26 @@ def _risk(paths: Any) -> str:
         or path.startswith("scripts/ai_review_gate.py")
         for path in paths
     ):
-        return "governance"
-    if all(path in ROUTINE_FILES or path.startswith(ROUTINE_PREFIXES) for path in paths):
-        return "routine"
-    return "unknown"
+        path_risk = "governance"
+    elif all(path in ROUTINE_FILES or path.startswith(ROUTINE_PREFIXES) for path in paths):
+        path_risk = "routine"
+    else:
+        path_risk = "unknown"
+
+    if not isinstance(labels, list) or not all(isinstance(label, str) for label in labels):
+        return "unknown"
+    label_risks = {
+        label.strip().casefold()
+        for label in labels
+        if label.strip().casefold() in HIGH_RISK
+    }
+    if path_risk in HIGH_RISK:
+        return path_risk
+    if len(label_risks) == 1:
+        return next(iter(label_risks))
+    if label_risks:
+        return "unknown"
+    return path_risk
 
 
 def evaluate(data: Any, now: datetime | None = None) -> dict[str, Any]:
@@ -79,13 +95,22 @@ def evaluate(data: Any, now: datetime | None = None) -> dict[str, Any]:
     if not isinstance(data, dict):
         return {"decision": "FAIL", "blockers": ["INPUT_INVALID"]}
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    labels = data.get("labels")
+    if data.get("labels_complete") is not True:
+        blockers.append("LABEL_STATE_INCOMPLETE")
+    if (
+        not isinstance(labels, list)
+        or not all(isinstance(label, str) for label in labels)
+        or any(not label.strip() for label in labels)
+    ):
+        blockers.append("LABELS_INVALID")
     expected = {
         "schema_version": "1",
         "repository": REPOSITORY,
         "pr_number": data.get("pr_number"),
         "base_sha": data.get("base_sha"),
         "head_sha": data.get("head_sha"),
-        "risk_class": _risk(data.get("changed_paths")),
+        "risk_class": _risk(data.get("changed_paths"), labels),
         "policy_version": POLICY_VERSION,
         "integration_id": INTEGRATION_ID,
     }

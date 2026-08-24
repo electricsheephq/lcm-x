@@ -84,6 +84,14 @@ jobs:
                 throw Error('pull request is not an open, ready default-branch change');
               const files = await github.paginate(github.rest.pulls.listFiles,
                 {owner, repo, pull_number: prNumber, per_page: 100});
+              if (!Array.isArray(pr.data.labels)) throw Error('live PR labels unavailable');
+              const normalizeLabels = (labels) => {
+                if (!Array.isArray(labels) || labels.some(label =>
+                  !label || typeof label.name !== 'string' || !label.name.trim()))
+                  throw Error('live PR labels unavailable');
+                return labels.map(label => label.name.trim().toLowerCase()).sort();
+              };
+              const labelNames = normalizeLabels(pr.data.labels);
               const query = `query($owner:String!,$repo:String!,$pr:Int!,$cursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100,after:$cursor){nodes{isResolved}pageInfo{hasNextPage endCursor}}}}}`;
               let cursor = null, unresolved = 0;
               do {
@@ -98,6 +106,7 @@ jobs:
               fs.writeFileSync('/tmp/gate.py', Buffer.from(source.data.content, 'base64'));
               const input = {repository: `${owner}/${repo}`, pr_number: prNumber,
                 base_sha: pr.data.base.sha, head_sha: head, changed_paths: files.map(file => file.filename),
+                labels: labelNames, labels_complete: true,
                 receipts: JSON.parse(process.env.RECEIPTS_JSON), unresolved_threads: unresolved,
                 api_complete: true, pagination_complete: true};
               const run = cp.spawnSync('python', ['/tmp/gate.py'], {input: JSON.stringify(input), encoding: 'utf8'});
@@ -105,7 +114,9 @@ jobs:
               const live = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
               const liveBranch = await github.rest.repos.getBranch({owner, repo, branch: defaultBranch});
               if (live.data.head.sha !== head || live.data.base.sha !== pr.data.base.sha ||
-                  liveBranch.data.commit.sha !== protectedSha) throw Error('PR or protected-base drift');
+                  liveBranch.data.commit.sha !== protectedSha ||
+                  JSON.stringify(normalizeLabels(live.data.labels)) !== JSON.stringify(labelNames))
+                throw Error('PR, labels, or protected-base drift');
               conclusion = run.status === 0 && result.decision === 'PASS' ? 'success' : 'failure';
               summary = JSON.stringify(result);
             } catch (error) {

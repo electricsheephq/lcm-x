@@ -37,13 +37,15 @@ def receipt(lane: str, *, risk: str = "routine", reviewer: str | None = None):
     }
 
 
-def payload(paths: list[str] | None = None):
+def payload(paths: list[str] | None = None, labels: list[str] | None = None):
     return {
         "repository": "electricsheephq/lcm-x",
         "pr_number": 350,
         "base_sha": BASE,
         "head_sha": HEAD,
         "changed_paths": paths or ["docs/operator-guide.md"],
+        "labels": [] if labels is None else labels,
+        "labels_complete": True,
         "receipts": [receipt("acceptance")],
         "unresolved_threads": 0,
         "api_complete": True,
@@ -83,6 +85,67 @@ def test_unknown_risk_fails_closed_to_two_lanes():
 
     assert result["risk_class"] == "unknown"
     assert "ADVERSARIAL_RECEIPT_COUNT_INVALID" in result["blockers"]
+
+
+def test_high_risk_live_label_escalates_benchmark_and_tests_paths():
+    data = payload(["bench/results.json", "tests/test_benchmark.py"], ["data-integrity"])
+    data["receipts"] = [
+        receipt("acceptance", risk="data-integrity"),
+        receipt("adversarial", risk="data-integrity"),
+    ]
+
+    result = evaluate(data, NOW)
+
+    assert result["decision"] == "PASS"
+    assert result["risk_class"] == "data-integrity"
+
+
+def test_unlabeled_routine_benchmark_docs_input_requires_acceptance_only():
+    data = payload(["bench/results.json", "docs/operator-guide.md"], [])
+
+    result = evaluate(data, NOW)
+
+    assert result["decision"] == "PASS"
+    assert result["risk_class"] == "routine"
+
+
+def test_routine_labels_cannot_downgrade_governance_or_unknown_paths():
+    for path, expected_risk in (
+        (".github/workflows/ai-review-gate.yml", "governance"),
+        ("access_context/tools.py", "unknown"),
+    ):
+        data = payload([path], ["routine"])
+        data["receipts"] = [
+            receipt("acceptance", risk=expected_risk),
+            receipt("adversarial", risk=expected_risk),
+        ]
+
+        result = evaluate(data, NOW)
+
+        assert result["decision"] == "PASS"
+        assert result["risk_class"] == expected_risk
+
+
+def test_missing_or_malformed_label_state_fails_closed():
+    cases = (
+        None,
+        {"labels": None},
+        {"labels": "data-integrity"},
+        {"labels": ["data-integrity", 1]},
+        {"labels": ["data-integrity"], "labels_complete": False},
+    )
+    for changes in cases:
+        data = payload(["bench/results.json"])
+        if changes is None:
+            data.pop("labels")
+            data.pop("labels_complete")
+        else:
+            data.update(changes)
+
+        result = evaluate(data, NOW)
+
+        assert result["decision"] == "FAIL"
+        assert any(blocker.startswith("LABEL") for blocker in result["blockers"])
 
 
 def test_missing_or_extra_receipts_fail():
@@ -172,6 +235,10 @@ def test_workflow_is_base_trusted_and_resets_each_head():
     assert "core.setFailed(`Failed to reset PRs:" in workflow
     assert "context.ref !== `refs/heads/${defaultBranch}`" in workflow
     assert "ref: protectedSha" in workflow
+    assert "Array.isArray(pr.data.labels)" in workflow
+    assert "label.name.trim().toLowerCase()" in workflow
+    assert "labels_complete: true" in workflow
+    assert "labels: labelNames" in workflow
     assert "actions/checkout" not in workflow
     assert "pull_request.head" not in workflow
     assert "eval(" not in workflow
