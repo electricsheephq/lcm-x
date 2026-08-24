@@ -11,15 +11,15 @@ from typing import Any
 SCHEMA_VERSION = "1"
 REPOSITORY = "electricsheephq/lcm-x"
 RULESET_ID = 20888757
-REQUIRED_CHECK_PAIRS = (
+REQUIRED_CI_CHECK_PAIRS = (
     ("workflow-lint", 15368),
     ("lint", 15368),
     ("test (3.11)", 15368),
     ("test (3.12)", 15368),
     ("test (3.13)", 15368),
     ("test (3.14)", 15368),
-    ("AI review exact-head", 15368),
 )
+REQUIRED_CHECK_PAIRS = REQUIRED_CI_CHECK_PAIRS + (("AI review exact-head", 15368),)
 FINDING_GATE_CLASSES = {"MERGE_BLOCKING", "RELEASE_BLOCKING", "NON_BLOCKING"}
 TERMINAL_FINDING_DISPOSITIONS = {
     "FIXED_NOW",
@@ -53,16 +53,22 @@ def _pair(value: dict[str, Any]) -> tuple[str, int]:
 def _trusted_checks(
     checks: list[dict[str, Any]],
     target_sha: str,
+    base_sha: str,
+    required_pairs: tuple[tuple[str, int], ...] = REQUIRED_CHECK_PAIRS,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     matched: list[dict[str, Any]] = []
     blockers: list[str] = []
 
-    for context, integration_id in REQUIRED_CHECK_PAIRS:
+    for context, integration_id in required_pairs:
         exact = [
             check
             for check in checks
             if _pair(check) == (context, integration_id)
             and check.get("head_sha") == target_sha
+            and (
+                context != "AI review exact-head"
+                or check.get("base_sha") == base_sha
+            )
         ]
         passing = [
             check
@@ -107,7 +113,9 @@ def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str,
     if pr.get("base_sha") != policy.get("base_sha"):
         blockers.append("BASE_POLICY_SHA_MISMATCH")
 
-    matched, check_blockers = _trusted_checks(data.get("checks", []), head_sha)
+    matched, check_blockers = _trusted_checks(
+        data.get("checks", []), head_sha, str(policy.get("base_sha", ""))
+    )
     blockers.extend(check_blockers)
 
     if any(thread.get("is_resolved") is not True for thread in data.get("threads", [])):
@@ -285,7 +293,12 @@ def _evaluate_post_merge(data: dict[str, Any]) -> dict[str, Any]:
     if issue.get("state") != "CLOSED" or issue.get("state_reason") != "COMPLETED":
         blockers.append("ISSUE_DISPOSITION_UNVERIFIED")
 
-    matched, check_blockers = _trusted_checks(data.get("checks", []), merge_commit)
+    matched, check_blockers = _trusted_checks(
+        data.get("checks", []),
+        merge_commit,
+        str(policy.get("base_sha", "")),
+        REQUIRED_CI_CHECK_PAIRS,
+    )
     blockers.extend(check_blockers)
     decision = _decision_for(blockers, "post_merge")
     return _receipt(data, decision, blockers, matched, "post-merge")

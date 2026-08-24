@@ -56,6 +56,8 @@ def test_routine_acceptance_receipt_passes():
 
     assert result["decision"] == "PASS"
     assert result["risk_class"] == "routine"
+    assert result["base_sha"] == BASE
+    assert result["head_sha"] == HEAD
     assert result["blockers"] == []
     assert result["receipts"][0]["evidence_digest"] == DIGEST
 
@@ -159,10 +161,13 @@ def test_workflow_is_base_trusted_and_resets_each_head():
     ).read_text(encoding="utf-8")
 
     assert "pull_request_target:" in workflow
+    assert "push:" in workflow
     assert "workflow_dispatch:" in workflow
     assert "checks: write" in workflow
     assert "AI review exact-head" in workflow
     assert "head_sha: head" in workflow
+    assert "${prNumber}:${base}:${head}" in workflow
+    assert "Protected base changed" in workflow
     assert "context.ref !== `refs/heads/${defaultBranch}`" in workflow
     assert "ref: protectedSha" in workflow
     assert "actions/checkout" not in workflow

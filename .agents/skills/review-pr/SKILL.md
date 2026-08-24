@@ -25,7 +25,8 @@ Build JSON for `scripts/maintainer_gate.py` from live reads:
 - schema `1`, mode `readiness`, and repository `electricsheephq/lcm-x`;
 - protected base ref/SHA, ruleset `20888757`, and every required `(context, integration_id)` pair;
 - PR number, base/head identity, state, draft flag, and accepted issue;
-- exact-head check-runs with name, app id, status, and conclusion;
+- exact-head check-runs with name, app id, status, conclusion, and the AI summary's bound base
+  SHA;
 - every review thread and every verified finding with its terminal disposition.
 
 The protected ruleset must contain exactly the six CI checks plus `AI review exact-head`, all

@@ -1,6 +1,8 @@
 name: AI review exact-head issuer
 
 on:
+  push:
+    branches: [main]
   pull_request_target:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
@@ -33,12 +35,8 @@ jobs:
           script: |
             const fs = require('fs'), cp = require('child_process');
             const owner = context.repo.owner, repo = context.repo.repo;
-            const prNumber = context.eventName === 'workflow_dispatch'
-              ? Number('${{ inputs.pr_number }}') : context.payload.pull_request.number;
-            const pr = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
-            const head = pr.data.head.sha;
-            const externalId = `ai-review-gate:${prNumber}:${head}`;
-            const emit = async (conclusion, summary) => {
+            const emit = async (prNumber, base, head, conclusion, summary) => {
+              const externalId = `ai-review-gate:${prNumber}:${base}:${head}`;
               const listed = await github.rest.checks.listForRef({owner, repo, ref: head,
                 check_name: 'AI review exact-head', filter: 'latest', per_page: 100});
               const prior = listed.data.check_runs
@@ -51,7 +49,21 @@ jobs:
                 : github.rest.checks.create({...payload, name: 'AI review exact-head',
                     head_sha: head, external_id: externalId});
             };
-            await emit('failure', context.eventName === 'workflow_dispatch'
+            if (context.eventName === 'push') {
+              const open = await github.paginate(github.rest.pulls.list,
+                {owner, repo, state: 'open', base: 'main', per_page: 100});
+              for (const candidate of open) {
+                await emit(candidate.number, candidate.base.sha, candidate.head.sha, 'failure',
+                  'Protected base changed; fresh exact-base/head review receipts are required.');
+              }
+              return;
+            }
+            const prNumber = context.eventName === 'workflow_dispatch'
+              ? Number('${{ inputs.pr_number }}') : context.payload.pull_request.number;
+            const pr = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
+            const base = pr.data.base.sha;
+            const head = pr.data.head.sha;
+            await emit(prNumber, base, head, 'failure', context.eventName === 'workflow_dispatch'
               ? 'Validation started; fail closed until complete.' : 'Exact-head review receipts are missing.');
             if (context.eventName !== 'workflow_dispatch') return;
             let conclusion = 'failure', summary = 'Validation failed closed.';
@@ -93,5 +105,5 @@ jobs:
             } catch (error) {
               summary = `Validation failed closed: ${error.message}`;
             }
-            await emit(conclusion, summary);
+            await emit(prNumber, base, head, conclusion, summary);
             if (conclusion !== 'success') core.setFailed(summary);

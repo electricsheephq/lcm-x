@@ -156,7 +156,12 @@ def evaluate(data: Any, now: datetime | None = None) -> dict[str, Any]:
     ]
     return {
         "decision": "PASS" if not blockers else "FAIL",
+        "repository": data.get("repository"),
+        "pr_number": data.get("pr_number"),
+        "base_sha": data.get("base_sha"),
+        "head_sha": data.get("head_sha"),
         "risk_class": expected["risk_class"],
+        "policy_version": POLICY_VERSION,
         "blockers": sorted(set(blockers)),
         "receipts": sorted(evidence, key=lambda item: str(item.get("lane"))),
     }

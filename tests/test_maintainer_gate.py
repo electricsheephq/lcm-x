@@ -30,6 +30,7 @@ def passing_checks(head_sha: str = HEAD) -> list[dict[str, object]]:
         {
             **required,
             "head_sha": head_sha,
+            "base_sha": BASE,
             "status": "completed",
             "conclusion": "success",
         }
@@ -209,6 +210,18 @@ def test_same_named_wrong_app_check_is_rejected():
     ]
 
 
+def test_ai_check_bound_to_a_prior_base_is_rejected():
+    payload = ready_payload()
+    payload["checks"][-1]["base_sha"] = "9" * 40
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "NOT_READY"
+    assert "TRUSTED_CHECK_UNSATISFIED:AI review exact-head:15368" in receipt[
+        "blocker_codes"
+    ]
+
+
 def test_duplicate_trusted_check_is_rejected_even_when_one_passes():
     payload = ready_payload()
     payload["checks"].append(
@@ -315,7 +328,7 @@ def test_post_merge_verifies_exact_merge_commit():
     receipt = evaluate(post_merge_payload())
 
     assert receipt["decision"] == "POST_MERGE_VERIFIED"
-    assert len(receipt["matched_trusted_checks"]) == len(REQUIRED)
+    assert len(receipt["matched_trusted_checks"]) == len(REQUIRED) - 1
 
 
 def test_post_merge_rejects_an_open_pr():
