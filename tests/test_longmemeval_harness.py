@@ -16,6 +16,7 @@ import pytest
 from benchmarking.longmemeval import (
     ARMS,
     DATASET_REVISION,
+    ProviderAccounting,
     RERANK_MODE_MIXED,
     RERANK_MODE_PLACEHOLDER,
     RERANK_MODE_VOYAGE,
@@ -35,12 +36,14 @@ from benchmarking.longmemeval import (
     recall_hit_sessions,
     recall_hit_turn_keys,
     rerank_sessions_voyage,
+    resolve_harness_providers,
     rrf_fuse,
     run_harness,
     summary_turn_keys,
     turn_ndcg_at_k,
     turn_recall_at_k,
 )
+from benchmarking.longmemeval import _typed_provider_degraded_outcomes
 
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "lcm_longmemeval.py"
 
@@ -882,6 +885,8 @@ def test_dump_candidates_stub_has_header_rows_gold_and_null_markers(tmp_path):
         "__dump_header__": {
             "provider": "stub",
             "model": "",
+            "chunk_provider": "stub",
+            "chunk_model": "",
             "dataset_label": "s",
             "source_sha256": None,
             "manifest_sha256": None,
@@ -1233,3 +1238,334 @@ def test_cli_rejects_dump_candidates_aliasing_run_files(tmp_path):
     )
     assert ok == (output_dir / "candidates.jsonl").resolve()
     assert cli._validated_dump_candidates_path(None, output_dir=output_dir, dataset=None) is None
+
+
+# --------------------------------------------------------------------------- #
+# #345 provider identity, accounting, and provider-free resume alignment.
+# --------------------------------------------------------------------------- #
+
+
+class _IdentityEmbedder:
+    provider_id = "voyage"
+    dim = 4
+
+    def __init__(self, model_id):
+        self.model_id = model_id
+        self.document_calls = 0
+        self.query_calls = 0
+
+    @staticmethod
+    def _vector(text):
+        value = float((sum(str(text).encode("utf-8")) % 7) + 1)
+        return [value, 1.0, 0.5, 0.25]
+
+    def embed_documents(self, texts):
+        self.document_calls += 1
+        return [self._vector(text) for text in texts]
+
+    def embed_query(self, text):
+        self.query_calls += 1
+        return self._vector(text)
+
+
+class _ContextualIdentityEmbedder(_IdentityEmbedder):
+    supports_contextualized_grouping = True
+
+    def __init__(self, model_id):
+        super().__init__(model_id)
+        self.contextual_groups = []
+
+    def embed_chunk_group_batches(self, groups, *, before_dispatch=None):
+        for group in groups:
+            indexes = tuple(index for index, _text in group)
+            self.contextual_groups.append(indexes)
+            if before_dispatch is not None:
+                before_dispatch(indexes)
+            yield indexes, [self._vector(text) for _index, text in group]
+
+
+def test_resolve_harness_providers_uses_production_chunk_identity_and_pair_cache(
+    monkeypatch,
+):
+    import benchmarking.longmemeval as lme
+
+    resolutions = []
+
+    def resolve(provider, model, **_kwargs):
+        resolutions.append((provider, model))
+        return _IdentityEmbedder(model)
+
+    monkeypatch.setattr(lme, "resolve_harness_provider", resolve)
+    providers = resolve_harness_providers("voyage", "voyage-4-large")
+
+    assert providers.summary_binding == ("voyage", "voyage-4-large")
+    assert providers.chunk_binding == ("voyage", "voyage-context-4")
+    assert resolutions == [
+        ("voyage", "voyage-4-large"),
+        ("voyage", "voyage-context-4"),
+    ]
+    assert providers.summary is not providers.chunk
+    resolutions.clear()
+    contextual_provider = resolve_harness_providers("voyage", "voyage-context-4")
+    assert resolutions == [("voyage", "voyage-context-4")]
+    assert contextual_provider.summary is contextual_provider.chunk
+    header = lme._checkpoint_header(
+        provider="voyage",
+        model="voyage-4-large",
+        rerank=False,
+        embeddings_enabled=True,
+        dataset_label="m",
+        direct_source_sha256=None,
+        manifest_sha256=None,
+        reuse_db_template=True,
+        embedding_batch_size=64,
+    )["__checkpoint_header__"]
+    assert (header["chunk_provider"], header["chunk_model"]) == (
+        "voyage",
+        "voyage-context-4",
+    )
+
+
+@pytest.mark.parametrize("contextual", [False, True])
+def test_evaluate_question_separates_provider_phases_and_chunk_grouping(
+    tmp_path, contextual
+):
+    summary = _IdentityEmbedder("voyage-4-large")
+    chunk_class = _ContextualIdentityEmbedder if contextual else _IdentityEmbedder
+    chunk = chunk_class("voyage-context-4")
+    accounting = ProviderAccounting()
+    question = parse_question(
+        _make_raw(
+            "q-accounting",
+            "single-session-user",
+            sessions={
+                "s-evidence": [
+                    {
+                        "role": "user",
+                        "content": "accounting chunk evidence " * 40,
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "second accounting chunk evidence " * 40,
+                        "has_answer": True,
+                    }
+                ]
+            },
+            answer_session_ids=["s-evidence"],
+            question="where is the accounting chunk evidence",
+        )
+    )
+
+    evaluate_question(
+        question,
+        summary,
+        chunk_provider=chunk,
+        accounting=accounting,
+        provider_name="voyage",
+        tmp_dir=tmp_path,
+        embeddings_enabled=True,
+    )
+
+    snapshot = accounting.snapshot()
+    assert snapshot["summary_documents"]["requests"] == 1
+    assert snapshot["chunk_documents"]["requests"] == 1
+    assert snapshot["harness_queries"]["requests"] == 2
+    assert snapshot["harness_queries"]["documents"] == 2
+    # Production recall may legitimately avoid semantic transport when its
+    # fresh-session scope has no candidates. Zero here is a truthful no-dispatch,
+    # not an omitted phase; the injected-provider transport case is tested below.
+    assert snapshot["production_lcm_recall_queries"]["requests"] == 0
+    assert snapshot["production_lcm_recall_queries"]["usage_tokens"] == 0
+    for role in ("summary_documents", "chunk_documents", "harness_queries"):
+        assert snapshot[role]["usage_tokens_complete"] is False
+        assert snapshot[role]["usage_tokens"] is None
+        assert snapshot[role]["known_usage_tokens"] == 0
+    assert accounting.degraded_outcomes == ["summary_provider_unavailable"]
+    if contextual:
+        assert len(chunk.contextual_groups) >= 2
+        assert snapshot["chunk_documents"]["provider_dispatches"] == len(
+            chunk.contextual_groups
+        )
+        assert chunk.document_calls == 0
+    else:
+        assert chunk.document_calls == 1
+
+        reused_accounting = ProviderAccounting()
+        evaluate_question(
+            question,
+            summary,
+            chunk_provider=summary,
+            accounting=reused_accounting,
+            provider_name="voyage",
+            tmp_dir=tmp_path / "same-identity",
+            embeddings_enabled=True,
+        )
+        assert reused_accounting.snapshot()["harness_queries"]["requests"] == 1
+
+
+def test_production_recall_accounts_separate_summary_and_chunk_queries(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as lme
+
+    lme._ensure_hermes_lcm_package()
+    import hermes_lcm.tools as lcm_tools
+
+    accounting = ProviderAccounting()
+    summary = lme._AccountingProvider(
+        _IdentityEmbedder("voyage-4-large"),
+        accounting,
+        "production_lcm_recall_queries",
+    )
+    chunk = lme._AccountingProvider(
+        _IdentityEmbedder("voyage-context-4"),
+        accounting,
+        "production_lcm_recall_queries",
+    )
+
+    def fake_recall(args, *, engine):
+        engine._lcm_embedding_provider_cache[1].embed_query(args["query"])
+        engine._lcm_chunk_provider_cache[1].embed_query(args["query"])
+        return json.dumps({"hits": [], "degraded": False})
+
+    monkeypatch.setattr(lcm_tools, "lcm_recall", fake_recall)
+    production_recall_hits(
+        _synthetic_dataset()[0],
+        type("Config", (), {})(),
+        None,
+        None,
+        summary,
+        chunk_provider_embedder=chunk,
+        provider_name="voyage",
+        chunk_provider_name="voyage",
+        tmp_dir=tmp_path,
+        embeddings_enabled=True,
+        limit=10,
+        accounting=accounting,
+    )
+
+    row = accounting.snapshot()["production_lcm_recall_queries"]
+    assert row["requests"] == 2
+    assert row["documents"] == 2
+    assert row["provider_dispatches"] == 2
+    assert row["usage_tokens_complete"] is False
+    assert row["usage_tokens"] is None
+
+
+def test_typed_provider_degraded_outcomes_map_known_and_reject_unknown():
+    assert _typed_provider_degraded_outcomes(
+        {
+            "degraded": True,
+            "degraded_reason": (
+                "embedding provider is not configured; "
+                "chunk embedding provider unavailable: offline"
+            ),
+        }
+    ) == ("summary_provider_disabled", "chunk_provider_unavailable")
+    with pytest.raises(ValueError, match="unknown lcm_recall degraded reason"):
+        _typed_provider_degraded_outcomes(
+            {"degraded": True, "degraded_reason": "surprising new fallback"}
+        )
+
+
+def test_content_cache_accounts_dispatches_by_pair_and_query(tmp_path):
+    from benchmarking.longmemeval import ContentHashEmbeddingCache, _AccountingProvider
+
+    class UsageEmbedder(_IdentityEmbedder):
+        def __init__(self, model_id):
+            super().__init__(model_id)
+            self.last_usage_tokens = None
+            self._usage_serial = 0
+
+        def _next_usage(self):
+            self._usage_serial += 1
+            self.last_usage_tokens = self._usage_serial
+
+        def embed_documents(self, texts):
+            self._next_usage()
+            return super().embed_documents(texts)
+
+        def embed_query(self, text):
+            self._next_usage()
+            return super().embed_query(text)
+
+    first = UsageEmbedder("voyage-4-large")
+    second = UsageEmbedder("voyage-context-4")
+    cache_path = tmp_path / "embeddings.sqlite3"
+    summary_cache = ContentHashEmbeddingCache(first, cache_path)
+    chunk_cache = ContentHashEmbeddingCache(second, cache_path)
+    accounting = ProviderAccounting()
+    summary_documents = _AccountingProvider(
+        summary_cache, accounting, "summary_documents"
+    )
+    harness_queries = _AccountingProvider(
+        summary_cache, accounting, "harness_queries"
+    )
+
+    summary_documents.embed_documents(["same text"])
+    summary_documents.embed_documents(["same text"])
+    chunk_cache.embed_documents(["same text"])
+    harness_queries.embed_query("question")
+
+    snapshot = accounting.snapshot()
+    assert snapshot["summary_documents"]["requests"] == 2
+    assert snapshot["summary_documents"]["provider_dispatches"] == 1
+    assert snapshot["summary_documents"]["usage_tokens_complete"] is True
+    assert snapshot["harness_queries"]["provider_dispatches"] == 1
+    assert first.document_calls == 1
+    assert second.document_calls == 1
+
+
+def test_completed_resume_and_binding_mismatch_do_not_resolve_provider(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as lme
+
+    questions = _synthetic_dataset()
+    selected_ids = [question.question_id for question in questions]
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    accounting = ProviderAccounting()
+    initial_report = run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "initial",
+        checkpoint_path=checkpoint,
+        accounting=accounting,
+    )
+    assert accounting.snapshot()["summary_documents"]["requests"] > 0
+    assert "accounting" not in initial_report
+    assert "accounting" not in checkpoint.read_text(encoding="utf-8")
+
+    def forbidden_resolution(*_args, **_kwargs):
+        raise AssertionError("provider resolution must not occur")
+
+    monkeypatch.setattr(lme, "resolve_harness_providers", forbidden_resolution)
+    resumed = run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "resume",
+        checkpoint_path=checkpoint,
+        resume=True,
+        selected_question_ids=selected_ids,
+    )
+    assert resumed["question_count"] == len(questions)
+
+    lines = checkpoint.read_text(encoding="utf-8").splitlines()
+    header = json.loads(lines[0])
+    header["__checkpoint_header__"]["chunk_model"] = "wrong-chunk-binding"
+    checkpoint.write_text(
+        "\n".join([json.dumps(header, sort_keys=True), *lines[1:]]) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="checkpoint configuration mismatch"):
+        run_harness(
+            questions,
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / "mismatch",
+            checkpoint_path=checkpoint,
+            resume=True,
+            selected_question_ids=selected_ids,
+        )
