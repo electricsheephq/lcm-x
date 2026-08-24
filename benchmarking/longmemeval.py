@@ -250,7 +250,8 @@ def _accounted_provider_attempt(
     """Run one provider attempt and record every observable dispatch and usage."""
     if accounting is None:
         return operation()
-    before_calls = getattr(provider, "provider_dispatches", None)
+    _observe_provider_transports(provider)
+    before_calls = _provider_dispatch_count(provider)
     failure: Exception | None = None
     succeeded = False
     try:
@@ -261,7 +262,7 @@ def _accounted_provider_attempt(
         failure = exc
         raise
     finally:
-        after_calls = getattr(provider, "provider_dispatches", None)
+        after_calls = _provider_dispatch_count(provider)
         if failure is not None and _is_provider_predispatch_error(failure):
             dispatches = 0
         elif isinstance(before_calls, int) and isinstance(after_calls, int):
@@ -430,7 +431,12 @@ class _AccountingProvider:
             # deliberately switches to one attempt. Observe provider counters so
             # accounting never changes the safe 429 retry contract.
             result = method(groups)
-        except Exception:
+        except Exception as exc:
+            after_calls = _provider_dispatch_count(self._provider)
+            if isinstance(before_calls, int) and isinstance(after_calls, int):
+                local_dispatches = max(0, after_calls - before_calls)
+            elif not _is_provider_predispatch_error(exc):
+                local_dispatches = 1
             self._accounting.record_call(
                 self._role,
                 document_count=document_count,
@@ -454,8 +460,13 @@ class _AccountingProvider:
                         known_usage += usage
                     yield batch
             except Exception as exc:
+                after_calls = _provider_dispatch_count(self._provider)
+                if isinstance(before_calls, int) and isinstance(after_calls, int):
+                    local_dispatches = max(0, after_calls - before_calls)
+                elif not _is_provider_predispatch_error(exc):
+                    local_dispatches = max(1, local_dispatches)
                 if not _is_provider_predispatch_error(exc):
-                    usage_complete = local_dispatches == 0
+                    usage_complete = False
                 raise
             finally:
                 after_calls = _provider_dispatch_count(self._provider)
@@ -888,7 +899,7 @@ class ContentHashEmbeddingCache:
                 encoded = [self._encode_vector(vector) for vector in vectors]
                 with self._connect() as connection:
                     connection.executemany(
-                        "INSERT OR REPLACE INTO embedding_cache "
+                        "INSERT OR IGNORE INTO embedding_cache "
                         "(provider, model, content_sha256, vector_dim, vector_f64_le) "
                         "VALUES (?, ?, ?, ?, ?)",
                         [
@@ -907,8 +918,10 @@ class ContentHashEmbeddingCache:
                     self.last_usage_tokens = max(0, int(usage))
                 except (TypeError, ValueError, OverflowError):
                     self.last_usage_tokens = None
+                durable = self._lookup([digest_by_index[index] for index in indexes])
                 yield _CachedDocumentBatch(
-                    indexes, tuple(tuple(vector) for vector in vectors)
+                    indexes,
+                    tuple(tuple(durable[digest_by_index[index]]) for index in indexes),
                 )
         except Exception:
             raise

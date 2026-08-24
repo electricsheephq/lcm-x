@@ -201,6 +201,33 @@ def test_contextual_cache_hit_adds_no_stale_usage(tmp_path):
     assert row["usage_tokens"] == 5
 
 
+def test_concurrent_contextual_writers_return_first_durable_vectors(tmp_path):
+    path = tmp_path / "contextual-race.db"
+    barrier = threading.Barrier(2)
+
+    class RacingContextualProvider(_ContextualProvider):
+        def embed_chunk_group_batches(self, groups, *, before_dispatch=None):
+            barrier.wait(timeout=5)
+            yield from super().embed_chunk_group_batches(
+                groups, before_dispatch=before_dispatch
+            )
+
+    left = lme.ContentHashEmbeddingCache(
+        RacingContextualProvider(offset=10.0), path
+    )
+    right = lme.ContentHashEmbeddingCache(
+        RacingContextualProvider(offset=20.0), path
+    )
+    groups = [[(0, "shared context")]]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(lambda: list(left.embed_chunk_group_batches(groups))),
+            executor.submit(lambda: list(right.embed_chunk_group_batches(groups))),
+        ]
+        results = [future.result(timeout=10) for future in futures]
+    assert results[0] == results[1]
+
+
 class TestCacheEnvGate:
     def test_unset_env_returns_provider_object_unchanged(self, monkeypatch):
         raw = _CountingProvider()

@@ -1731,6 +1731,29 @@ def test_accounted_warmup_attempt_is_not_omitted():
     assert row["usage_tokens"] == 3
 
 
+def test_accounted_warmup_observes_all_retry_transports():
+    import benchmarking.longmemeval as lme
+
+    class RetryingWarmup(_IdentityEmbedder):
+        last_usage_tokens = 3
+
+        def __init__(self):
+            super().__init__("voyage-context-4")
+            self._transport = lambda: None
+
+        def warmup(self):
+            self._transport()
+            self._transport()
+            return self._vector("warmup")
+
+    provider = RetryingWarmup()
+    accounting = ProviderAccounting()
+    assert lme._accounted_provider_attempt(
+        provider, accounting, "chunk_documents", provider.warmup
+    )
+    assert accounting.snapshot()["chunk_documents"]["provider_dispatches"] == 2
+
+
 @pytest.mark.parametrize("path", ["flat", "cached", "contextual"])
 def test_predispatch_refusal_records_no_provider_transport(tmp_path, path):
     import benchmarking.longmemeval as lme
@@ -1895,6 +1918,36 @@ def test_contextual_postdispatch_failure_marks_unknown_usage_incomplete():
     assert row["provider_dispatches"] == 1
     assert row["usage_tokens"] is None
     assert row["usage_tokens_complete"] is False
+
+
+@pytest.mark.parametrize(
+    ("predispatch", "expected_dispatches", "expected_complete"),
+    [(False, 1, False), (True, 0, True)],
+)
+def test_contextual_unobservable_failure_is_conservative(
+    predispatch, expected_dispatches, expected_complete
+):
+    import benchmarking.longmemeval as lme
+
+    class UnobservableFailure(_IdentityEmbedder):
+        last_usage_tokens = None
+
+        def embed_chunk_group_batches(self, groups):
+            error = RuntimeError("unobservable failure")
+            if predispatch:
+                error.transport_started = False
+            raise error
+            yield  # pragma: no cover
+
+    accounting = ProviderAccounting()
+    wrapped = lme._AccountingProvider(
+        UnobservableFailure("voyage-context-4"), accounting, "chunk_documents"
+    )
+    with pytest.raises(RuntimeError, match="unobservable failure"):
+        list(wrapped.embed_chunk_group_batches([[(0, "chunk")]]))
+    row = accounting.snapshot()["chunk_documents"]
+    assert row["provider_dispatches"] == expected_dispatches
+    assert row["usage_tokens_complete"] is expected_complete
 
 
 def test_completed_resume_and_binding_mismatch_do_not_resolve_provider(
