@@ -245,3 +245,14 @@ def test_workflow_is_base_trusted_and_resets_each_head():
     assert "actions/checkout" not in workflow
     assert "pull_request.head" not in workflow
     assert "eval(" not in workflow
+
+
+def test_workflow_resets_on_label_lifecycle_events():
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]" in workflow
+    assert "await emit(prNumber, base, head, 'failure', context.eventName === 'workflow_dispatch'" in workflow
+    assert "'Exact-head review receipts are missing.'" in workflow
+    assert "if (context.eventName !== 'workflow_dispatch') return;" in workflow
