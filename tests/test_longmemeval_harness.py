@@ -1278,6 +1278,9 @@ class _ContextualIdentityEmbedder(_IdentityEmbedder):
         self.contextual_groups = []
 
     def embed_chunk_group_batches(self, groups, *, before_dispatch=None):
+        self.max_groups_per_call = max(
+            getattr(self, "max_groups_per_call", 0), len(groups)
+        )
         for group in groups:
             indexes = tuple(index for index, _text in group)
             self.contextual_groups.append(indexes)
@@ -1294,6 +1297,9 @@ class _ProductionContextualIdentityEmbedder(_ContextualIdentityEmbedder):
     def embed_chunk_group_batches(self, groups, *, before_dispatch=None):
         from hermes_lcm.embedding_provider import EmbeddedDocumentBatch
 
+        self.max_groups_per_call = max(
+            getattr(self, "max_groups_per_call", 0), len(groups)
+        )
         for group in groups:
             indexes = tuple(index for index, _text in group)
             self.contextual_groups.append(indexes)
@@ -1424,7 +1430,8 @@ def test_evaluate_question_separates_provider_phases_and_chunk_grouping(
                         "role": "assistant",
                         "content": "second accounting chunk evidence " * 40,
                         "has_answer": True,
-                    }
+                    },
+                    {"role": "user", "content": "third accounting chunk " * 40},
                 ]
             },
             answer_session_ids=["s-evidence"],
@@ -1440,6 +1447,7 @@ def test_evaluate_question_separates_provider_phases_and_chunk_grouping(
         provider_name="voyage",
         tmp_dir=tmp_path,
         embeddings_enabled=True,
+        embedding_batch_size=2,
     )
 
     snapshot = accounting.snapshot()
@@ -1458,14 +1466,15 @@ def test_evaluate_question_separates_provider_phases_and_chunk_grouping(
         assert snapshot[role]["known_usage_tokens"] == 0
     if contextual_shape in {"tuple", "production"}:
         assert len(chunk.contextual_groups) >= 2
-        assert snapshot["chunk_documents"]["requests"] == 1
+        assert chunk.max_groups_per_call <= 2
+        assert snapshot["chunk_documents"]["requests"] == 2
         assert snapshot["chunk_documents"]["provider_dispatches"] == len(
             chunk.contextual_groups
         )
         assert chunk.document_calls == 0
     else:
         assert chunk.document_calls == snapshot["chunk_documents"]["requests"]
-        assert max(chunk.document_batch_sizes) == 1
+        assert max(chunk.document_batch_sizes) <= 2
 
 
 def test_evaluate_question_reuses_one_query_for_same_provider_identity(tmp_path):
@@ -1541,6 +1550,47 @@ def test_production_recall_accounts_separate_summary_and_chunk_queries(
     assert row["provider_dispatches"] == 2
     assert row["usage_tokens_complete"] is False
     assert row["usage_tokens"] is None
+
+
+@pytest.mark.parametrize("method", ["embed_query", "embed_query_interactive"])
+@pytest.mark.parametrize("outcome", ["success", "predispatch", "postdispatch"])
+def test_query_accounting_is_identical_for_interactive_calls(method, outcome):
+    import benchmarking.longmemeval as lme
+
+    class QueryProvider(_IdentityEmbedder):
+        provider_dispatches = 0
+        last_usage_tokens = 3
+
+        def _run(self, text):
+            if outcome == "predispatch":
+                error = RuntimeError("refused")
+                error.transport_started = False
+                raise error
+            self.provider_dispatches += 1
+            if outcome == "postdispatch":
+                raise RuntimeError("failed")
+            return self._vector(text)
+
+        def embed_query(self, text):
+            return self._run(text)
+
+        def embed_query_interactive(self, text, *, timeout):
+            assert timeout == 1.5
+            return self._run(text)
+
+    accounting = ProviderAccounting()
+    wrapped = lme._AccountingProvider(QueryProvider("voyage-4-large"), accounting, "harness_queries")
+    call = getattr(wrapped, method)
+    kwargs = {"timeout": 1.5} if method.endswith("interactive") else {}
+    if outcome == "success":
+        assert call("question", **kwargs)
+    else:
+        with pytest.raises(RuntimeError):
+            call("question", **kwargs)
+    row = accounting.snapshot()["harness_queries"]
+    assert row["requests"] == 1
+    assert row["provider_dispatches"] == (0 if outcome == "predispatch" else 1)
+    assert row["usage_tokens"] == (3 if outcome == "success" else (0 if outcome == "predispatch" else None))
 
 
 def test_typed_provider_degraded_outcomes_ignore_general_and_reject_unknown_provider():

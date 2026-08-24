@@ -91,6 +91,57 @@ class TestCacheIdentity:
             assert connection.execute("SELECT count(*) FROM embedding_cache").fetchone()[0] == 3
 
 
+class _ContextualProvider(_CountingProvider):
+    supports_contextualized_grouping = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.provider_dispatches = 0
+
+    def embed_chunk_group_batches(self, groups, *, before_dispatch=None):
+        self.provider_dispatches += 1
+        if before_dispatch is not None:
+            raise AssertionError("observation must not select the callback retry contract")
+        for group in groups:
+            indexes = tuple(index for index, _text in group)
+            context = "\u241f".join(text for _index, text in group)
+            yield indexes, tuple(self.embed_documents([context + text])[0] for _index, text in group)
+
+
+def test_contextual_cache_binds_pair_order_and_privacy_and_reuses_without_transport(tmp_path):
+    path = tmp_path / "contextual.db"
+    groups = [[(0, "alpha"), (1, "beta")], [(2, "gamma")]]
+    first = _ContextualProvider("context-model")
+    cached = lme.ContentHashEmbeddingCache(first, path, privacy_namespace="public-a")
+    expected = list(cached.embed_chunk_group_batches(groups))
+    first_dispatches = first.provider_dispatches
+    actual = list(cached.embed_chunk_group_batches(groups))
+
+    assert actual == expected
+    assert first.provider_dispatches == first_dispatches
+    changed = _ContextualProvider("context-model")
+    other = lme.ContentHashEmbeddingCache(changed, path, privacy_namespace="public-b")
+    list(other.embed_chunk_group_batches([[ (0, "beta"), (1, "alpha") ]]))
+    assert changed.provider_dispatches == 1
+
+
+def test_contextual_cache_observation_preserves_provider_retry_contract(tmp_path):
+    class RetryingProvider(_ContextualProvider):
+        def embed_chunk_group_batches(self, groups, *, before_dispatch=None):
+            if before_dispatch is not None:
+                raise AssertionError("callback disables safe retries")
+            self.provider_dispatches += 2
+            yield from super().embed_chunk_group_batches(groups)
+            self.provider_dispatches -= 1
+
+    raw = RetryingProvider("context-model")
+    cached = lme.ContentHashEmbeddingCache(raw, tmp_path / "retry.db")
+    accounting = lme.ProviderAccounting()
+    wrapped = lme._AccountingProvider(cached, accounting, "chunk_documents")
+    assert list(wrapped.embed_chunk_group_batches([[(0, "chunk")]]))
+    assert accounting.snapshot()["chunk_documents"]["provider_dispatches"] == 2
+
+
 class TestCacheEnvGate:
     def test_unset_env_returns_provider_object_unchanged(self, monkeypatch):
         raw = _CountingProvider()

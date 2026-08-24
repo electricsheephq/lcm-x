@@ -219,6 +219,28 @@ def _is_provider_predispatch_error(exc: BaseException) -> bool:
     return getattr(exc, "transport_started", None) is False
 
 
+def _observe_provider_transports(provider: Any) -> None:
+    """Count real transport attempts without selecting a callback contract."""
+    transport = getattr(provider, "_transport", None)
+    if not callable(transport) or hasattr(provider, "_harness_transport_attempts"):
+        return
+    provider._harness_transport_attempts = 0
+
+    def observed_transport(*args: Any, **kwargs: Any) -> Any:
+        provider._harness_transport_attempts += 1
+        return transport(*args, **kwargs)
+
+    provider._transport = observed_transport
+
+
+def _provider_dispatch_count(provider: Any) -> int | None:
+    for name in ("provider_dispatches", "_harness_transport_attempts"):
+        value = getattr(provider, name, None)
+        if isinstance(value, int):
+            return value
+    return None
+
+
 def _accounted_provider_attempt(
     provider: Any,
     accounting: ProviderAccounting | None,
@@ -267,6 +289,7 @@ class _AccountingProvider:
 
     def __init__(self, provider: Any, accounting: ProviderAccounting, role: str):
         self._provider = provider
+        _observe_provider_transports(provider)
         self._accounting = accounting
         self._role = accounting._validate_role(role)
 
@@ -283,7 +306,7 @@ class _AccountingProvider:
         values = list(texts)
         if not values:
             return []
-        before_calls = getattr(self._provider, "provider_dispatches", None)
+        before_calls = _provider_dispatch_count(self._provider)
         batch_method = getattr(type(self._provider), "embed_document_batches", None)
         dispatches = 0
         known_usage = 0
@@ -292,13 +315,8 @@ class _AccountingProvider:
             if callable(batch_method):
                 vectors_by_index: dict[int, Sequence[float]] = {}
 
-                def before_dispatch(_indexes):
-                    nonlocal dispatches
+                for batch in batch_method(self._provider, values):
                     dispatches += 1
-
-                for batch in batch_method(
-                    self._provider, values, before_dispatch=before_dispatch
-                ):
                     indexes = tuple(batch.indexes)
                     vectors = tuple(batch.vectors)
                     if len(indexes) != len(vectors):
@@ -318,7 +336,7 @@ class _AccountingProvider:
                 result = [vectors_by_index[index] for index in range(len(values))]
             else:
                 result = self._provider.embed_documents(values)
-                after_calls = getattr(self._provider, "provider_dispatches", None)
+                after_calls = _provider_dispatch_count(self._provider)
                 if isinstance(before_calls, int) and isinstance(after_calls, int):
                     dispatches = max(0, after_calls - before_calls)
                 else:
@@ -330,7 +348,7 @@ class _AccountingProvider:
                     known_usage = usage
             return [list(vector) for vector in result]
         except Exception as exc:
-            after_calls = getattr(self._provider, "provider_dispatches", None)
+            after_calls = _provider_dispatch_count(self._provider)
             if _is_provider_predispatch_error(exc):
                 if isinstance(before_calls, int) and isinstance(after_calls, int):
                     dispatches = max(0, after_calls - before_calls)
@@ -351,14 +369,14 @@ class _AccountingProvider:
                 usage_complete=usage_complete,
             )
 
-    def embed_query(self, text: str) -> list[float]:
-        before_calls = getattr(self._provider, "provider_dispatches", None)
+    def _embed_query(self, method: str, text: str, **kwargs: Any) -> list[float]:
+        before_calls = _provider_dispatch_count(self._provider)
         dispatches = 0
         usage_tokens = 0
         usage_complete = True
         try:
-            result = self._provider.embed_query(text)
-            after_calls = getattr(self._provider, "provider_dispatches", None)
+            result = getattr(self._provider, method)(text, **kwargs)
+            after_calls = _provider_dispatch_count(self._provider)
             if isinstance(before_calls, int) and isinstance(after_calls, int):
                 dispatches = max(0, after_calls - before_calls)
             else:
@@ -370,7 +388,7 @@ class _AccountingProvider:
                 usage_tokens = usage
             return list(result)
         except Exception as exc:
-            after_calls = getattr(self._provider, "provider_dispatches", None)
+            after_calls = _provider_dispatch_count(self._provider)
             if isinstance(before_calls, int) and isinstance(after_calls, int):
                 dispatches = max(0, after_calls - before_calls)
             elif not _is_provider_predispatch_error(exc):
@@ -386,25 +404,29 @@ class _AccountingProvider:
                 usage_complete=usage_complete,
             )
 
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed_query("embed_query", text)
+
+    def embed_query_interactive(self, text: str, *, timeout: float) -> list[float]:
+        return self._embed_query("embed_query_interactive", text, timeout=timeout)
+
     def embed_chunk_group_batches(self, groups, *, before_dispatch=None):
         """Forward contextual grouping while accounting every accepted request."""
 
         document_count = sum(len(group) for group in groups)
+        before_calls = _provider_dispatch_count(self._provider)
         local_dispatches = 0
         known_usage = 0
         usage_complete = True
-
-        def dispatch(indexes):
-            nonlocal local_dispatches
-            local_dispatches += 1
-            if before_dispatch is not None:
-                before_dispatch(indexes)
 
         method = getattr(self._provider, "embed_chunk_group_batches", None)
         if not callable(method):
             raise AttributeError("provider does not support contextualized grouping")
         try:
-            result = method(groups, before_dispatch=dispatch)
+            # Voyage treats a before_dispatch callback as a durable preflight and
+            # deliberately switches to one attempt. Observe provider counters so
+            # accounting never changes the safe 429 retry contract.
+            result = method(groups)
         except Exception as exc:
             if _is_provider_predispatch_error(exc):
                 local_dispatches = max(0, local_dispatches - 1)
@@ -422,6 +444,7 @@ class _AccountingProvider:
             nonlocal known_usage, local_dispatches, usage_complete
             try:
                 for batch in result:
+                    local_dispatches += 1
                     usage = self._usage_tokens()
                     if usage is None:
                         usage_complete = False
@@ -434,6 +457,9 @@ class _AccountingProvider:
                 usage_complete = local_dispatches == 0
                 raise
             finally:
+                after_calls = _provider_dispatch_count(self._provider)
+                if isinstance(before_calls, int) and isinstance(after_calls, int):
+                    local_dispatches = max(0, after_calls - before_calls)
                 self._accounting.record_call(
                     self._role,
                     document_count=document_count,
@@ -527,6 +553,12 @@ class StubEmbedder:
         return self._embed(text)
 
 
+@dataclass(frozen=True)
+class _CachedDocumentBatch:
+    indexes: tuple[int, ...]
+    vectors: tuple[tuple[float, ...], ...]
+
+
 class ContentHashEmbeddingCache:
     """Per-document embedding cache keyed by exact provider input text.
 
@@ -544,8 +576,10 @@ class ContentHashEmbeddingCache:
         *,
         provider_id: str | None = None,
         model_id: str | None = None,
+        privacy_namespace: str = "public-longmemeval-v1",
     ) -> None:
         self._provider = provider
+        _observe_provider_transports(provider)
         self.cache_path = Path(cache_path)
         self.provider_id = str(
             provider_id or getattr(provider, "provider_id", "")
@@ -557,6 +591,9 @@ class ContentHashEmbeddingCache:
             raise ValueError("embedding cache provider id must not be empty")
         if not self._model_id:
             raise ValueError("embedding cache model id must not be empty")
+        self._privacy_namespace = str(privacy_namespace).strip()
+        if not self._privacy_namespace:
+            raise ValueError("embedding cache privacy namespace must not be empty")
         self.hits = 0
         self.misses = 0
         # Process-local only; never persisted in the cache database or reports.
@@ -661,21 +698,15 @@ class ContentHashEmbeddingCache:
             missing_texts = [missing_by_digest[digest] for digest in missing_digests]
             batch_method = getattr(type(self._provider), "embed_document_batches", None)
             dispatches = 0
+            before_calls = _provider_dispatch_count(self._provider)
             known_usage = 0
             usage_complete = True
             if callable(batch_method):
                 vectors_by_index: dict[int, Sequence[float]] = {}
 
-                def before_dispatch(_indexes):
-                    nonlocal dispatches
-                    dispatches += 1
-
                 try:
-                    for provider_batch in batch_method(
-                        self._provider,
-                        missing_texts,
-                        before_dispatch=before_dispatch,
-                    ):
+                    for provider_batch in batch_method(self._provider, missing_texts):
+                        dispatches += 1
                         indexes = tuple(provider_batch.indexes)
                         batch_vectors = tuple(provider_batch.vectors)
                         if len(indexes) != len(batch_vectors):
@@ -690,20 +721,27 @@ class ContentHashEmbeddingCache:
                             usage_complete = False
                 except Exception as exc:
                     if _is_provider_predispatch_error(exc):
-                        dispatches = max(0, dispatches - 1)
+                        dispatches = 0
                     raise
                 finally:
+                    after_calls = _provider_dispatch_count(self._provider)
+                    if isinstance(before_calls, int) and isinstance(after_calls, int):
+                        dispatches = max(0, after_calls - before_calls)
                     self.provider_dispatches += dispatches
                 vectors = [vectors_by_index[index] for index in range(len(missing_texts))]
             else:
-                self.provider_dispatches += 1
                 dispatches = 1
                 try:
                     vectors = list(self._provider.embed_documents(missing_texts))
                 except Exception as exc:
                     if _is_provider_predispatch_error(exc):
-                        self.provider_dispatches -= 1
+                        dispatches = 0
                     raise
+                finally:
+                    after_calls = _provider_dispatch_count(self._provider)
+                    if isinstance(before_calls, int) and isinstance(after_calls, int):
+                        dispatches = max(0, after_calls - before_calls)
+                    self.provider_dispatches += dispatches
                 usage = getattr(self._provider, "last_usage_tokens", None)
                 try:
                     known_usage = max(0, int(usage))
@@ -744,17 +782,31 @@ class ContentHashEmbeddingCache:
             raise RuntimeError("embedding cache did not retain a populated key") from exc
 
     def embed_query(self, text: str) -> list[float]:
-        self.provider_dispatches += 1
+        return self._embed_query("embed_query", text)
+
+    def embed_query_interactive(self, text: str, *, timeout: float) -> list[float]:
+        return self._embed_query("embed_query_interactive", text, timeout=timeout)
+
+    def _embed_query(self, method: str, text: str, **kwargs: Any) -> list[float]:
+        before_calls = _provider_dispatch_count(self._provider)
         succeeded = False
         try:
-            result = self._provider.embed_query(text)
+            result = getattr(self._provider, method)(text, **kwargs)
             succeeded = True
             return result
         except Exception as exc:
             if _is_provider_predispatch_error(exc):
-                self.provider_dispatches -= 1
+                return_dispatches = 0
+            else:
+                return_dispatches = 1
             raise
         finally:
+            after_calls = _provider_dispatch_count(self._provider)
+            if isinstance(before_calls, int) and isinstance(after_calls, int):
+                return_dispatches = max(0, after_calls - before_calls)
+            elif succeeded:
+                return_dispatches = 1
+            self.provider_dispatches += return_dispatches
             usage = (
                 getattr(self._provider, "last_usage_tokens", None)
                 if succeeded
@@ -764,6 +816,106 @@ class ContentHashEmbeddingCache:
                 self.last_usage_tokens = max(0, int(usage))
             except (TypeError, ValueError, OverflowError):
                 self.last_usage_tokens = None
+
+    def _contextual_digests(self, group: Sequence[tuple[int, str]]) -> list[str]:
+        identity = json.dumps(
+            {
+                "dimension": self.dim,
+                "dtype": "float64-le",
+                "model": self.model_id,
+                "privacy": self._privacy_namespace,
+                "provider": self.provider_id,
+                "texts": [str(text) for _index, text in group],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        group_digest = self.content_sha256(identity)
+        return [
+            self.content_sha256(f"context-v1:{group_digest}:{index}")
+            for index in range(len(group))
+        ]
+
+    def embed_chunk_group_batches(self, groups, *, before_dispatch=None):
+        prepared = [
+            [(int(index), str(text)) for index, text in group] for group in groups
+        ]
+        cached_batches: list[_CachedDocumentBatch] = []
+        missing_groups: list[list[tuple[int, str]]] = []
+        digest_by_index: dict[int, str] = {}
+        for group in prepared:
+            digests = self._contextual_digests(group)
+            found = self._lookup(digests)
+            if len(found) == len(digests):
+                self.hits += len(group)
+                cached_batches.append(
+                    _CachedDocumentBatch(
+                        tuple(index for index, _text in group),
+                        tuple(tuple(found[digest]) for digest in digests),
+                    )
+                )
+            else:
+                self.misses += len(group)
+                missing_groups.append(group)
+                digest_by_index.update(
+                    (index, digest) for (index, _text), digest in zip(group, digests)
+                )
+        yield from cached_batches
+        if not missing_groups:
+            return
+        method = getattr(self._provider, "embed_chunk_group_batches", None)
+        if not callable(method):
+            raise AttributeError("provider does not support contextualized grouping")
+        before_calls = _provider_dispatch_count(self._provider)
+        dispatches = 0
+        try:
+            for batch in method(missing_groups):
+                indexes = (
+                    tuple(int(index) for index in batch.indexes)
+                    if hasattr(batch, "indexes")
+                    else tuple(batch[0])
+                )
+                vectors = (
+                    tuple(batch.vectors)
+                    if hasattr(batch, "vectors")
+                    else tuple(batch[1])
+                )
+                dispatches += 1
+                encoded = [self._encode_vector(vector) for vector in vectors]
+                with self._connect() as connection:
+                    connection.executemany(
+                        "INSERT OR REPLACE INTO embedding_cache "
+                        "(provider, model, content_sha256, vector_dim, vector_f64_le) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        [
+                            (
+                                self.provider_id,
+                                self.model_id,
+                                digest_by_index[index],
+                                dimension,
+                                sqlite3.Binary(payload),
+                            )
+                            for index, (dimension, payload) in zip(indexes, encoded)
+                        ],
+                    )
+                usage = getattr(self._provider, "last_usage_tokens", None)
+                try:
+                    self.last_usage_tokens = max(0, int(usage))
+                except (TypeError, ValueError, OverflowError):
+                    self.last_usage_tokens = None
+                yield _CachedDocumentBatch(
+                    indexes, tuple(tuple(vector) for vector in vectors)
+                )
+        except Exception as exc:
+            if _is_provider_predispatch_error(exc):
+                dispatches = 0
+            raise
+        finally:
+            after_calls = _provider_dispatch_count(self._provider)
+            if isinstance(before_calls, int) and isinstance(after_calls, int):
+                dispatches = max(0, after_calls - before_calls)
+            self.provider_dispatches += dispatches
 
     def __getattr__(self, name: str):
         return getattr(self._provider, name)
@@ -2252,7 +2404,7 @@ def evaluate_question(
     for ``hybrid_rerank``, ``rerank_mode`` ride alongside for aggregation.
     """
     _ensure_hermes_lcm_package()
-    from hermes_lcm.chunking import group_by_store_id, iter_message_chunks
+    from hermes_lcm.chunking import iter_message_chunks
     from hermes_lcm.config import LCMConfig
     from hermes_lcm.dag import SummaryDAG, SummaryNode
     from hermes_lcm.embedding_provider import default_chunk_model
@@ -2336,7 +2488,7 @@ def evaluate_question(
     # longest, so per-chunk embedding is actually faster; the summary-call collapse
     # is the win that matters for network/live providers.)
     summary_specs: list[tuple[str, int, str]] = []  # (session_id, node_id, summary_text)
-    chunk_items: list[Any] = []
+    contextual_chunk_groups: list[list[Any]] = []
     flat_chunk_batch: list[Any] = []
     grouping_target = chunk_provider
     supports_grouping = bool(
@@ -2344,6 +2496,7 @@ def evaluate_question(
         and getattr(grouping_target, "supports_contextualized_grouping", False)
     ) and callable(getattr(grouping_target, "embed_chunk_group_batches", None))
     flat_chunk_batch_size = max(1, int(embedding_batch_size or 1))
+    contextual_group_batch_size = max(1, int(embedding_batch_size or EMBED_BATCH_SIZE))
     try:
         if embeddings_enabled:
             vector_store.register_profile(model, summary_name, dim)
@@ -2384,6 +2537,44 @@ def evaluate_question(
                 )
             flat_chunk_batch.clear()
 
+        def flush_contextual_chunks() -> None:
+            if not contextual_chunk_groups:
+                return
+            chunk_items = [chunk for group in contextual_chunk_groups for chunk in group]
+            groups: list[list[tuple[int, str]]] = []
+            offset = 0
+            for group in contextual_chunk_groups:
+                groups.append(
+                    [(offset + index, str(chunk.text)) for index, chunk in enumerate(group)]
+                )
+                offset += len(group)
+            chunk_vectors_by_index: dict[int, Sequence[float]] = {}
+            for batch in chunk_documents_provider.embed_chunk_group_batches(groups):
+                indexes = getattr(batch, "indexes", None)
+                vectors = getattr(batch, "vectors", None)
+                if indexes is None or vectors is None:
+                    indexes, vectors = batch
+                if len(indexes) != len(vectors):
+                    raise ValueError(
+                        "contextual chunk provider returned mismatched indexes/vectors"
+                    )
+                chunk_vectors_by_index.update(zip(map(int, indexes), vectors))
+            if len(chunk_vectors_by_index) != len(chunk_items):
+                raise ValueError("contextual chunk provider returned incomplete vectors")
+            for index, chunk in enumerate(chunk_items):
+                vector_store.record_chunk_embedding(
+                    chunk.chunk_id,
+                    chunk_model,
+                    chunk_vectors_by_index[index],
+                    store_id=chunk.store_id,
+                    chunk_index=chunk.chunk_index,
+                    char_start=chunk.char_start,
+                    char_end=chunk.char_end,
+                    token_estimate=chunk.token_estimate,
+                    identity=chunk_identity,
+                )
+            contextual_chunk_groups.clear()
+
         for order, (session_id, session) in enumerate(
             zip(question.haystack_session_ids, question.haystack_sessions), start=1
         ):
@@ -2413,13 +2604,19 @@ def evaluate_question(
                     # contextualized providers. Stream the local/non-context
                     # fallback in bounded batches so it never retains the full
                     # question corpus or forces one longest-text padded batch.
-                    for chunk in iter_message_chunks(rows, policy="conversational"):
-                        if supports_grouping:
-                            chunk_items.append(chunk)
+                    for row in rows:
+                        message_chunks = list(
+                            iter_message_chunks([row], policy="conversational")
+                        )
+                        if supports_grouping and message_chunks:
+                            contextual_chunk_groups.append(message_chunks)
+                            if len(contextual_chunk_groups) >= contextual_group_batch_size:
+                                flush_contextual_chunks()
                         else:
-                            flat_chunk_batch.append(chunk)
-                            if len(flat_chunk_batch) >= flat_chunk_batch_size:
-                                flush_flat_chunks()
+                            for chunk in message_chunks:
+                                flat_chunk_batch.append(chunk)
+                                if len(flat_chunk_batch) >= flat_chunk_batch_size:
+                                    flush_flat_chunks()
             summary_text = deterministic_session_summary(session)
             session_summaries[session_id] = summary_text
             node_id = dag.add_node(
@@ -2437,49 +2634,8 @@ def evaluate_question(
 
         if embeddings_enabled and not supports_grouping:
             flush_flat_chunks()
-
-        if embeddings_enabled and supports_grouping and chunk_items:
-            chunk_texts = [str(chunk.text) for chunk in chunk_items]
-            groups = [
-                [(index, chunk_texts[index]) for index in group]
-                for group in group_by_store_id(
-                    [int(chunk.store_id) for chunk in chunk_items]
-                )
-            ]
-            chunk_batches = chunk_documents_provider.embed_chunk_group_batches(groups)
-            chunk_vectors_by_index: dict[int, Sequence[float]] = {}
-            for batch in chunk_batches:
-                indexes = getattr(batch, "indexes", None)
-                vectors = getattr(batch, "vectors", None)
-                if indexes is None or vectors is None:
-                    try:
-                        indexes, vectors = batch
-                    except (TypeError, ValueError) as exc:
-                        raise ValueError(
-                            "contextual chunk provider returned malformed batch"
-                        ) from exc
-                if len(indexes) != len(vectors):
-                    raise ValueError(
-                        "contextual chunk provider returned mismatched indexes/vectors"
-                    )
-                chunk_vectors_by_index.update(
-                    {int(index): vector for index, vector in zip(indexes, vectors)}
-                )
-            if len(chunk_vectors_by_index) != len(chunk_items):
-                raise ValueError("contextual chunk provider returned incomplete vectors")
-            for index in range(len(chunk_items)):
-                chunk = chunk_items[index]
-                vector_store.record_chunk_embedding(
-                    chunk.chunk_id,
-                    chunk_model,
-                    chunk_vectors_by_index[index],
-                    store_id=chunk.store_id,
-                    chunk_index=chunk.chunk_index,
-                    char_start=chunk.char_start,
-                    char_end=chunk.char_end,
-                    token_estimate=chunk.token_estimate,
-                    identity=chunk_identity,
-                )
+        elif embeddings_enabled and supports_grouping:
+            flush_contextual_chunks()
 
         if embeddings_enabled and summary_specs:
             summary_vectors = _embed_in_batches(
