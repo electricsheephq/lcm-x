@@ -117,11 +117,10 @@ Run `actionlint` when workflows change. Record exact commands and results in the
 - Keep strict required-status enforcement enabled. If a base-push reset API call fails, GitHub's
   up-to-date requirement must still block merging until a head synchronization resets the AI
   check and fresh exact-base/head receipts pass.
-- Require the protected `AI review exact-head` check. Routine, docs, and benchmark changes need
-  one acceptance receipt; governance, security, data-integrity, migration, persistence,
-  lifecycle, runtime, workflow-policy, unknown-risk, and Hermes host-contract changes need
-  distinct acceptance and adversarial receipts. Every receipt must bind the exact head, pass at
-  95 or above, and report zero unresolved findings.
+- Require the protected `AI review exact-head` check. Every PR, including routine, docs, and
+  benchmark changes, requires distinct exact-head `acceptance` and `adversarial` receipts.
+  Every receipt must bind the exact head, pass at 95 or above, and report zero findings;
+  labels cannot reduce the required lanes.
 - Do not merge with failing/pending required checks, unresolved actionable threads, a changed
   head, missing issue acceptance, or unowned product/security decisions.
 - Never push directly to `main`, bypass the ruleset, use auto-merge, or force-push/delete

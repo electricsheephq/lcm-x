@@ -97,10 +97,9 @@ Maintainers use the protected-main `.agents/skills/land-pr/SKILL.md`:
 
 - required checks must pass on the pinned `headRefOid` with trusted workflow identities;
 - the protected `AI review exact-head` check must pass on the current head;
-- routine/docs/benchmark changes need one acceptance receipt at 95 or above;
-- governance, data-integrity, security, migration, persistence, profile/session, lifecycle,
-  runtime, workflow-policy, unknown-risk, and Hermes-contract changes need distinct acceptance
-  and adversarial receipts, each at 95 or above;
+- every PR requires distinct exact-head `acceptance` and `adversarial` receipts, including
+  routine/docs/benchmark changes, each at 95 or above;
+- labels cannot reduce the required lanes, and every receipt must report zero findings;
 - every actionable review thread needs a terminal disposition and resolution;
 - accepted issues, exact-head state, and product/security decisions are re-fetched before merge;
 - merges use merge commits only—never squash, rebase, direct-main push, auto-merge, or bypass.

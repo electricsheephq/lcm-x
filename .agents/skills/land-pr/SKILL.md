@@ -93,11 +93,10 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
 
 - Require one successful `AI review exact-head` check-run from GitHub Actions app `15368` on
   `$head`. Read its content-free summary and bind its receipt IDs, lanes, evidence digests,
-  policy version, scores, and risk class. Routine/docs/benchmark changes require one
-  `acceptance` receipt. Governance, security, data-integrity, migration, persistence, lifecycle,
-  runtime, workflow-policy, unknown-risk, and Hermes host-contract changes require distinct
-  `acceptance` and `adversarial` receipts. Every receipt must report `PASS`, score at least 95,
-  and zero findings; scores are never averaged.
+  policy version, scores, and risk class. Every PR requires distinct exact-head `acceptance`
+  and `adversarial` receipts, including routine/docs/benchmark changes. Every receipt must
+  report `PASS`, score at least 95, and zero findings; labels cannot reduce the required lanes,
+  and scores are never averaged.
 - Require every returned review thread to have `isResolved: true`; list and stop on any
   unresolved thread.
 - After a review-driven head change, require new receipts for the changed risk surface and

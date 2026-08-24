@@ -44,14 +44,14 @@ def payload(paths: list[str] | None = None):
         "base_sha": BASE,
         "head_sha": HEAD,
         "changed_paths": paths or ["docs/operator-guide.md"],
-        "receipts": [receipt("acceptance")],
+        "receipts": [receipt("acceptance"), receipt("adversarial")],
         "unresolved_threads": 0,
         "api_complete": True,
         "pagination_complete": True,
     }
 
 
-def test_routine_acceptance_receipt_passes():
+def test_routine_distinct_acceptance_and_adversarial_receipts_pass():
     result = evaluate(payload(), NOW)
 
     assert result["decision"] == "PASS"
@@ -79,6 +79,7 @@ def test_governance_requires_distinct_acceptance_and_adversarial_receipts():
 
 def test_unknown_risk_fails_closed_to_two_lanes():
     data = payload(["access_context/tools.py"])
+    data["receipts"] = [receipt("acceptance", risk="unknown")]
     result = evaluate(data, NOW)
 
     assert result["risk_class"] == "unknown"
@@ -155,6 +156,35 @@ def test_duplicate_task_and_receipt_ids_fail():
         assert f"DUPLICATE_{key.upper()}" in evaluate(candidate, NOW)["blockers"]
 
 
+def test_every_risk_class_requires_both_distinct_lanes():
+    for path, risk in (
+        (["docs/operator-guide.md"], "routine"),
+        ([".github/workflows/ai-review-gate.yml"], "governance"),
+        (["access_context/tools.py"], "unknown"),
+    ):
+        data = payload(path)
+        data["receipts"] = [
+            receipt("acceptance", risk=risk),
+            receipt("adversarial", risk=risk),
+        ]
+        assert evaluate(data, NOW)["decision"] == "PASS"
+
+
+def test_labels_are_organizational_metadata_only():
+    data = payload()
+    baseline = evaluate(data, NOW)
+    data["labels"] = ["routine", "security"]
+    assert evaluate(data, NOW) == baseline
+
+
+def test_duplicate_or_conflicting_receipts_fail_closed_for_each_identity():
+    data = payload(["AGENTS.md"])
+    for key in ("reviewer_id", "task_id", "receipt_id"):
+        candidate = deepcopy(data)
+        candidate["receipts"][1][key] = candidate["receipts"][0][key]
+        assert f"DUPLICATE_{key.upper()}" in evaluate(candidate, NOW)["blockers"]
+
+
 def test_workflow_is_base_trusted_and_resets_each_head():
     workflow = (
         REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
@@ -162,16 +192,64 @@ def test_workflow_is_base_trusted_and_resets_each_head():
 
     assert "pull_request_target:" in workflow
     assert "push:" in workflow
-    assert "workflow_dispatch:" in workflow
+    assert "repository_dispatch:" in workflow
+    assert "types: [ai-review-receipts]" in workflow
+    assert "workflow_dispatch:" not in workflow
     assert "checks: write" in workflow
     assert "AI review exact-head" in workflow
     assert "head_sha: head" in workflow
     assert "${prNumber}:${base}:${head}" in workflow
+    assert "filter: 'all'" in workflow
     assert "Protected base changed" in workflow
     assert "const failures = []" in workflow
     assert "core.setFailed(`Failed to reset PRs:" in workflow
     assert "context.ref !== `refs/heads/${defaultBranch}`" in workflow
     assert "ref: protectedSha" in workflow
+    assert "context.sha !== protectedSha" in workflow
+    assert "pull_request_target:" in workflow
+    assert "types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]" in workflow
+    assert "labeled" not in workflow
+    assert "unlabeled" not in workflow
+    assert "concurrency:" in workflow
+    assert "group: ai-review-gate-global" in workflow
+    assert "cancel-in-progress: false" in workflow
+    assert "github.run_id" not in workflow
+    assert "queue:" not in workflow
     assert "actions/checkout" not in workflow
     assert "pull_request.head" not in workflow
     assert "eval(" not in workflow
+
+
+def test_workflow_reconciles_all_open_prs_before_dispatch_evaluation():
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
+    ).read_text(encoding="utf-8")
+
+    reconcile = workflow.index("const reconcileOpenPullRequests")
+    dispatch_guard = workflow.index("if (context.eventName !== 'repository_dispatch') return;")
+    assert reconcile < dispatch_guard
+    assert "github.paginate(github.rest.pulls.list" in workflow
+    assert "github.rest.pulls.get" in workflow
+    assert "base: defaultBranch" in workflow
+    assert "await emit(live.data.number, live.data.base.sha, live.data.head.sha, 'failure'" in workflow
+    assert "if (failures.length) core.setFailed" in workflow
+    assert "return;" in workflow[dispatch_guard:]
+
+
+def test_workflow_rechecks_complete_target_state_before_success():
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
+    ).read_text(encoding="utf-8")
+
+    assert workflow.count("github.paginate(github.rest.pulls.listFiles") == 1
+    assert workflow.count("listFiles(prNumber)") >= 2
+    assert workflow.count("reviewThreads(first:100") == 1
+    assert workflow.count("unresolvedThreads(prNumber)") >= 2
+    assert "live.data.head.sha !== head" in workflow
+    assert "live.data.base.sha !== base" in workflow
+    assert "liveBranch.data.commit.sha !== protectedSha" in workflow
+    assert "context.ref !== `refs/heads/${defaultBranch}`" in workflow
+    assert "JSON.stringify(liveFiles) !== JSON.stringify(files)" in workflow
+    assert "unresolved !== 0" in workflow
+    assert "matches.length > 1" in workflow
+    assert "DUPLICATE_TRUSTED_CHECK" in workflow
