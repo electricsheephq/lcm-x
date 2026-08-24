@@ -235,10 +235,13 @@ def test_workflow_is_base_trusted_and_resets_each_head():
     assert "core.setFailed(`Failed to reset PRs:" in workflow
     assert "context.ref !== `refs/heads/${defaultBranch}`" in workflow
     assert "ref: protectedSha" in workflow
-    assert "Array.isArray(pr.data.labels)" in workflow
+    assert "const loadLiveLabels = () => github.paginate(github.rest.issues.listLabelsOnIssue" in workflow
+    assert "issue_number: prNumber" in workflow
+    assert workflow.count("await loadLiveLabels()") == 2
     assert "label.name.trim().toLowerCase()" in workflow
     assert "labels_complete: true" in workflow
     assert "labels: labelNames" in workflow
+    assert "pr.data.labels" not in workflow
     assert "actions/checkout" not in workflow
     assert "pull_request.head" not in workflow
     assert "eval(" not in workflow

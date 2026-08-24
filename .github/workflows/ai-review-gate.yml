@@ -84,14 +84,15 @@ jobs:
                 throw Error('pull request is not an open, ready default-branch change');
               const files = await github.paginate(github.rest.pulls.listFiles,
                 {owner, repo, pull_number: prNumber, per_page: 100});
-              if (!Array.isArray(pr.data.labels)) throw Error('live PR labels unavailable');
               const normalizeLabels = (labels) => {
                 if (!Array.isArray(labels) || labels.some(label =>
                   !label || typeof label.name !== 'string' || !label.name.trim()))
                   throw Error('live PR labels unavailable');
                 return labels.map(label => label.name.trim().toLowerCase()).sort();
               };
-              const labelNames = normalizeLabels(pr.data.labels);
+              const loadLiveLabels = () => github.paginate(github.rest.issues.listLabelsOnIssue,
+                {owner, repo, issue_number: prNumber, per_page: 100});
+              const labelNames = normalizeLabels(await loadLiveLabels());
               const query = `query($owner:String!,$repo:String!,$pr:Int!,$cursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100,after:$cursor){nodes{isResolved}pageInfo{hasNextPage endCursor}}}}}`;
               let cursor = null, unresolved = 0;
               do {
@@ -113,9 +114,10 @@ jobs:
               const result = JSON.parse(run.stdout || '{}');
               const live = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
               const liveBranch = await github.rest.repos.getBranch({owner, repo, branch: defaultBranch});
+              const liveLabelNames = normalizeLabels(await loadLiveLabels());
               if (live.data.head.sha !== head || live.data.base.sha !== pr.data.base.sha ||
                   liveBranch.data.commit.sha !== protectedSha ||
-                  JSON.stringify(normalizeLabels(live.data.labels)) !== JSON.stringify(labelNames))
+                  JSON.stringify(liveLabelNames) !== JSON.stringify(labelNames))
                 throw Error('PR, labels, or protected-base drift');
               conclusion = run.status === 0 && result.decision === 'PASS' ? 'success' : 'failure';
               summary = JSON.stringify(result);
