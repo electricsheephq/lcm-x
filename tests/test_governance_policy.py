@@ -84,6 +84,11 @@ def test_every_pr_requires_two_exact_head_lanes_and_labels_cannot_reduce_them():
         .read_text(encoding="utf-8")
         .split()
     )
+    reviewing = " ".join(
+        (REPO_ROOT / ".agents" / "skills" / "review-pr" / "SKILL.md")
+        .read_text(encoding="utf-8")
+        .split()
+    )
 
     assert (
         "Every PR, including routine, docs, and benchmark changes, requires distinct exact-head"
@@ -96,8 +101,11 @@ def test_every_pr_requires_two_exact_head_lanes_and_labels_cannot_reduce_them():
     ) in guide
     assert "Every PR has distinct exact-head `acceptance` and `adversarial` receipts at 95+;" in template
     assert "Every PR requires distinct exact-head `acceptance` and `adversarial` receipts" in landing
+    assert "Every PR, including routine/docs/benchmark work, requires distinct `acceptance` and" in reviewing
+    assert "zero findings; labels cannot reduce the required lanes" in policy
     assert "Routine/docs/benchmark changes require one `acceptance` receipt" not in landing
     assert "Routine/docs/benchmark work has one acceptance receipt" not in template
+    assert "Routine/docs/benchmark work requires one `acceptance` receipt" not in reviewing
 
 
 def test_triage_skill_is_bounded_and_read_only_by_default():

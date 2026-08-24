@@ -43,10 +43,10 @@ Read the successful `AI review exact-head` check on the exact head and its conte
 Bind repository, PR, base/head SHA, risk class, policy version, lane, reviewer/task/receipt IDs,
 verdict, score, findings, evidence digest, and expiry.
 
-- Routine/docs/benchmark work requires one `acceptance` receipt, `PASS >=95`.
-- Governance, security, data-integrity, migration, persistence, lifecycle, runtime,
-  workflow-policy, unknown-risk, and Hermes host-contract work requires distinct `acceptance`
-  and `adversarial` receipts, each `PASS >=95`.
+- Every PR, including routine/docs/benchmark work, requires distinct `acceptance` and
+  `adversarial` receipts, each `PASS >=95`.
+- Risk classification still binds each receipt to the changed paths, but labels and risk class
+  never reduce the two required lanes.
 - Scores are never averaged. Duplicate identities, stale bindings, any finding, or an unresolved
   GitHub review thread is blocking.
 

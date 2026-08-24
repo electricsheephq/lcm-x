@@ -119,8 +119,8 @@ Run `actionlint` when workflows change. Record exact commands and results in the
   check and fresh exact-base/head receipts pass.
 - Require the protected `AI review exact-head` check. Every PR, including routine, docs, and
   benchmark changes, requires distinct exact-head `acceptance` and `adversarial` receipts.
-  Every receipt must bind the exact head, pass at 95 or above, and report zero unresolved
-  findings; labels cannot reduce the required lanes.
+  Every receipt must bind the exact head, pass at 95 or above, and report zero findings;
+  labels cannot reduce the required lanes.
 - Do not merge with failing/pending required checks, unresolved actionable threads, a changed
   head, missing issue acceptance, or unowned product/security decisions.
 - Never push directly to `main`, bypass the ruleset, use auto-merge, or force-push/delete
