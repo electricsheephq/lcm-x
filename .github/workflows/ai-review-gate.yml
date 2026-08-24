@@ -61,74 +61,135 @@ jobs:
             const listFiles = (prNumber) => github.paginate(github.rest.pulls.listFiles,
               {owner, repo, pull_number: prNumber, per_page: 100})
               .then(files => files.map(file => file.filename));
+            const listTimeline = (prNumber) => github.paginate(
+              github.rest.issues.listEventsForTimeline,
+              {owner, repo, issue_number: prNumber, per_page: 100})
+              .then(events => events
+                .filter(event => ['base_ref_changed', 'head_ref_force_pushed', 'closed',
+                  'reopened', 'convert_to_draft', 'ready_for_review'].includes(event.event))
+                .map(event => ({event: event.event, id: event.id, created_at: event.created_at})));
+            const listTrustedChecks = (head) => github.paginate(github.rest.checks.listForRef,
+              {owner, repo, ref: head, check_name: 'AI review exact-head', filter: 'all', per_page: 100})
+              .then(runs => runs.filter(run => run.name === 'AI review exact-head')
+                .map(run => ({name: run.name, app_id: run.app?.id, external_id: run.external_id,
+                  head_sha: run.head_sha, status: run.status, conclusion: run.conclusion,
+                  output: run.output, output_summary: run.output?.summary})));
+            const runValidator = async (input, protectedSha) => {
+              const source = await github.rest.repos.getContent({owner, repo,
+                path: 'scripts/ai_review_gate.py', ref: protectedSha});
+              if (Array.isArray(source.data) || source.data.encoding !== 'base64') throw Error('validator unavailable');
+              fs.writeFileSync('/tmp/gate.py', Buffer.from(source.data.content, 'base64'));
+              const run = cp.spawnSync('python', ['/tmp/gate.py'], {input: JSON.stringify(input), encoding: 'utf8'});
+              if (run.error) throw run.error;
+              return {run, result: JSON.parse(run.stdout || '{}')};
+            };
+            const snapshot = async (prNumber, defaultBranch) => {
+              const live = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
+              const pr = live.data;
+              const files = await listFiles(prNumber);
+              const unresolved = await unresolvedThreads(prNumber);
+              const timeline = await listTimeline(prNumber);
+              const checks = await listTrustedChecks(pr.head.sha);
+              return {repository: `${owner}/${repo}`, pr_number: pr.number,
+                base_ref: pr.base.ref, base_sha: pr.base.sha, head_sha: pr.head.sha,
+                changed_paths: files, timeline_events: timeline,
+                unresolved_threads: unresolved, check_runs: checks,
+                api_complete: true, pagination_complete: true,
+                draft: pr.draft, state: pr.state, default_branch: defaultBranch};
+            };
             const reconcileOpenPullRequests = async (defaultBranch) => {
               const open = await github.paginate(github.rest.pulls.list,
                 {owner, repo, state: 'open', base: defaultBranch, per_page: 100});
-              const failures = [];
+              const snapshots = [], failures = [];
               for (const candidate of open) {
-                try {
-                  const live = await github.rest.pulls.get({owner, repo, pull_number: candidate.number});
-                  if (live.data.state !== 'open' || live.data.base.ref !== defaultBranch)
-                    throw Error('PR is no longer an open default-base change');
-                  await emit(live.data.number, live.data.base.sha, live.data.head.sha, 'failure',
-                    'Protected base changed; fresh exact-base/head review receipts are required.');
-                } catch (error) {
+                try { snapshots.push(await snapshot(candidate.number, defaultBranch)); }
+                catch (error) {
                   failures.push(`${candidate.number}:${error.message}`);
+                  snapshots.push({repository: `${owner}/${repo}`, pr_number: candidate.number,
+                    api_complete: false, pagination_complete: false, api_error: true,
+                    changed_paths: [], timeline_events: [], check_runs: []});
                 }
               }
               if (failures.length) core.setFailed(`Failed to reset PRs: ${failures.join(',')}`);
-              return failures;
+              return {snapshots, failures};
             };
             const repository = await github.rest.repos.get({owner, repo});
             const defaultBranch = repository.data.default_branch;
             const branch = await github.rest.repos.getBranch({owner, repo, branch: defaultBranch});
             const protectedSha = branch.data.commit.sha;
-            const failures = await reconcileOpenPullRequests(defaultBranch);
-            if (failures.length) return;
-            if (context.eventName !== 'repository_dispatch') return;
-            let prNumber = null, base = null, head = null;
+            const dispatchEvent = context.eventName === 'repository_dispatch';
+            let prNumber = null, base = null, head = null, result = null;
             let conclusion = 'failure', summary = 'Validation failed closed.';
             try {
-              const dispatch = context.payload.client_payload;
-              if (!dispatch || typeof dispatch !== 'object' || Array.isArray(dispatch) ||
-                  !Array.isArray(dispatch.receipts)) throw Error('dispatch payload invalid');
-              prNumber = Number(dispatch.pr_number);
-              if (!Number.isInteger(prNumber) || prNumber <= 0)
-                throw Error('dispatch PR number invalid');
-              if (context.ref !== `refs/heads/${defaultBranch}` || context.sha !== protectedSha)
-                throw Error('dispatch must execute from current protected default branch');
-              let pr = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
-              base = pr.data.base.sha;
-              head = pr.data.head.sha;
-              await emit(prNumber, base, head, 'failure', 'Validation started; fail closed until complete.');
-              if (pr.data.base.ref !== defaultBranch || pr.data.state !== 'open' || pr.data.draft)
-                throw Error('pull request is not an open, ready default-branch change');
-              const files = await listFiles(prNumber);
-              const unresolved = await unresolvedThreads(prNumber);
-              const source = await github.rest.repos.getContent({owner, repo,
-                path: 'scripts/ai_review_gate.py', ref: protectedSha});
-              if (Array.isArray(source.data) || source.data.encoding !== 'base64') throw Error('validator unavailable');
-              fs.writeFileSync('/tmp/gate.py', Buffer.from(source.data.content, 'base64'));
-              const input = {repository: `${owner}/${repo}`, pr_number: prNumber,
-                base_sha: base, head_sha: head, changed_paths: files,
-                receipts: dispatch.receipts, unresolved_threads: unresolved,
-                api_complete: true, pagination_complete: true};
-              const run = cp.spawnSync('python', ['/tmp/gate.py'], {input: JSON.stringify(input), encoding: 'utf8'});
-              if (run.error) throw run.error;
-              const result = JSON.parse(run.stdout || '{}');
-              const live = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
-              const liveBranch = await github.rest.repos.getBranch({owner, repo, branch: defaultBranch});
-              const liveFiles = await listFiles(prNumber);
-              const liveUnresolved = await unresolvedThreads(prNumber);
-              if (live.data.head.sha !== head || live.data.base.sha !== base ||
-                  live.data.base.ref !== defaultBranch || live.data.state !== 'open' || live.data.draft ||
-                  liveBranch.data.commit.sha !== protectedSha ||
-                  context.ref !== `refs/heads/${defaultBranch}` || context.sha !== protectedSha ||
-                  JSON.stringify(liveFiles) !== JSON.stringify(files) || unresolved !== 0 ||
-                  liveUnresolved !== 0) throw Error('PR, protected-base, files, or threads drift');
-              if (run.status !== 0 || result.decision !== 'PASS') throw Error('receipt validation failed');
-              conclusion = 'success';
-              summary = JSON.stringify(result);
+              const reconciled = await reconcileOpenPullRequests(defaultBranch);
+              const snapshots = reconciled.snapshots;
+              if (dispatchEvent) {
+                const dispatch = context.payload.client_payload;
+                const sender = context.payload.sender;
+                const run_attempt = Number(process.env.GITHUB_RUN_ATTEMPT || '1');
+                if (!dispatch || typeof dispatch !== 'object' || Array.isArray(dispatch))
+                  throw Error('dispatch payload invalid');
+                if (typeof dispatch.pr_number !== 'number' || !Number.isInteger(dispatch.pr_number) || dispatch.pr_number <= 0) throw Error('dispatch PR number invalid');
+                prNumber = dispatch.pr_number;
+                const tuple = (await github.rest.pulls.get({owner, repo, pull_number: prNumber})).data;
+                base = tuple.base.sha; head = tuple.head.sha; await emit(prNumber, base, head, 'failure', 'Protected base changed or stored packet invalid; validation started and fails closed until complete.');
+                if (sender?.login !== '100yenadmin' || Number(sender?.id) !== 239388517 ||
+                    sender?.type !== 'User' || context.actor !== '100yenadmin' || Number(context.actor_id) !== 239388517)
+                  throw Error('dispatch producer unauthenticated');
+                if (!Number.isInteger(run_attempt) || run_attempt !== 1)
+                  throw Error('repository dispatch reruns cannot promote');
+                if (!Array.isArray(dispatch.receipts) || typeof dispatch.dispatch_id !== 'string')
+                  throw Error('dispatch packet invalid');
+                if (context.ref !== `refs/heads/${defaultBranch}` || context.sha !== protectedSha)
+                  throw Error('dispatch must execute from current protected default branch');
+                const target = await snapshot(prNumber, defaultBranch);
+                const priorDispatchIds = [];
+                for (const check of target.check_runs) {
+                  try { const packet = JSON.parse(check.output_summary || check.output?.summary || '{}');
+                    if (packet.dispatch_id) priorDispatchIds.push(packet.dispatch_id); }
+                  catch (_) { /* validator records malformed state */ }
+                }
+                const input = {schema_version: '2', target, peers: snapshots.filter(item => item.pr_number !== prNumber),
+                  receipts: dispatch.receipts, producer: {login: sender.login, id: Number(sender.id), type: sender.type},
+                  run: {id: process.env.GITHUB_RUN_ID, attempt: run_attempt},
+                  dispatch_id: dispatch.dispatch_id, prior_dispatch_ids: priorDispatchIds};
+                const validated = await runValidator(input, protectedSha);
+                const run = validated.run; result = validated.result;
+                for (const peer of result.peers || []) {
+                  if (!peer.preserve) {
+                    const live = snapshots.find(item => item.pr_number === peer.pr_number);
+                    if (live?.base_sha && live?.head_sha)
+                      await emit(live.pr_number, live.base_sha, live.head_sha, 'failure',
+                        JSON.stringify(peer));
+                  }
+                }
+                const live = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
+                const liveBranch = await github.rest.repos.getBranch({owner, repo, branch: defaultBranch});
+                const liveFiles = await listFiles(prNumber);
+                const liveTimeline = await listTimeline(prNumber);
+                const liveUnresolved = await unresolvedThreads(prNumber);
+                if (live.data.head.sha !== head || live.data.base.sha !== base ||
+                    live.data.base.ref !== defaultBranch || live.data.state !== 'open' || live.data.draft ||
+                    liveBranch.data.commit.sha !== protectedSha || context.ref !== `refs/heads/${defaultBranch}` ||
+                    context.sha !== protectedSha || JSON.stringify(liveFiles) !== JSON.stringify(target.changed_paths) ||
+                    JSON.stringify(liveTimeline) !== JSON.stringify(target.timeline_events) ||
+                    liveUnresolved !== 0 || target.unresolved_threads !== 0)
+                  throw Error('PR, protected-base, files, or threads drift');
+                if (run.status !== 0 || result.decision !== 'PASS') throw Error('receipt validation failed');
+                conclusion = 'success'; summary = JSON.stringify(result.packet);
+              } else {
+                const validated = await runValidator({schema_version: '2', mode: 'peer_only', peers: snapshots}, protectedSha);
+                const run = validated.run; result = validated.result;
+                for (const peer of result.peers || []) {
+                  if (!peer.preserve) {
+                    const live = snapshots.find(item => item.pr_number === peer.pr_number);
+                    if (live?.base_sha && live?.head_sha)
+                      await emit(live.pr_number, live.base_sha, live.head_sha, 'failure', JSON.stringify(peer));
+                  }
+                }
+                if (run.status !== 0 || result.decision !== 'PASS') throw Error('peer reconciliation incomplete');
+                return;
+              }
             } catch (error) {
               summary = `Validation failed closed: ${error.message}`;
             }

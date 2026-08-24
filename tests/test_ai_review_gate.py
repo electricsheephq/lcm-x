@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
-from scripts.ai_review_gate import evaluate
+from scripts.ai_review_gate import (
+    build_packet,
+    evaluate,
+    evaluate_reconciliation,
+    state_fingerprint,
+)
 
 
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
@@ -134,11 +140,8 @@ def test_receipt_rejects_raw_or_unregistered_fields_and_unsafe_ids():
 
 
 def test_live_state_and_thread_failures_fail_closed():
-    for field, value in (
-        ("api_complete", False),
-        ("pagination_complete", False),
-        ("unresolved_threads", 1),
-    ):
+    for field, value in (("api_complete", False), ("pagination_complete", False),
+                         ("unresolved_threads", 1), ("pr_number", True)):
         data = payload()
         data[field] = value
         assert evaluate(data, NOW)["decision"] == "FAIL"
@@ -200,8 +203,8 @@ def test_workflow_is_base_trusted_and_resets_each_head():
     assert "head_sha: head" in workflow
     assert "${prNumber}:${base}:${head}" in workflow
     assert "filter: 'all'" in workflow
-    assert "Protected base changed" in workflow
-    assert "const failures = []" in workflow
+    assert "Protected base changed" in workflow or "stored packet invalid" in workflow
+    assert "const snapshots = [], failures = []" in workflow
     assert "core.setFailed(`Failed to reset PRs:" in workflow
     assert "context.ref !== `refs/heads/${defaultBranch}`" in workflow
     assert "ref: protectedSha" in workflow
@@ -226,12 +229,12 @@ def test_workflow_reconciles_all_open_prs_before_dispatch_evaluation():
     ).read_text(encoding="utf-8")
 
     reconcile = workflow.index("const reconcileOpenPullRequests")
-    dispatch_guard = workflow.index("if (context.eventName !== 'repository_dispatch') return;")
+    dispatch_guard = workflow.index("const dispatchEvent = context.eventName === 'repository_dispatch';")
     assert reconcile < dispatch_guard
     assert "github.paginate(github.rest.pulls.list" in workflow
     assert "github.rest.pulls.get" in workflow
     assert "base: defaultBranch" in workflow
-    assert "await emit(live.data.number, live.data.base.sha, live.data.head.sha, 'failure'" in workflow
+    assert "await emit(live.pr_number, live.base_sha, live.head_sha, 'failure'" in workflow
     assert "if (failures.length) core.setFailed" in workflow
     assert "return;" in workflow[dispatch_guard:]
 
@@ -249,7 +252,73 @@ def test_workflow_rechecks_complete_target_state_before_success():
     assert "live.data.base.sha !== base" in workflow
     assert "liveBranch.data.commit.sha !== protectedSha" in workflow
     assert "context.ref !== `refs/heads/${defaultBranch}`" in workflow
-    assert "JSON.stringify(liveFiles) !== JSON.stringify(files)" in workflow
-    assert "unresolved !== 0" in workflow
+    assert "JSON.stringify(liveFiles) !== JSON.stringify(target.changed_paths)" in workflow
+    assert "target.unresolved_threads !== 0" in workflow
     assert "matches.length > 1" in workflow
     assert "DUPLICATE_TRUSTED_CHECK" in workflow
+
+
+def _v2_snapshot(pr_number: int, *, complete: bool = True):
+    base, head = BASE, HEAD
+    live = {
+        "repository": "electricsheephq/lcm-x",
+        "pr_number": pr_number,
+        "base_ref": "main",
+        "base_sha": base,
+        "head_sha": head,
+        "changed_paths": ["docs/operator-guide.md"], "timeline_events": [],
+        "unresolved_threads": 0,
+        "api_complete": complete,
+        "pagination_complete": complete,
+        "state": "open",
+        "draft": False,
+    }
+    receipts = [receipt("acceptance"), receipt("adversarial")]
+    for item in receipts:
+        item["pr_number"] = pr_number
+    packet = build_packet(live, receipts, producer={"login": "100yenadmin", "id": 239388517, "type": "User"},
+                          run={"id": f"run-{pr_number}", "attempt": 1}, dispatch_id=f"dispatch-{pr_number}")
+    check = {"name": "AI review exact-head", "app_id": 15368,
+             "external_id": f"ai-review-gate:{pr_number}:{base}:{head}", "head_sha": head,
+             "status": "completed", "conclusion": "success",
+             "output_summary": json.dumps(packet, sort_keys=True, separators=(",", ":"))}
+    return {**live, "check_runs": [check]}
+
+
+def _v2_dispatch(target: dict[str, object], *, receipts_override=None, **extra):
+    data = {key: target[key] for key in (
+        "repository", "pr_number", "base_sha", "head_sha", "changed_paths",
+        "timeline_events", "unresolved_threads", "api_complete", "pagination_complete",
+    )}
+    data.update({
+        "schema_version": "2", "target": target,
+        "receipts": receipts_override
+        or [receipt("acceptance"), receipt("adversarial")],
+        "producer": {"login": "100yenadmin", "id": 239388517, "type": "User"},
+        "run": {"id": "run-target", "attempt": 1},
+        "dispatch_id": "dispatch-target-fresh",
+        "peers": [],
+        **extra,
+    })
+    return data
+
+
+def test_red_base_cannot_reconstruct_a_stored_peer_packet():
+    peer = _v2_snapshot(351)
+    result = evaluate_reconciliation(
+        _v2_dispatch(_v2_snapshot(350), peers=[peer]), NOW
+    )
+    assert result["decision"] == "PASS"
+    assert result["peers"][0]["preserve"] is True
+    packet_for_peer = json.loads(peer["check_runs"][0]["output_summary"])
+    assert packet_for_peer["state_fingerprint"] == state_fingerprint(peer)
+
+
+def test_red_base_accepts_dispatch_without_authenticated_producer_or_attempt_guard():
+    target = _v2_snapshot(350)
+    data = _v2_dispatch(target, producer={"login": "100yenadmin", "id": 239388517})
+    data["run"] = {"id": "rerun", "attempt": 2}
+    result = evaluate_reconciliation(data)
+    assert result["decision"] == "FAIL"
+    assert "PRODUCER_UNAUTHENTICATED" in result["blockers"]
+    assert "RUN_ATTEMPT_INVALID" in result["blockers"]
