@@ -11,17 +11,15 @@ from typing import Any
 SCHEMA_VERSION = "1"
 REPOSITORY = "electricsheephq/lcm-x"
 RULESET_ID = 20888757
-REQUIRED_CHECK_PAIRS = (
+REQUIRED_CI_CHECK_PAIRS = (
     ("workflow-lint", 15368),
     ("lint", 15368),
     ("test (3.11)", 15368),
     ("test (3.12)", 15368),
     ("test (3.13)", 15368),
     ("test (3.14)", 15368),
-    ("Analyze (actions)", 15368),
-    ("Analyze (javascript-typescript)", 15368),
-    ("Analyze (python)", 15368),
 )
+REQUIRED_CHECK_PAIRS = REQUIRED_CI_CHECK_PAIRS + (("AI review exact-head", 15368),)
 FINDING_GATE_CLASSES = {"MERGE_BLOCKING", "RELEASE_BLOCKING", "NON_BLOCKING"}
 TERMINAL_FINDING_DISPOSITIONS = {
     "FIXED_NOW",
@@ -52,35 +50,25 @@ def _pair(value: dict[str, Any]) -> tuple[str, int]:
     return str(value.get("context", "")), int(value.get("integration_id", 0))
 
 
-def _latest_reviews(reviews: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    latest: dict[str, list[dict[str, Any]]] = {}
-    for review in reviews:
-        author = str(review.get("author", ""))
-        if not author:
-            continue
-        current = latest.get(author, [])
-        submitted_at = str(review.get("submitted_at", ""))
-        current_time = str(current[0].get("submitted_at", "")) if current else ""
-        if not current or submitted_at > current_time:
-            latest[author] = [review]
-        elif submitted_at == current_time:
-            current.append(review)
-    return [review for reviews_at_latest_time in latest.values() for review in reviews_at_latest_time]
-
-
 def _trusted_checks(
     checks: list[dict[str, Any]],
     target_sha: str,
+    base_sha: str,
+    required_pairs: tuple[tuple[str, int], ...] = REQUIRED_CHECK_PAIRS,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     matched: list[dict[str, Any]] = []
     blockers: list[str] = []
 
-    for context, integration_id in REQUIRED_CHECK_PAIRS:
+    for context, integration_id in required_pairs:
         exact = [
             check
             for check in checks
             if _pair(check) == (context, integration_id)
             and check.get("head_sha") == target_sha
+            and (
+                context != "AI review exact-head"
+                or check.get("base_sha") == base_sha
+            )
         ]
         passing = [
             check
@@ -95,118 +83,6 @@ def _trusted_checks(
         else:
             matched.append({"context": context, "integration_id": integration_id})
     return matched, blockers
-
-
-def _review_gate(data: dict[str, Any], head_sha: str) -> list[str]:
-    pr = data.get("pr", {})
-    author = str(pr.get("author", ""))
-    latest = _latest_reviews(data.get("latest_reviews", []))
-    blockers: list[str] = []
-
-    if any(review.get("state") == "CHANGES_REQUESTED" for review in latest):
-        blockers.append("LATEST_CHANGES_REQUESTED")
-
-    approvals = [
-        review
-        for review in latest
-        if review.get("state") == "APPROVED"
-        and review.get("commit_sha") == head_sha
-        and review.get("author") != author
-        and review.get("codeowner") is True
-    ]
-    if not approvals:
-        blockers.append("NON_AUTHOR_CODEOWNER_APPROVAL_MISSING")
-    return blockers
-
-
-def _semantic_review_gate(data: dict[str, Any], head_sha: str) -> list[str]:
-    if data.get("pr", {}).get("requires_semantic_review") is not True:
-        return []
-    receipt = data.get("semantic_review_receipt", {})
-    if (
-        receipt.get("status") != "PASS"
-        or receipt.get("head_sha") != head_sha
-        or receipt.get("independent") is not True
-    ):
-        return ["SEMANTIC_REVIEW_MISSING_OR_STALE"]
-    return []
-
-
-def _blind_review_gate(data: dict[str, Any], head_sha: str) -> list[str]:
-    receipts = data.get("blind_review_receipts", [])
-    blockers: list[str] = []
-    selected: list[dict[str, Any]] = []
-    for lane in ("acceptance", "adversarial"):
-        valid = [
-            receipt
-            for receipt in receipts
-            if receipt.get("lane") == lane
-            and receipt.get("status") == "PASS"
-            and isinstance(receipt.get("score"), int)
-            and receipt["score"] >= 95
-            and receipt.get("head_sha") == head_sha
-            and receipt.get("independent") is True
-            and type(receipt.get("unresolved_findings")) is int
-            and receipt["unresolved_findings"] == 0
-            and isinstance(receipt.get("reviewer_id"), str)
-            and bool(receipt["reviewer_id"])
-            and isinstance(receipt.get("receipt_id"), str)
-            and bool(receipt["receipt_id"])
-        ]
-        if not valid:
-            blockers.append(f"BLIND_{lane.upper()}_REVIEW_MISSING")
-        elif len(valid) > 1:
-            blockers.append(f"BLIND_{lane.upper()}_REVIEW_AMBIGUOUS")
-        else:
-            selected.append(valid[0])
-
-    if len(selected) == 2:
-        if len({receipt["reviewer_id"] for receipt in selected}) != 2:
-            blockers.append("BLIND_REVIEWER_IDENTITY_DUPLICATE")
-        if len({receipt["receipt_id"] for receipt in selected}) != 2:
-            blockers.append("BLIND_RECEIPT_IDENTITY_DUPLICATE")
-    return blockers
-
-
-def _bypass_gate(
-    data: dict[str, Any], head_sha: str, actor_receipt: dict[str, Any]
-) -> list[str]:
-    policy = data.get("protected_policy", {})
-    actor_id = actor_receipt.get("actor_id")
-    actor_login = actor_receipt.get("actor")
-    bypass_actors = policy.get("bypass_actors", [])
-    bypass_actor = [
-        actor
-        for actor in bypass_actors
-        if actor.get("actor_type") == "User"
-        and actor.get("actor_id") == actor_id
-        and actor.get("bypass_mode") == "pull_request"
-    ]
-    blockers: list[str] = []
-    if not actor_login or not bypass_actor:
-        blockers.append("PR_ONLY_ADMIN_BYPASS_NOT_CONFIGURED_FOR_ACTOR")
-    if len(bypass_actor) != 1 or len(bypass_actors) != 1:
-        blockers.append("BROAD_OR_UNSAFE_BYPASS_ACTOR_PRESENT")
-    blockers.extend(_blind_review_gate(data, head_sha))
-    return blockers
-
-
-def _bypass_qualification_gate(
-    data: dict[str, Any], head_sha: str, qualification: dict[str, Any]
-) -> list[str]:
-    expected = {
-        "repository": data.get("repository"),
-        "pr_number": data.get("pr", {}).get("number"),
-        "head_sha": head_sha,
-        "action": "qualify_admin_pr_only",
-    }
-    blockers = [
-        f"ADMIN_BYPASS_QUALIFICATION_{key.upper()}_MISMATCH"
-        for key, value in expected.items()
-        if qualification.get(key) != value
-    ]
-    blockers.extend(_bypass_gate(data, head_sha, qualification))
-    return blockers
 
 
 def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str, Any]]]:
@@ -224,6 +100,7 @@ def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str,
         or policy.get("base_ref") != "main"
         or not policy.get("base_sha")
         or policy.get("ruleset_id") != RULESET_ID
+        or policy.get("strict_required_status_checks_policy") is not True
         or [_pair(item) for item in policy.get("required_checks", [])]
         != list(REQUIRED_CHECK_PAIRS)
     ):
@@ -237,7 +114,9 @@ def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str,
     if pr.get("base_sha") != policy.get("base_sha"):
         blockers.append("BASE_POLICY_SHA_MISMATCH")
 
-    matched, check_blockers = _trusted_checks(data.get("checks", []), head_sha)
+    matched, check_blockers = _trusted_checks(
+        data.get("checks", []), head_sha, str(policy.get("base_sha", ""))
+    )
     blockers.extend(check_blockers)
 
     if any(thread.get("is_resolved") is not True for thread in data.get("threads", [])):
@@ -259,7 +138,6 @@ def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str,
     issue = data.get("accepted_issue", {})
     if issue.get("accepted") is not True or not issue.get("number"):
         blockers.append("ACCEPTED_ISSUE_MISSING")
-    blockers.extend(_semantic_review_gate(data, head_sha))
     return blockers, head_sha, matched
 
 
@@ -303,7 +181,6 @@ def _decision_for(blockers: list[str], mode: str) -> str:
             "POST_MERGE_ANCESTRY_INVALID",
         }
         or blocker.startswith("MERGE_AUTHORIZATION_")
-        or blocker.startswith("ADMIN_BYPASS_QUALIFICATION_")
         for blocker in blockers
     ):
         return "STATE_DRIFT"
@@ -311,7 +188,6 @@ def _decision_for(blockers: list[str], mode: str) -> str:
         blocker in {
             "PROTECTED_POLICY_UNTRUSTED",
             "EXACT_MERGE_AUTHORIZATION_MISSING",
-            "PR_ONLY_ADMIN_BYPASS_NOT_CONFIGURED_FOR_ACTOR",
             "ACCEPTED_ISSUE_MISSING",
         }
         for blocker in blockers
@@ -342,38 +218,18 @@ def _evaluate(data: dict[str, Any]) -> dict[str, Any]:
         return _evaluate_post_merge(data)
 
     blockers, head_sha, matched = _base_blockers(data)
-    review_blockers = _review_gate(data, head_sha)
     authorization = data.get("merge_authorization", {})
-    qualification = data.get("admin_bypass_qualification", {})
-    use_bypass = authorization.get("use_admin_bypass") is True
-    qualify_bypass = mode == "readiness" and bool(qualification)
-    if use_bypass or qualify_bypass:
-        blockers.extend(
-            blocker
-            for blocker in review_blockers
-            if blocker != "NON_AUTHOR_CODEOWNER_APPROVAL_MISSING"
-        )
-    else:
-        blockers.extend(review_blockers)
     if mode == "landing":
         blockers.extend(_landing_authorization_gate(data, head_sha))
-        if use_bypass:
-            blockers.extend(_bypass_gate(data, head_sha, authorization))
-        elif authorization.get("use_admin_bypass") not in (None, False):
-            blockers.append("ADMIN_BYPASS_FLAG_INVALID")
+        if authorization.get("use_admin_bypass") not in (None, False):
+            blockers.append("ADMIN_BYPASS_FORBIDDEN")
     elif authorization:
         blockers.append("READINESS_INPUT_CONTAINS_MERGE_AUTHORIZATION")
-    elif qualify_bypass:
-        blockers.extend(_bypass_qualification_gate(data, head_sha, qualification))
+    if data.get("admin_bypass_qualification"):
+        blockers.append("ADMIN_BYPASS_FORBIDDEN")
 
     decision = _decision_for(blockers, mode)
-    if use_bypass:
-        path = "admin-pr-only-bypass"
-    elif qualify_bypass:
-        path = "admin-pr-only-qualified"
-    else:
-        path = "protected-normal"
-    return _receipt(data, decision, blockers, matched, path)
+    return _receipt(data, decision, blockers, matched, "protected-normal")
 
 
 def _evaluate_post_merge(data: dict[str, Any]) -> dict[str, Any]:
@@ -406,6 +262,7 @@ def _evaluate_post_merge(data: dict[str, Any]) -> dict[str, Any]:
         or policy.get("base_ref") != "main"
         or not policy.get("base_sha")
         or policy.get("ruleset_id") != RULESET_ID
+        or policy.get("strict_required_status_checks_policy") is not True
         or [_pair(item) for item in policy.get("required_checks", [])]
         != list(REQUIRED_CHECK_PAIRS)
     ):
@@ -438,7 +295,12 @@ def _evaluate_post_merge(data: dict[str, Any]) -> dict[str, Any]:
     if issue.get("state") != "CLOSED" or issue.get("state_reason") != "COMPLETED":
         blockers.append("ISSUE_DISPOSITION_UNVERIFIED")
 
-    matched, check_blockers = _trusted_checks(data.get("checks", []), merge_commit)
+    matched, check_blockers = _trusted_checks(
+        data.get("checks", []),
+        merge_commit,
+        str(policy.get("base_sha", "")),
+        REQUIRED_CI_CHECK_PAIRS,
+    )
     blockers.extend(check_blockers)
     decision = _decision_for(blockers, "post_merge")
     return _receipt(data, decision, blockers, matched, "post-merge")

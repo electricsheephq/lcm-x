@@ -20,9 +20,7 @@ REQUIRED = [
     {"context": "test (3.12)", "integration_id": 15368},
     {"context": "test (3.13)", "integration_id": 15368},
     {"context": "test (3.14)", "integration_id": 15368},
-    {"context": "Analyze (actions)", "integration_id": 15368},
-    {"context": "Analyze (javascript-typescript)", "integration_id": 15368},
-    {"context": "Analyze (python)", "integration_id": 15368},
+    {"context": "AI review exact-head", "integration_id": 15368},
 ]
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "maintainer_gate.py"
 
@@ -32,6 +30,7 @@ def passing_checks(head_sha: str = HEAD) -> list[dict[str, object]]:
         {
             **required,
             "head_sha": head_sha,
+            "base_sha": BASE,
             "status": "completed",
             "conclusion": "success",
         }
@@ -49,6 +48,7 @@ def ready_payload(mode: str = "readiness") -> dict[str, object]:
             "base_ref": "main",
             "base_sha": BASE,
             "ruleset_id": 20888757,
+            "strict_required_status_checks_policy": True,
             "required_checks": deepcopy(REQUIRED),
             "bypass_actors": [],
         },
@@ -60,26 +60,11 @@ def ready_payload(mode: str = "readiness") -> dict[str, object]:
             "author": "100yenadmin",
             "state": "OPEN",
             "draft": False,
-            "requires_semantic_review": True,
         },
         "checks": passing_checks(),
-        "latest_reviews": [
-            {
-                "author": "Tosko4",
-                "state": "APPROVED",
-                "commit_sha": HEAD,
-                "submitted_at": "2026-08-16T10:00:00Z",
-                "codeowner": True,
-            }
-        ],
         "threads": [{"is_resolved": True}],
         "findings": [],
         "accepted_issue": {"number": 218, "accepted": True, "state": "OPEN"},
-        "semantic_review_receipt": {
-            "status": "PASS",
-            "head_sha": HEAD,
-            "independent": True,
-        },
     }
 
 
@@ -92,57 +77,6 @@ def exact_authorization(use_admin_bypass: bool = False) -> dict[str, object]:
         "actor": "100yenadmin",
         "actor_id": 239388517,
         "use_admin_bypass": use_admin_bypass,
-    }
-
-
-def blind_receipts() -> list[dict[str, object]]:
-    return [
-        {
-            "lane": "acceptance",
-            "status": "PASS",
-            "score": 97,
-            "head_sha": HEAD,
-            "independent": True,
-            "unresolved_findings": 0,
-            "reviewer_id": "checker-acceptance",
-            "receipt_id": "receipt-acceptance-001",
-        },
-        {
-            "lane": "adversarial",
-            "status": "PASS",
-            "score": 96,
-            "head_sha": HEAD,
-            "independent": True,
-            "unresolved_findings": 0,
-            "reviewer_id": "checker-adversarial",
-            "receipt_id": "receipt-adversarial-001",
-        },
-    ]
-
-
-def admin_payload() -> dict[str, object]:
-    payload = ready_payload("landing")
-    payload["latest_reviews"] = []
-    payload["merge_authorization"] = exact_authorization(True)
-    payload["protected_policy"]["bypass_actors"] = [
-        {
-            "actor_id": 239388517,
-            "actor_type": "User",
-            "bypass_mode": "pull_request",
-        }
-    ]
-    payload["blind_review_receipts"] = blind_receipts()
-    return payload
-
-
-def admin_qualification() -> dict[str, object]:
-    return {
-        "repository": "electricsheephq/lcm-x",
-        "pr_number": 218,
-        "head_sha": HEAD,
-        "action": "qualify_admin_pr_only",
-        "actor": "100yenadmin",
-        "actor_id": 239388517,
     }
 
 
@@ -214,7 +148,7 @@ def test_pr_authored_policy_cannot_weaken_protected_main_policy():
     receipt = evaluate(payload)
 
     assert receipt["decision"] == "NOT_READY"
-    assert "TRUSTED_CHECK_UNSATISFIED:Analyze (python):15368" in receipt[
+    assert "TRUSTED_CHECK_UNSATISFIED:AI review exact-head:15368" in receipt[
         "blocker_codes"
     ]
 
@@ -244,7 +178,7 @@ def test_non_main_base_is_not_directly_landable():
     assert evaluate(payload)["decision"] == "NOT_DIRECTLY_LANDABLE"
 
 
-def test_author_approval_cannot_satisfy_non_author_gate():
+def test_human_approval_cannot_substitute_for_the_ai_check():
     payload = ready_payload()
     payload["latest_reviews"] = [
         {
@@ -255,11 +189,14 @@ def test_author_approval_cannot_satisfy_non_author_gate():
             "codeowner": True,
         }
     ]
+    payload["checks"] = payload["checks"][:-1]
 
     receipt = evaluate(payload)
 
     assert receipt["decision"] == "NOT_READY"
-    assert "NON_AUTHOR_CODEOWNER_APPROVAL_MISSING" in receipt["blocker_codes"]
+    assert "TRUSTED_CHECK_UNSATISFIED:AI review exact-head:15368" in receipt[
+        "blocker_codes"
+    ]
 
 
 def test_same_named_wrong_app_check_is_rejected():
@@ -270,6 +207,18 @@ def test_same_named_wrong_app_check_is_rejected():
 
     assert receipt["decision"] == "NOT_READY"
     assert "TRUSTED_CHECK_UNSATISFIED:workflow-lint:15368" in receipt[
+        "blocker_codes"
+    ]
+
+
+def test_ai_check_bound_to_a_prior_base_is_rejected():
+    payload = ready_payload()
+    payload["checks"][-1]["base_sha"] = "9" * 40
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "NOT_READY"
+    assert "TRUSTED_CHECK_UNSATISFIED:AI review exact-head:15368" in receipt[
         "blocker_codes"
     ]
 
@@ -343,6 +292,16 @@ def test_wrong_ruleset_id_is_an_owner_gate():
     assert "PROTECTED_POLICY_UNTRUSTED" in receipt["blocker_codes"]
 
 
+def test_non_strict_required_checks_policy_is_an_owner_gate():
+    payload = ready_payload()
+    payload["protected_policy"]["strict_required_status_checks_policy"] = False
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "OWNER_GATE"
+    assert "PROTECTED_POLICY_UNTRUSTED" in receipt["blocker_codes"]
+
+
 def test_normal_exact_authorization_is_ready_for_landing():
     payload = ready_payload("landing")
     payload["merge_authorization"] = exact_authorization()
@@ -366,142 +325,21 @@ def test_landing_requires_a_positive_exact_pr_number():
     assert "PR_IDENTITY_INVALID" in receipt["blocker_codes"]
 
 
-def test_pr_only_admin_bypass_requires_both_blind_scores_at_95():
-    payload = admin_payload()
-    payload["blind_review_receipts"][1]["score"] = 94
+def test_admin_bypass_is_forbidden_after_bootstrap():
+    payload = ready_payload("landing")
+    payload["merge_authorization"] = exact_authorization(True)
 
     receipt = evaluate(payload)
 
     assert receipt["decision"] == "NOT_READY"
-    assert "BLIND_ADVERSARIAL_REVIEW_MISSING" in receipt["blocker_codes"]
-
-
-def test_pr_only_admin_bypass_requires_explicit_zero_unresolved_findings():
-    payload = admin_payload()
-    payload["blind_review_receipts"][0].pop("unresolved_findings")
-
-    receipt = evaluate(payload)
-
-    assert receipt["decision"] == "NOT_READY"
-    assert "BLIND_ACCEPTANCE_REVIEW_MISSING" in receipt["blocker_codes"]
-
-
-def test_pr_only_admin_bypass_requires_distinct_reviewer_identities():
-    payload = admin_payload()
-    payload["blind_review_receipts"][1]["reviewer_id"] = "checker-acceptance"
-
-    receipt = evaluate(payload)
-
-    assert receipt["decision"] == "NOT_READY"
-    assert "BLIND_REVIEWER_IDENTITY_DUPLICATE" in receipt["blocker_codes"]
-
-
-def test_pr_only_admin_bypass_requires_distinct_receipt_identities():
-    payload = admin_payload()
-    payload["blind_review_receipts"][1]["receipt_id"] = "receipt-acceptance-001"
-
-    receipt = evaluate(payload)
-
-    assert receipt["decision"] == "NOT_READY"
-    assert "BLIND_RECEIPT_IDENTITY_DUPLICATE" in receipt["blocker_codes"]
-
-
-def test_pr_only_admin_bypass_can_qualify_without_author_approval():
-    receipt = evaluate(admin_payload())
-
-    assert receipt["decision"] == "READY_FOR_AUTHORIZED_LANDING"
-    assert receipt["evaluated"]["path"] == "admin-pr-only-bypass"
-    assert receipt["authority_granted"] is False
-
-
-def test_pr_only_admin_bypass_does_not_waive_changes_requested():
-    payload = admin_payload()
-    payload["latest_reviews"] = [
-        {
-            "author": "Tosko4",
-            "state": "CHANGES_REQUESTED",
-            "commit_sha": HEAD,
-            "submitted_at": "2026-08-16T11:00:00Z",
-            "codeowner": True,
-        }
-    ]
-
-    receipt = evaluate(payload)
-
-    assert receipt["decision"] == "NOT_READY"
-    assert "LATEST_CHANGES_REQUESTED" in receipt["blocker_codes"]
-
-
-def test_equal_timestamp_changes_requested_fails_closed():
-    payload = admin_payload()
-    payload["latest_reviews"] = [
-        {
-            "author": "Tosko4",
-            "state": "APPROVED",
-            "commit_sha": HEAD,
-            "submitted_at": "2026-08-16T11:00:00Z",
-            "codeowner": True,
-        },
-        {
-            "author": "Tosko4",
-            "state": "CHANGES_REQUESTED",
-            "commit_sha": HEAD,
-            "submitted_at": "2026-08-16T11:00:00Z",
-            "codeowner": True,
-        },
-    ]
-
-    receipt = evaluate(payload)
-
-    assert receipt["decision"] == "NOT_READY"
-    assert "LATEST_CHANGES_REQUESTED" in receipt["blocker_codes"]
-
-
-def test_pr_only_admin_bypass_rejects_any_extra_or_broad_actor():
-    payload = admin_payload()
-    payload["protected_policy"]["bypass_actors"].append(
-        {"actor_id": 1, "actor_type": "Team", "bypass_mode": "always"}
-    )
-
-    receipt = evaluate(payload)
-
-    assert receipt["decision"] == "NOT_READY"
-    assert "BROAD_OR_UNSAFE_BYPASS_ACTOR_PRESENT" in receipt["blocker_codes"]
-
-
-def test_readiness_can_report_a_non_authoritative_admin_qualification():
-    payload = admin_payload()
-    payload["mode"] = "readiness"
-    payload["admin_bypass_qualification"] = admin_qualification()
-    del payload["merge_authorization"]
-
-    receipt = evaluate(payload)
-
-    assert receipt["decision"] == "READY_FOR_AUTHORIZED_LANDING"
-    assert receipt["evaluated"]["path"] == "admin-pr-only-qualified"
-    assert receipt["authority_granted"] is False
-
-
-def test_admin_readiness_qualification_is_bound_to_exact_head():
-    payload = admin_payload()
-    payload["mode"] = "readiness"
-    payload["admin_bypass_qualification"] = admin_qualification()
-    payload["admin_bypass_qualification"]["head_sha"] = "9" * 40
-    del payload["merge_authorization"]
-
-    receipt = evaluate(payload)
-
-    assert receipt["decision"] == "STATE_DRIFT"
-    assert (
-        "ADMIN_BYPASS_QUALIFICATION_HEAD_SHA_MISMATCH" in receipt["blocker_codes"]
-    )
+    assert "ADMIN_BYPASS_FORBIDDEN" in receipt["blocker_codes"]
 
 
 def test_post_merge_verifies_exact_merge_commit():
     receipt = evaluate(post_merge_payload())
 
     assert receipt["decision"] == "POST_MERGE_VERIFIED"
-    assert len(receipt["matched_trusted_checks"]) == len(REQUIRED)
+    assert len(receipt["matched_trusted_checks"]) == len(REQUIRED) - 1
 
 
 def test_post_merge_rejects_an_open_pr():

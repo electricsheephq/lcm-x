@@ -1,0 +1,115 @@
+name: AI review exact-head issuer
+
+on:
+  push:
+    branches: [main]
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number
+        required: true
+        type: number
+      receipts_json:
+        description: Content-free review receipt array
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+
+jobs:
+  issue:
+    name: Issue exact-head AI review check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reset or validate the live PR head
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          RECEIPTS_JSON: ${{ inputs.receipts_json }}
+        with:
+          script: |
+            const fs = require('fs'), cp = require('child_process');
+            const owner = context.repo.owner, repo = context.repo.repo;
+            const emit = async (prNumber, base, head, conclusion, summary) => {
+              const externalId = `ai-review-gate:${prNumber}:${base}:${head}`;
+              const listed = await github.rest.checks.listForRef({owner, repo, ref: head,
+                check_name: 'AI review exact-head', filter: 'latest', per_page: 100});
+              const prior = listed.data.check_runs
+                .filter(run => run.external_id === externalId && run.app?.id === 15368)
+                .sort((a, b) => b.id - a.id)[0];
+              const payload = {owner, repo, status: 'completed', conclusion,
+                output: {title: 'Exact-head AI review', summary: summary.slice(0, 65000)}};
+              return prior
+                ? github.rest.checks.update({...payload, check_run_id: prior.id})
+                : github.rest.checks.create({...payload, name: 'AI review exact-head',
+                    head_sha: head, external_id: externalId});
+            };
+            if (context.eventName === 'push') {
+              const open = await github.paginate(github.rest.pulls.list,
+                {owner, repo, state: 'open', base: 'main', per_page: 100});
+              const failures = [];
+              for (const candidate of open) {
+                try {
+                  await emit(candidate.number, candidate.base.sha, candidate.head.sha, 'failure',
+                    'Protected base changed; fresh exact-base/head review receipts are required.');
+                } catch (error) {
+                  failures.push(candidate.number);
+                }
+              }
+              if (failures.length) core.setFailed(`Failed to reset PRs: ${failures.join(',')}`);
+              return;
+            }
+            const prNumber = context.eventName === 'workflow_dispatch'
+              ? Number('${{ inputs.pr_number }}') : context.payload.pull_request.number;
+            const pr = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
+            const base = pr.data.base.sha;
+            const head = pr.data.head.sha;
+            await emit(prNumber, base, head, 'failure', context.eventName === 'workflow_dispatch'
+              ? 'Validation started; fail closed until complete.' : 'Exact-head review receipts are missing.');
+            if (context.eventName !== 'workflow_dispatch') return;
+            let conclusion = 'failure', summary = 'Validation failed closed.';
+            try {
+              const repository = await github.rest.repos.get({owner, repo});
+              const defaultBranch = repository.data.default_branch;
+              const branch = await github.rest.repos.getBranch({owner, repo, branch: defaultBranch});
+              const protectedSha = branch.data.commit.sha;
+              if (context.ref !== `refs/heads/${defaultBranch}` || context.sha !== protectedSha)
+                throw Error('dispatch must execute from current protected default branch');
+              if (pr.data.base.ref !== defaultBranch || pr.data.state !== 'open' || pr.data.draft)
+                throw Error('pull request is not an open, ready default-branch change');
+              const files = await github.paginate(github.rest.pulls.listFiles,
+                {owner, repo, pull_number: prNumber, per_page: 100});
+              const query = `query($owner:String!,$repo:String!,$pr:Int!,$cursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100,after:$cursor){nodes{isResolved}pageInfo{hasNextPage endCursor}}}}}`;
+              let cursor = null, unresolved = 0;
+              do {
+                const result = await github.graphql(query, {owner, repo, pr: prNumber, cursor});
+                const page = result.repository.pullRequest.reviewThreads;
+                unresolved += page.nodes.filter(node => !node.isResolved).length;
+                cursor = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+              } while (cursor);
+              const source = await github.rest.repos.getContent({owner, repo,
+                path: 'scripts/ai_review_gate.py', ref: protectedSha});
+              if (Array.isArray(source.data) || source.data.encoding !== 'base64') throw Error('validator unavailable');
+              fs.writeFileSync('/tmp/gate.py', Buffer.from(source.data.content, 'base64'));
+              const input = {repository: `${owner}/${repo}`, pr_number: prNumber,
+                base_sha: pr.data.base.sha, head_sha: head, changed_paths: files.map(file => file.filename),
+                receipts: JSON.parse(process.env.RECEIPTS_JSON), unresolved_threads: unresolved,
+                api_complete: true, pagination_complete: true};
+              const run = cp.spawnSync('python', ['/tmp/gate.py'], {input: JSON.stringify(input), encoding: 'utf8'});
+              const result = JSON.parse(run.stdout || '{}');
+              const live = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
+              const liveBranch = await github.rest.repos.getBranch({owner, repo, branch: defaultBranch});
+              if (live.data.head.sha !== head || live.data.base.sha !== pr.data.base.sha ||
+                  liveBranch.data.commit.sha !== protectedSha) throw Error('PR or protected-base drift');
+              conclusion = run.status === 0 && result.decision === 'PASS' ? 'success' : 'failure';
+              summary = JSON.stringify(result);
+            } catch (error) {
+              summary = `Validation failed closed: ${error.message}`;
+            }
+            await emit(prNumber, base, head, conclusion, summary);
+            if (conclusion !== 'success') core.setFailed(summary);
