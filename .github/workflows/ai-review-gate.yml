@@ -52,10 +52,16 @@ jobs:
             if (context.eventName === 'push') {
               const open = await github.paginate(github.rest.pulls.list,
                 {owner, repo, state: 'open', base: 'main', per_page: 100});
+              const failures = [];
               for (const candidate of open) {
-                await emit(candidate.number, candidate.base.sha, candidate.head.sha, 'failure',
-                  'Protected base changed; fresh exact-base/head review receipts are required.');
+                try {
+                  await emit(candidate.number, candidate.base.sha, candidate.head.sha, 'failure',
+                    'Protected base changed; fresh exact-base/head review receipts are required.');
+                } catch (error) {
+                  failures.push(candidate.number);
+                }
               }
+              if (failures.length) core.setFailed(`Failed to reset PRs: ${failures.join(',')}`);
               return;
             }
             const prNumber = context.eventName === 'workflow_dispatch'

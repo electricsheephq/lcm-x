@@ -168,6 +168,8 @@ def test_workflow_is_base_trusted_and_resets_each_head():
     assert "head_sha: head" in workflow
     assert "${prNumber}:${base}:${head}" in workflow
     assert "Protected base changed" in workflow
+    assert "const failures = []" in workflow
+    assert "core.setFailed(`Failed to reset PRs:" in workflow
     assert "context.ref !== `refs/heads/${defaultBranch}`" in workflow
     assert "ref: protectedSha" in workflow
     assert "actions/checkout" not in workflow

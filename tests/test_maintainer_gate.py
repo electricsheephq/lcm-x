@@ -48,6 +48,7 @@ def ready_payload(mode: str = "readiness") -> dict[str, object]:
             "base_ref": "main",
             "base_sha": BASE,
             "ruleset_id": 20888757,
+            "strict_required_status_checks_policy": True,
             "required_checks": deepcopy(REQUIRED),
             "bypass_actors": [],
         },
@@ -284,6 +285,16 @@ def test_missing_accepted_work_is_an_owner_gate():
 def test_wrong_ruleset_id_is_an_owner_gate():
     payload = ready_payload()
     payload["protected_policy"]["ruleset_id"] = 1
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == "OWNER_GATE"
+    assert "PROTECTED_POLICY_UNTRUSTED" in receipt["blocker_codes"]
+
+
+def test_non_strict_required_checks_policy_is_an_owner_gate():
+    payload = ready_payload()
+    payload["protected_policy"]["strict_required_status_checks_policy"] = False
 
     receipt = evaluate(payload)
 

@@ -55,7 +55,9 @@ Require success on the pinned head for:
 Treat pending, skipped, missing, stale-head, or failing required checks as blocking. Require one
 result per required name; resolve each Actions run and bind its `head_sha` to `$head` and its
 `workflow_id` to protected `CI` or the protected AI-review issuer. Reject name-only, duplicate,
-or mixed identities. A workflow-policy change is high-risk and needs both exact-head AI lanes.
+or mixed identities. Require strict up-to-date status enforcement so a protected-base change
+blocks merging even if an API fault prevents one reset write. A workflow-policy change is
+high-risk and needs both exact-head AI lanes.
 
 ## 4. Verify Exact-Head Review Coverage
 

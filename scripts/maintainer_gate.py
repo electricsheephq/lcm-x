@@ -100,6 +100,7 @@ def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str,
         or policy.get("base_ref") != "main"
         or not policy.get("base_sha")
         or policy.get("ruleset_id") != RULESET_ID
+        or policy.get("strict_required_status_checks_policy") is not True
         or [_pair(item) for item in policy.get("required_checks", [])]
         != list(REQUIRED_CHECK_PAIRS)
     ):
@@ -261,6 +262,7 @@ def _evaluate_post_merge(data: dict[str, Any]) -> dict[str, Any]:
         or policy.get("base_ref") != "main"
         or not policy.get("base_sha")
         or policy.get("ruleset_id") != RULESET_ID
+        or policy.get("strict_required_status_checks_policy") is not True
         or [_pair(item) for item in policy.get("required_checks", [])]
         != list(REQUIRED_CHECK_PAIRS)
     ):

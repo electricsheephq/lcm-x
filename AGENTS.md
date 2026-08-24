@@ -114,6 +114,9 @@ Run `actionlint` when workflows change. Record exact commands and results in the
 - Use `.agents/skills/land-pr/SKILL.md` when deciding readiness or landing a PR.
 - Pin the PR base SHA and `headRefOid`; checks and semantic review must cover that exact pair or
   an explicitly bounded delta. A protected-base change invalidates prior AI receipts.
+- Keep strict required-status enforcement enabled. If a base-push reset API call fails, GitHub's
+  up-to-date requirement must still block merging until a head synchronization resets the AI
+  check and fresh exact-base/head receipts pass.
 - Require the protected `AI review exact-head` check. Routine, docs, and benchmark changes need
   one acceptance receipt; governance, security, data-integrity, migration, persistence,
   lifecycle, runtime, workflow-policy, unknown-risk, and Hermes host-contract changes need
