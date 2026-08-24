@@ -67,7 +67,7 @@
 - [ ] Current `headRefOid` is recorded.
 - [ ] Required exact-head CI is green.
 - [ ] `AI review exact-head` passed on the current head.
-- [ ] Routine/docs/benchmark work has one acceptance receipt at 95+; high-risk or unknown work has distinct acceptance and adversarial receipts at 95+.
+- [ ] Every PR has distinct exact-head `acceptance` and `adversarial` receipts at 95+; labels cannot reduce the required lanes, and every receipt has zero findings.
 - [ ] All actionable review threads have terminal dispositions and are resolved.
 - [ ] The accepted issue, PR head, checks, reviews, threads, and authorization were deterministically re-fetched immediately before any authorized GitHub write.
 - [ ] Merge method is merge commit; do not squash or rebase.

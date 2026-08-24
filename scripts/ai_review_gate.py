@@ -103,7 +103,9 @@ def evaluate(data: Any, now: datetime | None = None) -> dict[str, Any]:
         blockers.append("UNRESOLVED_REVIEW_THREAD")
 
     receipts = data.get("receipts")
-    required_lanes = {"acceptance", "adversarial"} if expected["risk_class"] in HIGH_RISK else {"acceptance"}
+    # Review lanes are a fixed policy requirement.  Mutable PR labels and other
+    # event metadata are organizational inputs only and cannot lower the gate.
+    required_lanes = {"acceptance", "adversarial"}
     selected: list[dict[str, Any]] = []
     if not isinstance(receipts, list):
         blockers.append("RECEIPTS_INVALID")

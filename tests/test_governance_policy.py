@@ -71,6 +71,35 @@ def test_pull_request_template_separates_behavior_and_release_evidence():
     assert "immediately before any authorized GitHub write" in template
 
 
+def test_every_pr_requires_two_exact_head_lanes_and_labels_cannot_reduce_them():
+    policy = " ".join((REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8").split())
+    guide = " ".join((REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8").split())
+    template = " ".join(
+        (REPO_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md")
+        .read_text(encoding="utf-8")
+        .split()
+    )
+    landing = " ".join(
+        (REPO_ROOT / ".agents" / "skills" / "land-pr" / "SKILL.md")
+        .read_text(encoding="utf-8")
+        .split()
+    )
+
+    assert (
+        "Every PR, including routine, docs, and benchmark changes, requires distinct exact-head"
+        " `acceptance` and `adversarial` receipts."
+    ) in policy
+    assert "labels cannot reduce the required lanes" in policy
+    assert (
+        "every PR requires distinct exact-head `acceptance` and `adversarial` receipts,"
+        " including routine/docs/benchmark changes, each at 95 or above;"
+    ) in guide
+    assert "Every PR has distinct exact-head `acceptance` and `adversarial` receipts at 95+;" in template
+    assert "Every PR requires distinct exact-head `acceptance` and `adversarial` receipts" in landing
+    assert "Routine/docs/benchmark changes require one `acceptance` receipt" not in landing
+    assert "Routine/docs/benchmark work has one acceptance receipt" not in template
+
+
 def test_triage_skill_is_bounded_and_read_only_by_default():
     skill = (
         REPO_ROOT / ".agents" / "skills" / "triage-backlog" / "SKILL.md"
