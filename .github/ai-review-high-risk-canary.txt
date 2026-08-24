@@ -1,0 +1,2 @@
+Disposable governance-risk canary for exact-head AI review receipts.
+No workflow, policy, product, package, runtime, schema, or release behavior changes.
