@@ -182,16 +182,16 @@ class ProviderAccounting:
         *,
         document_count: int = 0,
         dispatches: int = 1,
-        usage_tokens: int | None = None,
+        usage_tokens: int = 0,
+        usage_complete: bool = True,
     ) -> None:
         role = self._validate_role(role)
         self.requests[role] += 1
         self.documents[role] += max(0, int(document_count))
         self.provider_dispatches[role] += max(0, int(dispatches))
-        if usage_tokens is None:
+        self.usage_tokens[role] += max(0, int(usage_tokens))
+        if not usage_complete:
             self.usage_tokens_complete[role] = False
-        else:
-            self.usage_tokens[role] += max(0, int(usage_tokens))
 
     def snapshot(self) -> dict[str, Any]:
         """Return a deterministic redacted snapshot suitable for local evidence."""
@@ -215,6 +215,49 @@ class ProviderAccounting:
         self.degraded_outcomes.extend(str(outcome) for outcome in outcomes)
 
 
+def _accounted_provider_attempt(
+    provider: Any,
+    accounting: ProviderAccounting | None,
+    role: str,
+    operation: Callable[[], Any],
+) -> Any:
+    """Run one provider attempt and record every observable dispatch and usage."""
+    if accounting is None:
+        return operation()
+    before_calls = getattr(provider, "provider_dispatches", None)
+    failure: Exception | None = None
+    succeeded = False
+    try:
+        result = operation()
+        succeeded = True
+        return result
+    except Exception as exc:
+        failure = exc
+        raise
+    finally:
+        after_calls = getattr(provider, "provider_dispatches", None)
+        if isinstance(before_calls, int) and isinstance(after_calls, int):
+            dispatches = max(0, after_calls - before_calls)
+        elif failure is not None and failure.__class__.__name__ == "ProviderPreDispatchError":
+            dispatches = 0
+        else:
+            dispatches = 1
+        raw_usage = getattr(provider, "last_usage_tokens", None) if succeeded else None
+        try:
+            usage_tokens = max(0, int(raw_usage))
+            usage_complete = True
+        except (TypeError, ValueError, OverflowError):
+            usage_tokens = 0
+            usage_complete = dispatches == 0
+        accounting.record_call(
+            role,
+            document_count=1,
+            dispatches=dispatches,
+            usage_tokens=usage_tokens,
+            usage_complete=usage_complete,
+        )
+
+
 class _AccountingProvider:
     """Role-bound provider proxy; it never changes provider behavior or output."""
 
@@ -223,11 +266,9 @@ class _AccountingProvider:
         self._accounting = accounting
         self._role = accounting._validate_role(role)
 
-    def _usage_tokens(self, before: Any) -> int | None:
+    def _usage_tokens(self) -> int | None:
         raw = getattr(self._provider, "last_usage_tokens", None)
-        # A provider's last-usage field is not cumulative. An unchanged value
-        # can be stale from a previous phase, so completeness fails closed.
-        if raw is None or raw == before:
+        if raw is None:
             return None
         try:
             return max(0, int(raw))
@@ -239,48 +280,110 @@ class _AccountingProvider:
         if not values:
             return []
         before_calls = getattr(self._provider, "provider_dispatches", None)
-        before_usage = getattr(self._provider, "last_usage_tokens", None)
-        result = self._provider.embed_documents(values)
-        after_calls = getattr(self._provider, "provider_dispatches", None)
-        if isinstance(before_calls, int) and isinstance(after_calls, int):
-            dispatches = max(0, after_calls - before_calls)
-        else:
-            # A normal non-cached provider call is one dispatch.  The content
-            # cache exposes its own exact counter, handled by this delta path.
-            dispatches = 1
-        usage_tokens = 0 if dispatches == 0 else self._usage_tokens(before_usage)
-        self._accounting.record_call(
-            self._role,
-            document_count=len(values),
-            dispatches=dispatches,
-            usage_tokens=usage_tokens,
-        )
-        return [list(vector) for vector in result]
+        batch_method = getattr(type(self._provider), "embed_document_batches", None)
+        dispatches = 0
+        known_usage = 0
+        usage_complete = True
+        try:
+            if callable(batch_method):
+                vectors_by_index: dict[int, Sequence[float]] = {}
+
+                def before_dispatch(_indexes):
+                    nonlocal dispatches
+                    dispatches += 1
+
+                for batch in batch_method(
+                    self._provider, values, before_dispatch=before_dispatch
+                ):
+                    indexes = tuple(batch.indexes)
+                    vectors = tuple(batch.vectors)
+                    if len(indexes) != len(vectors):
+                        raise ValueError(
+                            "embedding provider returned mismatched indexes/vectors"
+                        )
+                    vectors_by_index.update(zip(indexes, vectors))
+                    usage = self._usage_tokens()
+                    if usage is None:
+                        usage_complete = False
+                    else:
+                        known_usage += usage
+                if len(vectors_by_index) != len(values):
+                    raise ValueError(
+                        "embedding provider returned incomplete document vectors"
+                    )
+                result = [vectors_by_index[index] for index in range(len(values))]
+            else:
+                result = self._provider.embed_documents(values)
+                after_calls = getattr(self._provider, "provider_dispatches", None)
+                if isinstance(before_calls, int) and isinstance(after_calls, int):
+                    dispatches = max(0, after_calls - before_calls)
+                else:
+                    dispatches = 1
+                usage = self._usage_tokens()
+                if dispatches and usage is None:
+                    usage_complete = False
+                elif dispatches:
+                    known_usage = usage
+            return [list(vector) for vector in result]
+        except Exception as exc:
+            after_calls = getattr(self._provider, "provider_dispatches", None)
+            if isinstance(before_calls, int) and isinstance(after_calls, int):
+                dispatches = max(dispatches, max(0, after_calls - before_calls))
+            elif dispatches == 0 and exc.__class__.__name__ != "ProviderPreDispatchError":
+                dispatches = 1
+            usage_complete = dispatches == 0
+            raise
+        finally:
+            self._accounting.record_call(
+                self._role,
+                document_count=len(values),
+                dispatches=dispatches,
+                usage_tokens=known_usage,
+                usage_complete=usage_complete,
+            )
 
     def embed_query(self, text: str) -> list[float]:
         before_calls = getattr(self._provider, "provider_dispatches", None)
-        before_usage = getattr(self._provider, "last_usage_tokens", None)
-        result = self._provider.embed_query(text)
-        after_calls = getattr(self._provider, "provider_dispatches", None)
-        if isinstance(before_calls, int) and isinstance(after_calls, int):
-            dispatches = max(0, after_calls - before_calls)
-        else:
-            dispatches = 1
-        usage_tokens = 0 if dispatches == 0 else self._usage_tokens(before_usage)
-        self._accounting.record_call(
-            self._role,
-            document_count=1,
-            dispatches=dispatches,
-            usage_tokens=usage_tokens,
-        )
-        return list(result)
+        dispatches = 0
+        usage_tokens = 0
+        usage_complete = True
+        try:
+            result = self._provider.embed_query(text)
+            after_calls = getattr(self._provider, "provider_dispatches", None)
+            if isinstance(before_calls, int) and isinstance(after_calls, int):
+                dispatches = max(0, after_calls - before_calls)
+            else:
+                dispatches = 1
+            usage = self._usage_tokens()
+            if dispatches and usage is None:
+                usage_complete = False
+            elif dispatches:
+                usage_tokens = usage
+            return list(result)
+        except Exception as exc:
+            after_calls = getattr(self._provider, "provider_dispatches", None)
+            if isinstance(before_calls, int) and isinstance(after_calls, int):
+                dispatches = max(0, after_calls - before_calls)
+            elif exc.__class__.__name__ != "ProviderPreDispatchError":
+                dispatches = 1
+            usage_complete = dispatches == 0
+            raise
+        finally:
+            self._accounting.record_call(
+                self._role,
+                document_count=1,
+                dispatches=dispatches,
+                usage_tokens=usage_tokens,
+                usage_complete=usage_complete,
+            )
 
     def embed_chunk_group_batches(self, groups, *, before_dispatch=None):
         """Forward contextual grouping while accounting every accepted request."""
 
         document_count = sum(len(group) for group in groups)
         local_dispatches = 0
-        before_usage = getattr(self._provider, "last_usage_tokens", None)
+        known_usage = 0
+        usage_complete = True
 
         def dispatch(indexes):
             nonlocal local_dispatches
@@ -291,24 +394,40 @@ class _AccountingProvider:
         method = getattr(self._provider, "embed_chunk_group_batches", None)
         if not callable(method):
             raise AttributeError("provider does not support contextualized grouping")
-        result = method(groups, before_dispatch=dispatch)
-        # Generators perform work during iteration, so account after consumption
-        # rather than before returning the iterator.
-        def consume():
-            nonlocal local_dispatches
-            for batch in result:
-                yield batch
-            usage_tokens = (
-                0 if local_dispatches == 0
-                else self._usage_tokens(before_usage) if local_dispatches == 1
-                else None
-            )
+        try:
+            result = method(groups, before_dispatch=dispatch)
+        except Exception:
             self._accounting.record_call(
                 self._role,
                 document_count=document_count,
                 dispatches=local_dispatches,
-                usage_tokens=usage_tokens,
+                usage_tokens=0,
+                usage_complete=local_dispatches == 0,
             )
+            raise
+        # Generators perform work during iteration, so account after consumption
+        # rather than before returning the iterator.
+        def consume():
+            nonlocal known_usage, usage_complete
+            try:
+                for batch in result:
+                    usage = self._usage_tokens()
+                    if usage is None:
+                        usage_complete = False
+                    else:
+                        known_usage += usage
+                    yield batch
+            except Exception:
+                usage_complete = local_dispatches == 0
+                raise
+            finally:
+                self._accounting.record_call(
+                    self._role,
+                    document_count=document_count,
+                    dispatches=local_dispatches,
+                    usage_tokens=known_usage,
+                    usage_complete=usage_complete,
+                )
 
         return consume()
 
@@ -429,6 +548,7 @@ class ContentHashEmbeddingCache:
         self.misses = 0
         # Process-local only; never persisted in the cache database or reports.
         self.provider_dispatches = 0
+        self.last_usage_tokens: int | None = None
         self._initialize()
 
     @property
@@ -523,10 +643,51 @@ class ContentHashEmbeddingCache:
                 missing_by_digest.setdefault(digest, text)
 
         if missing_by_digest:
+            self.last_usage_tokens = None
             missing_digests = list(missing_by_digest)
             missing_texts = [missing_by_digest[digest] for digest in missing_digests]
-            self.provider_dispatches += 1
-            vectors = list(self._provider.embed_documents(missing_texts))
+            batch_method = getattr(type(self._provider), "embed_document_batches", None)
+            dispatches = 0
+            known_usage = 0
+            usage_complete = True
+            if callable(batch_method):
+                vectors_by_index: dict[int, Sequence[float]] = {}
+
+                def before_dispatch(_indexes):
+                    nonlocal dispatches
+                    dispatches += 1
+
+                try:
+                    for provider_batch in batch_method(
+                        self._provider,
+                        missing_texts,
+                        before_dispatch=before_dispatch,
+                    ):
+                        indexes = tuple(provider_batch.indexes)
+                        batch_vectors = tuple(provider_batch.vectors)
+                        if len(indexes) != len(batch_vectors):
+                            raise ValueError(
+                                "embedding provider returned mismatched indexes/vectors"
+                            )
+                        vectors_by_index.update(zip(indexes, batch_vectors))
+                        usage = getattr(self._provider, "last_usage_tokens", None)
+                        try:
+                            known_usage += max(0, int(usage))
+                        except (TypeError, ValueError, OverflowError):
+                            usage_complete = False
+                finally:
+                    self.provider_dispatches += dispatches
+                vectors = [vectors_by_index[index] for index in range(len(missing_texts))]
+            else:
+                self.provider_dispatches += 1
+                dispatches = 1
+                vectors = list(self._provider.embed_documents(missing_texts))
+                usage = getattr(self._provider, "last_usage_tokens", None)
+                try:
+                    known_usage = max(0, int(usage))
+                except (TypeError, ValueError, OverflowError):
+                    usage_complete = False
+            self.last_usage_tokens = known_usage if usage_complete else None
             if len(vectors) != len(missing_texts):
                 raise ValueError(
                     "embedding provider returned "
@@ -562,7 +723,21 @@ class ContentHashEmbeddingCache:
 
     def embed_query(self, text: str) -> list[float]:
         self.provider_dispatches += 1
-        return self._provider.embed_query(text)
+        succeeded = False
+        try:
+            result = self._provider.embed_query(text)
+            succeeded = True
+            return result
+        finally:
+            usage = (
+                getattr(self._provider, "last_usage_tokens", None)
+                if succeeded
+                else None
+            )
+            try:
+                self.last_usage_tokens = max(0, int(usage))
+            except (TypeError, ValueError, OverflowError):
+                self.last_usage_tokens = None
 
     def __getattr__(self, name: str):
         return getattr(self._provider, name)
@@ -603,6 +778,8 @@ def resolve_harness_provider(
     timeout: float = 300.0,
     use_embed_cache: bool = True,
     warmup: bool = True,
+    accounting: ProviderAccounting | None = None,
+    accounting_role: str = "summary_documents",
 ):
     """Return a WARMED embedder for ``provider``. ``stub`` stays fully offline.
 
@@ -630,7 +807,9 @@ def resolve_harness_provider(
             spend_guard=EmbeddingSpendGuard(max_calls=0),
         )
         if warmup:
-            resolved.warmup()
+            _accounted_provider_attempt(
+                resolved, accounting, accounting_role, resolved.warmup
+            )
     elif provider != "stub":
         from hermes_lcm.config import LCMConfig
         from hermes_lcm.embedding_provider import resolve_provider
@@ -644,7 +823,12 @@ def resolve_harness_provider(
     if resolved is None:
         raise ValueError(f"could not resolve embedding provider {provider!r}")
     if warmup and provider != "stub" and int(getattr(resolved, "dim", 0)) == 0:
-        resolved.embed_query("warmup")
+        _accounted_provider_attempt(
+            resolved,
+            accounting,
+            accounting_role,
+            lambda: resolved.embed_query("warmup"),
+        )
     if not use_embed_cache:
         return resolved
     return _maybe_cache_harness_provider(resolved, provider_name=provider)
@@ -657,6 +841,7 @@ def resolve_harness_providers(
     timeout: float = 300.0,
     use_embed_cache: bool = True,
     warmup: bool = True,
+    accounting: ProviderAccounting | None = None,
 ) -> HarnessProviderSet:
     """Resolve one cached provider per production summary/chunk identity.
 
@@ -668,7 +853,7 @@ def resolve_harness_providers(
     """
     cache: dict[tuple[str, str], Any] = {}
 
-    def resolve(requested_model: str) -> Any:
+    def resolve(requested_model: str, role: str) -> Any:
         key = (str(provider).strip().lower(), str(requested_model).strip())
         if key not in cache:
             cache[key] = resolve_harness_provider(
@@ -677,16 +862,22 @@ def resolve_harness_providers(
                 timeout=timeout,
                 use_embed_cache=use_embed_cache,
                 warmup=warmup,
+                accounting=accounting,
+                accounting_role=role,
             )
         return cache[key]
 
-    summary = resolve(model)
+    summary = resolve(model, "summary_documents")
     summary_binding = _provider_binding(summary, provider, model)
     _ensure_hermes_lcm_package()
     from hermes_lcm.embedding_provider import default_chunk_model
 
     chunk_model = default_chunk_model(summary_binding[0], summary_binding[1])
-    chunk = summary if chunk_model == summary_binding[1] else resolve(chunk_model)
+    chunk = (
+        summary
+        if chunk_model == summary_binding[1]
+        else resolve(chunk_model, "chunk_documents")
+    )
     chunk_binding = _provider_binding(chunk, summary_binding[0], chunk_model)
     return HarnessProviderSet(
         summary=summary,
@@ -1332,6 +1523,15 @@ def prewarm_embedding_cache(
         raise ValueError(f"{EMBED_CACHE_ENV} must be set for prewarm-cache")
     if progress_every <= 0:
         raise ValueError("progress_every must be positive")
+    configured_chunk = _configured_chunk_binding(
+        provider.provider_id, provider.model_id
+    )
+    if configured_chunk != (provider.provider_id, provider.model_id):
+        raise ValueError(
+            "prewarm-cache is unsupported when production summary and chunk "
+            "embedding identities differ; use the run path so each unit is cached "
+            "under its resolved provider/model pair"
+        )
 
     seen: set[str] = set()
     batch: list[str] = []
@@ -1757,9 +1957,18 @@ def recall_hit_turn_keys(
 
 
 def _typed_provider_degraded_outcomes(payload: dict[str, Any]) -> tuple[str, ...]:
-    """Map known provider degradation to stable codes and reject unknown causes."""
+    """Extract provider outcomes without treating general recall degradation as one."""
     if not payload.get("degraded"):
         return ()
+    known_codes = {code for _prefix, code in _KNOWN_PROVIDER_DEGRADED_REASONS}
+    explicit = payload.get("provider_degraded_outcomes")
+    if explicit is not None:
+        if not isinstance(explicit, list) or any(
+            not isinstance(outcome, str) or outcome not in known_codes
+            for outcome in explicit
+        ):
+            raise ValueError("lcm_recall returned unknown provider degraded outcomes")
+        return tuple(dict.fromkeys(explicit))
     raw_reason = payload.get("degraded_reason")
     if not isinstance(raw_reason, str) or not raw_reason.strip():
         raise ValueError("lcm_recall degraded without a non-empty degraded_reason")
@@ -1774,7 +1983,13 @@ def _typed_provider_degraded_outcomes(payload: dict[str, Any]) -> tuple[str, ...
             None,
         )
         if outcome is None:
-            raise ValueError(f"unknown lcm_recall degraded reason: {reason}")
+            # Aggregate recall degradation also contains general retrieval state
+            # (bounded coverage, arm failures, and scope timeouts).  Accounting
+            # ignores that prose, but still fails closed when an untyped reason
+            # claims to describe provider/embedding behavior.
+            if re.search(r"\b(provider|embedding|unsupported)\b", reason, re.I):
+                raise ValueError(f"unknown provider degraded reason: {reason}")
+            continue
         outcomes.append(outcome)
     return tuple(dict.fromkeys(outcomes))
 
@@ -2096,6 +2311,13 @@ def evaluate_question(
     # is the win that matters for network/live providers.)
     summary_specs: list[tuple[str, int, str]] = []  # (session_id, node_id, summary_text)
     chunk_items: list[Any] = []
+    flat_chunk_batch: list[Any] = []
+    grouping_target = chunk_provider
+    supports_grouping = bool(
+        embeddings_enabled
+        and getattr(grouping_target, "supports_contextualized_grouping", False)
+    ) and callable(getattr(grouping_target, "embed_chunk_group_batches", None))
+    flat_chunk_batch_size = max(1, int(embedding_batch_size or 1))
     try:
         if embeddings_enabled:
             vector_store.register_profile(model, summary_name, dim)
@@ -2113,6 +2335,28 @@ def evaluate_question(
                 "little",
                 "chunk",
             )
+
+        def flush_flat_chunks() -> None:
+            if not flat_chunk_batch:
+                return
+            vectors = _embed_in_batches(
+                chunk_documents_provider,
+                [str(chunk.text) for chunk in flat_chunk_batch],
+                batch_size=flat_chunk_batch_size,
+            )
+            for chunk, vector in zip(flat_chunk_batch, vectors):
+                vector_store.record_chunk_embedding(
+                    chunk.chunk_id,
+                    chunk_model,
+                    vector,
+                    store_id=chunk.store_id,
+                    chunk_index=chunk.chunk_index,
+                    char_start=chunk.char_start,
+                    char_end=chunk.char_end,
+                    token_estimate=chunk.token_estimate,
+                    identity=chunk_identity,
+                )
+            flat_chunk_batch.clear()
 
         for order, (session_id, session) in enumerate(
             zip(question.haystack_session_ids, question.haystack_sessions), start=1
@@ -2140,10 +2384,16 @@ def evaluate_question(
                         for sid, m in zip(store_ids, messages)
                     ]
                     # Keep production's contiguous per-message grouping for
-                    # contextualized providers, with a flat batched fallback for
-                    # local/non-context providers.
+                    # contextualized providers. Stream the local/non-context
+                    # fallback in bounded batches so it never retains the full
+                    # question corpus or forces one longest-text padded batch.
                     for chunk in iter_message_chunks(rows, policy="conversational"):
-                        chunk_items.append(chunk)
+                        if supports_grouping:
+                            chunk_items.append(chunk)
+                        else:
+                            flat_chunk_batch.append(chunk)
+                            if len(flat_chunk_batch) >= flat_chunk_batch_size:
+                                flush_flat_chunks()
             summary_text = deterministic_session_summary(session)
             session_summaries[session_id] = summary_text
             node_id = dag.add_node(
@@ -2159,61 +2409,44 @@ def evaluate_question(
             )
             summary_specs.append((session_id, node_id, summary_text))
 
-        if embeddings_enabled and chunk_items:
+        if embeddings_enabled and not supports_grouping:
+            flush_flat_chunks()
+
+        if embeddings_enabled and supports_grouping and chunk_items:
             chunk_texts = [str(chunk.text) for chunk in chunk_items]
-            supports_grouping = bool(
-                getattr(chunk_documents_provider, "supports_contextualized_grouping", False)
-            ) and callable(
-                getattr(chunk_documents_provider, "embed_chunk_group_batches", None)
-            )
-            if supports_grouping:
-                groups = [
-                    [(index, chunk_texts[index]) for index in group]
-                    for group in group_by_store_id(
-                        [int(chunk.store_id) for chunk in chunk_items]
-                    )
-                ]
-                chunk_batches = chunk_documents_provider.embed_chunk_group_batches(groups)
-                chunk_vectors_by_index: dict[int, Sequence[float]] = {}
-                for batch in chunk_batches:
-                    indexes = getattr(batch, "indexes", None)
-                    vectors = getattr(batch, "vectors", None)
-                    if indexes is None or vectors is None:
-                        try:
-                            indexes, vectors = batch
-                        except (TypeError, ValueError) as exc:
-                            raise ValueError(
-                                "contextual chunk provider returned malformed batch"
-                            ) from exc
-                    if len(indexes) != len(vectors):
-                        raise ValueError(
-                            "contextual chunk provider returned mismatched indexes/vectors"
-                        )
-                    chunk_vectors_by_index.update(
-                        {int(index): vector for index, vector in zip(indexes, vectors)}
-                    )
-                chunk_vectors = [
-                    chunk_vectors_by_index[index] for index in range(len(chunk_items))
-                    if index in chunk_vectors_by_index
-                ]
-                if len(chunk_vectors) != len(chunk_items):
-                    raise ValueError(
-                        "contextual chunk provider returned incomplete vectors"
-                    )
-                chunk_vector_pairs = zip(range(len(chunk_items)), chunk_vectors)
-            else:
-                chunk_vectors = _embed_in_batches(
-                    chunk_documents_provider,
-                    chunk_texts,
-                    batch_size=embedding_batch_size,
+            groups = [
+                [(index, chunk_texts[index]) for index in group]
+                for group in group_by_store_id(
+                    [int(chunk.store_id) for chunk in chunk_items]
                 )
-                chunk_vector_pairs = zip(range(len(chunk_items)), chunk_vectors)
-            for index, vector in chunk_vector_pairs:
+            ]
+            chunk_batches = chunk_documents_provider.embed_chunk_group_batches(groups)
+            chunk_vectors_by_index: dict[int, Sequence[float]] = {}
+            for batch in chunk_batches:
+                indexes = getattr(batch, "indexes", None)
+                vectors = getattr(batch, "vectors", None)
+                if indexes is None or vectors is None:
+                    try:
+                        indexes, vectors = batch
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            "contextual chunk provider returned malformed batch"
+                        ) from exc
+                if len(indexes) != len(vectors):
+                    raise ValueError(
+                        "contextual chunk provider returned mismatched indexes/vectors"
+                    )
+                chunk_vectors_by_index.update(
+                    {int(index): vector for index, vector in zip(indexes, vectors)}
+                )
+            if len(chunk_vectors_by_index) != len(chunk_items):
+                raise ValueError("contextual chunk provider returned incomplete vectors")
+            for index in range(len(chunk_items)):
                 chunk = chunk_items[index]
                 vector_store.record_chunk_embedding(
                     chunk.chunk_id,
                     chunk_model,
-                    vector,
+                    chunk_vectors_by_index[index],
                     store_id=chunk.store_id,
                     chunk_index=chunk.chunk_index,
                     char_start=chunk.char_start,
@@ -3048,7 +3281,26 @@ def run_harness(
     provider_set: HarnessProviderSet | None = None
     db_template: Path | None = None
     if not fully_completed_resume:
-        provider_set = resolve_harness_providers(provider_name, model)
+        if embeddings_enabled:
+            provider_set = resolve_harness_providers(
+                provider_name, model, accounting=accounting
+            )
+        else:
+            # Lexical-only runs retain the historical summary-provider setup but
+            # never resolve or warm the distinct production chunk identity.
+            summary_provider = resolve_harness_provider(
+                provider_name,
+                model,
+                accounting=accounting,
+                accounting_role="summary_documents",
+            )
+            summary_binding = _provider_binding(summary_provider, provider_name, model)
+            provider_set = HarnessProviderSet(
+                summary=summary_provider,
+                chunk=summary_provider,
+                summary_binding=summary_binding,
+                chunk_binding=_configured_chunk_binding(*summary_binding),
+            )
         if reuse_db_template:
             _ensure_hermes_lcm_package()
             from hermes_lcm.config import LCMConfig

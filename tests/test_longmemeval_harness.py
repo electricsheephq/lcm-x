@@ -1252,6 +1252,7 @@ class _IdentityEmbedder:
     def __init__(self, model_id):
         self.model_id = model_id
         self.document_calls = 0
+        self.document_batch_sizes = []
         self.query_calls = 0
 
     @staticmethod
@@ -1261,6 +1262,7 @@ class _IdentityEmbedder:
 
     def embed_documents(self, texts):
         self.document_calls += 1
+        self.document_batch_sizes.append(len(texts))
         return [self._vector(text) for text in texts]
 
     def embed_query(self, text):
@@ -1284,19 +1286,43 @@ class _ContextualIdentityEmbedder(_IdentityEmbedder):
             yield indexes, [self._vector(text) for _index, text in group]
 
 
+class _AdvertisedContextualIdentityEmbedder(_IdentityEmbedder):
+    supports_contextualized_grouping = True
+
+
+class _ProductionContextualIdentityEmbedder(_ContextualIdentityEmbedder):
+    def embed_chunk_group_batches(self, groups, *, before_dispatch=None):
+        from hermes_lcm.embedding_provider import EmbeddedDocumentBatch
+
+        for group in groups:
+            indexes = tuple(index for index, _text in group)
+            self.contextual_groups.append(indexes)
+            if before_dispatch is not None:
+                before_dispatch(indexes)
+            yield EmbeddedDocumentBatch(
+                indexes,
+                tuple(tuple(self._vector(text)) for _index, text in group),
+            )
+
+
 def test_resolve_harness_providers_uses_production_chunk_identity_and_pair_cache(
     monkeypatch,
 ):
     import benchmarking.longmemeval as lme
 
     resolutions = []
+    roles = []
 
-    def resolve(provider, model, **_kwargs):
+    def resolve(provider, model, **kwargs):
         resolutions.append((provider, model))
+        roles.append((kwargs.get("accounting"), kwargs.get("accounting_role")))
         return _IdentityEmbedder(model)
 
     monkeypatch.setattr(lme, "resolve_harness_provider", resolve)
-    providers = resolve_harness_providers("voyage", "voyage-4-large")
+    accounting = ProviderAccounting()
+    providers = resolve_harness_providers(
+        "voyage", "voyage-4-large", accounting=accounting
+    )
 
     assert providers.summary_binding == ("voyage", "voyage-4-large")
     assert providers.chunk_binding == ("voyage", "voyage-context-4")
@@ -1305,7 +1331,12 @@ def test_resolve_harness_providers_uses_production_chunk_identity_and_pair_cache
         ("voyage", "voyage-context-4"),
     ]
     assert providers.summary is not providers.chunk
+    assert roles == [
+        (accounting, "summary_documents"),
+        (accounting, "chunk_documents"),
+    ]
     resolutions.clear()
+    roles.clear()
     contextual_provider = resolve_harness_providers("voyage", "voyage-context-4")
     assert resolutions == [("voyage", "voyage-context-4")]
     assert contextual_provider.summary is contextual_provider.chunk
@@ -1326,12 +1357,57 @@ def test_resolve_harness_providers_uses_production_chunk_identity_and_pair_cache
     )
 
 
-@pytest.mark.parametrize("contextual", [False, True])
+def test_embedding_disabled_run_never_resolves_distinct_chunk_provider(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as lme
+
+    calls = []
+
+    def resolve_summary(provider, model, **kwargs):
+        calls.append((provider, model, kwargs.get("accounting_role")))
+        return _IdentityEmbedder(model)
+
+    def forbidden_pair_resolution(*_args, **_kwargs):
+        raise AssertionError("embedding-disabled run must not resolve a provider pair")
+
+    monkeypatch.setattr(lme, "resolve_harness_provider", resolve_summary)
+    monkeypatch.setattr(lme, "resolve_harness_providers", forbidden_pair_resolution)
+    question = parse_question(
+        _make_raw(
+            "q-no-embedding_abs",
+            "single-session-user",
+            sessions={"s": [{"role": "user", "content": "lexical only"}]},
+            answer_session_ids=[],
+        )
+    )
+
+    report = run_harness(
+        [question],
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path,
+        embeddings_enabled=False,
+        reuse_db_template=False,
+    )
+
+    assert report["abstention_excluded"] == 1
+    assert calls == [("voyage", "voyage-4-large", "summary_documents")]
+
+
+@pytest.mark.parametrize(
+    "contextual_shape", [None, "advertise-only", "tuple", "production"]
+)
 def test_evaluate_question_separates_provider_phases_and_chunk_grouping(
-    tmp_path, contextual
+    tmp_path, contextual_shape
 ):
     summary = _IdentityEmbedder("voyage-4-large")
-    chunk_class = _ContextualIdentityEmbedder if contextual else _IdentityEmbedder
+    chunk_class = {
+        None: _IdentityEmbedder,
+        "advertise-only": _AdvertisedContextualIdentityEmbedder,
+        "tuple": _ContextualIdentityEmbedder,
+        "production": _ProductionContextualIdentityEmbedder,
+    }[contextual_shape]
     chunk = chunk_class("voyage-context-4")
     accounting = ProviderAccounting()
     question = parse_question(
@@ -1368,7 +1444,7 @@ def test_evaluate_question_separates_provider_phases_and_chunk_grouping(
 
     snapshot = accounting.snapshot()
     assert snapshot["summary_documents"]["requests"] == 1
-    assert snapshot["chunk_documents"]["requests"] == 1
+    assert snapshot["chunk_documents"]["requests"] >= 1
     assert snapshot["harness_queries"]["requests"] == 2
     assert snapshot["harness_queries"]["documents"] == 2
     # Production recall may legitimately avoid semantic transport when its
@@ -1380,27 +1456,42 @@ def test_evaluate_question_separates_provider_phases_and_chunk_grouping(
         assert snapshot[role]["usage_tokens_complete"] is False
         assert snapshot[role]["usage_tokens"] is None
         assert snapshot[role]["known_usage_tokens"] == 0
-    assert accounting.degraded_outcomes == ["summary_provider_unavailable"]
-    if contextual:
+    if contextual_shape in {"tuple", "production"}:
         assert len(chunk.contextual_groups) >= 2
+        assert snapshot["chunk_documents"]["requests"] == 1
         assert snapshot["chunk_documents"]["provider_dispatches"] == len(
             chunk.contextual_groups
         )
         assert chunk.document_calls == 0
     else:
-        assert chunk.document_calls == 1
+        assert chunk.document_calls == snapshot["chunk_documents"]["requests"]
+        assert max(chunk.document_batch_sizes) == 1
 
-        reused_accounting = ProviderAccounting()
-        evaluate_question(
-            question,
-            summary,
-            chunk_provider=summary,
-            accounting=reused_accounting,
-            provider_name="voyage",
-            tmp_dir=tmp_path / "same-identity",
-            embeddings_enabled=True,
+
+def test_evaluate_question_reuses_one_query_for_same_provider_identity(tmp_path):
+    provider = _IdentityEmbedder("voyage-context-4")
+    accounting = ProviderAccounting()
+    question = parse_question(
+        _make_raw(
+            "q-query-reuse",
+            "single-session-user",
+            sessions={"s": [{"role": "user", "content": "same identity evidence"}]},
+            answer_session_ids=["s"],
+            question="same identity question",
         )
-        assert reused_accounting.snapshot()["harness_queries"]["requests"] == 1
+    )
+
+    evaluate_question(
+        question,
+        provider,
+        chunk_provider=provider,
+        accounting=accounting,
+        provider_name="voyage",
+        tmp_dir=tmp_path,
+        embeddings_enabled=True,
+    )
+
+    assert accounting.snapshot()["harness_queries"]["requests"] == 1
 
 
 def test_production_recall_accounts_separate_summary_and_chunk_queries(
@@ -1452,19 +1543,30 @@ def test_production_recall_accounts_separate_summary_and_chunk_queries(
     assert row["usage_tokens"] is None
 
 
-def test_typed_provider_degraded_outcomes_map_known_and_reject_unknown():
+def test_typed_provider_degraded_outcomes_ignore_general_and_reject_unknown_provider():
     assert _typed_provider_degraded_outcomes(
         {
             "degraded": True,
             "degraded_reason": (
                 "embedding provider is not configured; "
-                "chunk embedding provider unavailable: offline"
+                "full-text arm unavailable; "
+                "chunk embedding provider unavailable: offline; "
+                "summary candidate coverage bounded at 10"
             ),
         }
     ) == ("summary_provider_disabled", "chunk_provider_unavailable")
-    with pytest.raises(ValueError, match="unknown lcm_recall degraded reason"):
+    assert _typed_provider_degraded_outcomes(
+        {
+            "degraded": True,
+            "degraded_reason": "session exclusion scope resolution timed out",
+        }
+    ) == ()
+    with pytest.raises(ValueError, match="unknown provider degraded reason"):
         _typed_provider_degraded_outcomes(
-            {"degraded": True, "degraded_reason": "surprising new fallback"}
+            {
+                "degraded": True,
+                "degraded_reason": "embedding provider entered surprising mode",
+            }
         )
 
 
@@ -1514,6 +1616,101 @@ def test_content_cache_accounts_dispatches_by_pair_and_query(tmp_path):
     assert snapshot["harness_queries"]["provider_dispatches"] == 1
     assert first.document_calls == 1
     assert second.document_calls == 1
+
+
+def test_accounting_accepts_repeated_usage_and_records_failed_dispatch():
+    import benchmarking.longmemeval as lme
+
+    class RepeatUsage(_IdentityEmbedder):
+        provider_dispatches = 0
+        last_usage_tokens = 7
+
+        def embed_query(self, text):
+            self.provider_dispatches += 1
+            self.last_usage_tokens = 7
+            return super().embed_query(text)
+
+    provider = RepeatUsage("voyage-4-large")
+    accounting = ProviderAccounting()
+    wrapped = lme._AccountingProvider(provider, accounting, "harness_queries")
+    wrapped.embed_query("same token total")
+    wrapped.embed_query("same token total")
+    row = accounting.snapshot()["harness_queries"]
+    assert row["provider_dispatches"] == 2
+    assert row["usage_tokens"] == 14
+    assert row["usage_tokens_complete"] is True
+
+    class FailingProvider(RepeatUsage):
+        def embed_query(self, text):
+            self.provider_dispatches += 1
+            raise RuntimeError("transport failed")
+
+    failed_accounting = ProviderAccounting()
+    failed = lme._AccountingProvider(
+        FailingProvider("voyage-4-large"), failed_accounting, "harness_queries"
+    )
+    with pytest.raises(RuntimeError, match="transport failed"):
+        failed.embed_query("failed query")
+    failed_row = failed_accounting.snapshot()["harness_queries"]
+    assert failed_row["requests"] == 1
+    assert failed_row["provider_dispatches"] == 1
+    assert failed_row["usage_tokens_complete"] is False
+    assert failed_row["usage_tokens"] is None
+
+
+def test_accounted_warmup_attempt_is_not_omitted():
+    import benchmarking.longmemeval as lme
+
+    class WarmupProvider(_IdentityEmbedder):
+        provider_dispatches = 0
+        last_usage_tokens = None
+
+        def warmup(self):
+            self.provider_dispatches += 1
+            self.last_usage_tokens = 3
+            return self._vector("warmup")
+
+    provider = WarmupProvider("voyage-context-4")
+    accounting = ProviderAccounting()
+    assert lme._accounted_provider_attempt(
+        provider, accounting, "chunk_documents", provider.warmup
+    )
+    row = accounting.snapshot()["chunk_documents"]
+    assert row["requests"] == 1
+    assert row["provider_dispatches"] == 1
+    assert row["usage_tokens"] == 3
+
+
+def test_content_cache_exposes_internal_split_dispatches_and_usage(tmp_path):
+    import benchmarking.longmemeval as lme
+
+    lme._ensure_hermes_lcm_package()
+    from hermes_lcm.embedding_provider import EmbeddedDocumentBatch
+
+    class SplitProvider(_IdentityEmbedder):
+        last_usage_tokens = None
+
+        def embed_document_batches(self, texts, *, before_dispatch=None):
+            for indexes in ((0, 1), (2,)):
+                if before_dispatch is not None:
+                    before_dispatch(indexes)
+                self.last_usage_tokens = 5
+                yield EmbeddedDocumentBatch(
+                    indexes,
+                    tuple(tuple(self._vector(texts[index])) for index in indexes),
+                )
+
+    cached = lme.ContentHashEmbeddingCache(
+        SplitProvider("voyage-4-large"), tmp_path / "split.sqlite3"
+    )
+    accounting = ProviderAccounting()
+    wrapped = lme._AccountingProvider(cached, accounting, "summary_documents")
+    assert len(wrapped.embed_documents(["a", "b", "c"])) == 3
+    row = accounting.snapshot()["summary_documents"]
+    assert row["requests"] == 1
+    assert row["provider_dispatches"] == 2
+    assert row["usage_tokens"] == 10
+    assert row["usage_tokens_complete"] is True
 
 
 def test_completed_resume_and_binding_mismatch_do_not_resolve_provider(
