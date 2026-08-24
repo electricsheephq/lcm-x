@@ -352,15 +352,17 @@ class _AccountingProvider:
             if _is_provider_predispatch_error(exc):
                 if isinstance(before_calls, int) and isinstance(after_calls, int):
                     dispatches = max(0, after_calls - before_calls)
-                else:
-                    dispatches = max(0, dispatches - 1)
             elif isinstance(before_calls, int) and isinstance(after_calls, int):
                 dispatches = max(dispatches, max(0, after_calls - before_calls))
             elif dispatches == 0:
                 dispatches = 1
-            usage_complete = dispatches == 0
+            if not _is_provider_predispatch_error(exc):
+                usage_complete = dispatches == 0
             raise
         finally:
+            after_calls = _provider_dispatch_count(self._provider)
+            if isinstance(before_calls, int) and isinstance(after_calls, int):
+                dispatches = max(0, after_calls - before_calls)
             self._accounting.record_call(
                 self._role,
                 document_count=len(values),
@@ -417,6 +419,7 @@ class _AccountingProvider:
         before_calls = _provider_dispatch_count(self._provider)
         local_dispatches = 0
         known_usage = 0
+        usage_observed = False
         usage_complete = True
 
         method = getattr(self._provider, "embed_chunk_group_batches", None)
@@ -427,9 +430,7 @@ class _AccountingProvider:
             # deliberately switches to one attempt. Observe provider counters so
             # accounting never changes the safe 429 retry contract.
             result = method(groups)
-        except Exception as exc:
-            if _is_provider_predispatch_error(exc):
-                local_dispatches = max(0, local_dispatches - 1)
+        except Exception:
             self._accounting.record_call(
                 self._role,
                 document_count=document_count,
@@ -441,7 +442,7 @@ class _AccountingProvider:
         # Generators perform work during iteration, so account after consumption
         # rather than before returning the iterator.
         def consume():
-            nonlocal known_usage, local_dispatches, usage_complete
+            nonlocal known_usage, local_dispatches, usage_complete, usage_observed
             try:
                 for batch in result:
                     local_dispatches += 1
@@ -449,17 +450,19 @@ class _AccountingProvider:
                     if usage is None:
                         usage_complete = False
                     else:
+                        usage_observed = True
                         known_usage += usage
                     yield batch
             except Exception as exc:
-                if _is_provider_predispatch_error(exc):
-                    local_dispatches = max(0, local_dispatches - 1)
-                usage_complete = local_dispatches == 0
+                if not _is_provider_predispatch_error(exc):
+                    usage_complete = local_dispatches == 0
                 raise
             finally:
                 after_calls = _provider_dispatch_count(self._provider)
                 if isinstance(before_calls, int) and isinstance(after_calls, int):
                     local_dispatches = max(0, after_calls - before_calls)
+                if local_dispatches and not usage_observed:
+                    usage_complete = False
                 self._accounting.record_call(
                     self._role,
                     document_count=document_count,
@@ -719,9 +722,7 @@ class ContentHashEmbeddingCache:
                             known_usage += max(0, int(usage))
                         except (TypeError, ValueError, OverflowError):
                             usage_complete = False
-                except Exception as exc:
-                    if _is_provider_predispatch_error(exc):
-                        dispatches = 0
+                except Exception:
                     raise
                 finally:
                     after_calls = _provider_dispatch_count(self._provider)
@@ -861,7 +862,9 @@ class ContentHashEmbeddingCache:
                 digest_by_index.update(
                     (index, digest) for (index, _text), digest in zip(group, digests)
                 )
-        yield from cached_batches
+        for batch in cached_batches:
+            self.last_usage_tokens = 0
+            yield batch
         if not missing_groups:
             return
         method = getattr(self._provider, "embed_chunk_group_batches", None)
@@ -907,9 +910,7 @@ class ContentHashEmbeddingCache:
                 yield _CachedDocumentBatch(
                     indexes, tuple(tuple(vector) for vector in vectors)
                 )
-        except Exception as exc:
-            if _is_provider_predispatch_error(exc):
-                dispatches = 0
+        except Exception:
             raise
         finally:
             after_calls = _provider_dispatch_count(self._provider)

@@ -142,6 +142,65 @@ def test_contextual_cache_observation_preserves_provider_retry_contract(tmp_path
     assert accounting.snapshot()["chunk_documents"]["provider_dispatches"] == 2
 
 
+@pytest.mark.parametrize("path", ["documents", "contextual"])
+def test_cache_preserves_completed_dispatch_before_later_refusal(tmp_path, path):
+    class PartiallyRefusingProvider(_CountingProvider):
+        supports_contextualized_grouping = True
+
+        def _batches(self, indexes, texts):
+            yield type(
+                "Batch",
+                (),
+                {
+                    "indexes": indexes,
+                    "vectors": tuple(self.embed_documents([text])[0] for text in texts),
+                },
+            )()
+            error = RuntimeError("later request refused")
+            error.transport_started = False
+            raise error
+
+        def embed_document_batches(self, texts):
+            yield from self._batches((0,), texts[:1])
+
+        def embed_chunk_group_batches(self, groups):
+            index, text = groups[0][0]
+            yield from self._batches((index,), (text,))
+
+    cached = lme.ContentHashEmbeddingCache(
+        PartiallyRefusingProvider("context-model"), tmp_path / f"{path}.db"
+    )
+    with pytest.raises(RuntimeError, match="later request refused"):
+        if path == "documents":
+            cached.embed_documents(["first", "second"])
+        else:
+            list(cached.embed_chunk_group_batches([[(0, "first")], [(1, "second")]]))
+    assert cached.provider_dispatches == 1
+
+
+def test_contextual_cache_hit_adds_no_stale_usage(tmp_path):
+    class UsageProvider(_ContextualProvider):
+        last_usage_tokens = 0
+
+        def embed_chunk_group_batches(self, groups, *, before_dispatch=None):
+            self.last_usage_tokens = 5
+            yield from super().embed_chunk_group_batches(
+                groups, before_dispatch=before_dispatch
+            )
+
+    cached = lme.ContentHashEmbeddingCache(
+        UsageProvider("context-model"), tmp_path / "usage.db"
+    )
+    accounting = lme.ProviderAccounting()
+    wrapped = lme._AccountingProvider(cached, accounting, "chunk_documents")
+    groups = [[(0, "chunk")]]
+    list(wrapped.embed_chunk_group_batches(groups))
+    list(wrapped.embed_chunk_group_batches(groups))
+    row = accounting.snapshot()["chunk_documents"]
+    assert row["provider_dispatches"] == 1
+    assert row["usage_tokens"] == 5
+
+
 class TestCacheEnvGate:
     def test_unset_env_returns_provider_object_unchanged(self, monkeypatch):
         raw = _CountingProvider()
