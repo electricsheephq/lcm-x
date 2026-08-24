@@ -118,7 +118,7 @@ export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=fastembed       # in-process ONNX, CPU-friendly
 # Default model downloads ~90–130 MB once at warmup (bge-small / MiniLM class)
 
-# Or, if you already run Ollama:
+# Or, if you run Ollama on a verified loopback endpoint:
 # export LCM_EMBEDDING_PROVIDER=ollama
 # export LCM_EMBEDDING_MODEL=nomic-embed-text
 # export LCM_OLLAMA_BASE_URL=http://127.0.0.1:11434
@@ -128,17 +128,24 @@ Optional: installing `numpy` accelerates KNN on large vector sets; without it
 LCM uses a dependency-free bounded scan that stays correct, just smaller-scale
 (see [Embeddings setup](embeddings-setup.md)).
 
+The shipped Ollama provider assumes the configured service is trusted and does
+not apply the cloud privacy gate. A non-loopback or forwarded Ollama URL is not
+air-gapped; endpoint-aware locality remains #337.
+
 ## Profile: cost-guarded cloud embeddings
 
-Voyage's free tier (200M tokens on the voyage-4 family) is far more than this
-workload typically needs — LCM embeds bounded summaries, not raw transcripts.
-To keep hard boundaries anyway:
+LCM embeds bounded summaries by default, not raw transcripts. Verify current
+Voyage pricing and account limits before use, then keep hard boundaries:
 
 ```bash
 export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=voyage
 export LCM_EMBEDDING_MODEL=voyage-4-lite      # cheapest tier, $0.02/M after free
-export VOYAGE_API_KEY=...
+export VOYAGE_API_KEY=...                     # supply through your secret manager
+
+# Mandatory for cloud warmup, backfill, and semantic queries in v0.23.1.
+export LCM_SENSITIVE_PATTERNS_ENABLED=true
+export LCM_SENSITIVE_PATTERNS=api_key,bearer_token,password_assignment,private_key
 
 # Interactive queries: hard per-call wall-clock budget (default 3s)
 export LCM_EMBEDDING_QUERY_TIMEOUT_S=3
@@ -150,7 +157,34 @@ export LCM_EMBEDDING_BACKFILL_TIMEOUT_S=120
 
 Always dry-run `/lcm embed backfill` first: it reports document counts and
 token estimates with the same eligibility rules apply-mode uses, so the
-estimate is the bill.
+estimate is a gross-list-price planning estimate, not a billing guarantee.
+Account-specific free tokens and other billing adjustments are not included.
+The cloud embedding privacy transform changes provider input only and never
+rewrites existing durable messages, summaries, FTS rows, or payloads. The same
+`LCM_SENSITIVE_PATTERNS_ENABLED=true` setting also redacts configured matches
+from ordinary future ingest before they reach SQLite messages, FTS, summaries,
+active replay, or ordinary externalized ingest payloads; those matched values
+are intentionally not recoverable from those LCM surfaces. One exception is
+repetitive-assistant quarantine: it preserves the original assistant output in
+an externalized payload before redacting the replay copy, so that quarantined
+payload may retain configured matches. Both paths are configured-pattern
+boundaries rather than a guarantee that every sensitive fact has been
+classified.
+
+An existing OpenAI-format embedding service uses the same cloud boundary:
+
+```bash
+export LCM_EMBEDDINGS_ENABLED=true
+export LCM_EMBEDDING_PROVIDER=openai-compatible
+export LCM_EMBEDDING_MODEL=BAAI/bge-m3
+export LCM_EMBEDDING_BASE_URL=https://embedding-service.example/v1
+export LCM_EMBEDDING_API_KEY=...              # supply through your secret manager
+export LCM_SENSITIVE_PATTERNS_ENABLED=true
+export LCM_SENSITIVE_PATTERNS=api_key,bearer_token,password_assignment,private_key
+```
+
+The shipped `openai-compatible` identity is conservatively treated as cloud,
+even if the configured endpoint happens to be local.
 
 ## Verifying a profile
 

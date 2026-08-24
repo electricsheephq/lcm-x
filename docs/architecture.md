@@ -5,12 +5,20 @@ outside the quickstart README while preserving the details new operators and
 reviewers need. Runtime compatibility identifiers remain `hermes-lcm` for the
 plugin and `lcm` for the context engine.
 
+The released product baseline for this note is
+`v0.23.1@81d8d41197dddc4c09b57097f4955ebae32366a9`. The source snapshot
+used for reconciliation is
+`main@3d4fbb4c979dc09aef0b831bb50d928e0e18d68f`. Stable product and main
+development identities must be recorded separately in release, benchmark, and
+runtime evidence.
+
 ## What It Does
 
 - **SQLite message store** - preserves raw messages by default before compaction
 - **Summary DAG** - compacts older context into depth-aware summary nodes
 - **Bounded recovery** - pages raw messages, child summaries, and externalized payloads without flooding the main context
-- **Agent tools** - `lcm_grep`, `lcm_describe`, `lcm_expand`, and `lcm_expand_query`
+- **Agent tools** - 15 schemas spanning retrieval, session/provenance,
+  query/evidence, computation, status, inspection, and doctor workflows
 - **Source-aware retrieval** - filters raw rows and summaries by descendant source lineage
 - **Session controls** - ignore noisy sessions or keep sessions read-only with glob patterns
 - **Large payload controls** - optional ingest-time externalization for oversized tool/media/raw payloads, plus transcript GC for already-externalized tool results
@@ -42,6 +50,44 @@ claim that Hermes core has no persisted record of pre-compression history.
 4. **Escalate** - shrink oversize summaries from detailed to bullets to deterministic truncate
 5. **Assemble** - combine system prompt, highest-depth summaries, and fresh tail
 6. **Retrieve** - use LCM tools to drill into compacted history or synthesize from expanded context
+
+## Derived vectors and cloud privacy
+
+Raw messages remain source truth. Summaries, FTS indexes, embeddings, temporal
+rollups, query views, and assertions are derived layers and must retain explicit
+source/provenance relationships.
+
+In v0.23.1, known cloud embedding dispatch follows a separate provider-input
+privacy path:
+
+```text
+durable summary or semantic query (unchanged)
+  -> active named sensitive-pattern policy
+  -> provider-input-only placeholder transform
+  -> residual scan / fail closed
+  -> cloud embedding provider
+  -> vector stored under provider + model + dimension + privacy revision
+```
+
+The transform never rewrites durable messages, summaries, FTS rows, or payloads.
+Disabled, empty, unknown, drifted, or residual-unsafe policies stop cloud
+warmup, document dispatch, and semantic-query dispatch before transport. Policy
+identity uses only the transform version and active pattern-name hash; it never
+contains secret-derived bytes.
+
+`voyage` and `openai-compatible` are cloud-gated. FastEmbed is in-process.
+Ollama uses a configured HTTP endpoint; the unresolved remote-endpoint locality
+contract is tracked in #337, so operators must not assume every Ollama URL is
+on-machine.
+
+Raw-chunk embeddings are a separate outbound-data boundary because their
+documents derive from verbatim message/tool content. Cloud application requires
+explicit raw-text consent in addition to the sensitive-pattern policy. That
+gate does not claim all sensitive facts have been classified.
+
+Eva's accepted hosted-vector evidence proves this architecture for one exact
+profile/configuration only. It does not make trajectory embeddings, reranking,
+remote Ollama, or fleet/customer paths safe by implication.
 
 ## Development
 

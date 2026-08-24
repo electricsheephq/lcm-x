@@ -82,31 +82,57 @@ If you installed a symlink from a separate checkout:
 
 Restart Hermes after updating.
 
-## Upgrade from v0.20.0 to v0.22.0
+## Upgrade to v0.23.1
 
-1. While the old runtime is running, run `/lcm backup`. If Hermes or any other
-   SQLite writer may still be running, this is the only supported online backup
-   path.
+1. Resolve the effective database path from `LCM_DATABASE_PATH` or `lcm_status`.
+   For an online backup, set `LCM_ENABLE_SLASH_COMMAND=true` in the old
+   runtime's launch environment, restart that runtime so `/lcm` is registered,
+   and then run `/lcm backup`. If Hermes or any other SQLite writer may still be
+   running, this is the only supported online backup path.
 2. Alternatively, stop Hermes and every other process that can write the
-   database. After all writers are fully stopped, copy the profile's `lcm.db`
-   plus any existing `lcm.db-wal` and `lcm.db-shm` companions together as one
-   quiescent snapshot. Do not copy these files separately while a writer is
-   live.
-3. Update the plugin checkout to the RC and restart Hermes.
+   database. After all writers are fully stopped, copy the configured database
+   plus its matching `-wal` and `-shm` companions together as one quiescent
+   snapshot. For the default path those companions are `lcm.db-wal` and
+   `lcm.db-shm`; a custom database path uses the same suffixes. Do not copy these
+   files separately while a writer is live.
+3. Check out exact stable
+   `v0.23.1@81d8d41197dddc4c09b57097f4955ebae32366a9`, update the
+   plugin link if needed, and restart Hermes. Verify the SHA rather than trusting
+   the tag name alone.
 4. Send one normal message, then confirm `lcm_status` reports plugin version
-   `0.22.0` and the expected database path.
+   `0.23.1`, the exact loaded path/commit, and the expected database path.
+   Verify the embedding provider, model, dimension, and privacy revision from
+   `/lcm embed warmup` or an equivalent embedding-profile receipt; `lcm_status`
+   alone does not expose that identity.
 5. For a migration-shape audit, query that database with
    `SELECT value FROM metadata WHERE key = 'schema_version';`; the expected
    result is `5`.
 
-No manual core migration, data import, or embedding backfill is required. An
-existing v0.20 database opens in place and remains on core schema version 5.
-The 0.21 assertion, query-view, and trajectory families use additive named
-feature markers and create their tables only when the corresponding store or
-workflow is invoked. A stock/default-off upgrade therefore creates none of
-those optional tables. If you later enable a 0.21-only store, treat the
-pre-upgrade backup as the downgrade path rather than opening that modified
-database with an older plugin.
+No manual core migration or data import is required for the upgrade itself.
+Existing v0.20-v0.23 databases remain on core schema version 5. Existing cloud
+vectors from a pre-v0.23.1, revisionless identity are intentionally ineligible:
+configure the privacy policy, run `/lcm embed warmup`, and verify its reported
+provider/model/dimension/privacy identity. Dry-run the selected corpus and
+record its initial `remaining` count. The default page limit is 200, so allow no
+more than `ceil(initial_remaining / 200)` apply pages plus one final dry-run
+confirmation. Require `remaining` to decrease after every successful page and
+stop immediately on an error or no progress; finish only when the final result
+reports `remaining: 0`. Summary pages use `/lcm embed backfill --apply`.
+Chunk pages use the same apply command with `--corpus chunks` and
+`--confirm-raw-text`; `--corpus both --apply` likewise requires
+`--confirm-raw-text` on every apply command. Until every selected corpus
+finishes, semantic coverage is degraded and FTS remains the fallback.
+Assertion, query-view, trajectory, rollup, and embedding families remain
+additive/default-off and create derived state only when their workflows are
+invoked. If you later enable one of those stores, keep the pre-upgrade cold set
+as the downgrade path rather than mixing old code with newly created sidecars.
+
+Cloud embeddings are a separate operator decision. Before warmup, summary or
+chunk backfill, or semantic-query dispatch, enable a nonempty known sensitive
+pattern policy. Run `/lcm embed backfill` without `--apply` first. Raw-chunk
+cloud backfill additionally requires `--confirm-raw-text`; the privacy
+transform only catches configured patterns and is not a general data
+classification system.
 
 Temporal rollup settings do not change. When rollups are enabled, maintenance
 now runs through bounded eventual background work instead of blocking session
@@ -134,15 +160,19 @@ Expected signals:
 - ordinary skill discovery includes `hermes-lcm`; plugin-qualified explicit
   loading is `hermes-lcm:hermes-lcm` on hosts that support plugin skills
 
-Typical output:
+After following the exact-stable upgrade steps above, typical output is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm v0.23.0-rc1 (15 tools)
+  ✓ hermes-lcm v0.23.1 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm
 ```
+
+An untagged checkout of the reconciled `main` baseline instead reports
+`hermes-lcm v0.23.0-rc1 (15 tools)`. Version text alone is not release proof;
+verify the loaded commit and tag.
 
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
 `lcm_doctor`, and `/lcm doctor` also report the loaded plugin path and
@@ -234,8 +264,10 @@ environment variables:
 | `LCM_EMBEDDINGS_ENABLED` | `false` | Opt in to embedding warmup, backfill, and semantic retrieval storage |
 | `LCM_RERANK_WINDOW_LIMIT` | `0` | Optional positive cap on the `lcm_recall` rerank delivery window; `0` keeps the historical window unchanged, while a bound can stabilize the delivery set at `k ≤ limit` |
 | `LCM_RERANK_MARGIN` | `0.0` | Optional positive relevance-gap gate that holds the incoming rank-1 `lcm_recall` candidate unless the rerank challenger clears the margin |
-| `LCM_EMBEDDING_PROVIDER` | empty | Embedding provider: `voyage`, `ollama`, or `fastembed` |
+| `LCM_EMBEDDING_PROVIDER` | empty | Embedding provider: `voyage`, `ollama`, `fastembed`, or `openai-compatible` (`openai`/`siliconflow` aliases resolve to that provider identity) |
 | `LCM_EMBEDDING_MODEL` | empty | Provider model identifier registered by `/lcm embed warmup` |
+| `LCM_EMBEDDING_BASE_URL` | empty | Required API root for `openai-compatible`; `/embeddings` is appended after trailing-slash normalization |
+| `LCM_EMBEDDING_API_KEY_ENV` | `LCM_EMBEDDING_API_KEY` | Name of the environment variable holding the OpenAI-compatible endpoint key; store the value in an operator secret manager, never in config/docs |
 | `LCM_EMBEDDING_STORAGE_DTYPE` | `float32` | Vector storage dtype for newly-registered embedding profiles: `float32` (byte-identical legacy path) or `int8` (per-vector quantization plus a sign-bit prescreen, a distinct profile identity). See [Vector storage scale options (v3)](#vector-storage-scale-options-v3) |
 | `LCM_EMBEDDING_STORE_DIM` | `0` | Optional Matryoshka truncation dimension for newly-registered profiles (`0` = full profile dim); truncated vectors are renormalized and are also a distinct profile identity |
 | `LCM_EMBEDDING_BINARY_PRESCREEN` | `false` | Write the sign-bit prescreen for float32 identities too (int8 identities always write it), unlocking the full-corpus two-stage KNN; flipping it on an already-populated identity mints a new, distinct identity rather than mutating the existing one |
@@ -387,6 +419,14 @@ the vector profile revision. Disabling or changing the policy after warmup
 causes query and backfill dispatch to refuse until a new warmup registers the
 new identity. Durable messages, summaries, FTS rows, and payloads are not
 rewritten by this provider boundary.
+
+The cloud gate applies to provider identity `voyage`/`voyageai` and
+`openai-compatible` (including the `openai` and `siliconflow` configuration
+aliases after resolution). An OpenAI-compatible endpoint can be local or
+remote, but the shipped provider identity is conservatively cloud-gated. Set
+`LCM_EMBEDDING_BASE_URL` and the configured API-key environment name, then keep
+the same sensitive-pattern policy requirement unless a future reviewed
+endpoint-locality contract says otherwise.
 
 ### Cache policy boundary
 
@@ -879,9 +919,10 @@ error/traceback content. The v0.23.1 cloud boundary transforms configured
 sensitive-pattern matches before transport, but it cannot classify every
 possible sensitive fact. When the provider is a cloud provider (e.g. Voyage),
 `--corpus chunks|both --apply` **refuses** unless you also pass
-`--confirm-raw-text`. Local providers (fastembed/ollama) never transmit text
-off-box and are exempt. Historical source remains unchanged; only the provider
-input is transformed. See
+`--confirm-raw-text`. FastEmbed is in-process and exempt. The shipped Ollama
+provider is also exempt from the cloud gate, so use raw-chunk backfill only with
+a verified trusted local/loopback endpoint; #337 tracks endpoint-aware locality.
+Historical source remains unchanged; only provider input is transformed. See
 [embeddings-setup.md](embeddings-setup.md) for the full discussion.
 
 ### Contextualized chunk grouping
