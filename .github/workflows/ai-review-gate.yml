@@ -142,6 +142,7 @@ jobs:
                   throw Error('dispatch packet invalid');
                 if (context.ref !== `refs/heads/${defaultBranch}` || context.sha !== protectedSha)
                   throw Error('dispatch must execute from current protected default branch');
+                if (reconciled.failures.length) throw Error('open PR reconciliation incomplete');
                 const target = await snapshot(prNumber, defaultBranch);
                 const priorDispatchIds = [];
                 for (const check of target.check_runs) {

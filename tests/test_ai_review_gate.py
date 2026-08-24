@@ -147,6 +147,21 @@ def test_live_state_and_thread_failures_fail_closed():
         assert evaluate(data, NOW)["decision"] == "FAIL"
 
 
+def test_nested_receipt_pr_number_requires_exact_integer_type():
+    for invalid_pr_number in (True, 1.0):
+        receipts = [receipt("acceptance"), receipt("adversarial")]
+        for item in receipts:
+            item["pr_number"] = 1
+        receipts[0]["pr_number"] = invalid_pr_number
+
+        result = evaluate_reconciliation(
+            _v2_dispatch(_v2_snapshot(1), receipts_override=receipts), NOW
+        )
+
+        assert result["decision"] == "FAIL"
+        assert "ACCEPTANCE_PR_NUMBER_INVALID" in result["blockers"]
+
+
 def test_duplicate_task_and_receipt_ids_fail():
     data = payload(["AGENTS.md"])
     data["receipts"] = [
@@ -256,6 +271,25 @@ def test_workflow_rechecks_complete_target_state_before_success():
     assert "target.unresolved_threads !== 0" in workflow
     assert "matches.length > 1" in workflow
     assert "DUPLICATE_TRUSTED_CHECK" in workflow
+
+
+def test_workflow_reconciliation_failure_is_terminal_before_target_promotion():
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
+    ).read_text(encoding="utf-8")
+
+    target_reset = workflow.index(
+        "await emit(prNumber, base, head, 'failure', 'Protected base changed"
+    )
+    reconciliation_stop = workflow.index(
+        "if (reconciled.failures.length) throw Error('open PR reconciliation incomplete');"
+    )
+    target_snapshot = workflow.index(
+        "const target = await snapshot(prNumber, defaultBranch);"
+    )
+    target_success = workflow.index("conclusion = 'success';")
+
+    assert target_reset < reconciliation_stop < target_snapshot < target_success
 
 
 def _v2_snapshot(pr_number: int, *, complete: bool = True):

@@ -201,6 +201,8 @@ def _receipt_blockers(receipts: Any, live: dict[str, Any], now: datetime) -> lis
         selected.append(receipt)
         if set(receipt) != RECEIPT_FIELDS:
             blockers.append(f"{lane.upper()}_SCHEMA_INVALID")
+        if type(receipt.get("pr_number")) is not int or receipt["pr_number"] <= 0:
+            blockers.append(f"{lane.upper()}_PR_NUMBER_INVALID")
         if any(receipt.get(k) != v for k, v in expected.items()):
             blockers.append(f"{lane.upper()}_BINDING_MISMATCH")
         if not all(_identifier(receipt.get(k)) for k in ("reviewer_id", "task_id", "receipt_id")):
