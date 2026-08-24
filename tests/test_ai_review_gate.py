@@ -348,6 +348,24 @@ def test_red_base_cannot_reconstruct_a_stored_peer_packet():
     assert packet_for_peer["state_fingerprint"] == state_fingerprint(peer)
 
 
+def test_dispatch_id_reuse_reads_only_validated_exact_peer_check():
+    peer = _v2_snapshot(351)
+    stale = deepcopy(peer["check_runs"][0])
+    stale["external_id"] = f"ai-review-gate:351:{'4' * 40}:{HEAD}"
+    stale_packet = json.loads(stale["output_summary"])
+    stale_packet["dispatch_id"] = "dispatch-stale"
+    stale["output_summary"] = json.dumps(stale_packet)
+    peer["check_runs"].insert(0, stale)
+
+    result = evaluate_reconciliation(
+        _v2_dispatch(_v2_snapshot(350), peers=[peer], dispatch_id="dispatch-351"), NOW
+    )
+
+    assert result["decision"] == "FAIL"
+    assert "DISPATCH_ID_NOT_FRESH" in result["blockers"]
+    assert result["peers"][0]["preserve"] is True
+
+
 def test_red_base_accepts_dispatch_without_authenticated_producer_or_attempt_guard():
     target = _v2_snapshot(350)
     data = _v2_dispatch(target, producer={"login": "100yenadmin", "id": 239388517})

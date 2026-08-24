@@ -345,12 +345,9 @@ def evaluate_reconciliation(data: Any, now: datetime | None = None) -> dict[str,
     seen_dispatches: set[str] = set()
     for item, peer in zip(peer_results, peers):
         if item["preserve"]:
-            summary = next((run.get("output_summary", "") for run in peer.get("check_runs", []) if isinstance(run, dict) and run.get("name") == "AI review exact-head" and run.get("conclusion") == "success"), "")
-            try:
-                value = json.loads(summary)
-                seen_dispatches.add(value.get("dispatch_id"))
-            except (TypeError, ValueError, json.JSONDecodeError):
-                pass
+            _, packet = _check_blockers(peer)
+            if packet is not None:
+                seen_dispatches.add(packet.get("dispatch_id"))
     if dispatch_id in seen_dispatches:
         blockers.append("DISPATCH_ID_NOT_FRESH")
     return {
