@@ -85,9 +85,10 @@ Restart Hermes after updating.
 ## Upgrade to v0.23.1
 
 1. Resolve the effective database path from `LCM_DATABASE_PATH` or `lcm_status`.
-   While the old runtime is running, enable `LCM_ENABLE_SLASH_COMMAND=true` and
-   run `/lcm backup`. If Hermes or any other SQLite writer may still be running,
-   this is the only supported online backup path.
+   For an online backup, set `LCM_ENABLE_SLASH_COMMAND=true` in the old
+   runtime's launch environment, restart that runtime so `/lcm` is registered,
+   and then run `/lcm backup`. If Hermes or any other SQLite writer may still be
+   running, this is the only supported online backup path.
 2. Alternatively, stop Hermes and every other process that can write the
    database. After all writers are fully stopped, copy the configured database
    plus its matching `-wal` and `-shm` companions together as one quiescent
@@ -99,8 +100,10 @@ Restart Hermes after updating.
    plugin link if needed, and restart Hermes. Verify the SHA rather than trusting
    the tag name alone.
 4. Send one normal message, then confirm `lcm_status` reports plugin version
-   `0.23.1`, the exact loaded path/commit, the expected database path, and the
-   configured embedding/privacy identity.
+   `0.23.1`, the exact loaded path/commit, and the expected database path.
+   Verify the embedding provider, model, dimension, and privacy revision from
+   `/lcm embed warmup` or an equivalent embedding-profile receipt; `lcm_status`
+   alone does not expose that identity.
 5. For a migration-shape audit, query that database with
    `SELECT value FROM metadata WHERE key = 'schema_version';`; the expected
    result is `5`.
@@ -108,9 +111,17 @@ Restart Hermes after updating.
 No manual core migration or data import is required for the upgrade itself.
 Existing v0.20-v0.23 databases remain on core schema version 5. Existing cloud
 vectors from a pre-v0.23.1, revisionless identity are intentionally ineligible:
-configure the privacy policy, run `/lcm embed warmup`, dry-run the backfill, and
-then run `/lcm embed backfill --apply` to repopulate the privacy-bound identity.
-Until that finishes, semantic coverage is degraded and FTS remains the fallback.
+configure the privacy policy, run `/lcm embed warmup`, and verify its reported
+provider/model/dimension/privacy identity. Dry-run the selected corpus and
+record its initial `remaining` count. The default page limit is 200, so allow no
+more than `ceil(initial_remaining / 200)` apply pages plus one final dry-run
+confirmation. Require `remaining` to decrease after every successful page and
+stop immediately on an error or no progress; finish only when the final result
+reports `remaining: 0`. Summary pages use `/lcm embed backfill --apply`.
+Chunk pages use the same apply command with `--corpus chunks` and
+`--confirm-raw-text`; `--corpus both --apply` likewise requires
+`--confirm-raw-text` on every apply command. Until every selected corpus
+finishes, semantic coverage is degraded and FTS remains the fallback.
 Assertion, query-view, trajectory, rollup, and embedding families remain
 additive/default-off and create derived state only when their workflows are
 invoked. If you later enable one of those stores, keep the pre-upgrade cold set
