@@ -50,18 +50,17 @@ Require success on the pinned head for:
 - `test (3.12)`
 - `test (3.13)`
 - `test (3.14)`
-- `Analyze (actions)`
-- `Analyze (javascript-typescript)`
-- `Analyze (python)`
+- `AI review exact-head`
 
 Treat pending, skipped, missing, stale-head, or failing required checks as blocking. Require one
 result per required name; resolve each Actions run and bind its `head_sha` to `$head` and its
-`workflow_id` to protected `CI` or `CodeQL`. Reject name-only, duplicate, or mixed identities.
-If a required workflow changes, require exact-head code-owner review of its diff and identities.
+`workflow_id` to protected `CI` or the protected AI-review issuer. Reject name-only, duplicate,
+or mixed identities. A workflow-policy change is high-risk and needs both exact-head AI lanes.
 
-## 4. Verify Review Coverage
+## 4. Verify Exact-Head Review Coverage
 
-Read approvals and review threads directly; aggregate `reviewDecision` is not exact-head proof:
+Read review threads and the required AI check directly; aggregate `reviewDecision` is not
+exact-head proof:
 
 ```bash
 gh api graphql --paginate \
@@ -71,11 +70,6 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       headRefOid reviewDecision
-      author { login }
-      reviews(first: 100, after: $endCursor, states: [APPROVED, CHANGES_REQUESTED, DISMISSED]) {
-        nodes { author { login } commit { oid } state submittedAt }
-        pageInfo { hasNextPage endCursor }
-      }
     }
   }
 }'
@@ -95,23 +89,22 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
 }'
 ```
 
-- Require `reviewDecision: APPROVED` and `headRefOid` equal to `$head`, then group by author and
-  use only each author's latest opinionated review by `submittedAt`. Reject any latest
-  review with `state: CHANGES_REQUESTED`. Require at least one latest `APPROVED` review whose
-  `commit.oid` equals `headRefOid`, whose author differs from the PR author, and whose author is
-  listed for changed paths in the protected base revision's `.github/CODEOWNERS`.
+- Require one successful `AI review exact-head` check-run from GitHub Actions app `15368` on
+  `$head`. Read its content-free summary and bind its receipt IDs, lanes, evidence digests,
+  policy version, scores, and risk class. Routine/docs/benchmark changes require one
+  `acceptance` receipt. Governance, security, data-integrity, migration, persistence, lifecycle,
+  runtime, workflow-policy, unknown-risk, and Hermes host-contract changes require distinct
+  `acceptance` and `adversarial` receipts. Every receipt must report `PASS`, score at least 95,
+  and zero findings; scores are never averaged.
 - Require every returned review thread to have `isResolved: true`; list and stop on any
   unresolved thread.
-- For governance, data-integrity, security, migration, compaction, persistence, lifecycle/session
-  identity, or Hermes host-contract changes, require one independent semantic review covering
-  the named risk lane from a trusted checkout outside the PR-controlled tree.
-- After a review-driven head change, require a delta review for the changed risk surface and
-  re-read the head SHA and checks.
+- After a review-driven head change, require new receipts for the changed risk surface and
+  re-read the head SHA and checks. A lifecycle reset makes the required check fail until then.
 - Give every verified finding one terminal disposition. Do not turn unverified possibilities
   or nits into merge blockers.
 
-Do not count CI, author self-review, a flat bot status comment, or this skill as independent
-semantic review.
+Do not count ordinary CI, author self-review, a flat bot status comment, or this skill as an AI
+review receipt. Readiness is evidence only and never grants merge authority.
 
 ## 5. Check Hermes And Lossless Boundaries
 
@@ -131,8 +124,9 @@ uncertain, comment or report the relationship; do not close the issue.
 
 ## 7. Merge Deterministically
 
-Immediately before merging, repeat both paginated GraphQL queries from Section 4, reapply every
-Section 4 gate, and require `reviewDecision: APPROVED`. Only after those checks pass, run:
+Immediately before merging, repeat the paginated thread query from Section 4, reapply every
+Section 4 gate, and require the exact-head AI check to remain successful. Only after those checks
+pass, run:
 
 ```bash
 current_head="$(gh pr view <PR> --repo electricsheephq/lcm-x --json headRefOid --jq .headRefOid)"
@@ -156,7 +150,7 @@ Verify the result:
 merge_commit="$(gh pr view <PR> --repo electricsheephq/lcm-x \
   --json state,mergeCommit --jq 'select(.state == "MERGED") | .mergeCommit.oid')"; test -n "$merge_commit" && \
 test "$(gh api repos/electricsheephq/lcm-x/commits/main --jq .sha)" = "$merge_commit" && \
-required="$(gh api repos/electricsheephq/lcm-x/rulesets/20888757 --jq '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[] | {name: .context, app_id: .integration_id}]')" && gh api "repos/electricsheephq/lcm-x/commits/$merge_commit/check-runs?per_page=100" | jq -e --argjson required "$required" --argjson expected '["workflow-lint","lint","test (3.11)","test (3.12)","test (3.13)","test (3.14)","Analyze (actions)","Analyze (javascript-typescript)","Analyze (python)"]' '(($required | map(.name) | sort) == ($expected | sort)) and ([.check_runs[] | select(.status == "completed" and .conclusion == "success") | {name, app_id: .app.id}]) as $passed | ($required - $passed | length == 0)'
+required="$(gh api repos/electricsheephq/lcm-x/rulesets/20888757 --jq '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[] | {name: .context, app_id: .integration_id}]')" && gh api "repos/electricsheephq/lcm-x/commits/$merge_commit/check-runs?per_page=100" | jq -e --argjson required "$required" --argjson expected '["workflow-lint","lint","test (3.11)","test (3.12)","test (3.13)","test (3.14)","AI review exact-head"]' '(($required | map(.name) | sort) == ($expected | sort)) and ([.check_runs[] | select(.status == "completed" and .conclusion == "success") | {name, app_id: .app.id}]) as $passed | ($required - $passed | length == 0)'
 ```
 - Confirm the PR is merged and every Section 3 required check on the merge commit completed successfully.
 - Confirm verified closing issues are closed as completed.

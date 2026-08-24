@@ -144,11 +144,26 @@ def test_repository_policy_states_the_automation_boundary():
     assert "## Automation Boundary" in policy
     assert "Model output alone cannot close, label, assign, push, approve, or merge." in policy
     assert "Automated repair is opt-in" in policy
-    assert (
-        "Security and data-integrity code changes and public disclosure retain non-author "
-        "human code-owner approval." in normalized_policy
-    )
+    assert "distinct exact-head acceptance and adversarial AI review receipts" in normalized_policy
+    assert "each passing at 95 or above" in normalized_policy
     assert "Classification alone does not elevate routine reversible issue metadata" in policy
+
+
+def test_codeowners_and_landing_policy_use_the_exact_head_ai_gate():
+    owners = (REPO_ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
+    landing = (
+        REPO_ROOT / ".agents" / "skills" / "land-pr" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    review = (
+        REPO_ROOT / ".agents" / "skills" / "review-pr" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+
+    assert "* @100yenadmin" in owners
+    assert "Tosko4" not in owners
+    assert "AI review exact-head" in landing
+    assert "AI review exact-head" in review
+    assert "Analyze (actions)" not in landing
+    assert "non-author code owner" not in landing.lower()
 
 
 def test_triage_prompt_and_contributor_automation_scope_are_bounded():
