@@ -1681,6 +1681,53 @@ def test_accounted_warmup_attempt_is_not_omitted():
     assert row["usage_tokens"] == 3
 
 
+@pytest.mark.parametrize("path", ["flat", "cached", "contextual"])
+def test_predispatch_refusal_records_no_provider_transport(tmp_path, path):
+    import benchmarking.longmemeval as lme
+
+    lme._ensure_hermes_lcm_package()
+    from hermes_lcm.embedding_provider import ProviderPreDispatchError
+
+    class RefusingProvider(_IdentityEmbedder):
+        transport_calls = 0
+
+        def embed_document_batches(self, texts, *, before_dispatch=None):
+            if before_dispatch is not None:
+                before_dispatch((0,))
+            raise ProviderPreDispatchError("refused before document transport")
+            yield  # pragma: no cover - keep this an iterator
+
+        def embed_chunk_group_batches(self, groups, *, before_dispatch=None):
+            if before_dispatch is not None:
+                before_dispatch((0,))
+            raise ProviderPreDispatchError("refused before contextual transport")
+            yield  # pragma: no cover - keep this an iterator
+
+    raw = RefusingProvider("voyage-context-4")
+    provider = (
+        lme.ContentHashEmbeddingCache(raw, tmp_path / "cache.sqlite3")
+        if path == "cached"
+        else raw
+    )
+    accounting = ProviderAccounting()
+    wrapped = lme._AccountingProvider(provider, accounting, "chunk_documents")
+
+    with pytest.raises(ProviderPreDispatchError):
+        if path == "contextual":
+            list(wrapped.embed_chunk_group_batches([[(0, "chunk")]]))
+        else:
+            wrapped.embed_documents(["chunk"])
+
+    row = accounting.snapshot()["chunk_documents"]
+    assert row["requests"] == 1
+    assert row["provider_dispatches"] == 0
+    assert row["usage_tokens"] == 0
+    assert row["usage_tokens_complete"] is True
+    assert raw.transport_calls == 0
+    if path == "cached":
+        assert provider.provider_dispatches == 0
+
+
 def test_content_cache_exposes_internal_split_dispatches_and_usage(tmp_path):
     import benchmarking.longmemeval as lme
 

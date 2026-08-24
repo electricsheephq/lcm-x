@@ -215,6 +215,10 @@ class ProviderAccounting:
         self.degraded_outcomes.extend(str(outcome) for outcome in outcomes)
 
 
+def _is_provider_predispatch_error(exc: BaseException) -> bool:
+    return getattr(exc, "transport_started", None) is False
+
+
 def _accounted_provider_attempt(
     provider: Any,
     accounting: ProviderAccounting | None,
@@ -236,10 +240,10 @@ def _accounted_provider_attempt(
         raise
     finally:
         after_calls = getattr(provider, "provider_dispatches", None)
-        if isinstance(before_calls, int) and isinstance(after_calls, int):
-            dispatches = max(0, after_calls - before_calls)
-        elif failure is not None and failure.__class__.__name__ == "ProviderPreDispatchError":
+        if failure is not None and _is_provider_predispatch_error(failure):
             dispatches = 0
+        elif isinstance(before_calls, int) and isinstance(after_calls, int):
+            dispatches = max(0, after_calls - before_calls)
         else:
             dispatches = 1
         raw_usage = getattr(provider, "last_usage_tokens", None) if succeeded else None
@@ -327,9 +331,14 @@ class _AccountingProvider:
             return [list(vector) for vector in result]
         except Exception as exc:
             after_calls = getattr(self._provider, "provider_dispatches", None)
-            if isinstance(before_calls, int) and isinstance(after_calls, int):
+            if _is_provider_predispatch_error(exc):
+                if isinstance(before_calls, int) and isinstance(after_calls, int):
+                    dispatches = max(0, after_calls - before_calls)
+                else:
+                    dispatches = max(0, dispatches - 1)
+            elif isinstance(before_calls, int) and isinstance(after_calls, int):
                 dispatches = max(dispatches, max(0, after_calls - before_calls))
-            elif dispatches == 0 and exc.__class__.__name__ != "ProviderPreDispatchError":
+            elif dispatches == 0:
                 dispatches = 1
             usage_complete = dispatches == 0
             raise
@@ -364,7 +373,7 @@ class _AccountingProvider:
             after_calls = getattr(self._provider, "provider_dispatches", None)
             if isinstance(before_calls, int) and isinstance(after_calls, int):
                 dispatches = max(0, after_calls - before_calls)
-            elif exc.__class__.__name__ != "ProviderPreDispatchError":
+            elif not _is_provider_predispatch_error(exc):
                 dispatches = 1
             usage_complete = dispatches == 0
             raise
@@ -396,7 +405,9 @@ class _AccountingProvider:
             raise AttributeError("provider does not support contextualized grouping")
         try:
             result = method(groups, before_dispatch=dispatch)
-        except Exception:
+        except Exception as exc:
+            if _is_provider_predispatch_error(exc):
+                local_dispatches = max(0, local_dispatches - 1)
             self._accounting.record_call(
                 self._role,
                 document_count=document_count,
@@ -408,7 +419,7 @@ class _AccountingProvider:
         # Generators perform work during iteration, so account after consumption
         # rather than before returning the iterator.
         def consume():
-            nonlocal known_usage, usage_complete
+            nonlocal known_usage, local_dispatches, usage_complete
             try:
                 for batch in result:
                     usage = self._usage_tokens()
@@ -417,7 +428,9 @@ class _AccountingProvider:
                     else:
                         known_usage += usage
                     yield batch
-            except Exception:
+            except Exception as exc:
+                if _is_provider_predispatch_error(exc):
+                    local_dispatches = max(0, local_dispatches - 1)
                 usage_complete = local_dispatches == 0
                 raise
             finally:
@@ -675,13 +688,22 @@ class ContentHashEmbeddingCache:
                             known_usage += max(0, int(usage))
                         except (TypeError, ValueError, OverflowError):
                             usage_complete = False
+                except Exception as exc:
+                    if _is_provider_predispatch_error(exc):
+                        dispatches = max(0, dispatches - 1)
+                    raise
                 finally:
                     self.provider_dispatches += dispatches
                 vectors = [vectors_by_index[index] for index in range(len(missing_texts))]
             else:
                 self.provider_dispatches += 1
                 dispatches = 1
-                vectors = list(self._provider.embed_documents(missing_texts))
+                try:
+                    vectors = list(self._provider.embed_documents(missing_texts))
+                except Exception as exc:
+                    if _is_provider_predispatch_error(exc):
+                        self.provider_dispatches -= 1
+                    raise
                 usage = getattr(self._provider, "last_usage_tokens", None)
                 try:
                     known_usage = max(0, int(usage))
@@ -728,6 +750,10 @@ class ContentHashEmbeddingCache:
             result = self._provider.embed_query(text)
             succeeded = True
             return result
+        except Exception as exc:
+            if _is_provider_predispatch_error(exc):
+                self.provider_dispatches -= 1
+            raise
         finally:
             usage = (
                 getattr(self._provider, "last_usage_tokens", None)
