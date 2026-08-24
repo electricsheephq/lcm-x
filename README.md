@@ -103,39 +103,41 @@ from a compression layer into a memory system: **large-output externalization
 and context-budget controls** (giant tool results move to recoverable refs
 instead of crowding the prompt), **temporal memory** (day/week/month rollups
 plus natural-time recall through `lcm_recent`), and **semantic retrieval**
-(embedding-backed `lcm_grep` semantic/hybrid modes with free-tier cloud or
-fully-local providers). See the
+(embedding-backed `lcm_grep` semantic/hybrid modes with Voyage,
+OpenAI-compatible endpoints, Ollama, or in-process FastEmbed). See the
 [Feature overview](docs/features-overview.md) for what each family does and
 why, and [Agent configuration profiles](docs/agent-config-profiles.md) for
 copy-paste setups per agent type.
 
 ## Project status
 
-The current baseline is `v0.22.0`. It includes the opt-in evidence and
-adaptive-retrieval tools, the deterministic LongMemEval retrieval harness, and
-committed configuration-specific retrieval results. The judged end-to-end QA
-run and the recommended Voyage retrieval run are still pending; retrieval
-scores do not prove answer quality, merge readiness, runtime safety, or customer
-readiness.
+The latest stable release is
+`v0.23.1@81d8d41197dddc4c09b57097f4955ebae32366a9`. It adds the
+fail-closed provider-input privacy boundary used by cloud summary/query
+embeddings while preserving the 15-tool surface, schema-5 core store, and
+default-off experimental features.
 
-Large follow-on changes are being reviewed separately:
+Stable release identity and the continuing `main` development line are
+separate proof planes. The source snapshot used for the current reconciliation
+is `main@3d4fbb4c979dc09aef0b831bb50d928e0e18d68f`; do not describe an
+arbitrary main checkout as the installed stable product.
 
-- [LCM Teams v1 (#200)](https://github.com/electricsheephq/lcm-x/pull/200)
-  is an opt-in, multi-principal isolation candidate. It is not part of RC2 or
-  current `main`, and the canonical [Teams roadmap
-  (#75)](https://github.com/electricsheephq/lcm-x/issues/75) still requires the
-  host carrier, completed policy/connector work, and a witnessed two-principal
-  acceptance pilot.
-- [RC2 reconciliation (#214)](https://github.com/electricsheephq/lcm-x/pull/214)
-  is a CI-only candidate for post-RC2 runtime fixes; it is not a release.
-- [Codex continuity and whitepaper control flow
-  (#215)](https://github.com/electricsheephq/lcm-x/pull/215) is an unmerged
-  candidate for provider-native continuity, compaction, concurrent storage,
-  and persistent map operators.
+That exact development baseline still identifies itself as
+`hermes-lcm v0.23.0-rc1 (15 tools)`. The stable tag identifies itself as
+`hermes-lcm v0.23.1 (15 tools)`. This is tracked as a deferred version-policy
+decision rather than being silently restamped by documentation changes.
 
-See [Current project state](docs/project-status.md) for the exact evidence,
-known gaps, and proof boundaries, and [Benchmark methodology](benchmarks/METHODOLOGY.md)
-for reproducible evaluation details.
+Eva has accepted exact stable v0.23.1 with hosted `voyage-4-large`,
+1024-dimensional float32 summary vectors under one privacy-bound identity.
+That evidence establishes runtime safety for Eva only, not fleet, customer,
+Teams, answer-accuracy, or universal benchmark readiness.
+
+The active finite evaluation is [#341](https://github.com/electricsheephq/lcm-x/issues/341):
+an answer-blind, exact-stable LongMemEval retrieval-provenance audit. It keeps
+product and benchmark-instrument identities separate and cannot change product
+retrieval behavior. See [Current project state](docs/project-status.md), the
+[roadmap](ROADMAP.md), and [Benchmark methodology](benchmarks/METHODOLOGY.md)
+for current identities, gaps, and proof boundaries.
 
 ## LCM vs built-in compression
 
@@ -236,15 +238,19 @@ Expected signals:
 - the normal available-skills index includes `hermes-lcm`; current hosts can
   also resolve the explicit plugin-qualified skill `hermes-lcm:hermes-lcm`
 
-Typical output:
+After checking out the exact stable tag, typical output is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm v0.23.0-rc1 (15 tools)
+  ✓ hermes-lcm v0.23.1 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm
 ```
+
+An untagged checkout of the reconciled `main` baseline instead reports
+`hermes-lcm v0.23.0-rc1 (15 tools)`; verify the loaded commit before treating
+either string as release proof.
 
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
 `lcm_doctor`, and `/lcm doctor` also report the loaded plugin path and
@@ -279,16 +285,24 @@ If you installed a symlink from a separate checkout:
 
 Restart Hermes after updating.
 
-For the `v0.22.0` line, take a normal backup of `lcm.db` before updating,
-then update the checkout and restart Hermes. No manual core migration or
-backfill is required: the core schema remains version 5. New assertion,
-query-view, and adaptive-retrieval state is additive, created only after the
-corresponding opt-in is enabled, and stored in the same profile database under
-named feature markers. The five new query/evidence tool schemas are visible in
-the tool list on stock installs, but automatic extraction, pre-answer evidence,
-assertion storage, query-view storage, and adaptive retrieval remain off. See
-[the operator upgrade and opt-in notes](docs/operator-guide.md#upgrade-from-v0200-to-v0210-rc2)
-before enabling them.
+Before upgrading to v0.23.1, resolve the effective database path from
+`LCM_DATABASE_PATH` or `lcm_status`. For an online backup, set
+`LCM_ENABLE_SLASH_COMMAND=true` in the old runtime's launch environment,
+restart that runtime so `/lcm` is registered, then run `/lcm backup`.
+Otherwise stop every SQLite writer and copy that configured database with its
+WAL/SHM companions as one cold set. Check out the exact stable tag/SHA, restart
+Hermes, and verify the loaded path, version, database path, schema 5, and all 15
+tools. No manual core migration is required for the upgrade itself. Existing
+cloud vectors from a pre-v0.23.1 identity require privacy-policy warmup, an
+identity check from the warmup/profile output, and the finite monotonic
+dry-run/apply loop in the operator guide before semantic coverage is complete.
+
+Cloud embeddings are a separate opt-in. They require
+`LCM_SENSITIVE_PATTERNS_ENABLED=true` with a nonempty known pattern policy
+before warmup, summary/chunk backfill, or semantic-query dispatch. Dry-run the
+backfill first; raw-chunk cloud backfill also requires explicit raw-text consent.
+See [the operator upgrade and privacy notes](docs/operator-guide.md#upgrade-to-v0231)
+before enabling embeddings.
 
 ## Commands and tools
 
@@ -507,7 +521,9 @@ enabled, nonempty, known policy; transforms matching provider input to
 pattern-only placeholders; rejects residual matches; and binds the transform
 version plus active-pattern-name hash into the vector profile revision. Policy
 drift refuses dispatch until `/lcm embed warmup` registers the new identity.
-Local FastEmbed and Ollama calls do not require this cloud gate.
+FastEmbed is in-process. The shipped Ollama provider does not apply the cloud
+gate, so use it only with a trusted local/loopback endpoint; #337 tracks
+endpoint-aware locality for remote Ollama configurations.
 
 ### Threshold ownership
 
@@ -873,8 +889,8 @@ exposes retrieval tools that can drill back into exact stored sources.
 - [Operator guide](docs/operator-guide.md) — install, activation, full
   configuration reference, diagnostics
 - [Retrieval tools reference](docs/retrieval-tools.md) — exact tool contracts
-- [Current project state](docs/project-status.md) — RC2 baseline, active
-  candidate PRs, missing gates, and proof boundaries
+- [Current project state](docs/project-status.md) — v0.23.1 stable baseline,
+  separate main-development identity, active work, and proof boundaries
 - [Benchmark methodology and results](benchmarks/METHODOLOGY.md) — retrieval
   and judged-QA evaluation contracts, reproduction, and landed result index
 - [Embeddings setup](docs/embeddings-setup.md) — free-tier and local embedding
@@ -923,9 +939,10 @@ priority. New features should be scoped, backwards-compatible, and tested.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for branch, validation, and PR guidance.
 See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
-See the [tags page](https://github.com/electricsheephq/lcm-x/tags) and
-[CHANGELOG](CHANGELOG.md) for version history. LCM-X does not currently publish
-a GitHub Release object or packaged artifact for `v0.22.0`.
+See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
+[tags page](https://github.com/electricsheephq/lcm-x/tags), and
+[CHANGELOG](CHANGELOG.md) for version history. `v0.23.1` is the latest stable
+GitHub Release; verify its exact SHA before installation.
 
 ## License
 

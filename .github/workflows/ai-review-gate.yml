@@ -1,0 +1,136 @@
+name: AI review exact-head issuer
+
+on:
+  push:
+    branches: [main]
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
+  repository_dispatch:
+    types: [ai-review-receipts]
+
+concurrency:
+  group: ai-review-gate-global
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+
+jobs:
+  issue:
+    name: Issue exact-head AI review check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reconcile and validate trusted exact-head state
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const fs = require('fs'), cp = require('child_process');
+            const owner = context.repo.owner, repo = context.repo.repo;
+            const emit = async (prNumber, base, head, conclusion, summary) => {
+              const externalId = `ai-review-gate:${prNumber}:${base}:${head}`;
+              const listed = await github.paginate(github.rest.checks.listForRef,
+                {owner, repo, ref: head, check_name: 'AI review exact-head', filter: 'all', per_page: 100});
+              const matches = listed.filter(run => run.name === 'AI review exact-head' &&
+                run.external_id === externalId && run.app?.id === 15368);
+              const payload = {owner, repo, status: 'completed', conclusion,
+                output: {title: 'Exact-head AI review', summary: summary.slice(0, 65000)}};
+              if (matches.length > 1) {
+                for (const match of matches)
+                  await github.rest.checks.update({...payload, check_run_id: match.id});
+                throw Error('DUPLICATE_TRUSTED_CHECK');
+              }
+              return matches.length === 1
+                ? github.rest.checks.update({...payload, check_run_id: matches[0].id})
+                : github.rest.checks.create({...payload, name: 'AI review exact-head',
+                    head_sha: head, external_id: externalId});
+            };
+            const unresolvedThreads = async (prNumber) => {
+              const query = `query($owner:String!,$repo:String!,$pr:Int!,$cursor:String){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100,after:$cursor){nodes{isResolved}pageInfo{hasNextPage endCursor}}}}}`;
+              let cursor = null, unresolved = 0;
+              do {
+                const result = await github.graphql(query, {owner, repo, pr: prNumber, cursor});
+                const page = result.repository.pullRequest.reviewThreads;
+                unresolved += page.nodes.filter(node => !node.isResolved).length;
+                cursor = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+              } while (cursor);
+              return unresolved;
+            };
+            const listFiles = (prNumber) => github.paginate(github.rest.pulls.listFiles,
+              {owner, repo, pull_number: prNumber, per_page: 100})
+              .then(files => files.map(file => file.filename));
+            const reconcileOpenPullRequests = async (defaultBranch) => {
+              const open = await github.paginate(github.rest.pulls.list,
+                {owner, repo, state: 'open', base: defaultBranch, per_page: 100});
+              const failures = [];
+              for (const candidate of open) {
+                try {
+                  const live = await github.rest.pulls.get({owner, repo, pull_number: candidate.number});
+                  if (live.data.state !== 'open' || live.data.base.ref !== defaultBranch)
+                    throw Error('PR is no longer an open default-base change');
+                  await emit(live.data.number, live.data.base.sha, live.data.head.sha, 'failure',
+                    'Protected base changed; fresh exact-base/head review receipts are required.');
+                } catch (error) {
+                  failures.push(`${candidate.number}:${error.message}`);
+                }
+              }
+              if (failures.length) core.setFailed(`Failed to reset PRs: ${failures.join(',')}`);
+              return failures;
+            };
+            const repository = await github.rest.repos.get({owner, repo});
+            const defaultBranch = repository.data.default_branch;
+            const branch = await github.rest.repos.getBranch({owner, repo, branch: defaultBranch});
+            const protectedSha = branch.data.commit.sha;
+            const failures = await reconcileOpenPullRequests(defaultBranch);
+            if (failures.length) return;
+            if (context.eventName !== 'repository_dispatch') return;
+            let prNumber = null, base = null, head = null;
+            let conclusion = 'failure', summary = 'Validation failed closed.';
+            try {
+              const dispatch = context.payload.client_payload;
+              if (!dispatch || typeof dispatch !== 'object' || Array.isArray(dispatch) ||
+                  !Array.isArray(dispatch.receipts)) throw Error('dispatch payload invalid');
+              prNumber = Number(dispatch.pr_number);
+              if (!Number.isInteger(prNumber) || prNumber <= 0)
+                throw Error('dispatch PR number invalid');
+              if (context.ref !== `refs/heads/${defaultBranch}` || context.sha !== protectedSha)
+                throw Error('dispatch must execute from current protected default branch');
+              let pr = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
+              base = pr.data.base.sha;
+              head = pr.data.head.sha;
+              await emit(prNumber, base, head, 'failure', 'Validation started; fail closed until complete.');
+              if (pr.data.base.ref !== defaultBranch || pr.data.state !== 'open' || pr.data.draft)
+                throw Error('pull request is not an open, ready default-branch change');
+              const files = await listFiles(prNumber);
+              const unresolved = await unresolvedThreads(prNumber);
+              const source = await github.rest.repos.getContent({owner, repo,
+                path: 'scripts/ai_review_gate.py', ref: protectedSha});
+              if (Array.isArray(source.data) || source.data.encoding !== 'base64') throw Error('validator unavailable');
+              fs.writeFileSync('/tmp/gate.py', Buffer.from(source.data.content, 'base64'));
+              const input = {repository: `${owner}/${repo}`, pr_number: prNumber,
+                base_sha: base, head_sha: head, changed_paths: files,
+                receipts: dispatch.receipts, unresolved_threads: unresolved,
+                api_complete: true, pagination_complete: true};
+              const run = cp.spawnSync('python', ['/tmp/gate.py'], {input: JSON.stringify(input), encoding: 'utf8'});
+              if (run.error) throw run.error;
+              const result = JSON.parse(run.stdout || '{}');
+              const live = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
+              const liveBranch = await github.rest.repos.getBranch({owner, repo, branch: defaultBranch});
+              const liveFiles = await listFiles(prNumber);
+              const liveUnresolved = await unresolvedThreads(prNumber);
+              if (live.data.head.sha !== head || live.data.base.sha !== base ||
+                  live.data.base.ref !== defaultBranch || live.data.state !== 'open' || live.data.draft ||
+                  liveBranch.data.commit.sha !== protectedSha ||
+                  context.ref !== `refs/heads/${defaultBranch}` || context.sha !== protectedSha ||
+                  JSON.stringify(liveFiles) !== JSON.stringify(files) || unresolved !== 0 ||
+                  liveUnresolved !== 0) throw Error('PR, protected-base, files, or threads drift');
+              if (run.status !== 0 || result.decision !== 'PASS') throw Error('receipt validation failed');
+              conclusion = 'success';
+              summary = JSON.stringify(result);
+            } catch (error) {
+              summary = `Validation failed closed: ${error.message}`;
+            }
+            if (prNumber && base && head) await emit(prNumber, base, head, conclusion, summary);
+            if (conclusion !== 'success') core.setFailed(summary);

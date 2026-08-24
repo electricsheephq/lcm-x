@@ -143,7 +143,9 @@ def _question() -> lme.Question:
 
 def test_prewarm_is_resumable_and_skips_all_warm_units(tmp_path):
     raw = _CountingProvider()
-    cached = lme.ContentHashEmbeddingCache(raw, tmp_path / "embeddings.db")
+    cached = lme.ContentHashEmbeddingCache(
+        raw, tmp_path / "embeddings.db", provider_id="stub", model_id="stub-hash-64"
+    )
 
     first = lme.prewarm_embedding_cache([_question()], cached)
     calls_after_first = raw.calls
@@ -154,6 +156,16 @@ def test_prewarm_is_resumable_and_skips_all_warm_units(tmp_path):
     assert second["already_cached"] == second["unique_request_units"]
     assert second["populated"] == 0
     assert raw.calls == calls_after_first
+
+
+def test_prewarm_rejects_split_summary_chunk_identity_before_embedding(tmp_path):
+    raw = _CountingProvider("voyage-4-large")
+    cached = lme.ContentHashEmbeddingCache(raw, tmp_path / "embeddings.db")
+
+    with pytest.raises(ValueError, match="summary and chunk embedding identities differ"):
+        lme.prewarm_embedding_cache([_question()], cached)
+
+    assert raw.calls == 0
 
 
 def test_cache_cli_subcommands_parse_without_execution():

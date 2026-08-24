@@ -103,7 +103,7 @@ versioning plan". Keyword search misses it; semantic search doesn't.
 | Feature | What you get | Why it matters |
 |---|---|---|
 | Vector store substrate | SQLite-backed embedding storage keyed by canonical provider identity, with benchmark-chosen KNN ladder | Switching models/providers can never silently mix incompatible vectors |
-| Pluggable providers | `voyage` (cloud, free tier), `ollama` (local server), `fastembed` (fully local, ONNX) | Zero-cost local privacy or best-quality cloud — same config surface |
+| Pluggable providers | `voyage` (cloud), `ollama` (configured server), `fastembed` (in-process ONNX), `openai-compatible` (OpenAI-format endpoint) | Reuse a hosted or local embedding service under one identity-locked config surface |
 | Explicit warmup | `/lcm embed warmup` resolves, dimension-locks, and registers the profile | Model downloads and dimension surprises happen at setup time, never mid-conversation |
 | Backfill (dry-run first) | `/lcm embed backfill` estimates cost/coverage before `--apply`; leased, crash-safe, truthful status | Embedding an existing archive is a deliberate, budgeted, resumable operation |
 | Semantic + hybrid `lcm_grep` | `mode='semantic'` (KNN over summaries) and `mode='hybrid'` (RRF fusion with full-text) | Meaning-based recall with the exact-match safety net, one absolute latency budget, graceful degrade to full-text |
@@ -113,6 +113,13 @@ Safety posture: `mode='full_text'` remains the byte-compatible default;
 semantic timeouts degrade to full-text with an explicit `degraded_to_fts`
 marker; filters that the semantic arm cannot honor exactly cause a degrade
 rather than approximate results; source-lineage checks fail closed.
+
+Known cloud providers fail closed unless sensitive-pattern handling is enabled
+with a nonempty recognized policy. Provider input is transformed without
+rewriting durable messages, summaries, FTS rows, or payloads, and the effective
+privacy policy is part of vector identity. This is pattern-based protection,
+not general content classification. Cloud raw-chunk backfill also requires an
+explicit raw-text consent flag because chunks are derived from verbatim source.
 
 Key switches: `LCM_EMBEDDINGS_ENABLED`, `LCM_EMBEDDING_PROVIDER`,
 `LCM_EMBEDDING_MODEL` (+ timeouts). Setup walkthrough:
@@ -133,30 +140,24 @@ flowchart LR
 
 ### Choosing an embedding provider
 
-| | `voyage` | `ollama` | `fastembed` |
-|---|---|---|---|
-| Runs where | Voyage AI cloud | Your Ollama server | In-process (ONNX, CPU) |
-| Cost | **200M tokens free** (voyage-4 family; no credit card), then from $0.02/M | Free | Free |
-| Setup | API key only | Ollama install + model pull | Optional `fastembed` pip install; ~90–130 MB model download at warmup |
-| Quality | Highest (frontier embedding models) | Model-dependent | Solid small-model baseline (`BAAI/bge-small-en-v1.5`, `all-MiniLM-L6-v2`) |
-| Privacy | Summaries leave the machine | Fully local | Fully local |
+| | `voyage` | `ollama` | `fastembed` | `openai-compatible` |
+|---|---|---|---|---|
+| Runs where | Voyage AI cloud | Configured Ollama endpoint | In-process (ONNX, CPU) | Configured OpenAI-format endpoint |
+| Cost | Provider pricing | Endpoint-dependent | Local compute | Endpoint-dependent |
+| Setup | API key | Ollama service + model | Optional `fastembed` install; model download at warmup | Base URL, model ID, and configured API-key environment |
+| Quality | Model-dependent frontier service | Model-dependent | Small local baseline | Endpoint/model-dependent |
+| Privacy | Cloud policy required | Always treated as trusted/exempt by the shipped code; a remote or forwarded endpoint receives ungated content, with endpoint-aware hardening deferred to #337 | On-machine | Conservatively cloud-gated by the shipped provider identity |
 
-**The Voyage free tier is generous for this workload.** LCM embeds bounded
-summaries, not raw transcripts — a heavy month of agent use is typically a few
-million tokens, so 200M free tokens covers initial backfill plus years of
-queries. The same free account also includes **200M free reranker tokens**
-(`rerank-2.5` at $0.05/M and `rerank-2.5-lite` at $0.02/M after) — LCM's hybrid
-mode currently fuses with RRF and does not call an external reranker, but the
-key you set up today already unlocks one for tools that use it, and it is the
-natural next enhancement for hybrid retrieval here.
+LCM embeds bounded summaries by default rather than raw transcripts. Dry-run a
+backfill to measure the selected corpus and verify current provider pricing
+immediately before any paid execution.
+`lcm_recall` can optionally rerank a bounded fused candidate window with Voyage,
+but reranking remains default-off and has its own cloud payload/privacy contract
+(#336). `lcm_grep` hybrid mode remains RRF-only.
 
-**Pairing note for code-search users:** if you already run a Voyage-backed
-code-graph tool (for example GitNexus, which uses `voyage-code-3` embeddings
-and `rerank-2.5` reranking in its premium mode, and a small local ONNX model —
-`snowflake-arctic-embed-xs` — in its default mode), one `VOYAGE_API_KEY`
-serves both: code search and agent memory draw from the same free allocation,
-and the fully-local pairing (`fastembed` here, the built-in ONNX model there)
-keeps both features offline with zero shared setup.
+Provider accounts and quotas may be shared with other tools, but LCM-X does not
+assume that another tool's model, endpoint, privacy policy, or billing contract
+is compatible. Register and account for the LCM vector identity independently.
 
 ## How the families compose
 

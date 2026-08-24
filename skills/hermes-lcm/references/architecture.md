@@ -2,6 +2,9 @@
 
 LCM-X keeps raw messages in profile-local SQLite and builds a summary DAG to keep active context bounded.
 
+Released baseline: `v0.23.1@81d8d41197dddc4c09b57097f4955ebae32366a9`.
+Stable runtime identity and a later main checkout are separate proof planes.
+
 ## Core flow
 
 1. The active context engine ingests messages into `lcm.db`.
@@ -11,6 +14,24 @@ LCM-X keeps raw messages in profile-local SQLite and builds a summary DAG to kee
 5. Recall tools recover exact source rows or bounded expanded context when summaries are insufficient.
 
 Raw messages are source truth. Summary nodes, embeddings, temporal rollups, query views, and assertions are derived and rebuildable layers with explicit provenance.
+
+## Cloud embedding privacy boundary
+
+Known cloud embedding paths transform provider input without rewriting durable
+source. Before warmup, document backfill, or semantic-query dispatch, LCM
+requires an enabled, nonempty, recognized sensitive-pattern policy; canonicalizes
+existing placeholders; replaces matches with pattern-only placeholders; scans
+for residual matches; and fails closed before transport on any invalid state.
+
+Vector identity binds provider, model, dimension, storage shape, and the active
+privacy revision. A policy change requires a new warmup/identity rather than
+mixing vectors. Evidence and status expose aggregate policy state, never matched
+content.
+
+Cloud raw-chunk embedding additionally requires explicit raw-text consent because
+chunks derive from verbatim message/tool content. The pattern gate is not a
+general classifier. `openai-compatible` is conservatively cloud-gated; Ollama
+endpoint locality must not be inferred solely from the provider name (#337).
 
 ## Scope model
 

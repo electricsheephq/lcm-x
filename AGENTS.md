@@ -98,9 +98,9 @@ Run `actionlint` when workflows change. Record exact commands and results in the
   authorization immediately before an authorized write.
 - Model output alone cannot close, label, assign, push, approve, or merge.
 - Automated repair is opt-in and limited to the exact accepted issue and current gate.
-- Security and data-integrity code changes and public disclosure retain non-author human
-  code-owner approval. Classification alone does not elevate routine reversible issue metadata
-  to that stronger gate.
+- Security and data-integrity changes require distinct exact-head acceptance and adversarial AI
+  review receipts, each passing at 95 or above. Public disclosure still requires an explicit
+  maintainer decision. Classification alone does not elevate routine reversible issue metadata.
 - Use `.agents/skills/triage-backlog/SKILL.md` read-only unless a maintainer explicitly
   authorizes one exact mutation; never use it for an automatic backlog sweep.
 - Invoking a skill never creates write authority. Routine reversible issue metadata needs one
@@ -112,14 +112,19 @@ Run `actionlint` when workflows change. Record exact commands and results in the
 ## Review And Merge
 
 - Use `.agents/skills/land-pr/SKILL.md` when deciding readiness or landing a PR.
-- Pin the PR `headRefOid`; checks and semantic review must cover that head or an explicitly
-  bounded delta.
-- Require one independent semantic review for changes involving data integrity, security,
-  migrations, compaction, lifecycle/session identity, persistence, or a Hermes host contract.
+- Pin the PR base SHA and `headRefOid`; checks and semantic review must cover that exact pair or
+  an explicitly bounded delta. A protected-base change invalidates prior AI receipts.
+- Keep strict required-status enforcement enabled. If a base-push reset API call fails, GitHub's
+  up-to-date requirement must still block merging until a head synchronization resets the AI
+  check and fresh exact-base/head receipts pass.
+- Require the protected `AI review exact-head` check. Every PR, including routine, docs, and
+  benchmark changes, requires distinct exact-head `acceptance` and `adversarial` receipts.
+  Every receipt must bind the exact head, pass at 95 or above, and report zero findings;
+  labels cannot reduce the required lanes.
 - Do not merge with failing/pending required checks, unresolved actionable threads, a changed
   head, missing issue acceptance, or unowned product/security decisions.
 - Never push directly to `main`, bypass the ruleset, use auto-merge, or force-push/delete
-  `main`.
+  `main`. The one recorded #218 bootstrap merge is the only exception and cannot be reused.
 - Use merge commits for PRs so contributor and upstream commits remain intact. Do not squash
   or rebase-merge into `main`.
 - Merge deterministically with the pinned head:
@@ -134,10 +139,10 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
 
 ## Maintainer And Bot Roles
 
-- `@100yenadmin` and `@Tosko4` are code owners. The PR author cannot satisfy their own required
-  approval.
+- `@100yenadmin` is the code owner. CODEOWNERS does not satisfy review readiness by itself;
+  protected exact-head CI, AI review, and thread gates do.
 - Bots and agents may triage, reproduce, implement, test, review, and prepare merge evidence.
-- Bots and agents may not bypass checks, approvals, code-owner review, review-thread resolution,
-  issue acceptance, or a product/security owner decision.
+- Bots and agents may not bypass checks, exact-head AI review, review-thread resolution, issue
+  acceptance, or a product/security owner decision.
 - Maintainers own feature acceptance, priority, compatibility decisions, terminal dispositions,
   and releases.

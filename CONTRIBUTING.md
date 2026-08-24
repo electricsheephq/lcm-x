@@ -96,12 +96,14 @@ why in the PR.
 Maintainers use the protected-main `.agents/skills/land-pr/SKILL.md`:
 
 - required checks must pass on the pinned `headRefOid` with trusted workflow identities;
-- one non-author code owner must approve the current head;
+- the protected `AI review exact-head` check must pass on the current head;
+- every PR requires distinct exact-head `acceptance` and `adversarial` receipts, including
+  routine/docs/benchmark changes, each at 95 or above;
+- labels cannot reduce the required lanes, and every receipt must report zero findings;
 - every actionable review thread needs a terminal disposition and resolution;
-- data-integrity, security, migration, compaction, persistence, profile/session, lifecycle, and
-  Hermes-contract changes need independent semantic review;
 - accepted issues, exact-head state, and product/security decisions are re-fetched before merge;
 - merges use merge commits only—never squash, rebase, direct-main push, auto-merge, or bypass.
+  The recorded #218 bootstrap transition is the sole non-repeatable exception.
 
 After merging, maintainers verify the merge commit is current `main`, linked issue disposition,
 and the required checks on the exact merge commit. Maintainers curate user-facing release notes;
@@ -112,9 +114,9 @@ commit lists or model output do not replace those notes.
 AI and bot output is proposal and evidence by default. Models may triage, reproduce, implement,
 test, and review, but deterministic tooling must re-fetch live state before any authorized write.
 Model output alone cannot close, label, assign, push, approve, or merge. Automated repair is
-opt-in and limited to the exact accepted issue and current gate. Security or data-integrity code
-changes and public disclosure retain the repository's human approval gate; classification alone
-does not elevate routine reversible issue metadata to that stronger gate.
+opt-in and limited to the exact accepted issue and current gate. Exact-head content-free AI
+review receipts are evidence consumed by the protected deterministic gate; they do not create
+write or merge authority. Public sensitive disclosure remains an explicit maintainer decision.
 
 Use the read-only `.agents/skills/triage-backlog/SKILL.md` for one issue, pull request, or duplicate
 cluster at a time. Invoking it does not authorize backlog sweeps or GitHub writes. Routine labels,
