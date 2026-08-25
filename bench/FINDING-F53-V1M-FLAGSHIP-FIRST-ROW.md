@@ -16,8 +16,16 @@ prose flag unset — disclosed, F49-class).
 > privacy transform (it embeds directly) — the benchmark and production embedding paths
 > diverge. F53 stands as the **pre-privacy-trio flagship of record**; the re-banked successor
 > (own registration + A/A′, with the BASELINE-LEDGER privacy-trio boundary, declaring whether
-> the harness matches the production transform) settles reproducibility empirically. Do NOT
-> compare a post-v0.23.1 row against F53 without that re-bank.
+> the harness matches the production transform) settles reproducibility empirically.
+> **Scope of the freeze (arm-precise):** F53's flagship numbers ARE the production `lcm_recall`
+> arm, and that arm is frozen — do NOT compare any later production-path (`lcm_recall`) row
+> against it until the re-bank. Harness-raw arms (summary/chunk/hybrid, which never apply the
+> privacy transform) did not cross the privacy boundary and remain comparable within the raw
+> path, subject separately to the #352 instrument boundary in BASELINE-LEDGER.md.
+> **Boundary naming (exact):** the frozen boundary is the embedding-transform content change —
+> #332/#333/#338 (shipped in v0.23.1) plus any subsequent embedding-transform revision change
+> (e.g. the pending #365/#366 privacy-revision bump, which adds its own ledger row at merge) —
+> not the version label alone.
 
 
 ## 1. The row (500 questions, 6 shards, fail-closed accounting)
