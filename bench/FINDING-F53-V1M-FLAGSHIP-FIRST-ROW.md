@@ -6,6 +6,17 @@ checkpoint/embed-cache). Corpus: prepared-m, manifest sha 300cf936… (recovered
 drive and re-verified). Config identical to the smoke basis (Voyage voyage-context-3, FTS
 prose flag unset — disclosed, F49-class).
 
+> ⚠ **REPRODUCIBILITY NOTE (appended 2026-08-26).** This row was measured on lcm-x v0.22.0
+> (92fd69b7), BEFORE the v0.23.1 privacy trio (#332/#333/#338) changed embedding-input content
+> and BEFORE the #365 fix bumped the privacy transform revision. It **no longer reproduces
+> bitwise on current main** (see #367): the redaction shapes the embedded corpus, and a
+> disabled-policy raise can silently degrade `lcm_recall` to FTS-only. F53 stands as the
+> **pre-privacy-trio flagship of record**; a re-banked successor row (its own registration +
+> A/A′, with the BASELINE-LEDGER privacy-trio boundary) is the reproducible replacement, to be
+> run when it serves a product decision (not speculative spend). Do NOT compare a post-v0.23.1
+> row against F53 without that re-bank.
+
+
 ## 1. The row (500 questions, 6 shards, fail-closed accounting)
 470 scored + 30 abstention-excluded by the instrument's design; 0 instrument failures.
 | arm | recall@1 | recall@10 | ndcg@10 |
