@@ -119,6 +119,20 @@ _PRIVATE_KEY_STRICT_MIN_CHARS = 16
 # prose like "... -----BEGIN PRIVATE KEY----- and -----END PRIVATE KEY----- ..."
 # does not and must not be consumed.
 _PRIVATE_KEY_INLINE_RUN_RE = re.compile(r"[A-Za-z0-9+/]{16,}")
+# One-or-more backslashes covers every nesting depth of serialization
+# ("\\n" from json.dumps, "\\\\n" from json-of-json / logged JSON).
+_PRIVATE_KEY_ESCAPED_NEWLINE_RE = re.compile(r"\\+(?:r\\+)?n|\"")
+# Real base64 key material is high-entropy; an English word/identifier shape
+# (pure lowercase, or a single capitalized word) is overwhelmingly prose
+# (p(base64) ~1e-6 for 16+ pure-lowercase chars), so prefixed-tail
+# classification rejects it — "service productionservice" is config prose,
+# not a key line. Applies only to prefix-stripped/prefixed tails; anchored
+# body lines keep the plain alphabet rule.
+_PRIVATE_KEY_ENGLISH_TOKEN_RE = re.compile(r"[a-z]+|[A-Z][a-z]+")
+
+
+def _looks_like_english_token(token: str) -> bool:
+    return _PRIVATE_KEY_ENGLISH_TOKEN_RE.fullmatch(token) is not None
 # No ^$ anchors: used via fullmatch(text, pos, endpos), where "^" would only
 # match at the real string start, not at pos.
 # Backslash admits JSON/log-serialized keys whose newlines are literal \n
@@ -336,10 +350,29 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
     """
     model: list[tuple[int, int, int, int, int]] = []
     offset = 0
+    segments: list[tuple[int, str]] = []
     for raw in text.splitlines(keepends=True):
         line_start = offset
         offset += len(raw)
         content = raw.splitlines()[0] if raw else ""
+        if "\\" in content and "PRIVATE KEY-----" in content.upper() and (
+            _PRIVATE_KEY_ESCAPED_NEWLINE_RE.search(content) is not None
+        ):
+            # JSON/log-serialized key: literal \n (optionally \r\n) escape
+            # sequences at any serialization depth are the key's real line
+            # separators, and bare quotes delimit the serialized string — both
+            # split into virtual lines so armor headers, truncated bodies, and
+            # short tails inside serialized text classify exactly like
+            # unserialized ones (a tail glued to the JSON closer, "CDEF\"}",
+            # still classifies). Offsets stay absolute; spans stay exact.
+            pos = 0
+            for piece in _PRIVATE_KEY_ESCAPED_NEWLINE_RE.split(content):
+                seg_start = content.find(piece, pos)
+                segments.append((line_start + seg_start, piece))
+                pos = seg_start + len(piece)
+        else:
+            segments.append((line_start, content))
+    for line_start, content in segments:
         stripped = content.strip(" \t")
         lead = content.find(stripped[:1]) if stripped else 0
         c_start = line_start + (lead if stripped else 0)
@@ -389,6 +422,7 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
                 and len(parts[0].split()) <= 4
                 and len(parts[1]) >= _PRIVATE_KEY_STRICT_MIN_CHARS
                 and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(parts[1]) is not None
+                and not _looks_like_english_token(parts[1])
             ):
                 kind = _PEM_LINE_KIND_PREFIXED_B64
         model.append((kind, redact_start, c_end, line_start, marker_end))
@@ -433,6 +467,32 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
         cursor = redact_to
         changed = True
 
+    def effective_kind(idx: int) -> int:
+        # Inside a BEGIN-anchored scan only: log collectors prefix every line
+        # ("INFO Proc-Type: …", "INFO CDEF"), so a line the context-free model
+        # calls OTHER gets one more chance with up to 4 leading tokens
+        # stripped. English-word tails (pure lowercase, or one capitalized
+        # word) never count as body — "service productionservice" is prose.
+        kind = model[idx][0]
+        if kind != _PEM_LINE_KIND_OTHER:
+            return kind
+        rest = text[model[idx][1]:model[idx][2]]
+        for _ in range(4):
+            split = rest.split(None, 1)
+            if len(split) < 2:
+                return _PEM_LINE_KIND_OTHER
+            rest = split[1]
+            if _PRIVATE_KEY_ARMOR_HEADER_RE.fullmatch(rest) is not None:
+                return _PEM_LINE_KIND_ARMOR
+            if (
+                _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(rest) is not None
+                and not _looks_like_english_token(rest)
+            ):
+                if len(rest) >= _PRIVATE_KEY_STRICT_MIN_CHARS:
+                    return _PEM_LINE_KIND_STRICT_B64
+                return _PEM_LINE_KIND_SHORT_B64
+        return _PEM_LINE_KIND_OTHER
+
     i = 0
     while i < n:
         kind, redact_start, content_end, line_start, _marker_end = model[i]
@@ -445,14 +505,23 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
             armor = 0
             while (
                 j < n
-                and model[j][0] == _PEM_LINE_KIND_ARMOR
+                and effective_kind(j) == _PEM_LINE_KIND_ARMOR
                 and armor < _PRIVATE_KEY_MAX_ARMOR_HEADERS
             ):
                 armor += 1
                 j += 1
-            if armor and j < n and model[j][0] == _PEM_LINE_KIND_BLANK:
+            if armor and j < n and (
+                model[j][0] == _PEM_LINE_KIND_BLANK
+                or (
+                    model[j][0] == _PEM_LINE_KIND_OTHER
+                    and len(text[model[j][1]:model[j][2]].split()) <= 1
+                    and model[j][2] - model[j][1] <= 10
+                )
+            ):
+                # The armor/body separator: a blank line, or its log-prefixed
+                # remnant (a lone short prefix token).
                 j += 1
-            if armor and (j >= n or model[j][0] not in (
+            if armor and (j >= n or effective_kind(j) not in (
                 _PEM_LINE_KIND_STRICT_B64,
                 _PEM_LINE_KIND_SHORT_B64,
                 _PEM_LINE_KIND_PREFIXED_B64,
@@ -464,7 +533,7 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                 # structure (e.g. a bare BEGIN quoted above config lines).
                 i += 1
                 continue
-            while j < n and model[j][0] in (
+            while j < n and effective_kind(j) in (
                 _PEM_LINE_KIND_STRICT_B64,
                 _PEM_LINE_KIND_SHORT_B64,
                 _PEM_LINE_KIND_PREFIXED_B64,
@@ -514,7 +583,14 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
             continue
         if kind == _PEM_LINE_KIND_OTHER and "PRIVATE KEY-----" in text[line_start:content_end].upper():
             scan = line_start
+            candidates = 0
             while scan < content_end:
+                candidates += 1
+                if candidates > 8:
+                    # Bounded work per line: >8 unmatched BEGIN candidates on
+                    # one line is a marker storm (adversarial construction,
+                    # out of declared scope) — stop rather than go quadratic.
+                    break
                 begin = _PRIVATE_KEY_BEGIN_RE.search(text, scan, content_end)
                 if begin is None:
                     break

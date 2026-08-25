@@ -771,3 +771,61 @@ def test_round7_realistic_shapes_encrypted_json_logs(tmp_path):
     )
     with pytest.raises(EmbeddingPrivacyPolicyError):
         validate_embedding_privacy_dispatch([pair], cfg, expected_revision=revision)
+
+
+def test_round8_serialized_and_prefixed_compositions(tmp_path):
+    # Round-8: virtual-line splitting makes serialized keys first-class model
+    # input (json.dumps at any nesting depth), and BEGIN-anchored scans
+    # reclassify log-prefixed lines — so compositions of the accidental shapes
+    # (serialization x truncation x armor x prefixes) are covered by
+    # construction, with English-word tails protected.
+    import json as _json
+
+    cfg = _config(tmp_path)
+    body = "Q" * 64
+
+    serialized_truncated = _json.dumps(
+        {"log": "-----BEGIN PRIVATE KEY-----\n" + body + "\nCDEF"}
+    )
+    serialized_encrypted = _json.dumps(
+        {
+            "log": "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n"
+            "DEK-Info: AES-128-CBC,AABB\n\n" + body + "\n-----END RSA PRIVATE KEY-----"
+        }
+    )
+    doubly_serialized = _json.dumps({"outer": serialized_truncated})
+    prefixed_armor_truncated = (
+        "INFO -----BEGIN RSA PRIVATE KEY-----\nINFO Proc-Type: 4,ENCRYPTED\n"
+        "INFO DEK-Info: AES-128-CBC,AABB\nINFO\nINFO " + body + "\nplain prose stays"
+    )
+    prefixed_short_tail = "-----BEGIN PRIVATE KEY-----\n" + body + "\nINFO CDEF\nprose stays"
+    for text in (
+        serialized_truncated,
+        serialized_encrypted,
+        doubly_serialized,
+        prefixed_armor_truncated,
+        prefixed_short_tail,
+    ):
+        for redacted in (
+            redact_sensitive_text(text, cfg),
+            protect_embedding_text(text, cfg)[0],
+        ):
+            assert body not in redacted, text[:50]
+    assert "plain prose stays" in redact_sensitive_text(prefixed_armor_truncated, cfg)
+    assert "prose stays" in redact_sensitive_text(prefixed_short_tail, cfg)
+
+    # Precision: English-word lines after a bare BEGIN are prose, not body.
+    prose = "-----BEGIN PRIVATE KEY-----\nservice productionservice\nMeeting Notes About Keys"
+    for redacted in (
+        redact_sensitive_text(prose, cfg),
+        protect_embedding_text(prose, cfg)[0],
+    ):
+        assert redacted == prose
+
+    # Perf bound: same-line marker storms do bounded work per line.
+    import time as _time
+
+    storm = "-----BEGIN PRIVATE KEY----- x " * 800
+    started = _time.perf_counter()
+    redact_sensitive_text(storm, cfg)
+    assert _time.perf_counter() - started < 1.0
