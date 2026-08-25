@@ -2308,6 +2308,8 @@ def evaluate_question(
         if accounting is not None
         else chunk_provider
     )
+    from hermes_lcm.ingest_protection import embedding_provider_requires_privacy
+
     config = LCMConfig(
         database_path=str(db_path),
         embeddings_enabled=embeddings_enabled,
@@ -2316,6 +2318,11 @@ def evaluate_question(
         rerank_enabled=recall_rerank,
         rerank_window_limit=recall_rerank_window,
         rerank_margin=recall_rerank_margin,
+        # Production posture (#367/#370): a cloud provider config with the
+        # privacy transform disabled is a configuration error and now fails
+        # loud on the recall path instead of silently degrading to FTS. The
+        # harness must run cloud providers the way production runs them.
+        sensitive_patterns_enabled=embedding_provider_requires_privacy(summary_name),
     )
     ingest_start = time.perf_counter()
     # F7: clone a pre-migrated template instead of re-running schema bootstrap.
@@ -2346,16 +2353,38 @@ def evaluate_question(
     flat_chunk_batch_size = max(1, int(embedding_batch_size or 1))
     try:
         if embeddings_enabled:
-            vector_store.register_profile(model, summary_name, dim)
+            # Production posture (#367/#370): cloud providers register their
+            # vector identity under the active privacy revision, exactly as
+            # the engine does — otherwise the recall path's identity check
+            # fails loud on a revision mismatch.
+            from hermes_lcm.ingest_protection import (
+                embedding_privacy_revision,
+                embedding_provider_requires_privacy,
+            )
+
+            summary_revision = (
+                embedding_privacy_revision(config)
+                if embedding_provider_requires_privacy(summary_name)
+                else None
+            )
+            chunk_revision = (
+                embedding_privacy_revision(config)
+                if embedding_provider_requires_privacy(chunk_name)
+                else None
+            )
+            vector_store.register_profile(
+                model, summary_name, dim, revision=summary_revision or ""
+            )
             identity = vector_store.capture_identity(model, provider=summary_name)
             # The raw-chunk corpus is a distinct task='chunk' profile/identity.
             vector_store.register_profile(
-                chunk_model, chunk_name, chunk_dim, task="chunk"
+                chunk_model, chunk_name, chunk_dim, task="chunk",
+                revision=chunk_revision or "",
             )
             chunk_identity = EmbeddingIdentity.canonical(
                 chunk_name,
                 chunk_model,
-                "",
+                chunk_revision or "",
                 chunk_dim,
                 "float32",
                 "little",
@@ -3332,6 +3361,10 @@ def run_harness(
             from hermes_lcm.config import LCMConfig
 
             db_template = Path(tmp_dir) / "_template.db"
+            from hermes_lcm.ingest_protection import (
+                embedding_provider_requires_privacy as _requires_privacy,
+            )
+
             _bootstrap_db_template(
                 db_template,
                 LCMConfig(
@@ -3339,6 +3372,12 @@ def run_harness(
                     embeddings_enabled=embeddings_enabled,
                     embedding_provider=provider_set.summary_binding[0],
                     embedding_model=provider_set.summary_binding[1],
+                    # Must match the per-question config's production posture
+                    # (#367/#370) or the registered vector identity diverges
+                    # from what the recall path computes.
+                    sensitive_patterns_enabled=_requires_privacy(
+                        provider_set.summary_binding[0]
+                    ),
                 ),
             )
 

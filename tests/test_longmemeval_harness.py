@@ -1447,11 +1447,13 @@ def test_evaluate_question_separates_provider_phases_and_chunk_grouping(
     assert snapshot["chunk_documents"]["requests"] >= 1
     assert snapshot["harness_queries"]["requests"] == 2
     assert snapshot["harness_queries"]["documents"] == 2
-    # Production recall may legitimately avoid semantic transport when its
-    # fresh-session scope has no candidates. Zero here is a truthful no-dispatch,
-    # not an omitted phase; the injected-provider transport case is tested below.
-    assert snapshot["production_lcm_recall_queries"]["requests"] == 0
-    assert snapshot["production_lcm_recall_queries"]["usage_tokens"] == 0
+    # Production recall embeds its query on both arms (summary + chunk) before
+    # candidate scoping, so two provider requests are the truthful count. The
+    # previous ==0 expectation was an artifact of the pre-#370 silent privacy
+    # degrade: the cloud-privacy gate raised before any provider call and
+    # lcm_recall swallowed it into an FTS fallback, so no query ever dispatched.
+    assert snapshot["production_lcm_recall_queries"]["requests"] == 2
+    assert snapshot["production_lcm_recall_queries"]["usage_tokens"] is None
     for role in ("summary_documents", "chunk_documents", "harness_queries"):
         assert snapshot[role]["usage_tokens_complete"] is False
         assert snapshot[role]["usage_tokens"] is None
