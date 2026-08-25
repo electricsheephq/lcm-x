@@ -216,6 +216,8 @@ def _receipt_blockers(
             blockers.append(f"{lane.upper()}_SCHEMA_INVALID")
         if type(receipt.get("pr_number")) is not int or receipt["pr_number"] <= 0:
             blockers.append(f"{lane.upper()}_PR_NUMBER_INVALID")
+        if type(receipt.get("integration_id")) is not int:
+            blockers.append(f"{lane.upper()}_INTEGRATION_ID_INVALID")
         if any(receipt.get(k) != v for k, v in expected.items()):
             blockers.append(f"{lane.upper()}_BINDING_MISMATCH")
         if not bind_risk and receipt.get("risk_class") not in HIGH_RISK | {"routine"}:
@@ -467,6 +469,8 @@ def evaluate(data: Any, now: datetime | None = None) -> dict[str, Any]:
         selected.append(receipt)
         if set(receipt) != RECEIPT_FIELDS:
             blockers.append(f"{lane.upper()}_SCHEMA_INVALID")
+        if type(receipt.get("integration_id")) is not int:
+            blockers.append(f"{lane.upper()}_INTEGRATION_ID_INVALID")
         if any(receipt.get(k) != v for k, v in expected.items()):
             blockers.append(f"{lane.upper()}_BINDING_MISMATCH")
         ids = (receipt.get("reviewer_id"), receipt.get("task_id"), receipt.get("receipt_id"))

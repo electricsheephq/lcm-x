@@ -189,6 +189,32 @@ def test_dispatch_envelope_preflight_rejects_malformed_receipts():
         assert "RECEIPT_SET_INVALID" in result["blockers"]
 
 
+def test_receipt_integration_id_requires_exact_integer_type():
+    for invalid_integration_id in (True, 15368.0):
+        legacy = payload()
+        legacy["receipts"][0]["integration_id"] = invalid_integration_id
+        assert "ACCEPTANCE_INTEGRATION_ID_INVALID" in evaluate(legacy, NOW)[
+            "blockers"
+        ]
+
+        envelope = {
+            "schema_version": "2",
+            "mode": "dispatch_envelope",
+            "target": {
+                "repository": "electricsheephq/lcm-x",
+                "pr_number": 350,
+                "base_sha": BASE,
+                "head_sha": HEAD,
+            },
+            "receipts": [receipt("acceptance"), receipt("adversarial")],
+            "dispatch_id": "dispatch-envelope-fresh",
+        }
+        envelope["receipts"][0]["integration_id"] = invalid_integration_id
+        assert "ACCEPTANCE_INTEGRATION_ID_INVALID" in evaluate_reconciliation(
+            envelope, NOW
+        )["blockers"]
+
+
 def test_duplicate_task_and_receipt_ids_fail():
     data = payload(["AGENTS.md"])
     data["receipts"] = [
