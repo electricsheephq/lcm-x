@@ -585,3 +585,53 @@ def test_complete_key_with_only_short_body_lines_is_redacted(tmp_path):
     ):
         assert "abcdef" not in redacted
         assert "BEGIN RSA PRIVATE KEY" not in redacted
+
+
+def test_line_shape_variants_cannot_bypass_key_redaction(tmp_path):
+    # Round-5 (review-probe shapes): CR-only endings, indented/prefixed
+    # markers, multiple short tails, and short-line re-wraps are all key
+    # material; redaction must not be defeatable by line-shape alone.
+    cfg = _config(tmp_path)
+    body = "Q" * 64
+    variants = {
+        "cr_only": "-----BEGIN PRIVATE KEY-----\r" + body + "\r-----END PRIVATE KEY-----\r",
+        "indented": "  -----BEGIN PRIVATE KEY-----\n  " + body + "\n  -----END PRIVATE KEY-----",
+        "prefixed": "key: -----BEGIN PRIVATE KEY-----\n" + body + "\n-----END PRIVATE KEY-----",
+        "two_short_tails": "-----BEGIN PRIVATE KEY-----\n" + body + "\nBBBBBBBB\nCCCCCCCC\nprose stays",
+        "all_short_rewrap": "-----BEGIN PRIVATE KEY-----\n" + "\n".join(["AbCd1234"] * 12),
+    }
+    for name, text in variants.items():
+        for redacted in (
+            redact_sensitive_text(text, cfg),
+            protect_embedding_text(text, cfg)[0],
+        ):
+            assert body not in redacted, name
+            assert "BBBBBBBB" not in redacted, name
+            assert "AbCd1234" not in redacted, name
+    assert "prose stays" in redact_sensitive_text(variants["two_short_tails"], cfg)
+    assert redact_sensitive_text(variants["prefixed"], cfg).startswith("key: ")
+
+
+def test_decoy_begin_does_not_shield_orphan_body(tmp_path):
+    # Round-5: a bare BEGIN plus prose earlier in the text must not suppress
+    # redaction or validation of a stripped body+END later (the old detector's
+    # seen-BEGIN suppression was global and provably wrong).
+    cfg = _config(tmp_path)
+    revision = embedding_privacy_revision(cfg)
+    body = "Q" * 64
+    decoy = (
+        "-----BEGIN PRIVATE KEY-----\nThis is prose, not a key body.\n"
+        + body + "\n-----END PRIVATE KEY-----"
+    )
+    for redacted in (
+        redact_sensitive_text(decoy, cfg),
+        protect_embedding_text(decoy, cfg)[0],
+    ):
+        assert body not in redacted
+        assert "-----END PRIVATE KEY-----" not in redacted
+        assert "This is prose, not a key body." in redacted
+    protected, _r, _c = protect_embedding_text(decoy, cfg)
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+    # The raw decoy text (unredacted) must FAIL validation despite the BEGIN.
+    with pytest.raises(EmbeddingPrivacyPolicyError):
+        validate_embedding_privacy_dispatch([decoy], cfg, expected_revision=revision)
