@@ -348,7 +348,53 @@ def test_workflow_captures_exact_target_dispatch_id_before_reset():
     assert "prior_dispatch_ids: priorDispatchIds" in workflow[target_reset:]
 
 
-def _v2_snapshot(pr_number: int, *, complete: bool = True):
+def test_workflow_final_reads_every_preserved_peer_before_exit():
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
+    ).read_text(encoding="utf-8")
+
+    helper = workflow.index("const finalReadPreservedPeers = async")
+    dispatch = workflow.index("if (dispatchEvent) {")
+    target_final_read = workflow.index(
+        "const live = await github.rest.pulls.get({owner, repo, pull_number: prNumber});",
+        dispatch,
+    )
+    peer_only = workflow.index("} else {", target_final_read)
+    peer_only_return = workflow.index("return;", peer_only)
+
+    assert helper < dispatch
+    assert "if (!peer.preserve) continue;" in workflow[helper:dispatch]
+    assert "const current = await snapshot(peer.pr_number, defaultBranch);" in workflow[
+        helper:dispatch
+    ]
+    assert (
+        "const finalValidated = await runValidator({schema_version: '2', "
+        "mode: 'peer_only', peers: [current]}, protectedSha);"
+    ) in workflow[helper:dispatch]
+    assert "await emit(original.pr_number, original.base_sha, original.head_sha, 'failure'" in workflow[
+        helper:dispatch
+    ]
+    assert "await emit(currentTuple.pr_number, currentTuple.base_sha, currentTuple.head_sha, 'failure'" in workflow[
+        helper:dispatch
+    ]
+    dispatch_final_read = workflow.index(
+        "await finalReadPreservedPeers(result.peers || [], snapshots, defaultBranch, protectedSha);",
+        dispatch,
+    )
+    peer_only_final_read = workflow.index(
+        "await finalReadPreservedPeers(result.peers || [], snapshots, defaultBranch, protectedSha);",
+        peer_only,
+    )
+    assert dispatch_final_read < target_final_read
+    assert peer_only_final_read < peer_only_return
+
+
+def _v2_snapshot(
+    pr_number: int,
+    *,
+    complete: bool = True,
+    changed_paths: list[str] | None = None,
+):
     base, head = BASE, HEAD
     live = {
         "repository": "electricsheephq/lcm-x",
@@ -356,14 +402,18 @@ def _v2_snapshot(pr_number: int, *, complete: bool = True):
         "base_ref": "main",
         "base_sha": base,
         "head_sha": head,
-        "changed_paths": ["docs/operator-guide.md"], "timeline_events": [],
+        "changed_paths": (
+            ["docs/operator-guide.md"] if changed_paths is None else changed_paths
+        ),
+        "timeline_events": [],
         "unresolved_threads": 0,
         "api_complete": complete,
         "pagination_complete": complete,
         "state": "open",
         "draft": False,
     }
-    receipts = [receipt("acceptance"), receipt("adversarial")]
+    risk = "unknown" if changed_paths == [] else "routine"
+    receipts = [receipt("acceptance", risk=risk), receipt("adversarial", risk=risk)]
     for item in receipts:
         item["pr_number"] = pr_number
     packet = build_packet(live, receipts, producer={"login": "100yenadmin", "id": 239388517, "type": "User"},
@@ -441,6 +491,19 @@ def test_invalid_peer_fails_only_that_peer_but_incomplete_snapshot_blocks_target
     )
     assert incomplete["decision"] == "FAIL"
     assert "PEER_SNAPSHOT_INCOMPLETE" in incomplete["blockers"]
+
+
+def test_complete_zero_file_peer_is_not_a_repository_snapshot_failure():
+    peer = _v2_snapshot(351, changed_paths=[])
+
+    result = evaluate_reconciliation(
+        _v2_dispatch(_v2_snapshot(350), peers=[peer]), NOW
+    )
+
+    assert result["decision"] == "PASS"
+    assert result["peers"][0]["preserve"] is True
+    assert result["peers"][0]["snapshot_error"] is False
+    assert "PEER_SNAPSHOT_INCOMPLETE" not in result["blockers"]
 
 
 def test_preserved_peer_does_not_overwrite_fresh_target_packet():

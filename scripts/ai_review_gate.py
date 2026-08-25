@@ -102,7 +102,7 @@ def state_fingerprint(live: dict[str, Any]) -> str:
     """Hash only the exact-head state that receipt reuse is allowed to bind."""
     paths = live.get("changed_paths")
     events = live.get("timeline_events", [])
-    if not isinstance(paths, list) or not paths or not all(isinstance(p, str) for p in paths):
+    if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
         raise ValueError("changed paths incomplete")
     if len(paths) != len(set(paths)):
         raise ValueError("changed paths duplicate")
