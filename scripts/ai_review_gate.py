@@ -54,6 +54,11 @@ PACKET_FIELDS = {
     "head_sha", "state_fingerprint", "receipts", "producer", "run",
     "dispatch_id",
 }
+SNAPSHOT_FAILURE_BLOCKERS = {
+    "LIVE_STATE_INVALID", "REPOSITORY_MISMATCH", "PR_INVALID",
+    "BASE_SHA_INVALID", "HEAD_SHA_INVALID", "API_INCOMPLETE",
+    "PAGINATION_INCOMPLETE", "API_ERROR", "CHECKS_INCOMPLETE",
+}
 
 
 def _time(value: Any) -> datetime:
@@ -285,7 +290,10 @@ def _check_blockers(live: dict[str, Any]) -> tuple[list[str], dict[str, Any] | N
 
 def _peer_result(live: Any, now: datetime) -> dict[str, Any]:
     blockers = _live_blockers(live)
-    snapshot_error = bool(blockers)
+    snapshot_error = any(
+        blocker in SNAPSHOT_FAILURE_BLOCKERS or blocker.startswith("STATE_INCOMPLETE:")
+        for blocker in blockers
+    )
     if not blockers:
         check_errors, packet = _check_blockers(live)
         blockers.extend(check_errors)
@@ -345,9 +353,9 @@ def evaluate_reconciliation(data: Any, now: datetime | None = None) -> dict[str,
     seen_dispatches: set[str] = set()
     for item, peer in zip(peer_results, peers):
         if item["preserve"]:
-            _, packet = _check_blockers(peer)
-            if packet is not None:
-                seen_dispatches.add(packet.get("dispatch_id"))
+            _, peer_packet = _check_blockers(peer)
+            if peer_packet is not None:
+                seen_dispatches.add(peer_packet.get("dispatch_id"))
     if dispatch_id in seen_dispatches:
         blockers.append("DISPATCH_ID_NOT_FRESH")
     return {

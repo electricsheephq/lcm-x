@@ -422,6 +422,38 @@ def test_dispatch_id_reuse_reads_only_validated_exact_peer_check():
     assert result["peers"][0]["preserve"] is True
 
 
+def test_invalid_peer_fails_only_that_peer_but_incomplete_snapshot_blocks_target():
+    for field, value in (("draft", True), ("unresolved_threads", 1)):
+        peer = _v2_snapshot(351)
+        peer[field] = value
+
+        result = evaluate_reconciliation(
+            _v2_dispatch(_v2_snapshot(350), peers=[peer]), NOW
+        )
+
+        assert result["decision"] == "PASS"
+        assert result["peers"][0]["preserve"] is False
+        assert "PEER_SNAPSHOT_INCOMPLETE" not in result["blockers"]
+
+    incomplete = evaluate_reconciliation(
+        _v2_dispatch(_v2_snapshot(350), peers=[_v2_snapshot(351, complete=False)]),
+        NOW,
+    )
+    assert incomplete["decision"] == "FAIL"
+    assert "PEER_SNAPSHOT_INCOMPLETE" in incomplete["blockers"]
+
+
+def test_preserved_peer_does_not_overwrite_fresh_target_packet():
+    result = evaluate_reconciliation(
+        _v2_dispatch(_v2_snapshot(350), peers=[_v2_snapshot(351)]), NOW
+    )
+
+    assert result["decision"] == "PASS"
+    assert result["packet"]["pr_number"] == 350
+    assert result["packet"]["dispatch_id"] == "dispatch-target-fresh"
+    assert result["peers"][0]["preserve"] is True
+
+
 def test_red_base_accepts_dispatch_without_authenticated_producer_or_attempt_guard():
     target = _v2_snapshot(350)
     data = _v2_dispatch(target, producer={"login": "100yenadmin", "id": 239388517})
