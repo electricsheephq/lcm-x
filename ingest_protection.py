@@ -99,12 +99,26 @@ _WRAPPED_BASE64_MIN_LINE_CHARS = 40
 _WRAPPED_BASE64_MIN_TERMINAL_LINE_CHARS = 16
 _BASE64_ALPHABET_RE = re.compile(r"^[A-Za-z0-9+/=_\s-]+$")
 _BASE64_LINE_ALPHABET_RE = re.compile(r"^[A-Za-z0-9+/=_-]+$")
-_PRIVATE_KEY_BASE64_BODY_LINE_RE = re.compile(r"^[A-Za-z0-9+/=]{16,}$")
-# Any-width base64-alphabet line: inside a BEGIN/END context every such line
-# belongs to the key (real PEM tails are short; re-wrapped key material can be
-# arbitrarily narrow). The strict >=16 form additionally anchors orphan-body
-# detection so lone short tokens never look like key structure.
-_PRIVATE_KEY_LENIENT_BODY_LINE_RE = re.compile(r"^[A-Za-z0-9+/=]+$")
+# THREAT MODEL (private-key redaction, declared after adversarial rounds 3-6
+# of #365/#366): the scanner prevents ACCIDENTAL leakage of PEM-structured
+# key material in realistic paste/log/transcript shapes (line-separator and
+# whitespace variants, indentation and label prefixes, truncation, stripped
+# markers, re-wrapped widths, inline one-line forms). It is NOT proof against
+# an adversary who re-encodes content — no content-based redactor can be,
+# since key material can be hex/base64-re-encoded, chunk-reordered, or
+# otherwise transformed arbitrarily. The dispatch validator is the fail-closed
+# second layer on the cloud path: structures the redactor cannot parse block
+# the embedding dispatch instead of leaking.
+# Base64 payload line: padding only ever trails (=/== suffix), so assignment
+# prose like `environment=prod` never classifies as key body. Strict (>=16
+# chars) lines anchor orphan-body detection; shorter lines join a run but
+# never start structure on their own.
+_PRIVATE_KEY_BODY_CHARS_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+_PRIVATE_KEY_STRICT_MIN_CHARS = 16
+# A real inline key has a substantial contiguous base64 run between markers;
+# prose like "... -----BEGIN PRIVATE KEY----- and -----END PRIVATE KEY----- ..."
+# does not and must not be consumed.
+_PRIVATE_KEY_INLINE_RUN_RE = re.compile(r"[A-Za-z0-9+/]{16,}")
 # No ^$ anchors: used via fullmatch(text, pos, endpos), where "^" would only
 # match at the real string start, not at pos.
 _PRIVATE_KEY_INLINE_SPAN_RE = re.compile(r"[A-Za-z0-9+/=\t ]*")
@@ -288,22 +302,27 @@ _PEM_LINE_KIND_BEGIN = 1
 _PEM_LINE_KIND_END = 2
 _PEM_LINE_KIND_STRICT_B64 = 3
 _PEM_LINE_KIND_SHORT_B64 = 4
+_PEM_LINE_KIND_END_INLINE = 5
 
 
-def _pem_line_model(text: str) -> list[tuple[int, int, int, int]]:
+def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
     """Classify every line of ``text`` once for the private-key scanner.
 
-    Returns ``(kind, redact_start, content_end, begin_marker_start)`` per line.
-    Classification runs on the horizontally-stripped content, and
+    Returns ``(kind, redact_start, content_end, line_start, marker_end)`` per
+    line. Classification runs on the horizontally-stripped content, and
     ``str.splitlines`` handles every line separator (\\n, \\r\\n, bare \\r,
     unicode line breaks) — CR-only or indented key material must not slip past
     a \\n-keyed scan. ``redact_start`` is where a redaction of this line should
     begin (the marker start for a BEGIN line so unrelated prefixes like
-    ``key: `` survive; the stripped content start otherwise) and
-    ``content_end`` excludes the line terminator so surrounding newlines are
-    preserved.
+    ``key: `` survive; the stripped content start otherwise); ``content_end``
+    excludes the line terminator so surrounding newlines are preserved;
+    ``marker_end`` is the END marker's absolute end for END/END_INLINE lines
+    (-1 otherwise). END_INLINE — a line that contains an END marker amid other
+    content — terminates a key body only when a base64 run precedes it
+    (``label: -----END PRIVATE KEY-----`` after a body is key structure; prose
+    merely mentioning the marker, with no body above, never matches).
     """
-    model: list[tuple[int, int, int, int]] = []
+    model: list[tuple[int, int, int, int, int]] = []
     offset = 0
     for raw in text.splitlines(keepends=True):
         line_start = offset
@@ -314,40 +333,52 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int]]:
         c_start = line_start + (lead if stripped else 0)
         c_end = c_start + len(stripped)
         kind = _PEM_LINE_KIND_OTHER
-        marker_start = -1
+        redact_start = c_start
+        marker_end = -1
         if "PRIVATE KEY-----" in stripped.upper():
             begin = _PRIVATE_KEY_BEGIN_RE.search(stripped)
             if begin is not None and begin.end() == len(stripped):
                 kind = _PEM_LINE_KIND_BEGIN
-                marker_start = c_start + begin.start()
-            elif _PRIVATE_KEY_END_RE.fullmatch(stripped) is not None:
-                kind = _PEM_LINE_KIND_END
-        elif _PRIVATE_KEY_BASE64_BODY_LINE_RE.fullmatch(stripped) is not None:
-            kind = _PEM_LINE_KIND_STRICT_B64
-        elif (
-            stripped
-            and _PRIVATE_KEY_LENIENT_BODY_LINE_RE.fullmatch(stripped) is not None
-        ):
-            kind = _PEM_LINE_KIND_SHORT_B64
-        model.append((kind, marker_start if marker_start >= 0 else c_start, c_end, line_start))
+                redact_start = c_start + begin.start()
+            else:
+                end = _PRIVATE_KEY_END_RE.search(stripped)
+                if end is not None and begin is None:
+                    marker_end = c_start + end.end()
+                    if end.start() == 0 and end.end() == len(stripped):
+                        kind = _PEM_LINE_KIND_END
+                    else:
+                        kind = _PEM_LINE_KIND_END_INLINE
+        elif stripped and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(stripped) is not None:
+            if len(stripped) >= _PRIVATE_KEY_STRICT_MIN_CHARS:
+                kind = _PEM_LINE_KIND_STRICT_B64
+            else:
+                kind = _PEM_LINE_KIND_SHORT_B64
+        model.append((kind, redact_start, c_end, line_start, marker_end))
     return model
 
 
 def _redact_private_key_blocks_with(text: str, placeholder) -> str:
     """Redact PEM private keys in one linear pass over a normalized line model.
 
-    Handles, fail-closed toward redaction (#365, rounds 3-5):
-    - complete blocks: BEGIN line, any contiguous base64-alphabet lines (any
-      width), an adjacent END line — redacted marker-to-marker;
+    Handles, fail-closed toward redaction (#365, rounds 3-6):
+    - complete blocks: BEGIN line, any contiguous base64 payload lines (any
+      width), an adjacent END line — redacted marker-to-marker; a decorated
+      END (``label: -----END PRIVATE KEY-----``) closes a block through its
+      marker end;
     - truncated blocks: BEGIN plus a contiguous base64 run with no adjacent
       END — redacted through the whole run (short re-wrapped lines included),
       never past it (unrelated prose and following keys survive);
-    - orphaned bodies: a base64 run containing a full-width line directly
-      followed by an END line, with no BEGIN — a decoy BEGIN elsewhere must
-      not shield a stripped key;
-    - inline one-line ``BEGIN ... END`` forms;
+    - orphaned bodies: a contiguous base64 run containing a full-width line —
+      leading short lines included — directly followed by an END or decorated
+      END line, with no BEGIN: a decoy BEGIN elsewhere must not shield a
+      stripped key;
+    - inline one-line ``BEGIN ... END`` forms, requiring a real base64 run
+      between the markers (prose mentioning both markers is never consumed);
+      every BEGIN candidate on the line is tried, so a decoy BEGIN cannot
+      blind a later valid inline key;
     - CR-only / unicode line separators and indented or prefixed markers.
-    A bare BEGIN marker followed by non-base64 prose is left in place.
+    A bare BEGIN marker followed by non-base64 prose is left in place. See the
+    THREAT MODEL comment above the predicates for the declared scope.
     """
     if "private key-----" not in text.lower():
         return text
@@ -366,7 +397,7 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
 
     i = 0
     while i < n:
-        kind, redact_start, content_end, line_start = model[i]
+        kind, redact_start, content_end, line_start, _marker_end = model[i]
         if kind == _PEM_LINE_KIND_BEGIN:
             j = i + 1
             saw_b64 = False
@@ -380,33 +411,63 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                 emit(redact_start, model[j][2])
                 i = j + 1
                 continue
+            if j < n and model[j][0] == _PEM_LINE_KIND_END_INLINE:
+                emit(redact_start, model[j][4])
+                i = j + 1
+                continue
             if saw_b64:
                 emit(redact_start, model[j - 1][2])
                 i = j
                 continue
             i += 1
             continue
-        if kind == _PEM_LINE_KIND_STRICT_B64:
+        if kind in (_PEM_LINE_KIND_STRICT_B64, _PEM_LINE_KIND_SHORT_B64):
             j = i
+            has_strict = kind == _PEM_LINE_KIND_STRICT_B64
             while j + 1 < n and model[j + 1][0] in (
                 _PEM_LINE_KIND_STRICT_B64,
                 _PEM_LINE_KIND_SHORT_B64,
             ):
                 j += 1
-            if j + 1 < n and model[j + 1][0] == _PEM_LINE_KIND_END:
-                emit(redact_start, model[j + 1][2])
+                has_strict = has_strict or model[j][0] == _PEM_LINE_KIND_STRICT_B64
+            if has_strict and j + 1 < n and model[j + 1][0] in (
+                _PEM_LINE_KIND_END,
+                _PEM_LINE_KIND_END_INLINE,
+            ):
+                end_kind, _rs, end_content_end, _ls, end_marker_end = model[j + 1]
+                emit(
+                    redact_start,
+                    end_content_end
+                    if end_kind == _PEM_LINE_KIND_END
+                    else end_marker_end,
+                )
                 i = j + 2
                 continue
             i = j + 1
             continue
         if kind == _PEM_LINE_KIND_OTHER and "PRIVATE KEY-----" in text[line_start:content_end].upper():
-            begin = _PRIVATE_KEY_BEGIN_RE.search(text, line_start, content_end)
-            if begin is not None:
+            scan = line_start
+            while scan < content_end:
+                begin = _PRIVATE_KEY_BEGIN_RE.search(text, scan, content_end)
+                if begin is None:
+                    break
                 inline_end = _PRIVATE_KEY_END_RE.search(text, begin.end(), content_end)
-                if inline_end is not None and _PRIVATE_KEY_INLINE_SPAN_RE.fullmatch(
-                    text, begin.end(), inline_end.start()
+                if (
+                    inline_end is not None
+                    and _PRIVATE_KEY_INLINE_SPAN_RE.fullmatch(
+                        text, begin.end(), inline_end.start()
+                    )
+                    and (
+                        begin.end() == inline_end.start()
+                        or _PRIVATE_KEY_INLINE_RUN_RE.search(
+                            text, begin.end(), inline_end.start()
+                        )
+                    )
                 ):
                     emit(begin.start(), inline_end.end())
+                    scan = inline_end.end()
+                    continue
+                scan = begin.end()
         i += 1
     parts.append(text[cursor:])
     return "".join(parts) if changed else text
@@ -935,9 +996,11 @@ def _has_orphaned_private_key_body(text: str) -> bool:
     model = _pem_line_model(text)
     run_has_strict = False
     prev_was_begin = False
-    for kind, _redact_start, _content_end, _line_start in model:
+    seen_begin_line = False
+    for kind, _redact_start, _content_end, _line_start, _marker_end in model:
         if kind == _PEM_LINE_KIND_BEGIN:
             prev_was_begin = True
+            seen_begin_line = True
             run_has_strict = False
             continue
         if kind in (_PEM_LINE_KIND_STRICT_B64, _PEM_LINE_KIND_SHORT_B64):
@@ -946,7 +1009,15 @@ def _has_orphaned_private_key_body(text: str) -> bool:
             if kind == _PEM_LINE_KIND_STRICT_B64:
                 run_has_strict = True
             continue
-        if kind == _PEM_LINE_KIND_END and run_has_strict:
+        if kind in (_PEM_LINE_KIND_END, _PEM_LINE_KIND_END_INLINE) and run_has_strict:
+            return True
+        if kind == _PEM_LINE_KIND_END and seen_begin_line:
+            # Fail-closed pair guard (cloud path): a surviving exact BEGIN
+            # line before a surviving exact END line is a structure the
+            # redactor could not parse (e.g. a body with internal whitespace
+            # on every line, which is indistinguishable from prose at the
+            # redactor level). Block the dispatch rather than risk shipping
+            # key material the line classifier cannot recognize.
             return True
         prev_was_begin = False
         run_has_strict = False

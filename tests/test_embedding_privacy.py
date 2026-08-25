@@ -565,12 +565,12 @@ def test_inline_single_line_private_key_still_redacted(tmp_path):
     # must also cover the whitespace-separated single-line PEM form the old
     # DOTALL regex handled.
     cfg = _config(tmp_path)
-    text = "before -----BEGIN PRIVATE KEY----- MIIEvQIBADANBg -----END PRIVATE KEY----- after"
+    text = "before -----BEGIN PRIVATE KEY----- MIIEvQIBADANBgkqhkiG9w0BAQEFAASC -----END PRIVATE KEY----- after"
     for redacted in (
         redact_sensitive_text(text, cfg),
         protect_embedding_text(text, cfg)[0],
     ):
-        assert "MIIEvQIBADANBg" not in redacted
+        assert "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC" not in redacted
         assert "before" in redacted and "after" in redacted
 
 
@@ -635,3 +635,60 @@ def test_decoy_begin_does_not_shield_orphan_body(tmp_path):
     # The raw decoy text (unredacted) must FAIL validation despite the BEGIN.
     with pytest.raises(EmbeddingPrivacyPolicyError):
         validate_embedding_privacy_dispatch([decoy], cfg, expected_revision=revision)
+
+
+def test_round6_completeness_and_precision_dispositions(tmp_path):
+    # Round-6 review shapes: decorated END closes structure (F1); a decoy
+    # inline BEGIN cannot blind a later valid inline key (F2); orphan runs
+    # include leading short lines (F4); assignment prose after a bare BEGIN
+    # is NOT consumed (F5); inline prose naming both markers is NOT consumed
+    # (F6); a space-riddled body is out of redactor scope but the validator
+    # pair-guard blocks its dispatch (F3, fail-closed on the cloud path).
+    cfg = _config(tmp_path)
+    revision = embedding_privacy_revision(cfg)
+    body = "Q" * 64
+
+    # F1: decorated orphan END — body redacted on both paths, raw text flagged.
+    f1 = body + "\nlabel: -----END PRIVATE KEY-----\ntrailing prose"
+    for redacted in (redact_sensitive_text(f1, cfg), protect_embedding_text(f1, cfg)[0]):
+        assert body not in redacted
+        assert "trailing prose" in redacted
+    with pytest.raises(EmbeddingPrivacyPolicyError):
+        validate_embedding_privacy_dispatch([f1], cfg, expected_revision=revision)
+
+    # F2: decoy inline BEGIN, then a valid inline key on the same line.
+    f2 = (
+        "note -----BEGIN PRIVATE KEY----- prose then -----BEGIN PRIVATE KEY----- "
+        "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC -----END PRIVATE KEY----- tail"
+    )
+    for redacted in (redact_sensitive_text(f2, cfg), protect_embedding_text(f2, cfg)[0]):
+        assert "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC" not in redacted
+        assert redacted.startswith("note ")
+        assert redacted.endswith(" tail")
+
+    # F4: orphan run with leading short lines — the whole run goes.
+    f4 = "TAIL\n" + body + "\n-----END PRIVATE KEY-----\nprose stays"
+    for redacted in (redact_sensitive_text(f4, cfg), protect_embedding_text(f4, cfg)[0]):
+        assert "TAIL" not in redacted
+        assert body not in redacted
+        assert "prose stays" in redacted
+
+    # F5: assignment prose after a bare BEGIN is preserved and not flagged.
+    f5 = "-----BEGIN PRIVATE KEY-----\nenvironment=prod\nregion=eu"
+    for redacted in (redact_sensitive_text(f5, cfg), protect_embedding_text(f5, cfg)[0]):
+        assert "environment=prod" in redacted
+        assert "region=eu" in redacted
+    protected, _r, _c = protect_embedding_text(f5, cfg)
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+
+    # F6: prose naming both markers inline is preserved and dispatchable.
+    f6 = "The docs mention -----BEGIN PRIVATE KEY----- and -----END PRIVATE KEY----- inline."
+    for redacted in (redact_sensitive_text(f6, cfg), protect_embedding_text(f6, cfg)[0]):
+        assert redacted == f6
+    validate_embedding_privacy_dispatch([f6], cfg, expected_revision=revision)
+
+    # F3: space-riddled body — redactor scope limitation (declared), but the
+    # surviving exact BEGIN/END pair blocks the embedding dispatch.
+    f3 = "-----BEGIN PRIVATE KEY-----\nSYNTH ETIC BODY 1234 5678 90AB\n-----END PRIVATE KEY-----"
+    with pytest.raises(EmbeddingPrivacyPolicyError):
+        validate_embedding_privacy_dispatch([f3], cfg, expected_revision=revision)
