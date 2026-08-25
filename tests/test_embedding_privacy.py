@@ -12,6 +12,7 @@ from hermes_lcm.ingest_protection import (
     EmbeddingPrivacyPolicyError,
     embedding_privacy_revision,
     protect_embedding_text,
+    redact_sensitive_text,
     validate_embedding_privacy_dispatch,
 )
 from hermes_lcm.vector_store import VectorStore
@@ -278,3 +279,56 @@ def test_summary_backfill_revalidates_policy_before_each_cloud_subdispatch(
     assert "status: error" in result
     assert "policy changed before provider dispatch" in result
     assert provider.documents == []
+
+
+# --- #365: pattern-ordering bypass (password/passphrase prefix eats the PEM begin marker) ---
+
+_KEY_BODY = "MIIEvQIBADANBgkqSUPERSECRETKEYMATERIAL"
+
+
+@pytest.mark.parametrize(
+    "prefixed",
+    [
+        "password: -----BEGIN PRIVATE KEY-----\n%s\n-----END PRIVATE KEY-----",
+        "passphrase=-----BEGIN OPENSSH PRIVATE KEY-----\n%s\n-----END OPENSSH PRIVATE KEY-----",
+        "pwd=-----BEGIN EC PRIVATE KEY-----\n%s\n-----END EC PRIVATE KEY-----",
+    ],
+)
+def test_embedding_privacy_redacts_pem_after_password_assignment(tmp_path, prefixed):
+    """#365: an assignment pattern must not consume the PEM begin marker and leak the body."""
+    cfg = _config(tmp_path)
+    text = prefixed % _KEY_BODY
+    protected, _revision, changed = protect_embedding_text(text, cfg)
+    assert _KEY_BODY not in protected
+    assert changed
+    # dispatch validation must also pass on the protected text (no residual)
+    revision = embedding_privacy_revision(cfg)
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+
+
+def test_embedding_privacy_residual_flags_orphaned_end_marker(tmp_path):
+    """Transform-independent residual check: a surviving PEM END marker fails closed."""
+    cfg = _config(tmp_path)
+    # Simulate a begin-marker already consumed by an upstream transform.
+    orphaned = "password: [prior] PRIVATE KEY-----\n%s\n-----END PRIVATE KEY-----" % _KEY_BODY
+    revision = embedding_privacy_revision(cfg)
+    with pytest.raises(EmbeddingPrivacyPolicyError):
+        validate_embedding_privacy_dispatch([orphaned], cfg, expected_revision=revision)
+
+
+def test_embedding_privacy_control_and_plain_secrets_still_redact(tmp_path):
+    cfg = _config(tmp_path)
+    own_line = "note\n-----BEGIN PRIVATE KEY-----\n%s\n-----END PRIVATE KEY-----" % _KEY_BODY
+    protected, _r, _c = protect_embedding_text(own_line, cfg)
+    assert _KEY_BODY not in protected
+    plain, _r2, _c2 = protect_embedding_text("password: hunter2secretvalue", cfg)
+    assert "hunter2secretvalue" not in plain
+
+
+def test_durable_redaction_pem_after_password_survives_ordering(tmp_path):
+    """#365 durable path: private_key runs before password_assignment; key body never stored."""
+    cfg = _config(tmp_path)
+    text = "password: -----BEGIN PRIVATE KEY-----\n%s\n-----END PRIVATE KEY-----" % _KEY_BODY
+    out = redact_sensitive_text(text, cfg)
+    assert _KEY_BODY not in out
+    assert "private_key" in out

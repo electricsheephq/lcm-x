@@ -802,6 +802,18 @@ def _embedding_privacy_redact_match(
     return full[:relative_start] + placeholder + full[relative_end:]
 
 
+def _private_key_first(names: Sequence[str]) -> list[str]:
+    """Order pattern names so private_key runs before any assignment pattern.
+
+    An assignment pattern whose secret group matches the literal ``-----BEGIN``
+    would otherwise consume the PEM begin marker and blind the private-key
+    redactor, leaking the key body (#365). Relative order of the rest is kept.
+    """
+    ordered = [n for n in names if n == "private_key"]
+    ordered.extend(n for n in names if n != "private_key")
+    return ordered
+
+
 def _embedding_privacy_redact_private_keys(text: str) -> str:
     """Replace complete or truncated PEM private-key blocks with placeholders."""
     if "private key-----" not in text.lower():
@@ -833,7 +845,14 @@ def _embedding_privacy_residual_patterns(
     residual: list[str] = []
     for name in active_names:
         if name == "private_key":
-            if _embedding_privacy_redact_private_keys(text) != text:
+            # Transform-INDEPENDENT check (#365): a surviving PEM END marker means
+            # an earlier pattern consumed the BEGIN marker the redactor keys on, so
+            # the key body shipped. Flag it even though the BEGIN-based redactor is
+            # now blind. (BEGIN redaction still flagged for truncated/no-END blocks.)
+            if (
+                _embedding_privacy_redact_private_keys(text) != text
+                or _PRIVATE_KEY_END_RE.search(text) is not None
+            ):
                 residual.append(name)
             continue
         if _SENSITIVE_PATTERN_CATALOG[name].search(text) is not None:
@@ -857,7 +876,10 @@ def protect_embedding_text(
     original = str(text)
     protected = _canonicalize_embedding_privacy_placeholders(original)
     _configured, active, _unknown = _configured_sensitive_pattern_names(config)
-    for name in sorted(set(active)):
+    # private_key MUST run first: an assignment pattern (e.g. password_assignment,
+    # whose secret_unquoted group matches the literal "-----BEGIN") can otherwise
+    # consume the PEM begin marker and leave the key body unredacted (#365).
+    for name in _private_key_first(sorted(set(active))):
         if name == "private_key":
             protected = _embedding_privacy_redact_private_keys(protected)
         else:
@@ -966,7 +988,9 @@ def redact_sensitive_text(text: str, config) -> str:
     if not active_names:
         return text
     protected = text
-    for name in active_names:
+    # private_key first — see #365; the durable default order lists
+    # password_assignment before private_key, which leaks the key body to storage.
+    for name in _private_key_first(active_names):
         protected = _apply_sensitive_pattern(
             name,
             lambda match, pattern_name=name: _redact_match(pattern_name, match),
