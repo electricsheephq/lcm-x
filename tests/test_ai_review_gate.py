@@ -162,6 +162,33 @@ def test_nested_receipt_pr_number_requires_exact_integer_type():
         assert "ACCEPTANCE_PR_NUMBER_INVALID" in result["blockers"]
 
 
+def test_dispatch_envelope_preflight_rejects_malformed_receipts():
+    envelope = {
+        "schema_version": "2",
+        "mode": "dispatch_envelope",
+        "target": {
+            "repository": "electricsheephq/lcm-x",
+            "pr_number": 350,
+            "base_sha": BASE,
+            "head_sha": HEAD,
+        },
+        "receipts": [
+            receipt("acceptance", risk="governance"),
+            receipt("adversarial", risk="governance"),
+        ],
+        "dispatch_id": "dispatch-envelope-fresh",
+    }
+
+    assert evaluate_reconciliation(envelope, NOW)["decision"] == "PASS"
+
+    for malformed in ([], [{}]):
+        candidate = deepcopy(envelope)
+        candidate["receipts"] = malformed
+        result = evaluate_reconciliation(candidate, NOW)
+        assert result["decision"] == "FAIL"
+        assert "RECEIPT_SET_INVALID" in result["blockers"]
+
+
 def test_duplicate_task_and_receipt_ids_fail():
     data = payload(["AGENTS.md"])
     data["receipts"] = [
@@ -325,6 +352,25 @@ def test_incomplete_dispatch_target_still_resets_known_peers():
         < terminal
         < target_guard
     )
+
+
+def test_dispatch_envelope_preflight_precedes_peer_resets():
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
+    ).read_text(encoding="utf-8")
+
+    dispatch = workflow.index("if (dispatchEvent) {")
+    authenticated = workflow.index("if (sender?.login !== '100yenadmin'", dispatch)
+    preflight = workflow.index("mode: 'dispatch_envelope'", authenticated)
+    preflight_stop = workflow.index("throw Error('dispatch packet invalid')", preflight)
+    reconciliation_guard = workflow.index("if (reconciled.failures.length)", preflight_stop)
+    peer_resets = workflow.index("await failKnownSnapshots(snapshots", reconciliation_guard)
+
+    assert authenticated < preflight < preflight_stop < reconciliation_guard < peer_resets
+    assert "envelopeValidated.run.status !== 0" in workflow[preflight:preflight_stop]
+    assert "envelopeValidated.result.decision !== 'PASS'" in workflow[
+        preflight:preflight_stop
+    ]
 
 
 def test_workflow_rechecks_complete_target_state_before_success():

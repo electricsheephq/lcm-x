@@ -239,6 +239,11 @@ jobs:
                   throw Error('dispatch packet invalid');
                 if (context.ref !== `refs/heads/${defaultBranch}` || context.sha !== protectedSha)
                   throw Error('dispatch must execute from current protected default branch');
+                const envelopeValidated = await runValidator({schema_version: '2', mode: 'dispatch_envelope',
+                  target: {repository: `${owner}/${repo}`, pr_number: prNumber, base_sha: base, head_sha: head},
+                  receipts: dispatch.receipts, dispatch_id: dispatch.dispatch_id}, protectedSha);
+                if (envelopeValidated.run.status !== 0 || envelopeValidated.result.decision !== 'PASS')
+                  throw Error('dispatch packet invalid');
                 if (reconciled.failures.length) {
                   const writeFailures = await failKnownSnapshots(snapshots,
                     'Open PR reconciliation failed closed.');

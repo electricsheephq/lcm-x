@@ -186,7 +186,13 @@ def _live_blockers(live: Any) -> list[str]:
     return blockers
 
 
-def _receipt_blockers(receipts: Any, live: dict[str, Any], now: datetime) -> list[str]:
+def _receipt_blockers(
+    receipts: Any,
+    live: dict[str, Any],
+    now: datetime,
+    *,
+    bind_risk: bool = True,
+) -> list[str]:
     blockers: list[str] = []
     if not isinstance(receipts, list) or len(receipts) != 2:
         return ["RECEIPT_SET_INVALID"]
@@ -194,9 +200,11 @@ def _receipt_blockers(receipts: Any, live: dict[str, Any], now: datetime) -> lis
     expected = {
         "schema_version": "1", "repository": REPOSITORY,
         "pr_number": live.get("pr_number"), "base_sha": live.get("base_sha"),
-        "head_sha": live.get("head_sha"), "risk_class": _risk(live.get("changed_paths")),
+        "head_sha": live.get("head_sha"),
         "policy_version": POLICY_VERSION, "integration_id": INTEGRATION_ID,
     }
+    if bind_risk:
+        expected["risk_class"] = _risk(live.get("changed_paths"))
     for lane in ("acceptance", "adversarial"):
         matches = [item for item in receipts if isinstance(item, dict) and item.get("lane") == lane]
         if len(matches) != 1:
@@ -210,6 +218,8 @@ def _receipt_blockers(receipts: Any, live: dict[str, Any], now: datetime) -> lis
             blockers.append(f"{lane.upper()}_PR_NUMBER_INVALID")
         if any(receipt.get(k) != v for k, v in expected.items()):
             blockers.append(f"{lane.upper()}_BINDING_MISMATCH")
+        if not bind_risk and receipt.get("risk_class") not in HIGH_RISK | {"routine"}:
+            blockers.append(f"{lane.upper()}_RISK_INVALID")
         if not all(_identifier(receipt.get(k)) for k in ("reviewer_id", "task_id", "receipt_id")):
             blockers.append(f"{lane.upper()}_IDENTITY_INVALID")
         digest = receipt.get("evidence_digest")
@@ -229,6 +239,36 @@ def _receipt_blockers(receipts: Any, live: dict[str, Any], now: datetime) -> lis
         if len(values) != len(set(values)):
             blockers.append(f"DUPLICATE_{key.upper()}")
     return blockers
+
+
+def _dispatch_envelope_result(data: dict[str, Any], now: datetime) -> dict[str, Any]:
+    blockers: list[str] = []
+    if set(data) != {"schema_version", "mode", "target", "receipts", "dispatch_id"}:
+        blockers.append("DISPATCH_ENVELOPE_SCHEMA_INVALID")
+    target = data.get("target")
+    if not isinstance(target, dict) or set(target) != {
+        "repository", "pr_number", "base_sha", "head_sha",
+    }:
+        return {
+            "decision": "FAIL",
+            "blockers": sorted(set(blockers + ["DISPATCH_TARGET_INVALID"])),
+        }
+    if target.get("repository") != REPOSITORY:
+        blockers.append("REPOSITORY_MISMATCH")
+    if type(target.get("pr_number")) is not int or target["pr_number"] <= 0:
+        blockers.append("PR_INVALID")
+    for field in ("base_sha", "head_sha"):
+        if not _sha40(target.get(field)):
+            blockers.append(f"{field.upper()}_INVALID")
+    if not _identifier(data.get("dispatch_id")):
+        blockers.append("DISPATCH_ID_INVALID")
+    blockers.extend(
+        _receipt_blockers(data.get("receipts"), target, now, bind_risk=False)
+    )
+    return {
+        "decision": "PASS" if not blockers else "FAIL",
+        "blockers": sorted(set(blockers)),
+    }
 
 
 def _packet_blockers(packet: Any, live: dict[str, Any], now: datetime) -> list[str]:
@@ -313,6 +353,8 @@ def evaluate_reconciliation(data: Any, now: datetime | None = None) -> dict[str,
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     if not isinstance(data, dict) or data.get("schema_version") != PACKET_SCHEMA_VERSION:
         return {"decision": "FAIL", "blockers": ["PACKET_SCHEMA_INVALID"], "peers": []}
+    if data.get("mode") == "dispatch_envelope":
+        return _dispatch_envelope_result(data, current)
     peers = data.get("peers")
     if not isinstance(peers, list):
         return {"decision": "FAIL", "blockers": ["PEER_SNAPSHOT_INVALID"], "peers": []}
