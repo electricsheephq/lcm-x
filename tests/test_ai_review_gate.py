@@ -309,10 +309,16 @@ def test_workflow_captures_exact_target_dispatch_id_before_reset():
     prior_target = workflow.index(
         "const priorTarget = snapshots.find(item => item.pr_number === prNumber);"
     )
+    target_guard = workflow.index(
+        "if (!priorTarget || priorTarget.api_complete !== true ||"
+    )
     expected_id = workflow.index(
         "const expectedExternalId = `ai-review-gate:${prNumber}:${base}:${head}`;"
     )
     exact_checks = workflow.index("check.app_id === 15368", expected_id)
+    prior_validation = workflow.index(
+        "const priorValidated = await runValidator({schema_version: '2', mode: 'peer_only', peers: [priorTarget]}, protectedSha);"
+    )
     target_reset = workflow.index(
         "await emit(prNumber, base, head, 'failure', 'Protected base changed"
     )
@@ -320,11 +326,25 @@ def test_workflow_captures_exact_target_dispatch_id_before_reset():
         "const target = await snapshot(prNumber, defaultBranch);"
     )
 
-    assert prior_target < expected_id < exact_checks < target_reset < target_snapshot
+    assert (
+        prior_target
+        < target_guard
+        < expected_id
+        < exact_checks
+        < prior_validation
+        < target_reset
+        < target_snapshot
+    )
+    assert "priorTarget.base_sha !== base || priorTarget.head_sha !== head" in workflow[
+        target_guard:expected_id
+    ]
     assert "check.external_id === expectedExternalId" in workflow[exact_checks:target_reset]
     assert "check.head_sha === head" in workflow[exact_checks:target_reset]
     assert "check.status === 'completed'" in workflow[exact_checks:target_reset]
     assert "check.conclusion === 'success'" in workflow[exact_checks:target_reset]
+    assert "!priorValidated.result.peers[0].preserve" in workflow[
+        prior_validation:target_reset
+    ]
     assert "prior_dispatch_ids: priorDispatchIds" in workflow[target_reset:]
 
 

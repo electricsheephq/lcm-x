@@ -134,11 +134,22 @@ jobs:
                 const tuple = (await github.rest.pulls.get({owner, repo, pull_number: prNumber})).data;
                 base = tuple.base.sha; head = tuple.head.sha;
                 const priorTarget = snapshots.find(item => item.pr_number === prNumber);
+                if (!priorTarget || priorTarget.api_complete !== true ||
+                    priorTarget.pagination_complete !== true || priorTarget.repository !== `${owner}/${repo}` ||
+                    priorTarget.base_ref !== defaultBranch || priorTarget.base_sha !== base || priorTarget.head_sha !== head ||
+                    priorTarget.state !== 'open' || priorTarget.draft)
+                  throw Error('dispatch target missing or drifted from reconciliation');
                 const expectedExternalId = `ai-review-gate:${prNumber}:${base}:${head}`;
                 const priorExactChecks = (priorTarget?.check_runs || []).filter(check =>
                   check.app_id === 15368 && check.external_id === expectedExternalId &&
                   check.head_sha === head && check.status === 'completed' && check.conclusion === 'success');
                 if (priorExactChecks.length > 1) throw Error('DUPLICATE_TRUSTED_CHECK');
+                if (priorExactChecks.length === 1) {
+                  const priorValidated = await runValidator({schema_version: '2', mode: 'peer_only', peers: [priorTarget]}, protectedSha);
+                  if (priorValidated.run.status !== 0 || priorValidated.result.decision !== 'PASS' ||
+                      priorValidated.result.peers?.length !== 1 || !priorValidated.result.peers[0].preserve)
+                    throw Error('prior target packet invalid');
+                }
                 const priorDispatchIds = [];
                 for (const check of priorExactChecks) {
                   const stored = check.output_summary || check.output?.summary;
