@@ -292,6 +292,42 @@ def test_workflow_reconciliation_failure_is_terminal_before_target_promotion():
     assert target_reset < reconciliation_stop < target_snapshot < target_success
 
 
+def test_workflow_uses_supported_actor_id_environment():
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "process.env.GITHUB_ACTOR_ID" in workflow
+    assert "context.actor_id" not in workflow
+
+
+def test_workflow_captures_exact_target_dispatch_id_before_reset():
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
+    ).read_text(encoding="utf-8")
+
+    prior_target = workflow.index(
+        "const priorTarget = snapshots.find(item => item.pr_number === prNumber);"
+    )
+    expected_id = workflow.index(
+        "const expectedExternalId = `ai-review-gate:${prNumber}:${base}:${head}`;"
+    )
+    exact_checks = workflow.index("check.app_id === 15368", expected_id)
+    target_reset = workflow.index(
+        "await emit(prNumber, base, head, 'failure', 'Protected base changed"
+    )
+    target_snapshot = workflow.index(
+        "const target = await snapshot(prNumber, defaultBranch);"
+    )
+
+    assert prior_target < expected_id < exact_checks < target_reset < target_snapshot
+    assert "check.external_id === expectedExternalId" in workflow[exact_checks:target_reset]
+    assert "check.head_sha === head" in workflow[exact_checks:target_reset]
+    assert "check.status === 'completed'" in workflow[exact_checks:target_reset]
+    assert "check.conclusion === 'success'" in workflow[exact_checks:target_reset]
+    assert "prior_dispatch_ids: priorDispatchIds" in workflow[target_reset:]
+
+
 def _v2_snapshot(pr_number: int, *, complete: bool = True):
     base, head = BASE, HEAD
     live = {
