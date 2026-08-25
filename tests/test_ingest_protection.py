@@ -4703,8 +4703,10 @@ def test_sensitive_private_key_fallback_bounds_input_without_regex(tmp_path, mon
     small = "-----BEGIN RSA PRIVATE KEY-----\nabcdef\n-----END RSA PRIVATE KEY-----"
     assert "BEGIN RSA PRIVATE KEY" not in ip.redact_sensitive_text(small, engine._config)
 
-    big = "-----BEGIN PRIVATE KEY-----\n" + "A" * (ip._SENSITIVE_STDLIB_MAX_CHARS + 10)
-    assert ip.redact_sensitive_text(big, engine._config) == big
+    body = "A" * (ip._SENSITIVE_STDLIB_MAX_CHARS + 10)
+    big = "-----BEGIN PRIVATE KEY-----\n" + body
+    # The linear scanner safely handles large key-shaped truncated bodies.
+    assert body not in ip.redact_sensitive_text(big, engine._config)
 
 
 def test_ingest_externalizes_line_wrapped_base64_block(tmp_path):

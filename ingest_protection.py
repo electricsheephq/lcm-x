@@ -99,6 +99,7 @@ _WRAPPED_BASE64_MIN_LINE_CHARS = 40
 _WRAPPED_BASE64_MIN_TERMINAL_LINE_CHARS = 16
 _BASE64_ALPHABET_RE = re.compile(r"^[A-Za-z0-9+/=_\s-]+$")
 _BASE64_LINE_ALPHABET_RE = re.compile(r"^[A-Za-z0-9+/=_-]+$")
+_PRIVATE_KEY_BASE64_BODY_LINE_RE = re.compile(r"^[A-Za-z0-9+/=]{16,}$")
 _PRIVATE_KEY_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE)
 _PRIVATE_KEY_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE)
 _EXTERNALIZED_PLACEHOLDER_PREFIX = "[Externalized LCM ingest payload:"
@@ -158,7 +159,7 @@ _HERMES_RESULTS_DIRNAME = "hermes-results"
 _MAX_RECOVERED_PERSISTED_OUTPUT_BYTES = 64 * 1024 * 1024
 _SENSITIVE_PLACEHOLDER_PREFIX = "[LCM sensitive redaction:"
 _EMBEDDING_PRIVACY_PLACEHOLDER_PREFIX = "[LCM embedding privacy:"
-_EMBEDDING_PRIVACY_TRANSFORM_VERSION = "privacy:v1"
+_EMBEDDING_PRIVACY_TRANSFORM_VERSION = "privacy:v2"
 _EMBEDDING_PRIVACY_PLACEHOLDER_RE = re.compile(
     r"\[LCM (?:sensitive redaction|embedding privacy):\s*"
     r"name=(?P<name>[a-z0-9_-]+)[^\]]*\]",
@@ -192,11 +193,8 @@ _SENSITIVE_PATTERN_CATALOG: dict[str, re.Pattern[str]] = {
 }
 
 # Sensitive redaction runs synchronously in the ingest path. The private_key
-# pattern (lazy `.*?` under DOTALL) rescans to end-of-string for every unmatched
-# BEGIN header, so a multi-MB payload with many headers and no END is O(n^2) and
-# can block a turn for minutes. Guard it: prefer the optional `regex` engine with
-# a match timeout (fail-open on timeout), and when `regex` is unavailable bound
-# the input length the stdlib DOTALL pattern is applied to.
+# catalog regex is retained for configuration compatibility, but substitution
+# always bypasses it in favor of the linear scanner below.
 try:  # pragma: no cover - exercised when the optional dependency is absent
     import regex as _regex_engine
 except Exception:  # pragma: no cover - keep the plugin importable in minimal installs
@@ -243,8 +241,8 @@ def _regex_pattern_for(name: str) -> Any:
 def _apply_sensitive_pattern(name: str, repl, text: str) -> str:
     """Substitute one sensitive pattern with a ReDoS-safe strategy.
 
-    Fails open (leaves the span unredacted) with a one-time warning rather than
-    blocking the ingest path on a pathological input.
+    Private keys always use the linear scanner; other catalog patterns use
+    their bounded character-class regexes.
     """
     # Only the private_key pattern (lazy `.*?` under DOTALL, which rescans to
     # end-of-string per unmatched BEGIN header) is O(n^2) and needs a guard.
@@ -252,6 +250,8 @@ def _apply_sensitive_pattern(name: str, repl, text: str) -> str:
     # run via stdlib and never fail open - a redaction bypass under CPU load
     # would be a silent secret leak, so we restrict fail-open to the one
     # pattern that genuinely requires it.
+    if name == "private_key":
+        return _redact_private_key_blocks(text)
     if name in _BACKTRACKING_RISKY_SENSITIVE_PATTERNS:
         regex_pattern = _regex_pattern_for(name)
         if regex_pattern is not None:
@@ -269,22 +269,38 @@ def _apply_sensitive_pattern(name: str, repl, text: str) -> str:
                         _SENSITIVE_MATCH_TIMEOUT_SECONDS,
                     )
                 return _redact_private_key_blocks(text)
-        elif name == "private_key":
-            return _redact_private_key_blocks(text)
     return _SENSITIVE_PATTERN_CATALOG[name].sub(repl, text)
 
 
+def _truncated_private_key_body_end(text: str, begin_end: int) -> int | None:
+    """Return the end of a contiguous PEM-shaped body after a BEGIN marker."""
+    if text.startswith("\r\n", begin_end):
+        cursor = begin_end + 2
+    elif text.startswith("\n", begin_end):
+        cursor = begin_end + 1
+    else:
+        return None
+
+    body_end: int | None = None
+    while cursor <= len(text):
+        newline = text.find("\n", cursor)
+        line_end = len(text) if newline < 0 else newline
+        content_end = (
+            line_end - 1
+            if line_end > cursor and text[line_end - 1] == "\r"
+            else line_end
+        )
+        if _PRIVATE_KEY_BASE64_BODY_LINE_RE.fullmatch(text[cursor:content_end]) is None:
+            break
+        body_end = content_end
+        if newline < 0:
+            break
+        cursor = newline + 1
+    return body_end
 
 
-def _redact_private_key_blocks(text: str) -> str:
-    """Redact PEM private-key blocks with a linear scanner.
-
-    This keeps large valid keys protected even when the optional ``regex``
-    package is unavailable, without running the stdlib DOTALL private-key
-    pattern over a pathological multi-MB input. A truncated block (BEGIN with
-    no matching END) is redacted from the header to end-of-input to match the
-    embedding path — leaving it intact leaked the body to durable storage (#365).
-    """
+def _redact_private_key_blocks_with(text: str, placeholder) -> str:
+    """Redact complete and surgically bounded truncated PEM private keys."""
     if "private key-----" not in text.lower():
         return text
     parts: list[str] = []
@@ -297,19 +313,38 @@ def _redact_private_key_blocks(text: str) -> str:
             break
         end = _PRIVATE_KEY_END_RE.search(text, begin.end())
         if end is None:
-            # Truncated key: redact from the header through end-of-input.
-            secret = text[begin.start():]
+            body_end = _truncated_private_key_body_end(text, begin.end())
+            if body_end is None:
+                parts.append(text[cursor:begin.end()])
+                cursor = begin.end()
+                continue
+            secret = text[begin.start():body_end]
             parts.append(text[cursor:begin.start()])
-            parts.append(_sensitive_placeholder("private_key", secret))
+            parts.append(placeholder(secret))
+            cursor = body_end
             changed = True
-            break
+            continue
         block_end = end.end()
         secret = text[begin.start():block_end]
         parts.append(text[cursor:begin.start()])
-        parts.append(_sensitive_placeholder("private_key", secret))
+        parts.append(placeholder(secret))
         cursor = block_end
         changed = True
     return "".join(parts) if changed else text
+
+
+def _redact_private_key_blocks(text: str) -> str:
+    """Redact PEM private-key blocks with a linear scanner.
+
+    This keeps large valid keys protected even when the optional ``regex``
+    package is unavailable, without running the stdlib DOTALL private-key
+    pattern over a pathological multi-MB input. A truncated block (BEGIN with
+    no matching END) is redacted only through its contiguous PEM-shaped base64
+    body, preserving unrelated trailing prose (#365).
+    """
+    return _redact_private_key_blocks_with(
+        text, lambda secret: _sensitive_placeholder("private_key", secret)
+    )
 
 
 def _is_wrapped_base64_line(line: str) -> bool:
@@ -807,23 +842,25 @@ def _embedding_privacy_redact_match(
     return full[:relative_start] + placeholder + full[relative_end:]
 
 
-_STRIPPED_PRIVATE_KEY_RE = re.compile(
-    # A base64/PEM body run (>=40 chars) followed by a PRIVATE-KEY END marker,
-    # with the BEGIN marker MISSING before it — the shape left when an earlier
-    # pattern consumed "-----BEGIN" (#365). Prose that merely mentions the END
-    # phrase has no preceding body and is not flagged.
-    r"[A-Za-z0-9+/=\s]{40,}-----END [A-Z0-9 ]*PRIVATE KEY-----",
-    re.IGNORECASE,
-)
-
-
 def _has_orphaned_private_key_body(text: str) -> bool:
-    """True if a private-key body survives without its BEGIN marker."""
-    for match in _STRIPPED_PRIVATE_KEY_RE.finditer(text):
-        preceding = text[: match.start()]
-        # Real leak: no BEGIN marker anywhere before this body+END pair.
-        if _PRIVATE_KEY_BEGIN_RE.search(preceding) is None:
+    """True for line-oriented PEM body + END structure without an earlier BEGIN."""
+    seen_begin = False
+    body_lines = 0
+    for line in text.splitlines():
+        if _PRIVATE_KEY_BEGIN_RE.search(line) is not None:
+            seen_begin = True
+            body_lines = 0
+            continue
+        if _PRIVATE_KEY_BASE64_BODY_LINE_RE.fullmatch(line) is not None:
+            body_lines += 1
+            continue
+        if (
+            body_lines > 0
+            and not seen_begin
+            and _PRIVATE_KEY_END_RE.fullmatch(line) is not None
+        ):
             return True
+        body_lines = 0
     return False
 
 
@@ -841,27 +878,9 @@ def _private_key_first(names: Sequence[str]) -> list[str]:
 
 def _embedding_privacy_redact_private_keys(text: str) -> str:
     """Replace complete or truncated PEM private-key blocks with placeholders."""
-    if "private key-----" not in text.lower():
-        return text
-    parts: list[str] = []
-    cursor = 0
-    changed = False
-    while True:
-        begin = _PRIVATE_KEY_BEGIN_RE.search(text, cursor)
-        if begin is None:
-            parts.append(text[cursor:])
-            break
-        end = _PRIVATE_KEY_END_RE.search(text, begin.end())
-        if end is None:
-            parts.append(text[cursor:begin.start()])
-            parts.append(_embedding_privacy_placeholder("private_key"))
-            changed = True
-            break
-        parts.append(text[cursor:begin.start()])
-        parts.append(_embedding_privacy_placeholder("private_key"))
-        cursor = end.end()
-        changed = True
-    return "".join(parts) if changed else text
+    return _redact_private_key_blocks_with(
+        text, lambda _secret: _embedding_privacy_placeholder("private_key")
+    )
 
 
 def _embedding_privacy_residual_patterns(

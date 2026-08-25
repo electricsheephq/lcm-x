@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import sqlite3
+import time
 from types import SimpleNamespace
 
 import pytest
 
 import hermes_lcm.command as command_mod
+import hermes_lcm.ingest_protection as ingest_protection_mod
 import hermes_lcm.tools as tools_mod
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, SummaryNode
@@ -15,7 +18,7 @@ from hermes_lcm.ingest_protection import (
     redact_sensitive_text,
     validate_embedding_privacy_dispatch,
 )
-from hermes_lcm.vector_store import VectorStore
+from hermes_lcm.vector_store import EmbeddingIdentity, VectorStore
 
 
 class CaptureProvider:
@@ -105,7 +108,8 @@ def test_provider_transform_removes_secret_metadata_and_canonicalizes_placeholde
     protected, revision, changed = protect_embedding_text(raw, config)
 
     assert changed is True
-    assert revision.startswith("privacy:v1:")
+    assert revision.startswith("privacy:v2:")
+    assert not revision.startswith("privacy:v1:")
     assert "abcdefghijklmnop" not in protected
     assert "correct-horse-battery" not in protected
     assert "deadbeefdeadbeef" not in protected
@@ -135,7 +139,8 @@ def test_truncated_private_key_is_redacted_before_semantic_cloud_call(tmp_path):
     finally:
         store.close()
 
-    raw_query = "context before\n-----BEGIN PRIVATE KEY-----\ntruncated material"
+    key_body = "MIIEvQIBADANBgkqSUPERSECRETKEYMATERIAL"
+    raw_query = "context before\n-----BEGIN PRIVATE KEY-----\n" + key_body
     result = tools_mod._lcm_grep_embed_query(
         provider,
         raw_query,
@@ -148,7 +153,65 @@ def test_truncated_private_key_is_redacted_before_semantic_cloud_call(tmp_path):
     assert provider.queries == [
         "context before\n[LCM embedding privacy: name=private_key]"
     ]
-    assert "truncated material" not in provider.queries[0]
+    assert key_body not in provider.queries[0]
+
+
+def test_privacy_v2_revision_makes_v1_vectors_pending(tmp_path):
+    config = _config(tmp_path)
+    dag = SummaryDAG(config.database_path)
+    try:
+        node_id = dag.add_node(
+            SummaryNode(
+                session_id="session-a",
+                depth=0,
+                summary="benign summary",
+                created_at=1.0,
+                latest_at=1.0,
+            )
+        )
+    finally:
+        dag.close()
+
+    current_revision = embedding_privacy_revision(config)
+    old_revision = current_revision.replace("privacy:v2:", "privacy:v1:", 1)
+    store = VectorStore(config.database_path, config=config)
+    try:
+        old_identity_hash = store.register_profile(
+            "voyage-4-large", "voyage", 2, revision=old_revision
+        )
+        old_identity = EmbeddingIdentity.canonical(
+            "voyage",
+            "voyage-4-large",
+            old_revision,
+            2,
+            "float32",
+            "little",
+            "summary",
+        )
+        store.record_embedding(
+            str(node_id),
+            "summary",
+            "voyage-4-large",
+            [1.0, 0.0],
+            identity=old_identity,
+        )
+        current_identity_hash = store.register_profile(
+            "voyage-4-large", "voyage", 2, revision=current_revision
+        )
+    finally:
+        store.close()
+
+    assert current_identity_hash != old_identity_hash
+    conn = sqlite3.connect(config.database_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        pending, rows = command_mod._embedding_pending_rows(
+            conn, current_identity_hash, 10
+        )
+    finally:
+        conn.close()
+    assert pending == 1
+    assert [int(row["node_id"]) for row in rows] == [node_id]
 
 
 def test_semantic_query_makes_zero_cloud_calls_when_policy_disabled(tmp_path):
@@ -345,12 +408,88 @@ def test_durable_redacts_truncated_pem_after_password(tmp_path):
     assert _KEY_BODY not in protected
 
 
+def test_truncated_private_key_redaction_preserves_trailing_prose(tmp_path):
+    cfg = _config(tmp_path)
+    prose = "This trailing prose must remain visible."
+    padded_body = _KEY_BODY + "=="
+    text = "prefix\n-----BEGIN PRIVATE KEY-----\n%s\n%s" % (padded_body, prose)
+
+    durable = redact_sensitive_text(text, cfg)
+    protected, _revision, changed = protect_embedding_text(text, cfg)
+
+    assert padded_body not in durable
+    assert padded_body not in protected
+    assert prose in durable
+    assert prose in protected
+    assert changed is True
+
+
+def test_bare_private_key_begin_followed_by_prose_is_left_intact(tmp_path):
+    cfg = _config(tmp_path)
+    text = "-----BEGIN PRIVATE KEY-----\nThis is prose, not a base64 key body."
+
+    durable = redact_sensitive_text(text, cfg)
+    protected, _revision, changed = protect_embedding_text(text, cfg)
+
+    assert durable == text
+    assert protected == text
+    assert changed is False
+
+
+def test_durable_truncated_private_key_uses_linear_scanner_with_regex_installed(
+    monkeypatch, tmp_path
+):
+    cfg = _config(tmp_path)
+    text = "-----BEGIN PRIVATE KEY-----\n%s" % _KEY_BODY
+    monkeypatch.setattr(ingest_protection_mod, "_regex_engine", object())
+
+    def unexpected_regex_lookup(_name):
+        raise AssertionError("private_key must bypass the optional regex engine")
+
+    monkeypatch.setattr(
+        ingest_protection_mod, "_regex_pattern_for", unexpected_regex_lookup
+    )
+
+    durable = redact_sensitive_text(text, cfg)
+
+    assert _KEY_BODY not in durable
+    assert "private_key" in durable
+
+
+def test_durable_linear_scanner_redacts_large_truncated_body_without_regex(
+    monkeypatch, tmp_path
+):
+    cfg = _config(tmp_path)
+    monkeypatch.setattr(ingest_protection_mod, "_regex_engine", None)
+    ingest_protection_mod._SENSITIVE_REGEX_CATALOG.clear()
+    body = "A" * (ingest_protection_mod._SENSITIVE_STDLIB_MAX_CHARS + 10)
+    text = "-----BEGIN PRIVATE KEY-----\n" + body
+
+    durable = redact_sensitive_text(text, cfg)
+
+    assert body not in durable
+    assert "private_key" in durable
+
+
 def test_residual_allows_prose_with_bare_end_marker(tmp_path):
     """#365 review finding 2: prose containing only an END phrase must NOT fail closed."""
     cfg = _config(tmp_path)
-    prose = "The key file terminates with the line -----END PRIVATE KEY----- and nothing else."
+    prose = "This is an illustrative terminator -----END PRIVATE KEY----- in prose."
     revision = embedding_privacy_revision(cfg)
     # must not raise
     validate_embedding_privacy_dispatch([prose], cfg, expected_revision=revision)
     protected, _r, _c = protect_embedding_text(prose, cfg)
     assert "-----END PRIVATE KEY-----" in protected  # left intact, no false redaction
+
+
+def test_residual_private_key_detector_is_linear_on_long_single_line(tmp_path):
+    cfg = _config(tmp_path)
+    revision = embedding_privacy_revision(cfg)
+
+    started = time.perf_counter()
+    validate_embedding_privacy_dispatch(
+        ["A" * 8000], cfg, expected_revision=revision
+    )
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.1
