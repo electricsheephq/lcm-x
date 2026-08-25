@@ -113,6 +113,55 @@ jobs:
               if (failures.length) core.setFailed(`Failed to reset PRs: ${failures.join(',')}`);
               return {snapshots, failures};
             };
+            const finalReadInvalidPeers = async (peerResults, snapshots, defaultBranch, protectedSha) => {
+              for (const peer of peerResults) {
+                if (peer.preserve) continue;
+                const original = snapshots.find(item => item.pr_number === peer.pr_number);
+                let currentTuple = null, currentPeer = null;
+                try {
+                  if (!original?.base_sha || !original?.head_sha)
+                    throw Error('invalid peer original tuple unavailable');
+                  const current = await snapshot(peer.pr_number, defaultBranch);
+                  currentTuple = current;
+                  const currentValidated = await runValidator({schema_version: '2', mode: 'peer_only', peers: [current]}, protectedSha);
+                  if (currentValidated.run.status !== 0 || currentValidated.result.decision !== 'PASS' ||
+                      currentValidated.result.peers?.length !== 1)
+                    throw Error('invalid peer final validation failed');
+                  currentPeer = currentValidated.result.peers[0];
+                } catch (error) {
+                  const writeFailures = [];
+                  if (original?.base_sha && original?.head_sha) {
+                    try {
+                      await emit(original.pr_number, original.base_sha, original.head_sha, 'failure',
+                        `Invalid peer final read failed closed: ${error.message}`);
+                    } catch (writeError) { writeFailures.push(writeError.message); }
+                  }
+                  if (currentTuple?.base_sha && currentTuple?.head_sha &&
+                      (currentTuple.base_sha !== original?.base_sha || currentTuple.head_sha !== original?.head_sha)) {
+                    try {
+                      await emit(currentTuple.pr_number, currentTuple.base_sha, currentTuple.head_sha, 'failure',
+                        `Invalid peer final read failed closed: ${error.message}`);
+                    } catch (writeError) { writeFailures.push(writeError.message); }
+                  }
+                  const suffix = writeFailures.length ? `; failure writes: ${writeFailures.join(',')}` : '';
+                  throw Error(`invalid peer final read failed: ${error.message}${suffix}`);
+                }
+                if (currentPeer.preserve) continue;
+                const writeFailures = [];
+                try {
+                  await emit(original.pr_number, original.base_sha, original.head_sha, 'failure',
+                    JSON.stringify(currentPeer));
+                } catch (writeError) { writeFailures.push(writeError.message); }
+                if (currentTuple.base_sha !== original.base_sha || currentTuple.head_sha !== original.head_sha) {
+                  try {
+                    await emit(currentTuple.pr_number, currentTuple.base_sha, currentTuple.head_sha, 'failure',
+                      JSON.stringify(currentPeer));
+                  } catch (writeError) { writeFailures.push(writeError.message); }
+                }
+                if (writeFailures.length)
+                  throw Error(`invalid peer failure writes failed: ${writeFailures.join(',')}`);
+              }
+            };
             const finalReadPreservedPeers = async (peerResults, snapshots, defaultBranch, protectedSha) => {
               for (const peer of peerResults) {
                 if (!peer.preserve) continue;
@@ -212,14 +261,7 @@ jobs:
                   dispatch_id: dispatch.dispatch_id, prior_dispatch_ids: priorDispatchIds};
                 const validated = await runValidator(input, protectedSha);
                 const run = validated.run; result = validated.result;
-                for (const peer of result.peers || []) {
-                  if (!peer.preserve) {
-                    const live = snapshots.find(item => item.pr_number === peer.pr_number);
-                    if (live?.base_sha && live?.head_sha)
-                      await emit(live.pr_number, live.base_sha, live.head_sha, 'failure',
-                        JSON.stringify(peer));
-                  }
-                }
+                await finalReadInvalidPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
                 await finalReadPreservedPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
                 const live = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
                 const liveBranch = await github.rest.repos.getBranch({owner, repo, branch: defaultBranch});
@@ -238,13 +280,7 @@ jobs:
               } else {
                 const validated = await runValidator({schema_version: '2', mode: 'peer_only', peers: snapshots}, protectedSha);
                 const run = validated.run; result = validated.result;
-                for (const peer of result.peers || []) {
-                  if (!peer.preserve) {
-                    const live = snapshots.find(item => item.pr_number === peer.pr_number);
-                    if (live?.base_sha && live?.head_sha)
-                      await emit(live.pr_number, live.base_sha, live.head_sha, 'failure', JSON.stringify(peer));
-                  }
-                }
+                await finalReadInvalidPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
                 await finalReadPreservedPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
                 if (run.status !== 0 || result.decision !== 'PASS') throw Error('peer reconciliation incomplete');
                 return;

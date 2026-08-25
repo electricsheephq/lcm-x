@@ -249,7 +249,9 @@ def test_workflow_reconciles_all_open_prs_before_dispatch_evaluation():
     assert "github.paginate(github.rest.pulls.list" in workflow
     assert "github.rest.pulls.get" in workflow
     assert "base: defaultBranch" in workflow
-    assert "await emit(live.pr_number, live.base_sha, live.head_sha, 'failure'" in workflow
+    assert "const finalReadInvalidPeers = async" in workflow
+    assert "await emit(original.pr_number, original.base_sha, original.head_sha, 'failure'" in workflow
+    assert "await emit(currentTuple.pr_number, currentTuple.base_sha, currentTuple.head_sha, 'failure'" in workflow
     assert "if (failures.length) core.setFailed" in workflow
     assert "return;" in workflow[dispatch_guard:]
 
@@ -387,6 +389,47 @@ def test_workflow_final_reads_every_preserved_peer_before_exit():
     )
     assert dispatch_final_read < target_final_read
     assert peer_only_final_read < peer_only_return
+
+
+def test_workflow_rechecks_invalid_peers_before_failure_write():
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
+    ).read_text(encoding="utf-8")
+
+    helper = workflow.index("const finalReadInvalidPeers = async")
+    dispatch = workflow.index("if (dispatchEvent) {")
+    assert helper < dispatch
+    assert "if (peer.preserve) continue;" in workflow[helper:dispatch]
+    assert "const current = await snapshot(peer.pr_number, defaultBranch);" in workflow[
+        helper:dispatch
+    ]
+    assert (
+        "const currentValidated = await runValidator({schema_version: '2', "
+        "mode: 'peer_only', peers: [current]}, protectedSha);"
+    ) in workflow[helper:dispatch]
+    assert "if (currentPeer.preserve) continue;" in workflow[helper:dispatch]
+    assert "await emit(original.pr_number, original.base_sha, original.head_sha, 'failure'" in workflow[
+        helper:dispatch
+    ]
+    assert "await emit(currentTuple.pr_number, currentTuple.base_sha, currentTuple.head_sha, 'failure'" in workflow[
+        helper:dispatch
+    ]
+
+    invalid_call = (
+        "await finalReadInvalidPeers(result.peers || [], snapshots, defaultBranch, "
+        "protectedSha);"
+    )
+    preserve_call = (
+        "await finalReadPreservedPeers(result.peers || [], snapshots, defaultBranch, "
+        "protectedSha);"
+    )
+    dispatch_invalid = workflow.index(invalid_call, dispatch)
+    dispatch_preserve = workflow.index(preserve_call, dispatch)
+    peer_only = workflow.index("} else {", dispatch_preserve)
+    peer_invalid = workflow.index(invalid_call, peer_only)
+    peer_preserve = workflow.index(preserve_call, peer_only)
+    assert dispatch_invalid < dispatch_preserve
+    assert peer_invalid < peer_preserve
 
 
 def _v2_snapshot(
