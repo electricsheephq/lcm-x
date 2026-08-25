@@ -106,6 +106,9 @@ jobs:
                 catch (error) {
                   failures.push(`${candidate.number}:${error.message}`);
                   snapshots.push({repository: `${owner}/${repo}`, pr_number: candidate.number,
+                    base_ref: candidate.base?.ref, base_sha: candidate.base?.sha,
+                    head_sha: candidate.head?.sha, state: candidate.state,
+                    draft: candidate.draft, default_branch: defaultBranch,
                     api_complete: false, pagination_complete: false, api_error: true,
                     changed_paths: [], timeline_events: [], check_runs: []});
                 }
@@ -265,7 +268,12 @@ jobs:
                   throw Error('dispatch packet invalid');
                 if (context.ref !== `refs/heads/${defaultBranch}` || context.sha !== protectedSha)
                   throw Error('dispatch must execute from current protected default branch');
-                if (reconciled.failures.length) throw Error('open PR reconciliation incomplete');
+                if (reconciled.failures.length) {
+                  const writeFailures = await failKnownSnapshots(snapshots,
+                    'Open PR reconciliation failed closed.');
+                  const suffix = writeFailures.length ? `; failure writes: ${writeFailures.join(',')}` : '';
+                  throw Error(`open PR reconciliation incomplete${suffix}`);
+                }
                 const target = await snapshot(prNumber, defaultBranch);
                 const input = {schema_version: '2', target, peers: snapshots.filter(item => item.pr_number !== prNumber),
                   receipts: dispatch.receipts, producer: {login: sender.login, id: Number(sender.id), type: sender.type},
