@@ -1305,6 +1305,154 @@ class _ProductionContextualIdentityEmbedder(_ContextualIdentityEmbedder):
             )
 
 
+class _CapturingIdentityEmbedder(_IdentityEmbedder):
+    def __init__(self, model_id, *, provider_id="voyage"):
+        super().__init__(model_id)
+        self.provider_id = provider_id
+        self.captured_documents = []
+
+    def embed_documents(self, texts):
+        current = [str(text) for text in texts]
+        self.captured_documents.append(current)
+        return super().embed_documents(current)
+
+
+class _CapturingContextualIdentityEmbedder(_CapturingIdentityEmbedder):
+    supports_contextualized_grouping = True
+
+    def __init__(self, model_id, *, provider_id="voyage"):
+        super().__init__(model_id, provider_id=provider_id)
+        self.captured_contextual_groups = []
+
+    def embed_chunk_group_batches(self, groups, *, before_dispatch=None):
+        for group in groups:
+            current = [(int(index), str(text)) for index, text in group]
+            self.captured_contextual_groups.append(current)
+            indexes = tuple(index for index, _text in current)
+            if before_dispatch is not None:
+                before_dispatch(indexes)
+            yield indexes, [self._vector(text) for _index, text in current]
+
+
+_PRIVACY_SECRET = "super-secret-370"
+_PRIVACY_TEXT = f"password={_PRIVACY_SECRET} " + ("privacy context " * 40)
+_PRIVACY_PLACEHOLDER = "[LCM embedding privacy: name=password_assignment]"
+
+
+def _privacy_question(question_id):
+    return parse_question(
+        _make_raw(
+            question_id,
+            "single-session-user",
+            sessions={
+                "s-private": [
+                    {"role": "user", "content": _PRIVACY_TEXT, "has_answer": True}
+                ]
+            },
+            answer_session_ids=["s-private"],
+            question="what credential was saved",
+        )
+    )
+
+
+def _flatten_document_calls(provider):
+    return [text for call in provider.captured_documents for text in call]
+
+
+def test_cloud_summary_document_is_protected_before_provider_dispatch(tmp_path):
+    summary = _CapturingIdentityEmbedder("voyage-4-large")
+    chunk = _IdentityEmbedder("voyage-context-4")
+
+    evaluate_question(
+        _privacy_question("q-private-summary"),
+        summary,
+        chunk_provider=chunk,
+        provider_name="voyage",
+        tmp_dir=tmp_path,
+        embeddings_enabled=True,
+    )
+
+    outbound = _flatten_document_calls(summary)
+    assert outbound
+    assert any(_PRIVACY_PLACEHOLDER in text for text in outbound)
+    assert all(_PRIVACY_SECRET not in text for text in outbound)
+
+
+def test_cloud_flat_chunk_document_is_protected_before_provider_dispatch(tmp_path):
+    summary = _CapturingIdentityEmbedder("voyage-4-large")
+    chunk = _CapturingIdentityEmbedder("voyage-context-4")
+
+    evaluate_question(
+        _privacy_question("q-private-flat-chunk"),
+        summary,
+        chunk_provider=chunk,
+        provider_name="voyage",
+        tmp_dir=tmp_path,
+        embeddings_enabled=True,
+    )
+
+    outbound = _flatten_document_calls(chunk)
+    assert outbound
+    assert any(_PRIVACY_PLACEHOLDER in text for text in outbound)
+    assert all(_PRIVACY_SECRET not in text for text in outbound)
+
+
+def test_cloud_contextual_chunk_group_is_protected_before_provider_dispatch(tmp_path):
+    summary = _CapturingIdentityEmbedder("voyage-4-large")
+    chunk = _CapturingContextualIdentityEmbedder("voyage-context-4")
+
+    evaluate_question(
+        _privacy_question("q-private-contextual-chunk"),
+        summary,
+        chunk_provider=chunk,
+        provider_name="voyage",
+        tmp_dir=tmp_path,
+        embeddings_enabled=True,
+    )
+
+    outbound = [
+        text
+        for group in chunk.captured_contextual_groups
+        for _index, text in group
+    ]
+    assert outbound
+    assert any(_PRIVACY_PLACEHOLDER in text for text in outbound)
+    assert all(_PRIVACY_SECRET not in text for text in outbound)
+
+
+def test_stub_summary_document_reaches_provider_byte_identical(
+    tmp_path, monkeypatch
+):
+    import hermes_lcm.ingest_protection as ingest_protection
+
+    def unexpected_privacy_call(*_args, **_kwargs):
+        raise AssertionError("local provider must not call cloud privacy helpers")
+
+    monkeypatch.setattr(
+        ingest_protection, "protect_embedding_text", unexpected_privacy_call
+    )
+    monkeypatch.setattr(
+        ingest_protection,
+        "validate_embedding_privacy_dispatch",
+        unexpected_privacy_call,
+    )
+    summary = _CapturingIdentityEmbedder("stub", provider_id="stub")
+    chunk = _CapturingIdentityEmbedder("stub-chunk", provider_id="stub")
+    question = _privacy_question("q-private-stub")
+    expected = deterministic_session_summary(question.haystack_sessions[0])
+
+    evaluate_question(
+        question,
+        summary,
+        chunk_provider=chunk,
+        provider_name="stub",
+        tmp_dir=tmp_path,
+        embeddings_enabled=True,
+    )
+
+    assert summary.captured_documents == [[expected]]
+
+
 def test_resolve_harness_providers_uses_production_chunk_identity_and_pair_cache(
     monkeypatch,
 ):

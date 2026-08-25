@@ -2308,7 +2308,15 @@ def evaluate_question(
         if accounting is not None
         else chunk_provider
     )
-    from hermes_lcm.ingest_protection import embedding_provider_requires_privacy
+    from hermes_lcm.ingest_protection import (
+        embedding_privacy_revision,
+        embedding_provider_requires_privacy,
+        protect_embedding_text,
+        validate_embedding_privacy_dispatch,
+    )
+
+    summary_requires_privacy = embedding_provider_requires_privacy(summary_name)
+    chunk_requires_privacy = embedding_provider_requires_privacy(chunk_name)
 
     config = LCMConfig(
         database_path=str(db_path),
@@ -2322,7 +2330,9 @@ def evaluate_question(
         # privacy transform disabled is a configuration error and now fails
         # loud on the recall path instead of silently degrading to FTS. The
         # harness must run cloud providers the way production runs them.
-        sensitive_patterns_enabled=embedding_provider_requires_privacy(summary_name),
+        sensitive_patterns_enabled=(
+            summary_requires_privacy or chunk_requires_privacy
+        ),
     )
     ingest_start = time.perf_counter()
     # F7: clone a pre-migrated template instead of re-running schema bootstrap.
@@ -2357,19 +2367,14 @@ def evaluate_question(
             # vector identity under the active privacy revision, exactly as
             # the engine does — otherwise the recall path's identity check
             # fails loud on a revision mismatch.
-            from hermes_lcm.ingest_protection import (
-                embedding_privacy_revision,
-                embedding_provider_requires_privacy,
-            )
-
             summary_revision = (
                 embedding_privacy_revision(config)
-                if embedding_provider_requires_privacy(summary_name)
+                if summary_requires_privacy
                 else None
             )
             chunk_revision = (
                 embedding_privacy_revision(config)
-                if embedding_provider_requires_privacy(chunk_name)
+                if chunk_requires_privacy
                 else None
             )
             vector_store.register_profile(
@@ -2394,10 +2399,30 @@ def evaluate_question(
         def flush_flat_chunks() -> None:
             if not flat_chunk_batch:
                 return
+            chunk_texts = [str(chunk.text) for chunk in flat_chunk_batch]
+            before_dispatch = None
+            if chunk_revision is not None:
+                chunk_texts = [
+                    protect_embedding_text(
+                        text,
+                        config,
+                        expected_revision=chunk_revision,
+                    )[0]
+                    for text in chunk_texts
+                ]
+
+                def before_dispatch(texts: Sequence[str]) -> None:
+                    validate_embedding_privacy_dispatch(
+                        texts,
+                        config,
+                        expected_revision=chunk_revision,
+                    )
+
             vectors = _embed_in_batches(
                 chunk_documents_provider,
-                [str(chunk.text) for chunk in flat_chunk_batch],
+                chunk_texts,
                 batch_size=flat_chunk_batch_size,
+                before_dispatch=before_dispatch,
             )
             for chunk, vector in zip(flat_chunk_batch, vectors):
                 vector_store.record_chunk_embedding(
@@ -2469,13 +2494,34 @@ def evaluate_question(
 
         if embeddings_enabled and supports_grouping and chunk_items:
             chunk_texts = [str(chunk.text) for chunk in chunk_items]
+            contextual_before_dispatch = None
+            if chunk_revision is not None:
+                chunk_texts = [
+                    protect_embedding_text(
+                        text,
+                        config,
+                        expected_revision=chunk_revision,
+                    )[0]
+                    for text in chunk_texts
+                ]
+
+                def contextual_before_dispatch(indexes: Sequence[int]) -> None:
+                    validate_embedding_privacy_dispatch(
+                        [chunk_texts[int(index)] for index in indexes],
+                        config,
+                        expected_revision=chunk_revision,
+                    )
+
             groups = [
                 [(index, chunk_texts[index]) for index in group]
                 for group in group_by_store_id(
                     [int(chunk.store_id) for chunk in chunk_items]
                 )
             ]
-            chunk_batches = chunk_documents_provider.embed_chunk_group_batches(groups)
+            chunk_batches = chunk_documents_provider.embed_chunk_group_batches(
+                groups,
+                before_dispatch=contextual_before_dispatch,
+            )
             chunk_vectors_by_index: dict[int, Sequence[float]] = {}
             for batch in chunk_batches:
                 indexes = getattr(batch, "indexes", None)
@@ -2511,10 +2557,30 @@ def evaluate_question(
                 )
 
         if embeddings_enabled and summary_specs:
+            summary_texts = [text for _session, _node, text in summary_specs]
+            summary_before_dispatch = None
+            if summary_revision is not None:
+                summary_texts = [
+                    protect_embedding_text(
+                        text,
+                        config,
+                        expected_revision=summary_revision,
+                    )[0]
+                    for text in summary_texts
+                ]
+
+                def summary_before_dispatch(texts: Sequence[str]) -> None:
+                    validate_embedding_privacy_dispatch(
+                        texts,
+                        config,
+                        expected_revision=summary_revision,
+                    )
+
             summary_vectors = _embed_in_batches(
                 summary_documents_provider,
-                [text for _session, _node, text in summary_specs],
+                summary_texts,
                 batch_size=embedding_batch_size,
+                before_dispatch=summary_before_dispatch,
             )
             for (session_id, node_id, _text), vector in zip(summary_specs, summary_vectors):
                 vector_store.record_embedding(
@@ -2702,7 +2768,13 @@ def _embedding_batch_size() -> int:
     return value
 
 
-def _embed_in_batches(embedder, texts: Sequence[str], batch_size: int | None = None) -> list:
+def _embed_in_batches(
+    embedder,
+    texts: Sequence[str],
+    batch_size: int | None = None,
+    *,
+    before_dispatch=None,
+) -> list:
     """Embed ``texts`` in ``batch_size`` sub-batches, concatenating the results.
 
     One ``embed_documents`` call per sub-batch (F7 amortization) while each call
@@ -2716,6 +2788,8 @@ def _embed_in_batches(embedder, texts: Sequence[str], batch_size: int | None = N
     vectors: list = []
     for start in range(0, len(texts), batch_size):
         batch = list(texts[start:start + batch_size])
+        if before_dispatch is not None:
+            before_dispatch(batch)
         embedded = list(embedder.embed_documents(batch))
         if len(embedded) != len(batch):
             raise ValueError(
