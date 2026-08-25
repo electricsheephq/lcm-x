@@ -5978,6 +5978,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     embedding_query_metrics.append(
                         _lcm_embedding_query_metric(provider)
                     )
+            except EmbeddingPrivacyPolicyError:
+                # Deterministic configuration error — never degrade (#367).
+                raise
             except VoyageError as exc:
                 provider = None
                 degraded_reasons.append(f"query embedding failed: {exc}")
@@ -6018,6 +6021,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         embedding_query_metrics.append(
                             _lcm_embedding_query_metric(chunk_provider)
                         )
+                except EmbeddingPrivacyPolicyError:
+                    # Deterministic configuration error — never degrade (#367).
+                    raise
                 except VoyageError as exc:
                     degraded_reasons.append(f"chunk query embedding failed: {exc}")
                 except TimeoutError:
@@ -6055,6 +6061,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     except TimeoutError:
                         timed_out = True
                         coverage["summary"] = "none"
+                    except EmbeddingPrivacyPolicyError:
+                        # Deterministic configuration error — never degrade (#367).
+                        raise
                     except Exception as exc:  # noqa: BLE001
                         coverage["summary"] = "none"
                         degraded_reasons.append(f"summary arm failed: {exc}")
@@ -6084,6 +6093,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     except TimeoutError:
                         timed_out = True
                         coverage["chunk"] = "none"
+                    except EmbeddingPrivacyPolicyError:
+                        # Deterministic configuration error — never degrade (#367).
+                        raise
                     except Exception as exc:  # noqa: BLE001
                         coverage["chunk"] = "none"
                         degraded_reasons.append(f"chunk arm failed: {exc}")
