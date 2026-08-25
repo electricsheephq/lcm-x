@@ -100,6 +100,17 @@ _WRAPPED_BASE64_MIN_TERMINAL_LINE_CHARS = 16
 _BASE64_ALPHABET_RE = re.compile(r"^[A-Za-z0-9+/=_\s-]+$")
 _BASE64_LINE_ALPHABET_RE = re.compile(r"^[A-Za-z0-9+/=_-]+$")
 _PRIVATE_KEY_BASE64_BODY_LINE_RE = re.compile(r"^[A-Za-z0-9+/=]{16,}$")
+# A PEM body's final line may be shorter than a full wrapped line (down to a
+# few characters); the truncated-block redaction bound must include it or the
+# key's tail survives redaction.
+_PRIVATE_KEY_TERMINAL_BODY_LINE_RE = re.compile(r"^[A-Za-z0-9+/=]{1,15}$")
+# Lenient body shape used ONLY to decide END-marker adjacency for complete
+# blocks (never as a truncated redaction bound): anything base64-alphabet-only
+# between BEGIN and an adjacent END belongs to the key.
+_PRIVATE_KEY_LENIENT_BODY_LINE_RE = re.compile(r"^[A-Za-z0-9+/=]+$")
+# No ^$ anchors: used via fullmatch(text, pos, endpos), where "^" would only
+# match at the real string start, not at pos.
+_PRIVATE_KEY_INLINE_SPAN_RE = re.compile(r"[A-Za-z0-9+/=\t ]*")
 _PRIVATE_KEY_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE)
 _PRIVATE_KEY_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE)
 _EXTERNALIZED_PLACEHOLDER_PREFIX = "[Externalized LCM ingest payload:"
@@ -159,7 +170,10 @@ _HERMES_RESULTS_DIRNAME = "hermes-results"
 _MAX_RECOVERED_PERSISTED_OUTPUT_BYTES = 64 * 1024 * 1024
 _SENSITIVE_PLACEHOLDER_PREFIX = "[LCM sensitive redaction:"
 _EMBEDDING_PRIVACY_PLACEHOLDER_PREFIX = "[LCM embedding privacy:"
-_EMBEDDING_PRIVACY_TRANSFORM_VERSION = "privacy:v2"
+# v3: single-pass PEM scanner (short-terminal-line bound, body-adjacent END
+# pairing, linear on pathological inputs) — output differs from v2 on
+# truncated/multi-key material, so v2-era vectors must re-embed.
+_EMBEDDING_PRIVACY_TRANSFORM_VERSION = "privacy:v3"
 _EMBEDDING_PRIVACY_PLACEHOLDER_RE = re.compile(
     r"\[LCM (?:sensitive redaction|embedding privacy):\s*"
     r"name=(?P<name>[a-z0-9_-]+)[^\]]*\]",
@@ -272,31 +286,61 @@ def _apply_sensitive_pattern(name: str, repl, text: str) -> str:
     return _SENSITIVE_PATTERN_CATALOG[name].sub(repl, text)
 
 
-def _truncated_private_key_body_end(text: str, begin_end: int) -> int | None:
-    """Return the end of a contiguous PEM-shaped body after a BEGIN marker."""
-    if text.startswith("\r\n", begin_end):
-        cursor = begin_end + 2
-    elif text.startswith("\n", begin_end):
-        cursor = begin_end + 1
-    else:
-        return None
+def _scan_private_key_block(text: str, begin_end: int) -> tuple[int | None, int | None]:
+    """Single forward pass over the PEM-shaped lines after a BEGIN marker.
 
-    body_end: int | None = None
-    while cursor <= len(text):
-        newline = text.find("\n", cursor)
-        line_end = len(text) if newline < 0 else newline
+    Returns ``(block_end, strict_end)``. ``block_end`` is set (END-inclusive)
+    when a matching END marker starts on the line directly after the contiguous
+    base64-alphabet body — the complete-block case. ``strict_end`` is the
+    truncated-block redaction bound: the end of the last full-width body line,
+    extended by at most one short terminal line (a real PEM tail). The scan
+    never searches ahead of the first non-body line, so pathological inputs
+    with many unmatched BEGIN markers stay linear (the prior END-to-EOF search
+    was quadratic), and a truncated block can never consume unrelated prose or
+    a following key (the END must be body-adjacent, not merely later).
+    """
+    n = len(text)
+    if text.startswith("\r\n", begin_end):
+        pos = begin_end + 2
+    elif text.startswith("\n", begin_end):
+        pos = begin_end + 1
+    else:
+        return None, None
+
+    strict_end: int | None = None
+    terminal_taken = False
+    saw_strict = False
+    while pos <= n:
+        newline = text.find("\n", pos)
+        line_end = n if newline < 0 else newline
         content_end = (
             line_end - 1
-            if line_end > cursor and text[line_end - 1] == "\r"
+            if line_end > pos and text[line_end - 1] == "\r"
             else line_end
         )
-        if _PRIVATE_KEY_BASE64_BODY_LINE_RE.fullmatch(text[cursor:content_end]) is None:
-            break
-        body_end = content_end
+        line = text[pos:content_end]
+        if _PRIVATE_KEY_BASE64_BODY_LINE_RE.fullmatch(line) is not None:
+            saw_strict = True
+            if not terminal_taken:
+                strict_end = content_end
+        elif (
+            saw_strict
+            and not terminal_taken
+            and _PRIVATE_KEY_TERMINAL_BODY_LINE_RE.fullmatch(line) is not None
+        ):
+            terminal_taken = True
+            strict_end = content_end
+        elif _PRIVATE_KEY_LENIENT_BODY_LINE_RE.fullmatch(line) is not None:
+            pass  # keeps END adjacency alive; never extends the truncated bound
+        else:
+            end_match = _PRIVATE_KEY_END_RE.match(text, pos)
+            if end_match is not None:
+                return end_match.end(), strict_end
+            return None, strict_end
         if newline < 0:
             break
-        cursor = newline + 1
-    return body_end
+        pos = newline + 1
+    return None, strict_end
 
 
 def _redact_private_key_blocks_with(text: str, placeholder) -> str:
@@ -306,30 +350,38 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
     parts: list[str] = []
     cursor = 0
     changed = False
+    n = len(text)
     while True:
         begin = _PRIVATE_KEY_BEGIN_RE.search(text, cursor)
         if begin is None:
             parts.append(text[cursor:])
             break
-        end = _PRIVATE_KEY_END_RE.search(text, begin.end())
-        if end is None:
-            body_end = _truncated_private_key_body_end(text, begin.end())
-            if body_end is None:
-                parts.append(text[cursor:begin.end()])
-                cursor = begin.end()
-                continue
-            secret = text[begin.start():body_end]
+        newline = text.find("\n", begin.end())
+        eol = n if newline < 0 else newline
+        inline_end = _PRIVATE_KEY_END_RE.search(text, begin.end(), eol)
+        if inline_end is not None and _PRIVATE_KEY_INLINE_SPAN_RE.fullmatch(
+            text, begin.end(), inline_end.start()
+        ):
             parts.append(text[cursor:begin.start()])
-            parts.append(placeholder(secret))
-            cursor = body_end
+            parts.append(placeholder(text[begin.start():inline_end.end()]))
+            cursor = inline_end.end()
             changed = True
             continue
-        block_end = end.end()
-        secret = text[begin.start():block_end]
-        parts.append(text[cursor:begin.start()])
-        parts.append(placeholder(secret))
-        cursor = block_end
-        changed = True
+        block_end, strict_end = _scan_private_key_block(text, begin.end())
+        if block_end is not None:
+            parts.append(text[cursor:begin.start()])
+            parts.append(placeholder(text[begin.start():block_end]))
+            cursor = block_end
+            changed = True
+            continue
+        if strict_end is not None:
+            parts.append(text[cursor:begin.start()])
+            parts.append(placeholder(text[begin.start():strict_end]))
+            cursor = strict_end
+            changed = True
+            continue
+        parts.append(text[cursor:begin.end()])
+        cursor = begin.end()
     return "".join(parts) if changed else text
 
 
@@ -846,13 +898,16 @@ def _has_orphaned_private_key_body(text: str) -> bool:
     """True for line-oriented PEM body + END structure without an earlier BEGIN."""
     seen_begin = False
     body_lines = 0
+    terminal_taken = False
     for line in text.splitlines():
         if _PRIVATE_KEY_BEGIN_RE.search(line) is not None:
             seen_begin = True
             body_lines = 0
+            terminal_taken = False
             continue
         if _PRIVATE_KEY_BASE64_BODY_LINE_RE.fullmatch(line) is not None:
-            body_lines += 1
+            if not terminal_taken:
+                body_lines += 1
             continue
         if (
             body_lines > 0
@@ -860,7 +915,18 @@ def _has_orphaned_private_key_body(text: str) -> bool:
             and _PRIVATE_KEY_END_RE.fullmatch(line) is not None
         ):
             return True
+        if (
+            body_lines > 0
+            and not terminal_taken
+            and _PRIVATE_KEY_TERMINAL_BODY_LINE_RE.fullmatch(line) is not None
+        ):
+            # A real PEM tail may be one short base64 line right before END;
+            # it must not reset the body count or the stripped-key variant
+            # with a short final line would pass validation.
+            terminal_taken = True
+            continue
         body_lines = 0
+        terminal_taken = False
     return False
 
 

@@ -108,8 +108,8 @@ def test_provider_transform_removes_secret_metadata_and_canonicalizes_placeholde
     protected, revision, changed = protect_embedding_text(raw, config)
 
     assert changed is True
-    assert revision.startswith("privacy:v2:")
-    assert not revision.startswith("privacy:v1:")
+    assert revision.startswith("privacy:v3:")
+    assert not revision.startswith("privacy:v2:")
     assert "abcdefghijklmnop" not in protected
     assert "correct-horse-battery" not in protected
     assert "deadbeefdeadbeef" not in protected
@@ -156,7 +156,7 @@ def test_truncated_private_key_is_redacted_before_semantic_cloud_call(tmp_path):
     assert key_body not in provider.queries[0]
 
 
-def test_privacy_v2_revision_makes_v1_vectors_pending(tmp_path):
+def test_privacy_v3_revision_makes_prior_vectors_pending(tmp_path):
     config = _config(tmp_path)
     dag = SummaryDAG(config.database_path)
     try:
@@ -173,7 +173,7 @@ def test_privacy_v2_revision_makes_v1_vectors_pending(tmp_path):
         dag.close()
 
     current_revision = embedding_privacy_revision(config)
-    old_revision = current_revision.replace("privacy:v2:", "privacy:v1:", 1)
+    old_revision = current_revision.replace("privacy:v3:", "privacy:v2:", 1)
     store = VectorStore(config.database_path, config=config)
     try:
         old_identity_hash = store.register_profile(
@@ -493,3 +493,95 @@ def test_residual_private_key_detector_is_linear_on_long_single_line(tmp_path):
     elapsed = time.perf_counter() - started
 
     assert elapsed < 0.1
+
+
+def test_truncated_key_short_terminal_line_is_redacted_both_paths(tmp_path):
+    # Round-3 finding 1: a valid short final base64 line (real PEM tails are
+    # often shorter than a wrapped line) must be inside the redaction bound.
+    cfg = _config(tmp_path)
+    revision = embedding_privacy_revision(cfg)
+    text = "-----BEGIN PRIVATE KEY-----\n" + "A" * 64 + "\nCDEF\ntrailing prose stays"
+    for redacted in (
+        redact_sensitive_text(text, cfg),
+        protect_embedding_text(text, cfg)[0],
+    ):
+        assert "AAAA" not in redacted
+        assert "CDEF" not in redacted
+        assert "trailing prose stays" in redacted
+    protected, _r, _c = protect_embedding_text(text, cfg)
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+
+
+def test_stripped_key_with_short_terminal_line_fails_residual_validation(tmp_path):
+    # Round-3 finding 1 (residual half): body + short tail + END, BEGIN absent.
+    cfg = _config(tmp_path)
+    revision = embedding_privacy_revision(cfg)
+    stripped = "A" * 64 + "\nCDEF\n-----END PRIVATE KEY-----"
+    with pytest.raises(EmbeddingPrivacyPolicyError):
+        validate_embedding_privacy_dispatch([stripped], cfg, expected_revision=revision)
+
+
+def test_truncated_key_never_consumes_prose_before_a_complete_key(tmp_path):
+    # Round-3 finding 2: END pairing must be body-adjacent; a truncated key
+    # followed by prose and a complete key redacts both keys, keeps the prose.
+    cfg = _config(tmp_path)
+    body = "B" * 64
+    text = (
+        "-----BEGIN PRIVATE KEY-----\n" + "A" * 64 + "\n"
+        "meeting notes about the incident\n"
+        "-----BEGIN PRIVATE KEY-----\n" + body + "\n-----END PRIVATE KEY-----\n"
+        "closing prose"
+    )
+    for redacted in (
+        redact_sensitive_text(text, cfg),
+        protect_embedding_text(text, cfg)[0],
+    ):
+        assert "AAAA" not in redacted
+        assert body not in redacted
+        assert "meeting notes about the incident" in redacted
+        assert "closing prose" in redacted
+        assert "-----END PRIVATE KEY-----" not in redacted
+
+
+def test_many_unmatched_begin_markers_scan_linearly_both_paths(tmp_path):
+    # Round-3 finding 3: per-BEGIN END searches to EOF were quadratic (CI
+    # measured 13.9s on the pathological ingest input); the single-pass
+    # scanner must stay far under the CI 3s bound on both paths.
+    cfg = _config(tmp_path)
+    revision = embedding_privacy_revision(cfg)
+    pathological = ("-----BEGIN PRIVATE KEY-----\n" + "A" * 64 + "\n") * 20000
+    started = time.perf_counter()
+    redacted = redact_sensitive_text(pathological, cfg)
+    protected, _r, _c = protect_embedding_text(pathological, cfg)
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+    elapsed = time.perf_counter() - started
+    assert "AAAA" not in redacted
+    assert "AAAA" not in protected
+    assert elapsed < 3.0
+
+
+def test_inline_single_line_private_key_still_redacted(tmp_path):
+    # private_key now always routes through the linear scanner, so the scanner
+    # must also cover the whitespace-separated single-line PEM form the old
+    # DOTALL regex handled.
+    cfg = _config(tmp_path)
+    text = "before -----BEGIN PRIVATE KEY----- MIIEvQIBADANBg -----END PRIVATE KEY----- after"
+    for redacted in (
+        redact_sensitive_text(text, cfg),
+        protect_embedding_text(text, cfg)[0],
+    ):
+        assert "MIIEvQIBADANBg" not in redacted
+        assert "before" in redacted and "after" in redacted
+
+
+def test_complete_key_with_only_short_body_lines_is_redacted(tmp_path):
+    # Complete-block adjacency must be lenient about body-line width
+    # (mirrors the redact-path coverage in test_ingest_protection).
+    cfg = _config(tmp_path)
+    text = "-----BEGIN RSA PRIVATE KEY-----\nabcdef\n-----END RSA PRIVATE KEY-----"
+    for redacted in (
+        redact_sensitive_text(text, cfg),
+        protect_embedding_text(text, cfg)[0],
+    ):
+        assert "abcdef" not in redacted
+        assert "BEGIN RSA PRIVATE KEY" not in redacted
