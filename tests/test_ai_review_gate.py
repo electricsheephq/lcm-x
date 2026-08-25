@@ -282,13 +282,7 @@ def test_dispatch_reconciliation_failure_resets_every_known_snapshot():
     ).read_text(encoding="utf-8")
 
     dispatch = workflow.index("if (dispatchEvent) {")
-    target_reset = workflow.index(
-        "await emit(prNumber, base, head, 'failure', 'Protected base changed",
-        dispatch,
-    )
-    reconciliation_guard = workflow.index(
-        "if (reconciled.failures.length)", target_reset
-    )
+    reconciliation_guard = workflow.index("if (reconciled.failures.length)", dispatch)
     peer_resets = workflow.index(
         "await failKnownSnapshots(snapshots", reconciliation_guard
     )
@@ -299,9 +293,38 @@ def test_dispatch_reconciliation_failure_resets_every_known_snapshot():
         "const target = await snapshot(prNumber, defaultBranch);", reconciliation_guard
     )
 
-    assert target_reset < reconciliation_guard < peer_resets < terminal < target_snapshot
+    assert reconciliation_guard < peer_resets < terminal < target_snapshot
     assert "const writeFailures =" in workflow[reconciliation_guard:peer_resets]
     assert "failure writes:" in workflow[peer_resets:terminal]
+
+
+def test_incomplete_dispatch_target_still_resets_known_peers():
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
+    ).read_text(encoding="utf-8")
+
+    dispatch = workflow.index("if (dispatchEvent) {")
+    authenticated = workflow.index("if (sender?.login !== '100yenadmin'", dispatch)
+    packet_guard = workflow.index("if (!Array.isArray(dispatch.receipts)", dispatch)
+    protected_ref = workflow.index("if (context.ref !== `refs/heads/${defaultBranch}`", dispatch)
+    reconciliation_guard = workflow.index("if (reconciled.failures.length)", dispatch)
+    peer_resets = workflow.index(
+        "await failKnownSnapshots(snapshots", reconciliation_guard
+    )
+    terminal = workflow.index(
+        "throw Error(`open PR reconciliation incomplete", peer_resets
+    )
+    target_guard = workflow.index("if (!priorTarget || priorTarget.api_complete !== true", dispatch)
+
+    assert (
+        authenticated
+        < packet_guard
+        < protected_ref
+        < reconciliation_guard
+        < peer_resets
+        < terminal
+        < target_guard
+    )
 
 
 def test_workflow_rechecks_complete_target_state_before_success():
@@ -328,9 +351,7 @@ def test_workflow_reconciliation_failure_is_terminal_before_target_promotion():
         REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
     ).read_text(encoding="utf-8")
 
-    target_reset = workflow.index(
-        "await emit(prNumber, base, head, 'failure', 'Protected base changed"
-    )
+    peer_resets = workflow.index("await failKnownSnapshots(snapshots")
     reconciliation_stop = workflow.index(
         "throw Error(`open PR reconciliation incomplete"
     )
@@ -339,7 +360,7 @@ def test_workflow_reconciliation_failure_is_terminal_before_target_promotion():
     )
     target_success = workflow.index("conclusion = 'success';")
 
-    assert target_reset < reconciliation_stop < target_snapshot < target_success
+    assert peer_resets < reconciliation_stop < target_snapshot < target_success
 
 
 def test_workflow_uses_supported_actor_id_environment():

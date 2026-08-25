@@ -230,6 +230,21 @@ jobs:
                 prNumber = dispatch.pr_number;
                 const tuple = (await github.rest.pulls.get({owner, repo, pull_number: prNumber})).data;
                 base = tuple.base.sha; head = tuple.head.sha;
+                if (sender?.login !== '100yenadmin' || Number(sender?.id) !== 239388517 ||
+                    sender?.type !== 'User' || context.actor !== '100yenadmin' || Number(process.env.GITHUB_ACTOR_ID) !== 239388517)
+                  throw Error('dispatch producer unauthenticated');
+                if (!Number.isInteger(run_attempt) || run_attempt !== 1)
+                  throw Error('repository dispatch reruns cannot promote');
+                if (!Array.isArray(dispatch.receipts) || typeof dispatch.dispatch_id !== 'string')
+                  throw Error('dispatch packet invalid');
+                if (context.ref !== `refs/heads/${defaultBranch}` || context.sha !== protectedSha)
+                  throw Error('dispatch must execute from current protected default branch');
+                if (reconciled.failures.length) {
+                  const writeFailures = await failKnownSnapshots(snapshots,
+                    'Open PR reconciliation failed closed.');
+                  const suffix = writeFailures.length ? `; failure writes: ${writeFailures.join(',')}` : '';
+                  throw Error(`open PR reconciliation incomplete${suffix}`);
+                }
                 const priorTarget = snapshots.find(item => item.pr_number === prNumber);
                 if (!priorTarget || priorTarget.api_complete !== true ||
                     priorTarget.pagination_complete !== true || priorTarget.repository !== `${owner}/${repo}` ||
@@ -259,21 +274,6 @@ jobs:
                   }
                 }
                 await emit(prNumber, base, head, 'failure', 'Protected base changed or stored packet invalid; validation started and fails closed until complete.');
-                if (sender?.login !== '100yenadmin' || Number(sender?.id) !== 239388517 ||
-                    sender?.type !== 'User' || context.actor !== '100yenadmin' || Number(process.env.GITHUB_ACTOR_ID) !== 239388517)
-                  throw Error('dispatch producer unauthenticated');
-                if (!Number.isInteger(run_attempt) || run_attempt !== 1)
-                  throw Error('repository dispatch reruns cannot promote');
-                if (!Array.isArray(dispatch.receipts) || typeof dispatch.dispatch_id !== 'string')
-                  throw Error('dispatch packet invalid');
-                if (context.ref !== `refs/heads/${defaultBranch}` || context.sha !== protectedSha)
-                  throw Error('dispatch must execute from current protected default branch');
-                if (reconciled.failures.length) {
-                  const writeFailures = await failKnownSnapshots(snapshots,
-                    'Open PR reconciliation failed closed.');
-                  const suffix = writeFailures.length ? `; failure writes: ${writeFailures.join(',')}` : '';
-                  throw Error(`open PR reconciliation incomplete${suffix}`);
-                }
                 const target = await snapshot(prNumber, defaultBranch);
                 const input = {schema_version: '2', target, peers: snapshots.filter(item => item.pr_number !== prNumber),
                   receipts: dispatch.receipts, producer: {login: sender.login, id: Number(sender.id), type: sender.type},
