@@ -332,3 +332,25 @@ def test_durable_redaction_pem_after_password_survives_ordering(tmp_path):
     out = redact_sensitive_text(text, cfg)
     assert _KEY_BODY not in out
     assert "private_key" in out
+
+
+def test_durable_redacts_truncated_pem_after_password(tmp_path):
+    """#365 review finding 1: truncated key (BEGIN, no END) must not leak to durable storage."""
+    cfg = _config(tmp_path)
+    text = "password: -----BEGIN PRIVATE KEY-----\n%s\n<no end marker>" % _KEY_BODY
+    out = redact_sensitive_text(text, cfg)
+    assert _KEY_BODY not in out
+    # embedding path parity
+    protected, _r, _c = protect_embedding_text(text, cfg)
+    assert _KEY_BODY not in protected
+
+
+def test_residual_allows_prose_with_bare_end_marker(tmp_path):
+    """#365 review finding 2: prose containing only an END phrase must NOT fail closed."""
+    cfg = _config(tmp_path)
+    prose = "The key file terminates with the line -----END PRIVATE KEY----- and nothing else."
+    revision = embedding_privacy_revision(cfg)
+    # must not raise
+    validate_embedding_privacy_dispatch([prose], cfg, expected_revision=revision)
+    protected, _r, _c = protect_embedding_text(prose, cfg)
+    assert "-----END PRIVATE KEY-----" in protected  # left intact, no false redaction

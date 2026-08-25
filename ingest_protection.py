@@ -281,8 +281,9 @@ def _redact_private_key_blocks(text: str) -> str:
 
     This keeps large valid keys protected even when the optional ``regex``
     package is unavailable, without running the stdlib DOTALL private-key
-    pattern over a pathological multi-MB input. Unmatched BEGIN headers are
-    left intact; there is no complete key block to redact.
+    pattern over a pathological multi-MB input. A truncated block (BEGIN with
+    no matching END) is redacted from the header to end-of-input to match the
+    embedding path — leaving it intact leaked the body to durable storage (#365).
     """
     if "private key-----" not in text.lower():
         return text
@@ -296,7 +297,11 @@ def _redact_private_key_blocks(text: str) -> str:
             break
         end = _PRIVATE_KEY_END_RE.search(text, begin.end())
         if end is None:
-            parts.append(text[cursor:])
+            # Truncated key: redact from the header through end-of-input.
+            secret = text[begin.start():]
+            parts.append(text[cursor:begin.start()])
+            parts.append(_sensitive_placeholder("private_key", secret))
+            changed = True
             break
         block_end = end.end()
         secret = text[begin.start():block_end]
@@ -802,6 +807,26 @@ def _embedding_privacy_redact_match(
     return full[:relative_start] + placeholder + full[relative_end:]
 
 
+_STRIPPED_PRIVATE_KEY_RE = re.compile(
+    # A base64/PEM body run (>=40 chars) followed by a PRIVATE-KEY END marker,
+    # with the BEGIN marker MISSING before it — the shape left when an earlier
+    # pattern consumed "-----BEGIN" (#365). Prose that merely mentions the END
+    # phrase has no preceding body and is not flagged.
+    r"[A-Za-z0-9+/=\s]{40,}-----END [A-Z0-9 ]*PRIVATE KEY-----",
+    re.IGNORECASE,
+)
+
+
+def _has_orphaned_private_key_body(text: str) -> bool:
+    """True if a private-key body survives without its BEGIN marker."""
+    for match in _STRIPPED_PRIVATE_KEY_RE.finditer(text):
+        preceding = text[: match.start()]
+        # Real leak: no BEGIN marker anywhere before this body+END pair.
+        if _PRIVATE_KEY_BEGIN_RE.search(preceding) is None:
+            return True
+    return False
+
+
 def _private_key_first(names: Sequence[str]) -> list[str]:
     """Order pattern names so private_key runs before any assignment pattern.
 
@@ -851,7 +876,7 @@ def _embedding_privacy_residual_patterns(
             # now blind. (BEGIN redaction still flagged for truncated/no-END blocks.)
             if (
                 _embedding_privacy_redact_private_keys(text) != text
-                or _PRIVATE_KEY_END_RE.search(text) is not None
+                or _has_orphaned_private_key_body(text)
             ):
                 residual.append(name)
             continue
