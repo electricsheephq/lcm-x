@@ -1278,6 +1278,9 @@ class _ContextualIdentityEmbedder(_IdentityEmbedder):
         self.contextual_groups = []
 
     def embed_chunk_group_batches(self, groups, *, before_dispatch=None):
+        self.max_groups_per_call = max(
+            getattr(self, "max_groups_per_call", 0), len(groups)
+        )
         for group in groups:
             indexes = tuple(index for index, _text in group)
             self.contextual_groups.append(indexes)
@@ -1294,6 +1297,9 @@ class _ProductionContextualIdentityEmbedder(_ContextualIdentityEmbedder):
     def embed_chunk_group_batches(self, groups, *, before_dispatch=None):
         from hermes_lcm.embedding_provider import EmbeddedDocumentBatch
 
+        self.max_groups_per_call = max(
+            getattr(self, "max_groups_per_call", 0), len(groups)
+        )
         for group in groups:
             indexes = tuple(index for index, _text in group)
             self.contextual_groups.append(indexes)
@@ -1424,7 +1430,8 @@ def test_evaluate_question_separates_provider_phases_and_chunk_grouping(
                         "role": "assistant",
                         "content": "second accounting chunk evidence " * 40,
                         "has_answer": True,
-                    }
+                    },
+                    {"role": "user", "content": "third accounting chunk " * 40},
                 ]
             },
             answer_session_ids=["s-evidence"],
@@ -1440,6 +1447,7 @@ def test_evaluate_question_separates_provider_phases_and_chunk_grouping(
         provider_name="voyage",
         tmp_dir=tmp_path,
         embeddings_enabled=True,
+        embedding_batch_size=2,
     )
 
     snapshot = accounting.snapshot()
@@ -1458,14 +1466,15 @@ def test_evaluate_question_separates_provider_phases_and_chunk_grouping(
         assert snapshot[role]["known_usage_tokens"] == 0
     if contextual_shape in {"tuple", "production"}:
         assert len(chunk.contextual_groups) >= 2
-        assert snapshot["chunk_documents"]["requests"] == 1
+        assert chunk.max_groups_per_call <= 2
+        assert snapshot["chunk_documents"]["requests"] == 2
         assert snapshot["chunk_documents"]["provider_dispatches"] == len(
             chunk.contextual_groups
         )
         assert chunk.document_calls == 0
     else:
         assert chunk.document_calls == snapshot["chunk_documents"]["requests"]
-        assert max(chunk.document_batch_sizes) == 1
+        assert max(chunk.document_batch_sizes) <= 2
 
 
 def test_evaluate_question_reuses_one_query_for_same_provider_identity(tmp_path):
@@ -1541,6 +1550,47 @@ def test_production_recall_accounts_separate_summary_and_chunk_queries(
     assert row["provider_dispatches"] == 2
     assert row["usage_tokens_complete"] is False
     assert row["usage_tokens"] is None
+
+
+@pytest.mark.parametrize("method", ["embed_query", "embed_query_interactive"])
+@pytest.mark.parametrize("outcome", ["success", "predispatch", "postdispatch"])
+def test_query_accounting_is_identical_for_interactive_calls(method, outcome):
+    import benchmarking.longmemeval as lme
+
+    class QueryProvider(_IdentityEmbedder):
+        provider_dispatches = 0
+        last_usage_tokens = 3
+
+        def _run(self, text):
+            if outcome == "predispatch":
+                error = RuntimeError("refused")
+                error.transport_started = False
+                raise error
+            self.provider_dispatches += 1
+            if outcome == "postdispatch":
+                raise RuntimeError("failed")
+            return self._vector(text)
+
+        def embed_query(self, text):
+            return self._run(text)
+
+        def embed_query_interactive(self, text, *, timeout):
+            assert timeout == 1.5
+            return self._run(text)
+
+    accounting = ProviderAccounting()
+    wrapped = lme._AccountingProvider(QueryProvider("voyage-4-large"), accounting, "harness_queries")
+    call = getattr(wrapped, method)
+    kwargs = {"timeout": 1.5} if method.endswith("interactive") else {}
+    if outcome == "success":
+        assert call("question", **kwargs)
+    else:
+        with pytest.raises(RuntimeError):
+            call("question", **kwargs)
+    row = accounting.snapshot()["harness_queries"]
+    assert row["requests"] == 1
+    assert row["provider_dispatches"] == (0 if outcome == "predispatch" else 1)
+    assert row["usage_tokens"] == (3 if outcome == "success" else (0 if outcome == "predispatch" else None))
 
 
 def test_typed_provider_degraded_outcomes_ignore_general_and_reject_unknown_provider():
@@ -1681,6 +1731,29 @@ def test_accounted_warmup_attempt_is_not_omitted():
     assert row["usage_tokens"] == 3
 
 
+def test_accounted_warmup_observes_all_retry_transports():
+    import benchmarking.longmemeval as lme
+
+    class RetryingWarmup(_IdentityEmbedder):
+        last_usage_tokens = 3
+
+        def __init__(self):
+            super().__init__("voyage-context-4")
+            self._transport = lambda: None
+
+        def warmup(self):
+            self._transport()
+            self._transport()
+            return self._vector("warmup")
+
+    provider = RetryingWarmup()
+    accounting = ProviderAccounting()
+    assert lme._accounted_provider_attempt(
+        provider, accounting, "chunk_documents", provider.warmup
+    )
+    assert accounting.snapshot()["chunk_documents"]["provider_dispatches"] == 2
+
+
 @pytest.mark.parametrize("path", ["flat", "cached", "contextual"])
 def test_predispatch_refusal_records_no_provider_transport(tmp_path, path):
     import benchmarking.longmemeval as lme
@@ -1758,6 +1831,123 @@ def test_content_cache_exposes_internal_split_dispatches_and_usage(tmp_path):
     assert row["provider_dispatches"] == 2
     assert row["usage_tokens"] == 10
     assert row["usage_tokens_complete"] is True
+
+
+@pytest.mark.parametrize("path", ["documents", "contextual"])
+def test_batched_accounting_counts_retry_transports_not_yielded_batches(path):
+    import benchmarking.longmemeval as lme
+
+    class RetryingProvider(_IdentityEmbedder):
+        def __init__(self):
+            super().__init__("voyage-context-4")
+            self._transport = lambda: None
+
+        def _one_batch(self, indexes, texts):
+            self._transport()
+            self._transport()
+            yield type("Batch", (), {"indexes": indexes, "vectors": tuple(self._vector(text) for text in texts)})()
+
+        def embed_document_batches(self, texts):
+            yield from self._one_batch(tuple(range(len(texts))), texts)
+
+        def embed_chunk_group_batches(self, groups):
+            indexes = tuple(index for group in groups for index, _text in group)
+            texts = tuple(text for group in groups for _index, text in group)
+            yield from self._one_batch(indexes, texts)
+
+    accounting = ProviderAccounting()
+    wrapped = lme._AccountingProvider(RetryingProvider(), accounting, "chunk_documents")
+    if path == "documents":
+        wrapped.embed_documents(["chunk"])
+    else:
+        list(wrapped.embed_chunk_group_batches([[(0, "chunk")]]))
+    assert accounting.snapshot()["chunk_documents"]["provider_dispatches"] == 2
+
+
+@pytest.mark.parametrize("path", ["documents", "contextual"])
+def test_batched_accounting_preserves_completed_dispatch_before_refusal(path):
+    import benchmarking.longmemeval as lme
+
+    class PartiallyRefusingProvider(_IdentityEmbedder):
+        def _batches(self, indexes, texts):
+            yield type("Batch", (), {"indexes": indexes, "vectors": tuple(self._vector(text) for text in texts)})()
+            error = RuntimeError("later request refused")
+            error.transport_started = False
+            raise error
+
+        def embed_document_batches(self, texts):
+            yield from self._batches(tuple(range(len(texts))), texts)
+
+        def embed_chunk_group_batches(self, groups):
+            indexes = tuple(index for group in groups for index, _text in group)
+            texts = tuple(text for group in groups for _index, text in group)
+            yield from self._batches(indexes, texts)
+
+    accounting = ProviderAccounting()
+    wrapped = lme._AccountingProvider(
+        PartiallyRefusingProvider("voyage-context-4"), accounting, "chunk_documents"
+    )
+    with pytest.raises(RuntimeError, match="later request refused"):
+        if path == "documents":
+            wrapped.embed_documents(["chunk"])
+        else:
+            list(wrapped.embed_chunk_group_batches([[(0, "chunk")]]))
+    assert accounting.snapshot()["chunk_documents"]["provider_dispatches"] == 1
+
+
+def test_contextual_postdispatch_failure_marks_unknown_usage_incomplete():
+    import benchmarking.longmemeval as lme
+
+    class FailingProvider(_IdentityEmbedder):
+        last_usage_tokens = None
+
+        def __init__(self):
+            super().__init__("voyage-context-4")
+            self._transport = lambda: None
+
+        def embed_chunk_group_batches(self, groups):
+            self._transport()
+            raise RuntimeError("post-dispatch failure")
+            yield  # pragma: no cover
+
+    accounting = ProviderAccounting()
+    wrapped = lme._AccountingProvider(FailingProvider(), accounting, "chunk_documents")
+    with pytest.raises(RuntimeError, match="post-dispatch failure"):
+        list(wrapped.embed_chunk_group_batches([[(0, "chunk")]]))
+    row = accounting.snapshot()["chunk_documents"]
+    assert row["provider_dispatches"] == 1
+    assert row["usage_tokens"] is None
+    assert row["usage_tokens_complete"] is False
+
+
+@pytest.mark.parametrize(
+    ("predispatch", "expected_dispatches", "expected_complete"),
+    [(False, 1, False), (True, 0, True)],
+)
+def test_contextual_unobservable_failure_is_conservative(
+    predispatch, expected_dispatches, expected_complete
+):
+    import benchmarking.longmemeval as lme
+
+    class UnobservableFailure(_IdentityEmbedder):
+        last_usage_tokens = None
+
+        def embed_chunk_group_batches(self, groups):
+            error = RuntimeError("unobservable failure")
+            if predispatch:
+                error.transport_started = False
+            raise error
+            yield  # pragma: no cover
+
+    accounting = ProviderAccounting()
+    wrapped = lme._AccountingProvider(
+        UnobservableFailure("voyage-context-4"), accounting, "chunk_documents"
+    )
+    with pytest.raises(RuntimeError, match="unobservable failure"):
+        list(wrapped.embed_chunk_group_batches([[(0, "chunk")]]))
+    row = accounting.snapshot()["chunk_documents"]
+    assert row["provider_dispatches"] == expected_dispatches
+    assert row["usage_tokens_complete"] is expected_complete
 
 
 def test_completed_resume_and_binding_mismatch_do_not_resolve_provider(
