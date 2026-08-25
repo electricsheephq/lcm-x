@@ -692,3 +692,82 @@ def test_round6_completeness_and_precision_dispositions(tmp_path):
     f3 = "-----BEGIN PRIVATE KEY-----\nSYNTH ETIC BODY 1234 5678 90AB\n-----END PRIVATE KEY-----"
     with pytest.raises(EmbeddingPrivacyPolicyError):
         validate_embedding_privacy_dispatch([f3], cfg, expected_revision=revision)
+
+
+def test_round7_realistic_shapes_encrypted_json_logs(tmp_path):
+    # Round-7 (thread sweep + R6, all in declared scope): encrypted PEM armor
+    # headers, JSON-escaped serialization, log-collector prefixes, all-short
+    # orphan runs — and the precision guards those fixes must not break.
+    cfg = _config(tmp_path)
+    revision = embedding_privacy_revision(cfg)
+    body = "Q" * 64
+
+    # RFC 1421 encrypted key: headers + blank line, complete AND truncated.
+    enc_complete = (
+        "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n"
+        "DEK-Info: AES-128-CBC,ABCDEF0123456789\n\n" + body + "\n"
+        "-----END RSA PRIVATE KEY-----"
+    )
+    enc_truncated = (
+        "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n"
+        "DEK-Info: AES-128-CBC,ABCDEF0123456789\n\n" + body + "\nprose stays"
+    )
+    for text in (enc_complete, enc_truncated):
+        for redacted in (
+            redact_sensitive_text(text, cfg),
+            protect_embedding_text(text, cfg)[0],
+        ):
+            assert body not in redacted, text[:40]
+    assert "prose stays" in redact_sensitive_text(enc_truncated, cfg)
+
+    # JSON-escaped one-physical-line key (serialized logs).
+    esc = (
+        '{"log": "-----BEGIN PRIVATE KEY-----\\\\n' + "M" * 40
+        + '\\\\n-----END PRIVATE KEY-----"}'
+    )
+    for redacted in (
+        redact_sensitive_text(esc, cfg),
+        protect_embedding_text(esc, cfg)[0],
+    ):
+        assert "M" * 40 not in redacted
+
+    # Log-collector prefixes on every line.
+    logged = (
+        "INFO -----BEGIN PRIVATE KEY-----\nINFO " + body + "\n"
+        "INFO -----END PRIVATE KEY-----"
+    )
+    for redacted in (
+        redact_sensitive_text(logged, cfg),
+        protect_embedding_text(logged, cfg)[0],
+    ):
+        assert body not in redacted
+
+    # All-short orphan run (stripped, re-wrapped) directly before END.
+    orphan_short = "AbCd0011\nEfGh2233\nIjKl4455\n-----END PRIVATE KEY-----"
+    for redacted in (
+        redact_sensitive_text(orphan_short, cfg),
+        protect_embedding_text(orphan_short, cfg)[0],
+    ):
+        assert "AbCd0011" not in redacted
+
+    # PRECISION: a lone token before prose that merely mentions a decorated
+    # END marker is ordinary content — kept, and dispatchable.
+    fp = (
+        "abcdef0123456789AB\n"
+        "see label: -----END PRIVATE KEY----- for format details"
+    )
+    for redacted in (
+        redact_sensitive_text(fp, cfg),
+        protect_embedding_text(fp, cfg)[0],
+    ):
+        assert redacted == fp
+    validate_embedding_privacy_dispatch([fp], cfg, expected_revision=revision)
+
+    # Pair guard covers decorated END: space-riddled body between an exact
+    # BEGIN line and a labeled END line still blocks the dispatch.
+    pair = (
+        "-----BEGIN PRIVATE KEY-----\nSYNTH ETIC BODY 1234 5678 90AB\n"
+        "label: -----END PRIVATE KEY-----"
+    )
+    with pytest.raises(EmbeddingPrivacyPolicyError):
+        validate_embedding_privacy_dispatch([pair], cfg, expected_revision=revision)

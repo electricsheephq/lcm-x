@@ -121,7 +121,15 @@ _PRIVATE_KEY_STRICT_MIN_CHARS = 16
 _PRIVATE_KEY_INLINE_RUN_RE = re.compile(r"[A-Za-z0-9+/]{16,}")
 # No ^$ anchors: used via fullmatch(text, pos, endpos), where "^" would only
 # match at the real string start, not at pos.
-_PRIVATE_KEY_INLINE_SPAN_RE = re.compile(r"[A-Za-z0-9+/=\t ]*")
+# Backslash admits JSON/log-serialized keys whose newlines are literal \n
+# two-char sequences — a one-physical-line PEM in a serialized log is a common
+# accidental paste shape.
+_PRIVATE_KEY_INLINE_SPAN_RE = re.compile(r"[A-Za-z0-9+/=\t\\ ]*")
+# RFC 1421 encapsulated-header line (encrypted traditional PEM):
+# "Proc-Type: 4,ENCRYPTED" / "DEK-Info: AES-128-CBC,..." — appears between
+# BEGIN and the base64 body, followed by one blank line.
+_PRIVATE_KEY_ARMOR_HEADER_RE = re.compile(r"^[A-Za-z0-9-]{2,32}:\s?\S.*$")
+_PRIVATE_KEY_MAX_ARMOR_HEADERS = 5
 _PRIVATE_KEY_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE)
 _PRIVATE_KEY_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE)
 _EXTERNALIZED_PLACEHOLDER_PREFIX = "[Externalized LCM ingest payload:"
@@ -303,6 +311,10 @@ _PEM_LINE_KIND_END = 2
 _PEM_LINE_KIND_STRICT_B64 = 3
 _PEM_LINE_KIND_SHORT_B64 = 4
 _PEM_LINE_KIND_END_INLINE = 5
+_PEM_LINE_KIND_ARMOR = 6
+_PEM_LINE_KIND_BLANK = 7
+_PEM_LINE_KIND_END_LOOSE = 8
+_PEM_LINE_KIND_PREFIXED_B64 = 9
 
 
 def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
@@ -346,13 +358,39 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
                     marker_end = c_start + end.end()
                     if end.start() == 0 and end.end() == len(stripped):
                         kind = _PEM_LINE_KIND_END
-                    else:
+                    elif end.start() <= 20 and end.end() == len(stripped):
+                        # Short label prefix, nothing after the marker: key
+                        # structure ("label: -----END PRIVATE KEY-----").
                         kind = _PEM_LINE_KIND_END_INLINE
+                    else:
+                        # Marker amid prose ("see -----END ... ----- for
+                        # format"): terminates a BEGIN-anchored block only,
+                        # never an orphan run — prose plus a nearby token must
+                        # not be consumed as a stripped key.
+                        kind = _PEM_LINE_KIND_END_LOOSE
         elif stripped and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(stripped) is not None:
             if len(stripped) >= _PRIVATE_KEY_STRICT_MIN_CHARS:
                 kind = _PEM_LINE_KIND_STRICT_B64
             else:
                 kind = _PEM_LINE_KIND_SHORT_B64
+        elif not stripped:
+            kind = _PEM_LINE_KIND_BLANK
+        elif _PRIVATE_KEY_ARMOR_HEADER_RE.fullmatch(stripped) is not None:
+            kind = _PEM_LINE_KIND_ARMOR
+        else:
+            # Log-collector shape: every body line carries a prefix
+            # ("INFO MII…", "2026-… DEBUG MII…"). A line whose final
+            # whitespace-separated token is a full-width base64 token, with at
+            # most 4 prefix tokens, joins a BEGIN-anchored body run (only —
+            # never orphan structure, so hash dumps near prose stay intact).
+            parts = stripped.rsplit(None, 1)
+            if (
+                len(parts) == 2
+                and len(parts[0].split()) <= 4
+                and len(parts[1]) >= _PRIVATE_KEY_STRICT_MIN_CHARS
+                and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(parts[1]) is not None
+            ):
+                kind = _PEM_LINE_KIND_PREFIXED_B64
         model.append((kind, redact_start, c_end, line_start, marker_end))
     return model
 
@@ -401,9 +439,35 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
         if kind == _PEM_LINE_KIND_BEGIN:
             j = i + 1
             saw_b64 = False
+            # RFC 1421 encrypted-key armor: header lines then one blank line
+            # sit between BEGIN and the base64 body; consume them so a
+            # truncated encrypted key still redacts through its body.
+            armor = 0
+            while (
+                j < n
+                and model[j][0] == _PEM_LINE_KIND_ARMOR
+                and armor < _PRIVATE_KEY_MAX_ARMOR_HEADERS
+            ):
+                armor += 1
+                j += 1
+            if armor and j < n and model[j][0] == _PEM_LINE_KIND_BLANK:
+                j += 1
+            if armor and (j >= n or model[j][0] not in (
+                _PEM_LINE_KIND_STRICT_B64,
+                _PEM_LINE_KIND_SHORT_B64,
+                _PEM_LINE_KIND_PREFIXED_B64,
+                _PEM_LINE_KIND_END,
+                _PEM_LINE_KIND_END_INLINE,
+                _PEM_LINE_KIND_END_LOOSE,
+            )):
+                # Headers without a following body or END are not key
+                # structure (e.g. a bare BEGIN quoted above config lines).
+                i += 1
+                continue
             while j < n and model[j][0] in (
                 _PEM_LINE_KIND_STRICT_B64,
                 _PEM_LINE_KIND_SHORT_B64,
+                _PEM_LINE_KIND_PREFIXED_B64,
             ):
                 saw_b64 = True
                 j += 1
@@ -411,7 +475,10 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                 emit(redact_start, model[j][2])
                 i = j + 1
                 continue
-            if j < n and model[j][0] == _PEM_LINE_KIND_END_INLINE:
+            if j < n and model[j][0] in (
+                _PEM_LINE_KIND_END_INLINE,
+                _PEM_LINE_KIND_END_LOOSE,
+            ):
                 emit(redact_start, model[j][4])
                 i = j + 1
                 continue
@@ -430,7 +497,7 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
             ):
                 j += 1
                 has_strict = has_strict or model[j][0] == _PEM_LINE_KIND_STRICT_B64
-            if has_strict and j + 1 < n and model[j + 1][0] in (
+            if (has_strict or j > i) and j + 1 < n and model[j + 1][0] in (
                 _PEM_LINE_KIND_END,
                 _PEM_LINE_KIND_END_INLINE,
             ):
@@ -995,6 +1062,7 @@ def _has_orphaned_private_key_body(text: str) -> bool:
     """
     model = _pem_line_model(text)
     run_has_strict = False
+    run_len = 0
     prev_was_begin = False
     seen_begin_line = False
     for kind, _redact_start, _content_end, _line_start, _marker_end in model:
@@ -1002,16 +1070,20 @@ def _has_orphaned_private_key_body(text: str) -> bool:
             prev_was_begin = True
             seen_begin_line = True
             run_has_strict = False
+            run_len = 0
             continue
         if kind in (_PEM_LINE_KIND_STRICT_B64, _PEM_LINE_KIND_SHORT_B64):
             if prev_was_begin:
                 return True
             if kind == _PEM_LINE_KIND_STRICT_B64:
                 run_has_strict = True
+            run_len += 1
             continue
-        if kind in (_PEM_LINE_KIND_END, _PEM_LINE_KIND_END_INLINE) and run_has_strict:
+        if kind in (_PEM_LINE_KIND_END, _PEM_LINE_KIND_END_INLINE) and (
+            run_has_strict or run_len >= 2
+        ):
             return True
-        if kind == _PEM_LINE_KIND_END and seen_begin_line:
+        if kind in (_PEM_LINE_KIND_END, _PEM_LINE_KIND_END_INLINE) and seen_begin_line:
             # Fail-closed pair guard (cloud path): a surviving exact BEGIN
             # line before a surviving exact END line is a structure the
             # redactor could not parse (e.g. a body with internal whitespace
@@ -1021,6 +1093,7 @@ def _has_orphaned_private_key_body(text: str) -> bool:
             return True
         prev_was_begin = False
         run_has_strict = False
+        run_len = 0
     return False
 
 
