@@ -225,22 +225,21 @@ jobs:
                   check.app_id === 15368 && check.external_id === expectedExternalId &&
                   check.head_sha === head && check.status === 'completed' && check.conclusion === 'success');
                 if (priorExactChecks.length > 1) throw Error('DUPLICATE_TRUSTED_CHECK');
+                const priorDispatchIds = [];
                 if (priorExactChecks.length === 1) {
                   const priorValidated = await runValidator({schema_version: '2', mode: 'peer_only', peers: [priorTarget]}, protectedSha);
-                  if (priorValidated.run.status !== 0 || priorValidated.result.decision !== 'PASS' ||
-                      priorValidated.result.peers?.length !== 1 || !priorValidated.result.peers[0].preserve)
-                    throw Error('prior target packet invalid');
-                }
-                const priorDispatchIds = [];
-                for (const check of priorExactChecks) {
-                  const stored = check.output_summary || check.output?.summary;
-                  if (typeof stored !== 'string') throw Error('prior target packet missing');
-                  try {
-                    const packet = JSON.parse(stored);
-                    if (typeof packet.dispatch_id !== 'string') throw Error('prior target dispatch ID invalid');
-                    priorDispatchIds.push(packet.dispatch_id);
-                  } catch (error) {
-                    throw Error(`prior target packet invalid: ${error.message}`);
+                  if (priorValidated.run.status === 0 && priorValidated.result.decision === 'PASS' &&
+                      priorValidated.result.peers?.length === 1 && priorValidated.result.peers[0].preserve) {
+                    const check = priorExactChecks[0];
+                    const stored = check.output_summary || check.output?.summary;
+                    if (typeof stored !== 'string') throw Error('prior target packet missing');
+                    try {
+                      const packet = JSON.parse(stored);
+                      if (typeof packet.dispatch_id !== 'string') throw Error('prior target dispatch ID invalid');
+                      priorDispatchIds.push(packet.dispatch_id);
+                    } catch (error) {
+                      throw Error(`prior target packet invalid: ${error.message}`);
+                    }
                   }
                 }
                 await emit(prNumber, base, head, 'failure', 'Protected base changed or stored packet invalid; validation started and fails closed until complete.');

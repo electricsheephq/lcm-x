@@ -344,10 +344,48 @@ def test_workflow_captures_exact_target_dispatch_id_before_reset():
     assert "check.head_sha === head" in workflow[exact_checks:target_reset]
     assert "check.status === 'completed'" in workflow[exact_checks:target_reset]
     assert "check.conclusion === 'success'" in workflow[exact_checks:target_reset]
-    assert "!priorValidated.result.peers[0].preserve" in workflow[
+    assert "priorValidated.result.peers[0].preserve" in workflow[
         prior_validation:target_reset
     ]
     assert "prior_dispatch_ids: priorDispatchIds" in workflow[target_reset:]
+
+
+def test_workflow_invalid_prior_target_does_not_abort_fresh_renewal():
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
+    ).read_text(encoding="utf-8")
+
+    prior_ids = workflow.index("const priorDispatchIds = [];")
+    prior_validation = workflow.index(
+        "const priorValidated = await runValidator({schema_version: '2', "
+        "mode: 'peer_only', peers: [priorTarget]}, protectedSha);"
+    )
+    optional_history = workflow.index(
+        "if (priorValidated.run.status === 0 && priorValidated.result.decision === 'PASS'",
+        prior_validation,
+    )
+    target_reset = workflow.index(
+        "await emit(prNumber, base, head, 'failure', 'Protected base changed",
+        optional_history,
+    )
+    target_snapshot = workflow.index(
+        "const target = await snapshot(prNumber, defaultBranch);",
+        target_reset,
+    )
+
+    assert prior_ids < prior_validation < optional_history < target_reset < target_snapshot
+    assert "throw Error('prior target packet invalid');" not in workflow[
+        prior_validation:target_reset
+    ]
+    assert "priorValidated.result.peers?.length === 1" in workflow[
+        optional_history:target_reset
+    ]
+    assert "priorValidated.result.peers[0].preserve" in workflow[
+        optional_history:target_reset
+    ]
+    assert "priorDispatchIds.push(packet.dispatch_id);" in workflow[
+        optional_history:target_reset
+    ]
 
 
 def test_workflow_final_reads_every_preserved_peer_before_exit():
