@@ -470,6 +470,41 @@ def test_workflow_rechecks_invalid_peers_before_failure_write():
     assert peer_invalid < peer_preserve
 
 
+def test_workflow_resets_every_known_peer_when_peer_validation_fails():
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
+    ).read_text(encoding="utf-8")
+
+    helper = workflow.index("const failKnownSnapshots = async")
+    dispatch = workflow.index("if (dispatchEvent) {")
+    peer_only = workflow.index("} else {", dispatch)
+    validator = workflow.index(
+        "validated = await runValidator({schema_version: '2', "
+        "mode: 'peer_only', peers: snapshots}, protectedSha);",
+        peer_only,
+    )
+    reset = workflow.index("await failKnownSnapshots(snapshots", validator)
+    final_read = workflow.index("await finalReadInvalidPeers", reset)
+
+    assert helper < dispatch
+    assert "for (const candidate of snapshots)" in workflow[helper:dispatch]
+    assert "if (!candidate?.pr_number || !candidate?.base_sha || !candidate?.head_sha)" in workflow[
+        helper:dispatch
+    ]
+    assert "continue;" in workflow[helper:dispatch]
+    assert "await emit(candidate.pr_number, candidate.base_sha, candidate.head_sha, 'failure'" in workflow[
+        helper:dispatch
+    ]
+    assert "writeFailures.push" in workflow[helper:dispatch]
+    assert validator < reset < final_read
+    assert "validated.run.status !== 0" in workflow[validator:reset]
+    assert "validated.result.decision !== 'PASS'" in workflow[validator:reset]
+    assert "!Array.isArray(validated.result.peers)" in workflow[validator:reset]
+    assert "validated.result.peers.length !== snapshots.length" in workflow[
+        validator:reset
+    ]
+
+
 def _v2_snapshot(
     pr_number: int,
     *,

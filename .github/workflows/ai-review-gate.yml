@@ -113,6 +113,19 @@ jobs:
               if (failures.length) core.setFailed(`Failed to reset PRs: ${failures.join(',')}`);
               return {snapshots, failures};
             };
+            const failKnownSnapshots = async (snapshots, reason) => {
+              const writeFailures = [];
+              for (const candidate of snapshots) {
+                if (!candidate?.pr_number || !candidate?.base_sha || !candidate?.head_sha)
+                  continue;
+                try {
+                  await emit(candidate.pr_number, candidate.base_sha, candidate.head_sha, 'failure', reason);
+                } catch (error) {
+                  writeFailures.push(`${candidate.pr_number}:${error.message}`);
+                }
+              }
+              return writeFailures;
+            };
             const finalReadInvalidPeers = async (peerResults, snapshots, defaultBranch, protectedSha) => {
               for (const peer of peerResults) {
                 if (peer.preserve) continue;
@@ -277,7 +290,19 @@ jobs:
                 if (run.status !== 0 || result.decision !== 'PASS') throw Error('receipt validation failed');
                 conclusion = 'success'; summary = JSON.stringify(result.packet);
               } else {
-                const validated = await runValidator({schema_version: '2', mode: 'peer_only', peers: snapshots}, protectedSha);
+                let validated;
+                try {
+                  validated = await runValidator({schema_version: '2', mode: 'peer_only', peers: snapshots}, protectedSha);
+                  if (validated.run.status !== 0 || validated.result.decision !== 'PASS' ||
+                      !Array.isArray(validated.result.peers) ||
+                      validated.result.peers.length !== snapshots.length)
+                    throw Error('peer reconciliation validation incomplete');
+                } catch (error) {
+                  const writeFailures = await failKnownSnapshots(snapshots,
+                    `Peer reconciliation validation failed closed: ${error.message}`);
+                  const suffix = writeFailures.length ? `; failure writes: ${writeFailures.join(',')}` : '';
+                  throw Error(`peer reconciliation validation failed: ${error.message}${suffix}`);
+                }
                 const run = validated.run; result = validated.result;
                 await finalReadInvalidPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
                 await finalReadPreservedPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
