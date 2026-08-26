@@ -646,6 +646,76 @@ def test_workflow_resets_every_known_peer_when_peer_validation_fails():
     ]
 
 
+def test_workflow_dispatch_resets_every_known_peer_when_validation_fails():
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
+    ).read_text(encoding="utf-8")
+
+    helper = workflow.index("const failKnownSnapshots = async")
+    dispatch = workflow.index("if (dispatchEvent) {")
+    input_packet = workflow.index("const input = {schema_version: '2', target", dispatch)
+    validator = workflow.index(
+        "const validated = await runValidator(input, protectedSha);", input_packet
+    )
+    reset = workflow.index("await failKnownSnapshots(snapshots", validator)
+    live_target = workflow.index(
+        "const live = await github.rest.pulls.get({owner, repo, pull_number: prNumber});",
+        reset,
+    )
+
+    assert helper < dispatch < input_packet < validator < reset < live_target
+    # The reset-all guard covers INFRA failures only (crash, malformed output,
+    # incomplete peer results). A clean FAIL decision means the validator
+    # evaluated every peer, so peers keep their own verdicts and only the
+    # dispatch target fails — the decision check sits AFTER the catch block.
+    assert "run.status !== 0" in workflow[validator:reset]
+    assert "!Array.isArray(result.peers)" in workflow[validator:reset]
+    assert "result.peers.length !== input.peers.length" in workflow[validator:reset]
+    assert "result.decision !== 'PASS'" not in workflow[validator:reset]
+    decision_check = workflow.index(
+        "if (result.decision !== 'PASS') throw Error('receipt validation failed');", reset
+    )
+    assert reset < decision_check < live_target
+    assert "for (const candidate of snapshots)" in workflow[helper:dispatch]
+
+
+def test_workflow_dispatch_validation_failure_is_terminal_before_target_promotion():
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
+    ).read_text(encoding="utf-8")
+
+    input_packet = workflow.index("const input = {schema_version: '2', target")
+    wrapping = workflow.index("try {", input_packet)
+    validator = workflow.index(
+        "const validated = await runValidator(input, protectedSha);", wrapping
+    )
+    invalid_read = workflow.index("await finalReadInvalidPeers(result.peers", validator)
+    preserved_read = workflow.index(
+        "await finalReadPreservedPeers(result.peers", invalid_read
+    )
+    failure_catch = workflow.index("} catch (error) {", preserved_read)
+    peer_resets = workflow.index("await failKnownSnapshots(snapshots", failure_catch)
+    terminal = workflow.index(
+        "throw Error(`peer reconciliation validation failed:", peer_resets
+    )
+    target_promotion = workflow.index("conclusion = 'success';", terminal)
+
+    assert (
+        wrapping
+        < validator
+        < invalid_read
+        < preserved_read
+        < failure_catch
+        < peer_resets
+        < terminal
+        < target_promotion
+    )
+    assert "Peer reconciliation validation failed closed:" in workflow[
+        failure_catch:terminal
+    ]
+    assert "failure writes:" in workflow[peer_resets:terminal]
+
+
 def _v2_snapshot(
     pr_number: int,
     *,

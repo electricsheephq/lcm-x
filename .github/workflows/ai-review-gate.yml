@@ -290,10 +290,26 @@ jobs:
                   receipts: dispatch.receipts, producer: {login: sender.login, id: Number(sender.id), type: sender.type},
                   run: {id: process.env.GITHUB_RUN_ID, attempt: run_attempt},
                   dispatch_id: dispatch.dispatch_id, prior_dispatch_ids: priorDispatchIds};
-                const validated = await runValidator(input, protectedSha);
-                const run = validated.run; result = validated.result;
-                await finalReadInvalidPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
-                await finalReadPreservedPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
+                try {
+                  // Infra failures only: a validator crash, malformed output, or an
+                  // incomplete peer-result set leaves peer state UNKNOWN, so every
+                  // known snapshot resets. A clean FAIL decision is NOT in this
+                  // class — the validator evaluated every peer, so peers keep their
+                  // own verdicts and only the dispatch target fails (below).
+                  const validated = await runValidator(input, protectedSha);
+                  const run = validated.run; result = validated.result;
+                  if (run.status !== 0 ||
+                      !Array.isArray(result.peers) || result.peers.length !== input.peers.length)
+                    throw Error('peer reconciliation validation incomplete');
+                  await finalReadInvalidPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
+                  await finalReadPreservedPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
+                } catch (error) {
+                  const writeFailures = await failKnownSnapshots(snapshots,
+                    `Peer reconciliation validation failed closed: ${error.message}`);
+                  const suffix = writeFailures.length ? `; failure writes: ${writeFailures.join(',')}` : '';
+                  throw Error(`peer reconciliation validation failed: ${error.message}${suffix}`);
+                }
+                if (result.decision !== 'PASS') throw Error('receipt validation failed');
                 const live = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
                 const liveBranch = await github.rest.repos.getBranch({owner, repo, branch: defaultBranch});
                 const liveFiles = await listFiles(prNumber);
@@ -306,7 +322,6 @@ jobs:
                     JSON.stringify(liveTimeline) !== JSON.stringify(target.timeline_events) ||
                     liveUnresolved !== 0 || target.unresolved_threads !== 0)
                   throw Error('PR, protected-base, files, or threads drift');
-                if (run.status !== 0 || result.decision !== 'PASS') throw Error('receipt validation failed');
                 conclusion = 'success'; summary = JSON.stringify(result.packet);
               } else {
                 let validated;
