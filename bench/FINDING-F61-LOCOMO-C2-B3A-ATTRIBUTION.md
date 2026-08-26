@@ -19,7 +19,8 @@ paid-aa-20260820T211813Z. Recompute record: 2026-08-26/interim-review/artifacts/
 | single-hop | 45.39% | 46.81% | 37.2% | no-loss |
 
 **VERDICT: PASS, both arms** — every category above F48 declared; adversarial +29.6/+29.4 over
-baseline (band was ≥36.7 = +4; measured ≈ double the band). A/A′: aggregate spread **0.30pt**,
+baseline (band was ≥36.7 = +4.0; measured +29.6 ≈ 7× the band's margin, and the category nearly
+doubles the F48 baseline: 32.7 → 62.3). A/A′: aggregate spread **0.30pt**,
 82/1986 questions discordant (**4.13%**), fail-closed accounting **0 incomplete** both arms.
 Aggregates recomputed from per-question `checkpoint.questions[*].phases.evaluate.label` — never
 the run's own summary (which matches: 67.42/67.72).
