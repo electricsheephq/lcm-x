@@ -84,7 +84,8 @@ The checklist is safe to paste into a release note or PR validation section afte
 - [ ] deterministic benchmark smoke passed
 - [ ] deterministic stress smoke/release passed
 - [ ] git status before/after validation reviewed
-- [ ] rc tag published as a prerelease (`vX.Y.Z-rcN`) — or release is docs/bench-only
+- [ ] rc tag published as a prerelease (`vX.Y.Z-rcN`) — or release is non-product (only
+      `bench/`, `docs/`, `tests/`, and `.github/release-notes/` changes, per CONTRIBUTING.md)
 - [ ] Phase A / B / C gauntlet receipts linked for this exact rc tree
 
 ### Doctor triage

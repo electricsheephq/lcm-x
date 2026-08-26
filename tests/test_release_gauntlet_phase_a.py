@@ -107,6 +107,9 @@ def test_dev_posture_covers_every_tool_despite_disabled_tools_env(tmp_path):
     runner = worktree / "bench/instruments/release_gauntlet/phase_a_tool_matrix.py"
     env = os.environ.copy()
     env["LCM_DISABLED_TOOLS"] = "lcm_recall"
+    # Pin the provider: a parent-environment LCM_GAUNTLET_CLOUD_PROVIDER would
+    # change which credential gate (and SKIP wording) the receipt asserts.
+    env["LCM_GAUNTLET_CLOUD_PROVIDER"] = "voyage"
     env.pop("VOYAGE_API_KEY", None)
     env.pop("LCM_EMBEDDING_API_KEY", None)
     env.pop("SILICONFLOW_API_KEY", None)

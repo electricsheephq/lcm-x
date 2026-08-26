@@ -367,14 +367,22 @@ def _planted_secret(mod, engine, outbound, *, expect_365_fixed):
     recall_start = len(outbound)
     recall_query = f"privacy fixture api_key={PLANTED['api_key']}"
     recall = engine.handle_tool_call("lcm_recall", {"query": recall_query})
+    recall_hits = json.loads(recall)["hits"]
+    assert recall_hits
+    assert any(secret in recall for fixture in fixtures for secret in fixture["secrets"]), "recall did not return raw lossless durable text"
+    # Every fixture must survive recall raw: hits are bounded snippet views, so
+    # the full-secret assertion applies to short fixtures; the long chunk
+    # fixture asserts unredacted presence (its secret sits past any snippet).
+    for index, fixture in enumerate(fixtures):
+        payload = engine.handle_tool_call("lcm_recall", {"query": str(fixture["content"])[:48]})
+        assert "[LCM sensitive redaction:" not in payload, f"recall redacted fixture {index}"
+        if len(fixture["content"]) <= 512:
+            assert all(secret in payload for secret in fixture["secrets"]), f"recall lost fixture {index}'s raw secret"
     recall_dispatches = outbound[recall_start:]
     assert recall_dispatches, "recall made no semantic query dispatch to audit"
     for text in recall_dispatches:
         assert PLANTED["api_key"] not in text, "recall query dispatch leaked the planted secret"
         mod["ingest_protection"].validate_embedding_privacy_dispatch([text], engine._config, expected_revision=revision)
-    recall_hits = json.loads(recall)["hits"]
-    assert recall_hits
-    assert any(secret in recall for fixture in fixtures for secret in fixture["secrets"]), "recall did not return raw lossless durable text"
     if known and expect_365_fixed:
         raise AssertionError("#365 defining composition leaked on: " + ", ".join(sorted(set(known))))
     engine.on_session_start("gauntlet-c", conversation_id="conversation-gauntlet-c", platform="phase-a", context_length=200_000)
@@ -395,7 +403,7 @@ def _opt_out(mod, engine, outbound):
     assert hits, "opt-out recall returned no hits"
     query_dispatches = outbound[query_start:]
     assert query_dispatches, "opt-out recall made no semantic query dispatch"
-    assert any(PLANTED["password"] in text for text in query_dispatches), "opt-out query dispatch did not carry the raw query by explicit choice"
+    assert query_text in query_dispatches, "opt-out query dispatch was not the byte-identical raw query"
     assert not any("[LCM embedding privacy:" in text for text in outbound)
 
 
