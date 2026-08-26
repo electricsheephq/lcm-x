@@ -1,6 +1,7 @@
 # RELEASE READINESS V1 — the rc-first GA gate (owner-ratified 2026-08-26)
 
-Every release that touches product code (anything outside bench/, docs/, tests/) is **rc-first**:
+Every release that touches product code (anything outside bench/, docs/, tests/, and
+.github/release-notes/) is **rc-first**:
 no GA tag without a release candidate that has passed this gauntlet live. Point releases are not
 exempt — a "small" diff on a hot path (ingest, recall, privacy) is exactly the profile that
 needs a live soak. Docs/bench-only releases may skip to GA with a note in the release notes.
@@ -12,10 +13,18 @@ needs a live soak. Docs/bench-only releases may skip to GA with a note in the re
    at `.github/release-notes/vX.Y.Z-rc1.md`.
 3. **Run the gauntlet** (phases A-C below) against the rc tag. Every phase produces a receipt
    file under the session-notes artifacts dir; the GA cut references all three.
-4. **Fix-and-respin**: any P0/P1 finding → fix PR (through the gate) → `-rc2` → re-run the
-   affected phases (full re-run if the fix touches ingest/recall/privacy).
-5. **GA tag `vX.Y.Z`** only when A+B+C receipts are green for the exact rc tree that GA is cut
-   from (rcN tree == GA tree, tag difference only). GA notes = rc notes + gauntlet summary.
+4. **Fix-and-respin**: any P0/P1 finding → fix PR (through the gate) → `-rc2` → re-run.
+   Carry-forward rule (every receipt binds an exact tree, so carrying needs proof): **Phase B
+   re-runs on every respin** (it is diff-scoped by definition). Phases A and C may carry a prior
+   rc's receipt ONLY when the rcN→rcN+1 diff touches nothing outside bench/, docs/, tests/, and
+   .github/release-notes/ — the carried receipt is referenced WITH the diff-scope proof
+   (`git diff rcN..rcN+1 --name-only`) recorded beside it. Any product-code delta re-runs all
+   affected phases (ingest/recall/privacy deltas re-run everything).
+5. **GA tag `vX.Y.Z`** only when A+B+C receipts are green for the passing rc tree. Because
+   release.yml reads curated notes from the tagged tree, the GA commit may differ from the rc
+   tree by EXACTLY the release-notes addition and nothing else — verified mechanically:
+   `git diff rcN..GA --name-only` must be a subset of `.github/release-notes/`. GA notes =
+   rc notes + gauntlet summary + receipt links.
 
 ## Phase A — Live all-tools matrix (the "clone" test)
 
