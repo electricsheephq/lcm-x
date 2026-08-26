@@ -829,3 +829,34 @@ def test_round8_serialized_and_prefixed_compositions(tmp_path):
     started = _time.perf_counter()
     redact_sensitive_text(storm, cfg)
     assert _time.perf_counter() - started < 1.0
+
+
+def test_round9_escape_artifact_normalization(tmp_path):
+    # Round-9 (R8 review): serialization/prefix artifacts are normalized, not
+    # special-cased — trailing escape backslashes and escaped-tab indentation
+    # trim before classification; colon-ended log prefixes reclassify inside
+    # BEGIN scans; the armor/body separator accepts a prefixed blank remnant.
+    import json as _json
+
+    cfg = _config(tmp_path)
+    body = "Q" * 64
+    cases = [
+        _json.dumps({"outer": _json.dumps({"log": "-----BEGIN PRIVATE KEY-----\n" + body + "\nCDEF"})}),
+        (
+            "host app -----BEGIN RSA PRIVATE KEY-----\nhost app Proc-Type: 4,ENCRYPTED\n"
+            "host app DEK-Info: AES-128-CBC,AABB\nhost app\nhost app " + body + "\nprose stays"
+        ),
+        "INFO: -----BEGIN PRIVATE KEY-----\nINFO: " + body + "\nINFO: CDEF",
+        _json.dumps({"log": "\t-----BEGIN PRIVATE KEY-----\n\t" + body + "\n\t-----END PRIVATE KEY-----"}),
+        _json.dumps({"o": _json.dumps({"log": "app -----BEGIN RSA PRIVATE KEY-----\napp Proc-Type: 4,ENCRYPTED\napp\napp " + body})}),
+    ]
+    for text in cases:
+        for redacted in (
+            redact_sensitive_text(text, cfg),
+            protect_embedding_text(text, cfg)[0],
+        ):
+            assert body not in redacted, text[:60]
+            assert "CDEF" not in redacted, text[:60]
+    assert "prose stays" in redact_sensitive_text(cases[1], cfg)
+    nk = _json.dumps({"msg": "no keys here, just a normal log line with data"})
+    assert redact_sensitive_text(nk, cfg) == nk

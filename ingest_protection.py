@@ -122,6 +122,8 @@ _PRIVATE_KEY_INLINE_RUN_RE = re.compile(r"[A-Za-z0-9+/]{16,}")
 # One-or-more backslashes covers every nesting depth of serialization
 # ("\\n" from json.dumps, "\\\\n" from json-of-json / logged JSON).
 _PRIVATE_KEY_ESCAPED_NEWLINE_RE = re.compile(r"\\+(?:r\\+)?n|\"")
+_PRIVATE_KEY_SEGMENT_LEAD_TRIM_RE = re.compile(r"(?:\\+t|[ \t])+")
+_PRIVATE_KEY_SEGMENT_TRAIL_TRIM_RE = re.compile(r"(?:\\+t?|[ \t])+$")
 # Real base64 key material is high-entropy; an English word/identifier shape
 # (pure lowercase, or a single capitalized word) is overwhelmingly prose
 # (p(base64) ~1e-6 for 16+ pure-lowercase chars), so prefixed-tail
@@ -368,8 +370,19 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
             pos = 0
             for piece in _PRIVATE_KEY_ESCAPED_NEWLINE_RE.split(content):
                 seg_start = content.find(piece, pos)
-                segments.append((line_start + seg_start, piece))
                 pos = seg_start + len(piece)
+                # Serialization artifacts are not content: escaped-tab
+                # indentation (\t at any depth) leads a segment, and the
+                # escape backslashes of the following separator/closing quote
+                # trail it — trim both so the payload classifies.
+                lead = _PRIVATE_KEY_SEGMENT_LEAD_TRIM_RE.match(piece)
+                if lead is not None and lead.end():
+                    seg_start += lead.end()
+                    piece = piece[lead.end():]
+                trail = _PRIVATE_KEY_SEGMENT_TRAIL_TRIM_RE.search(piece)
+                if trail is not None and trail.start() < len(piece):
+                    piece = piece[:trail.start()]
+                segments.append((line_start + seg_start, piece))
         else:
             segments.append((line_start, content))
     for line_start, content in segments:
@@ -474,13 +487,16 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
         # stripped. English-word tails (pure lowercase, or one capitalized
         # word) never count as body — "service productionservice" is prose.
         kind = model[idx][0]
-        if kind != _PEM_LINE_KIND_OTHER:
+        if kind not in (_PEM_LINE_KIND_OTHER, _PEM_LINE_KIND_ARMOR):
             return kind
+        # An ARMOR-shaped line can be a colon-ended log prefix ("INFO: MII…")
+        # in front of real body — prefix-strip before trusting the armor
+        # shape; genuine armor values (commas, spaces) never classify as body.
         rest = text[model[idx][1]:model[idx][2]]
         for _ in range(4):
             split = rest.split(None, 1)
             if len(split) < 2:
-                return _PEM_LINE_KIND_OTHER
+                return kind
             rest = split[1]
             if _PRIVATE_KEY_ARMOR_HEADER_RE.fullmatch(rest) is not None:
                 return _PEM_LINE_KIND_ARMOR
@@ -491,7 +507,7 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                 if len(rest) >= _PRIVATE_KEY_STRICT_MIN_CHARS:
                     return _PEM_LINE_KIND_STRICT_B64
                 return _PEM_LINE_KIND_SHORT_B64
-        return _PEM_LINE_KIND_OTHER
+        return kind
 
     i = 0
     while i < n:
@@ -514,8 +530,11 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                 model[j][0] == _PEM_LINE_KIND_BLANK
                 or (
                     model[j][0] == _PEM_LINE_KIND_OTHER
-                    and len(text[model[j][1]:model[j][2]].split()) <= 1
-                    and model[j][2] - model[j][1] <= 10
+                    and 0
+                    < len(tokens := text[model[j][1]:model[j][2]].split())
+                    <= 4
+                    and all(len(tok) <= 12 for tok in tokens)
+                    and effective_kind(j) == _PEM_LINE_KIND_OTHER
                 )
             ):
                 # The armor/body separator: a blank line, or its log-prefixed
