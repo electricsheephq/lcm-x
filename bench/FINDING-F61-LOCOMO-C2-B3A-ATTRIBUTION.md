@@ -61,7 +61,25 @@ benchmark bridge; the product ingest-path analog (#324 sender/timestamp provenan
 untrusted-evidence boundary) is the productization this result unlocks, and IT needs its own
 confirmation run.
 
-## 5. Next
+## 5. E+R− mechanism-pool per-row deltas (registered publication, run sheet §3)
+
+Per-row data: `bench/data/FINDING-F61-er-minus-pool-rows.csv` (256 rows; every row was an F48
+adversarial MISS with gold evidence delivered but attribution un-ingested, per
+FINDING-B3-PC). Recomputed from the same raw checkpoint verdicts as §1:
+
+| slice | rows | arm A correct | arm A′ correct |
+|---|---|---|---|
+| E+R− pool (F48: 0% by construction) | 256 | **135 (52.73%)** | **132 (51.56%)** |
+| E− pool (evidence not delivered; F48: 0%) | 44 | 21 (47.73%) | 24 (54.55%) |
+| adversarial non-pool (F48-correct rows + none-of-pool) | 190 | 143 (75.26%) | 145 (76.32%) |
+
+Consistency: 135+143 = 278 = §1's arm-A adversarial numerator; 132+145 = 277 = A′'s. Reading:
+the gain is mechanism-consistent — over half the predeclared attribution-failure pool flips to
+correct in both arms — while the E− slice's similar recovery shows attribution also improves
+retrieval/binding beyond the delivered-evidence mechanism, consistent with §2's
+every-category-up observation.
+
+## 6. Next
 
 Productize B3-A via #324/#317 (v0.24.0 flagship candidate); scoreboard row rides this finding's
-PR; the E+R− pool publishes with the row per the registration.
+PR.
