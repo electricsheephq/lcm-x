@@ -48,17 +48,53 @@ def _scrubbed_environment(worktree: Path):
 def _default_hermes_repo(worktree: Path) -> Path | None:
     candidates = (worktree.parent / "hermes-agent", worktree.parent / "hermes")
     return next((path for path in candidates if (path / "agent/context_engine.py").is_file()), None)
+def _module_world_snapshot():
+    return {
+        name: sys.modules[name]
+        for name in list(sys.modules)
+        if name in ("agent", "hermes_lcm")
+        or name.startswith(("agent.", "hermes_lcm."))
+    }
+
+
+def _restore_module_world(snapshot, inserted_path):
+    if inserted_path is not None:
+        try:
+            sys.path.remove(inserted_path)
+        except ValueError:
+            pass
+    for name in list(sys.modules):
+        if name in ("agent", "hermes_lcm") or name.startswith(("agent.", "hermes_lcm.")):
+            sys.modules.pop(name, None)
+    sys.modules.update(snapshot)
+
+
 def _load(worktree: Path, hermes_repo: Path | None = None, *, release: bool = False):
     hermes_repo = hermes_repo.resolve() if hermes_repo else _default_hermes_repo(worktree)
     if release and hermes_repo is None:
         raise RuntimeError(
             "release mode requires --hermes-repo resolving to a Hermes checkout"
         )
+    # Everything below mutates the interpreter's module world (sys.path, the
+    # agent.* family, the hermes_lcm family). Snapshot it so EVERY exit —
+    # exception or the cleanup returned to run() — restores the host process
+    # exactly (in-process callers like tests must see zero residue).
+    snapshot = _module_world_snapshot()
+    inserted_path = None
     if hermes_repo is not None:
-        sys.path.insert(0, str(hermes_repo))
+        inserted_path = str(hermes_repo)
+        sys.path.insert(0, inserted_path)
         for name in list(sys.modules):
             if name == "agent" or name.startswith("agent."):
                 del sys.modules[name]
+    try:
+        return _load_inner(worktree, hermes_repo, release, snapshot, inserted_path)
+    except BaseException:
+        _restore_module_world(snapshot, inserted_path)
+        raise
+
+
+def _load_inner(worktree, hermes_repo, release, snapshot, inserted_path):
     try:
         context = importlib.import_module("agent.context_engine")
     except ModuleNotFoundError as exc:
@@ -103,7 +139,11 @@ def _load(worktree: Path, hermes_repo: Path | None = None, *, release: bool = Fa
     sys.modules["hermes_lcm"] = package
     names = ("assertion_store", "command", "config", "dag", "embedding_provider", "engine", "ingest_protection", "tools")
     modules = {name: importlib.import_module(f"hermes_lcm.{name}") for name in names}
-    return modules, engine_surface, hermes_identity
+
+    def cleanup():
+        _restore_module_world(snapshot, inserted_path)
+
+    return modules, engine_surface, hermes_identity, cleanup
 def _engine(mod, state: Path, posture: str, *, patterns: bool):
     provider = "fastembed" if posture == "local" else os.getenv(
         "LCM_GAUNTLET_CLOUD_PROVIDER", "voyage"
@@ -457,26 +497,34 @@ def run(worktree: Path, out: Path, *, release: bool = False, rc_tag: str | None 
     hermes_identity = None
     with _scrubbed_environment(worktree) as scrubbed:
         mod = None
+        world_cleanup = None
         if not preflight:
             try:
-                mod, engine_surface, hermes_identity = _load(
+                mod, engine_surface, hermes_identity, world_cleanup = _load(
                     worktree, hermes_repo=hermes_repo, release=release
                 )
             except Exception as exc:
                 preflight.append(_safe_detail(exc))
-        if mod is not None and not preflight:
-            local = _engine(mod, Path(tempfile.mkdtemp(prefix="local-", dir=state_root)), "local", patterns=False)
-            try:
-                context = _seed(mod, local)
-                registered = sorted({schema["name"] for schema in local.get_tool_schemas() if str(schema.get("name", "")).startswith("lcm_")})
-                missing = sorted(set(registered) - SCENARIOS)
-                unexpected = sorted(SCENARIOS - set(registered))
-                records += _run_matrix(local, registered, context, patterns=False, posture="local", missing=missing)
-            finally:
-                local.shutdown()
-            cloud_records, cloud_batteries = _cloud_rows(mod, state_root, registered, missing, expect_365_fixed=expect_365_fixed)
-            records += cloud_records
-            batteries += cloud_batteries
+        try:
+            if mod is not None and not preflight:
+                local = _engine(mod, Path(tempfile.mkdtemp(prefix="local-", dir=state_root)), "local", patterns=False)
+                try:
+                    context = _seed(mod, local)
+                    registered = sorted({schema["name"] for schema in local.get_tool_schemas() if str(schema.get("name", "")).startswith("lcm_")})
+                    missing = sorted(set(registered) - SCENARIOS)
+                    unexpected = sorted(SCENARIOS - set(registered))
+                    records += _run_matrix(local, registered, context, patterns=False, posture="local", missing=missing)
+                finally:
+                    local.shutdown()
+                cloud_records, cloud_batteries = _cloud_rows(mod, state_root, registered, missing, expect_365_fixed=expect_365_fixed)
+                records += cloud_records
+                batteries += cloud_batteries
+        finally:
+            if world_cleanup is not None:
+                # Restore the host interpreter's module world (agent.* and
+                # hermes_lcm families + the inserted sys.path entry): the
+                # runner must leave zero residue in an embedding process.
+                world_cleanup()
     final_identity = _git_identity(worktree)
     if release and final_identity != identity:
         preflight.append("release identity changed while the runner was executing")

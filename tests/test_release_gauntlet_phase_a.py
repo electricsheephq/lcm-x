@@ -165,9 +165,10 @@ def test_cloud_posture_blocks_non_product_cloud_provider(
 ):
     phase_a = _runner_module()
     worktree = Path(__file__).resolve().parents[1]
-    mod, _surface, _identity = phase_a._load(
+    mod, _surface, _identity, world_cleanup = phase_a._load(
         worktree, hermes_repo=_fake_hermes_repo(tmp_path / "loader")
     )
+    request_cleanup = world_cleanup  # restore the module world when done
     monkeypatch.setenv("LCM_GAUNTLET_CLOUD_PROVIDER", provider)
 
     records, batteries = phase_a._cloud_rows(
@@ -191,6 +192,7 @@ def test_cloud_posture_blocks_non_product_cloud_provider(
         )
         == "BLOCKED"
     )
+    request_cleanup()
 
 
 def test_known_leak_blocks_release_but_stays_loud_but_ok_in_dev():
