@@ -2168,3 +2168,23 @@ def test_resume_binds_active_embedding_privacy_revision(tmp_path, monkeypatch):
     assert "embedding_privacy_revision" in message
     assert stale_revision in message
     assert active_revision in message
+
+
+def test_provider_aliases_require_privacy_binding():
+    # R5 review: the resolver maps "openai"/"siliconflow" to the
+    # openai-compatible cloud provider, so the privacy predicate must hold
+    # for the alias spellings too — a config-string alias must never reach
+    # the cloud with raw payloads.
+    import benchmarking.longmemeval as lme
+
+    lme._ensure_hermes_lcm_package()
+    from hermes_lcm.ingest_protection import embedding_provider_requires_privacy
+
+    for alias in ("openai", "siliconflow", "openai-compatible", "voyage"):
+        assert embedding_provider_requires_privacy(alias), alias
+    for local in ("stub", "fastembed", "ollama"):
+        assert not embedding_provider_requires_privacy(local), local
+    _config, revision = lme._embedding_privacy_context(
+        "openai", "text-embedding-x", embeddings_enabled=True
+    )
+    assert revision is not None
