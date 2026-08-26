@@ -61,6 +61,7 @@ from .extraction import (
     strip_injected_context_blocks,
 )
 from .ingest_protection import (
+    EmbeddingPrivacyPolicyError,
     _expected_persisted_output_chars,
     _has_lossy_sensitive_redaction,
     _contains_media_payload,
@@ -611,6 +612,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         self._proactive_recall_injected_count = 0
         self._proactive_recall_skipped_count = 0
         self._proactive_recall_timeout_count = 0
+        self._proactive_recall_privacy_error_count = 0
+        self._proactive_recall_privacy_warned = False
         self._last_ingest_error = ""
         self._last_ingest_error_time: float = 0
         # Cooldown timestamp to prevent compression cascade after boundary skip.
@@ -6710,6 +6713,21 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 provider_override=provider_override,
             )
             payload = json.loads(raw)
+        except EmbeddingPrivacyPolicyError as exc:
+            # A privacy-policy error is a deterministic configuration error
+            # (#367/#370): the assembly contract still holds (inject nothing,
+            # never break the turn), but the operator must be able to SEE it —
+            # a dedicated counter plus one WARNING per process, not an
+            # every-turn DEBUG line.
+            if not self._proactive_recall_privacy_warned:
+                self._proactive_recall_privacy_warned = True
+                logger.warning(
+                    "LCM proactive recall disabled by embedding privacy policy "
+                    "error (recurring until the configuration is fixed): %s",
+                    exc,
+                )
+            self._proactive_recall_privacy_error_count += 1
+            return None
         except Exception:  # noqa: BLE001 - never let recall break assembly
             logger.debug("LCM proactive recall failed; injecting nothing", exc_info=True)
             self._proactive_recall_skipped_count += 1

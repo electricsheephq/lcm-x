@@ -8085,6 +8085,9 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
             "injected": int(getattr(engine, "_proactive_recall_injected_count", 0) or 0),
             "skipped": int(getattr(engine, "_proactive_recall_skipped_count", 0) or 0),
             "timeout": int(getattr(engine, "_proactive_recall_timeout_count", 0) or 0),
+            "privacy_policy_errors": int(
+                getattr(engine, "_proactive_recall_privacy_error_count", 0) or 0
+            ),
         },
         "config_sources": config_sources,
         "config_source_warnings": config_source_warnings,
