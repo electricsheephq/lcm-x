@@ -114,8 +114,12 @@ semantic timeouts degrade to full-text with an explicit `degraded_to_fts`
 marker; filters that the semantic arm cannot honor exactly cause a degrade
 rather than approximate results; source-lineage checks fail closed.
 
-Known cloud providers fail closed unless sensitive-pattern handling is enabled
-with a nonempty recognized policy. Provider input is transformed without
+Known cloud providers protect provider-bound input by default
+(`embedding_privacy_enabled` auto-resolves ON for cloud; an explicit
+`LCM_EMBEDDING_PRIVACY_ENABLED=false` opt-out sends raw text under the
+`privacy:off` revision). Durable redaction (`sensitive_patterns_enabled`)
+is a separate, opt-in choice — the durable store is lossless by default.
+Provider input is transformed without
 rewriting durable messages, summaries, FTS rows, or payloads, and the effective
 privacy policy is part of vector identity. This is pattern-based protection,
 not general content classification. Cloud raw-chunk backfill also requires an

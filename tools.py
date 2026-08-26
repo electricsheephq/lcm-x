@@ -5434,7 +5434,8 @@ def _lcm_recall_rerank(
     ``ordered`` MUST already carry the scope/recency prior so the window reflects
     the true top-N rather than the raw RRF order (RERANK-1). Any failure (no
     provider, non-voyage, network, deadline) skips silently back to the incoming
-    order with a ``skipped: <reason>`` status.
+    order with a ``skipped: <reason>`` status. Privacy-policy failures remain
+    loud, matching the cloud query-embedding path.
     """
     if not bool(getattr(config, "rerank_enabled", False)):
         return ordered, "disabled", []
@@ -5447,22 +5448,48 @@ def _lcm_recall_rerank(
     head = ordered[:window]
     if not head:
         return ordered, "skipped: no candidates to rerank", []
+    outbound_query = str(query)
     documents = [str(entry["hit"].get("snippet") or "") for entry in head]
+    privacy_revision: str | None = None
+    if embedding_provider_requires_privacy(
+        str(getattr(provider, "provider_id", "") or "")
+    ):
+        outbound_query, privacy_revision, _changed = protect_embedding_text(
+            outbound_query, config
+        )
+        documents = [
+            protect_embedding_text(
+                document, config, expected_revision=privacy_revision
+            )[0]
+            for document in documents
+        ]
+
+    def invoke() -> list[tuple[int, float]]:
+        if privacy_revision is not None:
+            validate_embedding_privacy_dispatch(
+                [outbound_query, *documents],
+                config,
+                expected_revision=privacy_revision,
+            )
+        return provider.rerank(
+            outbound_query,
+            documents,
+            top_k=len(documents),
+            timeout=max(0.001, deadline - time.monotonic()),
+            model=(
+                str(getattr(config, "rerank_model", "") or "").strip()
+                or "rerank-2.5-lite"
+            ),
+        )
+
     try:
         ranked = _run_within_deadline(
-            lambda: provider.rerank(
-                query,
-                documents,
-                top_k=len(documents),
-                timeout=max(0.001, deadline - time.monotonic()),
-                model=(
-                    str(getattr(config, "rerank_model", "") or "").strip()
-                    or "rerank-2.5-lite"
-                ),
-            ),
+            invoke,
             remaining_s=deadline - time.monotonic(),
             name="lcm-recall-rerank",
         )
+    except EmbeddingPrivacyPolicyError:
+        raise
     except Exception as exc:  # noqa: BLE001 - any failure => skip rerank
         return ordered, f"skipped: {exc}", []
     if not ranked:

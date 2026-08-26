@@ -18,6 +18,7 @@ from hermes_lcm.ingest_protection import (
     redact_sensitive_text,
     validate_embedding_privacy_dispatch,
 )
+from hermes_lcm.store import MessageStore
 from hermes_lcm.vector_store import EmbeddingIdentity, VectorStore
 
 
@@ -39,13 +40,14 @@ class CaptureProvider:
         return [[1.0, 0.0] for _ in current]
 
 
-def _config(tmp_path, *, enabled=True, patterns=None):
+def _config(tmp_path, *, enabled=True, privacy_enabled=None, patterns=None):
     return LCMConfig(
         database_path=str(tmp_path / "privacy.db"),
         embeddings_enabled=True,
         embedding_provider="voyage",
         embedding_model="voyage-4-large",
         sensitive_patterns_enabled=enabled,
+        embedding_privacy_enabled=privacy_enabled,
         sensitive_patterns=(
             ["api_key", "bearer_token", "password_assignment", "private_key"]
             if patterns is None
@@ -87,13 +89,78 @@ def _engine_with_summary(tmp_path, text: str):
     return engine
 
 
-def test_cloud_privacy_policy_requires_enabled_nonempty_known_patterns(tmp_path):
-    with pytest.raises(EmbeddingPrivacyPolicyError, match="enabled"):
-        embedding_privacy_revision(_config(tmp_path, enabled=False))
+def test_cloud_privacy_is_independent_of_durable_redaction_and_validates_catalog(tmp_path):
+    revision = embedding_privacy_revision(_config(tmp_path, enabled=False))
+    assert revision.startswith("privacy:v3:")
     with pytest.raises(EmbeddingPrivacyPolicyError, match="nonempty"):
-        embedding_privacy_revision(_config(tmp_path, patterns=[]))
+        embedding_privacy_revision(_config(tmp_path, enabled=False, patterns=[]))
     with pytest.raises(EmbeddingPrivacyPolicyError, match="unknown"):
-        embedding_privacy_revision(_config(tmp_path, patterns=["api_key", "future_pattern"]))
+        embedding_privacy_revision(
+            _config(tmp_path, enabled=False, patterns=["api_key", "future_pattern"])
+        )
+
+
+def test_default_cloud_posture_keeps_durable_text_raw_and_protects_provider_copy(tmp_path):
+    secret = "abcdefghijklmnop"
+    raw = f"api_key={secret}"
+    config = _config(tmp_path, enabled=False)
+    store = MessageStore(config.database_path, ingest_protection_config=config)
+    try:
+        store_id = store.append("session-a", {"role": "user", "content": raw})
+        assert store.get(store_id)["content"] == raw
+    finally:
+        store.close()
+
+    protected, revision, changed = protect_embedding_text(raw, config)
+    assert changed is True
+    assert secret not in protected
+    assert revision.startswith("privacy:v3:")
+    validate_embedding_privacy_dispatch([protected], config, expected_revision=revision)
+    status = ingest_protection_mod.sensitive_pattern_status(config)
+    assert status["sensitive_patterns_enabled"] is False
+    assert status["embedding_privacy_setting"] == "auto"
+    assert status["embedding_privacy_enabled"] is True
+
+
+def test_cloud_privacy_explicit_opt_out_is_raw_noop_with_distinguished_revision(tmp_path):
+    raw = "api_key=abcdefghijklmnop"
+    config = _config(tmp_path, enabled=False, privacy_enabled=False, patterns=[])
+
+    protected, revision, changed = protect_embedding_text(raw, config)
+
+    assert (protected, revision, changed) == (raw, "privacy:off", False)
+    assert validate_embedding_privacy_dispatch(
+        [raw], config, expected_revision=revision
+    ) == "privacy:off"
+    store = VectorStore(config.database_path, config=config)
+    try:
+        off_identity = store.register_profile(
+            "voyage-4-large", "voyage", 2, revision=revision
+        )
+        config.embedding_privacy_enabled = True
+        config.sensitive_patterns = ["api_key"]
+        on_revision = embedding_privacy_revision(config)
+        on_identity = store.register_profile(
+            "voyage-4-large", "voyage", 2, revision=on_revision
+        )
+    finally:
+        store.close()
+    assert on_revision != revision
+    assert on_identity != off_identity
+
+
+def test_local_provider_document_path_is_byte_identical(tmp_path):
+    config = _config(tmp_path, enabled=False)
+    documents = [("node-1", "api_key=abcdefghijklmnop", 4)]
+
+    prepared = command_mod._prepare_embedding_provider_documents(
+        documents,
+        config=config,
+        provider_name="fastembed",
+        expected_revision="",
+    )
+
+    assert prepared == (documents, None, 0, 0, None)
 
 
 def test_provider_transform_removes_secret_metadata_and_canonicalizes_placeholders(tmp_path):
@@ -214,24 +281,35 @@ def test_privacy_v3_revision_makes_prior_vectors_pending(tmp_path):
     assert [int(row["node_id"]) for row in rows] == [node_id]
 
 
-def test_semantic_query_makes_zero_cloud_calls_when_policy_disabled(tmp_path):
-    config = _config(tmp_path, enabled=False)
+def test_semantic_query_opt_out_sends_raw_query_under_privacy_off_identity(tmp_path):
+    config = _config(tmp_path, enabled=False, privacy_enabled=False)
     provider = CaptureProvider()
     engine = SimpleNamespace(
         _config=config,
         _store=SimpleNamespace(db_path=tmp_path / "privacy.db"),
     )
 
-    with pytest.raises(EmbeddingPrivacyPolicyError, match="enabled"):
-        tools_mod._lcm_grep_embed_query(
-            provider,
-            "api_key=abcdefghijklmnop",
-            engine=engine,
-            task="summary",
-            remaining_s=1.0,
+    store = VectorStore(engine._store.db_path, config=config)
+    try:
+        store.register_profile(
+            provider.model_id,
+            provider.provider_id,
+            2,
+            revision="privacy:off",
         )
+    finally:
+        store.close()
 
-    assert provider.queries == []
+    result = tools_mod._lcm_grep_embed_query(
+        provider,
+        "api_key=abcdefghijklmnop",
+        engine=engine,
+        task="summary",
+        remaining_s=1.0,
+    )
+
+    assert result == [1.0, 0.0]
+    assert provider.queries == ["api_key=abcdefghijklmnop"]
 
 
 def test_semantic_query_requires_registered_policy_revision_and_redacts(tmp_path):
@@ -267,8 +345,8 @@ def test_semantic_query_requires_registered_policy_revision_and_redacts(tmp_path
     assert provider.queries[0].endswith("[LCM embedding privacy: name=api_key]")
 
 
-def test_warmup_refuses_cloud_before_probe_when_policy_disabled(monkeypatch, tmp_path):
-    config = _config(tmp_path, enabled=False)
+def test_warmup_allows_explicit_cloud_privacy_opt_out(monkeypatch, tmp_path):
+    config = _config(tmp_path, enabled=False, privacy_enabled=False)
     provider = CaptureProvider()
     engine = SimpleNamespace(
         _config=config,
@@ -278,9 +356,10 @@ def test_warmup_refuses_cloud_before_probe_when_policy_disabled(monkeypatch, tmp
 
     result = command_mod._embedding_warmup_text(engine)
 
-    assert "status: error" in result
-    assert "sensitive" in result.lower()
-    assert provider.queries == []
+    assert "status: ready" in result
+    assert "privacy_revision: privacy:off" in result
+    assert provider.queries
+    assert set(provider.queries) == {"warmup"}
 
 
 def test_summary_backfill_transforms_provider_input_and_reports_aggregate_privacy(
