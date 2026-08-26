@@ -671,9 +671,10 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
         # in front of real body — prefix-strip before trusting the armor
         # shape; genuine armor values (commas, spaces) never classify as body.
         rest = _normalize_escaped_solidus(text[model[idx][1]:model[idx][2]])
-        # Attached Markdown/quote markers (">MII…", "|MII…") carry no
-        # whitespace; strip them before any classification.
-        rest = rest.lstrip(">|").strip(" \t")
+        # Attached Markdown/quote/diff markers (">MII…", "|MII…", "-MII…")
+        # carry no whitespace; strip them before any classification. '-' is
+        # not in the base64 charset, so stripping it never eats body.
+        rest = rest.lstrip(">|-").strip(" \t")
         head, colon_sep, colon_after = rest.partition(":")
         colon_after = colon_after.strip(" \t")
         if (
@@ -712,7 +713,10 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                 for tok in tokens
             )
             and max(len(tok) for tok in tokens) >= 8
+            and any(any(c.isdigit() or c in "+/=" for c in tok) for tok in tokens)
         ):
+            # Digit/symbol evidence required: real chunked base64 carries
+            # digits; "INFO IMPORTANT" (all-caps word pairs) does not.
             return _PEM_LINE_KIND_STRICT_B64
         armor_shape = _PRIVATE_KEY_ARMOR_HEADER_RE.fullmatch(rest) is not None
         for _ in range(6):
@@ -808,7 +812,8 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                     # tail evidence only after a full-width line — a real PEM
                     # tail follows body; a doc heading follows a bare BEGIN.
                     seg = text[model[j][1]:model[j][2]].strip(" \t")
-                    if saw_strict_run or not seg.isalpha():
+                    tok = seg.split()[-1] if seg.split() else seg
+                    if saw_strict_run or not tok.lstrip(">|-").isalpha():
                         saw_b64 = True
                         last_evidence = j
                 elif run_kind != _PEM_LINE_KIND_LENIENT_B64:
@@ -1502,6 +1507,8 @@ def _has_orphaned_private_key_body(text: str) -> bool:
     not shield a stripped key from validation. Prose that merely mentions a
     marker inline (not as the whole line) never matches.
     """
+    if "private key-----" not in text.lower():
+        return False
     model = _pem_line_model(text)
     run_has_strict = False
     run_len = 0

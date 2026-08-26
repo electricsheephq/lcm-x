@@ -1089,6 +1089,14 @@ def test_round16_orphan_symmetry_and_escape_spellings(tmp_path):
     out = redact_sensitive_text(syslog, cfg)
     assert body not in out and "CDEF" not in out and "plain tail" in out
 
+    # R21: deletion-diff attached '-' prefixes; prefixed headings stay
+    # (chunked evidence requires digits); marker-free texts skip the model.
+    diff_key = "------BEGIN PRIVATE KEY-----\n-" + body + "\n-CDEF\nprose stays"
+    out = redact_sensitive_text(diff_key, cfg)
+    assert body not in out and "CDEF" not in out and "prose stays" in out
+    pfx_heading = "INFO -----BEGIN PRIVATE KEY-----\nINFO IMPORTANT\nINFO this explains keys"
+    assert redact_sensitive_text(pfx_heading, cfg) == pfx_heading
+
     # Precision: suffixed marker mentions and hash dumps stay untouched.
     for keep in (
         "we discussed the -----END PRIVATE KEY----- marker in prose",
