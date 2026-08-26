@@ -2,11 +2,13 @@
 from __future__ import annotations
 import argparse
 from contextlib import contextmanager
+import hashlib
 import importlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -22,6 +24,7 @@ PLANTED = {
     "json_serialized": "GAUNTLETJSONSERIALIZEDD4", "log_prefixed": "GAUNTLETLOGPREFIXE5", "password": "GAUNTLETPASSWORDF6", "api_key": "GAUNTLETAPIKEYG7",
     "password_pem": "GAUNTLETPASSWORDPEMH8", "passphrase_pem": "GAUNTLETPASSPHRASEPEMI9", "quoted_password_pem": "GAUNTLETQUOTEDPASSWORDPEMJ0", "chunk_path": "GAUNTLETCHUNKPATHK1",
 }
+_RELEASE_TAG_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+(?:-rc[0-9]+)?$")
 @contextmanager
 def _scrubbed_environment(worktree: Path):
     original = dict(os.environ)
@@ -41,6 +44,10 @@ def _default_hermes_repo(worktree: Path) -> Path | None:
     return next((path for path in candidates if (path / "agent/context_engine.py").is_file()), None)
 def _load(worktree: Path, hermes_repo: Path | None = None, *, release: bool = False):
     hermes_repo = hermes_repo.resolve() if hermes_repo else _default_hermes_repo(worktree)
+    if release and hermes_repo is None:
+        raise RuntimeError(
+            "release mode requires --hermes-repo resolving to a Hermes checkout"
+        )
     if hermes_repo is not None:
         sys.path.insert(0, str(hermes_repo))
         for name in list(sys.modules):
@@ -58,11 +65,31 @@ def _load(worktree: Path, hermes_repo: Path | None = None, *, release: bool = Fa
         context.__phase_a_stub__ = True
         sys.modules["agent"], sys.modules["agent.context_engine"] = agent, context
         engine_surface = "engine=stubbed-context-base (NOT the hermes surface)"
+        hermes_identity = None
     else:
-        source = Path(str(context.__file__)).resolve()
+        module_file = getattr(context, "__file__", None)
+        if not module_file:
+            raise RuntimeError("agent.context_engine has no module __file__")
+        source = Path(str(module_file)).resolve()
         if release and hermes_repo is not None and hermes_repo not in source.parents:
             raise RuntimeError(f"agent.context_engine imported from {source}, not --hermes-repo {hermes_repo}")
+        context_engine = getattr(context, "ContextEngine", None)
+        markers = {
+            "select_context (assemble marker)": getattr(context_engine, "select_context", None),
+            "on_turn_complete (ingest marker)": getattr(context_engine, "on_turn_complete", None),
+        }
+        missing_markers = [name for name, value in markers.items() if not callable(value)]
+        if release and (not isinstance(context_engine, type) or missing_markers):
+            found = type(context_engine).__name__ if context_engine is not None else "missing"
+            detail = ", ".join(missing_markers) or "ContextEngine is not a class"
+            raise RuntimeError(
+                f"Hermes ContextEngine surface invalid at {source}: found {found}; missing {detail}"
+            )
         engine_surface = f"engine=hermes-context-engine ({source})"
+        hermes_identity = {
+            "module_path": str(source),
+            "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        }
     for name in list(sys.modules):
         if name == "hermes_lcm" or name.startswith("hermes_lcm."):
             del sys.modules[name]
@@ -70,7 +97,7 @@ def _load(worktree: Path, hermes_repo: Path | None = None, *, release: bool = Fa
     sys.modules["hermes_lcm"] = package
     names = ("assertion_store", "command", "config", "dag", "embedding_provider", "engine", "ingest_protection", "tools")
     modules = {name: importlib.import_module(f"hermes_lcm.{name}") for name in names}
-    return modules, engine_surface
+    return modules, engine_surface, hermes_identity
 def _engine(mod, state: Path, posture: str, *, patterns: bool):
     provider = "fastembed" if posture == "local" else os.getenv(
         "LCM_GAUNTLET_CLOUD_PROVIDER", "voyage"
@@ -295,13 +322,26 @@ def _loud_fail(mod, state: Path):
         assert status["proactive_recall"]["privacy_policy_errors"] == before + 1
     finally:
         engine.shutdown()
-def _key_gate(provider: str):
+def _key_gate(mod, provider: str):
+    requires_privacy = mod["ingest_protection"].embedding_provider_requires_privacy(
+        provider
+    )
+    if not requires_privacy:
+        return (
+            "provider credential",
+            False,
+            f"configuration error: CLOUD posture provider {provider!r} is not in the product cloud set",
+        )
     if provider in {"voyage", "voyageai"}:
-        return "VOYAGE_API_KEY", bool(os.getenv("VOYAGE_API_KEY", "").strip())
+        return "VOYAGE_API_KEY", bool(os.getenv("VOYAGE_API_KEY", "").strip()), None
     if provider in {"openai", "openai-compatible", "siliconflow"}:
         present = bool(os.getenv("LCM_EMBEDDING_API_KEY", "").strip() or os.getenv("SILICONFLOW_API_KEY", "").strip())
-        return "LCM_EMBEDDING_API_KEY or SILICONFLOW_API_KEY", present
-    return "provider-specific standard environment", True
+        return "LCM_EMBEDDING_API_KEY or SILICONFLOW_API_KEY", present, None
+    return (
+        "provider credential",
+        False,
+        f"configuration error: product cloud provider {provider!r} has no Phase A credential gate",
+    )
 def _safe_detail(exc):
     detail = f"{type(exc).__name__}: {exc}"
     for value in PLANTED.values():
@@ -318,6 +358,12 @@ def _release_identity_failures(identity, rc_tag):
         failures.append("release worktree is dirty")
     if not rc_tag:
         failures.append("release mode requires --rc-tag")
+    elif _RELEASE_TAG_RE.fullmatch(rc_tag) is None:
+        failures.append(
+            "release mode --rc-tag must match "
+            "^v[0-9]+\\.[0-9]+\\.[0-9]+(-rc[0-9]+)?$; "
+            f"got {rc_tag!r}"
+        )
     elif identity.get("tag") != rc_tag:
         failures.append(f"HEAD exact tag is {identity.get('tag')!r}, not requested --rc-tag {rc_tag!r}")
     return failures
@@ -336,13 +382,24 @@ def _run_matrix(engine, registered, context, *, patterns, posture, missing):
     return records
 def _verdict(records, batteries, *, release, coverage_failed, preflight):
     skipped = any(row[2] == "SKIP" for row in records) or any(row[1] == "SKIP" for row in batteries)
+    blocked = any(row[2] == "BLOCKED" for row in records) or any(row[1] == "BLOCKED" for row in batteries)
+    known_leak = any(row[2] == "KNOWN-LEAK-ON-BASE" for row in records) or any(
+        row[1] == "KNOWN-LEAK-ON-BASE" for row in batteries
+    )
     failed = coverage_failed or any(row[2] == "FAIL" for row in records) or any(row[1] == "FAIL" for row in batteries)
-    if preflight or (release and skipped):
+    if preflight or blocked or (release and (skipped or known_leak)):
         return "BLOCKED"
     return "FAIL" if failed else "PASS"
 def _cloud_rows(mod, state_root, registered, missing, *, expect_365_fixed):
     provider = os.getenv("LCM_GAUNTLET_CLOUD_PROVIDER", "voyage").strip().lower()
-    key_name, present = _key_gate(provider)
+    key_name, present, gate_error = _key_gate(mod, provider)
+    if gate_error:
+        reason = f"BLOCKED: {gate_error}"
+        return [
+            ("cloud", tool, "BLOCKED", reason) for tool in registered
+        ], [
+            (name, "BLOCKED", reason) for name in ("planted-secret", "loud-fail")
+        ]
     if not present:
         reason = f"SKIP: {key_name} is absent"
         return [("cloud", tool, "SKIP", reason) for tool in registered], [(name, "SKIP", reason) for name in ("planted-secret", "loud-fail")]
@@ -385,11 +442,14 @@ def run(worktree: Path, out: Path, *, release: bool = False, rc_tag: str | None 
     records, batteries, registered = [], [], []
     missing, unexpected = [], []
     engine_surface = "engine=not-loaded"
+    hermes_identity = None
     with _scrubbed_environment(worktree) as scrubbed:
         mod = None
         if not preflight:
             try:
-                mod, engine_surface = _load(worktree, hermes_repo=hermes_repo, release=release)
+                mod, engine_surface, hermes_identity = _load(
+                    worktree, hermes_repo=hermes_repo, release=release
+                )
             except Exception as exc:
                 preflight.append(_safe_detail(exc))
         if mod is not None and not preflight:
@@ -412,7 +472,9 @@ def run(worktree: Path, out: Path, *, release: bool = False, rc_tag: str | None 
     coverage_failed = bool(missing or unexpected)
     verdict = _verdict(records, batteries, release=release, coverage_failed=coverage_failed, preflight=preflight)
     identity_note = f"release bound to requested tag `{rc_tag}`" if release else "DEV RUN — identity unbound"
-    lines = ["# PHASE-A RECEIPT", "", f"- Mode: `{'release' if release else 'dev'}`", f"- Identity: {identity_note}", f"- RC tag at HEAD: `{identity['tag']}`", f"- Tree SHA: `{identity['tree']}`", f"- HEAD SHA: `{identity['head']}`", f"- Dirty state: `{'dirty' if identity['dirty'] else 'clean'}`", f"- Engine surface: {engine_surface}", f"- Environment scrubbed: `{', '.join(scrubbed) if scrubbed else 'none'}`", f"- #365 expectation: `{'fixed' if expect_365_fixed else 'KNOWN-LEAK-ON-BASE allowed'}`", f"- Command: `{shlex.join([sys.executable, *sys.argv])}`", f"- HERMES_LCM_REPO: `{worktree}`", "- Claim class: `code_green_local`", f"- Runtime registry tools: {len(registered)}", f"- Registry coverage: `{'FAIL' if coverage_failed else 'COMPLETE'}`", f"- Missing matrix rows: `{', '.join(missing) if missing else 'none'}`", f"- Unexpected scenario rows: `{', '.join(unexpected) if unexpected else 'none'}`", "", "## Preflight"]
+    hermes_module_path = hermes_identity["module_path"] if hermes_identity else "not-loaded"
+    hermes_module_sha256 = hermes_identity["sha256"] if hermes_identity else "not-loaded"
+    lines = ["# PHASE-A RECEIPT", "", f"- Mode: `{'release' if release else 'dev'}`", f"- Identity: {identity_note}", f"- Requested release tag: `{rc_tag if rc_tag is not None else 'none'}`", f"- RC tag at HEAD: `{identity['tag']}`", f"- Tree SHA: `{identity['tree']}`", f"- HEAD SHA: `{identity['head']}`", f"- Dirty state: `{'dirty' if identity['dirty'] else 'clean'}`", f"- Engine surface: {engine_surface}", f"- Hermes ContextEngine module __file__: `{hermes_module_path}`", f"- Hermes ContextEngine module sha256: `{hermes_module_sha256}`", f"- Environment scrubbed: `{', '.join(scrubbed) if scrubbed else 'none'}`", f"- #365 expectation: `{'fixed' if expect_365_fixed else 'KNOWN-LEAK-ON-BASE allowed'}`", f"- Command: `{shlex.join([sys.executable, *sys.argv])}`", f"- HERMES_LCM_REPO: `{worktree}`", "- Claim class: `code_green_local`", f"- Runtime registry tools: {len(registered)}", f"- Registry coverage: `{'FAIL' if coverage_failed else 'COMPLETE'}`", f"- Missing matrix rows: `{', '.join(missing) if missing else 'none'}`", f"- Unexpected scenario rows: `{', '.join(unexpected) if unexpected else 'none'}`", "", "## Preflight"]
     lines += [f"- BLOCKED: {detail}" for detail in preflight] or ["- PASS"]
     lines += ["", "## Tool matrix", "", "| Posture | Tool | Result | Detail |", "|---|---|---|---|"]
     lines += [f"| {posture} | `{tool}` | {result} | {detail} |" for posture, tool, result, detail in records]
