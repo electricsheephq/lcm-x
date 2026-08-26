@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -542,9 +543,11 @@ class _FakeReranker:
         self._order = order
         self._raise = raise_error
         self.calls = 0
+        self.payloads = []
 
     def rerank(self, query, documents, *, top_k=None, timeout):
         self.calls += 1
+        self.payloads.append((query, list(documents)))
         if self._raise:
             raise RuntimeError("provider down")
         order = self._order if self._order is not None else list(range(len(documents)))
@@ -559,6 +562,15 @@ def test_rerank_sessions_voyage_reorders_window_and_appends_tail():
     assert reranker.calls == 1
     # Window [a,b,c] reordered to [c,a,b]; tail [d,e] preserved.
     assert out == ["c", "a", "b", "d", "e"]
+
+
+def test_rerank_sessions_voyage_keeps_raw_production_parity_payloads():
+    reranker = _FakeReranker()
+    query = "password=raw-query-secret"
+    summaries = {"a": "password=raw-candidate-secret"}
+
+    assert rerank_sessions_voyage(reranker, query, ["a"], summaries) == ["a"]
+    assert reranker.payloads == [(query, [summaries["a"]])]
 
 
 def test_rerank_sessions_voyage_signals_fallback_on_error_and_empty():
@@ -891,6 +903,7 @@ def test_dump_candidates_stub_has_header_rows_gold_and_null_markers(tmp_path):
             "source_sha256": None,
             "manifest_sha256": None,
             "embeddings_enabled": True,
+            "embedding_privacy_revision": None,
             "rerank": False,
             "recall_rerank": False,
             "recall_rerank_window": 0,
@@ -1305,6 +1318,259 @@ class _ProductionContextualIdentityEmbedder(_ContextualIdentityEmbedder):
             )
 
 
+class _CapturingIdentityEmbedder(_IdentityEmbedder):
+    def __init__(self, model_id, *, provider_id="voyage"):
+        super().__init__(model_id)
+        self.provider_id = provider_id
+        self.captured_documents = []
+        self.captured_queries = []
+
+    def embed_documents(self, texts):
+        current = [str(text) for text in texts]
+        self.captured_documents.append(current)
+        return super().embed_documents(current)
+
+    def embed_query(self, text):
+        current = str(text)
+        self.captured_queries.append(current)
+        return super().embed_query(current)
+
+
+class _CapturingContextualIdentityEmbedder(_CapturingIdentityEmbedder):
+    supports_contextualized_grouping = True
+
+    def __init__(self, model_id, *, provider_id="voyage"):
+        super().__init__(model_id, provider_id=provider_id)
+        self.captured_contextual_groups = []
+
+    def embed_chunk_group_batches(self, groups, *, before_dispatch=None):
+        for group in groups:
+            current = [(int(index), str(text)) for index, text in group]
+            self.captured_contextual_groups.append(current)
+            indexes = tuple(index for index, _text in current)
+            if before_dispatch is not None:
+                before_dispatch(indexes)
+            yield indexes, [self._vector(text) for _index, text in current]
+
+
+_PRIVACY_SECRET = "super-secret-370"
+_PRIVACY_TEXT = f"password={_PRIVACY_SECRET} " + ("privacy context " * 40)
+_PRIVACY_PLACEHOLDER = "[LCM embedding privacy: name=password_assignment]"
+
+
+def _privacy_question(question_id, *, question="what credential was saved"):
+    return parse_question(
+        _make_raw(
+            question_id,
+            "single-session-user",
+            sessions={
+                "s-private": [
+                    {"role": "user", "content": _PRIVACY_TEXT, "has_answer": True}
+                ]
+            },
+            answer_session_ids=["s-private"],
+            question=question,
+        )
+    )
+
+
+def _flatten_document_calls(provider):
+    return [text for call in provider.captured_documents for text in call]
+
+
+def test_cloud_summary_document_is_protected_before_provider_dispatch(tmp_path):
+    summary = _CapturingIdentityEmbedder("voyage-4-large")
+    chunk = _IdentityEmbedder("voyage-context-4")
+
+    evaluate_question(
+        _privacy_question("q-private-summary"),
+        summary,
+        chunk_provider=chunk,
+        provider_name="voyage",
+        tmp_dir=tmp_path,
+        embeddings_enabled=True,
+    )
+
+    outbound = _flatten_document_calls(summary)
+    assert outbound
+    assert any(_PRIVACY_PLACEHOLDER in text for text in outbound)
+    assert all(_PRIVACY_SECRET not in text for text in outbound)
+
+
+def test_cloud_flat_chunk_document_is_protected_before_provider_dispatch(tmp_path):
+    summary = _CapturingIdentityEmbedder("voyage-4-large")
+    chunk = _CapturingIdentityEmbedder("voyage-context-4")
+
+    evaluate_question(
+        _privacy_question("q-private-flat-chunk"),
+        summary,
+        chunk_provider=chunk,
+        provider_name="voyage",
+        tmp_dir=tmp_path,
+        embeddings_enabled=True,
+    )
+
+    outbound = _flatten_document_calls(chunk)
+    assert outbound
+    assert any(_PRIVACY_PLACEHOLDER in text for text in outbound)
+    assert all(_PRIVACY_SECRET not in text for text in outbound)
+
+
+def test_cloud_contextual_chunk_group_is_protected_before_provider_dispatch(tmp_path):
+    summary = _CapturingIdentityEmbedder("voyage-4-large")
+    chunk = _CapturingContextualIdentityEmbedder("voyage-context-4")
+
+    evaluate_question(
+        _privacy_question("q-private-contextual-chunk"),
+        summary,
+        chunk_provider=chunk,
+        provider_name="voyage",
+        tmp_dir=tmp_path,
+        embeddings_enabled=True,
+    )
+
+    outbound = [
+        text
+        for group in chunk.captured_contextual_groups
+        for _index, text in group
+    ]
+    assert outbound
+    assert any(_PRIVACY_PLACEHOLDER in text for text in outbound)
+    assert all(_PRIVACY_SECRET not in text for text in outbound)
+
+
+def test_cloud_query_is_protected_before_provider_dispatch(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setattr(lme, "production_recall_hits", lambda *_args, **_kwargs: [])
+    summary = _CapturingIdentityEmbedder("voyage-4-large")
+    chunk = _CapturingIdentityEmbedder("voyage-context-4")
+
+    evaluate_question(
+        _privacy_question("q-private-query", question=_PRIVACY_TEXT),
+        summary,
+        chunk_provider=chunk,
+        provider_name="voyage",
+        tmp_dir=tmp_path,
+        embeddings_enabled=True,
+    )
+
+    outbound = summary.captured_queries + chunk.captured_queries
+    assert outbound
+    assert all(_PRIVACY_PLACEHOLDER in text for text in outbound)
+    assert all(_PRIVACY_SECRET not in text for text in outbound)
+
+
+def test_stub_query_reaches_provider_byte_identical(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setattr(lme, "production_recall_hits", lambda *_args, **_kwargs: [])
+    provider = _CapturingIdentityEmbedder("stub", provider_id="stub")
+    question = _privacy_question("q-private-stub-query", question=_PRIVACY_TEXT)
+
+    evaluate_question(
+        question,
+        provider,
+        chunk_provider=provider,
+        provider_name="stub",
+        tmp_dir=tmp_path,
+        embeddings_enabled=True,
+    )
+
+    assert provider.captured_queries == [_PRIVACY_TEXT]
+
+
+def test_prewarm_cloud_documents_are_protected_before_dispatch(tmp_path):
+    import benchmarking.longmemeval as lme
+
+    raw = _CapturingIdentityEmbedder("voyage-context-4")
+    cached = lme.ContentHashEmbeddingCache(raw, tmp_path / "prewarm.sqlite3")
+
+    lme.prewarm_embedding_cache(
+        [_privacy_question("q-private-prewarm")], cached, progress_every=100
+    )
+
+    outbound = _flatten_document_calls(raw)
+    assert outbound
+    assert any(_PRIVACY_PLACEHOLDER in text for text in outbound)
+    assert all(_PRIVACY_SECRET not in text for text in outbound)
+
+
+def test_determinism_probe_cloud_documents_are_protected_before_dispatch(tmp_path):
+    import benchmarking.longmemeval as lme
+
+    provider = _CapturingIdentityEmbedder("voyage-4-large")
+
+    report = lme.embedding_determinism_report(
+        [_privacy_question("q-private-determinism")],
+        provider,
+        sample_size=1,
+    )
+
+    outbound = _flatten_document_calls(provider)
+    assert report["sample_size"] == 1
+    assert outbound
+    assert all(_PRIVACY_PLACEHOLDER in text for text in outbound)
+    assert all(_PRIVACY_SECRET not in text for text in outbound)
+
+
+def test_embeddings_disabled_preserves_raw_corpus_text_in_fts(tmp_path):
+    provider = _IdentityEmbedder("voyage-4-large")
+    question = _privacy_question("q-private-fts-off")
+
+    evaluate_question(
+        question,
+        provider,
+        provider_name="voyage",
+        tmp_dir=tmp_path,
+        embeddings_enabled=False,
+    )
+
+    db_path = tmp_path / "q-private-fts-off.db"
+    with sqlite3.connect(db_path) as connection:
+        fts_text = "\n".join(
+            str(row[0])
+            for row in connection.execute(
+                "SELECT content FROM messages_fts ORDER BY rowid"
+            )
+        )
+    assert _PRIVACY_SECRET in fts_text
+    assert _PRIVACY_PLACEHOLDER not in fts_text
+
+
+def test_stub_summary_document_reaches_provider_byte_identical(
+    tmp_path, monkeypatch
+):
+    import hermes_lcm.ingest_protection as ingest_protection
+
+    def unexpected_privacy_call(*_args, **_kwargs):
+        raise AssertionError("local provider must not call cloud privacy helpers")
+
+    monkeypatch.setattr(
+        ingest_protection, "protect_embedding_text", unexpected_privacy_call
+    )
+    monkeypatch.setattr(
+        ingest_protection,
+        "validate_embedding_privacy_dispatch",
+        unexpected_privacy_call,
+    )
+    summary = _CapturingIdentityEmbedder("stub", provider_id="stub")
+    chunk = _CapturingIdentityEmbedder("stub-chunk", provider_id="stub")
+    question = _privacy_question("q-private-stub")
+    expected = deterministic_session_summary(question.haystack_sessions[0])
+
+    evaluate_question(
+        question,
+        summary,
+        chunk_provider=chunk,
+        provider_name="stub",
+        tmp_dir=tmp_path,
+        embeddings_enabled=True,
+    )
+
+    assert summary.captured_documents == [[expected]]
+
+
 def test_resolve_harness_providers_uses_production_chunk_identity_and_pair_cache(
     monkeypatch,
 ):
@@ -1447,11 +1713,13 @@ def test_evaluate_question_separates_provider_phases_and_chunk_grouping(
     assert snapshot["chunk_documents"]["requests"] >= 1
     assert snapshot["harness_queries"]["requests"] == 2
     assert snapshot["harness_queries"]["documents"] == 2
-    # Production recall may legitimately avoid semantic transport when its
-    # fresh-session scope has no candidates. Zero here is a truthful no-dispatch,
-    # not an omitted phase; the injected-provider transport case is tested below.
-    assert snapshot["production_lcm_recall_queries"]["requests"] == 0
-    assert snapshot["production_lcm_recall_queries"]["usage_tokens"] == 0
+    # Production recall embeds its query on both arms (summary + chunk) before
+    # candidate scoping, so two provider requests are the truthful count. The
+    # previous ==0 expectation was an artifact of the pre-#370 silent privacy
+    # degrade: the cloud-privacy gate raised before any provider call and
+    # lcm_recall swallowed it into an FTS fallback, so no query ever dispatched.
+    assert snapshot["production_lcm_recall_queries"]["requests"] == 2
+    assert snapshot["production_lcm_recall_queries"]["usage_tokens"] is None
     for role in ("summary_documents", "chunk_documents", "harness_queries"):
         assert snapshot[role]["usage_tokens_complete"] is False
         assert snapshot[role]["usage_tokens"] is None
@@ -1813,3 +2081,110 @@ def test_completed_resume_and_binding_mismatch_do_not_resolve_provider(
             resume=True,
             selected_question_ids=selected_ids,
         )
+
+
+def test_resume_binds_active_embedding_privacy_revision(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+
+    question = parse_question(
+        _make_raw(
+            "q-private-revision_abs",
+            "single-session-user",
+            sessions={"s": [{"role": "user", "content": "no scored dispatch"}]},
+            answer_session_ids=[],
+        )
+    )
+    provider = _IdentityEmbedder("voyage-4-large")
+    provider_set = lme.HarnessProviderSet(
+        summary=provider,
+        chunk=provider,
+        summary_binding=("voyage", "voyage-4-large"),
+        chunk_binding=("voyage", "voyage-context-4"),
+    )
+    monkeypatch.setattr(
+        lme, "resolve_harness_providers", lambda *_args, **_kwargs: provider_set
+    )
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    dump_path = tmp_path / "run" / "candidates.jsonl"
+
+    run_harness(
+        [question],
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path / "initial",
+        checkpoint_path=checkpoint,
+        dump_candidates_path=dump_path,
+        reuse_db_template=False,
+    )
+
+    checkpoint_lines = checkpoint.read_text(encoding="utf-8").splitlines()
+    checkpoint_header = json.loads(checkpoint_lines[0])
+    active_revision = checkpoint_header["__checkpoint_header__"][
+        "embedding_privacy_revision"
+    ]
+    assert isinstance(active_revision, str) and active_revision
+    dump_header = json.loads(dump_path.read_text(encoding="utf-8").splitlines()[0])
+    assert dump_header["__dump_header__"]["embedding_privacy_revision"] == active_revision
+
+    def forbidden_resolution(*_args, **_kwargs):
+        raise AssertionError("completed matching-revision resume must not resolve providers")
+
+    monkeypatch.setattr(lme, "resolve_harness_providers", forbidden_resolution)
+    resumed = run_harness(
+        [question],
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path / "matching",
+        checkpoint_path=checkpoint,
+        resume=True,
+        selected_question_ids=[question.question_id],
+        reuse_db_template=False,
+    )
+    assert resumed["question_count"] == 1
+
+    stale_revision = "embedding-privacy-stale:test"
+    checkpoint_header["__checkpoint_header__"][
+        "embedding_privacy_revision"
+    ] = stale_revision
+    checkpoint.write_text(
+        "\n".join(
+            [json.dumps(checkpoint_header, sort_keys=True), *checkpoint_lines[1:]]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError) as exc_info:
+        run_harness(
+            [question],
+            provider_name="voyage",
+            model="voyage-4-large",
+            tmp_dir=tmp_path / "mismatch",
+            checkpoint_path=checkpoint,
+            resume=True,
+            selected_question_ids=[question.question_id],
+            reuse_db_template=False,
+        )
+    message = str(exc_info.value)
+    assert "embedding_privacy_revision" in message
+    assert stale_revision in message
+    assert active_revision in message
+
+
+def test_provider_aliases_require_privacy_binding():
+    # R5 review: the resolver maps "openai"/"siliconflow" to the
+    # openai-compatible cloud provider, so the privacy predicate must hold
+    # for the alias spellings too — a config-string alias must never reach
+    # the cloud with raw payloads.
+    import benchmarking.longmemeval as lme
+
+    lme._ensure_hermes_lcm_package()
+    from hermes_lcm.ingest_protection import embedding_provider_requires_privacy
+
+    for alias in ("openai", "siliconflow", "openai-compatible", "voyage"):
+        assert embedding_provider_requires_privacy(alias), alias
+    for local in ("stub", "fastembed", "ollama"):
+        assert not embedding_provider_requires_privacy(local), local
+    _config, revision = lme._embedding_privacy_context(
+        "openai", "text-embedding-x", embeddings_enabled=True
+    )
+    assert revision is not None

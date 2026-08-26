@@ -334,3 +334,30 @@ def test_assemble_context_default_off_has_no_block(tmp_path, provider):
         [{"role": "user", "content": QUERY}],
     )
     assert not any("<relevant-memories>" in str(m.get("content", "")) for m in result)
+
+
+def test_privacy_policy_error_is_counted_and_warned_not_silent(tmp_path, provider, monkeypatch, caplog):
+    # #370 review: a deterministic privacy-configuration error must stay
+    # non-blocking for assembly but be operator-visible — a dedicated counter
+    # plus one WARNING per process, never an every-turn DEBUG-only skip.
+    import logging
+
+    from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
+    import hermes_lcm.tools as tools_mod
+
+    engine = _make_engine(tmp_path)
+    _seed_cross_session_hit(engine)
+
+    def raising_recall(args, **kwargs):
+        raise EmbeddingPrivacyPolicyError(
+            "cloud embedding privacy requires sensitive-pattern handling to be enabled"
+        )
+
+    monkeypatch.setattr(tools_mod, "lcm_recall", raising_recall)
+    with caplog.at_level(logging.WARNING):
+        assert engine._build_proactive_recall_message(_tail(), "user", set()) is None
+        assert engine._build_proactive_recall_message(_tail(), "user", set()) is None
+    assert engine._proactive_recall_privacy_error_count == 2
+    assert engine._proactive_recall_skipped_count == 0
+    warnings = [r for r in caplog.records if "privacy policy" in r.message]
+    assert len(warnings) == 1  # once per process, not per turn
