@@ -378,6 +378,8 @@ def _planted_secret(mod, engine, outbound, *, expect_365_fixed):
         assert "[LCM sensitive redaction:" not in payload, f"recall redacted fixture {index}"
         if len(fixture["content"]) <= 512:
             assert all(secret in payload for secret in fixture["secrets"]), f"recall lost fixture {index}'s raw secret"
+        else:
+            assert "Chunk safety sentence" in payload, f"recall did not retrieve fixture {index}'s distinctive content"
     recall_dispatches = outbound[recall_start:]
     assert recall_dispatches, "recall made no semantic query dispatch to audit"
     for text in recall_dispatches:
