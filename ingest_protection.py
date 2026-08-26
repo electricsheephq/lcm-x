@@ -375,8 +375,13 @@ _EMBEDDING_PRIVACY_PLACEHOLDER_RE = re.compile(
     r"name=(?P<name>[a-z0-9_-]+)[^\]]*\]",
     re.IGNORECASE,
 )
+# Includes the resolver's aliases (embedding_provider.resolve_provider maps
+# "openai"/"siliconflow" to the openai-compatible cloud provider): the
+# privacy predicate must hold for every spelling a CALLER might pass, not
+# just the canonical id the resolved provider object carries — a config
+# string alias must never bypass cloud privacy (#370 review).
 _EMBEDDING_PRIVACY_CLOUD_PROVIDERS = frozenset(
-    {"voyage", "voyageai", "openai-compatible"}
+    {"voyage", "voyageai", "openai-compatible", "openai", "siliconflow"}
 )
 _SENSITIVE_PATTERN_CATALOG: dict[str, re.Pattern[str]] = {
     "api_key": re.compile(

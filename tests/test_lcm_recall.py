@@ -19,8 +19,12 @@ import hermes_lcm.tools as lcm_tools
 import hermes_lcm.vector_store as vector_store_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, SummaryNode
-from hermes_lcm.embedding_provider import resolve_provider as real_resolve_provider
+from hermes_lcm.embedding_provider import (
+    VoyageError,
+    resolve_provider as real_resolve_provider,
+)
 from hermes_lcm.ingest_protection import (
+    EmbeddingPrivacyPolicyError,
     embedding_privacy_revision,
     embedding_provider_requires_privacy,
 )
@@ -251,6 +255,85 @@ def test_voyage_chunk_recall_uses_context_model(recall_engine, monkeypatch):
         "model": "voyage-context-4",
         "query_vector": [0.0, 1.0],
     }
+
+
+def test_recall_reraises_embedding_privacy_policy_error_for_summary(
+    recall_engine, monkeypatch
+):
+    recall_engine._config.embedding_provider = "voyage"
+    recall_engine._config.embedding_model = "voyage-4-large"
+    recall_engine._config.sensitive_patterns_enabled = False
+    recall_engine._store.append(
+        CURRENT, {"role": "user", "content": "summary privacy policy query"}
+    )
+    provider = MockProvider()
+    provider.provider_id = "voyage"
+    provider.model_id = "voyage-4-large"
+    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: provider)
+
+    with pytest.raises(EmbeddingPrivacyPolicyError, match="enabled"):
+        lcm_tools.lcm_recall(
+            {"query": "summary privacy policy query", "include": "summaries"},
+            engine=recall_engine,
+        )
+
+    assert provider.queries == []
+
+
+def test_recall_voyage_error_still_degrades_to_fts(recall_engine, monkeypatch):
+    recall_engine._config.embedding_provider = "voyage"
+    recall_engine._config.embedding_model = "voyage-4-large"
+    recall_engine._store.append(
+        CURRENT,
+        {
+            "role": "user",
+            "content": "kanban dashboard sprint transient voyage failure fallback",
+        },
+    )
+
+    class FailingVoyageProvider(MockProvider):
+        provider_id = "voyage"
+        model_id = "voyage-4-large"
+
+        def embed_query(self, _text):
+            raise VoyageError("network", "temporary network failure")
+
+    payload = _recall(
+        recall_engine,
+        monkeypatch,
+        provider=FailingVoyageProvider(),
+        include="all",
+    )
+
+    assert payload["degraded"] is True
+    assert "query embedding failed: temporary network failure" in payload[
+        "degraded_reason"
+    ]
+    assert payload["hits"]
+    assert all(hit["kind"] == "message_excerpt" for hit in payload["hits"])
+
+
+def test_recall_reraises_embedding_privacy_policy_error_for_chunk(
+    recall_engine, monkeypatch
+):
+    recall_engine._config.embedding_provider = "voyage"
+    recall_engine._config.embedding_model = "voyage-4-large"
+    recall_engine._config.sensitive_patterns_enabled = False
+    recall_engine._store.append(
+        CURRENT, {"role": "user", "content": "chunk privacy policy query"}
+    )
+    provider = MockProvider()
+    provider.provider_id = "voyage"
+    provider.model_id = "voyage-4-large"
+    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: provider)
+
+    with pytest.raises(EmbeddingPrivacyPolicyError, match="enabled"):
+        lcm_tools.lcm_recall(
+            {"query": "chunk privacy policy query", "include": "verbatim"},
+            engine=recall_engine,
+        )
+
+    assert provider.queries == []
 
 
 def test_recall_returns_cross_session_summaries_without_a_filter(recall_engine, monkeypatch):
