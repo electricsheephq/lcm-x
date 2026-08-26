@@ -733,7 +733,11 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
             if not rest:
                 return _PEM_LINE_KIND_ARMOR if armor_shape else kind
             if _PRIVATE_KEY_ARMOR_HEADER_RE.fullmatch(rest) is not None:
-                return _PEM_LINE_KIND_ARMOR
+                # Time tokens ('12:34:56 …') masquerade as armor mid-strip:
+                # note the shape but KEEP STRIPPING — body evidence deeper in
+                # the line dominates armor shapes (round-15 principle).
+                armor_shape = True
+                continue
             if (
                 _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(rest) is not None
                 and not _looks_like_english_token(rest)
@@ -741,7 +745,7 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                 if len(rest) >= _PRIVATE_KEY_STRICT_MIN_CHARS:
                     return _PEM_LINE_KIND_STRICT_B64
                 return _PEM_LINE_KIND_SHORT_B64
-        return kind
+        return _PEM_LINE_KIND_ARMOR if armor_shape else kind
 
     i = 0
     back_watermark = -1

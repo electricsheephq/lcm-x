@@ -1083,10 +1083,11 @@ def test_round16_orphan_symmetry_and_escape_spellings(tmp_path):
     assert body not in out and "prose stays" in out
     syslog = (
         "Aug 26 12:34:56 host app[123]: -----BEGIN PRIVATE KEY-----\n"
-        "Aug 26 12:34:56 host app[123]: " + body + "\nplain tail"
+        "Aug 26 12:34:56 host app[123]: " + body + "\n"
+        "Aug 26 12:34:56 host app[123]: CDEF\nplain tail"
     )
     out = redact_sensitive_text(syslog, cfg)
-    assert body not in out and "plain tail" in out
+    assert body not in out and "CDEF" not in out and "plain tail" in out
 
     # Precision: suffixed marker mentions and hash dumps stay untouched.
     for keep in (
