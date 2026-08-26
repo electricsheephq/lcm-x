@@ -25,6 +25,61 @@ def _isolate_runner_modules():
     gc.collect()
 
 
+def _run_in_subprocess(
+    tmp_path, *, sabotage="", run_kwargs, sys_path_prepend=None, env_extra=None
+):
+    """Execute phase_a.run() in a child interpreter.
+
+    Full-matrix runs register worktree modules whose provider singletons hold
+    file descriptors and can shadow the conftest's hermes_lcm registration —
+    in-process execution contaminates the shared pytest process (CI's low-FD
+    canary caught this), so every run() goes through a child python.
+    """
+    worktree = Path(__file__).resolve().parents[1]
+    runner = worktree / "bench/instruments/release_gauntlet/phase_a_tool_matrix.py"
+    out = tmp_path / "sub-receipt"
+    wrapper = tmp_path / "wrapper.py"
+    wrapper.write_text(
+        "import importlib.util, sys\n"
+        "from pathlib import Path\n"
+        + (
+            f"sys.path.insert(0, {str(sys_path_prepend)!r})\n"
+            if sys_path_prepend is not None
+            else ""
+        )
+        + f"spec = importlib.util.spec_from_file_location('phase_a_sub', {str(runner)!r})\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n"
+        + sabotage
+        + f"run_kwargs = {run_kwargs!r}\n"
+        "if run_kwargs.get('hermes_repo') is not None:\n"
+        "    run_kwargs['hermes_repo'] = Path(run_kwargs['hermes_repo'])\n"
+        f"code, receipt = mod.run(Path({str(worktree)!r}), Path({str(out)!r}), **run_kwargs)\n"
+        "print('RECEIPT::' + str(receipt))\n"
+        "sys.exit(code)\n",
+        encoding="utf-8",
+    )
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("LCM_", "HERMES_"))}
+    for key in ("VOYAGE_API_KEY", "LCM_EMBEDDING_API_KEY", "SILICONFLOW_API_KEY"):
+        env.pop(key, None)
+    if env_extra:
+        env.update(env_extra)
+    completed = subprocess.run(
+        [sys.executable, str(wrapper)], capture_output=True, text=True, env=env,
+        cwd=str(worktree), timeout=600,
+    )
+    receipt_path = None
+    for line in completed.stdout.splitlines():
+        if line.startswith("RECEIPT::"):
+            receipt_path = Path(line.split("::", 1)[1])
+    assert receipt_path is not None, completed.stdout + completed.stderr
+    return (
+        completed.returncode,
+        receipt_path.read_text(encoding="utf-8"),
+        completed.stderr,
+    )
+
+
 def _runner_module():
     worktree = Path(__file__).resolve().parents[1]
     path = worktree / "bench/instruments/release_gauntlet/phase_a_tool_matrix.py"
@@ -92,34 +147,24 @@ def test_dev_posture_covers_every_tool_despite_disabled_tools_env(tmp_path):
     assert "Exit verdict: `PASS`" in receipt
 
 
-def test_release_mode_blocks_the_same_cloud_skip(tmp_path, monkeypatch):
-    phase_a = _runner_module()
-    worktree = Path(__file__).resolve().parents[1]
-    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
-    monkeypatch.delenv("LCM_EMBEDDING_API_KEY", raising=False)
-    monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
-    monkeypatch.setattr(
-        phase_a,
-        "_git_identity",
-        lambda _path: {
-            "head": "abc123",
-            "tree": "tree123",
-            "tag": "v0.0.0-rc1",
-            "dirty": False,
+def test_release_mode_blocks_the_same_cloud_skip(tmp_path):
+    hermes_repo = _fake_hermes_repo(tmp_path)
+    sabotage = (
+        "mod._git_identity = lambda _p: "
+        "{'head': 'abc123', 'tree': 'tree123', 'tag': 'v0.0.0-rc1', 'dirty': False}\n"
+    )
+    code, receipt, stderr = _run_in_subprocess(
+        tmp_path,
+        sabotage=sabotage,
+        run_kwargs={
+            "release": True,
+            "rc_tag": "v0.0.0-rc1",
+            "hermes_repo": str(hermes_repo),
+            "expect_365_fixed": False,
         },
     )
-    hermes_repo = _fake_hermes_repo(tmp_path)
-    code, receipt_path = phase_a.run(
-        worktree,
-        tmp_path / "receipt",
-        release=True,
-        rc_tag="v0.0.0-rc1",
-        hermes_repo=hermes_repo,
-        expect_365_fixed=False,
-    )
-    receipt = receipt_path.read_text(encoding="utf-8")
     module_path = (hermes_repo / "agent/context_engine.py").resolve()
-    assert code != 0
+    assert code != 0, stderr + receipt
     assert "| cloud | `lcm_recall` | SKIP |" in receipt
     assert f"Hermes ContextEngine module __file__: `{module_path}`" in receipt
     assert (
@@ -210,9 +255,7 @@ def test_release_identity_requires_clean_exact_rc_tag(identity, tag, expected):
     assert bool(failures) is bool(expected)
 
 
-def test_release_mode_rejects_ambient_hermes_module(tmp_path, monkeypatch):
-    phase_a = _runner_module()
-    worktree = Path(__file__).resolve().parents[1]
+def test_release_mode_rejects_ambient_hermes_module(tmp_path):
     ambient = tmp_path / "ambient"
     ambient_agent = ambient / "agent"
     ambient_agent.mkdir(parents=True)
@@ -223,28 +266,22 @@ def test_release_mode_rejects_ambient_hermes_module(tmp_path, monkeypatch):
     )
     hermes_repo = tmp_path / "claimed-hermes"
     hermes_repo.mkdir()
-    monkeypatch.syspath_prepend(str(ambient))
-    monkeypatch.setattr(
-        phase_a,
-        "_git_identity",
-        lambda _path: {
-            "head": "abc123",
-            "tree": "tree123",
-            "tag": "v1.2.3-rc1",
-            "dirty": False,
+    sabotage = (
+        "mod._git_identity = lambda _p: "
+        "{'head': 'abc123', 'tree': 'tree123', 'tag': 'v1.2.3-rc1', 'dirty': False}\n"
+    )
+    code, receipt, stderr = _run_in_subprocess(
+        tmp_path,
+        sabotage=sabotage,
+        run_kwargs={
+            "release": True,
+            "rc_tag": "v1.2.3-rc1",
+            "hermes_repo": str(hermes_repo),
         },
+        sys_path_prepend=ambient,
     )
 
-    code, receipt_path = phase_a.run(
-        worktree,
-        tmp_path / "receipt",
-        release=True,
-        rc_tag="v1.2.3-rc1",
-        hermes_repo=hermes_repo,
-    )
-    receipt = receipt_path.read_text(encoding="utf-8")
-
-    assert code != 0
+    assert code != 0, stderr + receipt
     assert "agent.context_engine imported from" in receipt
     assert "not --hermes-repo" in receipt
     assert "Exit verdict: `BLOCKED`" in receipt
@@ -290,23 +327,21 @@ def test_contextual_chunk_dispatch_is_captured():
     assert outbound == ["first", "second"]
 
 
-def test_noop_scenario_is_a_runner_failure(tmp_path, monkeypatch):
-    phase_a = _runner_module()
-    original = phase_a._scenario
-
-    def no_op_status(engine, tool, context, *, patterns):
-        if tool == "lcm_status":
-            return None
-        return original(engine, tool, context, patterns=patterns)
-
-    monkeypatch.setattr(phase_a, "_scenario", no_op_status)
-    code, receipt_path = phase_a.run(
-        Path(__file__).resolve().parents[1],
-        tmp_path,
-        expect_365_fixed=False,
+def test_noop_scenario_is_a_runner_failure(tmp_path):
+    sabotage = (
+        "_orig = mod._scenario\n"
+        "def _noop(engine, tool, context, *, patterns):\n"
+        "    if tool == 'lcm_status':\n"
+        "        return None\n"
+        "    return _orig(engine, tool, context, patterns=patterns)\n"
+        "mod._scenario = _noop\n"
     )
-    receipt = receipt_path.read_text(encoding="utf-8")
-    assert code != 0
+    code, receipt, stderr = _run_in_subprocess(
+        tmp_path,
+        sabotage=sabotage,
+        run_kwargs={"expect_365_fixed": False},
+    )
+    assert code != 0, stderr + receipt
     assert "| local | `lcm_status` | FAIL |" in receipt
     assert "scenario returned no postcondition evidence" in receipt
     assert "Exit verdict: `FAIL`" in receipt
