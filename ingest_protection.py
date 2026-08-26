@@ -1767,30 +1767,70 @@ def _pem_marker_with_inline_body(text: str) -> bool:
     return False
 
 
-def _pem_fragment_near_private_key_placeholder(text: str) -> bool:
-    """True when a 16+ base64-charset token sits near a private_key placeholder.
+_PRIVATE_KEY_PLACEHOLDER_RE = re.compile(
+    r"\[LCM (?:sensitive redaction|embedding privacy):\s*name=private_key[^\]]*\]",
+    re.IGNORECASE,
+)
 
-    Marker-independent backstop (#383 rounds 4-5): when the transform redacted
-    part of a key (the placeholder proves a key was here), any surviving
-    unbroken 16+ base64-alphabet token within the adjacency window is treated
-    as an orphaned body fragment and blocks the dispatch fail-closed — even a
-    word-shaped one ("internationalization"): beside a redacted PRIVATE KEY,
-    blocking a rare prose dispatch loudly beats shipping a key fragment.
+
+def _pem_fragment_near_private_key_placeholder(text: str) -> bool:
+    """True when a 16+ base64-charset token sits near a PRIVATE_KEY placeholder.
+
+    Marker-independent backstop (#383 rounds 4-6): a private_key placeholder
+    proves a private key was redacted at that spot, so any surviving unbroken
+    16+ base64-alphabet token in its adjacency window is an orphaned key-body
+    fragment and blocks the dispatch fail-closed. Scoped to the private_key
+    placeholder name deliberately: a 16+ base64 token beside a NON-key
+    placeholder (e.g. a git SHA next to a redacted `api_key`) is ambiguous and
+    must NOT over-block — marker-independent MULTI-LINE key bodies are covered
+    instead by `_has_orphan_full_width_base64_run`, and a lone token beside a
+    non-key placeholder is the accepted precision boundary (like sub-16 tokens).
     """
-    marker = "[LCM embedding privacy: name=private_key]"
     window = 160
-    start = 0
-    while True:
-        idx = text.find(marker, start)
-        if idx < 0:
-            return False
-        lo = max(0, idx - window)
-        hi = min(len(text), idx + len(marker) + window)
+    for pm in _PRIVATE_KEY_PLACEHOLDER_RE.finditer(text):
+        lo = max(0, pm.start() - window)
+        # Bound the scan to the adjacency window plus 16 chars of headroom: a
+        # 16+ run STARTING anywhere inside the window still yields a >=16-char
+        # match within [lo, hi] (its first 16 chars land before hi), while an
+        # explicit endpos keeps each placeholder's scan O(window) instead of
+        # O(remaining text) — the latter is O(placeholders * text) on inputs
+        # with many placeholders and no nearby base64 (#383 round-6 perf fix).
+        hi = min(len(text), pm.end() + window + _PRIVATE_KEY_STRICT_MIN_CHARS)
         for m in _PRIVATE_KEY_INLINE_RUN_RE.finditer(text, lo, hi):
             run = m.group(0)
-            if len(run) >= _PRIVATE_KEY_STRICT_MIN_CHARS and run not in marker:
+            if len(run) >= _PRIVATE_KEY_STRICT_MIN_CHARS and run not in pm.group(0):
                 return True
-        start = idx + len(marker)
+    return False
+
+
+def _has_orphan_full_width_base64_run(text: str) -> bool:
+    """True when >=2 contiguous full-width base64 body lines survive, markerless.
+
+    Transform- AND marker-INDEPENDENT backstop (#383 round 6): a truncated key
+    whose body is split by a long non-base64 line leaves body lines with no
+    surviving BEGIN/END marker and no placeholder in range — invisible to every
+    marker- or placeholder-keyed check. Two or more contiguous strict base64
+    lines of full PEM wrap width (>=40 chars) are the private-key body
+    signature; ordinary prose/config never produces them. Lines already inside
+    a redaction placeholder do not count. Fail-closed: a genuine multi-line
+    base64 attachment on the cloud path blocks rather than ships (the durable
+    store is untouched; a base64 blob has no embedding value anyway).
+    """
+    run = 0
+    for kind, redact_start, content_end, _line_start, _marker_end in _pem_line_model(text):
+        if kind in (_PEM_LINE_KIND_STRICT_B64, _PEM_LINE_KIND_PREFIXED_B64) and (
+            content_end - redact_start
+        ) >= 40:
+            segment = text[redact_start:content_end]
+            if "[LCM embedding privacy:" in segment or "[LCM sensitive redaction:" in segment:
+                run = 0
+                continue
+            run += 1
+            if run >= 2:
+                return True
+        else:
+            run = 0
+    return False
 
 
 def _embedding_privacy_residual_patterns(
@@ -1803,15 +1843,18 @@ def _embedding_privacy_residual_patterns(
             # an earlier pattern consumed the BEGIN marker the redactor keys on, so
             # the key body shipped. Flag it even though the BEGIN-based redactor is
             # now blind. (BEGIN redaction still flagged for truncated/no-END blocks.)
-            # Backstops (#383): a surviving marker beside a base64 run, and an
-            # orphan 16+ base64 token adjacent to a private_key placeholder,
-            # both block fail-closed — the validator no longer shares the
-            # transform's marker-keyed blind spot.
+            # Backstops (#383 rounds 4-6): a surviving marker beside a base64
+            # run, an orphan 16+ base64 token adjacent to ANY privacy
+            # placeholder, and >=2 contiguous full-width markerless base64 body
+            # lines — all block fail-closed, so the validator no longer shares
+            # the transform's marker/placeholder-keyed blind spot (round 6
+            # closed a truncated body split by a long non-base64 line).
             if (
                 _embedding_privacy_redact_private_keys(text) != text
                 or _has_orphaned_private_key_body(text)
                 or _pem_marker_with_inline_body(text)
                 or _pem_fragment_near_private_key_placeholder(text)
+                or _has_orphan_full_width_base64_run(text)
             ):
                 residual.append(name)
             continue

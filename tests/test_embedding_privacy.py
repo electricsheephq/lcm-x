@@ -1499,3 +1499,46 @@ def test_validator_backstops_preserve_prose_and_neighbor_hashes(tmp_path):
     protected, revision, _changed = protect_embedding_text(sha_text, cfg)
     assert "SECRETKEYVALUE00" not in protected
     validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+
+
+def test_truncated_key_body_split_by_long_line_blocks_fail_closed(tmp_path):
+    # Round-6 (independent review): a truncated PRIVATE KEY whose body is split
+    # by one long non-base64 line leaves markerless full-width base64 body lines
+    # that every marker/placeholder-keyed check missed. The marker-independent
+    # orphan-run backstop (>=2 contiguous full-width base64 lines) blocks it.
+    cfg = _config(tmp_path, enabled=False)
+    note = (
+        "Note captured from the deployment console during the paste; the "
+        "following lines were emitted verbatim and are opaque payload text."
+    )
+    body = [
+        "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj",
+        "MHcCAQEEIQD1eJ7yhkG0987xyzABCDEFghijkLMNOPqrstuvwxyz0987654321pq",
+        "oAoGCCqGSM49AwEHoUQDQgAEZ9tRLsawNpSpw23cDEFghijkLMNOpqrstuvwXY12",
+    ]
+    text = "-----BEGIN PRIVATE KEY-----\n" + body[0] + "\n" + note + "\n" + "\n".join(body[1:])
+    try:
+        protected, revision, _changed = protect_embedding_text(text, cfg)
+    except EmbeddingPrivacyPolicyError:
+        return  # blocked fail-closed at the transform layer
+    if any(line in protected for line in body):
+        with pytest.raises(EmbeddingPrivacyPolicyError):
+            validate_embedding_privacy_dispatch(
+                [protected], cfg, expected_revision=revision
+            )
+
+
+def test_full_width_base64_backstop_stays_linear(tmp_path):
+    # The orphan-run + placeholder-proximity backstops must not reintroduce the
+    # quadratic scan the round-3 linearity test guards (20000 placeholders with
+    # no nearby base64 must not scan-to-EOF per placeholder).
+    import time as _time
+
+    cfg = _config(tmp_path)
+    revision = embedding_privacy_revision(cfg)
+    pathological = ("-----BEGIN PRIVATE KEY-----\n" + "A" * 64 + "\n") * 20000
+    started = _time.perf_counter()
+    protected, _r, _c = protect_embedding_text(pathological, cfg)
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+    assert _time.perf_counter() - started < 3.0
+    assert "AAAA" not in protected
