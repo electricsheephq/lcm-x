@@ -268,7 +268,15 @@ def _scenario(engine, tool, ctx, *, patterns):
         assert "Constellation anchor" in json.dumps(_payload(engine, tool, {"prompt": "Show the anchor", "node_ids": [ctx["node:gauntlet-c"]], "output": "evidence"})["evidence"])
     elif tool == "lcm_status":
         status = _payload(engine, tool, {})
-        assert status["store"]["messages"] == 10 and status["lifecycle_fragmentation"]["messages_total"] == 30 and status["ingest_protection"]["enabled"] is patterns and status["proactive_recall"]["privacy_policy_errors"] == 0
+        # The cloud posture's privacy battery ingests 10 extra rows before
+        # the matrix runs, so totals are posture-aware exact values.
+        expected_total = 40 if patterns else 30
+        assert (
+            status["store"]["messages"] == 10
+            and status["lifecycle_fragmentation"]["messages_total"] == expected_total
+            and status["ingest_protection"]["enabled"] is patterns
+            and status["proactive_recall"]["privacy_policy_errors"] == 0
+        )
     elif tool == "lcm_inspect":
         inspected = _payload(engine, tool, {})
         assert inspected["read_only"] is True and inspected["session_id"] == "gauntlet-c" and inspected["messages"]["total"] == inspected["messages"]["fresh_tail"]["returned"] == 10

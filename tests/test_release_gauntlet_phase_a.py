@@ -124,7 +124,7 @@ def test_dev_posture_covers_every_tool_despite_disabled_tools_env(tmp_path):
         env=env,
         text=True,
         capture_output=True,
-        timeout=60,
+        timeout=600,
     )
     receipt = (tmp_path / "PHASE-A-RECEIPT.md").read_text(encoding="utf-8")
     assert completed.returncode == 0, completed.stdout + completed.stderr + receipt

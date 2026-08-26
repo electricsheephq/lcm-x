@@ -24,7 +24,7 @@ needs a live soak. Docs/bench-only releases may skip to GA with a note in the re
 5. **GA tag `vX.Y.Z`** only when A+B+C receipts are green for the passing rc tree. Because
    release.yml reads curated notes from the tagged tree, the GA commit may differ from the rc
    tree by EXACTLY the release-notes addition and nothing else — verified mechanically:
-   `git diff rcN..GA --name-only` must be a subset of `.github/release-notes/`. GA notes =
+   `git diff --name-status rcN..GA` must show ONLY `A` (added) entries under `.github/release-notes/` — modifying or deleting existing notes is not the exception. GA notes =
    rc notes + gauntlet summary + receipt links.
 
 ## Phase A — Live all-tools matrix (the "clone" test)
