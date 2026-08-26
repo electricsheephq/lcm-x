@@ -12,7 +12,10 @@ Latest stable is `v0.23.1@81d8d41197dddc4c09b57097f4955ebae32366a9`. The source 
 
 Stable and main are separate identities. Stable is the product-under-test and installed-runtime baseline; main is the continuing development line. #342 owns main's deferred version-metadata policy.
 
-Eva has accepted v0.23.1 with hosted `voyage-4-large`, 1024-dimensional float32 summary vectors under the fail-closed privacy identity. The proof ceiling is Eva only.
+Eva has accepted v0.23.1 with hosted `voyage-4-large`, 1024-dimensional float32 summary
+vectors under that release's fail-closed privacy identity (v0.23.1 coupled cloud embedding
+to durable redaction; main has since split the two flags — see docs/features-overview.md).
+The proof ceiling is Eva only.
 
 ## Track A — Exact-stable retrieval provenance
 
@@ -65,6 +68,11 @@ Release work requires:
 - required non-author code-owner approval and zero unresolved blocker threads;
 - merge commits through normal protection;
 - detached release validation and exact tag/release readback;
+- rc-first delivery for any release touching product code: a `vX.Y.Z-rcN` prerelease that
+  passes the live gauntlet in `bench/specs/RELEASE-READINESS-V1.md` (Phase A all-tools
+  matrix on a fresh clone across privacy postures, Phase B multi-agent P0/P1 sweep of the
+  full release diff, Phase C 30+ turn `hermes acp` soak) before the GA tag, with the GA
+  commit differing from the passing rc tree by exactly the added release notes;
 - explicit proof boundaries and rollback ownership.
 
 Never restamp stable from main casually, move an existing tag, bypass the ruleset, or treat a benchmark result as runtime/customer proof.

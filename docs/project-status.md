@@ -23,6 +23,13 @@ The source snapshot used for this reconciliation is `main@3d4fbb4c979dc09aef0b83
 
 Main currently retains stale `plugin.yaml` prerelease metadata. #342 owns the P4 version-policy decision for the next release preparation; it does not invalidate the stable tag or installed stable identity.
 
+Since v0.23.1, main has changed two operator-visible contracts: durable redaction and
+cloud-embedding privacy are now independent flags (`LCM_SENSITIVE_PATTERNS_ENABLED` vs
+`LCM_EMBEDDING_PRIVACY_ENABLED`, #374), and privacy-policy errors on the recall path fail
+loud instead of degrading to full-text (#370). Releases containing product code are rc-first
+under `bench/specs/RELEASE-READINESS-V1.md` (#373). None of this changes the accepted stable
+identity or Eva's proof boundary.
+
 ## Eva acceptance state
 
 Eva is accepted on exact stable v0.23.1 with hosted `voyage-4-large`, 1024-dimensional float32 summary vectors under the privacy-bound vector identity.

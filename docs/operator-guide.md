@@ -111,7 +111,9 @@ Restart Hermes after updating.
 No manual core migration or data import is required for the upgrade itself.
 Existing v0.20-v0.23 databases remain on core schema version 5. Existing cloud
 vectors from a pre-v0.23.1, revisionless identity are intentionally ineligible:
-configure the privacy policy, run `/lcm embed warmup`, and verify its reported
+confirm the embedding-privacy posture (auto-on for cloud, or the explicit
+`LCM_EMBEDDING_PRIVACY_ENABLED=false` opt-out) and the pattern catalog, run
+`/lcm embed warmup`, and verify its reported
 provider/model/dimension/privacy identity. Dry-run the selected corpus and
 record its initial `remaining` count. The default page limit is 200, so allow no
 more than `ceil(initial_remaining / 200)` apply pages plus one final dry-run
@@ -127,9 +129,13 @@ additive/default-off and create derived state only when their workflows are
 invoked. If you later enable one of those stores, keep the pre-upgrade cold set
 as the downgrade path rather than mixing old code with newly created sidecars.
 
-Cloud embeddings are a separate operator decision. Before warmup, summary or
-chunk backfill, or semantic-query dispatch, enable a nonempty known sensitive
-pattern policy. Run `/lcm embed backfill` without `--apply` first. Raw-chunk
+Cloud embeddings are a separate operator decision. Provider-bound copies are protected
+automatically for known cloud providers; do NOT enable `LCM_SENSITIVE_PATTERNS_ENABLED`
+for this — that flag is the separate, irreversible durable-redaction opt-in. Before
+warmup, summary or chunk backfill, or semantic-query dispatch, confirm
+`LCM_SENSITIVE_PATTERNS` holds at least one recognized pattern name, or set
+`LCM_EMBEDDING_PRIVACY_ENABLED=false` to opt out deliberately under the `privacy:off`
+vector revision. Run `/lcm embed backfill` without `--apply` first. Raw-chunk
 cloud backfill additionally requires `--confirm-raw-text`; the privacy
 transform only catches configured patterns and is not a general data
 classification system.
@@ -285,6 +291,12 @@ environment variables:
 | `LCM_EMPTY_LIFECYCLE_GC_THRESHOLD` | `200` | Number of lifecycle rows at which the GC pass fires (default 200 so fresh installs skip the work) |
 | `LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS` | `24` | Automatic GC only deletes empty lifecycle rows at least this old; set `0` only in trusted/test environments that intentionally want immediate empty-row pruning |
 
+`lcm_status` reports a `proactive_recall` block with `injected`, `skipped`, `timeout`, and
+`privacy_policy_errors`. A nonzero `privacy_policy_errors` is a deterministic configuration
+fault, not load shedding: proactive injection is disabled until the embedding-privacy policy
+is fixed, one WARNING is logged per process, and `lcm_recall` raises rather than degrading to
+full-text on the same fault (#370).
+
 ### Evidence and adaptive retrieval (0.21 RC)
 
 Hermes exposes all 15 LCM tool schemas whenever LCM is the active context
@@ -325,9 +337,9 @@ profile's existing `lcm.db` and may include exact quotes, spans, and dependency
 refs. Provider-neutral evidence tools do not upload them by themselves.
 Embedding-backed retrieval, including automatic pre-answer baseline retrieval,
 assertion extraction, and the optional selective compiler can send configured
-content to their selected providers. Review those provider and redaction
-settings before opting in; sensitive-pattern redaction is also default-off and
-is forward-only.
+content to their selected providers. Review those provider and redaction settings before opting in. Durable sensitive-pattern
+redaction is default-off and forward-only; cloud provider-copy privacy is separate, on by
+default for known cloud providers, and never rewrites durable rows.
 
 Advanced compaction, assembly, and extraction knobs are defined in `config.py`.
 
@@ -421,19 +433,21 @@ Cloud embedding input has an additional non-persistent privacy transform. It
 canonicalizes historical redaction placeholders, replaces current matches with
 pattern-only placeholders that contain no raw value, length, byte count, or
 secret-derived digest, and rejects any residual detector match before transport.
-The transform version and a digest of sorted active pattern names are stored in
-the vector profile revision. Disabling or changing the policy after warmup
-causes query and backfill dispatch to refuse until a new warmup registers the
-new identity. Durable messages, summaries, FTS rows, and payloads are not
+The transform version and a digest of sorted active pattern names are stored in the vector
+profile revision; the explicit opt-out stores the distinguished `privacy:off` revision
+instead. Changing the pattern policy, or flipping `LCM_EMBEDDING_PRIVACY_ENABLED` in either
+direction after warmup, changes that identity and causes query and backfill dispatch to
+refuse until a new warmup registers it — existing vectors under the old revision stay
+ineligible until re-embedded. Durable messages, summaries, FTS rows, and payloads are not
 rewritten by this provider boundary.
 
 The cloud gate applies to provider identity `voyage`/`voyageai` and
 `openai-compatible` (including the `openai` and `siliconflow` configuration
 aliases after resolution). An OpenAI-compatible endpoint can be local or
-remote, but the shipped provider identity is conservatively cloud-gated. Set
-`LCM_EMBEDDING_BASE_URL` and the configured API-key environment name, then keep
-the same sensitive-pattern policy requirement unless a future reviewed
-endpoint-locality contract says otherwise.
+remote, but the shipped provider identity is conservatively cloud-gated. Set `LCM_EMBEDDING_BASE_URL` and the configured API-key environment name; provider-copy
+privacy resolves ON for that identity exactly as it does for Voyage, and the same nonempty
+known-catalog requirement applies unless you take the explicit `privacy:off` opt-out or a
+future reviewed endpoint-locality contract says otherwise.
 
 ### Cache policy boundary
 

@@ -136,7 +136,15 @@ def test_dev_posture_covers_every_tool_despite_disabled_tools_env(tmp_path):
     assert "Missing matrix rows: `none`" in receipt
     assert "Unexpected scenario rows: `none`" in receipt
     assert receipt.count("| local | `lcm_") == 15
-    assert "| cloud | `lcm_recall` | SKIP | SKIP: VOYAGE_API_KEY is absent |" in receipt
+    assert "| cloud-default | `lcm_recall` | SKIP | SKIP: VOYAGE_API_KEY is absent |" in receipt
+    for battery in (
+        "planted-secret",
+        "opt-out",
+        "durable-redaction",
+        "misconfiguration",
+    ):
+        assert f"| {battery} | SKIP | SKIP: VOYAGE_API_KEY is absent |" in receipt
+    assert "rerank transform covered by product regressions, not a live battery" in receipt
     assert "Exit verdict: `PASS`" in receipt
 
 
@@ -159,7 +167,7 @@ def test_release_mode_blocks_the_same_cloud_skip(tmp_path):
     )
     module_path = (hermes_repo / "agent/context_engine.py").resolve()
     assert code != 0, stderr + receipt
-    assert "| cloud | `lcm_recall` | SKIP |" in receipt
+    assert "| cloud-default | `lcm_recall` | SKIP |" in receipt
     assert f"Hermes ContextEngine module __file__: `{module_path}`" in receipt
     assert (
         f"Hermes ContextEngine module sha256: "
@@ -234,6 +242,12 @@ def test_cloud_posture_blocks_non_product_cloud_provider(
 
     assert records[0][2] == "BLOCKED"
     assert all(row[1] == "BLOCKED" for row in batteries)
+    assert [row[0] for row in batteries] == [
+        "planted-secret",
+        "opt-out",
+        "durable-redaction",
+        "misconfiguration",
+    ]
     assert f"provider {provider!r} is not in the product cloud set" in records[0][3]
     assert (
         phase_a._verdict(
@@ -402,13 +416,46 @@ def test_contextual_chunk_dispatch_is_captured():
     assert outbound == ["first", "second"]
 
 
+@pytest.mark.parametrize(
+    ("privacy_setting", "expected"),
+    [(None, None), (False, False), (True, True)],
+)
+def test_engine_threads_embedding_privacy_setting(tmp_path, privacy_setting, expected):
+    phase_a = _runner_module()
+    captured = {}
+
+    class Config:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    class Engine:
+        def __init__(self, *, config, hermes_home):
+            self.config = config
+            self.hermes_home = hermes_home
+
+    mod = {
+        "config": type("ConfigModule", (), {"LCMConfig": Config}),
+        "engine": type("EngineModule", (), {"LCMEngine": Engine}),
+    }
+    phase_a._engine(
+        mod,
+        tmp_path,
+        "cloud",
+        patterns=False,
+        embedding_privacy=privacy_setting,
+    )
+
+    assert captured["sensitive_patterns_enabled"] is False
+    assert captured["embedding_privacy_enabled"] is expected
+
+
 def test_noop_scenario_is_a_runner_failure(tmp_path):
     sabotage = (
         "_orig = mod._scenario\n"
-        "def _noop(engine, tool, context, *, patterns):\n"
+        "def _noop(engine, tool, context, *, patterns, posture):\n"
         "    if tool == 'lcm_status':\n"
         "        return None\n"
-        "    return _orig(engine, tool, context, patterns=patterns)\n"
+        "    return _orig(engine, tool, context, patterns=patterns, posture=posture)\n"
         "mod._scenario = _noop\n"
     )
     code, receipt, stderr = _run_in_subprocess(

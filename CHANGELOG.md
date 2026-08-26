@@ -5,7 +5,19 @@ version tags but does not have a destination GitHub Release object for RC2.
 
 ## Unreleased
 
-(nothing yet)
+- Lossless by default: durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`,
+  default off) is now fully independent of cloud-embedding privacy. Known cloud providers
+  protect only the provider-bound copy, controlled by the new `LCM_EMBEDDING_PRIVACY_ENABLED`
+  (unset = auto-on for cloud); `false` is an explicit opt-out bound to the `privacy:off`
+  vector revision. Cloud embedding no longer requires durable redaction, and a disabled
+  durable policy no longer blocks cloud dispatch. Changing the posture changes vector
+  identity and requires a new `/lcm embed warmup`. (#374)
+- `lcm_recall` no longer silently degrades to full-text on an embedding-privacy policy
+  error; proactive recall counts them and `lcm_status` exposes `privacy_policy_errors`. (#370)
+- Rerank payloads are protected under the embedding-privacy resolution: the rerank query and
+  snippets are transformed before leaving the machine when privacy is ON. (#371)
+- Releases containing product code are rc-first: `bench/specs/RELEASE-READINESS-V1.md` is
+  the GA gate. (#373)
 
 ## v0.23.0-rc1 - 2026-08-21
 

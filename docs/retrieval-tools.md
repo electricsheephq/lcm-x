@@ -31,7 +31,7 @@ arguments documented below.
 | Tool | Use |
 |------|-----|
 | `lcm_grep` | Search current-session raw messages and summaries. `mode='full_text'` is the byte-compatible default; `mode='semantic'` searches embedded summaries; `mode='hybrid'` combines full-text and semantic ranks with RRF. Set `exclude_current_session=true` or pass `exclude_session_ids` to remove sessions before candidate caps, fusion, and final ranking. Opt into `content_scope='externalized'` or `'both'` for bounded literal search over recoverable payload prefixes owned by the active session. Opt into `session_scope='all'` or `session_scope='session'` (with `session_id`) for bounded archive recovery over rows already present in `lcm.db`, including externally backfilled rows that may carry source strings such as `openclaw-lcm:*`; broader scopes return raw-message hits only in full-text mode and cannot search externalized payloads. Raw-message filters `role`, `time_from`, `time_to`, `source`, and `conversation_id` are pushed into the full-text query; when any is supplied, externalized payload results are omitted, and summary hits are omitted for the role/time filters so the filter contract stays exact. Use `session_search` for earlier separate sessions or broad cross-session recall. |
-| `lcm_recall` | Search the agent's entire memory across ALL conversations and all time by meaning. Runs three arms over the whole local database — full-text raw messages, embedded summary KNN, and verbatim chunk KNN — removes sessions selected by `exclude_current_session` or `exclude_session_ids`, then fuses the remaining candidates with RRF, dedupes chunk hits against FTS by `store_id`, and applies a soft prior `final_score = rank_score × (1 + scope_bias × is_current_conversation) × recency_boost(half_life=30d, floor 0.5)`. `scope_bias` (0..1, default 0.5) and recency are ranking BOOSTS, never filters. `include` selects `all`/`summaries`/`verbatim`. An optional voyage `rerank-2.5-lite` stage (`LCM_RERANK_ENABLED`, default off) reorders the top window of candidates AFTER the scope/recency prior, as a pure rank-reorder (voyage relevance is never spliced onto the RRF scale); any failure skips silently to RRF order. When embeddings are disabled or the vector corpora are empty the tool degrades to the full-text arm — including for `include='summaries'`, whose only vector arm is dead in that state, so a summaries request still returns full-text hits rather than nothing. Each hit carries an `expand_hint`: verbatim excerpts get `lcm_expand(store_id=..., content_offset=...)`, current-session summary hits get `lcm_expand(node_id=...)`, and cross-session summary hits get `lcm_expand(node_id=..., session_id=...)`. Use `lcm_grep(mode='full_text')` for exact text in a known range and `lcm_load_session` for full transcripts. |
+| `lcm_recall` | Search the agent's entire memory across ALL conversations and all time by meaning. Runs three arms over the whole local database — full-text raw messages, embedded summary KNN, and verbatim chunk KNN — removes sessions selected by `exclude_current_session` or `exclude_session_ids`, then fuses the remaining candidates with RRF, dedupes chunk hits against FTS by `store_id`, and applies a soft prior `final_score = rank_score × (1 + scope_bias × is_current_conversation) × recency_boost(half_life=30d, floor 0.5)`. `scope_bias` (0..1, default 0.5) and recency are ranking BOOSTS, never filters. `include` selects `all`/`summaries`/`verbatim`. An optional voyage `rerank-2.5-lite` stage (`LCM_RERANK_ENABLED`, default off) reorders the top window of candidates AFTER the scope/recency prior, as a pure rank-reorder (voyage relevance is never spliced onto the RRF scale); transient failures (no provider, network, deadline) skip silently to RRF order, while an embedding-privacy policy error propagates as an error instead. When embeddings are disabled or the vector corpora are empty the tool degrades to the full-text arm — including for `include='summaries'`, whose only vector arm is dead in that state, so a summaries request still returns full-text hits rather than nothing; an embedding-privacy policy error is never absorbed this way — it raises (#370). Each hit carries an `expand_hint`: verbatim excerpts get `lcm_expand(store_id=..., content_offset=...)`, current-session summary hits get `lcm_expand(node_id=...)`, and cross-session summary hits get `lcm_expand(node_id=..., session_id=...)`. Use `lcm_grep(mode='full_text')` for exact text in a known range and `lcm_load_session` for full transcripts. |
 | `lcm_query_state` | Query the feature-flagged same-DB V4 assertion sidecar by canonical subject, optional predicate/kind/scope/speaker, and optional as-of boundary. Returns typed lifecycle state with exact message store IDs, character spans, hashes, and quotes. It preserves unresolved conflicts and never treats recency alone as supersession. |
 | `lcm_compute` | Execute a question-derived, provider-neutral date/count/sum/difference/order/latest-state operation over exact raw spans or assertion IDs. Values, units, labels, keys, dates, operand order, completeness, and final wording are validated; unsupported or ambiguous inputs return an evidence-only fallback. |
 | `lcm_compile_evidence` | Turn one bounded semantic proposal into an exact-source-grounded evidence brief. The proposal may name facets and operands, but product code validates refs, quotes, spans, entities, dates, values, units, distinct keys, roles, and sources; finite coverage is never accepted from the proposal alone. |
@@ -220,6 +220,12 @@ are not spliced into the much smaller RRF/composite score scale. Provider,
 network, or deadline failures keep the incoming order and are reported under
 `provenance.rerank`. This stage applies to `lcm_recall`, not `lcm_grep`.
 
+When the embedding-privacy resolution is ON for the provider, the rerank query and every
+snippet are transformed with the provider-copy transform before transport and validated for
+residuals; ranking indices map back to the original hits, so only what leaves the machine is
+changed. The explicit `privacy:off` opt-out sends raw payloads by choice. A privacy-policy
+error propagates rather than silently skipping to RRF order (#371/#370).
+
 If the summary or chunk arm ran under `coverage='bounded'` (recency-truncated
 candidate scan) or `coverage='full_approx'` (two-stage binary-prescreen KNN,
 see [vector storage scale options](operator-guide.md#vector-storage-scale-options-v3)),
@@ -227,6 +233,16 @@ see [vector storage scale options](operator-guide.md#vector-storage-scale-option
 the caveat — the same disclosure mechanism as `lcm_grep`'s `degraded_reason` —
 so a caller never mistakes a truncated or approximate arm's contribution to the
 fused ranking for an exhaustive exact one.
+
+### Privacy-policy errors are not a degrade
+
+An embedding-privacy policy error (empty/unknown catalog, post-warmup policy drift, residual
+detector match) is a deterministic configuration fault. `lcm_recall` raises it from every
+arm — query embedding, chunk query embedding, summary arm, chunk arm, and rerank — rather
+than reporting `degraded_to_fts`. Proactive recall keeps the assembly contract (injects
+nothing, never breaks the turn) but logs one WARNING per process and increments the
+`privacy_policy_errors` counter in `lcm_status`. `lcm_grep` retains its ordinary degrade
+behavior.
 
 ### Deterministic recall smoke evaluation
 
