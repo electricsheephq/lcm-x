@@ -237,7 +237,8 @@ environment variables:
 | `LCM_IGNORE_SESSION_PATTERNS` | empty | Comma-separated session globs excluded from LCM storage |
 | `LCM_STATELESS_SESSION_PATTERNS` | empty | Comma-separated session globs kept read-only |
 | `LCM_IGNORE_MESSAGE_PATTERNS` | empty | Comma-separated regex patterns; matching message content (plain text, extracted text parts for structured/multimodal content, or normalized JSON fallback when no text parts exist) is excluded from LCM storage |
-| `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | Opt in to deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads. Known cloud embedding providers require it enabled with a nonempty known policy before warmup, backfill, or semantic-query dispatch |
+| `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | Opt in to durable deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads; it does not control cloud embedding privacy |
+| `LCM_EMBEDDING_PRIVACY_ENABLED` | unset (`auto`) | Protect provider-bound copies for known cloud embedding providers without rewriting durable data. Set `false` for an explicit raw-cloud opt-out (`privacy:off` vector revision); local providers remain unchanged |
 | `LCM_SENSITIVE_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Comma-separated named sensitive pattern catalog entries to apply when redaction is enabled |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `false` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS` | `12000` | Externalization threshold for normalized payload text |
@@ -386,8 +387,14 @@ table. Both paths are read-only and make no LLM calls. When the feature is off
 or its tables are empty, the block remains present with zero counts and null
 age/cursor/error values so monitoring consumers do not need a second schema.
 
-Sensitive-pattern handling is disabled by default so ordinary LCM storage and
-`lcm_expand` remain lossless. When `LCM_SENSITIVE_PATTERNS_ENABLED=true`, matched
+LCM is lossless by default: durable messages, FTS rows, summaries, and payloads
+remain untouched unless `LCM_SENSITIVE_PATTERNS_ENABLED=true` is explicitly set.
+Cloud embedding privacy is independent and transforms provider-bound copies
+only. It defaults on for known cloud providers; setting
+`LCM_EMBEDDING_PRIVACY_ENABLED=false` explicitly sends raw embedding input and
+binds vectors to `privacy:off`. Local providers remain byte-identical.
+
+When `LCM_SENSITIVE_PATTERNS_ENABLED=true`, matched
 secret values are replaced with metadata-only placeholders before SQLite, FTS,
 summaries, active replay, and externalized payload JSON receive the content. This
 is intentionally not lossless for matching values: the raw matched secret is
@@ -860,8 +867,8 @@ before applying any work:
 export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=ollama   # voyage or fastembed are also supported
 export LCM_EMBEDDING_MODEL=nomic-embed-text
-# Required for a known cloud provider such as Voyage:
-# export LCM_SENSITIVE_PATTERNS_ENABLED=true
+# Known cloud providers protect provider-bound copies automatically.
+# Optional explicit raw-cloud opt-out: export LCM_EMBEDDING_PRIVACY_ENABLED=false
 
 /lcm embed warmup
 /lcm embed backfill

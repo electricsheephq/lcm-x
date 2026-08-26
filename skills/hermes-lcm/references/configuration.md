@@ -39,7 +39,7 @@ Use `docs/operator-guide.md` as the complete current source. Start with:
 - `LCM_LEAF_CHUNK_TOKENS`: maximum raw material per leaf compaction group;
 - `LCM_DATABASE_PATH`: profile-local SQLite path when the default is unsuitable;
 - `LCM_IGNORE_SESSION_PATTERNS` and `LCM_STATELESS_SESSION_PATTERNS`: storage ownership boundaries;
-- summary/embedding provider settings only after confirming credentials, cost, and data handling. Known cloud embedding providers require `LCM_SENSITIVE_PATTERNS_ENABLED=true` with a nonempty known pattern list; warmup binds that policy into vector identity and later query/backfill calls fail closed on drift.
+- summary/embedding provider settings only after confirming credentials, cost, and data handling. Known cloud providers protect provider-bound copies automatically with the configured nonempty known pattern list while durable storage stays raw. `LCM_SENSITIVE_PATTERNS_ENABLED=true` is a separate irreversible durable-ingest opt-in. `LCM_EMBEDDING_PRIVACY_ENABLED=false` explicitly sends raw cloud copies under the `privacy:off` vector revision; warmup binds the chosen posture and later query/backfill calls fail closed on identity drift.
 
 Optional slash commands are disabled by default with `LCM_ENABLE_SLASH_COMMAND=false`. Destructive cleanup apply is separately guarded. Do not enable mutation surfaces merely to diagnose a problem.
 

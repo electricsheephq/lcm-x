@@ -2,7 +2,7 @@
 
 Every number ships with its full run config, variance, fail-close accounting, and known dataset defects — rows that cannot meet the standard do not render.
 
-Generated from `results.jsonl` (sha256: `8b73abf73543264e0d1efa2707aaecffb0e118b12e60c5b5bddff25b8f6f664b`, rows: 10)
+Generated from `results.jsonl` (sha256: `f57e48e994b625d229aa0a16c69d44ed035d493e57b92ec958c255d7d06d341c`, rows: 10)
 
 ## Summary
 
@@ -261,6 +261,7 @@ A/A' 100q fixed-seed subset (seed 20260802): 95/95 scored questions per-question
 - The 25q smoke's r@1 0.96 was a first-N sampling artifact (full-500 r@1 = 0.50); first-N smokes retired, seeded-random only
 - Delivery (r@10 95.6%) clears the 90% line; top-slot ranking (r@1 50%) is the declared next lever
 - FTS arm dark (prose flag unset) — disclosed; V1-M FTS-ON variant decided after LoCoMo C1
+- FROZEN vs current main (caveat appended 2026-08-26 per PR #368 review): row measured pre-v0.23.1 privacy trio (#332/#333/#338); the production lcm_recall arm may not be compared against post-v0.23.1 production-path rows until the registered re-bank (BASELINE-LEDGER privacy-trio boundary; FINDING-F53 reproducibility note). Reproducibility on current main is UNVERIFIED, not proven broken.
 
 ### <a id="longmemeval-v1-s500-accuracy-2026-07-29"></a>longmemeval-v1-s500-accuracy-2026-07-29
 
