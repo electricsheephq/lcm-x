@@ -5,7 +5,7 @@ version tags but does not have a destination GitHub Release object for RC2.
 
 ## Unreleased
 
-## v0.23.2 - release candidate
+## v0.23.2 - security + lossless point release
 
 - Lossless by default: durable sensitive-pattern redaction (`LCM_SENSITIVE_PATTERNS_ENABLED`,
   default off) is now fully independent of cloud-embedding privacy. Known cloud providers

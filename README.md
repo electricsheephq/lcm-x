@@ -122,14 +122,15 @@ default-off experimental features.
 independent — see "Sensitive-pattern redaction" below.)
 
 Stable release identity and the continuing `main` development line are
-separate proof planes. The source snapshot used for the current reconciliation
-is `main@3d4fbb4c979dc09aef0b831bb50d928e0e18d68f`; do not describe an
-arbitrary main checkout as the installed stable product.
+separate proof planes; do not describe an arbitrary `main` checkout as the
+installed stable product.
 
-That exact development baseline still identifies itself as
-`hermes-lcm v0.23.2 (15 tools)`. The stable tag identifies itself as
-`hermes-lcm v0.23.1 (15 tools)`. This is tracked as a deferred version-policy
-decision rather than being silently restamped by documentation changes.
+The reconciled `main` line now identifies itself as
+`hermes-lcm v0.23.2 (15 tools)` — aligned forward from the `v0.23.1` stable
+tag, which identifies itself as `hermes-lcm v0.23.1 (15 tools)`. This resolves
+the earlier drift where `main` declared an older release candidate than the
+shipped stable tag (#385); it is a forward bump, never a restamp of any past
+commit's own recorded identity.
 
 Eva has accepted exact stable v0.23.1 with hosted `voyage-4-large`,
 1024-dimensional float32 summary vectors under one privacy-bound identity.

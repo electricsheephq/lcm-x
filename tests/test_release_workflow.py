@@ -44,10 +44,19 @@ def test_release_candidate_identity_surfaces_are_synchronized():
 
 
 def test_plugin_version_is_not_a_release_downgrade():
-    manifest = (REPO_ROOT / "plugin.yaml").read_text(encoding="utf-8")
+    import re
 
-    # Release preparation must bump the stable identity instead of restoring an older RC.
-    assert f"version: {IDENTITY_VERSION}" in manifest
+    manifest = (REPO_ROOT / "plugin.yaml").read_text(encoding="utf-8")
+    match = re.search(r"^version:\s*(\S+)", manifest, re.MULTILINE)
+    assert match is not None, "plugin.yaml declares no version"
+    declared = match.group(1)
+    # Parse the release core (drop any -rcN suffix) and assert it never regresses
+    # below the last shipped stable — a restored older RC (e.g. 0.23.0-rc1) fails
+    # this even if IDENTITY_VERSION were changed with it (not tautological).
+    core = tuple(int(part) for part in declared.split("-")[0].split("."))
+    assert core >= (0, 23, 1), f"plugin.yaml version {declared!r} is a downgrade below the 0.23.1 stable floor"
+    # And it must match the identity every other surface is synchronized to.
+    assert declared == IDENTITY_VERSION
 
 
 def test_issue_forms_stay_within_github_element_limit():
