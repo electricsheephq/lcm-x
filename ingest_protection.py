@@ -309,6 +309,10 @@ _PRIVATE_KEY_ARMOR_HEADER_RE = re.compile(r"^[A-Za-z0-9-]{2,32}:\s?\S.*$")
 _PRIVATE_KEY_MAX_ARMOR_HEADERS = 5
 _PRIVATE_KEY_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE)
 _PRIVATE_KEY_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE)
+# ANY PEM armor marker (private key, certificate, public key, …): a truncated
+# private-key body can share a line with a following marker of any armor type
+# (#383 finding #3), so the leading-body-run split keys off the generic marker.
+_PEM_ANY_MARKER_RE = re.compile(r"-----(?:BEGIN|END) [A-Z0-9 ]+-----", re.IGNORECASE)
 _EXTERNALIZED_PLACEHOLDER_PREFIX = "[Externalized LCM ingest payload:"
 _QUARANTINED_ASSISTANT_KIND = "quarantined_assistant_output"
 _QUARANTINED_ASSISTANT_REASON = "high_repetition"
@@ -553,6 +557,49 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
         kind = _PEM_LINE_KIND_OTHER
         redact_start = c_start
         marker_end = -1
+        if "PRIVATE KEY-----" not in stripped.upper():
+            # A truncated private-key body can be glued to a following NON-
+            # private-key PEM marker (a CERTIFICATE / PUBLIC KEY the key was
+            # concatenated before) — this line has no "PRIVATE KEY-----" so the
+            # branch below never sees it (#383 adversarial-review finding #3).
+            # Split the leading base64 body run off as a forced STRICT_B64 entry
+            # so an open truncated block consumes and redacts it; the remainder
+            # is OTHER (it opens nothing). Digit/base64-symbol evidence required
+            # so all-caps doc headings before a marker are not swept.
+            gmarker = _PEM_ANY_MARKER_RE.search(stripped)
+            if gmarker is not None and gmarker.start() > 0:
+                run_end = 0
+                scan = 0
+                saw_body = False
+                have_evidence = False
+                prefix = stripped[: gmarker.start()]
+                while scan < len(prefix):
+                    while scan < len(prefix) and prefix[scan] in " \t":
+                        scan += 1
+                    tok_start = scan
+                    while scan < len(prefix) and prefix[scan] not in " \t":
+                        scan += 1
+                    ctok = _normalize_escaped_solidus(prefix[tok_start:scan])
+                    if (
+                        ctok
+                        and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(ctok) is not None
+                        and not _looks_like_english_token(ctok)
+                    ):
+                        saw_body = True
+                        run_end = scan
+                        if any(ch.isdigit() or ch in "+/=" for ch in ctok):
+                            have_evidence = True
+                    else:
+                        break
+                if saw_body and have_evidence:
+                    model.append(
+                        (_PEM_LINE_KIND_STRICT_B64, c_start, c_start + run_end, c_start, -1)
+                    )
+                    rem_start = c_start + run_end
+                    model.append(
+                        (_PEM_LINE_KIND_OTHER, rem_start, c_end, rem_start, -1)
+                    )
+                    continue
         if "PRIVATE KEY-----" in stripped.upper():
             begin = _PRIVATE_KEY_BEGIN_RE.search(stripped)
             end = _PRIVATE_KEY_END_RE.search(stripped)

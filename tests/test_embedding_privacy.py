@@ -519,6 +519,51 @@ def test_truncated_body_run_before_inline_begin_fully_redacts(tmp_path, secrets,
     validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
 
 
+@pytest.mark.parametrize(
+    ("secrets", "text"),
+    [
+        # truncated private-key body glued to a following CERTIFICATE BEGIN
+        # (the line has no "PRIVATE KEY-----" — finding #3).
+        (
+            ["MIIEvQIBADANBgkqSUPERSECRETKEY9"],
+            "trunc -----BEGIN PRIVATE KEY-----\n"
+            "MIIEvQIBADANBgkqSUPERSECRETKEY9 -----BEGIN CERTIFICATE-----\n"
+            "CB\n-----END CERTIFICATE-----",
+        ),
+        # …and a following PUBLIC KEY BEGIN.
+        (
+            ["MIIEvQIBADANBgkqSUPERSECRETKEY9"],
+            "trunc -----BEGIN PRIVATE KEY-----\n"
+            "MIIEvQIBADANBgkqSUPERSECRETKEY9 -----BEGIN PUBLIC KEY-----\n"
+            "PB\n-----END PUBLIC KEY-----",
+        ),
+        # …multi-token short-run body before a CERTIFICATE BEGIN.
+        (
+            ["MIIE1111", "BBBB2222", "CCCC3333"],
+            "trunc -----BEGIN PRIVATE KEY-----\n"
+            "MIIE1111 BBBB2222 CCCC3333 -----BEGIN CERTIFICATE-----\n"
+            "CB\n-----END CERTIFICATE-----",
+        ),
+    ],
+    ids=["cert-marker", "public-key-marker", "cert-multi-token"],
+)
+def test_truncated_body_before_non_private_key_marker_redacts(tmp_path, secrets, text):
+    cfg = _config(tmp_path, enabled=False)
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+    for secret in secrets:
+        assert secret not in protected
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+
+
+def test_standalone_certificate_body_is_not_redacted(tmp_path):
+    # A public certificate with no adjacent truncated private key must be left
+    # intact (the leading-run split only fires as a truncated-body continuation).
+    cfg = _config(tmp_path, enabled=False)
+    text = "-----BEGIN CERTIFICATE-----\nMIICPUBLICCERTBODY123\n-----END CERTIFICATE-----"
+    protected, _revision, _changed = protect_embedding_text(text, cfg)
+    assert "MIICPUBLICCERTBODY123" in protected
+
+
 def test_doc_heading_before_quoted_begin_is_not_over_redacted(tmp_path):
     # An all-caps doc heading with no digit/base64 evidence before a BEGIN must
     # NOT be swept as a truncated body run (round-21 precision preserved).
