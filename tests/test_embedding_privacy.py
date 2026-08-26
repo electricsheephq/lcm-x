@@ -481,6 +481,53 @@ def test_truncated_private_key_before_inline_begin_is_redacted(tmp_path, text):
     validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
 
 
+@pytest.mark.parametrize(
+    ("secrets", "text"),
+    [
+        # multi-token body run before an inline BEGIN: every token must redact,
+        # not only the first (the leading-run generalization of #383).
+        (
+            ["AAAABBBB1111", "CCCCDDDD2222", "EEEEFFFF3333"],
+            "trunc -----BEGIN PRIVATE KEY-----\n"
+            "AAAABBBB1111 CCCCDDDD2222 EEEEFFFF3333 prose "
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\nZBODY9\n"
+            "-----END ENCRYPTED PRIVATE KEY-----",
+        ),
+        # short (<16-char) but digit-bearing leading token: the adjacent
+        # truncated BEGIN is the structural evidence.
+        (
+            ["SHORT99"],
+            "trunc -----BEGIN PRIVATE KEY-----\nSHORT99 "
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\nZBODY9\n"
+            "-----END ENCRYPTED PRIVATE KEY-----",
+        ),
+        # serialized (escaped-newline) variant of the same composition.
+        (
+            ["SERIALBODY5555"],
+            "trunc -----BEGIN PRIVATE KEY-----\\n"
+            "SERIALBODY5555 prose -----BEGIN ENCRYPTED PRIVATE KEY-----\\n"
+            "X\\n-----END ENCRYPTED PRIVATE KEY-----",
+        ),
+    ],
+    ids=["multi-token-run", "short-digit-token", "serialized-newline"],
+)
+def test_truncated_body_run_before_inline_begin_fully_redacts(tmp_path, secrets, text):
+    cfg = _config(tmp_path, enabled=False)
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+    for secret in secrets:
+        assert secret not in protected
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+
+
+def test_doc_heading_before_quoted_begin_is_not_over_redacted(tmp_path):
+    # An all-caps doc heading with no digit/base64 evidence before a BEGIN must
+    # NOT be swept as a truncated body run (round-21 precision preserved).
+    cfg = _config(tmp_path, enabled=False)
+    text = "IMPORTANT NOTICE -----BEGIN PRIVATE KEY-----"
+    protected, _revision, _changed = protect_embedding_text(text, cfg)
+    assert "IMPORTANT NOTICE" in protected
+
+
 def test_release_gauntlet_privacy_battery_join_has_no_standard_leak(tmp_path):
     import json
 

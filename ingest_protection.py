@@ -557,29 +557,47 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
             begin = _PRIVATE_KEY_BEGIN_RE.search(stripped)
             end = _PRIVATE_KEY_END_RE.search(stripped)
             if begin is not None and begin.end() == len(stripped):
-                # A truncated block's last body token can share a physical
-                # line with the BEGIN of the next block. Model those as two
-                # virtual lines so the open block can consume its body tail;
-                # otherwise the later BEGIN classification orphans the token
-                # before its own redact_start (#383).
+                # A truncated block's body run can share one physical/serialized
+                # line with the BEGIN of the next block. Split off the LEADING
+                # base64-body run (not just the first token, and short tokens
+                # count — the adjacent truncated BEGIN is the structural
+                # evidence) as a virtual body line so the open block consumes
+                # and redacts its tail; the BEGIN marker becomes its own virtual
+                # line. Otherwise the whole-line BEGIN classification orphans the
+                # run before the next block's redact_start (#383). Require
+                # digit/base64-symbol evidence in the run so all-caps doc
+                # headings ("IMPORTANT NOTICE") before a quoted BEGIN are not
+                # swept (round-21 precision). Classify normalized, redact raw.
+                run_end = 0
+                scan = 0
+                saw_body = False
+                have_evidence = False
                 prefix = stripped[:begin.start()]
-                token_end = 0
-                while token_end < len(prefix) and prefix[token_end] not in " \t":
-                    token_end += 1
-                raw_token = prefix[:token_end]
-                class_token = _normalize_escaped_solidus(raw_token)
-                if (
-                    end is None
-                    and len(class_token) >= _PRIVATE_KEY_STRICT_MIN_CHARS
-                    and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(class_token) is not None
-                    and not _looks_like_english_token(class_token)
-                ):
+                while end is None and scan < len(prefix):
+                    while scan < len(prefix) and prefix[scan] in " \t":
+                        scan += 1
+                    tok_start = scan
+                    while scan < len(prefix) and prefix[scan] not in " \t":
+                        scan += 1
+                    ctok = _normalize_escaped_solidus(prefix[tok_start:scan])
+                    if (
+                        ctok
+                        and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(ctok) is not None
+                        and not _looks_like_english_token(ctok)
+                    ):
+                        saw_body = True
+                        run_end = scan
+                        if any(ch.isdigit() or ch in "+/=" for ch in ctok):
+                            have_evidence = True
+                    else:
+                        break
+                if saw_body and have_evidence:
                     marker_start = c_start + begin.start()
                     model.append(
                         (
                             _PEM_LINE_KIND_STRICT_B64,
                             c_start,
-                            c_start + len(raw_token),
+                            c_start + run_end,
                             c_start,
                             -1,
                         )
