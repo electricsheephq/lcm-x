@@ -70,8 +70,10 @@ durable summary or semantic query (unchanged)
 ```
 
 The transform never rewrites durable messages, summaries, FTS rows, or payloads.
-Disabled, empty, unknown, drifted, or residual-unsafe policies stop cloud
-warmup, document dispatch, and semantic-query dispatch before transport. Policy
+When embedding privacy is ON (the cloud default), empty, unknown, drifted, or
+residual-unsafe policies stop cloud warmup, document dispatch, and
+semantic-query dispatch before transport; the explicit `privacy:off` opt-out
+dispatches raw input under its own bound revision instead of blocking. Policy
 identity uses only the transform version and active pattern-name hash; it never
 contains secret-derived bytes.
 
