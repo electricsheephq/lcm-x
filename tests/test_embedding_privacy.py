@@ -860,3 +860,15 @@ def test_round9_escape_artifact_normalization(tmp_path):
     assert "prose stays" in redact_sensitive_text(cases[1], cfg)
     nk = _json.dumps({"msg": "no keys here, just a normal log line with data"})
     assert redact_sensitive_text(nk, cfg) == nk
+
+    # R9 review: escaped-tab indentation AFTER a log prefix, serialized —
+    # the composition of all five factors (serialization, prefix, escaped
+    # tab, armor, truncation) must redact.
+    five = _json.dumps(
+        {"log": "app \t-----BEGIN RSA PRIVATE KEY-----\napp \tProc-Type: 4,ENCRYPTED\napp \t\napp \t" + body}
+    )
+    for redacted in (
+        redact_sensitive_text(five, cfg),
+        protect_embedding_text(five, cfg)[0],
+    ):
+        assert body not in redacted

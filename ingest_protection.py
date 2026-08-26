@@ -498,6 +498,13 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
             if len(split) < 2:
                 return kind
             rest = split[1]
+            # Serialized indentation can sit AFTER the prefix ("INFO \tMII…"):
+            # normalize escaped horizontal whitespace at each strip step.
+            lead = _PRIVATE_KEY_SEGMENT_LEAD_TRIM_RE.match(rest)
+            if lead is not None and lead.end():
+                rest = rest[lead.end():]
+                if not rest:
+                    return kind
             if _PRIVATE_KEY_ARMOR_HEADER_RE.fullmatch(rest) is not None:
                 return _PEM_LINE_KIND_ARMOR
             if (
