@@ -475,6 +475,32 @@ def _configured_chunk_binding(provider: str, model: str) -> tuple[str, str]:
     return normalized_provider, default_chunk_model(normalized_provider, model)
 
 
+def _embedding_privacy_context(
+    provider: str, model: str, *, embeddings_enabled: bool = True
+) -> tuple[Any | None, str | None]:
+    """Return the production-parity cloud dispatch config and active revision."""
+    _ensure_hermes_lcm_package()
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.ingest_protection import (
+        embedding_privacy_revision,
+        embedding_provider_requires_privacy,
+    )
+
+    normalized_provider = str(provider or "").strip().lower()
+    requires_privacy = bool(embeddings_enabled) and embedding_provider_requires_privacy(
+        normalized_provider
+    )
+    if not requires_privacy:
+        return None, None
+    config = LCMConfig(
+        embeddings_enabled=True,
+        embedding_provider=normalized_provider,
+        embedding_model=str(model or "").strip(),
+        sensitive_patterns_enabled=True,
+    )
+    return config, embedding_privacy_revision(config)
+
+
 def _ensure_hermes_lcm_package() -> None:
     """Make this source checkout importable as ``hermes_lcm`` (no plugin registration)."""
     ensure_agent_context_engine_importable()
@@ -1558,6 +1584,14 @@ def prewarm_embedding_cache(
             "embedding identities differ; use the run path so each unit is cached "
             "under its resolved provider/model pair"
         )
+    privacy_config, privacy_revision = _embedding_privacy_context(
+        provider.provider_id, provider.model_id
+    )
+    if privacy_revision is not None:
+        from hermes_lcm.ingest_protection import (
+            protect_embedding_text,
+            validate_embedding_privacy_dispatch,
+        )
 
     seen: set[str] = set()
     batch: list[str] = []
@@ -1569,6 +1603,12 @@ def prewarm_embedding_cache(
         if not batch:
             return
         already_cached += provider.cached_count(batch)
+        if privacy_revision is not None:
+            validate_embedding_privacy_dispatch(
+                batch,
+                privacy_config,
+                expected_revision=privacy_revision,
+            )
         provider.embed_documents(batch)
         processed += len(batch)
         if progress is not None:
@@ -1577,6 +1617,12 @@ def prewarm_embedding_cache(
 
     for question in questions:
         for text in iter_ingest_embedding_request_units(question):
+            if privacy_revision is not None:
+                text = protect_embedding_text(
+                    text,
+                    privacy_config,
+                    expected_revision=privacy_revision,
+                )[0]
             digest = provider.content_sha256(text)
             if digest in seen:
                 continue
@@ -1605,10 +1651,34 @@ def embedding_determinism_report(
     """Embed random unique session summaries twice and compare float bits."""
     if sample_size <= 0:
         raise ValueError("sample_size must be positive")
+    privacy_config, privacy_revision = _embedding_privacy_context(
+        str(getattr(provider, "provider_id", "")),
+        str(getattr(provider, "model_id", "")),
+    )
+    before_dispatch = None
+    if privacy_revision is not None:
+        from hermes_lcm.ingest_protection import (
+            protect_embedding_text,
+            validate_embedding_privacy_dispatch,
+        )
+
+        def before_dispatch(texts: Sequence[str]) -> None:
+            validate_embedding_privacy_dispatch(
+                texts,
+                privacy_config,
+                expected_revision=privacy_revision,
+            )
+
     unique: dict[str, str] = {}
     for question in questions:
         for session in question.haystack_sessions:
             text = deterministic_session_summary(session)
+            if privacy_revision is not None:
+                text = protect_embedding_text(
+                    text,
+                    privacy_config,
+                    expected_revision=privacy_revision,
+                )[0]
             digest = ContentHashEmbeddingCache.content_sha256(text)
             unique.setdefault(digest, text)
     if len(unique) < sample_size:
@@ -1618,8 +1688,12 @@ def embedding_determinism_report(
 
     sampled_digests = random.Random(seed).sample(list(unique), sample_size)
     sampled_texts = [unique[digest] for digest in sampled_digests]
-    first = _embed_in_batches(provider, sampled_texts)
-    second = _embed_in_batches(provider, sampled_texts)
+    first = _embed_in_batches(
+        provider, sampled_texts, before_dispatch=before_dispatch
+    )
+    second = _embed_in_batches(
+        provider, sampled_texts, before_dispatch=before_dispatch
+    )
     if len(first) != sample_size or len(second) != sample_size:
         raise ValueError("determinism probe provider returned the wrong vector count")
 
@@ -2331,7 +2405,8 @@ def evaluate_question(
         # loud on the recall path instead of silently degrading to FTS. The
         # harness must run cloud providers the way production runs them.
         sensitive_patterns_enabled=(
-            summary_requires_privacy or chunk_requires_privacy
+            embeddings_enabled
+            and (summary_requires_privacy or chunk_requires_privacy)
         ),
     )
     ingest_start = time.perf_counter()
@@ -2347,6 +2422,8 @@ def evaluate_question(
     store_id_to_session: dict[int, str] = {}
     store_id_to_turn: dict[int, TurnKey] = {}
     chunk_identity = None
+    summary_revision: str | None = None
+    chunk_revision: str | None = None
     # F7: collect every session summary, then embed the whole corpus in one batched
     # ``embed_documents`` call instead of one call per session. (Raw chunks stay
     # per-item: for local ONNX providers, batching pads every text to the batch's
@@ -2591,8 +2668,20 @@ def evaluate_question(
 
         relevant = evidence_sessions(question)
         relevant_turns = evidence_turns(question)
+        summary_query = str(question.question)
+        if summary_revision is not None:
+            summary_query = protect_embedding_text(
+                summary_query,
+                config,
+                expected_revision=summary_revision,
+            )[0]
+            validate_embedding_privacy_dispatch(
+                [summary_query],
+                config,
+                expected_revision=summary_revision,
+            )
         query_vec = (
-            harness_query_provider.embed_query(question.question)
+            harness_query_provider.embed_query(summary_query)
             if embeddings_enabled
             else None
         )
@@ -2651,11 +2740,22 @@ def evaluate_question(
         rerank_turns = summary_turn_keys(rerank_ranked)
 
         if embeddings_enabled:
-            chunk_query_vec = (
-                query_vec
-                if (summary_name, model) == (chunk_name, chunk_model)
-                else harness_chunk_query_provider.embed_query(question.question)
-            )
+            if (summary_name, model) == (chunk_name, chunk_model):
+                chunk_query_vec = query_vec
+            else:
+                chunk_query = str(question.question)
+                if chunk_revision is not None:
+                    chunk_query = protect_embedding_text(
+                        chunk_query,
+                        config,
+                        expected_revision=chunk_revision,
+                    )[0]
+                    validate_embedding_privacy_dispatch(
+                        [chunk_query],
+                        config,
+                        expected_revision=chunk_revision,
+                    )
+                chunk_query_vec = harness_chunk_query_provider.embed_query(chunk_query)
             chunk_raw, chunk_ms = _timed(
                 lambda: chunk_hits(
                     vector_store,
@@ -2872,6 +2972,9 @@ def _checkpoint_header(
     embedding_batch_size: int | None,
 ) -> dict[str, Any]:
     chunk_provider, chunk_model = _configured_chunk_binding(provider, model)
+    _privacy_config, privacy_revision = _embedding_privacy_context(
+        provider, model, embeddings_enabled=embeddings_enabled
+    )
     bindings: dict[str, Any] = {
         "provider": provider,
         "model": model,
@@ -2881,6 +2984,7 @@ def _checkpoint_header(
         "recall_rerank": recall_rerank,
         "recall_rerank_window": recall_rerank_window,
         "embeddings_enabled": embeddings_enabled,
+        "embedding_privacy_revision": privacy_revision,
         "dataset_label": dataset_label,
         "reuse_db_template": reuse_db_template,
         "embedding_batch_size": embedding_batch_size,
@@ -2913,6 +3017,9 @@ def _candidate_dump_header(
     # run records manifest_sha256, so an existing dump from a different corpus
     # under the same label fails validation instead of being appended to.
     chunk_provider, chunk_model = _configured_chunk_binding(provider, model)
+    _privacy_config, privacy_revision = _embedding_privacy_context(
+        provider, model, embeddings_enabled=embeddings_enabled
+    )
     bindings: dict[str, Any] = {
         "provider": provider,
         "model": model,
@@ -2922,6 +3029,7 @@ def _candidate_dump_header(
         "source_sha256": direct_source_sha256,
         "manifest_sha256": manifest_sha256,
         "embeddings_enabled": embeddings_enabled,
+        "embedding_privacy_revision": privacy_revision,
         "rerank": rerank,
         "recall_rerank": recall_rerank,
         "recall_rerank_window": recall_rerank_window,
@@ -2936,6 +3044,20 @@ def _validate_candidate_dump_header(
     record: Any, *, expected_header: dict[str, Any], path: Path
 ) -> None:
     if record != expected_header:
+        actual_revision = (
+            record.get(_DUMP_HEADER_KEY, {}).get("embedding_privacy_revision")
+            if isinstance(record, dict)
+            and isinstance(record.get(_DUMP_HEADER_KEY), dict)
+            else None
+        )
+        expected_revision = expected_header[_DUMP_HEADER_KEY].get(
+            "embedding_privacy_revision"
+        )
+        if actual_revision != expected_revision:
+            raise ValueError(
+                "candidate dump privacy revision mismatch for "
+                f"{path}: artifact={actual_revision!r}, current={expected_revision!r}"
+            )
         raise ValueError(f"candidate dump configuration mismatch for {path}")
 
 
@@ -3449,8 +3571,9 @@ def run_harness(
                     # Must match the per-question config's production posture
                     # (#367/#370) or the registered vector identity diverges
                     # from what the recall path computes.
-                    sensitive_patterns_enabled=_requires_privacy(
-                        provider_set.summary_binding[0]
+                    sensitive_patterns_enabled=(
+                        embeddings_enabled
+                        and _requires_privacy(provider_set.summary_binding[0])
                     ),
                 ),
             )
