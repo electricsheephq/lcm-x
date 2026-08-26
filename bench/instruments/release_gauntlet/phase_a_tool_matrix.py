@@ -345,7 +345,7 @@ def _planted_secret(mod, engine, outbound, *, expect_365_fixed):
     known = []
     for index, (fixture, row) in enumerate(zip(fixtures, rows)):
         durable = str(row["content"])
-        assert all(secret in durable for secret in fixture["secrets"]), f"durable row {index} did not preserve its planted secret"
+        assert durable == fixture["content"], f"durable row {index} is not byte-identical to the ingested fixture"
         assert "[LCM sensitive redaction:" not in durable, f"durable row {index} was redacted under the lossless default"
     assert "status: ready" in mod["command"].handle_lcm_command("embed warmup", engine)
     assert "status: complete" in mod["command"].handle_lcm_command("embed backfill --apply --limit 50", engine)
@@ -364,7 +364,14 @@ def _planted_secret(mod, engine, outbound, *, expect_365_fixed):
             mod["ingest_protection"].validate_embedding_privacy_dispatch([text], engine._config, expected_revision=revision)
     assert outbound
     assert any("[LCM embedding privacy:" in text for text in outbound)
-    recall = engine.handle_tool_call("lcm_recall", {"query": "privacy fixture"})
+    recall_start = len(outbound)
+    recall_query = f"privacy fixture api_key={PLANTED['api_key']}"
+    recall = engine.handle_tool_call("lcm_recall", {"query": recall_query})
+    recall_dispatches = outbound[recall_start:]
+    assert recall_dispatches, "recall made no semantic query dispatch to audit"
+    for text in recall_dispatches:
+        assert PLANTED["api_key"] not in text, "recall query dispatch leaked the planted secret"
+        mod["ingest_protection"].validate_embedding_privacy_dispatch([text], engine._config, expected_revision=revision)
     recall_hits = json.loads(recall)["hits"]
     assert recall_hits
     assert any(secret in recall for fixture in fixtures for secret in fixture["secrets"]), "recall did not return raw lossless durable text"
@@ -382,6 +389,13 @@ def _opt_out(mod, engine, outbound):
     assert "status: complete" in mod["command"].handle_lcm_command("embed backfill --apply --limit 50", engine)
     assert outbound, "opt-out made no embedding dispatch"
     assert summary in outbound, "opt-out provider input did not preserve the durable summary byte-for-byte"
+    query_start = len(outbound)
+    query_text = f"opt-out probe password={PLANTED['password']}"
+    hits = json.loads(engine.handle_tool_call("lcm_recall", {"query": query_text}))["hits"]
+    assert hits, "opt-out recall returned no hits"
+    query_dispatches = outbound[query_start:]
+    assert query_dispatches, "opt-out recall made no semantic query dispatch"
+    assert any(PLANTED["password"] in text for text in query_dispatches), "opt-out query dispatch did not carry the raw query by explicit choice"
     assert not any("[LCM embedding privacy:" in text for text in outbound)
 
 

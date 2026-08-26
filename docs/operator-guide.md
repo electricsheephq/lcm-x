@@ -435,10 +435,13 @@ pattern-only placeholders that contain no raw value, length, byte count, or
 secret-derived digest, and rejects any residual detector match before transport.
 The transform version and a digest of sorted active pattern names are stored in the vector
 profile revision; the explicit opt-out stores the distinguished `privacy:off` revision
-instead. Changing the pattern policy, or flipping `LCM_EMBEDDING_PRIVACY_ENABLED` in either
-direction after warmup, changes that identity and causes query and backfill dispatch to
-refuse until a new warmup registers it — existing vectors under the old revision stay
-ineligible until re-embedded. Durable messages, summaries, FTS rows, and payloads are not
+instead. While the transform is on, changing the pattern policy changes that identity, as
+does flipping `LCM_EMBEDDING_PRIVACY_ENABLED` in either direction after warmup; either
+change causes query and backfill dispatch to refuse until a new warmup registers it —
+existing vectors under the old revision stay ineligible until re-embedded (run
+`/lcm embed warmup` then `/lcm embed backfill --apply`; LCM never re-embeds
+automatically). Under the explicit opt-out the pattern catalog is not part of the
+`privacy:off` identity, so catalog edits alone change nothing until you opt back in. Durable messages, summaries, FTS rows, and payloads are not
 rewritten by this provider boundary.
 
 The cloud gate applies to provider identity `voyage`/`voyageai` and
