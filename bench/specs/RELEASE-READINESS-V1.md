@@ -17,7 +17,8 @@ needs a live soak. Docs/bench-only releases may skip to GA with a note in the re
    Carry-forward rule (every receipt binds an exact tree, so carrying needs proof): **Phase B
    re-runs on every respin** (it is diff-scoped by definition). Phases A and C may carry a prior
    rc's receipt ONLY when the rcN→rcN+1 diff touches nothing outside bench/, docs/, tests/, and
-   .github/release-notes/ — the carried receipt is referenced WITH the diff-scope proof
+   .github/release-notes/ — AND nothing under bench/instruments/release_gauntlet/ (a changed
+   gauntlet invalidates its own receipts) — the carried receipt is referenced WITH the diff-scope proof
    (`git diff rcN..rcN+1 --name-only`) recorded beside it. Any product-code delta re-runs all
    affected phases (ingest/recall/privacy deltas re-run everything).
 5. **GA tag `vX.Y.Z`** only when A+B+C receipts are green for the passing rc tree. Because
