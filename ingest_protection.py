@@ -641,6 +641,26 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
         # Attached Markdown/quote markers (">MII…", "|MII…") carry no
         # whitespace; strip them before any classification.
         rest = rest.lstrip(">|").strip(" \t")
+        head, colon_sep, colon_after = rest.partition(":")
+        colon_after = colon_after.strip(" \t")
+        if (
+            colon_sep
+            and 2 <= len(head) <= 32
+            and colon_after
+            and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(colon_after) is not None
+            and not _looks_like_english_token(colon_after)
+        ):
+            # Colon-prefixed BODY ("INFO: MII…" / "INFO:MII…") — must win
+            # over the armor shape, which it also matches. Genuine armor
+            # values ("4,ENCRYPTED", "AES-128-CBC,…") contain commas and
+            # never classify as base64 body.
+            if len(colon_after) >= _PRIVATE_KEY_STRICT_MIN_CHARS:
+                return _PEM_LINE_KIND_STRICT_B64
+            return _PEM_LINE_KIND_SHORT_B64
+        if _PRIVATE_KEY_ARMOR_HEADER_RE.fullmatch(rest) is not None:
+            # Armor headers, attached-marker form included
+            # (">Proc-Type: 4,ENCRYPTED").
+            return _PEM_LINE_KIND_ARMOR
         if _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(rest) is not None:
             if not _looks_like_english_token(rest):
                 if len(rest) >= _PRIVATE_KEY_STRICT_MIN_CHARS:
@@ -665,18 +685,6 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
             and max(len(tok) for tok in tokens) >= 8
         ):
             return _PEM_LINE_KIND_STRICT_B64
-        # No-space colon prefix ("INFO:MII…"): split at the first colon.
-        head, sep, after = rest.partition(":")
-        if (
-            sep
-            and 2 <= len(head) <= 32
-            and after
-            and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(after) is not None
-            and not _looks_like_english_token(after)
-        ):
-            if len(after) >= _PRIVATE_KEY_STRICT_MIN_CHARS:
-                return _PEM_LINE_KIND_STRICT_B64
-            return _PEM_LINE_KIND_SHORT_B64
         for _ in range(4):
             split = rest.split(None, 1)
             if len(split) < 2:

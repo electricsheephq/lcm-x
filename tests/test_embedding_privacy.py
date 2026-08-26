@@ -990,6 +990,14 @@ def test_round14_serialization_and_prefix_variants(tmp_path):
             cfg,
             expected_revision=revision,
         )
+    # Attached markers composed with armor (R14 review's cross-product case).
+    attached_armor = (
+        ">-----BEGIN RSA PRIVATE KEY-----\n>Proc-Type: 4,ENCRYPTED\n"
+        ">DEK-Info: AES-128-CBC,AABB\n>\n>" + body + "\nprose stays"
+    )
+    out = redact_sensitive_text(attached_armor, cfg)
+    assert body not in out and "prose stays" in out
+
     # Precision: prefixed hash dumps with no marker, prose after BEGIN.
     dump = "INFO " + "a1b2c3d4" * 8 + "\nINFO " + "e5f6a7b8" * 8 + "\nno markers anywhere"
     assert redact_sensitive_text(dump, cfg) == dump
