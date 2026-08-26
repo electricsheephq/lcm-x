@@ -24,6 +24,7 @@ from hermes_lcm.embedding_provider import (
     resolve_provider as real_resolve_provider,
 )
 from hermes_lcm.ingest_protection import (
+    EmbeddingPrivacyPolicyError,
     embedding_privacy_revision,
     embedding_provider_requires_privacy,
 )
@@ -920,11 +921,26 @@ def test_rerank_skips_silently_on_non_voyage_provider(recall_engine, monkeypatch
     assert payload["hits"]  # order preserved from RRF, not dropped
 
 
-def test_rerank_applies_and_reorders_with_voyage_provider(recall_engine, monkeypatch):
+def test_rerank_protects_cloud_payload_and_reorders_original_hits(
+    recall_engine, monkeypatch
+):
     recall_engine._config.rerank_enabled = True
     recall_engine._config.rerank_model = "rerank-2.5"
-    a = _add_summary(recall_engine, "kanban alpha", session_id="session-a", created_at=5.0)
-    b = _add_summary(recall_engine, "kanban beta", session_id="session-b", created_at=5.0)
+    query_secret = "query-secret-abcdefghijklmnop"
+    alpha_secret = "alpha-secret-abcdefghijklmnop"
+    beta_secret = "beta-secret-abcdefghijklmnop"
+    a = _add_summary(
+        recall_engine,
+        f"kanban alpha api_key={alpha_secret}",
+        session_id="session-a",
+        created_at=5.0,
+    )
+    b = _add_summary(
+        recall_engine,
+        f"kanban beta api_key={beta_secret}",
+        session_id="session-b",
+        created_at=5.0,
+    )
     # a is RRF rank 1, b rank 2 (seeded under the voyage identity the rerank
     # provider resolves KNN against).
     _seed_summary_vectors(recall_engine, [(a, [1.0, 0.0]), (b, [0.95, 0.312])], provider="voyage")
@@ -932,9 +948,13 @@ def test_rerank_applies_and_reorders_with_voyage_provider(recall_engine, monkeyp
     class RerankProvider(MockProvider):
         provider_id = "voyage"
         observed_model = None
+        observed_query = None
+        observed_documents = None
 
         def rerank(self, query, documents, *, top_k=None, timeout, model="rerank-2.5-lite"):
             self.observed_model = model
+            self.observed_query = query
+            self.observed_documents = list(documents)
             # Flip relevance: the LAST document scores highest (index i -> score i),
             # returned in descending-relevance order as the real API does.
             return sorted(
@@ -943,11 +963,114 @@ def test_rerank_applies_and_reorders_with_voyage_provider(recall_engine, monkeyp
 
     provider = RerankProvider()
     payload = _recall(
-        recall_engine, monkeypatch, provider=provider, include="summaries", scope_bias=0.0, limit=5
+        recall_engine,
+        monkeypatch,
+        provider=provider,
+        query=f"kanban api_key={query_secret}",
+        include="summaries",
+        scope_bias=0.0,
+        limit=5,
     )
     assert payload["provenance"]["rerank"] == "applied"
     assert payload["hits"][0]["node_id"] == b
+    assert beta_secret in payload["hits"][0]["snippet"]
     assert provider.observed_model == "rerank-2.5"
+    assert query_secret not in provider.observed_query
+    assert provider.observed_query.endswith("[LCM embedding privacy: name=api_key]")
+    assert all(
+        "[LCM embedding privacy: name=api_key]" in doc
+        for doc in provider.observed_documents
+    )
+    assert all(
+        secret not in " ".join(provider.observed_documents)
+        for secret in (alpha_secret, beta_secret)
+    )
+
+
+def test_rerank_privacy_opt_out_keeps_raw_payload(recall_engine, monkeypatch):
+    recall_engine._config.rerank_enabled = True
+    recall_engine._config.embedding_privacy_enabled = False
+    query = "kanban api_key=query-secret-abcdefghijklmnop"
+    snippet = "kanban raw api_key=snippet-secret-abcdefghijklmnop"
+    node = _add_summary(
+        recall_engine, snippet, session_id="session-a", created_at=5.0
+    )
+    _seed_summary_vectors(
+        recall_engine, [(node, [1.0, 0.0])], provider="voyage"
+    )
+
+    class CaptureRerankProvider(MockProvider):
+        provider_id = "voyage"
+
+        def __init__(self):
+            super().__init__()
+            self.payload = None
+
+        def rerank(
+            self, query, documents, *, top_k=None, timeout, model="rerank-2.5-lite"
+        ):
+            self.payload = (query, list(documents))
+            return [(0, 1.0)]
+
+    provider = CaptureRerankProvider()
+    payload = _recall(
+        recall_engine,
+        monkeypatch,
+        provider=provider,
+        query=query,
+        include="summaries",
+        scope_bias=0.0,
+        limit=5,
+    )
+
+    assert payload["provenance"]["rerank"] == "applied"
+    assert provider.payload == (query, [snippet])
+
+
+def test_rerank_privacy_policy_error_propagates(recall_engine, monkeypatch):
+    recall_engine._config.rerank_enabled = True
+    node = _add_summary(
+        recall_engine, "kanban policy", session_id="session-a", created_at=5.0
+    )
+    _seed_summary_vectors(
+        recall_engine, [(node, [1.0, 0.0])], provider="voyage"
+    )
+
+    class RerankProvider(MockProvider):
+        provider_id = "voyage"
+
+        def rerank(
+            self, query, documents, *, top_k=None, timeout, model="rerank-2.5-lite"
+        ):
+            return [(0, 1.0)]
+
+    real_validate = lcm_tools.validate_embedding_privacy_dispatch
+    validation_count = 0
+
+    def fail_at_rerank_dispatch(texts, config, *, expected_revision):
+        nonlocal validation_count
+        validation_count += 1
+        if validation_count == 2:
+            raise EmbeddingPrivacyPolicyError("policy changed before rerank dispatch")
+        return real_validate(texts, config, expected_revision=expected_revision)
+
+    monkeypatch.setattr(
+        lcm_tools,
+        "validate_embedding_privacy_dispatch",
+        fail_at_rerank_dispatch,
+    )
+
+    with pytest.raises(
+        EmbeddingPrivacyPolicyError, match="policy changed before rerank dispatch"
+    ):
+        _recall(
+            recall_engine,
+            monkeypatch,
+            provider=RerankProvider(),
+            include="summaries",
+            scope_bias=0.0,
+            limit=5,
+        )
 
 
 def test_rerank_margin_holds_incumbent_and_reports_scores(recall_engine, monkeypatch):
