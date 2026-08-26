@@ -9,23 +9,6 @@ import sys
 
 import pytest
 
-pytest.skip("CI bisect probe — temporarily skipping this module", allow_module_level=True)
-
-
-@pytest.fixture(autouse=True)
-def _isolate_runner_modules():
-    # Every full-matrix run in this file registers worktree modules whose
-    # provider singletons hold file descriptors; restore sys.modules after
-    # each test so cumulative residue cannot push later tests over a low FD
-    # limit (CI's deliberate canary).
-    import gc
-
-    before = set(sys.modules)
-    yield
-    for name in set(sys.modules) - before:
-        sys.modules.pop(name, None)
-    gc.collect()
-
 
 def _run_in_subprocess(
     tmp_path, *, sabotage="", run_kwargs, sys_path_prepend=None, env_extra=None
