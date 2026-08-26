@@ -127,7 +127,7 @@ is `main@3d4fbb4c979dc09aef0b831bb50d928e0e18d68f`; do not describe an
 arbitrary main checkout as the installed stable product.
 
 That exact development baseline still identifies itself as
-`hermes-lcm v0.23.0-rc1 (15 tools)`. The stable tag identifies itself as
+`hermes-lcm v0.23.2 (15 tools)`. The stable tag identifies itself as
 `hermes-lcm v0.23.1 (15 tools)`. This is tracked as a deferred version-policy
 decision rather than being silently restamped by documentation changes.
 
@@ -253,7 +253,7 @@ Provider Plugins:
 ```
 
 An untagged checkout of the reconciled `main` baseline instead reports
-`hermes-lcm v0.23.0-rc1 (15 tools)`; verify the loaded commit before treating
+`hermes-lcm v0.23.2 (15 tools)`; verify the loaded commit before treating
 either string as release proof.
 
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,

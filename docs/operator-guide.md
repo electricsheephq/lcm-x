@@ -177,7 +177,7 @@ Provider Plugins:
 ```
 
 An untagged checkout of the reconciled `main` baseline instead reports
-`hermes-lcm v0.23.0-rc1 (15 tools)`. Version text alone is not release proof;
+`hermes-lcm v0.23.2 (15 tools)`. Version text alone is not release proof;
 verify the loaded commit and tag.
 
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
