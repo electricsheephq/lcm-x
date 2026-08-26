@@ -474,6 +474,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
         float,
     ),
     _EnvFieldSpec("sensitive_patterns_enabled", "LCM_SENSITIVE_PATTERNS_ENABLED", bool),
+    _EnvFieldSpec("embedding_privacy_enabled", "LCM_EMBEDDING_PRIVACY_ENABLED", bool),
     _EnvFieldSpec("large_output_externalization_enabled", "LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED", bool),
     _EnvFieldSpec("large_output_externalization_threshold_chars", "LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS", int),
     _EnvFieldSpec("large_output_externalization_path", "LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH", str),
@@ -696,10 +697,15 @@ class LCMConfig:
     assertion_extraction_timeout_seconds: float = 30.0
 
     # -- Sensitive-pattern handling ---
-    # Disabled by default. When enabled, named patterns redact matching secrets
-    # before LCM storage, FTS indexing, summarization, or externalization.
+    # Durable redaction is opt-in. When enabled, named patterns redact matching
+    # secrets before LCM storage, FTS indexing, summarization, or externalization.
     sensitive_patterns_enabled: bool = False
-    # Named pattern catalog entries to apply when sensitive handling is enabled.
+    # Provider-bound embedding copies have an independent privacy posture.
+    # None means automatic: enabled for recognized cloud providers and skipped
+    # for local providers. False is an explicit cloud-privacy opt-out whose
+    # distinguished revision keeps vector identities posture-bound.
+    embedding_privacy_enabled: bool | None = None
+    # Named catalog entries shared by durable redaction and provider-copy privacy.
     sensitive_patterns: list[str] = field(
         default_factory=lambda: ["api_key", "bearer_token", "password_assignment", "private_key"]
     )

@@ -99,6 +99,214 @@ _WRAPPED_BASE64_MIN_LINE_CHARS = 40
 _WRAPPED_BASE64_MIN_TERMINAL_LINE_CHARS = 16
 _BASE64_ALPHABET_RE = re.compile(r"^[A-Za-z0-9+/=_\s-]+$")
 _BASE64_LINE_ALPHABET_RE = re.compile(r"^[A-Za-z0-9+/=_-]+$")
+# THREAT MODEL (private-key redaction, declared after adversarial rounds 3-6
+# of #365/#366): the scanner prevents ACCIDENTAL leakage of PEM-structured
+# key material in realistic paste/log/transcript shapes (line-separator and
+# whitespace variants, indentation and label prefixes, truncation, stripped
+# markers, re-wrapped widths, inline one-line forms). It is NOT proof against
+# an adversary who re-encodes content — no content-based redactor can be,
+# since key material can be hex/base64-re-encoded, chunk-reordered, or
+# otherwise transformed arbitrarily. The dispatch validator is the fail-closed
+# second layer on the cloud path: structures the redactor cannot parse block
+# the embedding dispatch instead of leaking.
+# Base64 payload line: padding only ever trails (=/== suffix), so assignment
+# prose like `environment=prod` never classifies as key body. Strict (>=16
+# chars) lines anchor orphan-body detection; shorter lines join a run but
+# never start structure on their own.
+_PRIVATE_KEY_BODY_CHARS_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+_PRIVATE_KEY_STRICT_MIN_CHARS = 16
+# A real inline key has a substantial contiguous base64 run between markers;
+# prose like "... -----BEGIN PRIVATE KEY----- and -----END PRIVATE KEY----- ..."
+# does not and must not be consumed.
+_PRIVATE_KEY_INLINE_RUN_RE = re.compile(r"[A-Za-z0-9+/]{16,}")
+# One-or-more backslashes covers every nesting depth of serialization
+# ("\\n" from json.dumps, "\\\\n" from json-of-json / logged JSON).
+def _split_serialized_pem_line(content: str):
+    """Yield (offset, piece) splitting on escaped separators and bare quotes.
+
+    Single linear pass. A regex here is quadratic on long backslash runs
+    (every failed start re-consumes the run — measured 34s at 100k), so the
+    scan is hand-rolled: a backslash run followed by an escaped line
+    separator (n, r, r\\n at any depth, or u2028/u2029/u000b/u000c/u0085)
+    or a bare quote splits the line; anything else is content.
+    """
+    n = len(content)
+    seg_start = 0
+    i = 0
+    while i < n:
+        ch = content[i]
+        if ch == '"' or ch == "'":
+            # Double quotes delimit JSON strings; single quotes delimit
+            # Python repr()/logged dict values — both end a serialized value.
+            yield seg_start, content[seg_start:i]
+            i += 1
+            seg_start = i
+            continue
+        if ch != "\\":
+            i += 1
+            continue
+        run = i
+        while run < n and content[run] == "\\":
+            run += 1
+        end = None
+        if run < n:
+            nxt = content[run]
+            if nxt in "nf":
+                # json.dumps shorthands: \n, and \f for U+000C (form feed,
+                # a str.splitlines separator like the rest).
+                end = run + 1
+            elif nxt == "r":
+                end = run + 1
+                run2 = end
+                while run2 < n and content[run2] == "\\":
+                    run2 += 1
+                if run2 > end and run2 < n and content[run2] == "n":
+                    end = run2 + 1
+            elif nxt == "u" and content[run + 1:run + 5] in (
+                # The COMPLETE str.splitlines separator set in \uXXXX form:
+                # VT, FF, FS, GS, RS, NEL, LS, PS. With \n/\r/\f handled as
+                # shorthands above, every separator splitlines honors is
+                # recognized when serialized — the enumeration is closed
+                # (test derives it from splitlines itself).
+                "000b", "000c", "001c", "001d", "001e",
+                "0085", "2028", "2029",
+            ):
+                end = run + 5
+        if end is None:
+            # Not a separator: resume AT the char after the run so an escaped
+            # quote (backslash + quote) still splits on its quote.
+            i = run
+            continue
+        yield seg_start, content[seg_start:i]
+        i = end
+        seg_start = end
+    yield seg_start, content[seg_start:]
+
+
+_PRIVATE_KEY_ESCAPED_SEPARATOR_HINT_RE = re.compile(
+    r"\\[rnfu]|[\"']"
+)
+
+
+def _normalize_escaped_solidus(text: str) -> str:
+    """Linear any-depth solidus unescape for CLASSIFICATION only.
+
+    A backslash run followed by "/" or "u002f"/"u002F" collapses to "/" —
+    json.dumps nesting doubles the backslashes per depth, and a regex here
+    would be quadratic on backslash storms (same class as the separator
+    scan), so the pass is hand-rolled. Never applied to redaction offsets:
+    callers classify on the normalized text and redact the raw slice.
+    """
+    if "\\" not in text:
+        return text
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch != "\\":
+            out.append(ch)
+            i += 1
+            continue
+        run = i
+        while run < n and text[run] == "\\":
+            run += 1
+        if run < n and text[run] == "/":
+            out.append("/")
+            i = run + 1
+            continue
+        if run + 4 < n and text[run] == "u" and text[run + 1:run + 5] in ("002f", "002F"):
+            out.append("/")
+            i = run + 5
+            continue
+        out.append(text[i:run])
+        i = run
+    return "".join(out)
+
+
+def _trim_pem_segment(piece: str) -> tuple[int, str]:
+    """Linear trim of escape artifacts around a virtual PEM segment.
+
+    Removes leading/trailing horizontal whitespace and escaped-tab (\t at any
+    escaping depth) plus trailing escape backslashes (the next separator's or
+    closing quote's escapes). Hand-rolled scans — the earlier regexes had
+    nested quantifiers with exponential backtracking on backslash runs
+    (CodeQL js/redos-class finding on this PR).
+    """
+    start = 0
+    n = len(piece)
+    while start < n:
+        ch = piece[start]
+        if ch in " \t":
+            start += 1
+            continue
+        if ch == "\\":
+            run = start
+            while run < n and piece[run] == "\\":
+                run += 1
+            if run < n and piece[run] == "t":
+                start = run + 1
+                continue
+        break
+    end = n
+    while end > start:
+        ch = piece[end - 1]
+        if ch in " \t":
+            end -= 1
+            continue
+        if ch == "\\":
+            end -= 1
+            continue
+        if ch == "t":
+            run = end - 1
+            while run > start and piece[run - 1] == "\\":
+                run -= 1
+            if run < end - 1:
+                end = run
+                continue
+        break
+    return start, piece[start:end]
+# Real base64 key material is high-entropy; an English word/identifier shape
+# (pure lowercase, or a single capitalized word) is overwhelmingly prose
+# (p(base64) ~1e-6 for 16+ pure-lowercase chars), so prefixed-tail
+# classification rejects it — "service productionservice" is config prose,
+# not a key line. Applies only to prefix-stripped/prefixed tails; anchored
+# body lines keep the plain alphabet rule.
+def _looks_like_english_token(token: str) -> bool:
+    """English word/identifier shape vs base64-ish key material.
+
+    Letters-only tokens: pure lowercase ("example") and Camel/Title case
+    ("Report", "ThisIsNotAKeyLine") read as prose. Base64 of random bytes is
+    distinguished by uppercase RUNS: a mixed-case letters-only token with 3+
+    consecutive capitals ("MIIEvQIBADANBgkq…") — or an all-caps token — stays
+    body-eligible. Anything with a digit, +, /, or = is never English-shaped.
+    """
+    if not token.isalpha() or not token.isascii():
+        return False
+    if token.islower():
+        return True
+    if token.isupper():
+        return False
+    run = 0
+    for ch in token:
+        if ch.isupper():
+            run += 1
+            if run >= 3:
+                return False
+        else:
+            run = 0
+    return True
+# No ^$ anchors: used via fullmatch(text, pos, endpos), where "^" would only
+# match at the real string start, not at pos.
+# Backslash admits JSON/log-serialized keys whose newlines are literal \n
+# two-char sequences — a one-physical-line PEM in a serialized log is a common
+# accidental paste shape.
+_PRIVATE_KEY_INLINE_SPAN_RE = re.compile(r"[A-Za-z0-9+/=\t\\ ]*")
+# RFC 1421 encapsulated-header line (encrypted traditional PEM):
+# "Proc-Type: 4,ENCRYPTED" / "DEK-Info: AES-128-CBC,..." — appears between
+# BEGIN and the base64 body, followed by one blank line.
+_PRIVATE_KEY_ARMOR_HEADER_RE = re.compile(r"^[A-Za-z0-9-]{2,32}:\s?\S.*$")
+_PRIVATE_KEY_MAX_ARMOR_HEADERS = 5
 _PRIVATE_KEY_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE)
 _PRIVATE_KEY_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE)
 _EXTERNALIZED_PLACEHOLDER_PREFIX = "[Externalized LCM ingest payload:"
@@ -158,14 +366,22 @@ _HERMES_RESULTS_DIRNAME = "hermes-results"
 _MAX_RECOVERED_PERSISTED_OUTPUT_BYTES = 64 * 1024 * 1024
 _SENSITIVE_PLACEHOLDER_PREFIX = "[LCM sensitive redaction:"
 _EMBEDDING_PRIVACY_PLACEHOLDER_PREFIX = "[LCM embedding privacy:"
-_EMBEDDING_PRIVACY_TRANSFORM_VERSION = "privacy:v1"
+# v3: single-pass PEM scanner (short-terminal-line bound, body-adjacent END
+# pairing, linear on pathological inputs) — output differs from v2 on
+# truncated/multi-key material, so v2-era vectors must re-embed.
+_EMBEDDING_PRIVACY_TRANSFORM_VERSION = "privacy:v3"
 _EMBEDDING_PRIVACY_PLACEHOLDER_RE = re.compile(
     r"\[LCM (?:sensitive redaction|embedding privacy):\s*"
     r"name=(?P<name>[a-z0-9_-]+)[^\]]*\]",
     re.IGNORECASE,
 )
+# Includes the resolver's aliases (embedding_provider.resolve_provider maps
+# "openai"/"siliconflow" to the openai-compatible cloud provider): the
+# privacy predicate must hold for every spelling a CALLER might pass, not
+# just the canonical id the resolved provider object carries — a config
+# string alias must never bypass cloud privacy (#370 review).
 _EMBEDDING_PRIVACY_CLOUD_PROVIDERS = frozenset(
-    {"voyage", "voyageai", "openai-compatible"}
+    {"voyage", "voyageai", "openai-compatible", "openai", "siliconflow"}
 )
 _SENSITIVE_PATTERN_CATALOG: dict[str, re.Pattern[str]] = {
     "api_key": re.compile(
@@ -192,11 +408,8 @@ _SENSITIVE_PATTERN_CATALOG: dict[str, re.Pattern[str]] = {
 }
 
 # Sensitive redaction runs synchronously in the ingest path. The private_key
-# pattern (lazy `.*?` under DOTALL) rescans to end-of-string for every unmatched
-# BEGIN header, so a multi-MB payload with many headers and no END is O(n^2) and
-# can block a turn for minutes. Guard it: prefer the optional `regex` engine with
-# a match timeout (fail-open on timeout), and when `regex` is unavailable bound
-# the input length the stdlib DOTALL pattern is applied to.
+# catalog regex is retained for configuration compatibility, but substitution
+# always bypasses it in favor of the linear scanner below.
 try:  # pragma: no cover - exercised when the optional dependency is absent
     import regex as _regex_engine
 except Exception:  # pragma: no cover - keep the plugin importable in minimal installs
@@ -243,8 +456,8 @@ def _regex_pattern_for(name: str) -> Any:
 def _apply_sensitive_pattern(name: str, repl, text: str) -> str:
     """Substitute one sensitive pattern with a ReDoS-safe strategy.
 
-    Fails open (leaves the span unredacted) with a one-time warning rather than
-    blocking the ingest path on a pathological input.
+    Private keys always use the linear scanner; other catalog patterns use
+    their bounded character-class regexes.
     """
     # Only the private_key pattern (lazy `.*?` under DOTALL, which rescans to
     # end-of-string per unmatched BEGIN header) is O(n^2) and needs a guard.
@@ -252,6 +465,8 @@ def _apply_sensitive_pattern(name: str, repl, text: str) -> str:
     # run via stdlib and never fail open - a redaction bypass under CPU load
     # would be a silent secret leak, so we restrict fail-open to the one
     # pattern that genuinely requires it.
+    if name == "private_key":
+        return _redact_private_key_blocks(text)
     if name in _BACKTRACKING_RISKY_SENSITIVE_PATTERNS:
         regex_pattern = _regex_pattern_for(name)
         if regex_pattern is not None:
@@ -269,11 +484,528 @@ def _apply_sensitive_pattern(name: str, repl, text: str) -> str:
                         _SENSITIVE_MATCH_TIMEOUT_SECONDS,
                     )
                 return _redact_private_key_blocks(text)
-        elif name == "private_key":
-            return _redact_private_key_blocks(text)
     return _SENSITIVE_PATTERN_CATALOG[name].sub(repl, text)
 
 
+_PEM_LINE_KIND_OTHER = 0
+_PEM_LINE_KIND_BEGIN = 1
+_PEM_LINE_KIND_END = 2
+_PEM_LINE_KIND_STRICT_B64 = 3
+_PEM_LINE_KIND_SHORT_B64 = 4
+_PEM_LINE_KIND_END_INLINE = 5
+_PEM_LINE_KIND_ARMOR = 6
+_PEM_LINE_KIND_BLANK = 7
+_PEM_LINE_KIND_END_LOOSE = 8
+_PEM_LINE_KIND_PREFIXED_B64 = 9
+_PEM_LINE_KIND_LENIENT_B64 = 10
+
+
+def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
+    """Classify every line of ``text`` once for the private-key scanner.
+
+    Returns ``(kind, redact_start, content_end, line_start, marker_end)`` per
+    line. Classification runs on the horizontally-stripped content, and
+    ``str.splitlines`` handles every line separator (\\n, \\r\\n, bare \\r,
+    unicode line breaks) — CR-only or indented key material must not slip past
+    a \\n-keyed scan. ``redact_start`` is where a redaction of this line should
+    begin (the marker start for a BEGIN line so unrelated prefixes like
+    ``key: `` survive; the stripped content start otherwise); ``content_end``
+    excludes the line terminator so surrounding newlines are preserved;
+    ``marker_end`` is the END marker's absolute end for END/END_INLINE lines
+    (-1 otherwise). END_INLINE — a line that contains an END marker amid other
+    content — terminates a key body only when a base64 run precedes it
+    (``label: -----END PRIVATE KEY-----`` after a body is key structure; prose
+    merely mentioning the marker, with no body above, never matches).
+    """
+    model: list[tuple[int, int, int, int, int]] = []
+    offset = 0
+    segments: list[tuple[int, str]] = []
+    for raw in text.splitlines(keepends=True):
+        line_start = offset
+        offset += len(raw)
+        content = raw.splitlines()[0] if raw else ""
+        if _PRIVATE_KEY_ESCAPED_SEPARATOR_HINT_RE.search(content) is not None:
+            # JSON/log-serialized key: literal \n (optionally \r\n) escape
+            # sequences at any serialization depth are the key's real line
+            # separators, and bare quotes delimit the serialized string — both
+            # split into virtual lines so armor headers, truncated bodies, and
+            # short tails inside serialized text classify exactly like
+            # unserialized ones (a tail glued to the JSON closer, "CDEF\"}",
+            # still classifies). Offsets stay absolute; spans stay exact.
+            for seg_start, piece in _split_serialized_pem_line(content):
+                # Serialization artifacts are not content: escaped-tab
+                # indentation (\t at any depth) leads a segment, and the
+                # escape backslashes of the following separator/closing quote
+                # trail it — trim both so the payload classifies.
+                trim_off, piece = _trim_pem_segment(piece)
+                seg_start += trim_off
+                segments.append((line_start + seg_start, piece))
+        else:
+            segments.append((line_start, content))
+    for line_start, content in segments:
+        stripped = content.strip(" \t")
+        # JSON's optional solidus escape (\/) is legal inside base64 bodies;
+        # classify on the unescaped form, keep offsets on the raw text.
+        class_stripped = _normalize_escaped_solidus(stripped)
+        lead = content.find(stripped[:1]) if stripped else 0
+        c_start = line_start + (lead if stripped else 0)
+        c_end = c_start + len(stripped)
+        kind = _PEM_LINE_KIND_OTHER
+        redact_start = c_start
+        marker_end = -1
+        if "PRIVATE KEY-----" in stripped.upper():
+            begin = _PRIVATE_KEY_BEGIN_RE.search(stripped)
+            end = _PRIVATE_KEY_END_RE.search(stripped)
+            if begin is not None and begin.end() == len(stripped):
+                kind = _PEM_LINE_KIND_BEGIN
+                redact_start = c_start + begin.start()
+                if end is not None and end.end() <= begin.start():
+                    # A compacted "END ... BEGIN" line: the leading END can
+                    # close a preceding orphan run before the BEGIN opens the
+                    # next block (marker_end carries the END bound).
+                    marker_end = c_start + end.end()
+            elif (
+                begin is not None
+                and (end is None or end.start() < begin.start())
+                and _PRIVATE_KEY_INLINE_SPAN_RE.fullmatch(
+                    stripped, begin.end()
+                )
+                and _PRIVATE_KEY_INLINE_RUN_RE.search(stripped, begin.end())
+            ):
+                # Newline-normalized form: the base64 payload sits ON the
+                # BEGIN line ("-----BEGIN ...----- MIIE…"), END on a later
+                # line. Treat as a BEGIN whose block span already includes
+                # the same-line body.
+                kind = _PEM_LINE_KIND_BEGIN
+                redact_start = c_start + begin.start()
+            elif end is not None and begin is None:
+                marker_end = c_start + end.end()
+                if end.start() == 0 and end.end() == len(stripped):
+                    kind = _PEM_LINE_KIND_END
+                elif not stripped[end.end():].strip("\"'),.;:]}"):
+                    # Prefix of any length (labels, timestamped log lines)
+                    # with nothing but closing punctuation after the marker
+                    # (serialization/prose terminators): key structure.
+                    kind = _PEM_LINE_KIND_END_INLINE
+                else:
+                    # A SUFFIX after the marker ("see -----END ... ----- for
+                    # format"): prose context — terminates a BEGIN-anchored
+                    # block only, never an orphan run.
+                    kind = _PEM_LINE_KIND_END_LOOSE
+        elif (
+            class_stripped
+            and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(class_stripped) is not None
+            and not _looks_like_english_token(class_stripped)
+        ):
+            if len(class_stripped) >= _PRIVATE_KEY_STRICT_MIN_CHARS:
+                kind = _PEM_LINE_KIND_STRICT_B64
+            else:
+                kind = _PEM_LINE_KIND_SHORT_B64
+        elif not stripped:
+            kind = _PEM_LINE_KIND_BLANK
+        elif _PRIVATE_KEY_ARMOR_HEADER_RE.fullmatch(stripped) is not None:
+            kind = _PEM_LINE_KIND_ARMOR
+        else:
+            # Log-collector shape: every body line carries a prefix
+            # ("INFO MII…", "2026-… DEBUG MII…"). A line whose final
+            # whitespace-separated token is a full-width base64 token, with at
+            # most 4 prefix tokens, joins a BEGIN-anchored body run (only —
+            # never orphan structure, so hash dumps near prose stay intact).
+            parts = stripped.rsplit(None, 1)
+            if (
+                len(parts) == 2
+                and len(parts[0].split()) <= 6
+                and len(parts[1]) >= _PRIVATE_KEY_STRICT_MIN_CHARS
+                and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(parts[1]) is not None
+                and not _looks_like_english_token(parts[1])
+            ):
+                kind = _PEM_LINE_KIND_PREFIXED_B64
+        model.append((kind, redact_start, c_end, line_start, marker_end))
+    return model
+
+
+def _redact_private_key_blocks_with(text: str, placeholder) -> str:
+    """Redact PEM private keys in one linear pass over a normalized line model.
+
+    Handles, fail-closed toward redaction (#365, rounds 3-6):
+    - complete blocks: BEGIN line, any contiguous base64 payload lines (any
+      width), an adjacent END line — redacted marker-to-marker; a decorated
+      END (``label: -----END PRIVATE KEY-----``) closes a block through its
+      marker end;
+    - truncated blocks: BEGIN plus a contiguous base64 run with no adjacent
+      END — redacted through the whole run (short re-wrapped lines included),
+      never past it (unrelated prose and following keys survive);
+    - orphaned bodies: a contiguous base64 run containing a full-width line —
+      leading short lines included — directly followed by an END or decorated
+      END line, with no BEGIN: a decoy BEGIN elsewhere must not shield a
+      stripped key;
+    - inline one-line ``BEGIN ... END`` forms, requiring a real base64 run
+      between the markers (prose mentioning both markers is never consumed);
+      every BEGIN candidate on the line is tried, so a decoy BEGIN cannot
+      blind a later valid inline key;
+    - CR-only / unicode line separators and indented or prefixed markers.
+    A bare BEGIN marker followed by non-base64 prose is left in place. See the
+    THREAT MODEL comment above the predicates for the declared scope.
+    """
+    if "private key-----" not in text.lower():
+        return text
+    model = _pem_line_model(text)
+    n = len(model)
+    parts: list[str] = []
+    cursor = 0
+    changed = False
+
+    def emit(redact_from: int, redact_to: int) -> None:
+        nonlocal cursor, changed
+        parts.append(text[cursor:redact_from])
+        parts.append(placeholder(text[redact_from:redact_to]))
+        cursor = redact_to
+        changed = True
+
+    def effective_kind(idx: int) -> int:
+        # Inside a BEGIN-anchored scan only: log collectors prefix every line
+        # ("INFO Proc-Type: …", "INFO CDEF"), so a line the context-free model
+        # calls OTHER gets one more chance with up to 4 leading tokens
+        # stripped. English-word tails (pure lowercase, or one capitalized
+        # word) never count as body — "service productionservice" is prose.
+        kind = model[idx][0]
+        if kind not in (_PEM_LINE_KIND_OTHER, _PEM_LINE_KIND_ARMOR):
+            return kind
+        # An ARMOR-shaped line can be a colon-ended log prefix ("INFO: MII…")
+        # in front of real body — prefix-strip before trusting the armor
+        # shape; genuine armor values (commas, spaces) never classify as body.
+        rest = _normalize_escaped_solidus(text[model[idx][1]:model[idx][2]])
+        # Attached Markdown/quote/diff markers (">MII…", "|MII…", "-MII…")
+        # carry no whitespace; strip them before any classification. '-' is
+        # not in the base64 charset, so stripping it never eats body.
+        rest = rest.lstrip(">|-").strip(" \t")
+        head, colon_sep, colon_after = rest.partition(":")
+        colon_after = colon_after.strip(" \t")
+        if (
+            colon_sep
+            and 2 <= len(head) <= 32
+            and colon_after
+            and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(colon_after) is not None
+            and not _looks_like_english_token(colon_after)
+        ):
+            # Colon-prefixed BODY ("INFO: MII…" / "INFO:MII…") — must win
+            # over the armor shape, which it also matches. Genuine armor
+            # values ("4,ENCRYPTED", "AES-128-CBC,…") contain commas and
+            # never classify as base64 body.
+            if len(colon_after) >= _PRIVATE_KEY_STRICT_MIN_CHARS:
+                return _PEM_LINE_KIND_STRICT_B64
+            return _PEM_LINE_KIND_SHORT_B64
+        if _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(rest) is not None:
+            if not _looks_like_english_token(rest):
+                if len(rest) >= _PRIVATE_KEY_STRICT_MIN_CHARS:
+                    return _PEM_LINE_KIND_STRICT_B64
+                return _PEM_LINE_KIND_SHORT_B64
+            # English-shaped single tokens ("abcdef", "example") count inside
+            # a BEGIN-anchored scan as ADJACENCY only: they keep a complete
+            # block's END reachable but never justify truncated redaction on
+            # their own (N1zc precision).
+            return _PEM_LINE_KIND_LENIENT_B64
+        # Whitespace-chunked body ("SYNTH ETIC 1234 90AB …"): every token
+        # base64-charset, none English-shaped, at least two tokens with one
+        # of length >= 8 — prose fails the English test per token.
+        tokens = rest.split()
+        if (
+            len(tokens) >= 3
+            and all(
+                _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(tok) is not None
+                and not _looks_like_english_token(tok)
+                for tok in tokens
+            )
+            and max(len(tok) for tok in tokens) >= 8
+            and any(any(c.isdigit() or c in "+/=" for c in tok) for tok in tokens)
+        ):
+            # Digit/symbol evidence required: real chunked base64 carries
+            # digits; "INFO IMPORTANT" (all-caps word pairs) does not.
+            return _PEM_LINE_KIND_STRICT_B64
+        armor_shape = _PRIVATE_KEY_ARMOR_HEADER_RE.fullmatch(rest) is not None
+        for _ in range(6):
+            split = rest.split(None, 1)
+            if len(split) < 2:
+                # No further tokens: an armor-shaped line with no hidden body
+                # (">Proc-Type: 4,ENCRYPTED", "Proc-Type: 4,ENCRYPTED") is
+                # armor; anything else keeps its context-free kind. Checked
+                # AFTER token-stripping so a timestamped/colon log prefix
+                # hiding real body ("2026-…Z INFO MII…") classifies as body.
+                if armor_shape:
+                    return _PEM_LINE_KIND_ARMOR
+                return kind
+            rest = split[1]
+            # Serialized indentation can sit AFTER the prefix ("INFO \tMII…"):
+            # normalize escaped horizontal whitespace at each strip step.
+            _off, rest = _trim_pem_segment(rest)
+            if not rest:
+                return _PEM_LINE_KIND_ARMOR if armor_shape else kind
+            if _PRIVATE_KEY_ARMOR_HEADER_RE.fullmatch(rest) is not None:
+                # Time tokens ('12:34:56 …') masquerade as armor mid-strip:
+                # note the shape but KEEP STRIPPING — body evidence deeper in
+                # the line dominates armor shapes (round-15 principle).
+                armor_shape = True
+                continue
+            if (
+                _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(rest) is not None
+                and not _looks_like_english_token(rest)
+            ):
+                if len(rest) >= _PRIVATE_KEY_STRICT_MIN_CHARS:
+                    return _PEM_LINE_KIND_STRICT_B64
+                return _PEM_LINE_KIND_SHORT_B64
+        return _PEM_LINE_KIND_ARMOR if armor_shape else kind
+
+    i = 0
+    back_watermark = -1
+    while i < n:
+        kind, redact_start, content_end, line_start, _marker_end = model[i]
+        if kind == _PEM_LINE_KIND_BEGIN:
+            j = i + 1
+            saw_b64 = False
+            # RFC 1421 encrypted-key armor: header lines then one blank line
+            # sit between BEGIN and the base64 body; consume them so a
+            # truncated encrypted key still redacts through its body.
+            armor = 0
+            while (
+                j < n
+                and effective_kind(j) == _PEM_LINE_KIND_ARMOR
+                and armor < _PRIVATE_KEY_MAX_ARMOR_HEADERS
+            ):
+                armor += 1
+                j += 1
+            while j < n and model[j][0] == _PEM_LINE_KIND_BLANK:
+                j += 1
+            if j < n and (
+                model[j][0] == _PEM_LINE_KIND_OTHER
+                and 0
+                < len(tokens := text[model[j][1]:model[j][2]].split())
+                <= 6
+                and all(len(tok) <= 12 for tok in tokens)
+                and effective_kind(j) == _PEM_LINE_KIND_OTHER
+            ):
+                # A log-prefixed blank remnant (lone short prefix tokens).
+                j += 1
+                while j < n and model[j][0] == _PEM_LINE_KIND_BLANK:
+                    j += 1
+            if armor and (j >= n or effective_kind(j) not in (
+                _PEM_LINE_KIND_STRICT_B64,
+                _PEM_LINE_KIND_SHORT_B64,
+                _PEM_LINE_KIND_PREFIXED_B64,
+                _PEM_LINE_KIND_LENIENT_B64,
+                _PEM_LINE_KIND_END,
+                _PEM_LINE_KIND_END_INLINE,
+                _PEM_LINE_KIND_END_LOOSE,
+            )):
+                # Headers without a following body or END are not key
+                # structure (e.g. a bare BEGIN quoted above config lines).
+                i += 1
+                continue
+            last_evidence = -1
+            saw_strict_run = False
+            pending_shorts = []
+            while j < n:
+                run_kind = effective_kind(j)
+                if run_kind in (
+                    _PEM_LINE_KIND_STRICT_B64,
+                    _PEM_LINE_KIND_PREFIXED_B64,
+                ):
+                    saw_b64 = True
+                    saw_strict_run = True
+                    last_evidence = j
+                elif run_kind == _PEM_LINE_KIND_SHORT_B64:
+                    # A short token after body is a real PEM tail; after a
+                    # bare BEGIN it is a doc label ("IMPORTANT", "PKCS8") —
+                    # never sole evidence. A short-ONLY run counts only as a
+                    # re-wrap: >=2 contiguous shorts, each base64-aligned.
+                    if saw_strict_run:
+                        saw_b64 = True
+                        last_evidence = j
+                    else:
+                        seg = text[model[j][1]:model[j][2]].strip(" \t")
+                        tok = seg.split()[-1] if seg.split() else seg
+                        pending_shorts.append((j, len(tok.lstrip(">|-")) % 4 == 0))
+                elif run_kind == _PEM_LINE_KIND_LENIENT_B64:
+                    # An English-shaped line breaks short-run contiguity: a
+                    # real re-wrap is contiguous; identifier tokens separated
+                    # by words are documentation.
+                    if not saw_strict_run:
+                        pending_shorts = []
+                else:
+                    break
+                j += 1
+            if (
+                not saw_strict_run
+                and len(pending_shorts) >= 2
+                and all(aligned for _idx, aligned in pending_shorts)
+            ):
+                saw_b64 = True
+                last_evidence = pending_shorts[-1][0]
+            if j < n and model[j][0] == _PEM_LINE_KIND_END:
+                emit(redact_start, model[j][2])
+                i = j + 1
+                continue
+            if j < n and model[j][0] in (
+                _PEM_LINE_KIND_END_INLINE,
+                _PEM_LINE_KIND_END_LOOSE,
+            ):
+                emit(redact_start, model[j][4])
+                i = j + 1
+                continue
+            if saw_b64:
+                # Truncated bound: through the last EVIDENCE line only —
+                # trailing English-shaped lenient lines keep END adjacency
+                # alive but are prose when no END follows.
+                emit(redact_start, model[last_evidence][2])
+                i = last_evidence + 1
+                continue
+            begin_m = _PRIVATE_KEY_BEGIN_RE.match(text, redact_start)
+            if (
+                begin_m is not None
+                and begin_m.end() < content_end
+                and _PRIVATE_KEY_INLINE_RUN_RE.search(
+                    text, begin_m.end(), content_end
+                )
+            ):
+                # Newline-normalized truncated form: the base64 payload sits
+                # ON the BEGIN line with nothing usable after — redact the
+                # marker plus its same-line body.
+                emit(redact_start, content_end)
+                i += 1
+                continue
+            i += 1
+            continue
+        if kind in (
+            _PEM_LINE_KIND_STRICT_B64,
+            _PEM_LINE_KIND_SHORT_B64,
+            _PEM_LINE_KIND_PREFIXED_B64,
+        ):
+            j = i
+            has_strict = kind in (
+                _PEM_LINE_KIND_STRICT_B64,
+                _PEM_LINE_KIND_PREFIXED_B64,
+            )
+            while j + 1 < n and model[j + 1][0] in (
+                _PEM_LINE_KIND_STRICT_B64,
+                _PEM_LINE_KIND_SHORT_B64,
+                _PEM_LINE_KIND_PREFIXED_B64,
+            ):
+                j += 1
+                has_strict = has_strict or model[j][0] in (
+                    _PEM_LINE_KIND_STRICT_B64,
+                    _PEM_LINE_KIND_PREFIXED_B64,
+                )
+            if (has_strict or j > i) and j + 1 < n and model[j + 1][0] in (
+                _PEM_LINE_KIND_END,
+                _PEM_LINE_KIND_END_INLINE,
+            ):
+                end_kind, _rs, end_content_end, _ls, end_marker_end = model[j + 1]
+                emit(
+                    redact_start,
+                    end_content_end
+                    if end_kind == _PEM_LINE_KIND_END
+                    else end_marker_end,
+                )
+                i = j + 2
+                continue
+            if (
+                (has_strict or j > i)
+                and j + 1 < n
+                and model[j + 1][0] == _PEM_LINE_KIND_BEGIN
+                and model[j + 1][4] >= 0
+            ):
+                # Compacted "-----END ...----- -----BEGIN ...-----" line: its
+                # leading END closes this orphan run; the BEGIN half is then
+                # processed as its own block.
+                emit(redact_start, model[j + 1][4])
+                i = j + 1
+                continue
+            i = j + 1
+            continue
+        if kind in (_PEM_LINE_KIND_END, _PEM_LINE_KIND_END_INLINE):
+            # END-anchored backward pass (symmetric to the BEGIN-anchored
+            # forward pass): prefixed/colon orphan bodies classify OTHER or
+            # ARMOR context-free, so a preceding run is only visible with
+            # prefix-aware reclassification. Bounded lookback; evidence
+            # rules identical to the forward scan.
+            back = i - 1
+            first_evidence = -1
+            saw_back_evidence = False
+            while back >= 0 and back > back_watermark:
+                bk = effective_kind(back)
+                if bk in (
+                    _PEM_LINE_KIND_STRICT_B64,
+                    _PEM_LINE_KIND_SHORT_B64,
+                    _PEM_LINE_KIND_PREFIXED_B64,
+                ):
+                    saw_back_evidence = saw_back_evidence or bk != _PEM_LINE_KIND_SHORT_B64
+                    first_evidence = back
+                    back -= 1
+                    continue
+                if bk == _PEM_LINE_KIND_LENIENT_B64:
+                    back -= 1
+                    continue
+                break
+            back_watermark = max(back_watermark, i)
+            if saw_back_evidence and first_evidence >= 0:
+                end_bound = content_end if kind == _PEM_LINE_KIND_END else _marker_end
+                # Never cross content already emitted (an earlier redaction
+                # inside the lookback window): clamp to the cursor.
+                emit(max(model[first_evidence][1], cursor), end_bound)
+                i += 1
+                continue
+        if kind in (_PEM_LINE_KIND_END_INLINE, _PEM_LINE_KIND_END_LOOSE):
+            # Orphaned ONE-LINE body: an upgraded v1-era row can hold
+            # "<placeholder> MII… -----END PRIVATE KEY-----" on one physical
+            # line. A substantial contiguous base64 run directly before the
+            # marker (only base64/spacing between) is key material.
+            end_m = _PRIVATE_KEY_END_RE.search(text, redact_start, content_end)
+            if end_m is not None:
+                span_start = redact_start
+                probe = text[span_start:end_m.start()]
+                run = None
+                for m in _PRIVATE_KEY_INLINE_RUN_RE.finditer(probe):
+                    run = m
+                if run is not None and _PRIVATE_KEY_INLINE_SPAN_RE.fullmatch(
+                    probe, run.end()
+                ):
+                    emit(span_start + run.start(), end_m.end())
+                    i += 1
+                    continue
+            i += 1
+            continue
+        if kind == _PEM_LINE_KIND_OTHER and "PRIVATE KEY-----" in text[line_start:content_end].upper():
+            scan = line_start
+            candidates = 0
+            while scan < content_end:
+                candidates += 1
+                if candidates > 8:
+                    # Bounded work per line: >8 unmatched BEGIN candidates on
+                    # one line is a marker storm (adversarial construction,
+                    # out of declared scope) — stop rather than go quadratic.
+                    break
+                begin = _PRIVATE_KEY_BEGIN_RE.search(text, scan, content_end)
+                if begin is None:
+                    break
+                inline_end = _PRIVATE_KEY_END_RE.search(text, begin.end(), content_end)
+                if (
+                    inline_end is not None
+                    and _PRIVATE_KEY_INLINE_SPAN_RE.fullmatch(
+                        text, begin.end(), inline_end.start()
+                    )
+                    and (
+                        begin.end() == inline_end.start()
+                        or _PRIVATE_KEY_INLINE_RUN_RE.search(
+                            text, begin.end(), inline_end.start()
+                        )
+                    )
+                ):
+                    emit(begin.start(), inline_end.end())
+                    scan = inline_end.end()
+                    continue
+                scan = begin.end()
+        i += 1
+    parts.append(text[cursor:])
+    return "".join(parts) if changed else text
 
 
 def _redact_private_key_blocks(text: str) -> str:
@@ -281,30 +1013,13 @@ def _redact_private_key_blocks(text: str) -> str:
 
     This keeps large valid keys protected even when the optional ``regex``
     package is unavailable, without running the stdlib DOTALL private-key
-    pattern over a pathological multi-MB input. Unmatched BEGIN headers are
-    left intact; there is no complete key block to redact.
+    pattern over a pathological multi-MB input. A truncated block (BEGIN with
+    no matching END) is redacted only through its contiguous PEM-shaped base64
+    body, preserving unrelated trailing prose (#365).
     """
-    if "private key-----" not in text.lower():
-        return text
-    parts: list[str] = []
-    cursor = 0
-    changed = False
-    while True:
-        begin = _PRIVATE_KEY_BEGIN_RE.search(text, cursor)
-        if begin is None:
-            parts.append(text[cursor:])
-            break
-        end = _PRIVATE_KEY_END_RE.search(text, begin.end())
-        if end is None:
-            parts.append(text[cursor:])
-            break
-        block_end = end.end()
-        secret = text[begin.start():block_end]
-        parts.append(text[cursor:begin.start()])
-        parts.append(_sensitive_placeholder("private_key", secret))
-        cursor = block_end
-        changed = True
-    return "".join(parts) if changed else text
+    return _redact_private_key_blocks_with(
+        text, lambda secret: _sensitive_placeholder("private_key", secret)
+    )
 
 
 def _is_wrapped_base64_line(line: str) -> bool:
@@ -689,9 +1404,13 @@ def extract_all_externalized_payload_refs(text: str) -> list[str]:
 
 
 def sensitive_pattern_status(config) -> dict[str, Any]:
-    """Return metadata-only status for opt-in sensitive redaction."""
+    """Return metadata-only status for durable and provider-copy protection."""
     configured, active, unknown = _configured_sensitive_pattern_names(config)
     enabled = bool(getattr(config, "sensitive_patterns_enabled", False))
+    privacy_setting = getattr(config, "embedding_privacy_enabled", None)
+    privacy_provider = str(getattr(config, "embedding_provider", "") or "")
+    privacy_required = embedding_provider_requires_privacy(privacy_provider)
+    privacy_enabled = privacy_required and privacy_setting is not False
     return {
         "sensitive_patterns_enabled": enabled,
         "enabled": enabled,
@@ -700,6 +1419,16 @@ def sensitive_pattern_status(config) -> dict[str, Any]:
         "active_patterns": active if enabled else [],
         "unknown_patterns": unknown,
         "source": getattr(config, "sensitive_patterns_source", "default"),
+        "embedding_privacy_setting": (
+            "auto" if privacy_setting is None else "on" if privacy_setting else "off"
+        ),
+        "embedding_privacy_enabled": privacy_enabled,
+        "embedding_privacy_provider_requires_privacy": privacy_required,
+        "embedding_privacy_revision": (
+            None
+            if not privacy_required
+            else "active" if privacy_enabled else "privacy:off"
+        ),
         "placeholder_format": "[LCM sensitive redaction: name=<pattern>; chars=<n>; bytes=<n>; sha256=<16 for non-password>]",
         "lossless_recovery": False if enabled and active else None,
     }
@@ -746,13 +1475,12 @@ def embedding_provider_requires_privacy(provider_id: str) -> bool:
 def embedding_privacy_revision(config) -> str:
     """Return the canonical identity revision for cloud embedding input.
 
-    The revision deliberately contains only a transform version and a digest of
-    sorted pattern *names*. It never depends on matched text or secret bytes.
+    The active revision contains only a transform version and a digest of sorted
+    pattern *names*. Explicit opt-out returns ``privacy:off``. Neither posture
+    depends on matched text or secret bytes.
     """
-    if not bool(getattr(config, "sensitive_patterns_enabled", False)):
-        raise EmbeddingPrivacyPolicyError(
-            "cloud embedding privacy requires sensitive-pattern handling to be enabled"
-        )
+    if getattr(config, "embedding_privacy_enabled", None) is False:
+        return "privacy:off"
     configured, active, unknown = _configured_sensitive_pattern_names(config)
     if not configured or not active:
         raise EmbeddingPrivacyPolicyError(
@@ -802,29 +1530,90 @@ def _embedding_privacy_redact_match(
     return full[:relative_start] + placeholder + full[relative_end:]
 
 
+def _has_orphaned_private_key_body(text: str) -> bool:
+    """True when line-structured private-key material survives in ``text``.
+
+    Structural, transform-independent check on the normalized line model
+    (round 5): flags a BEGIN line followed by any base64-alphabet line, and a
+    base64 run containing a full-width line directly followed by an END line.
+    A correct redaction pass leaves neither shape, and there is deliberately
+    NO earlier-BEGIN suppression — a decoy BEGIN elsewhere in the text must
+    not shield a stripped key from validation. Prose that merely mentions a
+    marker inline (not as the whole line) never matches.
+    """
+    if "private key-----" not in text.lower():
+        return False
+    model = _pem_line_model(text)
+    run_has_strict = False
+    run_len = 0
+    prev_was_begin = False
+    seen_begin_line = False
+    for kind, _redact_start, _content_end, _line_start, _marker_end in model:
+        if kind == _PEM_LINE_KIND_BEGIN:
+            prev_was_begin = True
+            seen_begin_line = True
+            run_has_strict = False
+            run_len = 0
+            continue
+        if kind in (
+            _PEM_LINE_KIND_STRICT_B64,
+            _PEM_LINE_KIND_SHORT_B64,
+            _PEM_LINE_KIND_PREFIXED_B64,
+        ):
+            if prev_was_begin:
+                return True
+            if kind in (_PEM_LINE_KIND_STRICT_B64, _PEM_LINE_KIND_PREFIXED_B64):
+                run_has_strict = True
+            run_len += 1
+            continue
+        if kind in (_PEM_LINE_KIND_END, _PEM_LINE_KIND_END_INLINE) and (
+            run_has_strict or run_len >= 2
+        ):
+            return True
+        if kind in (_PEM_LINE_KIND_END_INLINE, _PEM_LINE_KIND_END_LOOSE):
+            end_m = _PRIVATE_KEY_END_RE.search(
+                text, _redact_start, _content_end
+            )
+            if end_m is not None:
+                probe = text[_redact_start:end_m.start()]
+                run = None
+                for m in _PRIVATE_KEY_INLINE_RUN_RE.finditer(probe):
+                    run = m
+                if run is not None and _PRIVATE_KEY_INLINE_SPAN_RE.fullmatch(
+                    probe, run.end()
+                ):
+                    return True
+        if kind in (_PEM_LINE_KIND_END, _PEM_LINE_KIND_END_INLINE) and seen_begin_line:
+            # Fail-closed pair guard (cloud path): a surviving exact BEGIN
+            # line before a surviving exact END line is a structure the
+            # redactor could not parse (e.g. a body with internal whitespace
+            # on every line, which is indistinguishable from prose at the
+            # redactor level). Block the dispatch rather than risk shipping
+            # key material the line classifier cannot recognize.
+            return True
+        prev_was_begin = False
+        run_has_strict = False
+        run_len = 0
+    return False
+
+
+def _private_key_first(names: Sequence[str]) -> list[str]:
+    """Order pattern names so private_key runs before any assignment pattern.
+
+    An assignment pattern whose secret group matches the literal ``-----BEGIN``
+    would otherwise consume the PEM begin marker and blind the private-key
+    redactor, leaking the key body (#365). Relative order of the rest is kept.
+    """
+    ordered = [n for n in names if n == "private_key"]
+    ordered.extend(n for n in names if n != "private_key")
+    return ordered
+
+
 def _embedding_privacy_redact_private_keys(text: str) -> str:
     """Replace complete or truncated PEM private-key blocks with placeholders."""
-    if "private key-----" not in text.lower():
-        return text
-    parts: list[str] = []
-    cursor = 0
-    changed = False
-    while True:
-        begin = _PRIVATE_KEY_BEGIN_RE.search(text, cursor)
-        if begin is None:
-            parts.append(text[cursor:])
-            break
-        end = _PRIVATE_KEY_END_RE.search(text, begin.end())
-        if end is None:
-            parts.append(text[cursor:begin.start()])
-            parts.append(_embedding_privacy_placeholder("private_key"))
-            changed = True
-            break
-        parts.append(text[cursor:begin.start()])
-        parts.append(_embedding_privacy_placeholder("private_key"))
-        cursor = end.end()
-        changed = True
-    return "".join(parts) if changed else text
+    return _redact_private_key_blocks_with(
+        text, lambda _secret: _embedding_privacy_placeholder("private_key")
+    )
 
 
 def _embedding_privacy_residual_patterns(
@@ -833,7 +1622,14 @@ def _embedding_privacy_residual_patterns(
     residual: list[str] = []
     for name in active_names:
         if name == "private_key":
-            if _embedding_privacy_redact_private_keys(text) != text:
+            # Transform-INDEPENDENT check (#365): a surviving PEM END marker means
+            # an earlier pattern consumed the BEGIN marker the redactor keys on, so
+            # the key body shipped. Flag it even though the BEGIN-based redactor is
+            # now blind. (BEGIN redaction still flagged for truncated/no-END blocks.)
+            if (
+                _embedding_privacy_redact_private_keys(text) != text
+                or _has_orphaned_private_key_body(text)
+            ):
                 residual.append(name)
             continue
         if _SENSITIVE_PATTERN_CATALOG[name].search(text) is not None:
@@ -855,9 +1651,14 @@ def protect_embedding_text(
             "run `/lcm embed warmup` before dispatch"
         )
     original = str(text)
+    if revision == "privacy:off":
+        return original, revision, False
     protected = _canonicalize_embedding_privacy_placeholders(original)
     _configured, active, _unknown = _configured_sensitive_pattern_names(config)
-    for name in sorted(set(active)):
+    # private_key MUST run first: an assignment pattern (e.g. password_assignment,
+    # whose secret_unquoted group matches the literal "-----BEGIN") can otherwise
+    # consume the PEM begin marker and leave the key body unredacted (#365).
+    for name in _private_key_first(sorted(set(active))):
         if name == "private_key":
             protected = _embedding_privacy_redact_private_keys(protected)
         else:
@@ -888,6 +1689,8 @@ def validate_embedding_privacy_dispatch(
         raise EmbeddingPrivacyPolicyError(
             "cloud embedding privacy policy changed before provider dispatch"
         )
+    if revision == "privacy:off":
+        return revision
     _configured, active, _unknown = _configured_sensitive_pattern_names(config)
     for text in texts:
         current = str(text)
@@ -966,7 +1769,9 @@ def redact_sensitive_text(text: str, config) -> str:
     if not active_names:
         return text
     protected = text
-    for name in active_names:
+    # private_key first — see #365; the durable default order lists
+    # password_assignment before private_key, which leaks the key body to storage.
+    for name in _private_key_first(active_names):
         protected = _apply_sensitive_pattern(
             name,
             lambda match, pattern_name=name: _redact_match(pattern_name, match),

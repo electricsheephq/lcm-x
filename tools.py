@@ -5434,7 +5434,8 @@ def _lcm_recall_rerank(
     ``ordered`` MUST already carry the scope/recency prior so the window reflects
     the true top-N rather than the raw RRF order (RERANK-1). Any failure (no
     provider, non-voyage, network, deadline) skips silently back to the incoming
-    order with a ``skipped: <reason>`` status.
+    order with a ``skipped: <reason>`` status. Privacy-policy failures remain
+    loud, matching the cloud query-embedding path.
     """
     if not bool(getattr(config, "rerank_enabled", False)):
         return ordered, "disabled", []
@@ -5447,22 +5448,48 @@ def _lcm_recall_rerank(
     head = ordered[:window]
     if not head:
         return ordered, "skipped: no candidates to rerank", []
+    outbound_query = str(query)
     documents = [str(entry["hit"].get("snippet") or "") for entry in head]
+    privacy_revision: str | None = None
+    if embedding_provider_requires_privacy(
+        str(getattr(provider, "provider_id", "") or "")
+    ):
+        outbound_query, privacy_revision, _changed = protect_embedding_text(
+            outbound_query, config
+        )
+        documents = [
+            protect_embedding_text(
+                document, config, expected_revision=privacy_revision
+            )[0]
+            for document in documents
+        ]
+
+    def invoke() -> list[tuple[int, float]]:
+        if privacy_revision is not None:
+            validate_embedding_privacy_dispatch(
+                [outbound_query, *documents],
+                config,
+                expected_revision=privacy_revision,
+            )
+        return provider.rerank(
+            outbound_query,
+            documents,
+            top_k=len(documents),
+            timeout=max(0.001, deadline - time.monotonic()),
+            model=(
+                str(getattr(config, "rerank_model", "") or "").strip()
+                or "rerank-2.5-lite"
+            ),
+        )
+
     try:
         ranked = _run_within_deadline(
-            lambda: provider.rerank(
-                query,
-                documents,
-                top_k=len(documents),
-                timeout=max(0.001, deadline - time.monotonic()),
-                model=(
-                    str(getattr(config, "rerank_model", "") or "").strip()
-                    or "rerank-2.5-lite"
-                ),
-            ),
+            invoke,
             remaining_s=deadline - time.monotonic(),
             name="lcm-recall-rerank",
         )
+    except EmbeddingPrivacyPolicyError:
+        raise
     except Exception as exc:  # noqa: BLE001 - any failure => skip rerank
         return ordered, f"skipped: {exc}", []
     if not ranked:
@@ -5978,6 +6005,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     embedding_query_metrics.append(
                         _lcm_embedding_query_metric(provider)
                     )
+            except EmbeddingPrivacyPolicyError:
+                # Deterministic configuration error — never degrade (#367).
+                raise
             except VoyageError as exc:
                 provider = None
                 degraded_reasons.append(f"query embedding failed: {exc}")
@@ -6018,6 +6048,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         embedding_query_metrics.append(
                             _lcm_embedding_query_metric(chunk_provider)
                         )
+                except EmbeddingPrivacyPolicyError:
+                    # Deterministic configuration error — never degrade (#367).
+                    raise
                 except VoyageError as exc:
                     degraded_reasons.append(f"chunk query embedding failed: {exc}")
                 except TimeoutError:
@@ -6055,6 +6088,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     except TimeoutError:
                         timed_out = True
                         coverage["summary"] = "none"
+                    except EmbeddingPrivacyPolicyError:
+                        # Deterministic configuration error — never degrade (#367).
+                        raise
                     except Exception as exc:  # noqa: BLE001
                         coverage["summary"] = "none"
                         degraded_reasons.append(f"summary arm failed: {exc}")
@@ -6084,6 +6120,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     except TimeoutError:
                         timed_out = True
                         coverage["chunk"] = "none"
+                    except EmbeddingPrivacyPolicyError:
+                        # Deterministic configuration error — never degrade (#367).
+                        raise
                     except Exception as exc:  # noqa: BLE001
                         coverage["chunk"] = "none"
                         degraded_reasons.append(f"chunk arm failed: {exc}")
@@ -8073,6 +8112,9 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
             "injected": int(getattr(engine, "_proactive_recall_injected_count", 0) or 0),
             "skipped": int(getattr(engine, "_proactive_recall_skipped_count", 0) or 0),
             "timeout": int(getattr(engine, "_proactive_recall_timeout_count", 0) or 0),
+            "privacy_policy_errors": int(
+                getattr(engine, "_proactive_recall_privacy_error_count", 0) or 0
+            ),
         },
         "config_sources": config_sources,
         "config_source_warnings": config_source_warnings,
