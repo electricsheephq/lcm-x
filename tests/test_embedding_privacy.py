@@ -895,8 +895,9 @@ def test_round11_thread_sweep_shapes(tmp_path):
     )
     assert _time.perf_counter() - started < 1.0
 
-    # Escaped separator classes json.dumps emits beyond \n.
-    for sep in ("\\r", "\\u2028", "\\u000b"):
+    # Escaped separator classes json.dumps emits beyond \n (\f is the
+    # shorthand json.dumps uses for U+000C).
+    for sep in ("\\r", "\\u2028", "\\u000b", "\\f"):
         text = '{"log": "-----BEGIN PRIVATE KEY-----' + sep + body + sep + 'tail"}'
         assert body not in redact_sensitive_text(text, cfg)
 

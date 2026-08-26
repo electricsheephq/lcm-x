@@ -149,7 +149,9 @@ def _split_serialized_pem_line(content: str):
         end = None
         if run < n:
             nxt = content[run]
-            if nxt == "n":
+            if nxt in "nf":
+                # json.dumps shorthands: \n, and \f for U+000C (form feed,
+                # a str.splitlines separator like the rest).
                 end = run + 1
             elif nxt == "r":
                 end = run + 1
@@ -174,7 +176,7 @@ def _split_serialized_pem_line(content: str):
 
 
 _PRIVATE_KEY_ESCAPED_SEPARATOR_HINT_RE = re.compile(
-    r"\\[rnu]|\""
+    r"\\[rnfu]|\""
 )
 
 
