@@ -1409,3 +1409,93 @@ def test_round16_orphan_symmetry_and_escape_spellings(tmp_path):
         "INFO " + "a1b2c3d4" * 8 + "\nINFO " + "e5f6a7b8" * 8 + "\nno markers anywhere",
     ):
         assert redact_sensitive_text(keep, cfg) == keep
+
+
+@pytest.mark.parametrize(
+    ("label", "text", "fragment"),
+    [
+        (
+            "no-digit-alphabet-tail",
+            "trunc -----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq abcdefghijklmnop "
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\nZBODY9\n-----END ENCRYPTED PRIVATE KEY-----",
+            "abcdefghijklmnop",
+        ),
+        (
+            "interrupted-resumed-run",
+            "trunc -----BEGIN PRIVATE KEY-----\nFIRSTBODY1111 prose RESUMEDBODY2222AA "
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\nZBODY9\n-----END ENCRYPTED PRIVATE KEY-----",
+            "RESUMEDBODY2222AA",
+        ),
+        (
+            "markdown-prefixed-body",
+            "trunc -----BEGIN PRIVATE KEY-----\n> MDBODY1111AAAA2222 "
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\nZBODY9\n-----END ENCRYPTED PRIVATE KEY-----",
+            "MDBODY1111AAAA2222",
+        ),
+        (
+            "single-line-begin-body-marker",
+            "log: -----BEGIN PRIVATE KEY----- MIIEvQIB1111ADANBgkqSECRET "
+            "-----BEGIN CERTIFICATE-----",
+            "MIIEvQIB1111ADANBgkqSECRET",
+        ),
+        (
+            "escaped-tab-separators",
+            "trunc -----BEGIN PRIVATE KEY-----\\tTABBODY1111AAAA2222BBBB\\t"
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\\tX\\t-----END ENCRYPTED PRIVATE KEY-----",
+            "TABBODY1111AAAA2222BBBB",
+        ),
+    ],
+    ids=[
+        "no-digit-tail",
+        "interrupted-resumed",
+        "markdown-prefixed",
+        "single-line-composition",
+        "escaped-tab",
+    ],
+)
+def test_marker_adjacency_variants_never_dispatch_raw(tmp_path, label, text, fragment):
+    # The transform is best-effort precise; the VALIDATOR is the fail-closed
+    # layer (#383 rounds 4-5). Either the transform redacts the fragment, or
+    # one of the two layers raises — a raw dispatch is the only failure.
+    cfg = _config(tmp_path, enabled=False)
+    try:
+        protected, revision, _changed = protect_embedding_text(text, cfg)
+    except EmbeddingPrivacyPolicyError:
+        return  # blocked fail-closed at the transform layer
+    if fragment in protected:
+        with pytest.raises(EmbeddingPrivacyPolicyError):
+            validate_embedding_privacy_dispatch(
+                [protected], cfg, expected_revision=revision
+            )
+    else:
+        validate_embedding_privacy_dispatch(
+            [protected], cfg, expected_revision=revision
+        )
+
+
+def test_hyphenated_marker_labels_split_the_leading_body_run(tmp_path):
+    cfg = _config(tmp_path, enabled=False)
+    text = (
+        "trunc -----BEGIN PRIVATE KEY-----\nMIIEvQIB1111ADANBgkq "
+        "-----BEGIN CERTIFICATE-REQUEST-----\nCR\n-----END CERTIFICATE-REQUEST-----"
+    )
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+    assert "MIIEvQIB1111ADANBgkq" not in protected
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+
+
+def test_validator_backstops_preserve_prose_and_neighbor_hashes(tmp_path):
+    cfg = _config(tmp_path, enabled=False)
+    # A prose mention of a marker (English tokens, no 16+ base64 run) passes.
+    prose = "see -----BEGIN PRIVATE KEY----- for the format details"
+    protected, revision, _changed = protect_embedding_text(prose, cfg)
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+    # A git SHA near a NON-private-key placeholder passes (rule B is scoped
+    # to private_key placeholders only).
+    sha_text = (
+        "api_key=SECRETKEYVALUE00 deployed at "
+        "0123456789abcdef0123456789abcdef01234567"
+    )
+    protected, revision, _changed = protect_embedding_text(sha_text, cfg)
+    assert "SECRETKEYVALUE00" not in protected
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)

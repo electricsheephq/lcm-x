@@ -309,10 +309,12 @@ _PRIVATE_KEY_ARMOR_HEADER_RE = re.compile(r"^[A-Za-z0-9-]{2,32}:\s?\S.*$")
 _PRIVATE_KEY_MAX_ARMOR_HEADERS = 5
 _PRIVATE_KEY_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE)
 _PRIVATE_KEY_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE)
-# ANY PEM armor marker (private key, certificate, public key, …): a truncated
-# private-key body can share a line with a following marker of any armor type
-# (#383 finding #3), so the leading-body-run split keys off the generic marker.
-_PEM_ANY_MARKER_RE = re.compile(r"-----(?:BEGIN|END) [A-Z0-9 ]+-----", re.IGNORECASE)
+# ANY PEM armor marker (private key, certificate, public key, certificate
+# request, …): a truncated private-key body can share a line with a following
+# marker of any armor type (#383 finding #3), so the leading-body-run split
+# keys off the generic marker. Hyphenated labels (CERTIFICATE-REQUEST,
+# X509-CRL) are legal armor labels and must match too.
+_PEM_ANY_MARKER_RE = re.compile(r"-----(?:BEGIN|END) [A-Z0-9 -]*[A-Z0-9]-----", re.IGNORECASE)
 _EXTERNALIZED_PLACEHOLDER_PREFIX = "[Externalized LCM ingest payload:"
 _QUARANTINED_ASSISTANT_KIND = "quarantined_assistant_output"
 _QUARANTINED_ASSISTANT_REASON = "high_repetition"
@@ -504,6 +506,65 @@ _PEM_LINE_KIND_PREFIXED_B64 = 9
 _PEM_LINE_KIND_LENIENT_B64 = 10
 
 
+def _pem_leading_body_run(prefix: str) -> tuple[bool, bool, int]:
+    """Scan the leading run of base64-body tokens in ``prefix``.
+
+    Token separators are physical spaces/tabs AND serialized escaped tabs (a
+    backslash run followed by ``t``, any nesting depth — the round-18 solidus
+    lesson: hand-rolled run-jumps, never a regex over backslash runs). Returns
+    ``(saw_body, have_evidence, run_end)`` where ``run_end`` is the raw offset
+    just past the last body token; evidence = any digit/base64-symbol in the
+    run (keeps all-caps doc headings out — round-21 precision).
+    """
+    n = len(prefix)
+    scan = 0
+    run_end = 0
+    saw_body = False
+    have_evidence = False
+    while scan < n:
+        # skip separators (physical whitespace / escaped tabs)
+        while scan < n:
+            if prefix[scan] in " \t":
+                scan += 1
+                continue
+            if prefix[scan] == "\\":
+                j = scan
+                while j < n and prefix[j] == "\\":
+                    j += 1
+                if j < n and prefix[j] == "t":
+                    scan = j + 1
+                    continue
+            break
+        tok_start = scan
+        while scan < n:
+            if prefix[scan] in " \t":
+                break
+            if prefix[scan] == "\\":
+                j = scan
+                while j < n and prefix[j] == "\\":
+                    j += 1
+                if j < n and prefix[j] == "t":
+                    break
+                scan = j
+                continue
+            scan += 1
+        if scan == tok_start:
+            break
+        ctok = _normalize_escaped_solidus(prefix[tok_start:scan])
+        if (
+            ctok
+            and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(ctok) is not None
+            and not _looks_like_english_token(ctok)
+        ):
+            saw_body = True
+            run_end = scan
+            if any(ch.isdigit() or ch in "+/=" for ch in ctok):
+                have_evidence = True
+        else:
+            break
+    return saw_body, have_evidence, run_end
+
+
 def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
     """Classify every line of ``text`` once for the private-key scanner.
 
@@ -568,29 +629,9 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
             # so all-caps doc headings before a marker are not swept.
             gmarker = _PEM_ANY_MARKER_RE.search(stripped)
             if gmarker is not None and gmarker.start() > 0:
-                run_end = 0
-                scan = 0
-                saw_body = False
-                have_evidence = False
-                prefix = stripped[: gmarker.start()]
-                while scan < len(prefix):
-                    while scan < len(prefix) and prefix[scan] in " \t":
-                        scan += 1
-                    tok_start = scan
-                    while scan < len(prefix) and prefix[scan] not in " \t":
-                        scan += 1
-                    ctok = _normalize_escaped_solidus(prefix[tok_start:scan])
-                    if (
-                        ctok
-                        and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(ctok) is not None
-                        and not _looks_like_english_token(ctok)
-                    ):
-                        saw_body = True
-                        run_end = scan
-                        if any(ch.isdigit() or ch in "+/=" for ch in ctok):
-                            have_evidence = True
-                    else:
-                        break
+                saw_body, have_evidence, run_end = _pem_leading_body_run(
+                    stripped[: gmarker.start()]
+                )
                 if saw_body and have_evidence:
                     model.append(
                         (_PEM_LINE_KIND_STRICT_B64, c_start, c_start + run_end, c_start, -1)
@@ -615,29 +656,13 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
                 # digit/base64-symbol evidence in the run so all-caps doc
                 # headings ("IMPORTANT NOTICE") before a quoted BEGIN are not
                 # swept (round-21 precision). Classify normalized, redact raw.
-                run_end = 0
-                scan = 0
                 saw_body = False
                 have_evidence = False
-                prefix = stripped[:begin.start()]
-                while end is None and scan < len(prefix):
-                    while scan < len(prefix) and prefix[scan] in " \t":
-                        scan += 1
-                    tok_start = scan
-                    while scan < len(prefix) and prefix[scan] not in " \t":
-                        scan += 1
-                    ctok = _normalize_escaped_solidus(prefix[tok_start:scan])
-                    if (
-                        ctok
-                        and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(ctok) is not None
-                        and not _looks_like_english_token(ctok)
-                    ):
-                        saw_body = True
-                        run_end = scan
-                        if any(ch.isdigit() or ch in "+/=" for ch in ctok):
-                            have_evidence = True
-                    else:
-                        break
+                run_end = 0
+                if end is None:
+                    saw_body, have_evidence, run_end = _pem_leading_body_run(
+                        stripped[: begin.start()]
+                    )
                 if saw_body and have_evidence:
                     marker_start = c_start + begin.start()
                     model.append(
@@ -1718,6 +1743,56 @@ def _embedding_privacy_redact_private_keys(text: str) -> str:
     )
 
 
+def _pem_marker_with_inline_body(text: str) -> bool:
+    """True when a surviving private-key marker shares a line with a base64 run.
+
+    Marker-independent backstop (#383 rounds 4-5): prose that merely MENTIONS a
+    marker ("see -----BEGIN PRIVATE KEY----- for format") carries English
+    tokens, no 16+ base64 run, and passes; a marker the transform failed to
+    parse as structure but which sits beside real body material is blocked
+    fail-closed instead of shipping.
+    """
+    lower = text.lower()
+    if "private key-----" not in lower:
+        return False
+    for raw in text.splitlines() or [text]:
+        for piece in _split_serialized_pem_line(raw) if _PRIVATE_KEY_ESCAPED_SEPARATOR_HINT_RE.search(raw) else [(0, raw)]:
+            line = piece[1] if isinstance(piece, tuple) else piece
+            if "private key-----" not in line.lower():
+                continue
+            for m in _PRIVATE_KEY_INLINE_RUN_RE.finditer(line):
+                run = m.group(0)
+                if not _looks_like_english_token(run):
+                    return True
+    return False
+
+
+def _pem_fragment_near_private_key_placeholder(text: str) -> bool:
+    """True when a 16+ base64-charset token sits near a private_key placeholder.
+
+    Marker-independent backstop (#383 rounds 4-5): when the transform redacted
+    part of a key (the placeholder proves a key was here), any surviving
+    unbroken 16+ base64-alphabet token within the adjacency window is treated
+    as an orphaned body fragment and blocks the dispatch fail-closed — even a
+    word-shaped one ("internationalization"): beside a redacted PRIVATE KEY,
+    blocking a rare prose dispatch loudly beats shipping a key fragment.
+    """
+    marker = "[LCM embedding privacy: name=private_key]"
+    window = 160
+    start = 0
+    while True:
+        idx = text.find(marker, start)
+        if idx < 0:
+            return False
+        lo = max(0, idx - window)
+        hi = min(len(text), idx + len(marker) + window)
+        for m in _PRIVATE_KEY_INLINE_RUN_RE.finditer(text, lo, hi):
+            run = m.group(0)
+            if len(run) >= _PRIVATE_KEY_STRICT_MIN_CHARS and run not in marker:
+                return True
+        start = idx + len(marker)
+
+
 def _embedding_privacy_residual_patterns(
     text: str, active_names: Sequence[str]
 ) -> list[str]:
@@ -1728,9 +1803,15 @@ def _embedding_privacy_residual_patterns(
             # an earlier pattern consumed the BEGIN marker the redactor keys on, so
             # the key body shipped. Flag it even though the BEGIN-based redactor is
             # now blind. (BEGIN redaction still flagged for truncated/no-END blocks.)
+            # Backstops (#383): a surviving marker beside a base64 run, and an
+            # orphan 16+ base64 token adjacent to a private_key placeholder,
+            # both block fail-closed — the validator no longer shares the
+            # transform's marker-keyed blind spot.
             if (
                 _embedding_privacy_redact_private_keys(text) != text
                 or _has_orphaned_private_key_body(text)
+                or _pem_marker_with_inline_body(text)
+                or _pem_fragment_near_private_key_placeholder(text)
             ):
                 residual.append(name)
             continue
