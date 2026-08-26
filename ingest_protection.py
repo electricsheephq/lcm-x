@@ -106,9 +106,18 @@ _BASE64_LINE_ALPHABET_RE = re.compile(r"^[A-Za-z0-9+/=_-]+$")
 # markers, re-wrapped widths, inline one-line forms). It is NOT proof against
 # an adversary who re-encodes content — no content-based redactor can be,
 # since key material can be hex/base64-re-encoded, chunk-reordered, or
-# otherwise transformed arbitrarily. The dispatch validator is the fail-closed
-# second layer on the cloud path: structures the redactor cannot parse block
-# the embedding dispatch instead of leaking.
+# otherwise transformed arbitrarily. That out-of-scope class explicitly
+# INCLUDES a body deliberately de-contiguated — e.g. a >=159-char non-base64
+# line interleaved between every single body line so no two full-width lines
+# are adjacent and none sits within a placeholder's proximity window (#383
+# round-6 finding B): such an author already owns the key and has restructured
+# it beyond any realistic accidental paste/log/transcript shape. The dispatch
+# validator is the fail-closed second layer for the ACCIDENTAL-shape class: a
+# residual it recognizes as key structure (a marker beside a base64 run, a
+# fragment beside a private_key placeholder, or >=2 contiguous full-width body
+# lines) blocks the embedding dispatch instead of leaking. It does not claim to
+# block every conceivable unparseable arrangement — the deliberately
+# de-contiguated body above is out of declared scope, not a guaranteed block.
 # Base64 payload line: padding only ever trails (=/== suffix), so assignment
 # prose like `environment=prod` never classifies as key body. Strict (>=16
 # chars) lines anchor orphan-body detection; shorter lines join a run but
