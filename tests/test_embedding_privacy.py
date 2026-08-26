@@ -1102,6 +1102,11 @@ def test_round16_orphan_symmetry_and_escape_spellings(tmp_path):
     # physical/escaped separators split (the marker need not share the line).
     pkcs = "-----BEGIN PRIVATE KEY-----\nPKCS8\ndocumentation follows here"
     assert redact_sensitive_text(pkcs, cfg) == pkcs
+    noncontig = (
+        "-----BEGIN PRIVATE KEY-----\nAbCd1234\nexample\nEfGh5678\n"
+        "documentation follows here"
+    )
+    assert redact_sensitive_text(noncontig, cfg) == noncontig
     mixed = (
         "-----BEGIN PRIVATE KEY-----\n" + "Q" * 24 + "\\n" + "R" * 24
         + "\\n" + "S" * 24 + "\nprose stays"

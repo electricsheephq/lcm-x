@@ -820,7 +820,13 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                         seg = text[model[j][1]:model[j][2]].strip(" \t")
                         tok = seg.split()[-1] if seg.split() else seg
                         pending_shorts.append((j, len(tok.lstrip(">|-")) % 4 == 0))
-                elif run_kind != _PEM_LINE_KIND_LENIENT_B64:
+                elif run_kind == _PEM_LINE_KIND_LENIENT_B64:
+                    # An English-shaped line breaks short-run contiguity: a
+                    # real re-wrap is contiguous; identifier tokens separated
+                    # by words are documentation.
+                    if not saw_strict_run:
+                        pending_shorts = []
+                else:
                     break
                 j += 1
             if (
