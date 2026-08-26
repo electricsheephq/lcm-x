@@ -928,3 +928,24 @@ def test_round11_thread_sweep_shapes(tmp_path):
     # ...but a complete block with a short English body still redacts.
     complete = "-----BEGIN PRIVATE KEY-----\nexample\n-----END PRIVATE KEY-----"
     assert "example" not in redact_sensitive_text(complete, cfg)
+
+
+def test_every_splitlines_separator_survives_serialization(tmp_path):
+    # Closed-form: derive the separator set from str.splitlines itself, so
+    # this cannot go stale — any char Python treats as a line break must also
+    # split virtual lines in its json-serialized (escaped) form.
+    import json as _json
+
+    cfg = _config(tmp_path)
+    body = "Q" * 64
+    separators = [
+        chr(c) for c in range(0x110000 if False else 0x3000)
+        if len(("a" + chr(c) + "b").splitlines()) > 1
+    ]
+    assert len(separators) >= 10  # \n \r \v \f FS GS RS NEL LS PS
+    for sep in separators:
+        text = _json.dumps(
+            {"log": "-----BEGIN PRIVATE KEY-----" + sep + body + sep + "tail"}
+        )
+        redacted = redact_sensitive_text(text, cfg)
+        assert body not in redacted, f"leak with separator U+{ord(sep):04X}"

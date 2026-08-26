@@ -161,7 +161,13 @@ def _split_serialized_pem_line(content: str):
                 if run2 > end and run2 < n and content[run2] == "n":
                     end = run2 + 1
             elif nxt == "u" and content[run + 1:run + 5] in (
-                "2028", "2029", "000b", "000c", "0085",
+                # The COMPLETE str.splitlines separator set in \uXXXX form:
+                # VT, FF, FS, GS, RS, NEL, LS, PS. With \n/\r/\f handled as
+                # shorthands above, every separator splitlines honors is
+                # recognized when serialized — the enumeration is closed
+                # (test derives it from splitlines itself).
+                "000b", "000c", "001c", "001d", "001e",
+                "0085", "2028", "2029",
             ):
                 end = run + 5
         if end is None:
