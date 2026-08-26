@@ -384,9 +384,12 @@ class MessageStore:
             "observed_at_source",
             "ALTER TABLE messages ADD COLUMN observed_at_source TEXT",
         )
-        self._conn.execute(
-            "UPDATE messages SET ingested_at = timestamp WHERE ingested_at IS NULL"
-        )
+        if self._conn.execute(
+            "SELECT 1 FROM messages WHERE ingested_at IS NULL LIMIT 1"
+        ).fetchone():
+            self._conn.execute(
+                "UPDATE messages SET ingested_at = timestamp WHERE ingested_at IS NULL"
+            )
 
     # -- Write operations ---------------------------------------------------
 

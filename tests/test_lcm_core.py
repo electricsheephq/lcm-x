@@ -782,6 +782,7 @@ class TestConfig:
         assert c.extraction_model == ""
         assert c.extraction_output_path == ""
         assert c.sensitive_patterns_enabled is False
+        assert c.embedding_privacy_enabled is None
         assert c.sensitive_patterns == ["api_key", "bearer_token", "password_assignment", "private_key"]
         assert c.sensitive_patterns_source == "default"
         assert c.large_output_externalization_enabled is False
@@ -839,6 +840,7 @@ class TestConfig:
         monkeypatch.setenv("LCM_EXTRACTION_MODEL", "openai/gpt-5.4-mini")
         monkeypatch.setenv("LCM_EXTRACTION_OUTPUT_PATH", "/tmp/extractions")
         monkeypatch.setenv("LCM_SENSITIVE_PATTERNS_ENABLED", "true")
+        monkeypatch.setenv("LCM_EMBEDDING_PRIVACY_ENABLED", "false")
         monkeypatch.setenv("LCM_SENSITIVE_PATTERNS", "api_key,bearer_token")
         monkeypatch.setenv("LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED", "true")
         monkeypatch.setenv("LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS", "4096")
@@ -878,6 +880,7 @@ class TestConfig:
         assert c.extraction_model == "openai/gpt-5.4-mini"
         assert c.extraction_output_path == "/tmp/extractions"
         assert c.sensitive_patterns_enabled is True
+        assert c.embedding_privacy_enabled is False
         assert c.sensitive_patterns == ["api_key", "bearer_token"]
         assert c.sensitive_patterns_source == "env"
         assert c.large_output_externalization_enabled is True
@@ -8480,6 +8483,50 @@ class TestLCMEngineCloning:
             assert clone._config.database_path == prototype._config.database_path
             assert clone._hermes_home == prototype._hermes_home
         finally:
+            prototype.shutdown()
+            if clone is not None:
+                clone.shutdown()
+
+    def test_deepcopy_current_schema_does_not_require_writer_ownership(
+        self, tmp_path, monkeypatch
+    ):
+        """Hermes agent cloning must survive an in-flight FTS metadata writer."""
+        from hermes_lcm import store as store_module
+        from hermes_lcm.db_bootstrap import join_background_integrity_scans
+        from hermes_lcm.engine import LCMEngine
+
+        db_path = tmp_path / "lcm-deepcopy-writer.db"
+        config = LCMConfig(database_path=str(db_path))
+        prototype = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
+        clone = None
+        writer = None
+        try:
+            # Let first-open integrity scans publish their markers, then model the
+            # same valid WAL writer boundary while Hermes deep-copies the engine.
+            join_background_integrity_scans(timeout=30.0)
+            writer = sqlite3.connect(str(db_path), isolation_level=None)
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("BEGIN IMMEDIATE")
+
+            original_configure = store_module.configure_connection
+
+            def configure_without_lock_wait(conn):
+                original_configure(conn)
+                conn.execute("PRAGMA busy_timeout=1")
+
+            monkeypatch.setattr(
+                store_module, "configure_connection", configure_without_lock_wait
+            )
+
+            clone = copy.deepcopy(prototype)
+
+            assert isinstance(clone, LCMEngine)
+            assert clone is not prototype
+            assert clone._config.database_path == prototype._config.database_path
+        finally:
+            if writer is not None:
+                writer.rollback()
+                writer.close()
             prototype.shutdown()
             if clone is not None:
                 clone.shutdown()
