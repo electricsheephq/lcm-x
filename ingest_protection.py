@@ -188,6 +188,42 @@ _PRIVATE_KEY_ESCAPED_SEPARATOR_HINT_RE = re.compile(
 )
 
 
+def _normalize_escaped_solidus(text: str) -> str:
+    """Linear any-depth solidus unescape for CLASSIFICATION only.
+
+    A backslash run followed by "/" or "u002f"/"u002F" collapses to "/" —
+    json.dumps nesting doubles the backslashes per depth, and a regex here
+    would be quadratic on backslash storms (same class as the separator
+    scan), so the pass is hand-rolled. Never applied to redaction offsets:
+    callers classify on the normalized text and redact the raw slice.
+    """
+    if "\\" not in text:
+        return text
+    out = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch != "\\":
+            out.append(ch)
+            i += 1
+            continue
+        run = i
+        while run < n and text[run] == "\\":
+            run += 1
+        if run < n and text[run] == "/":
+            out.append("/")
+            i = run + 1
+            continue
+        if run + 4 < n and text[run] == "u" and text[run + 1:run + 5] in ("002f", "002F"):
+            out.append("/")
+            i = run + 5
+            continue
+        out.append(text[i:run])
+        i = run
+    return "".join(out)
+
+
 def _trim_pem_segment(piece: str) -> tuple[int, str]:
     """Linear trim of escape artifacts around a virtual PEM segment.
 
@@ -507,11 +543,7 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
         stripped = content.strip(" \t")
         # JSON's optional solidus escape (\/) is legal inside base64 bodies;
         # classify on the unescaped form, keep offsets on the raw text.
-        class_stripped = stripped
-        if "\\" in class_stripped:
-            for esc in ("\\/", "\\u002f", "\\u002F"):
-                if esc in class_stripped:
-                    class_stripped = class_stripped.replace(esc, "/")
+        class_stripped = _normalize_escaped_solidus(stripped)
         lead = content.find(stripped[:1]) if stripped else 0
         c_start = line_start + (lead if stripped else 0)
         c_end = c_start + len(stripped)
@@ -638,11 +670,7 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
         # An ARMOR-shaped line can be a colon-ended log prefix ("INFO: MII…")
         # in front of real body — prefix-strip before trusting the armor
         # shape; genuine armor values (commas, spaces) never classify as body.
-        rest = text[model[idx][1]:model[idx][2]]
-        if "\\" in rest:
-            for esc in ("\\/", "\\u002f", "\\u002F"):
-                if esc in rest:
-                    rest = rest.replace(esc, "/")
+        rest = _normalize_escaped_solidus(text[model[idx][1]:model[idx][2]])
         # Attached Markdown/quote markers (">MII…", "|MII…") carry no
         # whitespace; strip them before any classification.
         rest = rest.lstrip(">|").strip(" \t")

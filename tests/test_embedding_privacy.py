@@ -1057,6 +1057,21 @@ def test_round16_orphan_symmetry_and_escape_spellings(tmp_path):
     )
     assert "QQQQabcd" not in redact_sensitive_text(pfx_solidus, cfg)
 
+    # R17: solidus escapes nest with serialization depth — derive depths 1-3
+    # from json.dumps itself so the spelling can never drift.
+    import json as _json16
+
+    inner = {"log": "INFO -----BEGIN PRIVATE KEY-----\nINFO " + "QQQQabcd" * 4 + "/QQQQ\nprose"}
+    d1 = _json16.dumps(inner)
+    d2 = _json16.dumps({"o": d1})
+    d3 = _json16.dumps({"oo": d2})
+    for depth_text in (d1, d2, d3):
+        for redacted in (
+            redact_sensitive_text(depth_text, cfg),
+            protect_embedding_text(depth_text, cfg)[0],
+        ):
+            assert "QQQQabcd" not in redacted
+
     # Precision: suffixed marker mentions and hash dumps stay untouched.
     for keep in (
         "we discussed the -----END PRIVATE KEY----- marker in prose",
