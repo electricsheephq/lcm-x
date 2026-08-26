@@ -1112,6 +1112,18 @@ def test_round16_orphan_symmetry_and_escape_spellings(tmp_path):
         "INFO EfGh5678\ndocumentation follows here"
     )
     assert redact_sensitive_text(pfx_noncontig, cfg) == pfx_noncontig
+
+    # R25: array-serialized quoted lines, punctuated END markers, multi-blanks.
+    import json as _json25
+
+    arr = _json25.dumps(["-----BEGIN PRIVATE KEY-----", body, "CDEF"])
+    assert body not in redact_sensitive_text(arr, cfg)
+    punct = body + "\n-----END PRIVATE KEY-----.\nprose stays"
+    out = redact_sensitive_text(punct, cfg)
+    assert body not in out and "prose stays" in out
+    blanks = "-----BEGIN PRIVATE KEY-----\n\n\n" + body + "\nprose stays"
+    out = redact_sensitive_text(blanks, cfg)
+    assert body not in out and "prose stays" in out
     mixed = (
         "-----BEGIN PRIVATE KEY-----\n" + "Q" * 24 + "\\n" + "R" * 24
         + "\\n" + "S" * 24 + "\nprose stays"

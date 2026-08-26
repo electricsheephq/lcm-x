@@ -519,9 +519,7 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
         line_start = offset
         offset += len(raw)
         content = raw.splitlines()[0] if raw else ""
-        if "\\" in content and (
-            _PRIVATE_KEY_ESCAPED_SEPARATOR_HINT_RE.search(content) is not None
-        ):
+        if _PRIVATE_KEY_ESCAPED_SEPARATOR_HINT_RE.search(content) is not None:
             # JSON/log-serialized key: literal \n (optionally \r\n) escape
             # sequences at any serialization depth are the key's real line
             # separators, and bare quotes delimit the serialized string — both
@@ -579,9 +577,10 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
                 marker_end = c_start + end.end()
                 if end.start() == 0 and end.end() == len(stripped):
                     kind = _PEM_LINE_KIND_END
-                elif end.end() == len(stripped):
+                elif not stripped[end.end():].strip("\"'),.;:]}"):
                     # Prefix of any length (labels, timestamped log lines)
-                    # with NOTHING after the marker: key structure.
+                    # with nothing but closing punctuation after the marker
+                    # (serialization/prose terminators): key structure.
                     kind = _PEM_LINE_KIND_END_INLINE
                 else:
                     # A SUFFIX after the marker ("see -----END ... ----- for
@@ -769,20 +768,20 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
             ):
                 armor += 1
                 j += 1
-            if j < n and (
-                model[j][0] == _PEM_LINE_KIND_BLANK
-                or (
-                    model[j][0] == _PEM_LINE_KIND_OTHER
-                    and 0
-                    < len(tokens := text[model[j][1]:model[j][2]].split())
-                    <= 6
-                    and all(len(tok) <= 12 for tok in tokens)
-                    and effective_kind(j) == _PEM_LINE_KIND_OTHER
-                )
-            ):
-                # The armor/body separator: a blank line, or its log-prefixed
-                # remnant (a lone short prefix token).
+            while j < n and model[j][0] == _PEM_LINE_KIND_BLANK:
                 j += 1
+            if j < n and (
+                model[j][0] == _PEM_LINE_KIND_OTHER
+                and 0
+                < len(tokens := text[model[j][1]:model[j][2]].split())
+                <= 6
+                and all(len(tok) <= 12 for tok in tokens)
+                and effective_kind(j) == _PEM_LINE_KIND_OTHER
+            ):
+                # A log-prefixed blank remnant (lone short prefix tokens).
+                j += 1
+                while j < n and model[j][0] == _PEM_LINE_KIND_BLANK:
+                    j += 1
             if armor and (j >= n or effective_kind(j) not in (
                 _PEM_LINE_KIND_STRICT_B64,
                 _PEM_LINE_KIND_SHORT_B64,
