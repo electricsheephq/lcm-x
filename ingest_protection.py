@@ -323,7 +323,7 @@ _PRIVATE_KEY_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----", re.IGNO
 # marker of any armor type (#383 finding #3), so the leading-body-run split
 # keys off the generic marker. Hyphenated labels (CERTIFICATE-REQUEST,
 # X509-CRL) are legal armor labels and must match too.
-_PEM_ANY_MARKER_RE = re.compile(r"-----(?:BEGIN|END) [A-Z0-9 -]*[A-Z0-9]-----", re.IGNORECASE)
+_PEM_ANY_MARKER_RE = re.compile(r"-----(?:BEGIN|END) [A-Z0-9 _-]*[A-Z0-9]-----", re.IGNORECASE)
 _EXTERNALIZED_PLACEHOLDER_PREFIX = "[Externalized LCM ingest payload:"
 _QUARANTINED_ASSISTANT_KIND = "quarantined_assistant_output"
 _QUARANTINED_ASSISTANT_REASON = "high_repetition"
@@ -638,14 +638,23 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
             # so all-caps doc headings before a marker are not swept.
             gmarker = _PEM_ANY_MARKER_RE.search(stripped)
             if gmarker is not None and gmarker.start() > 0:
+                prefix_seg = stripped[: gmarker.start()]
+                # Strip a leading markdown blockquote / diff prefix ("> ", "+ ",
+                # "- ") so a prefixed truncated tail before a non-private marker
+                # still scans as body (#383 round-7, ckrYc). Offset the emitted
+                # STRICT_B64 span past the stripped prefix so raw bounds stay exact.
+                pfx = 0
+                while pfx < len(prefix_seg) and prefix_seg[pfx] in ">+- \t":
+                    pfx += 1
                 saw_body, have_evidence, run_end = _pem_leading_body_run(
-                    stripped[: gmarker.start()]
+                    prefix_seg[pfx:]
                 )
                 if saw_body and have_evidence:
+                    body_start = c_start + pfx
                     model.append(
-                        (_PEM_LINE_KIND_STRICT_B64, c_start, c_start + run_end, c_start, -1)
+                        (_PEM_LINE_KIND_STRICT_B64, body_start, body_start + run_end, body_start, -1)
                     )
-                    rem_start = c_start + run_end
+                    rem_start = body_start + run_end
                     model.append(
                         (_PEM_LINE_KIND_OTHER, rem_start, c_end, rem_start, -1)
                     )
@@ -1858,12 +1867,21 @@ def _embedding_privacy_residual_patterns(
             # lines — all block fail-closed, so the validator no longer shares
             # the transform's marker/placeholder-keyed blind spot (round 6
             # closed a truncated body split by a long non-base64 line).
+            # The marker-independent backstops scan for base64 runs; escaped
+            # solidi (\/, any depth) split a run into sub-16 chunks and hide it,
+            # so also run them on the solidi-normalized text (#383 round-7,
+            # chwFQ). Placeholders and markers carry no solidi, so normalization
+            # only rejoins base64 — strictly more sensitive, detection-only.
+            normalized = _normalize_escaped_solidus(text)
             if (
                 _embedding_privacy_redact_private_keys(text) != text
                 or _has_orphaned_private_key_body(text)
                 or _pem_marker_with_inline_body(text)
+                or _pem_marker_with_inline_body(normalized)
                 or _pem_fragment_near_private_key_placeholder(text)
+                or _pem_fragment_near_private_key_placeholder(normalized)
                 or _has_orphan_full_width_base64_run(text)
+                or _has_orphan_full_width_base64_run(normalized)
             ):
                 residual.append(name)
             continue

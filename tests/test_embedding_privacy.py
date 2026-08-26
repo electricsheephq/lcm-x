@@ -1542,3 +1542,40 @@ def test_full_width_base64_backstop_stays_linear(tmp_path):
     validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
     assert _time.perf_counter() - started < 3.0
     assert "AAAA" not in protected
+
+
+@pytest.mark.parametrize(
+    ("label", "text", "frag"),
+    [
+        (
+            "escaped-solidus-inline-body",
+            "-----BEGIN PRIVATE KEY----- AAAAAAABBBBBBB\\/CCCCCCCDDDDDDD\\/EEEEEEE "
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----",
+            "AAAAAAABBBBBBB",
+        ),
+        (
+            "underscore-marker-label",
+            "-----BEGIN PRIVATE KEY-----\nSHORT99AAAA1111BBBB2222 -----BEGIN FOO_BAR-----\n"
+            "X\n-----END FOO_BAR-----",
+            "SHORT99AAAA1111BBBB2222",
+        ),
+        (
+            "markdown-prefix-before-nonkey-marker",
+            "-----BEGIN PRIVATE KEY-----\n> SECRETBODY1234567890AB -----BEGIN CERTIFICATE-----\n"
+            "C\n-----END CERTIFICATE-----",
+            "SECRETBODY1234567890AB",
+        ),
+    ],
+    ids=["escaped-solidus", "underscore-marker", "markdown-prefix"],
+)
+def test_round7_marker_adjacency_variants_never_dispatch_raw(tmp_path, label, text, frag):
+    cfg = _config(tmp_path, enabled=False)
+    try:
+        protected, revision, _changed = protect_embedding_text(text, cfg)
+    except EmbeddingPrivacyPolicyError:
+        return  # blocked fail-closed at the transform layer
+    if frag in protected:
+        with pytest.raises(EmbeddingPrivacyPolicyError):
+            validate_embedding_privacy_dispatch(
+                [protected], cfg, expected_revision=revision
+            )
