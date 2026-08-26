@@ -872,3 +872,58 @@ def test_round9_escape_artifact_normalization(tmp_path):
         protect_embedding_text(five, cfg)[0],
     ):
         assert body not in redacted
+
+
+def test_round11_thread_sweep_shapes(tmp_path):
+    # Round-11 (PR-thread sweep): CodeQL ReDoS on the trim regexes (now
+    # linear hand-rolled scans + linear segment splitter), missing escaped
+    # separator classes, body-on-BEGIN-line, END-before-BEGIN ordering,
+    # one-line orphan bodies (v1-era migration rows), and bare English
+    # tokens as body evidence.
+    import json as _json
+    import time as _time
+
+    cfg = _config(tmp_path)
+    revision = embedding_privacy_revision(cfg)
+    body = "Q" * 64
+    mii = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC"
+
+    # ReDoS: long backslash runs are linear (was 34s at 100k pre-fix).
+    started = _time.perf_counter()
+    redact_sensitive_text(
+        "-----BEGIN PRIVATE KEY-----\\n" + "\\" * 100000 + "x", cfg
+    )
+    assert _time.perf_counter() - started < 1.0
+
+    # Escaped separator classes json.dumps emits beyond \n.
+    for sep in ("\\r", "\\u2028", "\\u000b"):
+        text = '{"log": "-----BEGIN PRIVATE KEY-----' + sep + body + sep + 'tail"}'
+        assert body not in redact_sensitive_text(text, cfg)
+
+    # Newline-normalized: payload ON the BEGIN line.
+    joined = "-----BEGIN PRIVATE KEY----- " + mii + "\n-----END PRIVATE KEY-----"
+    assert mii not in redact_sensitive_text(joined, cfg)
+    joined_trunc = "-----BEGIN PRIVATE KEY----- " + mii + "\nprose stays"
+    out = redact_sensitive_text(joined_trunc, cfg)
+    assert mii not in out and "prose stays" in out
+
+    # Compacted "END ... BEGIN" line closes the preceding orphan run.
+    compact = (
+        body + "\n-----END PRIVATE KEY----- -----BEGIN PRIVATE KEY-----\n"
+        + "R" * 64 + "\n-----END PRIVATE KEY-----"
+    )
+    out = redact_sensitive_text(compact, cfg)
+    assert body not in out and "R" * 64 not in out
+
+    # One-line orphan body (upgraded v1-era row): redacted AND dispatch-blocked.
+    orphan_line = "[old placeholder] " + mii + " -----END PRIVATE KEY-----"
+    assert mii not in redact_sensitive_text(orphan_line, cfg)
+    with pytest.raises(EmbeddingPrivacyPolicyError):
+        validate_embedding_privacy_dispatch([orphan_line], cfg, expected_revision=revision)
+
+    # Bare English tokens are never truncated-redaction evidence...
+    prose = "-----BEGIN PRIVATE KEY-----\nThisIsNotAKeyLine\nfoo bar"
+    assert redact_sensitive_text(prose, cfg) == prose
+    # ...but a complete block with a short English body still redacts.
+    complete = "-----BEGIN PRIVATE KEY-----\nexample\n-----END PRIVATE KEY-----"
+    assert "example" not in redact_sensitive_text(complete, cfg)

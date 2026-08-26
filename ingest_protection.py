@@ -121,20 +121,135 @@ _PRIVATE_KEY_STRICT_MIN_CHARS = 16
 _PRIVATE_KEY_INLINE_RUN_RE = re.compile(r"[A-Za-z0-9+/]{16,}")
 # One-or-more backslashes covers every nesting depth of serialization
 # ("\\n" from json.dumps, "\\\\n" from json-of-json / logged JSON).
-_PRIVATE_KEY_ESCAPED_NEWLINE_RE = re.compile(r"\\+(?:r\\+)?n|\"")
-_PRIVATE_KEY_SEGMENT_LEAD_TRIM_RE = re.compile(r"(?:\\+t|[ \t])+")
-_PRIVATE_KEY_SEGMENT_TRAIL_TRIM_RE = re.compile(r"(?:\\+t?|[ \t])+$")
+def _split_serialized_pem_line(content: str):
+    """Yield (offset, piece) splitting on escaped separators and bare quotes.
+
+    Single linear pass. A regex here is quadratic on long backslash runs
+    (every failed start re-consumes the run — measured 34s at 100k), so the
+    scan is hand-rolled: a backslash run followed by an escaped line
+    separator (n, r, r\\n at any depth, or u2028/u2029/u000b/u000c/u0085)
+    or a bare quote splits the line; anything else is content.
+    """
+    n = len(content)
+    seg_start = 0
+    i = 0
+    while i < n:
+        ch = content[i]
+        if ch == '"':
+            yield seg_start, content[seg_start:i]
+            i += 1
+            seg_start = i
+            continue
+        if ch != "\\":
+            i += 1
+            continue
+        run = i
+        while run < n and content[run] == "\\":
+            run += 1
+        end = None
+        if run < n:
+            nxt = content[run]
+            if nxt == "n":
+                end = run + 1
+            elif nxt == "r":
+                end = run + 1
+                run2 = end
+                while run2 < n and content[run2] == "\\":
+                    run2 += 1
+                if run2 > end and run2 < n and content[run2] == "n":
+                    end = run2 + 1
+            elif nxt == "u" and content[run + 1:run + 5] in (
+                "2028", "2029", "000b", "000c", "0085",
+            ):
+                end = run + 5
+        if end is None:
+            # Not a separator: resume AT the char after the run so an escaped
+            # quote (backslash + quote) still splits on its quote.
+            i = run
+            continue
+        yield seg_start, content[seg_start:i]
+        i = end
+        seg_start = end
+    yield seg_start, content[seg_start:]
+
+
+_PRIVATE_KEY_ESCAPED_SEPARATOR_HINT_RE = re.compile(
+    r"\\[rnu]|\""
+)
+
+
+def _trim_pem_segment(piece: str) -> tuple[int, str]:
+    """Linear trim of escape artifacts around a virtual PEM segment.
+
+    Removes leading/trailing horizontal whitespace and escaped-tab (\t at any
+    escaping depth) plus trailing escape backslashes (the next separator's or
+    closing quote's escapes). Hand-rolled scans — the earlier regexes had
+    nested quantifiers with exponential backtracking on backslash runs
+    (CodeQL js/redos-class finding on this PR).
+    """
+    start = 0
+    n = len(piece)
+    while start < n:
+        ch = piece[start]
+        if ch in " \t":
+            start += 1
+            continue
+        if ch == "\\":
+            run = start
+            while run < n and piece[run] == "\\":
+                run += 1
+            if run < n and piece[run] == "t":
+                start = run + 1
+                continue
+        break
+    end = n
+    while end > start:
+        ch = piece[end - 1]
+        if ch in " \t":
+            end -= 1
+            continue
+        if ch == "\\":
+            end -= 1
+            continue
+        if ch == "t":
+            run = end - 1
+            while run > start and piece[run - 1] == "\\":
+                run -= 1
+            if run < end - 1:
+                end = run
+                continue
+        break
+    return start, piece[start:end]
 # Real base64 key material is high-entropy; an English word/identifier shape
 # (pure lowercase, or a single capitalized word) is overwhelmingly prose
 # (p(base64) ~1e-6 for 16+ pure-lowercase chars), so prefixed-tail
 # classification rejects it — "service productionservice" is config prose,
 # not a key line. Applies only to prefix-stripped/prefixed tails; anchored
 # body lines keep the plain alphabet rule.
-_PRIVATE_KEY_ENGLISH_TOKEN_RE = re.compile(r"[a-z]+|[A-Z][a-z]+")
-
-
 def _looks_like_english_token(token: str) -> bool:
-    return _PRIVATE_KEY_ENGLISH_TOKEN_RE.fullmatch(token) is not None
+    """English word/identifier shape vs base64-ish key material.
+
+    Letters-only tokens: pure lowercase ("example") and Camel/Title case
+    ("Report", "ThisIsNotAKeyLine") read as prose. Base64 of random bytes is
+    distinguished by uppercase RUNS: a mixed-case letters-only token with 3+
+    consecutive capitals ("MIIEvQIBADANBgkq…") — or an all-caps token — stays
+    body-eligible. Anything with a digit, +, /, or = is never English-shaped.
+    """
+    if not token.isalpha() or not token.isascii():
+        return False
+    if token.islower():
+        return True
+    if token.isupper():
+        return False
+    run = 0
+    for ch in token:
+        if ch.isupper():
+            run += 1
+            if run >= 3:
+                return False
+        else:
+            run = 0
+    return True
 # No ^$ anchors: used via fullmatch(text, pos, endpos), where "^" would only
 # match at the real string start, not at pos.
 # Backslash admits JSON/log-serialized keys whose newlines are literal \n
@@ -331,6 +446,7 @@ _PEM_LINE_KIND_ARMOR = 6
 _PEM_LINE_KIND_BLANK = 7
 _PEM_LINE_KIND_END_LOOSE = 8
 _PEM_LINE_KIND_PREFIXED_B64 = 9
+_PEM_LINE_KIND_LENIENT_B64 = 10
 
 
 def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
@@ -358,7 +474,7 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
         offset += len(raw)
         content = raw.splitlines()[0] if raw else ""
         if "\\" in content and "PRIVATE KEY-----" in content.upper() and (
-            _PRIVATE_KEY_ESCAPED_NEWLINE_RE.search(content) is not None
+            _PRIVATE_KEY_ESCAPED_SEPARATOR_HINT_RE.search(content) is not None
         ):
             # JSON/log-serialized key: literal \n (optionally \r\n) escape
             # sequences at any serialization depth are the key's real line
@@ -367,21 +483,13 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
             # short tails inside serialized text classify exactly like
             # unserialized ones (a tail glued to the JSON closer, "CDEF\"}",
             # still classifies). Offsets stay absolute; spans stay exact.
-            pos = 0
-            for piece in _PRIVATE_KEY_ESCAPED_NEWLINE_RE.split(content):
-                seg_start = content.find(piece, pos)
-                pos = seg_start + len(piece)
+            for seg_start, piece in _split_serialized_pem_line(content):
                 # Serialization artifacts are not content: escaped-tab
                 # indentation (\t at any depth) leads a segment, and the
                 # escape backslashes of the following separator/closing quote
                 # trail it — trim both so the payload classifies.
-                lead = _PRIVATE_KEY_SEGMENT_LEAD_TRIM_RE.match(piece)
-                if lead is not None and lead.end():
-                    seg_start += lead.end()
-                    piece = piece[lead.end():]
-                trail = _PRIVATE_KEY_SEGMENT_TRAIL_TRIM_RE.search(piece)
-                if trail is not None and trail.start() < len(piece):
-                    piece = piece[:trail.start()]
+                trim_off, piece = _trim_pem_segment(piece)
+                seg_start += trim_off
                 segments.append((line_start + seg_start, piece))
         else:
             segments.append((line_start, content))
@@ -395,26 +503,48 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
         marker_end = -1
         if "PRIVATE KEY-----" in stripped.upper():
             begin = _PRIVATE_KEY_BEGIN_RE.search(stripped)
+            end = _PRIVATE_KEY_END_RE.search(stripped)
             if begin is not None and begin.end() == len(stripped):
                 kind = _PEM_LINE_KIND_BEGIN
                 redact_start = c_start + begin.start()
-            else:
-                end = _PRIVATE_KEY_END_RE.search(stripped)
-                if end is not None and begin is None:
+                if end is not None and end.end() <= begin.start():
+                    # A compacted "END ... BEGIN" line: the leading END can
+                    # close a preceding orphan run before the BEGIN opens the
+                    # next block (marker_end carries the END bound).
                     marker_end = c_start + end.end()
-                    if end.start() == 0 and end.end() == len(stripped):
-                        kind = _PEM_LINE_KIND_END
-                    elif end.start() <= 20 and end.end() == len(stripped):
-                        # Short label prefix, nothing after the marker: key
-                        # structure ("label: -----END PRIVATE KEY-----").
-                        kind = _PEM_LINE_KIND_END_INLINE
-                    else:
-                        # Marker amid prose ("see -----END ... ----- for
-                        # format"): terminates a BEGIN-anchored block only,
-                        # never an orphan run — prose plus a nearby token must
-                        # not be consumed as a stripped key.
-                        kind = _PEM_LINE_KIND_END_LOOSE
-        elif stripped and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(stripped) is not None:
+            elif (
+                begin is not None
+                and (end is None or end.start() < begin.start())
+                and _PRIVATE_KEY_INLINE_SPAN_RE.fullmatch(
+                    stripped, begin.end()
+                )
+                and _PRIVATE_KEY_INLINE_RUN_RE.search(stripped, begin.end())
+            ):
+                # Newline-normalized form: the base64 payload sits ON the
+                # BEGIN line ("-----BEGIN ...----- MIIE…"), END on a later
+                # line. Treat as a BEGIN whose block span already includes
+                # the same-line body.
+                kind = _PEM_LINE_KIND_BEGIN
+                redact_start = c_start + begin.start()
+            elif end is not None and begin is None:
+                marker_end = c_start + end.end()
+                if end.start() == 0 and end.end() == len(stripped):
+                    kind = _PEM_LINE_KIND_END
+                elif end.start() <= 20 and end.end() == len(stripped):
+                    # Short label prefix, nothing after the marker: key
+                    # structure ("label: -----END PRIVATE KEY-----").
+                    kind = _PEM_LINE_KIND_END_INLINE
+                else:
+                    # Marker amid prose ("see -----END ... ----- for
+                    # format"): terminates a BEGIN-anchored block only,
+                    # never an orphan run — prose plus a nearby token must
+                    # not be consumed as a stripped key.
+                    kind = _PEM_LINE_KIND_END_LOOSE
+        elif (
+            stripped
+            and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(stripped) is not None
+            and not _looks_like_english_token(stripped)
+        ):
             if len(stripped) >= _PRIVATE_KEY_STRICT_MIN_CHARS:
                 kind = _PEM_LINE_KIND_STRICT_B64
             else:
@@ -493,6 +623,14 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
         # in front of real body — prefix-strip before trusting the armor
         # shape; genuine armor values (commas, spaces) never classify as body.
         rest = text[model[idx][1]:model[idx][2]]
+        if (
+            _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(rest.strip(" \t")) is not None
+        ):
+            # English-shaped single tokens ("abcdef", "example") count inside
+            # a BEGIN-anchored scan as ADJACENCY only: they keep a complete
+            # block's END reachable but never justify truncated redaction on
+            # their own (N1zc precision).
+            return _PEM_LINE_KIND_LENIENT_B64
         for _ in range(4):
             split = rest.split(None, 1)
             if len(split) < 2:
@@ -500,11 +638,9 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
             rest = split[1]
             # Serialized indentation can sit AFTER the prefix ("INFO \tMII…"):
             # normalize escaped horizontal whitespace at each strip step.
-            lead = _PRIVATE_KEY_SEGMENT_LEAD_TRIM_RE.match(rest)
-            if lead is not None and lead.end():
-                rest = rest[lead.end():]
-                if not rest:
-                    return kind
+            _off, rest = _trim_pem_segment(rest)
+            if not rest:
+                return kind
             if _PRIVATE_KEY_ARMOR_HEADER_RE.fullmatch(rest) is not None:
                 return _PEM_LINE_KIND_ARMOR
             if (
@@ -551,6 +687,7 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                 _PEM_LINE_KIND_STRICT_B64,
                 _PEM_LINE_KIND_SHORT_B64,
                 _PEM_LINE_KIND_PREFIXED_B64,
+                _PEM_LINE_KIND_LENIENT_B64,
                 _PEM_LINE_KIND_END,
                 _PEM_LINE_KIND_END_INLINE,
                 _PEM_LINE_KIND_END_LOOSE,
@@ -559,12 +696,16 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                 # structure (e.g. a bare BEGIN quoted above config lines).
                 i += 1
                 continue
-            while j < n and effective_kind(j) in (
-                _PEM_LINE_KIND_STRICT_B64,
-                _PEM_LINE_KIND_SHORT_B64,
-                _PEM_LINE_KIND_PREFIXED_B64,
-            ):
-                saw_b64 = True
+            while j < n:
+                run_kind = effective_kind(j)
+                if run_kind in (
+                    _PEM_LINE_KIND_STRICT_B64,
+                    _PEM_LINE_KIND_SHORT_B64,
+                    _PEM_LINE_KIND_PREFIXED_B64,
+                ):
+                    saw_b64 = True
+                elif run_kind != _PEM_LINE_KIND_LENIENT_B64:
+                    break
                 j += 1
             if j < n and model[j][0] == _PEM_LINE_KIND_END:
                 emit(redact_start, model[j][2])
@@ -580,6 +721,20 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
             if saw_b64:
                 emit(redact_start, model[j - 1][2])
                 i = j
+                continue
+            begin_m = _PRIVATE_KEY_BEGIN_RE.match(text, redact_start)
+            if (
+                begin_m is not None
+                and begin_m.end() < content_end
+                and _PRIVATE_KEY_INLINE_RUN_RE.search(
+                    text, begin_m.end(), content_end
+                )
+            ):
+                # Newline-normalized truncated form: the base64 payload sits
+                # ON the BEGIN line with nothing usable after — redact the
+                # marker plus its same-line body.
+                emit(redact_start, content_end)
+                i += 1
                 continue
             i += 1
             continue
@@ -605,7 +760,39 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                 )
                 i = j + 2
                 continue
+            if (
+                (has_strict or j > i)
+                and j + 1 < n
+                and model[j + 1][0] == _PEM_LINE_KIND_BEGIN
+                and model[j + 1][4] >= 0
+            ):
+                # Compacted "-----END ...----- -----BEGIN ...-----" line: its
+                # leading END closes this orphan run; the BEGIN half is then
+                # processed as its own block.
+                emit(redact_start, model[j + 1][4])
+                i = j + 1
+                continue
             i = j + 1
+            continue
+        if kind in (_PEM_LINE_KIND_END_INLINE, _PEM_LINE_KIND_END_LOOSE):
+            # Orphaned ONE-LINE body: an upgraded v1-era row can hold
+            # "<placeholder> MII… -----END PRIVATE KEY-----" on one physical
+            # line. A substantial contiguous base64 run directly before the
+            # marker (only base64/spacing between) is key material.
+            end_m = _PRIVATE_KEY_END_RE.search(text, redact_start, content_end)
+            if end_m is not None:
+                span_start = redact_start
+                probe = text[span_start:end_m.start()]
+                run = None
+                for m in _PRIVATE_KEY_INLINE_RUN_RE.finditer(probe):
+                    run = m
+                if run is not None and _PRIVATE_KEY_INLINE_SPAN_RE.fullmatch(
+                    probe, run.end()
+                ):
+                    emit(span_start + run.start(), end_m.end())
+                    i += 1
+                    continue
+            i += 1
             continue
         if kind == _PEM_LINE_KIND_OTHER and "PRIVATE KEY-----" in text[line_start:content_end].upper():
             scan = line_start
@@ -1185,6 +1372,19 @@ def _has_orphaned_private_key_body(text: str) -> bool:
             run_has_strict or run_len >= 2
         ):
             return True
+        if kind in (_PEM_LINE_KIND_END_INLINE, _PEM_LINE_KIND_END_LOOSE):
+            end_m = _PRIVATE_KEY_END_RE.search(
+                text, _redact_start, _content_end
+            )
+            if end_m is not None:
+                probe = text[_redact_start:end_m.start()]
+                run = None
+                for m in _PRIVATE_KEY_INLINE_RUN_RE.finditer(probe):
+                    run = m
+                if run is not None and _PRIVATE_KEY_INLINE_SPAN_RE.fullmatch(
+                    probe, run.end()
+                ):
+                    return True
         if kind in (_PEM_LINE_KIND_END, _PEM_LINE_KIND_END_INLINE) and seen_begin_line:
             # Fail-closed pair guard (cloud path): a surviving exact BEGIN
             # line before a surviving exact END line is a structure the
