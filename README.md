@@ -301,7 +301,8 @@ Cloud embeddings are a separate opt-in. Provider-bound copies use the configured
 sensitive-pattern catalog by default, while durable messages and FTS remain raw.
 `LCM_EMBEDDING_PRIVACY_ENABLED=false` explicitly opts out and binds vectors to
 the distinguished `privacy:off` revision. When provider-copy privacy is on, the
-catalog must contain at least one known pattern. Dry-run the backfill first;
+catalog must be nonempty and contain only supported pattern names (any unknown
+name fails warmup and dispatch loudly). Dry-run the backfill first;
 raw-chunk cloud backfill also requires explicit raw-text consent.
 See [the operator upgrade and privacy notes](docs/operator-guide.md#upgrade-to-v0231)
 before enabling embeddings.
@@ -498,7 +499,10 @@ remain untouched unless `LCM_SENSITIVE_PATTERNS_ENABLED=true` is explicitly set.
 Cloud embedding privacy is separate and transforms provider-bound copies only;
 it defaults on for known cloud providers and can be explicitly opted out with
 `LCM_EMBEDDING_PRIVACY_ENABLED=false`, which uses the `privacy:off` vector
-revision and sends raw embedding input. Local providers receive byte-identical
+revision and sends raw provider input. The nonempty known-pattern policy
+requirements for warmup, backfill, and semantic-query dispatch apply only when
+provider-copy privacy is ON — the explicit `privacy:off` opt-out bypasses
+catalog validation by design. Local providers receive byte-identical
 input and do not enter the cloud privacy path.
 
 When `LCM_SENSITIVE_PATTERNS_ENABLED=true`, matched

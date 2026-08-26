@@ -41,7 +41,8 @@ export LCM_EMBEDDING_MODEL=voyage-4-lite   # or voyage-4 / voyage-4-large
 /lcm embed backfill --apply         # embeds your history in bounded batches
 ```
 
-Known cloud providers protect only the copies sent for embedding, using
+Known cloud providers protect every provider-bound copy — embedding documents
+and queries, recall/grep/proactive query payloads, and rerank inputs — using
 `LCM_SENSITIVE_PATTERNS`, while the durable corpus remains lossless by default.
 Set `LCM_SENSITIVE_PATTERNS_ENABLED=true` only if you also want irreversible
 redaction on future durable ingest. To deliberately send raw embedding input,
