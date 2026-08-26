@@ -1,6 +1,12 @@
 """Phase A: isolated, runtime-enumerated live LCM tool matrix."""
 from __future__ import annotations
 import argparse
+
+if not __debug__:  # pragma: no cover - guarded before anything runs
+    raise SystemExit(
+        "phase_a_tool_matrix refuses optimized Python (-O/PYTHONOPTIMIZE): "
+        "assert statements implement the matrix postconditions"
+    )
 from contextlib import contextmanager
 import hashlib
 import importlib
@@ -300,7 +306,13 @@ def _privacy(mod, engine, outbound, *, expect_365_fixed):
     assert not [secret for fixture in fixtures if fixture["kind"] != "365" for secret in fixture["secrets"] if secret in recall], "recall leaked a non-#365 planted secret"
     if any(secret in recall for fixture in fixtures if fixture["kind"] == "365" for secret in fixture["secrets"]):
         known.append("recall")
-    assert json.loads(recall)["hits"]
+    recall_hits = json.loads(recall)["hits"]
+    assert recall_hits
+    assert any(
+        "[LCM sensitive redaction:" in json.dumps(hit)
+        or "[LCM embedding privacy:" in json.dumps(hit)
+        for hit in recall_hits
+    ), "recalled privacy-fixture hits carry no canonical redaction placeholder"
     if known and expect_365_fixed:
         raise AssertionError("#365 defining composition leaked on: " + ", ".join(sorted(set(known))))
     engine.on_session_start("gauntlet-c", conversation_id="conversation-gauntlet-c", platform="phase-a", context_length=200_000)
