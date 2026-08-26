@@ -149,13 +149,15 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
 
 ## Releases are rc-first (RELEASE-READINESS-V1)
 
-- Any release containing product code (outside `bench/`, docs, tests) MUST ship as a
-  `vX.Y.Z-rcN` prerelease first and pass the live gauntlet in
+- Any release containing product code (outside `bench/`, docs, tests, and
+  `.github/release-notes/`) MUST ship as a `vX.Y.Z-rcN` prerelease first and pass the live
+  gauntlet in
   `bench/specs/RELEASE-READINESS-V1.md` — Phase A (all-tools matrix on a fresh isolated clone,
   both privacy postures, planted-secret battery), Phase B (multi-agent P0/P1 adversarial sweep
   of the full release diff, upgrade/migration dimension mandatory), Phase C (30+ turn live
   `hermes acp` soak) — before the GA tag.
-- The GA tree must be byte-identical to the passing rc tree; GA release notes link the three
-  phase receipts. A P0/P1 gauntlet finding means fix → new rc → re-run.
+- The GA commit may differ from the passing rc tree by EXACTLY the release-notes addition
+  (mechanically verified: `git diff rcN..GA --name-only` ⊆ `.github/release-notes/`); GA notes
+  link the three phase receipts. A P0/P1 gauntlet finding means fix → new rc → re-run.
 - Agents preparing a release produce the rc tag and receipts; the GA cut itself follows the
   maintainers-own-releases rule above.
