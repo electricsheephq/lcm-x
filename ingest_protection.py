@@ -557,6 +557,43 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
             begin = _PRIVATE_KEY_BEGIN_RE.search(stripped)
             end = _PRIVATE_KEY_END_RE.search(stripped)
             if begin is not None and begin.end() == len(stripped):
+                # A truncated block's last body token can share a physical
+                # line with the BEGIN of the next block. Model those as two
+                # virtual lines so the open block can consume its body tail;
+                # otherwise the later BEGIN classification orphans the token
+                # before its own redact_start (#383).
+                prefix = stripped[:begin.start()]
+                token_end = 0
+                while token_end < len(prefix) and prefix[token_end] not in " \t":
+                    token_end += 1
+                raw_token = prefix[:token_end]
+                class_token = _normalize_escaped_solidus(raw_token)
+                if (
+                    end is None
+                    and len(class_token) >= _PRIVATE_KEY_STRICT_MIN_CHARS
+                    and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(class_token) is not None
+                    and not _looks_like_english_token(class_token)
+                ):
+                    marker_start = c_start + begin.start()
+                    model.append(
+                        (
+                            _PEM_LINE_KIND_STRICT_B64,
+                            c_start,
+                            c_start + len(raw_token),
+                            c_start,
+                            -1,
+                        )
+                    )
+                    model.append(
+                        (
+                            _PEM_LINE_KIND_BEGIN,
+                            marker_start,
+                            c_end,
+                            marker_start,
+                            -1,
+                        )
+                    )
+                    continue
                 kind = _PEM_LINE_KIND_BEGIN
                 redact_start = c_start + begin.start()
                 if end is not None and end.end() <= begin.start():

@@ -426,6 +426,106 @@ def test_summary_backfill_revalidates_policy_before_each_cloud_subdispatch(
 # --- #365: pattern-ordering bypass (password/passphrase prefix eats the PEM begin marker) ---
 
 _KEY_BODY = "MIIEvQIBADANBgkqSUPERSECRETKEYMATERIAL"
+_TRUNCATED_ARMOR_BODY = "GAUNTLETPEMTRUNCATEDB2"
+_ENCRYPTED_ARMOR_BODY = "GAUNTLETENCRYPTEDC3"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        (
+            "privacy fixture truncated -----BEGIN PRIVATE KEY-----\n"
+            + _TRUNCATED_ARMOR_BODY
+        ),
+        (
+            "privacy fixture complete -----BEGIN PRIVATE KEY-----\n"
+            "GAUNTLETPEMCOMPLETEA1\n-----END PRIVATE KEY-----\n"
+            "privacy fixture truncated -----BEGIN PRIVATE KEY-----\n"
+            + _TRUNCATED_ARMOR_BODY
+        ),
+        (
+            "privacy fixture truncated -----BEGIN PRIVATE KEY-----\n"
+            + _TRUNCATED_ARMOR_BODY
+            + " privacy fixture encrypted -----BEGIN ENCRYPTED PRIVATE KEY-----\n"
+            + _ENCRYPTED_ARMOR_BODY
+            + "\n-----END ENCRYPTED PRIVATE KEY-----"
+        ),
+        (
+            "privacy fixture complete -----BEGIN PRIVATE KEY-----\n"
+            "GAUNTLETPEMCOMPLETEA1\n-----END PRIVATE KEY-----\n"
+            "privacy fixture truncated -----BEGIN PRIVATE KEY-----\n"
+            + _TRUNCATED_ARMOR_BODY
+            + " privacy fixture encrypted -----BEGIN ENCRYPTED PRIVATE KEY-----\n"
+            + _ENCRYPTED_ARMOR_BODY
+            + "\n-----END ENCRYPTED PRIVATE KEY-----"
+        ),
+    ],
+    ids=[
+        "truncated-alone",
+        "complete-then-truncated",
+        "truncated-then-encrypted-armor",
+        "complete-then-truncated-then-encrypted-armor",
+    ],
+)
+def test_truncated_private_key_before_inline_begin_is_redacted(tmp_path, text):
+    cfg = _config(tmp_path, enabled=False)
+    with pytest.raises(EmbeddingPrivacyPolicyError, match="private_key"):
+        validate_embedding_privacy_dispatch(
+            [text], cfg, expected_revision=embedding_privacy_revision(cfg)
+        )
+
+    protected, revision, changed = protect_embedding_text(text, cfg)
+
+    assert changed is True
+    assert _TRUNCATED_ARMOR_BODY not in protected
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+
+
+def test_release_gauntlet_privacy_battery_join_has_no_standard_leak(tmp_path):
+    import json
+
+    cfg = _config(tmp_path, enabled=False)
+    planted = {
+        "pem_complete": "GAUNTLETPEMCOMPLETEA1",
+        "pem_truncated": _TRUNCATED_ARMOR_BODY,
+        "encrypted_armor": _ENCRYPTED_ARMOR_BODY,
+        "json_serialized": "GAUNTLETJSONSERIALIZEDD4",
+        "log_prefixed": "GAUNTLETLOGPREFIXE5",
+        "password": "GAUNTLETPASSWORDF6",
+        "api_key": "GAUNTLETAPIKEYG7",
+        "password_pem": "GAUNTLETPASSWORDPEMH8",
+        "passphrase_pem": "GAUNTLETPASSPHRASEPEMI9",
+        "quoted_password_pem": "GAUNTLETQUOTEDPASSWORDPEMJ0",
+        "chunk_path": "GAUNTLETCHUNKPATHK1",
+    }
+    long_chunk = " ".join(
+        f"Chunk safety sentence {index}." for index in range(180)
+    )
+    fixtures = [
+        ("standard", f"privacy fixture complete -----BEGIN PRIVATE KEY-----\n{planted['pem_complete']}\n-----END PRIVATE KEY-----", [planted["pem_complete"]]),
+        ("standard", f"privacy fixture truncated -----BEGIN PRIVATE KEY-----\n{planted['pem_truncated']}", [planted["pem_truncated"]]),
+        ("standard", f"privacy fixture encrypted -----BEGIN ENCRYPTED PRIVATE KEY-----\n{planted['encrypted_armor']}\n-----END ENCRYPTED PRIVATE KEY-----", [planted["encrypted_armor"]]),
+        ("standard", json.dumps({"private_key": f"-----BEGIN PRIVATE KEY-----\n{planted['json_serialized']}\n-----END PRIVATE KEY-----"}), [planted["json_serialized"]]),
+        ("standard", f"ERROR credential=-----BEGIN PRIVATE KEY-----\n{planted['log_prefixed']}\n-----END PRIVATE KEY-----", [planted["log_prefixed"]]),
+        ("standard", f"password={planted['password']} api_key={planted['api_key']}", [planted["password"], planted["api_key"]]),
+        ("365", f"password: -----BEGIN PRIVATE KEY-----\n{planted['password_pem']}\n-----END PRIVATE KEY-----", [planted["password_pem"]]),
+        ("365", f"passphrase=-----BEGIN PRIVATE KEY-----\n{planted['passphrase_pem']}\n-----END PRIVATE KEY-----", [planted["passphrase_pem"]]),
+        ("365", f"password=\"-----BEGIN PRIVATE KEY-----\n{planted['quoted_password_pem']}\n-----END PRIVATE KEY-----\"", [planted["quoted_password_pem"]]),
+        ("chunk", f"{long_chunk} api_key={planted['chunk_path']}", [planted["chunk_path"]]),
+    ]
+    joined = " ".join(content for _kind, content, _secrets in fixtures)
+    with pytest.raises(EmbeddingPrivacyPolicyError, match="private_key"):
+        validate_embedding_privacy_dispatch(
+            [joined], cfg, expected_revision=embedding_privacy_revision(cfg)
+        )
+
+    protected, revision, changed = protect_embedding_text(joined, cfg)
+
+    assert changed is True
+    for kind, _content, secrets in fixtures:
+        if kind != "365":
+            assert all(secret not in protected for secret in secrets), kind
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
 
 
 @pytest.mark.parametrize(
