@@ -1003,3 +1003,48 @@ def test_round14_serialization_and_prefix_variants(tmp_path):
     assert redact_sensitive_text(dump, cfg) == dump
     prose = "-----BEGIN PRIVATE KEY-----\nmeeting notes about the incident\nmore prose"
     assert redact_sensitive_text(prose, cfg) == prose
+
+
+def test_round16_orphan_symmetry_and_escape_spellings(tmp_path):
+    # Round-16: the END-anchored backward pass mirrors the BEGIN-anchored
+    # forward scan (prefixed/colon/timestamped orphan bodies), END tightness
+    # is suffix-based (a marker ending its line closes orphans regardless of
+    # prefix length), and \\u002f joins the solidus spellings.
+    cfg = _config(tmp_path)
+    revision = embedding_privacy_revision(cfg)
+    body = "Q" * 64
+
+    u002f = (
+        '{"log": "-----BEGIN PRIVATE KEY-----\\n'
+        + "QQQQabcd" * 4
+        + "\\u002f"
+        + "QQQQabcd" * 2
+        + '\\nprose"}'
+    )
+    colon_orphan = "INFO:" + body + "\nINFO:-----END PRIVATE KEY-----\nprose stays"
+    stamped_orphan = (
+        "2026-08-26T12:00:00Z INFO " + body + "\n"
+        "2026-08-26T12:00:00Z INFO -----END PRIVATE KEY-----\ntail prose"
+    )
+    for text, leak in (
+        (u002f, "QQQQabcd"),
+        (colon_orphan, body),
+        (stamped_orphan, body),
+    ):
+        for redacted in (
+            redact_sensitive_text(text, cfg),
+            protect_embedding_text(text, cfg)[0],
+        ):
+            assert leak not in redacted, text[:50]
+    assert "prose stays" in redact_sensitive_text(colon_orphan, cfg)
+    assert "tail prose" in redact_sensitive_text(stamped_orphan, cfg)
+    protected, _r, _c = protect_embedding_text(colon_orphan, cfg)
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+
+    # Precision: suffixed marker mentions and hash dumps stay untouched.
+    for keep in (
+        "we discussed the -----END PRIVATE KEY----- marker in prose",
+        "abcdef0123456789AB\nsee label: -----END PRIVATE KEY----- for format details",
+        "INFO " + "a1b2c3d4" * 8 + "\nINFO " + "e5f6a7b8" * 8 + "\nno markers anywhere",
+    ):
+        assert redact_sensitive_text(keep, cfg) == keep

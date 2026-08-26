@@ -507,9 +507,11 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
         stripped = content.strip(" \t")
         # JSON's optional solidus escape (\/) is legal inside base64 bodies;
         # classify on the unescaped form, keep offsets on the raw text.
-        class_stripped = (
-            stripped.replace("\\/", "/") if "\\/" in stripped else stripped
-        )
+        class_stripped = stripped
+        if "\\" in class_stripped:
+            for esc in ("\\/", "\\u002f", "\\u002F"):
+                if esc in class_stripped:
+                    class_stripped = class_stripped.replace(esc, "/")
         lead = content.find(stripped[:1]) if stripped else 0
         c_start = line_start + (lead if stripped else 0)
         c_end = c_start + len(stripped)
@@ -545,15 +547,14 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
                 marker_end = c_start + end.end()
                 if end.start() == 0 and end.end() == len(stripped):
                     kind = _PEM_LINE_KIND_END
-                elif end.start() <= 20 and end.end() == len(stripped):
-                    # Short label prefix, nothing after the marker: key
-                    # structure ("label: -----END PRIVATE KEY-----").
+                elif end.end() == len(stripped):
+                    # Prefix of any length (labels, timestamped log lines)
+                    # with NOTHING after the marker: key structure.
                     kind = _PEM_LINE_KIND_END_INLINE
                 else:
-                    # Marker amid prose ("see -----END ... ----- for
-                    # format"): terminates a BEGIN-anchored block only,
-                    # never an orphan run — prose plus a nearby token must
-                    # not be consumed as a stripped key.
+                    # A SUFFIX after the marker ("see -----END ... ----- for
+                    # format"): prose context — terminates a BEGIN-anchored
+                    # block only, never an orphan run.
                     kind = _PEM_LINE_KIND_END_LOOSE
         elif (
             class_stripped
@@ -657,10 +658,6 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
             if len(colon_after) >= _PRIVATE_KEY_STRICT_MIN_CHARS:
                 return _PEM_LINE_KIND_STRICT_B64
             return _PEM_LINE_KIND_SHORT_B64
-        if _PRIVATE_KEY_ARMOR_HEADER_RE.fullmatch(rest) is not None:
-            # Armor headers, attached-marker form included
-            # (">Proc-Type: 4,ENCRYPTED").
-            return _PEM_LINE_KIND_ARMOR
         if _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(rest) is not None:
             if not _looks_like_english_token(rest):
                 if len(rest) >= _PRIVATE_KEY_STRICT_MIN_CHARS:
@@ -685,16 +682,24 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
             and max(len(tok) for tok in tokens) >= 8
         ):
             return _PEM_LINE_KIND_STRICT_B64
+        armor_shape = _PRIVATE_KEY_ARMOR_HEADER_RE.fullmatch(rest) is not None
         for _ in range(4):
             split = rest.split(None, 1)
             if len(split) < 2:
+                # No further tokens: an armor-shaped line with no hidden body
+                # (">Proc-Type: 4,ENCRYPTED", "Proc-Type: 4,ENCRYPTED") is
+                # armor; anything else keeps its context-free kind. Checked
+                # AFTER token-stripping so a timestamped/colon log prefix
+                # hiding real body ("2026-…Z INFO MII…") classifies as body.
+                if armor_shape:
+                    return _PEM_LINE_KIND_ARMOR
                 return kind
             rest = split[1]
             # Serialized indentation can sit AFTER the prefix ("INFO \tMII…"):
             # normalize escaped horizontal whitespace at each strip step.
             _off, rest = _trim_pem_segment(rest)
             if not rest:
-                return kind
+                return _PEM_LINE_KIND_ARMOR if armor_shape else kind
             if _PRIVATE_KEY_ARMOR_HEADER_RE.fullmatch(rest) is not None:
                 return _PEM_LINE_KIND_ARMOR
             if (
@@ -844,6 +849,37 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                 continue
             i = j + 1
             continue
+        if kind in (_PEM_LINE_KIND_END, _PEM_LINE_KIND_END_INLINE):
+            # END-anchored backward pass (symmetric to the BEGIN-anchored
+            # forward pass): prefixed/colon orphan bodies classify OTHER or
+            # ARMOR context-free, so a preceding run is only visible with
+            # prefix-aware reclassification. Bounded lookback; evidence
+            # rules identical to the forward scan.
+            back = i - 1
+            first_evidence = -1
+            saw_back_evidence = False
+            while back >= 0 and i - back <= 200:
+                bk = effective_kind(back)
+                if bk in (
+                    _PEM_LINE_KIND_STRICT_B64,
+                    _PEM_LINE_KIND_SHORT_B64,
+                    _PEM_LINE_KIND_PREFIXED_B64,
+                ):
+                    saw_back_evidence = saw_back_evidence or bk != _PEM_LINE_KIND_SHORT_B64
+                    first_evidence = back
+                    back -= 1
+                    continue
+                if bk == _PEM_LINE_KIND_LENIENT_B64:
+                    back -= 1
+                    continue
+                break
+            if saw_back_evidence and first_evidence >= 0:
+                end_bound = content_end if kind == _PEM_LINE_KIND_END else _marker_end
+                # Never cross content already emitted (an earlier redaction
+                # inside the lookback window): clamp to the cursor.
+                emit(max(model[first_evidence][1], cursor), end_bound)
+                i += 1
+                continue
         if kind in (_PEM_LINE_KIND_END_INLINE, _PEM_LINE_KIND_END_LOOSE):
             # Orphaned ONE-LINE body: an upgraded v1-era row can hold
             # "<placeholder> MII… -----END PRIVATE KEY-----" on one physical
