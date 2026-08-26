@@ -8487,6 +8487,50 @@ class TestLCMEngineCloning:
             if clone is not None:
                 clone.shutdown()
 
+    def test_deepcopy_current_schema_does_not_require_writer_ownership(
+        self, tmp_path, monkeypatch
+    ):
+        """Hermes agent cloning must survive an in-flight FTS metadata writer."""
+        from hermes_lcm import store as store_module
+        from hermes_lcm.db_bootstrap import join_background_integrity_scans
+        from hermes_lcm.engine import LCMEngine
+
+        db_path = tmp_path / "lcm-deepcopy-writer.db"
+        config = LCMConfig(database_path=str(db_path))
+        prototype = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
+        clone = None
+        writer = None
+        try:
+            # Let first-open integrity scans publish their markers, then model the
+            # same valid WAL writer boundary while Hermes deep-copies the engine.
+            join_background_integrity_scans(timeout=30.0)
+            writer = sqlite3.connect(str(db_path), isolation_level=None)
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("BEGIN IMMEDIATE")
+
+            original_configure = store_module.configure_connection
+
+            def configure_without_lock_wait(conn):
+                original_configure(conn)
+                conn.execute("PRAGMA busy_timeout=1")
+
+            monkeypatch.setattr(
+                store_module, "configure_connection", configure_without_lock_wait
+            )
+
+            clone = copy.deepcopy(prototype)
+
+            assert isinstance(clone, LCMEngine)
+            assert clone is not prototype
+            assert clone._config.database_path == prototype._config.database_path
+        finally:
+            if writer is not None:
+                writer.rollback()
+                writer.close()
+            prototype.shutdown()
+            if clone is not None:
+                clone.shutdown()
+
     def test_deepcopy_matches_hermes_host_copy_contract_without_fallback(self, tmp_path):
         from hermes_lcm.engine import LCMEngine
 
