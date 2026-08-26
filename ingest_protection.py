@@ -106,9 +106,18 @@ _BASE64_LINE_ALPHABET_RE = re.compile(r"^[A-Za-z0-9+/=_-]+$")
 # markers, re-wrapped widths, inline one-line forms). It is NOT proof against
 # an adversary who re-encodes content — no content-based redactor can be,
 # since key material can be hex/base64-re-encoded, chunk-reordered, or
-# otherwise transformed arbitrarily. The dispatch validator is the fail-closed
-# second layer on the cloud path: structures the redactor cannot parse block
-# the embedding dispatch instead of leaking.
+# otherwise transformed arbitrarily. That out-of-scope class explicitly
+# INCLUDES a body deliberately de-contiguated — e.g. a >=159-char non-base64
+# line interleaved between every single body line so no two full-width lines
+# are adjacent and none sits within a placeholder's proximity window (#383
+# round-6 finding B): such an author already owns the key and has restructured
+# it beyond any realistic accidental paste/log/transcript shape. The dispatch
+# validator is the fail-closed second layer for the ACCIDENTAL-shape class: a
+# residual it recognizes as key structure (a marker beside a base64 run, a
+# fragment beside a private_key placeholder, or >=2 contiguous full-width body
+# lines) blocks the embedding dispatch instead of leaking. It does not claim to
+# block every conceivable unparseable arrangement — the deliberately
+# de-contiguated body above is out of declared scope, not a guaranteed block.
 # Base64 payload line: padding only ever trails (=/== suffix), so assignment
 # prose like `environment=prod` never classifies as key body. Strict (>=16
 # chars) lines anchor orphan-body detection; shorter lines join a run but
@@ -309,6 +318,12 @@ _PRIVATE_KEY_ARMOR_HEADER_RE = re.compile(r"^[A-Za-z0-9-]{2,32}:\s?\S.*$")
 _PRIVATE_KEY_MAX_ARMOR_HEADERS = 5
 _PRIVATE_KEY_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE)
 _PRIVATE_KEY_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----", re.IGNORECASE)
+# ANY PEM armor marker (private key, certificate, public key, certificate
+# request, …): a truncated private-key body can share a line with a following
+# marker of any armor type (#383 finding #3), so the leading-body-run split
+# keys off the generic marker. Hyphenated labels (CERTIFICATE-REQUEST,
+# X509-CRL) are legal armor labels and must match too.
+_PEM_ANY_MARKER_RE = re.compile(r"-----(?:BEGIN|END) [A-Z0-9 _-]*[A-Z0-9]-----", re.IGNORECASE)
 _EXTERNALIZED_PLACEHOLDER_PREFIX = "[Externalized LCM ingest payload:"
 _QUARANTINED_ASSISTANT_KIND = "quarantined_assistant_output"
 _QUARANTINED_ASSISTANT_REASON = "high_repetition"
@@ -500,6 +515,65 @@ _PEM_LINE_KIND_PREFIXED_B64 = 9
 _PEM_LINE_KIND_LENIENT_B64 = 10
 
 
+def _pem_leading_body_run(prefix: str) -> tuple[bool, bool, int]:
+    """Scan the leading run of base64-body tokens in ``prefix``.
+
+    Token separators are physical spaces/tabs AND serialized escaped tabs (a
+    backslash run followed by ``t``, any nesting depth — the round-18 solidus
+    lesson: hand-rolled run-jumps, never a regex over backslash runs). Returns
+    ``(saw_body, have_evidence, run_end)`` where ``run_end`` is the raw offset
+    just past the last body token; evidence = any digit/base64-symbol in the
+    run (keeps all-caps doc headings out — round-21 precision).
+    """
+    n = len(prefix)
+    scan = 0
+    run_end = 0
+    saw_body = False
+    have_evidence = False
+    while scan < n:
+        # skip separators (physical whitespace / escaped tabs)
+        while scan < n:
+            if prefix[scan] in " \t":
+                scan += 1
+                continue
+            if prefix[scan] == "\\":
+                j = scan
+                while j < n and prefix[j] == "\\":
+                    j += 1
+                if j < n and prefix[j] == "t":
+                    scan = j + 1
+                    continue
+            break
+        tok_start = scan
+        while scan < n:
+            if prefix[scan] in " \t":
+                break
+            if prefix[scan] == "\\":
+                j = scan
+                while j < n and prefix[j] == "\\":
+                    j += 1
+                if j < n and prefix[j] == "t":
+                    break
+                scan = j
+                continue
+            scan += 1
+        if scan == tok_start:
+            break
+        ctok = _normalize_escaped_solidus(prefix[tok_start:scan])
+        if (
+            ctok
+            and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(ctok) is not None
+            and not _looks_like_english_token(ctok)
+        ):
+            saw_body = True
+            run_end = scan
+            if any(ch.isdigit() or ch in "+/=" for ch in ctok):
+                have_evidence = True
+        else:
+            break
+    return saw_body, have_evidence, run_end
+
+
 def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
     """Classify every line of ``text`` once for the private-key scanner.
 
@@ -553,10 +627,81 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
         kind = _PEM_LINE_KIND_OTHER
         redact_start = c_start
         marker_end = -1
+        if "PRIVATE KEY-----" not in stripped.upper():
+            # A truncated private-key body can be glued to a following NON-
+            # private-key PEM marker (a CERTIFICATE / PUBLIC KEY the key was
+            # concatenated before) — this line has no "PRIVATE KEY-----" so the
+            # branch below never sees it (#383 adversarial-review finding #3).
+            # Split the leading base64 body run off as a forced STRICT_B64 entry
+            # so an open truncated block consumes and redacts it; the remainder
+            # is OTHER (it opens nothing). Digit/base64-symbol evidence required
+            # so all-caps doc headings before a marker are not swept.
+            gmarker = _PEM_ANY_MARKER_RE.search(stripped)
+            if gmarker is not None and gmarker.start() > 0:
+                prefix_seg = stripped[: gmarker.start()]
+                # Strip a leading markdown blockquote / diff prefix ("> ", "+ ",
+                # "- ") so a prefixed truncated tail before a non-private marker
+                # still scans as body (#383 round-7, ckrYc). Offset the emitted
+                # STRICT_B64 span past the stripped prefix so raw bounds stay exact.
+                pfx = 0
+                while pfx < len(prefix_seg) and prefix_seg[pfx] in ">+- \t":
+                    pfx += 1
+                saw_body, have_evidence, run_end = _pem_leading_body_run(
+                    prefix_seg[pfx:]
+                )
+                if saw_body and have_evidence:
+                    body_start = c_start + pfx
+                    model.append(
+                        (_PEM_LINE_KIND_STRICT_B64, body_start, body_start + run_end, body_start, -1)
+                    )
+                    rem_start = body_start + run_end
+                    model.append(
+                        (_PEM_LINE_KIND_OTHER, rem_start, c_end, rem_start, -1)
+                    )
+                    continue
         if "PRIVATE KEY-----" in stripped.upper():
             begin = _PRIVATE_KEY_BEGIN_RE.search(stripped)
             end = _PRIVATE_KEY_END_RE.search(stripped)
             if begin is not None and begin.end() == len(stripped):
+                # A truncated block's body run can share one physical/serialized
+                # line with the BEGIN of the next block. Split off the LEADING
+                # base64-body run (not just the first token, and short tokens
+                # count — the adjacent truncated BEGIN is the structural
+                # evidence) as a virtual body line so the open block consumes
+                # and redacts its tail; the BEGIN marker becomes its own virtual
+                # line. Otherwise the whole-line BEGIN classification orphans the
+                # run before the next block's redact_start (#383). Require
+                # digit/base64-symbol evidence in the run so all-caps doc
+                # headings ("IMPORTANT NOTICE") before a quoted BEGIN are not
+                # swept (round-21 precision). Classify normalized, redact raw.
+                saw_body = False
+                have_evidence = False
+                run_end = 0
+                if end is None:
+                    saw_body, have_evidence, run_end = _pem_leading_body_run(
+                        stripped[: begin.start()]
+                    )
+                if saw_body and have_evidence:
+                    marker_start = c_start + begin.start()
+                    model.append(
+                        (
+                            _PEM_LINE_KIND_STRICT_B64,
+                            c_start,
+                            c_start + run_end,
+                            c_start,
+                            -1,
+                        )
+                    )
+                    model.append(
+                        (
+                            _PEM_LINE_KIND_BEGIN,
+                            marker_start,
+                            c_end,
+                            marker_start,
+                            -1,
+                        )
+                    )
+                    continue
                 kind = _PEM_LINE_KIND_BEGIN
                 redact_start = c_start + begin.start()
                 if end is not None and end.end() <= begin.start():
@@ -1616,6 +1761,96 @@ def _embedding_privacy_redact_private_keys(text: str) -> str:
     )
 
 
+def _pem_marker_with_inline_body(text: str) -> bool:
+    """True when a surviving private-key marker shares a line with a base64 run.
+
+    Marker-independent backstop (#383 rounds 4-5): prose that merely MENTIONS a
+    marker ("see -----BEGIN PRIVATE KEY----- for format") carries English
+    tokens, no 16+ base64 run, and passes; a marker the transform failed to
+    parse as structure but which sits beside real body material is blocked
+    fail-closed instead of shipping.
+    """
+    lower = text.lower()
+    if "private key-----" not in lower:
+        return False
+    for raw in text.splitlines() or [text]:
+        for piece in _split_serialized_pem_line(raw) if _PRIVATE_KEY_ESCAPED_SEPARATOR_HINT_RE.search(raw) else [(0, raw)]:
+            line = piece[1] if isinstance(piece, tuple) else piece
+            if "private key-----" not in line.lower():
+                continue
+            for m in _PRIVATE_KEY_INLINE_RUN_RE.finditer(line):
+                run = m.group(0)
+                if not _looks_like_english_token(run):
+                    return True
+    return False
+
+
+_PRIVATE_KEY_PLACEHOLDER_RE = re.compile(
+    r"\[LCM (?:sensitive redaction|embedding privacy):\s*name=private_key[^\]]*\]",
+    re.IGNORECASE,
+)
+
+
+def _pem_fragment_near_private_key_placeholder(text: str) -> bool:
+    """True when a 16+ base64-charset token sits near a PRIVATE_KEY placeholder.
+
+    Marker-independent backstop (#383 rounds 4-6): a private_key placeholder
+    proves a private key was redacted at that spot, so any surviving unbroken
+    16+ base64-alphabet token in its adjacency window is an orphaned key-body
+    fragment and blocks the dispatch fail-closed. Scoped to the private_key
+    placeholder name deliberately: a 16+ base64 token beside a NON-key
+    placeholder (e.g. a git SHA next to a redacted `api_key`) is ambiguous and
+    must NOT over-block — marker-independent MULTI-LINE key bodies are covered
+    instead by `_has_orphan_full_width_base64_run`, and a lone token beside a
+    non-key placeholder is the accepted precision boundary (like sub-16 tokens).
+    """
+    window = 160
+    for pm in _PRIVATE_KEY_PLACEHOLDER_RE.finditer(text):
+        lo = max(0, pm.start() - window)
+        # Bound the scan to the adjacency window plus 16 chars of headroom: a
+        # 16+ run STARTING anywhere inside the window still yields a >=16-char
+        # match within [lo, hi] (its first 16 chars land before hi), while an
+        # explicit endpos keeps each placeholder's scan O(window) instead of
+        # O(remaining text) — the latter is O(placeholders * text) on inputs
+        # with many placeholders and no nearby base64 (#383 round-6 perf fix).
+        hi = min(len(text), pm.end() + window + _PRIVATE_KEY_STRICT_MIN_CHARS)
+        for m in _PRIVATE_KEY_INLINE_RUN_RE.finditer(text, lo, hi):
+            run = m.group(0)
+            if len(run) >= _PRIVATE_KEY_STRICT_MIN_CHARS and run not in pm.group(0):
+                return True
+    return False
+
+
+def _has_orphan_full_width_base64_run(text: str) -> bool:
+    """True when >=2 contiguous full-width base64 body lines survive, markerless.
+
+    Transform- AND marker-INDEPENDENT backstop (#383 round 6): a truncated key
+    whose body is split by a long non-base64 line leaves body lines with no
+    surviving BEGIN/END marker and no placeholder in range — invisible to every
+    marker- or placeholder-keyed check. Two or more contiguous strict base64
+    lines of full PEM wrap width (>=40 chars) are the private-key body
+    signature; ordinary prose/config never produces them. Lines already inside
+    a redaction placeholder do not count. Fail-closed: a genuine multi-line
+    base64 attachment on the cloud path blocks rather than ships (the durable
+    store is untouched; a base64 blob has no embedding value anyway).
+    """
+    run = 0
+    for kind, redact_start, content_end, _line_start, _marker_end in _pem_line_model(text):
+        if kind in (_PEM_LINE_KIND_STRICT_B64, _PEM_LINE_KIND_PREFIXED_B64) and (
+            content_end - redact_start
+        ) >= 40:
+            segment = text[redact_start:content_end]
+            if "[LCM embedding privacy:" in segment or "[LCM sensitive redaction:" in segment:
+                run = 0
+                continue
+            run += 1
+            if run >= 2:
+                return True
+        else:
+            run = 0
+    return False
+
+
 def _embedding_privacy_residual_patterns(
     text: str, active_names: Sequence[str]
 ) -> list[str]:
@@ -1626,9 +1861,27 @@ def _embedding_privacy_residual_patterns(
             # an earlier pattern consumed the BEGIN marker the redactor keys on, so
             # the key body shipped. Flag it even though the BEGIN-based redactor is
             # now blind. (BEGIN redaction still flagged for truncated/no-END blocks.)
+            # Backstops (#383 rounds 4-6): a surviving marker beside a base64
+            # run, an orphan 16+ base64 token adjacent to ANY privacy
+            # placeholder, and >=2 contiguous full-width markerless base64 body
+            # lines — all block fail-closed, so the validator no longer shares
+            # the transform's marker/placeholder-keyed blind spot (round 6
+            # closed a truncated body split by a long non-base64 line).
+            # The marker-independent backstops scan for base64 runs; escaped
+            # solidi (\/, any depth) split a run into sub-16 chunks and hide it,
+            # so also run them on the solidi-normalized text (#383 round-7,
+            # chwFQ). Placeholders and markers carry no solidi, so normalization
+            # only rejoins base64 — strictly more sensitive, detection-only.
+            normalized = _normalize_escaped_solidus(text)
             if (
                 _embedding_privacy_redact_private_keys(text) != text
                 or _has_orphaned_private_key_body(text)
+                or _pem_marker_with_inline_body(text)
+                or _pem_marker_with_inline_body(normalized)
+                or _pem_fragment_near_private_key_placeholder(text)
+                or _pem_fragment_near_private_key_placeholder(normalized)
+                or _has_orphan_full_width_base64_run(text)
+                or _has_orphan_full_width_base64_run(normalized)
             ):
                 residual.append(name)
             continue
