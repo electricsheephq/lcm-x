@@ -1,8 +1,17 @@
 """Phase A: isolated, runtime-enumerated live LCM tool matrix."""
 from __future__ import annotations
-import argparse, importlib, importlib.util, json, os, shlex
+import argparse
+from contextlib import contextmanager
+import importlib
+import importlib.util
+import json
+import os
 from pathlib import Path
-import subprocess, sys, tempfile, time
+import shlex
+import subprocess
+import sys
+import tempfile
+import time
 from types import ModuleType
 SCENARIOS = {
     "lcm_grep", "lcm_recall", "lcm_query_state", "lcm_compute", "lcm_compile_evidence", "lcm_evidence_pack", "lcm_retrieve", "lcm_recent",
@@ -11,23 +20,57 @@ SCENARIOS = {
 PLANTED = {
     "pem_complete": "GAUNTLETPEMCOMPLETEA1", "pem_truncated": "GAUNTLETPEMTRUNCATEDB2", "encrypted_armor": "GAUNTLETENCRYPTEDC3",
     "json_serialized": "GAUNTLETJSONSERIALIZEDD4", "log_prefixed": "GAUNTLETLOGPREFIXE5", "password": "GAUNTLETPASSWORDF6", "api_key": "GAUNTLETAPIKEYG7",
+    "password_pem": "GAUNTLETPASSWORDPEMH8", "passphrase_pem": "GAUNTLETPASSPHRASEPEMI9", "quoted_password_pem": "GAUNTLETQUOTEDPASSWORDPEMJ0", "chunk_path": "GAUNTLETCHUNKPATHK1",
 }
-def _load(worktree: Path):
-    try: importlib.import_module("agent.context_engine")
+@contextmanager
+def _scrubbed_environment(worktree: Path):
+    original = dict(os.environ)
+    preserved = {"LCM_EMBEDDING_API_KEY", "LCM_EMBEDDING_BASE_URL", "LCM_GAUNTLET_CLOUD_MODEL", "LCM_GAUNTLET_CLOUD_PROVIDER"}
+    scrubbed = sorted(key for key in original if key.startswith(("LCM_", "HERMES_")) and key not in preserved)
+    clean = {key: value for key, value in original.items() if key not in scrubbed}
+    clean["HERMES_LCM_REPO"] = str(worktree)
+    os.environ.clear()
+    os.environ.update(clean)
+    try:
+        yield scrubbed
+    finally:
+        os.environ.clear()
+        os.environ.update(original)
+def _default_hermes_repo(worktree: Path) -> Path | None:
+    candidates = (worktree.parent / "hermes-agent", worktree.parent / "hermes")
+    return next((path for path in candidates if (path / "agent/context_engine.py").is_file()), None)
+def _load(worktree: Path, hermes_repo: Path | None = None, *, release: bool = False):
+    hermes_repo = hermes_repo.resolve() if hermes_repo else _default_hermes_repo(worktree)
+    if hermes_repo is not None:
+        sys.path.insert(0, str(hermes_repo))
+        for name in list(sys.modules):
+            if name == "agent" or name.startswith("agent."):
+                del sys.modules[name]
+    try:
+        context = importlib.import_module("agent.context_engine")
     except ModuleNotFoundError as exc:
-        if exc.name not in {"agent", "agent.context_engine"}: raise
+        if exc.name not in {"agent", "agent.context_engine"}:
+            raise
+        if release:
+            raise RuntimeError(f"agent.context_engine import failed: {exc}; pass --hermes-repo") from exc
         agent, context = ModuleType("agent"), ModuleType("agent.context_engine")
         context.ContextEngine = type("ContextEngine", (), {"get_status": lambda self: {}})
+        context.__phase_a_stub__ = True
         sys.modules["agent"], sys.modules["agent.context_engine"] = agent, context
+        engine_surface = "engine=stubbed-context-base (NOT the hermes surface)"
+    else:
+        source = Path(str(context.__file__)).resolve()
+        if release and hermes_repo is not None and hermes_repo not in source.parents:
+            raise RuntimeError(f"agent.context_engine imported from {source}, not --hermes-repo {hermes_repo}")
+        engine_surface = f"engine=hermes-context-engine ({source})"
     for name in list(sys.modules):
         if name == "hermes_lcm" or name.startswith("hermes_lcm."):
             del sys.modules[name]
     package = importlib.util.module_from_spec(importlib.util.spec_from_file_location("hermes_lcm", worktree / "__init__.py", submodule_search_locations=[str(worktree)]))
     sys.modules["hermes_lcm"] = package
-    return {name: importlib.import_module(f"hermes_lcm.{name}") for name in (
-        "assertion_store", "command", "config", "dag", "embedding_provider",
-        "engine", "ingest_protection", "tools",
-    )}
+    names = ("assertion_store", "command", "config", "dag", "embedding_provider", "engine", "ingest_protection", "tools")
+    modules = {name: importlib.import_module(f"hermes_lcm.{name}") for name in names}
+    return modules, engine_surface
 def _engine(mod, state: Path, posture: str, *, patterns: bool):
     provider = "fastembed" if posture == "local" else os.getenv(
         "LCM_GAUNTLET_CLOUD_PROVIDER", "voyage"
@@ -114,87 +157,127 @@ def _scenario(engine, tool, ctx, *, patterns):
         for text, value, key in ((taxi, 60, "taxi"), (train, 20, "train"))
     ]
     if tool == "lcm_grep":
-        assert _payload(engine, tool, {"query": "Constellation anchor"})["results"]
+        assert "Constellation anchor" in json.dumps(_payload(engine, tool, {"query": "Constellation anchor"})["results"])
     elif tool == "lcm_recall":
-        assert _payload(engine, tool, {"query": "Constellation anchor"})["hits"]
+        assert "Constellation anchor" in json.dumps(_payload(engine, tool, {"query": "Constellation anchor"})["hits"]).replace(">>>", "").replace("<<<", "")
     elif tool == "lcm_query_state":
-        assert _payload(engine, tool, {"subject_key": "project:atlas"})["assertions"]
+        assert "approved" in json.dumps(_payload(engine, tool, {"subject_key": "project:atlas"})["assertions"])
     elif tool == "lcm_compute":
-        assert _payload(engine, tool, {"question": "What is the difference between the taxi and train fares?", "operands": operands})["status"] == "computed"
+        value = _payload(engine, tool, {"question": "What is the difference between the taxi and train fares?", "operands": operands})
+        assert value["status"] == "computed" and value["trace"]["result"] == "$40" and value["trace"]["result_value"] == 40 and value["answer"].startswith("$40 ")
     elif tool == "lcm_evidence_pack":
-        assert _payload(engine, tool, {"question": "What is the difference between the taxi and train fares?", "baseline_refs": operands})["status"] == "computed"
+        value = _payload(engine, tool, {"question": "What is the difference between the taxi and train fares?", "baseline_refs": operands})
+        assert value["status"] == "computed" and value["computation"]["result"] == "$40"
     elif tool == "lcm_compile_evidence":
         ref = _exact(atlas)
         proposal = {"version": "evidence-selector-v1", "selections": [{"claim_id": "atlas", "facet": "decision", **ref}], "missing_facets": []}
-        assert _payload(engine, tool, {"question": "What was the Atlas decision?", "baseline_refs": [ref], "proposal": proposal})["evidence"]
+        value = _payload(engine, tool, {"question": "What was the Atlas decision?", "baseline_refs": [ref], "proposal": proposal})
+        assert "Atlas decision is approved" in json.dumps(value["evidence"])
     elif tool == "lcm_retrieve":
         started = _payload(engine, tool, {"action": "start", "question": "What did Atlas decide?", "identity": {"intent_type": "release decision", "operation": "evidence_only"}, "requirements": [{"slot_id": "decision", "description": "Atlas decision"}]})
         found = _payload(engine, tool, {"action": "search", "retrieval_id": started["retrieval_id"], "missing_slot": "decision", "tool": "lcm_expand", "tool_args": {"store_id": atlas["store_id"]}})
-        assert found["evidence"]
+        assert "Atlas decision is approved" in json.dumps(found["evidence"])
     elif tool == "lcm_recent":
-        assert _payload(engine, tool, {"period": "today"})["sections"]
+        assert "gauntlet" in json.dumps(_payload(engine, tool, {"period": "today"})["sections"]).lower()
     elif tool == "lcm_load_session":
-        assert len(_payload(engine, tool, {"session_id": "gauntlet-a"})["messages"]) == 10
+        value = _payload(engine, tool, {"session_id": "gauntlet-a"})
+        assert value["total_messages"] == value["returned_messages"] == 10 and "The Atlas decision is approved" in json.dumps(value["messages"])
     elif tool == "lcm_describe":
-        assert _payload(engine, tool, {"node_id": ctx["node:gauntlet-c"]})["node_id"] == ctx["node:gauntlet-c"]
+        value = _payload(engine, tool, {"node_id": ctx["node:gauntlet-c"]})
+        assert (value["node_id"], value["source_type"], value["num_sources"], value["expand_hint"]) == (ctx["node:gauntlet-c"], "messages", 10, "Phase A corpus")
     elif tool == "lcm_expand":
         assert "Constellation anchor" in json.dumps(_payload(engine, tool, {"node_id": ctx["node:gauntlet-c"]}))
     elif tool == "lcm_expand_query":
-        assert _payload(engine, tool, {"prompt": "Show the anchor", "node_ids": [ctx["node:gauntlet-c"]], "output": "evidence"})["evidence"]
+        assert "Constellation anchor" in json.dumps(_payload(engine, tool, {"prompt": "Show the anchor", "node_ids": [ctx["node:gauntlet-c"]], "output": "evidence"})["evidence"])
     elif tool == "lcm_status":
         status = _payload(engine, tool, {})
-        assert status["store"]["messages"] >= 10 and status["ingest_protection"]["enabled"] is patterns
-        assert "privacy_policy_errors" in status["proactive_recall"]
+        assert status["store"]["messages"] == 10 and status["lifecycle_fragmentation"]["messages_total"] == 30 and status["ingest_protection"]["enabled"] is patterns and status["proactive_recall"]["privacy_policy_errors"] == 0
     elif tool == "lcm_inspect":
-        inspected = _payload(engine, tool, {}); assert inspected["read_only"] is True and inspected["messages"]
+        inspected = _payload(engine, tool, {})
+        assert inspected["read_only"] is True and inspected["session_id"] == "gauntlet-c" and inspected["messages"]["total"] == inspected["messages"]["fresh_tail"]["returned"] == 10
     elif tool == "lcm_doctor":
-        assert _payload(engine, tool, {})["overall"] == "healthy"
+        assert (value := _payload(engine, tool, {}))["overall"] == "healthy" and all(check["status"] == "pass" for check in value["checks"])
+    else:
+        raise AssertionError(f"no scenario implementation for {tool}")
+    return "exact named postcondition passed"
 class _Capture:
     def __init__(self, provider, outbound):
         self._provider, self._outbound = provider, outbound
-    def __getattr__(self, name): return getattr(self._provider, name)
+    def __getattr__(self, name):
+        return getattr(self._provider, name)
     def embed_query(self, text):
-        self._outbound.append(str(text)); return self._provider.embed_query(text)
+        self._outbound.append(str(text))
+        return self._provider.embed_query(text)
     def embed_query_interactive(self, text, *, timeout):
-        self._outbound.append(str(text)); return self._provider.embed_query_interactive(text, timeout=timeout)
+        self._outbound.append(str(text))
+        return self._provider.embed_query_interactive(text, timeout=timeout)
     def embed_documents(self, texts):
-        self._outbound.extend(map(str, texts)); return self._provider.embed_documents(texts)
+        self._outbound.extend(map(str, texts))
+        return self._provider.embed_documents(texts)
     def embed_document_batches(self, texts, *, before_dispatch=None):
         self._outbound.extend(map(str, texts))
         yield from self._provider.embed_document_batches(texts, before_dispatch=before_dispatch)
-def _privacy(mod, engine, ctx, outbound):
-    messages = [
-        {"role": "user", "content": f"privacy fixture complete -----BEGIN PRIVATE KEY-----\n{PLANTED['pem_complete']}\n-----END PRIVATE KEY-----"},
-        {"role": "user", "content": f"privacy fixture truncated -----BEGIN PRIVATE KEY-----\n{PLANTED['pem_truncated']}"},
-        {"role": "user", "content": f"privacy fixture encrypted -----BEGIN ENCRYPTED PRIVATE KEY-----\n{PLANTED['encrypted_armor']}\n-----END ENCRYPTED PRIVATE KEY-----"},
-        {"role": "user", "content": json.dumps({"private_key": f"-----BEGIN PRIVATE KEY-----\n{PLANTED['json_serialized']}\n-----END PRIVATE KEY-----"})},
-        {"role": "user", "content": f"ERROR credential=-----BEGIN PRIVATE KEY-----\n{PLANTED['log_prefixed']}\n-----END PRIVATE KEY-----"},
-        {"role": "user", "content": f"password={PLANTED['password']} api_key={PLANTED['api_key']}"},
+    def embed_chunk_group_batches(self, groups, *, before_dispatch=None):
+        self._outbound.extend(str(text) for group in groups for _index, text in group)
+        yield from self._provider.embed_chunk_group_batches(groups, before_dispatch=before_dispatch)
+def _privacy_fixtures():
+    long_chunk = " ".join(f"Chunk safety sentence {index}." for index in range(180))
+    return [
+        {"kind": "standard", "content": f"privacy fixture complete -----BEGIN PRIVATE KEY-----\n{PLANTED['pem_complete']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["pem_complete"]]},
+        {"kind": "standard", "content": f"privacy fixture truncated -----BEGIN PRIVATE KEY-----\n{PLANTED['pem_truncated']}", "secrets": [PLANTED["pem_truncated"]]},
+        {"kind": "standard", "content": f"privacy fixture encrypted -----BEGIN ENCRYPTED PRIVATE KEY-----\n{PLANTED['encrypted_armor']}\n-----END ENCRYPTED PRIVATE KEY-----", "secrets": [PLANTED["encrypted_armor"]]},
+        {"kind": "standard", "content": json.dumps({"private_key": f"-----BEGIN PRIVATE KEY-----\n{PLANTED['json_serialized']}\n-----END PRIVATE KEY-----"}), "secrets": [PLANTED["json_serialized"]]},
+        {"kind": "standard", "content": f"ERROR credential=-----BEGIN PRIVATE KEY-----\n{PLANTED['log_prefixed']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["log_prefixed"]]},
+        {"kind": "standard", "content": f"password={PLANTED['password']} api_key={PLANTED['api_key']}", "secrets": [PLANTED["password"], PLANTED["api_key"]]},
+        {"kind": "365", "content": f"password: -----BEGIN PRIVATE KEY-----\n{PLANTED['password_pem']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["password_pem"]]},
+        {"kind": "365", "content": f"passphrase=-----BEGIN PRIVATE KEY-----\n{PLANTED['passphrase_pem']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["passphrase_pem"]]},
+        {"kind": "365", "content": f"password=\"-----BEGIN PRIVATE KEY-----\n{PLANTED['quoted_password_pem']}\n-----END PRIVATE KEY-----\"", "secrets": [PLANTED["quoted_password_pem"]]},
+        {"kind": "chunk", "content": f"{long_chunk} api_key={PLANTED['chunk_path']}", "secrets": [PLANTED["chunk_path"]]},
     ]
+def _privacy(mod, engine, outbound, *, expect_365_fixed):
+    fixtures = _privacy_fixtures()
+    messages = [{"role": "user", "content": item["content"]} for item in fixtures]
     engine.on_session_start("gauntlet-secrets", conversation_id="conversation-secrets", platform="phase-a", context_length=200_000)
     engine._ingest_messages(messages)
     rows = engine._store.get_session_messages("gauntlet-secrets")
-    durable = json.dumps(rows)
-    assert all(secret not in durable for secret in PLANTED.values()) and "[LCM sensitive redaction:" in durable
-    node = mod["dag"].SummaryNode(
-        session_id="gauntlet-secrets", depth=0,
-        summary=" ".join(str(row["content"]) for row in rows), token_count=60,
-        source_token_count=120, source_ids=[row["store_id"] for row in rows],
-        source_type="messages", created_at=time.time(), earliest_at=time.time(),
-        latest_at=time.time(), expand_hint="Phase A privacy corpus",
-    )
+    assert len(rows) == len(fixtures), "privacy ingest did not preserve every planted turn"
+    known = []
+    for index, (fixture, row) in enumerate(zip(fixtures, rows)):
+        durable = str(row["content"])
+        leaks = [secret for secret in fixture["secrets"] if secret in durable]
+        if leaks and fixture["kind"] != "365":
+            raise AssertionError(f"durable row {index} leaked its planted secret")
+        if leaks:
+            known.append(f"durable-row-{index}")
+        else:
+            assert "[LCM sensitive redaction:" in durable, f"durable row {index} lacks its canonical per-turn placeholder"
+    node = mod["dag"].SummaryNode(session_id="gauntlet-secrets", depth=0, summary=" ".join(str(row["content"]) for row in rows), token_count=60, source_token_count=120, source_ids=[row["store_id"] for row in rows], source_type="messages", created_at=time.time(), earliest_at=time.time(), latest_at=time.time(), expand_hint="Phase A privacy corpus")
     engine._dag.add_node(node)
-    warmup = mod["command"].handle_lcm_command("embed warmup", engine); assert "status: ready" in warmup
-    backfill = mod["command"].handle_lcm_command("embed backfill --apply --limit 50", engine); assert "status: complete" in backfill
+    assert "status: ready" in mod["command"].handle_lcm_command("embed warmup", engine)
+    assert "status: complete" in mod["command"].handle_lcm_command("embed backfill --apply --limit 50", engine)
+    chunk_start = len(outbound)
+    assert "status: complete" in mod["command"].handle_lcm_command("embed backfill --corpus chunks --apply --confirm-raw-text --limit 100", engine)
+    chunk_outbound = outbound[chunk_start:]
+    assert chunk_outbound, "chunk backfill made no embedding dispatch"
+    assert any("Chunk safety sentence" in text for text in chunk_outbound)
     revision = mod["ingest_protection"].embedding_privacy_revision(engine._config)
     for text in outbound:
-        mod["ingest_protection"].validate_embedding_privacy_dispatch([text], engine._config, expected_revision=revision)
-    assert outbound and any("[LCM embedding privacy:" in text for text in outbound)
-    assert all(secret not in text for text in outbound for secret in PLANTED.values())
+        assert not [secret for fixture in fixtures if fixture["kind"] != "365" for secret in fixture["secrets"] if secret in text], "embedding dispatch leaked a non-#365 planted secret"
+        if any(secret in text for fixture in fixtures if fixture["kind"] == "365" for secret in fixture["secrets"]):
+            known.append("embedding-dispatch")
+        else:
+            mod["ingest_protection"].validate_embedding_privacy_dispatch([text], engine._config, expected_revision=revision)
+    assert outbound
+    assert any("[LCM embedding privacy:" in text for text in outbound)
     recall = engine.handle_tool_call("lcm_recall", {"query": "privacy fixture"})
-    assert all(secret not in recall for secret in PLANTED.values())
+    assert not [secret for fixture in fixtures if fixture["kind"] != "365" for secret in fixture["secrets"] if secret in recall], "recall leaked a non-#365 planted secret"
+    if any(secret in recall for fixture in fixtures if fixture["kind"] == "365" for secret in fixture["secrets"]):
+        known.append("recall")
     assert json.loads(recall)["hits"]
+    if known and expect_365_fixed:
+        raise AssertionError("#365 defining composition leaked on: " + ", ".join(sorted(set(known))))
     engine.on_session_start("gauntlet-c", conversation_id="conversation-gauntlet-c", platform="phase-a", context_length=200_000)
+    return bool(known)
 def _loud_fail(mod, state: Path):
     engine = _engine(mod, state, "cloud", patterns=False)
     try:
@@ -213,7 +296,8 @@ def _loud_fail(mod, state: Path):
     finally:
         engine.shutdown()
 def _key_gate(provider: str):
-    if provider in {"voyage", "voyageai"}: return "VOYAGE_API_KEY", bool(os.getenv("VOYAGE_API_KEY", "").strip())
+    if provider in {"voyage", "voyageai"}:
+        return "VOYAGE_API_KEY", bool(os.getenv("VOYAGE_API_KEY", "").strip())
     if provider in {"openai", "openai-compatible", "siliconflow"}:
         present = bool(os.getenv("LCM_EMBEDDING_API_KEY", "").strip() or os.getenv("SILICONFLOW_API_KEY", "").strip())
         return "LCM_EMBEDDING_API_KEY or SILICONFLOW_API_KEY", present
@@ -223,78 +307,132 @@ def _safe_detail(exc):
     for value in PLANTED.values():
         detail = detail.replace(value, "<redacted>")
     return detail.replace("\n", " ")[:300]
-def run(worktree: Path, out: Path):
-    started = time.monotonic(); worktree, out = worktree.resolve(), out.resolve()
+def _git_identity(worktree: Path):
+    def git(*args, check=True):
+        return subprocess.run(["git", "-C", str(worktree), *args], check=check, text=True, capture_output=True).stdout.strip()
+    tag = git("describe", "--tags", "--exact-match", "HEAD", check=False)
+    return {"head": git("rev-parse", "HEAD"), "tree": git("rev-parse", "HEAD^{tree}"), "tag": tag or "not-an-exact-tag", "dirty": bool(git("status", "--porcelain", "--untracked-files=all"))}
+def _release_identity_failures(identity, rc_tag):
+    failures = []
+    if identity.get("dirty"):
+        failures.append("release worktree is dirty")
+    if not rc_tag:
+        failures.append("release mode requires --rc-tag")
+    elif identity.get("tag") != rc_tag:
+        failures.append(f"HEAD exact tag is {identity.get('tag')!r}, not requested --rc-tag {rc_tag!r}")
+    return failures
+def _run_matrix(engine, registered, context, *, patterns, posture, missing):
+    records = []
+    for tool in registered:
+        try:
+            if tool in missing:
+                raise AssertionError("registered tool has no matrix scenario")
+            detail = _scenario(engine, tool, context, patterns=patterns)
+            if not detail:
+                raise AssertionError("scenario returned no postcondition evidence")
+            records.append((posture, tool, "PASS", detail))
+        except Exception as exc:
+            records.append((posture, tool, "FAIL", _safe_detail(exc)))
+    return records
+def _verdict(records, batteries, *, release, coverage_failed, preflight):
+    skipped = any(row[2] == "SKIP" for row in records) or any(row[1] == "SKIP" for row in batteries)
+    failed = coverage_failed or any(row[2] == "FAIL" for row in records) or any(row[1] == "FAIL" for row in batteries)
+    if preflight or (release and skipped):
+        return "BLOCKED"
+    return "FAIL" if failed else "PASS"
+def _cloud_rows(mod, state_root, registered, missing, *, expect_365_fixed):
+    provider = os.getenv("LCM_GAUNTLET_CLOUD_PROVIDER", "voyage").strip().lower()
+    key_name, present = _key_gate(provider)
+    if not present:
+        reason = f"SKIP: {key_name} is absent"
+        return [("cloud", tool, "SKIP", reason) for tool in registered], [(name, "SKIP", reason) for name in ("planted-secret", "loud-fail")]
+    outbound, original = [], mod["embedding_provider"].resolve_provider
+    def resolve(config, **kwargs):
+        value = original(config, **kwargs)
+        return _Capture(value, outbound) if value is not None else None
+    mod["command"].resolve_provider = resolve
+    mod["tools"].resolve_provider = resolve
+    cloud = _engine(mod, Path(tempfile.mkdtemp(prefix="cloud-", dir=state_root)), "cloud", patterns=True)
+    batteries = []
+    try:
+        context = _seed(mod, cloud)
+        try:
+            known = _privacy(mod, cloud, outbound, expect_365_fixed=expect_365_fixed)
+            batteries.append(("planted-secret", "KNOWN-LEAK-ON-BASE" if known else "PASS", "per-turn durable, summary/chunk dispatch, revision, recall checks passed"))
+        except Exception as exc:
+            batteries.append(("planted-secret", "FAIL", _safe_detail(exc)))
+        records = _run_matrix(cloud, registered, context, patterns=True, posture="cloud", missing=missing)
+    finally:
+        cloud.shutdown()
+        mod["command"].resolve_provider = original
+        mod["tools"].resolve_provider = original
+    try:
+        _loud_fail(mod, Path(tempfile.mkdtemp(prefix="cloud-loud-", dir=state_root)))
+        batteries.append(("loud-fail", "PASS", "raise, counter, status, assembly checks passed"))
+    except Exception as exc:
+        batteries.append(("loud-fail", "FAIL", _safe_detail(exc)))
+    return records, batteries
+def run(worktree: Path, out: Path, *, release: bool = False, rc_tag: str | None = None, hermes_repo: Path | None = None, expect_365_fixed: bool = True):
+    started = time.monotonic()
+    worktree, out = worktree.resolve(), out.resolve()
     if not (worktree / "engine.py").is_file():
         raise ValueError(f"not an LCM-X worktree: {worktree}")
-    out.mkdir(parents=True, exist_ok=True); state_root = out / "state"; state_root.mkdir(exist_ok=True)
-    os.environ["HERMES_LCM_REPO"] = str(worktree)
-    mod = _load(worktree)
-    records, batteries = [], []
-    local_state = Path(tempfile.mkdtemp(prefix="local-", dir=state_root)); local = _engine(mod, local_state, "local", patterns=False)
-    try:
-        local_ctx = _seed(mod, local)
-        registered = sorted({s["name"] for s in local.get_tool_schemas() if str(s.get("name", "")).startswith("lcm_")})
-        missing = sorted(set(registered) - SCENARIOS)
-        for tool in registered:
+    out.mkdir(parents=True, exist_ok=True)
+    state_root = out / "state"
+    state_root.mkdir(exist_ok=True)
+    identity = _git_identity(worktree)
+    preflight = _release_identity_failures(identity, rc_tag) if release else []
+    records, batteries, registered = [], [], []
+    missing, unexpected = [], []
+    engine_surface = "engine=not-loaded"
+    with _scrubbed_environment(worktree) as scrubbed:
+        mod = None
+        if not preflight:
             try:
-                if tool in missing: raise AssertionError("registered tool has no matrix scenario")
-                _scenario(local, tool, local_ctx, patterns=False)
-                records.append(("local", tool, "PASS", "real post-condition passed"))
+                mod, engine_surface = _load(worktree, hermes_repo=hermes_repo, release=release)
             except Exception as exc:
-                records.append(("local", tool, "FAIL", _safe_detail(exc)))
-    finally:
-        local.shutdown()
-    provider = os.getenv("LCM_GAUNTLET_CLOUD_PROVIDER", "voyage").strip().lower()
-    key_name, key_present = _key_gate(provider)
-    if not key_present:
-        reason = f"SKIP: {key_name} is absent"
-        records.extend(("cloud", tool, "SKIP", reason) for tool in registered)
-        batteries.extend((name, "SKIP", reason) for name in ("planted-secret", "loud-fail"))
-    else:
-        outbound, original = [], mod["embedding_provider"].resolve_provider
-        def resolve(config, **kwargs):
-            provider_value = original(config, **kwargs)
-            return _Capture(provider_value, outbound) if provider_value is not None else None
-        mod["command"].resolve_provider = resolve
-        mod["tools"].resolve_provider = resolve
-        cloud_state = Path(tempfile.mkdtemp(prefix="cloud-", dir=state_root)); cloud = _engine(mod, cloud_state, "cloud", patterns=True)
-        try:
-            cloud_ctx = _seed(mod, cloud)
+                preflight.append(_safe_detail(exc))
+        if mod is not None and not preflight:
+            local = _engine(mod, Path(tempfile.mkdtemp(prefix="local-", dir=state_root)), "local", patterns=False)
             try:
-                _privacy(mod, cloud, cloud_ctx, outbound)
-                batteries.append(("planted-secret", "PASS", "durable, dispatch, revision, recall checks passed"))
-            except Exception as exc:
-                batteries.append(("planted-secret", "FAIL", _safe_detail(exc)))
-            for tool in registered:
-                try:
-                    if tool in missing: raise AssertionError("registered tool has no matrix scenario")
-                    _scenario(cloud, tool, cloud_ctx, patterns=True)
-                    records.append(("cloud", tool, "PASS", "real post-condition passed"))
-                except Exception as exc:
-                    records.append(("cloud", tool, "FAIL", _safe_detail(exc)))
-        finally:
-            cloud.shutdown()
-        try:
-            _loud_fail(mod, Path(tempfile.mkdtemp(prefix="cloud-loud-", dir=state_root)))
-            batteries.append(("loud-fail", "PASS", "raise, counter, status, assembly checks passed"))
-        except Exception as exc:
-            batteries.append(("loud-fail", "FAIL", _safe_detail(exc)))
-    tree = subprocess.run(["git", "-C", str(worktree), "rev-parse", "HEAD^{tree}"], check=True, text=True, capture_output=True).stdout.strip(); tag = subprocess.run(["git", "-C", str(worktree), "describe", "--tags", "--exact-match", "HEAD"], text=True, capture_output=True).stdout.strip() or "not-an-exact-tag"
-    failed = bool(missing or any(row[2] == "FAIL" for row in records) or any(row[1] == "FAIL" for row in batteries))
-    lines = ["# PHASE-A RECEIPT", "", f"- RC tag: `{tag}`", f"- Tree SHA: `{tree}`", f"- Command: `{shlex.join([sys.executable, *sys.argv])}`", f"- HERMES_LCM_REPO: `{worktree}`", f"- Claim class: `code_green_local`", f"- Runtime registry tools: {len(registered)}", f"- Registry coverage: `{'FAIL' if missing else 'COMPLETE'}`", f"- Missing matrix rows: `{', '.join(missing) if missing else 'none'}`", "", "## Tool matrix", "", "| Posture | Tool | Result | Detail |", "|---|---|---|---|"]
+                context = _seed(mod, local)
+                registered = sorted({schema["name"] for schema in local.get_tool_schemas() if str(schema.get("name", "")).startswith("lcm_")})
+                missing = sorted(set(registered) - SCENARIOS)
+                unexpected = sorted(SCENARIOS - set(registered))
+                records += _run_matrix(local, registered, context, patterns=False, posture="local", missing=missing)
+            finally:
+                local.shutdown()
+            cloud_records, cloud_batteries = _cloud_rows(mod, state_root, registered, missing, expect_365_fixed=expect_365_fixed)
+            records += cloud_records
+            batteries += cloud_batteries
+    final_identity = _git_identity(worktree)
+    if release and final_identity != identity:
+        preflight.append("release identity changed while the runner was executing")
+    identity = final_identity
+    coverage_failed = bool(missing or unexpected)
+    verdict = _verdict(records, batteries, release=release, coverage_failed=coverage_failed, preflight=preflight)
+    identity_note = f"release bound to requested tag `{rc_tag}`" if release else "DEV RUN — identity unbound"
+    lines = ["# PHASE-A RECEIPT", "", f"- Mode: `{'release' if release else 'dev'}`", f"- Identity: {identity_note}", f"- RC tag at HEAD: `{identity['tag']}`", f"- Tree SHA: `{identity['tree']}`", f"- HEAD SHA: `{identity['head']}`", f"- Dirty state: `{'dirty' if identity['dirty'] else 'clean'}`", f"- Engine surface: {engine_surface}", f"- Environment scrubbed: `{', '.join(scrubbed) if scrubbed else 'none'}`", f"- #365 expectation: `{'fixed' if expect_365_fixed else 'KNOWN-LEAK-ON-BASE allowed'}`", f"- Command: `{shlex.join([sys.executable, *sys.argv])}`", f"- HERMES_LCM_REPO: `{worktree}`", "- Claim class: `code_green_local`", f"- Runtime registry tools: {len(registered)}", f"- Registry coverage: `{'FAIL' if coverage_failed else 'COMPLETE'}`", f"- Missing matrix rows: `{', '.join(missing) if missing else 'none'}`", f"- Unexpected scenario rows: `{', '.join(unexpected) if unexpected else 'none'}`", "", "## Preflight"]
+    lines += [f"- BLOCKED: {detail}" for detail in preflight] or ["- PASS"]
+    lines += ["", "## Tool matrix", "", "| Posture | Tool | Result | Detail |", "|---|---|---|---|"]
     lines += [f"| {posture} | `{tool}` | {result} | {detail} |" for posture, tool, result, detail in records]
     lines += ["", "## Batteries", "", "| Battery | Result | Detail |", "|---|---|---|"]
     lines += [f"| {name} | {result} | {detail} |" for name, result, detail in batteries]
-    lines += ["", f"- Wall time: `{time.monotonic() - started:.3f}s`", f"- Exit verdict: `{'FAIL' if failed else 'PASS'}`", "- Proof boundary: this receipt proves only the executed rows against this tree; skipped cloud rows are not release-readiness proof.", ""]
+    lines += ["", f"- Wall time: `{time.monotonic() - started:.3f}s`", f"- Exit verdict: `{verdict}`", "- Proof boundary: this receipt proves only the executed rows against this tree; skipped cloud rows are not release-readiness proof.", ""]
     receipt = out / "PHASE-A-RECEIPT.md"
     receipt.write_text("\n".join(lines), encoding="utf-8")
-    return 1 if failed else 0, receipt
+    return (0 if verdict == "PASS" else 1), receipt
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--worktree", type=Path, required=True); parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--worktree", type=Path, required=True)
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--release", action="store_true")
+    parser.add_argument("--rc-tag")
+    parser.add_argument("--hermes-repo", type=Path)
+    parser.add_argument("--expect-365-fixed", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
-    code, receipt = run(args.worktree, args.out)
-    print(receipt); return code
+    code, receipt = run(args.worktree, args.out, release=args.release, rc_tag=args.rc_tag, hermes_repo=args.hermes_repo, expect_365_fixed=args.expect_365_fixed)
+    print(receipt)
+    return code
 if __name__ == "__main__":
     raise SystemExit(main())
