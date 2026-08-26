@@ -218,18 +218,24 @@ jobs:
             let prNumber = null, base = null, head = null, result = null;
             let conclusion = 'failure', summary = 'Validation failed closed.';
             try {
-              const reconciled = await reconcileOpenPullRequests(defaultBranch);
-              const snapshots = reconciled.snapshots;
               if (dispatchEvent) {
+                // Identify the dispatch target before any broader API work: an
+                // identifiable target must reach the fail-closed emit even when
+                // open-PR enumeration itself rejects.
                 const dispatch = context.payload.client_payload;
-                const sender = context.payload.sender;
-                const run_attempt = Number(process.env.GITHUB_RUN_ATTEMPT || '1');
                 if (!dispatch || typeof dispatch !== 'object' || Array.isArray(dispatch))
                   throw Error('dispatch payload invalid');
                 if (typeof dispatch.pr_number !== 'number' || !Number.isInteger(dispatch.pr_number) || dispatch.pr_number <= 0) throw Error('dispatch PR number invalid');
                 prNumber = dispatch.pr_number;
                 const tuple = (await github.rest.pulls.get({owner, repo, pull_number: prNumber})).data;
                 base = tuple.base.sha; head = tuple.head.sha;
+              }
+              const reconciled = await reconcileOpenPullRequests(defaultBranch);
+              const snapshots = reconciled.snapshots;
+              if (dispatchEvent) {
+                const dispatch = context.payload.client_payload;
+                const sender = context.payload.sender;
+                const run_attempt = Number(process.env.GITHUB_RUN_ATTEMPT || '1');
                 if (sender?.login !== '100yenadmin' || Number(sender?.id) !== 239388517 ||
                     sender?.type !== 'User' || context.actor !== '100yenadmin' || Number(process.env.GITHUB_ACTOR_ID) !== 239388517)
                   throw Error('dispatch producer unauthenticated');

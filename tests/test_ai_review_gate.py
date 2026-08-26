@@ -782,3 +782,24 @@ def test_red_base_accepts_dispatch_without_authenticated_producer_or_attempt_gua
     assert result["decision"] == "FAIL"
     assert "PRODUCER_UNAUTHENTICATED" in result["blockers"]
     assert "RUN_ATTEMPT_INVALID" in result["blockers"]
+
+
+def test_workflow_identifies_dispatch_target_before_peer_enumeration():
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
+    ).read_text(encoding="utf-8")
+
+    target_number = workflow.index("prNumber = dispatch.pr_number;")
+    target_tuple = workflow.index("base = tuple.base.sha; head = tuple.head.sha;")
+    enumeration = workflow.index(
+        "const reconciled = await reconcileOpenPullRequests(defaultBranch);"
+    )
+
+    # A rejection of the top-level open-PR enumeration must still reach the
+    # fail-closed emit for an event-identified dispatch target: the target's
+    # number and tuple are captured before reconciliation can abort.
+    assert target_number < target_tuple < enumeration
+    assert (
+        "if (prNumber && base && head) await emit(prNumber, base, head, conclusion, summary);"
+        in workflow
+    )
