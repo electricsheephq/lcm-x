@@ -222,8 +222,11 @@ FTS-only instantly.
 
 The distinction matters for privacy. The summary corpus starts from model-generated summaries; the
 chunk corpus starts from raw message bytes, including tool-result output and error/traceback content.
-For known cloud providers, v0.23.1 applies the configured provider-input privacy transform and
-rejects residual detector matches before transport. This protects configured patterns but cannot
+For known cloud providers the configured provider-input privacy transform applies by default
+(`LCM_EMBEDDING_PRIVACY_ENABLED` unset) and rejects residual detector matches before
+transport; `LCM_EMBEDDING_PRIVACY_ENABLED=false` sends chunk text raw under the `privacy:off`
+revision. Neither posture redacts your durable history — the chunk corpus is read from raw
+message bytes either way. This protects configured patterns but cannot
 classify every possible sensitive fact in source-derived chunk text.
 
 Because of this, `--corpus chunks --apply` and `--corpus both --apply` **refuse** on a cloud provider

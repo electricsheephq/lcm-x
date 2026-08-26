@@ -32,8 +32,8 @@ needs a live soak. Docs/bench-only releases may skip to GA with a note in the re
 A fresh, isolated hermes+LCM clone (fresh HOME-style env, fresh DB, HERMES_LCM_REPO = worktree
 at the rc tag) — never a developer working tree. Two configurations, both driven LIVE:
 
-- **cloud posture**: real cloud embedding provider (small corpus — spend is cents), sensitive
-  patterns enabled (the only configuration production permits for cloud).
+- **cloud-default posture**: real cloud embedding provider (small corpus — spend is cents),
+  durable sensitive patterns off (lossless store) and embedding privacy auto-on.
 - **local posture**: fastembed/local provider, patterns off.
 
 Matrix: EVERY registered `lcm_*` tool (enumerate from the tool registry at run time — currently
@@ -43,12 +43,13 @@ lcm_compile_evidence, lcm_evidence_pack — the runner FAILS if it finds a regis
 matrix row, so new tools cannot ship untested) × both postures. Each row asserts a real
 post-condition (hits returned, status fields present, doctor clean), never just "no exception".
 
-Privacy battery (cloud posture): ingest planted secrets (the #365 shape battery: PEM complete /
-truncated / encrypted-armor / serialized / prefixed; passwords; api keys) through the real
-ingest path, then verify LIVE: durable store redacted, embedding dispatches validated (no
-residual), placeholders canonical, privacy revision registered, recall returns placeholders.
-Loud-fail battery: cloud provider + patterns off ⇒ lcm_recall raises; proactive counter
-increments; status exposes privacy_policy_errors; assembly never breaks.
+Privacy batteries (behind the cloud key gate): the planted-secret battery proves the shipped
+default keeps every planted secret raw in durable rows and recall while provider dispatches are
+transformed, canonical, residual-free, and revision-validated. Opt-out proves `privacy:off`
+preserves byte-identical provider input. Durable-redaction preserves those same redaction and
+placeholder checks as an opt-in posture. Misconfiguration uses an invalid pattern catalog to
+prove lcm_recall raises, the proactive counter increments, status exposes privacy_policy_errors,
+and assembly never breaks; its negative control proves the shipped default recall succeeds.
 
 ## Phase B — P0/P1 adversarial sweep (ultracode)
 

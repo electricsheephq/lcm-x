@@ -31,3 +31,7 @@ Cleanup apply is separately feature-gated. Never infer permission to enable it f
 - Weak exact recall: verify source rows exist, query construction/scope is correct, summary health is sound, and embedding coverage/provenance matches the requested mode.
 - Conflicting summary and raw evidence: prefer the newer exact raw evidence and inspect lineage.
 - Path B/context-engine schema log: expected on hosts where plugin-registry handlers do not receive active messages; context-engine schemas and dispatch remain the healthy route.
+- Proactive recall injects nothing and `lcm_status` shows `proactive_recall.privacy_policy_errors > 0`:
+  a deterministic embedding-privacy configuration fault, not load shedding. Check the
+  `LCM_SENSITIVE_PATTERNS` catalog (nonempty, recognized names) and whether the registered
+  vector revision matches the current posture; re-run `/lcm embed warmup` after any change.

@@ -180,6 +180,7 @@ export LCM_EMBEDDING_PROVIDER=openai-compatible
 export LCM_EMBEDDING_MODEL=BAAI/bge-m3
 export LCM_EMBEDDING_BASE_URL=https://embedding-service.example/v1
 export LCM_EMBEDDING_API_KEY=...              # supply through your secret manager
+# Conservatively treated as cloud: provider-bound copies are protected automatically.
 export LCM_SENSITIVE_PATTERNS=api_key,bearer_token,password_assignment,private_key
 ```
 

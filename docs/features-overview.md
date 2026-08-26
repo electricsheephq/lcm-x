@@ -113,6 +113,9 @@ Safety posture: `mode='full_text'` remains the byte-compatible default;
 semantic timeouts degrade to full-text with an explicit `degraded_to_fts`
 marker; filters that the semantic arm cannot honor exactly cause a degrade
 rather than approximate results; source-lineage checks fail closed.
+Degrading is for transient or capability failures only: an embedding-privacy policy error is
+a deterministic configuration fault, so `lcm_recall` raises it instead of degrading, and
+proactive recall counts it in `privacy_policy_errors` rather than injecting nothing quietly (#370).
 
 Known cloud providers protect provider-bound input by default
 (`embedding_privacy_enabled` auto-resolves ON for cloud; an explicit
@@ -150,14 +153,15 @@ flowchart LR
 | Cost | Provider pricing | Endpoint-dependent | Local compute | Endpoint-dependent |
 | Setup | API key | Ollama service + model | Optional `fastembed` install; model download at warmup | Base URL, model ID, and configured API-key environment |
 | Quality | Model-dependent frontier service | Model-dependent | Small local baseline | Endpoint/model-dependent |
-| Privacy | Cloud policy required | Always treated as trusted/exempt by the shipped code; a remote or forwarded endpoint receives ungated content, with endpoint-aware hardening deferred to #337 | On-machine | Conservatively cloud-gated by the shipped provider identity |
+| Privacy | Provider copies protected by default (`privacy:off` opt-out available) | Always treated as trusted/exempt by the shipped code; a remote or forwarded endpoint receives ungated content, with endpoint-aware hardening deferred to #337 | On-machine | Conservatively treated as cloud: provider copies protected by default under the shipped provider identity |
 
 LCM embeds bounded summaries by default rather than raw transcripts. Dry-run a
 backfill to measure the selected corpus and verify current provider pricing
 immediately before any paid execution.
-`lcm_recall` can optionally rerank a bounded fused candidate window with Voyage,
-but reranking remains default-off and has its own cloud payload/privacy contract
-(#336). `lcm_grep` hybrid mode remains RRF-only.
+`lcm_recall` can optionally rerank a bounded fused candidate window with Voyage. Reranking
+remains default-off; when it runs on a cloud provider its query and snippets are protected
+by the same embedding-privacy resolution before transport (#371), and the explicit
+`privacy:off` opt-out sends them raw by choice. #336 tracks the remaining payload contract. `lcm_grep` hybrid mode remains RRF-only.
 
 Provider accounts and quotas may be shared with other tools, but LCM-X does not
 assume that another tool's model, endpoint, privacy policy, or billing contract

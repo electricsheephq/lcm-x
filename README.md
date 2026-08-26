@@ -93,8 +93,10 @@ Core capabilities:
   glob patterns
 - **Large payload controls** - externalize oversized tool/media/raw payloads and
   protect SQLite from inline media-ish base64 blobs
-- **Sensitive-pattern controls** - optional named redaction of API keys, bearer
-  tokens, passwords, and private keys before LCM stores or summarizes them
+- **Sensitive-pattern controls** - two independent layers: opt-in durable redaction of API
+  keys, bearer tokens, passwords, and private keys before LCM stores or summarizes them
+  (off by default — the durable store is lossless), and automatic protection of the copies
+  sent to known cloud embedding providers
 - **Diagnostics** - runtime health, database checks, optional `/lcm` slash
   commands, backup-first repair/rotate paths
 
@@ -116,6 +118,8 @@ The latest stable release is
 fail-closed provider-input privacy boundary used by cloud summary/query
 embeddings while preserving the 15-tool surface, schema-5 core store, and
 default-off experimental features.
+(v0.23.1 coupled that boundary to durable redaction; main has since made the two
+independent — see "Sensitive-pattern redaction" below.)
 
 Stable release identity and the continuing `main` development line are
 separate proof planes. The source snapshot used for the current reconciliation
@@ -529,12 +533,16 @@ the digest to avoid making password-like values easier to dictionary-check.
 unknown names, source, and placeholder format without exposing raw secret values.
 
 Cloud embeddings add a separate provider-input-only privacy transform. It does
-not rewrite historical SQLite, FTS, summary, or payload data. Before cloud
-warmup, summary/chunk backfill, or semantic-query dispatch, LCM requires an
-enabled, nonempty, known policy; transforms matching provider input to
-pattern-only placeholders; rejects residual matches; and binds the transform
-version plus active-pattern-name hash into the vector profile revision. Policy
-drift refuses dispatch until `/lcm embed warmup` registers the new identity.
+not rewrite historical SQLite, FTS, summary, or payload data. It resolves ON
+automatically for known cloud providers and does not require
+`LCM_SENSITIVE_PATTERNS_ENABLED`. While it is on, cloud warmup, summary/chunk
+backfill, and semantic-query dispatch require a nonempty, known
+`LCM_SENSITIVE_PATTERNS` catalog; matching provider input becomes pattern-only
+placeholders, residual matches are rejected, and the transform version plus
+active-pattern-name hash bind into the vector profile revision.
+`LCM_EMBEDDING_PRIVACY_ENABLED=false` opts out explicitly and binds the
+distinguished `privacy:off` revision instead of blocking. Either way a posture or
+policy change refuses dispatch until `/lcm embed warmup` registers the new identity.
 FastEmbed is in-process. The shipped Ollama provider does not apply the cloud
 gate, so use it only with a trusted local/loopback endpoint; #337 tracks
 endpoint-aware locality for remote Ollama configurations.

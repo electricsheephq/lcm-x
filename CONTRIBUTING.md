@@ -109,6 +109,11 @@ After merging, maintainers verify the merge commit is current `main`, linked iss
 and the required checks on the exact merge commit. Maintainers curate user-facing release notes;
 commit lists or model output do not replace those notes.
 
+Releases are rc-first: any release containing product code (anything outside `bench/`,
+`docs/`, `tests/`, and `.github/release-notes/`) ships as a `vX.Y.Z-rcN` prerelease and must
+pass the live gauntlet in `bench/specs/RELEASE-READINESS-V1.md` before the GA tag. The GA
+commit may differ from the passing rc tree by exactly the added release-notes file.
+
 ## Automation Boundary
 
 AI and bot output is proposal and evidence by default. Models may triage, reproduce, implement,
