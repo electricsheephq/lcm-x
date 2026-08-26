@@ -2,7 +2,7 @@
 
 Every number ships with its full run config, variance, fail-close accounting, and known dataset defects — rows that cannot meet the standard do not render.
 
-Generated from `results.jsonl` (sha256: `f57e48e994b625d229aa0a16c69d44ed035d493e57b92ec958c255d7d06d341c`, rows: 10)
+Generated from `results.jsonl` (sha256: `f4a3e92ae51cf16a5b9b4622eb70d31651e08330493004a2e7da8769a1eb5dc6`, rows: 11)
 
 ## Summary
 
@@ -10,6 +10,7 @@ Generated from `results.jsonl` (sha256: `f57e48e994b625d229aa0a16c69d44ed035d493
 |---|---|---|---|---|---|
 | AMA-Bench (open-ended, 208 episodes) | strict judged accuracy, fail-closed denominator | 1180/2496 = 47.3% (scored-only 1180/2460 = 48.0%) | F | 2026-08-02 | [details](#ama208-full-2026-08-02) |
 | Internal scale instrument (389×, 19,829 sessions / 199,641 messages) | p50_ms | 263.6 ms @ 19,829 sessions (24× vs pre-fix; 125 ms @ 8k) | P | 2026-07-30 | [details](#scale-curve-fastscan-2026-07-30) |
+| LoCoMo (locomo10, 1,986q) | accuracy | 67.4% (1,339/1,986 MemScore) | F | 2026-08-26 | [details](#locomo10-1986-b3a-2026-08-26) |
 | LoCoMo (locomo10, 1,986q) | accuracy | 54.6% (1,085/1,986 MemScore) | F | 2026-08-02 | [details](#locomo10-1986-declared-2026-08-02) |
 | ~~LoCoMo (locomo10, 1,986q)~~ | ~~accuracy~~ | ~~47.0% (MemScore)~~ | ~~F~~ | ~~2026-07-30~~ | ~~[details](#locomo10-1986-arm-a-2026-07-30)~~ → [successor](#locomo10-1986-declared-2026-08-02) |
 | LongMemEval-V1 (S, 500q) | accuracy | 455/500 (91.0%) | P | 2026-07-29 | [details](#longmemeval-v1-s500-accuracy-2026-07-29) |
@@ -141,6 +142,68 @@ pin discipline PASS; truncation bug meant 5.7% of delivered results were silentl
 
 **superseded_by:**
 locomo10-1986-declared-2026-08-02
+
+### <a id="locomo10-1986-b3a-2026-08-26"></a>locomo10-1986-b3a-2026-08-26
+
+**id:**
+locomo10-1986-b3a-2026-08-26
+
+**benchmark:**
+LoCoMo (locomo10, 1,986q)
+
+**metric:**
+accuracy
+
+**value:**
+0.6742
+
+**display:**
+67.4% (1,339/1,986 MemScore)
+
+**tier:**
+F
+
+**date:**
+2026-08-26
+
+**system_commit:**
+hermes-lcm fork main @ 9d181aa (identical product tree to the F48 declared row — B3-A is a bridge-side ingest delta)
+
+**harness_commit:**
+memorybench wt-locomo-prep @ d305d590 (C1-era prep 2c36f98 + B3-A attribution cherry-pick 6233661; HERMES_MB_SPEAKER_PREFIX=1 is the single delta vs F48)
+
+**judge:**
+gpt-5.6-sol @ low; full prompts pinned (defaults.ts 7662f6…) — same judge and rubric as F48 (C1 pins amendments 1-4 inherited as the baseline environment)
+
+**reader:**
+gpt-5.6-sol @ medium (frontier answerer per two-tier doctrine, unchanged from F48)
+
+**retrieval_config:**
+F48 declared config verbatim (fastembed bge-small; fusion quota fts:chunk=1:2; conversational chunk threshold 10; answer-ready 2,400 chars) + HERMES_MB_SPEAKER_PREFIX=1: '<Speaker>: ' prefixes on user rows at ingest (SPEC-B3-ATTRIBUTION.md; 45-line bridge change)
+
+**dataset_exposure:**
+99 documented corrupted-gold rows all ran, scored as-is; known-corruption ceiling ≈95% (unchanged from F46 §6)
+
+**breakdown:**
+single-hop 45.4 (+8.2 vs F48) / multi-hop 71.7 (+6.9) / temporal 46.9 (+5.2) / world 78.2 (+8.5) / adversarial 62.3 (+29.6) — every category above F48 declared; band was adversarial ≥+4.0
+
+**variance:**
+pre-registered A/A′ pair on fresh stores: 82/1,986 discordant (4.13%), aggregate spread 0.30pt (A 67.42 / A′ 67.72); arm A is the scored read per the run sheet; A→A′ gap ≈110h (weaker pairing than C1's same-day pair — disclosed)
+
+**failclose:**
+0/1,986 incomplete both arms; paired failclose union-drop 0; PINS-POSTRUN PASS both arms (A′ postrun executed manually after the resume script exited pre-postrun — env pins verify a reconstruction from the script's own exports; sha-class pins verified against disk)
+
+**evidence:**
+- bench/FINDING-F61-LOCOMO-C2-B3A-ATTRIBUTION.md
+- bench/specs/RUN-SHEET-LOCOMO-C2-B3A.md (#316)
+- session-notes 2026-08-21 hermes-locomo-c2 artifacts (paid-aa-20260820T211813Z)
+- session-notes 2026-08-26 interim-review artifacts F61-recompute.txt
+
+**caveats:**
+- attribution is the lever, robustness is the prize: the adversarial (unanswerable) category nearly doubles (32.7 → 62.3) — the F59 §9 failure class (entity+recency-matched confusions from misattributed facts) attacked directly; every other category also rises, consistent with attribution improving retrieval binding generally
+- benchmark claim on the pinned trees only: B3-A lives in the benchmark bridge; the product ingest-path analog (#324 sender/timestamp provenance + #317 untrusted-evidence boundary) is the productization this unlocks and needs its own confirmation run (#379 epic)
+- not a claim about current main: v0.23.x privacy changes landed after these pins (BASELINE-LEDGER privacy-trio boundary); the F53 re-bank (#380) governs the retrieval row, not this one
+- A′ interruption chain disclosed in the finding §3: session teardown at search-phase start + resume-script death after 'Run complete!' — all checkpoint-recovered, 0 lost questions
 
 ### <a id="locomo10-1986-declared-2026-08-02"></a>locomo10-1986-declared-2026-08-02
 
