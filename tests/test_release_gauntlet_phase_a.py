@@ -10,6 +10,21 @@ import sys
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_runner_modules():
+    # Every full-matrix run in this file registers worktree modules whose
+    # provider singletons hold file descriptors; restore sys.modules after
+    # each test so cumulative residue cannot push later tests over a low FD
+    # limit (CI's deliberate canary).
+    import gc
+
+    before = set(sys.modules)
+    yield
+    for name in set(sys.modules) - before:
+        sys.modules.pop(name, None)
+    gc.collect()
+
+
 def _runner_module():
     worktree = Path(__file__).resolve().parents[1]
     path = worktree / "bench/instruments/release_gauntlet/phase_a_tool_matrix.py"
