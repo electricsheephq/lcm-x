@@ -1785,42 +1785,6 @@ def _pem_marker_with_inline_body(text: str) -> bool:
     return False
 
 
-_PRIVATE_KEY_PLACEHOLDER_RE = re.compile(
-    r"\[LCM (?:sensitive redaction|embedding privacy):\s*name=private_key[^\]]*\]",
-    re.IGNORECASE,
-)
-
-
-def _pem_fragment_near_private_key_placeholder(text: str) -> bool:
-    """True when a 16+ base64-charset token sits near a PRIVATE_KEY placeholder.
-
-    Marker-independent backstop (#383 rounds 4-6): a private_key placeholder
-    proves a private key was redacted at that spot, so any surviving unbroken
-    16+ base64-alphabet token in its adjacency window is an orphaned key-body
-    fragment and blocks the dispatch fail-closed. Scoped to the private_key
-    placeholder name deliberately: a 16+ base64 token beside a NON-key
-    placeholder (e.g. a git SHA next to a redacted `api_key`) is ambiguous and
-    must NOT over-block — marker-independent MULTI-LINE key bodies are covered
-    instead by `_has_orphan_full_width_base64_run`, and a lone token beside a
-    non-key placeholder is the accepted precision boundary (like sub-16 tokens).
-    """
-    window = 160
-    for pm in _PRIVATE_KEY_PLACEHOLDER_RE.finditer(text):
-        lo = max(0, pm.start() - window)
-        # Bound the scan to the adjacency window plus 16 chars of headroom: a
-        # 16+ run STARTING anywhere inside the window still yields a >=16-char
-        # match within [lo, hi] (its first 16 chars land before hi), while an
-        # explicit endpos keeps each placeholder's scan O(window) instead of
-        # O(remaining text) — the latter is O(placeholders * text) on inputs
-        # with many placeholders and no nearby base64 (#383 round-6 perf fix).
-        hi = min(len(text), pm.end() + window + _PRIVATE_KEY_STRICT_MIN_CHARS)
-        for m in _PRIVATE_KEY_INLINE_RUN_RE.finditer(text, lo, hi):
-            run = m.group(0)
-            if len(run) >= _PRIVATE_KEY_STRICT_MIN_CHARS and run not in pm.group(0):
-                return True
-    return False
-
-
 def _has_orphan_full_width_base64_run(text: str) -> bool:
     """True when >=2 contiguous full-width base64 body lines survive, markerless.
 
@@ -1851,6 +1815,44 @@ def _has_orphan_full_width_base64_run(text: str) -> bool:
     return False
 
 
+def _pem_full_width_line_near_placeholder(text: str) -> bool:
+    """True when a full-width base64 LINE sits near a private_key placeholder.
+
+    Marker-independent backstop (#383 round-8, replacing the removed
+    proximity-token backstop that over-blocked "private key + nearby git SHA").
+    A private_key placeholder proves a key was redacted there; a whole LINE that
+    is pure base64 of full PEM wrap width (>=40 chars, non-English) within a few
+    lines of it is another (orphaned) body line — e.g. a truncated key whose
+    body was split by a non-base64 line, leaving one body line non-contiguous.
+    Keyed on a full-width base64 LINE, NOT any 16+ token, so a git SHA / hash
+    embedded in a prose line ("Deployed at commit <sha> per the runbook") does
+    NOT match — the common over-block that regression #389 removed. A base64
+    hash ON ITS OWN LINE right beside a redacted key is a rarer accepted
+    fail-closed over-block.
+    """
+    lines = text.splitlines()
+    ph_window = 0
+    for line in lines:
+        stripped = line.strip(" \t")
+        low = stripped.lower()
+        is_ph = "[lcm embedding privacy: name=private_key]" in low or (
+            "[lcm sensitive redaction: name=private_key" in low
+        )
+        if is_ph:
+            ph_window = 3
+            continue
+        if ph_window > 0:
+            body = _normalize_escaped_solidus(stripped)
+            if (
+                len(body) >= 40
+                and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(body) is not None
+                and not _looks_like_english_token(body)
+            ):
+                return True
+            ph_window -= 1
+    return False
+
+
 def _embedding_privacy_residual_patterns(
     text: str, active_names: Sequence[str]
 ) -> list[str]:
@@ -1878,10 +1880,10 @@ def _embedding_privacy_residual_patterns(
                 or _has_orphaned_private_key_body(text)
                 or _pem_marker_with_inline_body(text)
                 or _pem_marker_with_inline_body(normalized)
-                or _pem_fragment_near_private_key_placeholder(text)
-                or _pem_fragment_near_private_key_placeholder(normalized)
                 or _has_orphan_full_width_base64_run(text)
                 or _has_orphan_full_width_base64_run(normalized)
+                or _pem_full_width_line_near_placeholder(text)
+                or _pem_full_width_line_near_placeholder(normalized)
             ):
                 residual.append(name)
             continue

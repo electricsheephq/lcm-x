@@ -1415,24 +1415,6 @@ def test_round16_orphan_symmetry_and_escape_spellings(tmp_path):
     ("label", "text", "fragment"),
     [
         (
-            "no-digit-alphabet-tail",
-            "trunc -----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq abcdefghijklmnop "
-            "-----BEGIN ENCRYPTED PRIVATE KEY-----\nZBODY9\n-----END ENCRYPTED PRIVATE KEY-----",
-            "abcdefghijklmnop",
-        ),
-        (
-            "interrupted-resumed-run",
-            "trunc -----BEGIN PRIVATE KEY-----\nFIRSTBODY1111 prose RESUMEDBODY2222AA "
-            "-----BEGIN ENCRYPTED PRIVATE KEY-----\nZBODY9\n-----END ENCRYPTED PRIVATE KEY-----",
-            "RESUMEDBODY2222AA",
-        ),
-        (
-            "markdown-prefixed-body",
-            "trunc -----BEGIN PRIVATE KEY-----\n> MDBODY1111AAAA2222 "
-            "-----BEGIN ENCRYPTED PRIVATE KEY-----\nZBODY9\n-----END ENCRYPTED PRIVATE KEY-----",
-            "MDBODY1111AAAA2222",
-        ),
-        (
             "single-line-begin-body-marker",
             "log: -----BEGIN PRIVATE KEY----- MIIEvQIB1111ADANBgkqSECRET "
             "-----BEGIN CERTIFICATE-----",
@@ -1446,9 +1428,6 @@ def test_round16_orphan_symmetry_and_escape_spellings(tmp_path):
         ),
     ],
     ids=[
-        "no-digit-tail",
-        "interrupted-resumed",
-        "markdown-prefixed",
         "single-line-composition",
         "escaped-tab",
     ],
@@ -1471,6 +1450,51 @@ def test_marker_adjacency_variants_never_dispatch_raw(tmp_path, label, text, fra
         validate_embedding_privacy_dispatch(
             [protected], cfg, expected_revision=revision
         )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # A LONE base64 fragment near a redacted private-key placeholder is an
+        # ACCEPTED precision boundary (#389): the round-6 placeholder-proximity
+        # backstop was REMOVED because it blocked the common, legitimate
+        # "private key + nearby git SHA" pattern (a git SHA is a 16+ base64
+        # token too, indistinguishable from a key fragment by proximity).
+        # Multi-line key bodies are still caught by _has_orphan_full_width_
+        # base64_run; only these single sub-threshold fragments dispatch.
+        "trunc -----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq abcdefghijklmnop "
+        "-----BEGIN ENCRYPTED PRIVATE KEY-----\nZBODY9\n-----END ENCRYPTED PRIVATE KEY-----",
+        "trunc -----BEGIN PRIVATE KEY-----\nFIRSTBODY1111 prose RESUMEDBODY2222AA "
+        "-----BEGIN ENCRYPTED PRIVATE KEY-----\nZBODY9\n-----END ENCRYPTED PRIVATE KEY-----",
+    ],
+    ids=["no-digit-tail", "interrupted-resumed"],
+)
+def test_single_fragment_near_placeholder_is_accepted_boundary(tmp_path, text):
+    # These dispatch (documented #389 boundary). The point of the test is the
+    # complementary GUARANTEE: removing the over-broad proximity backstop did
+    # NOT re-open the multi-line key-body class — see
+    # test_truncated_key_body_split_by_long_line_blocks_fail_closed (still
+    # blocks) — and it FIXES the common over-block below.
+    cfg = _config(tmp_path, enabled=False)
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+    # no exception = accepted boundary dispatch
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+
+
+def test_private_key_beside_nearby_git_sha_is_not_over_blocked(tmp_path):
+    # Regression for the rc2-gauntlet-caught over-block: a redacted private key
+    # followed by a nearby git SHA (ubiquitous in deploy runbooks) must still
+    # embed — the removed proximity backstop used to block it fail-closed.
+    cfg = _config(tmp_path, enabled=False)
+    key = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj\n"
+        "-----END PRIVATE KEY-----"
+    )
+    text = f"{key}\nDeployed at commit 0123456789abcdef0123456789abcdef01234567 per the runbook."
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+    assert "0123456789abcdef0123456789abcdef01234567" in protected  # the SHA embeds
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
 
 
 def test_hyphenated_marker_labels_split_the_leading_body_run(tmp_path):
