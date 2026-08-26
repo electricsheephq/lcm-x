@@ -3286,6 +3286,7 @@ def run_versioned_migrations(conn: sqlite3.Connection) -> None:
 
     refuse_schema_version_too_new(conn)
     current_version = get_schema_version(conn)
+    initial_version = current_version
     if current_version < 2:
         mark_migration_step_complete(conn, "v2_external_content_fts_triggers")
         current_version = 2
@@ -3316,4 +3317,7 @@ def run_versioned_migrations(conn: sqlite3.Connection) -> None:
     # feature materialized lazily by VectorStore (recorded via the named
     # ``embeddings_v1`` marker), so a disabled install stays at v5 with no
     # embedding tables and the numeric counter is free for the temporal train.
-    set_schema_version(conn, current_version)
+    # A current-schema open is read-only at the version-marker boundary. This
+    # lets parallel engine clones coexist with legitimate WAL writers.
+    if current_version != initial_version:
+        set_schema_version(conn, current_version)
