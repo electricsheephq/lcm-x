@@ -519,7 +519,7 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
         line_start = offset
         offset += len(raw)
         content = raw.splitlines()[0] if raw else ""
-        if "\\" in content and "PRIVATE KEY-----" in content.upper() and (
+        if "\\" in content and (
             _PRIVATE_KEY_ESCAPED_SEPARATOR_HINT_RE.search(content) is not None
         ):
             # JSON/log-serialized key: literal \n (optionally \r\n) escape
@@ -798,6 +798,7 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                 continue
             last_evidence = -1
             saw_strict_run = False
+            pending_shorts = []
             while j < n:
                 run_kind = effective_kind(j)
                 if run_kind in (
@@ -808,17 +809,27 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                     saw_strict_run = True
                     last_evidence = j
                 elif run_kind == _PEM_LINE_KIND_SHORT_B64:
-                    # A short PURE-ALPHA token ("IMPORTANT", "WARNING") is
-                    # tail evidence only after a full-width line — a real PEM
-                    # tail follows body; a doc heading follows a bare BEGIN.
-                    seg = text[model[j][1]:model[j][2]].strip(" \t")
-                    tok = seg.split()[-1] if seg.split() else seg
-                    if saw_strict_run or not tok.lstrip(">|-").isalpha():
+                    # A short token after body is a real PEM tail; after a
+                    # bare BEGIN it is a doc label ("IMPORTANT", "PKCS8") —
+                    # never sole evidence. A short-ONLY run counts only as a
+                    # re-wrap: >=2 contiguous shorts, each base64-aligned.
+                    if saw_strict_run:
                         saw_b64 = True
                         last_evidence = j
+                    else:
+                        seg = text[model[j][1]:model[j][2]].strip(" \t")
+                        tok = seg.split()[-1] if seg.split() else seg
+                        pending_shorts.append((j, len(tok.lstrip(">|-")) % 4 == 0))
                 elif run_kind != _PEM_LINE_KIND_LENIENT_B64:
                     break
                 j += 1
+            if (
+                not saw_strict_run
+                and len(pending_shorts) >= 2
+                and all(aligned for _idx, aligned in pending_shorts)
+            ):
+                saw_b64 = True
+                last_evidence = pending_shorts[-1][0]
             if j < n and model[j][0] == _PEM_LINE_KIND_END:
                 emit(redact_start, model[j][2])
                 i = j + 1

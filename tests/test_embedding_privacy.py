@@ -1097,6 +1097,18 @@ def test_round16_orphan_symmetry_and_escape_spellings(tmp_path):
     pfx_heading = "INFO -----BEGIN PRIVATE KEY-----\nINFO IMPORTANT\nINFO this explains keys"
     assert redact_sensitive_text(pfx_heading, cfg) == pfx_heading
 
+    # R22: digit-bearing doc labels ("PKCS8") after a bare BEGIN stay; a
+    # short-only run is evidence only as an aligned re-wrap; and mixed
+    # physical/escaped separators split (the marker need not share the line).
+    pkcs = "-----BEGIN PRIVATE KEY-----\nPKCS8\ndocumentation follows here"
+    assert redact_sensitive_text(pkcs, cfg) == pkcs
+    mixed = (
+        "-----BEGIN PRIVATE KEY-----\n" + "Q" * 24 + "\\n" + "R" * 24
+        + "\\n" + "S" * 24 + "\nprose stays"
+    )
+    out = redact_sensitive_text(mixed, cfg)
+    assert "QQQQ" not in out and "SSSS" not in out and "prose stays" in out
+
     # Precision: suffixed marker mentions and hash dumps stay untouched.
     for keep in (
         "we discussed the -----END PRIVATE KEY----- marker in prose",
