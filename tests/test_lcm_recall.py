@@ -24,7 +24,6 @@ from hermes_lcm.embedding_provider import (
     resolve_provider as real_resolve_provider,
 )
 from hermes_lcm.ingest_protection import (
-    EmbeddingPrivacyPolicyError,
     embedding_privacy_revision,
     embedding_provider_requires_privacy,
 )
@@ -165,10 +164,18 @@ def _recall(engine, monkeypatch, provider=None, **args):
                 2,
                 revision=embedding_privacy_revision(engine._config),
             )
+            store.register_profile(
+                provider.model_id,
+                provider.provider_id,
+                2,
+                revision=embedding_privacy_revision(engine._config),
+                task="chunk",
+            )
         finally:
             store.close()
     monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: provider)
-    payload = json.loads(lcm_tools.lcm_recall({"query": "kanban dashboard sprint", **args}, engine=engine))
+    query = str(args.pop("query", "kanban dashboard sprint"))
+    payload = json.loads(lcm_tools.lcm_recall({"query": query, **args}, engine=engine))
     return payload
 
 
@@ -257,27 +264,52 @@ def test_voyage_chunk_recall_uses_context_model(recall_engine, monkeypatch):
     }
 
 
-def test_recall_reraises_embedding_privacy_policy_error_for_summary(
+def test_recall_cloud_summary_query_is_protected_with_durable_redaction_off(
     recall_engine, monkeypatch
 ):
     recall_engine._config.embedding_provider = "voyage"
     recall_engine._config.embedding_model = "voyage-4-large"
     recall_engine._config.sensitive_patterns_enabled = False
-    recall_engine._store.append(
-        CURRENT, {"role": "user", "content": "summary privacy policy query"}
-    )
+    secret = "abcdefghijklmnop"
+    raw_query = f"summary privacy api_key={secret}"
+    recall_engine._store.append(CURRENT, {"role": "user", "content": raw_query})
     provider = MockProvider()
     provider.provider_id = "voyage"
     provider.model_id = "voyage-4-large"
-    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: provider)
+    _recall(
+        recall_engine,
+        monkeypatch,
+        provider=provider,
+        query=raw_query,
+        include="summaries",
+    )
 
-    with pytest.raises(EmbeddingPrivacyPolicyError, match="enabled"):
-        lcm_tools.lcm_recall(
-            {"query": "summary privacy policy query", "include": "summaries"},
-            engine=recall_engine,
-        )
+    assert len(provider.queries) == 1
+    assert secret not in provider.queries[0]
+    assert "[LCM embedding privacy: name=api_key]" in provider.queries[0]
 
-    assert provider.queries == []
+
+def test_recall_cloud_privacy_opt_out_sends_raw_query_without_policy_error(
+    recall_engine, monkeypatch
+):
+    recall_engine._config.embedding_provider = "voyage"
+    recall_engine._config.embedding_model = "voyage-4-large"
+    recall_engine._config.sensitive_patterns_enabled = False
+    recall_engine._config.embedding_privacy_enabled = False
+    raw_query = "summary privacy api_key=abcdefghijklmnop"
+    provider = MockProvider()
+    provider.provider_id = "voyage"
+    provider.model_id = "voyage-4-large"
+
+    _recall(
+        recall_engine,
+        monkeypatch,
+        provider=provider,
+        query=raw_query,
+        include="summaries",
+    )
+
+    assert provider.queries == [raw_query]
 
 
 def test_recall_voyage_error_still_degrades_to_fts(recall_engine, monkeypatch):
@@ -313,27 +345,29 @@ def test_recall_voyage_error_still_degrades_to_fts(recall_engine, monkeypatch):
     assert all(hit["kind"] == "message_excerpt" for hit in payload["hits"])
 
 
-def test_recall_reraises_embedding_privacy_policy_error_for_chunk(
+def test_recall_cloud_chunk_query_is_protected_with_durable_redaction_off(
     recall_engine, monkeypatch
 ):
     recall_engine._config.embedding_provider = "voyage"
     recall_engine._config.embedding_model = "voyage-4-large"
     recall_engine._config.sensitive_patterns_enabled = False
-    recall_engine._store.append(
-        CURRENT, {"role": "user", "content": "chunk privacy policy query"}
-    )
+    secret = "abcdefghijklmnop"
+    raw_query = f"chunk privacy api_key={secret}"
+    recall_engine._store.append(CURRENT, {"role": "user", "content": raw_query})
     provider = MockProvider()
     provider.provider_id = "voyage"
     provider.model_id = "voyage-4-large"
-    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: provider)
+    _recall(
+        recall_engine,
+        monkeypatch,
+        provider=provider,
+        query=raw_query,
+        include="verbatim",
+    )
 
-    with pytest.raises(EmbeddingPrivacyPolicyError, match="enabled"):
-        lcm_tools.lcm_recall(
-            {"query": "chunk privacy policy query", "include": "verbatim"},
-            engine=recall_engine,
-        )
-
-    assert provider.queries == []
+    assert len(provider.queries) == 1
+    assert secret not in provider.queries[0]
+    assert "[LCM embedding privacy: name=api_key]" in provider.queries[0]
 
 
 def test_recall_returns_cross_session_summaries_without_a_filter(recall_engine, monkeypatch):

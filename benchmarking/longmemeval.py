@@ -496,7 +496,8 @@ def _embedding_privacy_context(
         embeddings_enabled=True,
         embedding_provider=normalized_provider,
         embedding_model=str(model or "").strip(),
-        sensitive_patterns_enabled=True,
+        sensitive_patterns_enabled=False,
+        embedding_privacy_enabled=None,
     )
     return config, embedding_privacy_revision(config)
 
@@ -2400,14 +2401,10 @@ def evaluate_question(
         rerank_enabled=recall_rerank,
         rerank_window_limit=recall_rerank_window,
         rerank_margin=recall_rerank_margin,
-        # Production posture (#367/#370): a cloud provider config with the
-        # privacy transform disabled is a configuration error and now fails
-        # loud on the recall path instead of silently degrading to FTS. The
-        # harness must run cloud providers the way production runs them.
-        sensitive_patterns_enabled=(
-            embeddings_enabled
-            and (summary_requires_privacy or chunk_requires_privacy)
-        ),
+        # Keep the benchmark corpus lossless. Cloud privacy applies only to
+        # provider-bound copies and resolves on automatically for cloud names.
+        sensitive_patterns_enabled=False,
+        embedding_privacy_enabled=None,
     )
     ingest_start = time.perf_counter()
     # F7: clone a pre-migrated template instead of re-running schema bootstrap.
@@ -3557,10 +3554,6 @@ def run_harness(
             from hermes_lcm.config import LCMConfig
 
             db_template = Path(tmp_dir) / "_template.db"
-            from hermes_lcm.ingest_protection import (
-                embedding_provider_requires_privacy as _requires_privacy,
-            )
-
             _bootstrap_db_template(
                 db_template,
                 LCMConfig(
@@ -3568,13 +3561,9 @@ def run_harness(
                     embeddings_enabled=embeddings_enabled,
                     embedding_provider=provider_set.summary_binding[0],
                     embedding_model=provider_set.summary_binding[1],
-                    # Must match the per-question config's production posture
-                    # (#367/#370) or the registered vector identity diverges
-                    # from what the recall path computes.
-                    sensitive_patterns_enabled=(
-                        embeddings_enabled
-                        and _requires_privacy(provider_set.summary_binding[0])
-                    ),
+                    # Match the per-question lossless/provider-copy split.
+                    sensitive_patterns_enabled=False,
+                    embedding_privacy_enabled=None,
                 ),
             )
 

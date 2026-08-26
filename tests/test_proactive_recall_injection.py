@@ -350,7 +350,7 @@ def test_privacy_policy_error_is_counted_and_warned_not_silent(tmp_path, provide
 
     def raising_recall(args, **kwargs):
         raise EmbeddingPrivacyPolicyError(
-            "cloud embedding privacy requires sensitive-pattern handling to be enabled"
+            "cloud embedding privacy policy contains unknown pattern names: future_pattern"
         )
 
     monkeypatch.setattr(tools_mod, "lcm_recall", raising_recall)

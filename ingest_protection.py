@@ -1404,9 +1404,13 @@ def extract_all_externalized_payload_refs(text: str) -> list[str]:
 
 
 def sensitive_pattern_status(config) -> dict[str, Any]:
-    """Return metadata-only status for opt-in sensitive redaction."""
+    """Return metadata-only status for durable and provider-copy protection."""
     configured, active, unknown = _configured_sensitive_pattern_names(config)
     enabled = bool(getattr(config, "sensitive_patterns_enabled", False))
+    privacy_setting = getattr(config, "embedding_privacy_enabled", None)
+    privacy_provider = str(getattr(config, "embedding_provider", "") or "")
+    privacy_required = embedding_provider_requires_privacy(privacy_provider)
+    privacy_enabled = privacy_required and privacy_setting is not False
     return {
         "sensitive_patterns_enabled": enabled,
         "enabled": enabled,
@@ -1415,6 +1419,16 @@ def sensitive_pattern_status(config) -> dict[str, Any]:
         "active_patterns": active if enabled else [],
         "unknown_patterns": unknown,
         "source": getattr(config, "sensitive_patterns_source", "default"),
+        "embedding_privacy_setting": (
+            "auto" if privacy_setting is None else "on" if privacy_setting else "off"
+        ),
+        "embedding_privacy_enabled": privacy_enabled,
+        "embedding_privacy_provider_requires_privacy": privacy_required,
+        "embedding_privacy_revision": (
+            None
+            if not privacy_required
+            else "active" if privacy_enabled else "privacy:off"
+        ),
         "placeholder_format": "[LCM sensitive redaction: name=<pattern>; chars=<n>; bytes=<n>; sha256=<16 for non-password>]",
         "lossless_recovery": False if enabled and active else None,
     }
@@ -1461,13 +1475,12 @@ def embedding_provider_requires_privacy(provider_id: str) -> bool:
 def embedding_privacy_revision(config) -> str:
     """Return the canonical identity revision for cloud embedding input.
 
-    The revision deliberately contains only a transform version and a digest of
-    sorted pattern *names*. It never depends on matched text or secret bytes.
+    The active revision contains only a transform version and a digest of sorted
+    pattern *names*. Explicit opt-out returns ``privacy:off``. Neither posture
+    depends on matched text or secret bytes.
     """
-    if not bool(getattr(config, "sensitive_patterns_enabled", False)):
-        raise EmbeddingPrivacyPolicyError(
-            "cloud embedding privacy requires sensitive-pattern handling to be enabled"
-        )
+    if getattr(config, "embedding_privacy_enabled", None) is False:
+        return "privacy:off"
     configured, active, unknown = _configured_sensitive_pattern_names(config)
     if not configured or not active:
         raise EmbeddingPrivacyPolicyError(
@@ -1638,6 +1651,8 @@ def protect_embedding_text(
             "run `/lcm embed warmup` before dispatch"
         )
     original = str(text)
+    if revision == "privacy:off":
+        return original, revision, False
     protected = _canonicalize_embedding_privacy_placeholders(original)
     _configured, active, _unknown = _configured_sensitive_pattern_names(config)
     # private_key MUST run first: an assignment pattern (e.g. password_assignment,
@@ -1674,6 +1689,8 @@ def validate_embedding_privacy_dispatch(
         raise EmbeddingPrivacyPolicyError(
             "cloud embedding privacy policy changed before provider dispatch"
         )
+    if revision == "privacy:off":
+        return revision
     _configured, active, _unknown = _configured_sensitive_pattern_names(config)
     for text in texts:
         current = str(text)

@@ -297,10 +297,12 @@ cloud vectors from a pre-v0.23.1 identity require privacy-policy warmup, an
 identity check from the warmup/profile output, and the finite monotonic
 dry-run/apply loop in the operator guide before semantic coverage is complete.
 
-Cloud embeddings are a separate opt-in. They require
-`LCM_SENSITIVE_PATTERNS_ENABLED=true` with a nonempty known pattern policy
-before warmup, summary/chunk backfill, or semantic-query dispatch. Dry-run the
-backfill first; raw-chunk cloud backfill also requires explicit raw-text consent.
+Cloud embeddings are a separate opt-in. Provider-bound copies use the configured
+sensitive-pattern catalog by default, while durable messages and FTS remain raw.
+`LCM_EMBEDDING_PRIVACY_ENABLED=false` explicitly opts out and binds vectors to
+the distinguished `privacy:off` revision. When provider-copy privacy is on, the
+catalog must contain at least one known pattern. Dry-run the backfill first;
+raw-chunk cloud backfill also requires explicit raw-text consent.
 See [the operator upgrade and privacy notes](docs/operator-guide.md#upgrade-to-v0231)
 before enabling embeddings.
 
@@ -457,7 +459,8 @@ moved back to that assistant even when doing so exceeds a configured bound.
 | `LCM_IGNORE_SESSION_PATTERNS` | empty | Comma-separated session globs excluded from LCM storage |
 | `LCM_STATELESS_SESSION_PATTERNS` | empty | Comma-separated session globs kept read-only |
 | `LCM_IGNORE_MESSAGE_PATTERNS` | empty | Comma-separated regex patterns; matching message content is excluded from LCM storage |
-| `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | Opt in to deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads. Known cloud embedding providers also require this enabled with a nonempty known policy before warmup, backfill, or semantic-query dispatch |
+| `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | Opt in to durable deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads; it does not control cloud embedding privacy |
+| `LCM_EMBEDDING_PRIVACY_ENABLED` | unset (`auto`) | Protect provider-bound copies for known cloud embedding providers without rewriting durable data. Set `false` for an explicit raw-cloud opt-out (`privacy:off` vector revision); local providers remain unchanged |
 | `LCM_SENSITIVE_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Comma-separated named sensitive pattern catalog entries to apply when redaction is enabled |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `false` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS` | `12000` | Externalization threshold for normalized payload text |
@@ -490,8 +493,15 @@ Advanced compaction, assembly, and extraction knobs are defined in `config.py`.
 
 ### Sensitive-pattern redaction
 
-Sensitive-pattern handling is disabled by default so ordinary LCM storage and
-`lcm_expand` remain lossless. When `LCM_SENSITIVE_PATTERNS_ENABLED=true`, matched
+LCM is lossless by default: durable messages, FTS rows, summaries, and payloads
+remain untouched unless `LCM_SENSITIVE_PATTERNS_ENABLED=true` is explicitly set.
+Cloud embedding privacy is separate and transforms provider-bound copies only;
+it defaults on for known cloud providers and can be explicitly opted out with
+`LCM_EMBEDDING_PRIVACY_ENABLED=false`, which uses the `privacy:off` vector
+revision and sends raw embedding input. Local providers receive byte-identical
+input and do not enter the cloud privacy path.
+
+When `LCM_SENSITIVE_PATTERNS_ENABLED=true`, matched
 secret values are replaced with metadata-only placeholders before SQLite, FTS,
 summaries, active replay, and externalized payload JSON receive the content. This
 is intentionally not lossless for matching values: the raw matched secret is

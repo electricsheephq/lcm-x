@@ -35,11 +35,18 @@ export VOYAGE_API_KEY=...           # from dash.voyageai.com
 export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=voyage
 export LCM_EMBEDDING_MODEL=voyage-4-lite   # or voyage-4 / voyage-4-large
-export LCM_SENSITIVE_PATTERNS_ENABLED=true # required for cloud embedding input
+# Cloud provider-bound copies are protected automatically. Durable storage stays raw.
 /lcm embed warmup                   # probes API; registers model, dimensions, privacy revision
 /lcm embed backfill                 # dry run: shows counts + estimated tokens, writes nothing
 /lcm embed backfill --apply         # embeds your history in bounded batches
 ```
+
+Known cloud providers protect only the copies sent for embedding, using
+`LCM_SENSITIVE_PATTERNS`, while the durable corpus remains lossless by default.
+Set `LCM_SENSITIVE_PATTERNS_ENABLED=true` only if you also want irreversible
+redaction on future durable ingest. To deliberately send raw embedding input,
+set `LCM_EMBEDDING_PRIVACY_ENABLED=false`; this opt-out is recorded as the
+`privacy:off` vector revision, so changing the posture requires re-embedding.
 
 Notes: requests are batched under Voyage's caps — both the token budget and the 1000-item
 per-request cap; over-length documents are skipped and reported, never silently truncated;

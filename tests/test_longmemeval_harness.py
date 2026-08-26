@@ -1439,6 +1439,31 @@ def test_cloud_contextual_chunk_group_is_protected_before_provider_dispatch(tmp_
     assert all(_PRIVACY_SECRET not in text for text in outbound)
 
 
+def test_cloud_embeddings_keep_lossless_raw_corpus_in_fts(tmp_path):
+    summary = _CapturingIdentityEmbedder("voyage-4-large")
+    chunk = _CapturingIdentityEmbedder("voyage-context-4")
+    question = _privacy_question("q-private-fts-cloud")
+
+    evaluate_question(
+        question,
+        summary,
+        chunk_provider=chunk,
+        provider_name="voyage",
+        tmp_dir=tmp_path,
+        embeddings_enabled=True,
+    )
+
+    with sqlite3.connect(tmp_path / "q-private-fts-cloud.db") as connection:
+        fts_text = "\n".join(
+            str(row[0])
+            for row in connection.execute(
+                "SELECT content FROM messages_fts ORDER BY rowid"
+            )
+        )
+    assert _PRIVACY_SECRET in fts_text
+    assert _PRIVACY_PLACEHOLDER not in fts_text
+
+
 def test_cloud_query_is_protected_before_provider_dispatch(tmp_path, monkeypatch):
     import benchmarking.longmemeval as lme
 
