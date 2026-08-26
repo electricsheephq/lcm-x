@@ -294,7 +294,7 @@ environment variables:
 `lcm_status` reports a `proactive_recall` block with `injected`, `skipped`, `timeout`, and
 `privacy_policy_errors`. A nonzero `privacy_policy_errors` is a deterministic configuration
 fault, not load shedding: proactive injection is disabled until the embedding-privacy policy
-is fixed, one WARNING is logged per process, and `lcm_recall` raises rather than degrading to
+is fixed, one WARNING is logged per engine instance, and `lcm_recall` raises rather than degrading to
 full-text on the same fault (#370).
 
 ### Evidence and adaptive retrieval (0.21 RC)

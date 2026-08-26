@@ -240,7 +240,7 @@ An embedding-privacy policy error (empty/unknown catalog, post-warmup policy dri
 detector match) is a deterministic configuration fault. `lcm_recall` raises it from every
 arm — query embedding, chunk query embedding, summary arm, chunk arm, and rerank — rather
 than reporting `degraded_to_fts`. Proactive recall keeps the assembly contract (injects
-nothing, never breaks the turn) but logs one WARNING per process and increments the
+nothing, never breaks the turn) but logs one WARNING per engine instance and increments the
 `privacy_policy_errors` counter in `lcm_status`. `lcm_grep` retains its ordinary degrade
 behavior.
 
