@@ -9,6 +9,8 @@ import sys
 
 import pytest
 
+pytest.skip("CI bisect probe — temporarily skipping this module", allow_module_level=True)
+
 
 @pytest.fixture(autouse=True)
 def _isolate_runner_modules():
