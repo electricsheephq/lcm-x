@@ -639,6 +639,10 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
         # in front of real body — prefix-strip before trusting the armor
         # shape; genuine armor values (commas, spaces) never classify as body.
         rest = text[model[idx][1]:model[idx][2]]
+        if "\\" in rest:
+            for esc in ("\\/", "\\u002f", "\\u002F"):
+                if esc in rest:
+                    rest = rest.replace(esc, "/")
         # Attached Markdown/quote markers (">MII…", "|MII…") carry no
         # whitespace; strip them before any classification.
         rest = rest.lstrip(">|").strip(" \t")
@@ -712,6 +716,7 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
         return kind
 
     i = 0
+    back_watermark = -1
     while i < n:
         kind, redact_start, content_end, line_start, _marker_end = model[i]
         if kind == _PEM_LINE_KIND_BEGIN:
@@ -858,7 +863,7 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
             back = i - 1
             first_evidence = -1
             saw_back_evidence = False
-            while back >= 0 and i - back <= 200:
+            while back >= 0 and back > back_watermark:
                 bk = effective_kind(back)
                 if bk in (
                     _PEM_LINE_KIND_STRICT_B64,
@@ -873,6 +878,7 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                     back -= 1
                     continue
                 break
+            back_watermark = max(back_watermark, i)
             if saw_back_evidence and first_evidence >= 0:
                 end_bound = content_end if kind == _PEM_LINE_KIND_END else _marker_end
                 # Never cross content already emitted (an earlier redaction

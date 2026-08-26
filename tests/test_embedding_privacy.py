@@ -1041,6 +1041,22 @@ def test_round16_orphan_symmetry_and_escape_spellings(tmp_path):
     protected, _r, _c = protect_embedding_text(colon_orphan, cfg)
     validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
 
+    # R16: a long (>200-line) prefixed orphan run redacts COMPLETELY — a
+    # capped walk that partially redacts also destroys the END evidence
+    # validation needs (fail-open); the watermark walk is uncapped + linear.
+    lines = ["INFO:" + ("A" * 63) + chr(66 + (i % 20)) for i in range(201)]
+    long_run = "\n".join(lines) + "\nINFO:-----END PRIVATE KEY-----"
+    out = redact_sensitive_text(long_run, cfg)
+    assert lines[0] not in out and lines[-1] not in out
+
+    # R16: prefix composed with escaped solidus normalizes on the prefix path.
+    pfx_solidus = (
+        '{"log": "INFO -----BEGIN PRIVATE KEY-----\\nINFO '
+        + "QQQQabcd" * 4
+        + '\\/QQQQ\\nprose"}'
+    )
+    assert "QQQQabcd" not in redact_sensitive_text(pfx_solidus, cfg)
+
     # Precision: suffixed marker mentions and hash dumps stay untouched.
     for keep in (
         "we discussed the -----END PRIVATE KEY----- marker in prose",
