@@ -880,7 +880,6 @@ def test_round11_thread_sweep_shapes(tmp_path):
     # separator classes, body-on-BEGIN-line, END-before-BEGIN ordering,
     # one-line orphan bodies (v1-era migration rows), and bare English
     # tokens as body evidence.
-    import json as _json
     import time as _time
 
     cfg = _config(tmp_path)
