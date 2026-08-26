@@ -948,3 +948,50 @@ def test_every_splitlines_separator_survives_serialization(tmp_path):
         )
         redacted = redact_sensitive_text(text, cfg)
         assert body not in redacted, f"leak with separator U+{ord(sep):04X}"
+
+
+def test_round14_serialization_and_prefix_variants(tmp_path):
+    # Round-14 thread sweep: single-quoted/repr logs, JSON solidus escapes,
+    # prefixed orphan bodies (END-anchored), whitespace-chunked truncated
+    # bodies, no-space colon prefixes, attached Markdown markers — with the
+    # precision guards each demands.
+    cfg = _config(tmp_path)
+    revision = embedding_privacy_revision(cfg)
+    body = "Q" * 64
+
+    single_quoted = "{'log': '-----BEGIN PRIVATE KEY-----\\n" + "M" * 40 + "'}"
+    solidus = (
+        '{"log": "-----BEGIN PRIVATE KEY-----\\n'
+        + "QQQQabcd" * 6
+        + '\\/QQQQ\\nprose"}'
+    )
+    prefixed_orphan = "[ph]\nINFO " + body + "\nINFO -----END PRIVATE KEY-----\nprose stays"
+    chunked = "-----BEGIN PRIVATE KEY-----\nSYNTHET1C B0DY 1234 5678 90AB CDEF\nprose stays"
+    colon = "INFO:-----BEGIN PRIVATE KEY-----\nINFO:" + body + "\nINFO:CDEF"
+    blockquote = ">-----BEGIN PRIVATE KEY-----\n>" + body + "\n>prose text here"
+    for text, leak in (
+        (single_quoted, "M" * 40),
+        (solidus, "QQQQabcd"),
+        (prefixed_orphan, body),
+        (chunked, "SYNTHET1C"),
+        (colon, body),
+        (blockquote, body),
+    ):
+        for redacted in (
+            redact_sensitive_text(text, cfg),
+            protect_embedding_text(text, cfg)[0],
+        ):
+            assert leak not in redacted, text[:50]
+    assert "prose stays" in redact_sensitive_text(prefixed_orphan, cfg)
+    assert "prose text here" in redact_sensitive_text(blockquote, cfg)
+    with pytest.raises(EmbeddingPrivacyPolicyError):
+        validate_embedding_privacy_dispatch(
+            ["INFO " + body + "\nINFO -----END PRIVATE KEY-----"],
+            cfg,
+            expected_revision=revision,
+        )
+    # Precision: prefixed hash dumps with no marker, prose after BEGIN.
+    dump = "INFO " + "a1b2c3d4" * 8 + "\nINFO " + "e5f6a7b8" * 8 + "\nno markers anywhere"
+    assert redact_sensitive_text(dump, cfg) == dump
+    prose = "-----BEGIN PRIVATE KEY-----\nmeeting notes about the incident\nmore prose"
+    assert redact_sensitive_text(prose, cfg) == prose

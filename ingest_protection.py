@@ -135,7 +135,9 @@ def _split_serialized_pem_line(content: str):
     i = 0
     while i < n:
         ch = content[i]
-        if ch == '"':
+        if ch == '"' or ch == "'":
+            # Double quotes delimit JSON strings; single quotes delimit
+            # Python repr()/logged dict values — both end a serialized value.
             yield seg_start, content[seg_start:i]
             i += 1
             seg_start = i
@@ -182,7 +184,7 @@ def _split_serialized_pem_line(content: str):
 
 
 _PRIVATE_KEY_ESCAPED_SEPARATOR_HINT_RE = re.compile(
-    r"\\[rnfu]|\""
+    r"\\[rnfu]|[\"']"
 )
 
 
@@ -503,6 +505,11 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
             segments.append((line_start, content))
     for line_start, content in segments:
         stripped = content.strip(" \t")
+        # JSON's optional solidus escape (\/) is legal inside base64 bodies;
+        # classify on the unescaped form, keep offsets on the raw text.
+        class_stripped = (
+            stripped.replace("\\/", "/") if "\\/" in stripped else stripped
+        )
         lead = content.find(stripped[:1]) if stripped else 0
         c_start = line_start + (lead if stripped else 0)
         c_end = c_start + len(stripped)
@@ -549,11 +556,11 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
                     # not be consumed as a stripped key.
                     kind = _PEM_LINE_KIND_END_LOOSE
         elif (
-            stripped
-            and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(stripped) is not None
-            and not _looks_like_english_token(stripped)
+            class_stripped
+            and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(class_stripped) is not None
+            and not _looks_like_english_token(class_stripped)
         ):
-            if len(stripped) >= _PRIVATE_KEY_STRICT_MIN_CHARS:
+            if len(class_stripped) >= _PRIVATE_KEY_STRICT_MIN_CHARS:
                 kind = _PEM_LINE_KIND_STRICT_B64
             else:
                 kind = _PEM_LINE_KIND_SHORT_B64
@@ -631,14 +638,45 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
         # in front of real body — prefix-strip before trusting the armor
         # shape; genuine armor values (commas, spaces) never classify as body.
         rest = text[model[idx][1]:model[idx][2]]
-        if (
-            _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(rest.strip(" \t")) is not None
-        ):
+        # Attached Markdown/quote markers (">MII…", "|MII…") carry no
+        # whitespace; strip them before any classification.
+        rest = rest.lstrip(">|").strip(" \t")
+        if _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(rest) is not None:
+            if not _looks_like_english_token(rest):
+                if len(rest) >= _PRIVATE_KEY_STRICT_MIN_CHARS:
+                    return _PEM_LINE_KIND_STRICT_B64
+                return _PEM_LINE_KIND_SHORT_B64
             # English-shaped single tokens ("abcdef", "example") count inside
             # a BEGIN-anchored scan as ADJACENCY only: they keep a complete
             # block's END reachable but never justify truncated redaction on
             # their own (N1zc precision).
             return _PEM_LINE_KIND_LENIENT_B64
+        # Whitespace-chunked body ("SYNTH ETIC 1234 90AB …"): every token
+        # base64-charset, none English-shaped, at least two tokens with one
+        # of length >= 8 — prose fails the English test per token.
+        tokens = rest.split()
+        if (
+            len(tokens) >= 2
+            and all(
+                _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(tok) is not None
+                and not _looks_like_english_token(tok)
+                for tok in tokens
+            )
+            and max(len(tok) for tok in tokens) >= 8
+        ):
+            return _PEM_LINE_KIND_STRICT_B64
+        # No-space colon prefix ("INFO:MII…"): split at the first colon.
+        head, sep, after = rest.partition(":")
+        if (
+            sep
+            and 2 <= len(head) <= 32
+            and after
+            and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(after) is not None
+            and not _looks_like_english_token(after)
+        ):
+            if len(after) >= _PRIVATE_KEY_STRICT_MIN_CHARS:
+                return _PEM_LINE_KIND_STRICT_B64
+            return _PEM_LINE_KIND_SHORT_B64
         for _ in range(4):
             split = rest.split(None, 1)
             if len(split) < 2:
@@ -704,6 +742,7 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                 # structure (e.g. a bare BEGIN quoted above config lines).
                 i += 1
                 continue
+            last_evidence = -1
             while j < n:
                 run_kind = effective_kind(j)
                 if run_kind in (
@@ -712,6 +751,7 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                     _PEM_LINE_KIND_PREFIXED_B64,
                 ):
                     saw_b64 = True
+                    last_evidence = j
                 elif run_kind != _PEM_LINE_KIND_LENIENT_B64:
                     break
                 j += 1
@@ -727,8 +767,11 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                 i = j + 1
                 continue
             if saw_b64:
-                emit(redact_start, model[j - 1][2])
-                i = j
+                # Truncated bound: through the last EVIDENCE line only —
+                # trailing English-shaped lenient lines keep END adjacency
+                # alive but are prose when no END follows.
+                emit(redact_start, model[last_evidence][2])
+                i = last_evidence + 1
                 continue
             begin_m = _PRIVATE_KEY_BEGIN_RE.match(text, redact_start)
             if (
@@ -746,15 +789,26 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                 continue
             i += 1
             continue
-        if kind in (_PEM_LINE_KIND_STRICT_B64, _PEM_LINE_KIND_SHORT_B64):
+        if kind in (
+            _PEM_LINE_KIND_STRICT_B64,
+            _PEM_LINE_KIND_SHORT_B64,
+            _PEM_LINE_KIND_PREFIXED_B64,
+        ):
             j = i
-            has_strict = kind == _PEM_LINE_KIND_STRICT_B64
+            has_strict = kind in (
+                _PEM_LINE_KIND_STRICT_B64,
+                _PEM_LINE_KIND_PREFIXED_B64,
+            )
             while j + 1 < n and model[j + 1][0] in (
                 _PEM_LINE_KIND_STRICT_B64,
                 _PEM_LINE_KIND_SHORT_B64,
+                _PEM_LINE_KIND_PREFIXED_B64,
             ):
                 j += 1
-                has_strict = has_strict or model[j][0] == _PEM_LINE_KIND_STRICT_B64
+                has_strict = has_strict or model[j][0] in (
+                    _PEM_LINE_KIND_STRICT_B64,
+                    _PEM_LINE_KIND_PREFIXED_B64,
+                )
             if (has_strict or j > i) and j + 1 < n and model[j + 1][0] in (
                 _PEM_LINE_KIND_END,
                 _PEM_LINE_KIND_END_INLINE,
@@ -1369,10 +1423,14 @@ def _has_orphaned_private_key_body(text: str) -> bool:
             run_has_strict = False
             run_len = 0
             continue
-        if kind in (_PEM_LINE_KIND_STRICT_B64, _PEM_LINE_KIND_SHORT_B64):
+        if kind in (
+            _PEM_LINE_KIND_STRICT_B64,
+            _PEM_LINE_KIND_SHORT_B64,
+            _PEM_LINE_KIND_PREFIXED_B64,
+        ):
             if prev_was_begin:
                 return True
-            if kind == _PEM_LINE_KIND_STRICT_B64:
+            if kind in (_PEM_LINE_KIND_STRICT_B64, _PEM_LINE_KIND_PREFIXED_B64):
                 run_has_strict = True
             run_len += 1
             continue
