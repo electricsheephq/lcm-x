@@ -2227,6 +2227,8 @@ def rerank_sessions_voyage(
     *,
     window: int = RERANK_CANDIDATE_WINDOW,
     timeout: float = RERANK_TIMEOUT_S,
+    privacy_config=None,
+    privacy_revision: str | None = None,
 ) -> list[str] | None:
     """Rerank the top-``window`` fused sessions with a real cross-encoder.
 
@@ -2240,6 +2242,22 @@ def rerank_sessions_voyage(
     if not candidates:
         return None
     documents = [session_summaries.get(session, "") for session in candidates]
+    if privacy_config is not None and privacy_revision is not None:
+        # Production protects rerank payloads under the embedding-privacy
+        # resolution (#371); the harness mirrors it — only the provider-bound
+        # copies are transformed, ordering still applies to the originals.
+        _ensure_hermes_lcm_package()
+        from hermes_lcm.ingest_protection import protect_embedding_text
+
+        query = protect_embedding_text(
+            query, privacy_config, expected_revision=privacy_revision
+        )[0]
+        documents = [
+            protect_embedding_text(
+                doc, privacy_config, expected_revision=privacy_revision
+            )[0]
+            for doc in documents
+        ]
     try:
         ranked = reranker.rerank(query, documents, top_k=len(documents), timeout=timeout)
     except Exception:
@@ -2721,7 +2739,9 @@ def evaluate_question(
             and hasattr(provider_embedder, "rerank")
         ):
             real = rerank_sessions_voyage(
-                provider_embedder, question.question, hybrid_ranked, session_summaries
+                provider_embedder, question.question, hybrid_ranked, session_summaries,
+                privacy_config=config if summary_revision is not None else None,
+                privacy_revision=summary_revision,
             )
             if real is not None:
                 rerank_ranked = real
