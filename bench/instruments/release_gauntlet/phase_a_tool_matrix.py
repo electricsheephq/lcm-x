@@ -30,11 +30,15 @@ PLANTED = {
     "json_serialized": "GAUNTLETJSONSERIALIZEDD4", "log_prefixed": "GAUNTLETLOGPREFIXE5", "password": "GAUNTLETPASSWORDF6", "api_key": "GAUNTLETAPIKEYG7",
     "password_pem": "GAUNTLETPASSWORDPEMH8", "passphrase_pem": "GAUNTLETPASSPHRASEPEMI9", "quoted_password_pem": "GAUNTLETQUOTEDPASSWORDPEMJ0", "chunk_path": "GAUNTLETCHUNKPATHK1",
 }
-_RELEASE_TAG_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+(?:-rc[0-9]+)?$")
+_RELEASE_TAG_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$")
 @contextmanager
 def _scrubbed_environment(worktree: Path):
     original = dict(os.environ)
-    preserved = {"LCM_EMBEDDING_API_KEY", "LCM_EMBEDDING_BASE_URL", "LCM_GAUNTLET_CLOUD_MODEL", "LCM_GAUNTLET_CLOUD_PROVIDER"}
+    preserved = {
+        "LCM_EMBEDDING_API_KEY", "LCM_EMBEDDING_API_KEY_ENV",
+        "LCM_EMBEDDING_BASE_URL", "LCM_GAUNTLET_CLOUD_MODEL",
+        "LCM_GAUNTLET_CLOUD_PROVIDER", "VOYAGE_API_KEY",
+    }
     scrubbed = sorted(key for key in original if key.startswith(("LCM_", "HERMES_")) and key not in preserved)
     clean = {key: value for key, value in original.items() if key not in scrubbed}
     clean["HERMES_LCM_REPO"] = str(worktree)
@@ -404,6 +408,26 @@ def _git_identity(worktree: Path):
         return subprocess.run(["git", "-C", str(worktree), *args], check=check, text=True, capture_output=True).stdout.strip()
     tag = git("describe", "--tags", "--exact-match", "HEAD", check=False)
     return {"head": git("rev-parse", "HEAD"), "tree": git("rev-parse", "HEAD^{tree}"), "tag": tag or "not-an-exact-tag", "dirty": bool(git("status", "--porcelain", "--untracked-files=all"))}
+def _hermes_git_identity(hermes_repo: Path | None):
+    unavailable = {"head": "unavailable", "dirty": None}
+    if hermes_repo is None:
+        return {**unavailable, "error": "Hermes checkout not configured"}
+    try:
+        def git(*args):
+            return subprocess.run(
+                ["git", "-C", str(hermes_repo), *args], check=True,
+                text=True, capture_output=True,
+            ).stdout.strip()
+        top = Path(git("rev-parse", "--show-toplevel")).resolve()
+        if top != hermes_repo.resolve():
+            return {**unavailable, "error": "not a git checkout root"}
+        return {
+            "head": git("rev-parse", "HEAD"),
+            "dirty": bool(git("status", "--porcelain", "--untracked-files=all")),
+            "error": None,
+        }
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        return {**unavailable, "error": "not a git checkout"}
 def _release_identity_failures(identity, rc_tag):
     failures = []
     if identity.get("dirty"):
@@ -412,8 +436,8 @@ def _release_identity_failures(identity, rc_tag):
         failures.append("release mode requires --rc-tag")
     elif _RELEASE_TAG_RE.fullmatch(rc_tag) is None:
         failures.append(
-            "release mode --rc-tag must match "
-            "^v[0-9]+\\.[0-9]+\\.[0-9]+(-rc[0-9]+)?$; "
+            "release mode requires an RC-suffixed --rc-tag matching "
+            "^v[0-9]+\\.[0-9]+\\.[0-9]+-rc[0-9]+$; "
             f"got {rc_tag!r}"
         )
     elif identity.get("tag") != rc_tag:
@@ -489,8 +513,14 @@ def run(worktree: Path, out: Path, *, release: bool = False, rc_tag: str | None 
     out.mkdir(parents=True, exist_ok=True)
     state_root = out / "state"
     state_root.mkdir(exist_ok=True)
+    hermes_repo = hermes_repo.resolve() if hermes_repo else _default_hermes_repo(worktree)
     identity = _git_identity(worktree)
     preflight = _release_identity_failures(identity, rc_tag) if release else []
+    hermes_git_identity = _hermes_git_identity(hermes_repo)
+    if release and hermes_git_identity["error"]:
+        preflight.append(f"Hermes provenance unavailable: {hermes_git_identity['error']}")
+    elif release and hermes_git_identity["dirty"]:
+        preflight.append("Hermes checkout is dirty")
     records, batteries, registered = [], [], []
     missing, unexpected = [], []
     engine_surface = "engine=not-loaded"
@@ -529,12 +559,17 @@ def run(worktree: Path, out: Path, *, release: bool = False, rc_tag: str | None 
     if release and final_identity != identity:
         preflight.append("release identity changed while the runner was executing")
     identity = final_identity
+    final_hermes_git_identity = _hermes_git_identity(hermes_repo)
+    if release and final_hermes_git_identity != hermes_git_identity:
+        preflight.append("Hermes checkout identity changed while the runner was executing")
+    hermes_git_identity = final_hermes_git_identity
     coverage_failed = bool(missing or unexpected)
     verdict = _verdict(records, batteries, release=release, coverage_failed=coverage_failed, preflight=preflight)
     identity_note = f"release bound to requested tag `{rc_tag}`" if release else "DEV RUN — identity unbound"
     hermes_module_path = hermes_identity["module_path"] if hermes_identity else "not-loaded"
     hermes_module_sha256 = hermes_identity["sha256"] if hermes_identity else "not-loaded"
-    lines = ["# PHASE-A RECEIPT", "", f"- Mode: `{'release' if release else 'dev'}`", f"- Identity: {identity_note}", f"- Requested release tag: `{rc_tag if rc_tag is not None else 'none'}`", f"- RC tag at HEAD: `{identity['tag']}`", f"- Tree SHA: `{identity['tree']}`", f"- HEAD SHA: `{identity['head']}`", f"- Dirty state: `{'dirty' if identity['dirty'] else 'clean'}`", f"- Engine surface: {engine_surface}", f"- Hermes ContextEngine module __file__: `{hermes_module_path}`", f"- Hermes ContextEngine module sha256: `{hermes_module_sha256}`", f"- Environment scrubbed: `{', '.join(scrubbed) if scrubbed else 'none'}`", f"- #365 expectation: `{'fixed' if expect_365_fixed else 'KNOWN-LEAK-ON-BASE allowed'}`", f"- Command: `{shlex.join([sys.executable, *sys.argv])}`", f"- HERMES_LCM_REPO: `{worktree}`", "- Claim class: `code_green_local`", f"- Runtime registry tools: {len(registered)}", f"- Registry coverage: `{'FAIL' if coverage_failed else 'COMPLETE'}`", f"- Missing matrix rows: `{', '.join(missing) if missing else 'none'}`", f"- Unexpected scenario rows: `{', '.join(unexpected) if unexpected else 'none'}`", "", "## Preflight"]
+    hermes_dirty = "unavailable" if hermes_git_identity["dirty"] is None else ("dirty" if hermes_git_identity["dirty"] else "clean")
+    lines = ["# PHASE-A RECEIPT", "", f"- Mode: `{'release' if release else 'dev'}`", f"- Identity: {identity_note}", f"- Requested release tag: `{rc_tag if rc_tag is not None else 'none'}`", f"- RC tag at HEAD: `{identity['tag']}`", f"- Tree SHA: `{identity['tree']}`", f"- HEAD SHA: `{identity['head']}`", f"- Dirty state: `{'dirty' if identity['dirty'] else 'clean'}`", f"- Engine surface: {engine_surface}", f"- Hermes checkout: `{hermes_repo if hermes_repo else 'not-configured'}`", f"- Hermes checkout HEAD SHA: `{hermes_git_identity['head']}`", f"- Hermes checkout dirty state: `{hermes_dirty}`", f"- Hermes checkout provenance: `{hermes_git_identity['error'] or 'git -C verified'}`", f"- Hermes ContextEngine module __file__: `{hermes_module_path}`", f"- Hermes ContextEngine module sha256: `{hermes_module_sha256}`", f"- Environment scrubbed: `{', '.join(scrubbed) if scrubbed else 'none'}`", f"- #365 expectation: `{'fixed' if expect_365_fixed else 'KNOWN-LEAK-ON-BASE allowed'}`", f"- Command: `{shlex.join([sys.executable, *sys.argv])}`", f"- HERMES_LCM_REPO: `{worktree}`", "- Claim class: `code_green_local`", f"- Runtime registry tools: {len(registered)}", f"- Registry coverage: `{'FAIL' if coverage_failed else 'COMPLETE'}`", f"- Missing matrix rows: `{', '.join(missing) if missing else 'none'}`", f"- Unexpected scenario rows: `{', '.join(unexpected) if unexpected else 'none'}`", "", "## Preflight"]
     lines += [f"- BLOCKED: {detail}" for detail in preflight] or ["- PASS"]
     lines += ["", "## Tool matrix", "", "| Posture | Tool | Result | Detail |", "|---|---|---|---|"]
     lines += [f"| {posture} | `{tool}` | {result} | {detail} |" for posture, tool, result, detail in records]

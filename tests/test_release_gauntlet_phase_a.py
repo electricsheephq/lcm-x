@@ -95,6 +95,13 @@ def _fake_hermes_repo(root: Path, *, expected_surface: bool = True) -> Path:
     return repo
 
 
+def _clean_hermes_git_sabotage() -> str:
+    return (
+        "mod._hermes_git_identity = lambda _p: "
+        "{'head': 'hermes123', 'dirty': False, 'error': None}\n"
+    )
+
+
 def test_dev_posture_covers_every_tool_despite_disabled_tools_env(tmp_path):
     worktree = Path(__file__).resolve().parents[1]
     runner = worktree / "bench/instruments/release_gauntlet/phase_a_tool_matrix.py"
@@ -122,6 +129,7 @@ def test_dev_posture_covers_every_tool_despite_disabled_tools_env(tmp_path):
     receipt = (tmp_path / "PHASE-A-RECEIPT.md").read_text(encoding="utf-8")
     assert completed.returncode == 0, completed.stdout + completed.stderr + receipt
     assert "DEV RUN — identity unbound" in receipt
+    assert "Hermes checkout provenance: `Hermes checkout not configured`" in receipt
     assert "engine=stubbed-context-base (NOT the hermes surface)" in receipt
     assert "LCM_DISABLED_TOOLS" in receipt
     assert "Registry coverage: `COMPLETE`" in receipt
@@ -137,6 +145,7 @@ def test_release_mode_blocks_the_same_cloud_skip(tmp_path):
     sabotage = (
         "mod._git_identity = lambda _p: "
         "{'head': 'abc123', 'tree': 'tree123', 'tag': 'v0.0.0-rc1', 'dirty': False}\n"
+        + _clean_hermes_git_sabotage()
     )
     code, receipt, stderr = _run_in_subprocess(
         tmp_path,
@@ -156,7 +165,51 @@ def test_release_mode_blocks_the_same_cloud_skip(tmp_path):
         f"Hermes ContextEngine module sha256: "
         f"`{hashlib.sha256(module_path.read_bytes()).hexdigest()}`"
     ) in receipt
+    assert "Hermes checkout HEAD SHA: `hermes123`" in receipt
+    assert "Hermes checkout dirty state: `clean`" in receipt
     assert "Exit verdict: `BLOCKED`" in receipt
+
+
+def test_scrub_preserves_cloud_environment_allowlist(tmp_path, monkeypatch):
+    phase_a = _runner_module()
+    allowed = {
+        "LCM_GAUNTLET_CLOUD_PROVIDER": "openai-compatible",
+        "LCM_GAUNTLET_CLOUD_MODEL": "test-model",
+        "LCM_EMBEDDING_BASE_URL": "https://example.invalid/v1",
+        "LCM_EMBEDDING_API_KEY": "placeholder-key",
+        "LCM_EMBEDDING_API_KEY_ENV": "TEST_EMBEDDING_KEY",
+        "VOYAGE_API_KEY": "placeholder-voyage-key",
+    }
+    for key, value in allowed.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("LCM_DISABLED_TOOLS", "lcm_recall")
+
+    with phase_a._scrubbed_environment(tmp_path) as scrubbed:
+        assert {key: os.environ.get(key) for key in allowed} == allowed
+        assert "LCM_DISABLED_TOOLS" not in os.environ
+        assert "LCM_DISABLED_TOOLS" in scrubbed
+
+
+def test_hermes_git_identity_is_read_from_the_selected_checkout(
+    tmp_path, monkeypatch
+):
+    phase_a = _runner_module()
+    calls = []
+    outputs = {
+        ("rev-parse", "--show-toplevel"): str(tmp_path),
+        ("rev-parse", "HEAD"): "hermes123",
+        ("status", "--porcelain", "--untracked-files=all"): "",
+    }
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, outputs[tuple(args[3:])], "")
+
+    monkeypatch.setattr(phase_a.subprocess, "run", fake_run)
+    assert phase_a._hermes_git_identity(tmp_path) == {
+        "head": "hermes123", "dirty": False, "error": None,
+    }
+    assert all(call[:3] == ["git", "-C", str(tmp_path)] for call in calls)
 
 
 @pytest.mark.parametrize("provider", ["fastembed", "unknown-provider"])
@@ -224,13 +277,13 @@ def test_known_leak_blocks_release_but_stays_loud_but_ok_in_dev():
     ("identity", "tag", "expected"),
     [
         ({"dirty": False, "tag": "v1.2.3-rc1"}, "v1.2.3-rc1", []),
-        ({"dirty": False, "tag": "v1.2.3"}, "v1.2.3", []),
+        ({"dirty": False, "tag": "v1.2.3"}, "v1.2.3", ["RC-suffixed"]),
         ({"dirty": True, "tag": "v1.2.3-rc1"}, "v1.2.3-rc1", ["dirty"]),
         ({"dirty": False, "tag": "v1.2.3-rc2"}, "v1.2.3-rc1", ["exact tag"]),
         (
             {"dirty": False, "tag": "release-1.2.3"},
             "release-1.2.3",
-            ["must match"],
+            ["RC-suffixed"],
         ),
     ],
 )
@@ -256,6 +309,7 @@ def test_release_mode_rejects_ambient_hermes_module(tmp_path):
     sabotage = (
         "mod._git_identity = lambda _p: "
         "{'head': 'abc123', 'tree': 'tree123', 'tag': 'v1.2.3-rc1', 'dirty': False}\n"
+        + _clean_hermes_git_sabotage()
     )
     code, receipt, stderr = _run_in_subprocess(
         tmp_path,
@@ -271,6 +325,40 @@ def test_release_mode_rejects_ambient_hermes_module(tmp_path):
     assert code != 0, stderr + receipt
     assert "agent.context_engine imported from" in receipt
     assert "not --hermes-repo" in receipt
+    assert "Exit verdict: `BLOCKED`" in receipt
+
+
+@pytest.mark.parametrize(
+    ("hermes_identity", "expected"),
+    [
+        ({"head": "hermes123", "dirty": True, "error": None}, "is dirty"),
+        (
+            {"head": "unavailable", "dirty": None, "error": "not a git checkout"},
+            "not a git checkout",
+        ),
+    ],
+)
+def test_release_mode_requires_clean_hermes_git_checkout(
+    tmp_path, hermes_identity, expected
+):
+    hermes_repo = _fake_hermes_repo(tmp_path)
+    sabotage = (
+        "mod._git_identity = lambda _p: "
+        "{'head': 'abc123', 'tree': 'tree123', 'tag': 'v1.2.3-rc1', 'dirty': False}\n"
+        f"mod._hermes_git_identity = lambda _p: {hermes_identity!r}\n"
+    )
+    code, receipt, stderr = _run_in_subprocess(
+        tmp_path,
+        sabotage=sabotage,
+        run_kwargs={
+            "release": True,
+            "rc_tag": "v1.2.3-rc1",
+            "hermes_repo": str(hermes_repo),
+        },
+    )
+
+    assert code != 0, stderr + receipt
+    assert expected in receipt
     assert "Exit verdict: `BLOCKED`" in receipt
 
 
