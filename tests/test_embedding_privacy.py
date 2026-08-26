@@ -1072,6 +1072,22 @@ def test_round16_orphan_symmetry_and_escape_spellings(tmp_path):
         ):
             assert "QQQQabcd" not in redacted
 
+    # R19: doc headings after a bare BEGIN stay; PEM tails after body still
+    # redact; blank separators after unarmored BEGINs; 5-token syslog prefixes.
+    heading = "-----BEGIN PRIVATE KEY-----\nIMPORTANT\nthis heading explains keys"
+    assert redact_sensitive_text(heading, cfg) == heading
+    tail = "-----BEGIN PRIVATE KEY-----\n" + body + "\nCDEF\nprose"
+    assert "CDEF" not in redact_sensitive_text(tail, cfg)
+    blank_sep = "-----BEGIN PRIVATE KEY-----\n\n" + body + "\nprose stays"
+    out = redact_sensitive_text(blank_sep, cfg)
+    assert body not in out and "prose stays" in out
+    syslog = (
+        "Aug 26 12:34:56 host app[123]: -----BEGIN PRIVATE KEY-----\n"
+        "Aug 26 12:34:56 host app[123]: " + body + "\nplain tail"
+    )
+    out = redact_sensitive_text(syslog, cfg)
+    assert body not in out and "plain tail" in out
+
     # Precision: suffixed marker mentions and hash dumps stay untouched.
     for keep in (
         "we discussed the -----END PRIVATE KEY----- marker in prose",

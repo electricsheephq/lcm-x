@@ -610,7 +610,7 @@ def _pem_line_model(text: str) -> list[tuple[int, int, int, int, int]]:
             parts = stripped.rsplit(None, 1)
             if (
                 len(parts) == 2
-                and len(parts[0].split()) <= 4
+                and len(parts[0].split()) <= 6
                 and len(parts[1]) >= _PRIVATE_KEY_STRICT_MIN_CHARS
                 and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(parts[1]) is not None
                 and not _looks_like_english_token(parts[1])
@@ -715,7 +715,7 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
         ):
             return _PEM_LINE_KIND_STRICT_B64
         armor_shape = _PRIVATE_KEY_ARMOR_HEADER_RE.fullmatch(rest) is not None
-        for _ in range(4):
+        for _ in range(6):
             split = rest.split(None, 1)
             if len(split) < 2:
                 # No further tokens: an armor-shaped line with no hidden body
@@ -761,13 +761,13 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
             ):
                 armor += 1
                 j += 1
-            if armor and j < n and (
+            if j < n and (
                 model[j][0] == _PEM_LINE_KIND_BLANK
                 or (
                     model[j][0] == _PEM_LINE_KIND_OTHER
                     and 0
                     < len(tokens := text[model[j][1]:model[j][2]].split())
-                    <= 4
+                    <= 6
                     and all(len(tok) <= 12 for tok in tokens)
                     and effective_kind(j) == _PEM_LINE_KIND_OTHER
                 )
@@ -789,15 +789,24 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
                 i += 1
                 continue
             last_evidence = -1
+            saw_strict_run = False
             while j < n:
                 run_kind = effective_kind(j)
                 if run_kind in (
                     _PEM_LINE_KIND_STRICT_B64,
-                    _PEM_LINE_KIND_SHORT_B64,
                     _PEM_LINE_KIND_PREFIXED_B64,
                 ):
                     saw_b64 = True
+                    saw_strict_run = True
                     last_evidence = j
+                elif run_kind == _PEM_LINE_KIND_SHORT_B64:
+                    # A short PURE-ALPHA token ("IMPORTANT", "WARNING") is
+                    # tail evidence only after a full-width line — a real PEM
+                    # tail follows body; a doc heading follows a bare BEGIN.
+                    seg = text[model[j][1]:model[j][2]].strip(" \t")
+                    if saw_strict_run or not seg.isalpha():
+                        saw_b64 = True
+                        last_evidence = j
                 elif run_kind != _PEM_LINE_KIND_LENIENT_B64:
                     break
                 j += 1
