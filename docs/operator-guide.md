@@ -177,8 +177,11 @@ Provider Plugins:
 ```
 
 An untagged checkout of the reconciled `main` baseline instead reports
-`hermes-lcm v0.23.0-rc1 (15 tools)`. Version text alone is not release proof;
-verify the loaded commit and tag.
+`hermes-lcm v0.23.2 (15 tools)`. Version text alone is not release proof;
+verify the loaded commit and tag. `0.23.2` is the stable identity the next GA
+tag (`v0.23.2`) will carry unchanged — the release candidate and the GA cut
+share this exact tree and differ only by the added release-notes file, so this
+guide stays accurate across that transition without an edit.
 
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
 `lcm_doctor`, and `/lcm doctor` also report the loaded plugin path and
