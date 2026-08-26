@@ -1107,6 +1107,11 @@ def test_round16_orphan_symmetry_and_escape_spellings(tmp_path):
         "documentation follows here"
     )
     assert redact_sensitive_text(noncontig, cfg) == noncontig
+    pfx_noncontig = (
+        "-----BEGIN PRIVATE KEY-----\nINFO AbCd1234\nINFO example\n"
+        "INFO EfGh5678\ndocumentation follows here"
+    )
+    assert redact_sensitive_text(pfx_noncontig, cfg) == pfx_noncontig
     mixed = (
         "-----BEGIN PRIVATE KEY-----\n" + "Q" * 24 + "\\n" + "R" * 24
         + "\\n" + "S" * 24 + "\nprose stays"

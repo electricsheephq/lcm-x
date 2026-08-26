@@ -706,7 +706,7 @@ def _redact_private_key_blocks_with(text: str, placeholder) -> str:
         # of length >= 8 — prose fails the English test per token.
         tokens = rest.split()
         if (
-            len(tokens) >= 2
+            len(tokens) >= 3
             and all(
                 _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(tok) is not None
                 and not _looks_like_english_token(tok)
