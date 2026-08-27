@@ -45,7 +45,12 @@ post-condition (hits returned, status fields present, doctor clean), never just 
 
 Privacy batteries (behind the cloud key gate): the planted-secret battery proves the shipped
 default keeps every planted secret raw in durable rows and recall while provider dispatches are
-transformed, canonical, residual-free, and revision-validated. Opt-out proves `privacy:off`
+transformed, canonical, residual-free, and revision-validated. A fail-closed refusal is a valid
+no-leak outcome for the chunk corpus: the chunk splitter can cut a dense planted fixture
+mid-key, and the residual backstops then refuse that dispatch (report `stop_reason:
+privacy_refused`, `privacy_blocked >= 1`) rather than ship it — the battery accepts exactly
+that refusal shape (any other error still fails) and the raw-secret sweep covers everything
+that did dispatch. Opt-out proves `privacy:off`
 preserves byte-identical provider input. Durable-redaction preserves those same redaction and
 placeholder checks as an opt-in posture. Misconfiguration uses an invalid pattern catalog to
 prove lcm_recall raises, the proactive counter increments, status exposes privacy_policy_errors,

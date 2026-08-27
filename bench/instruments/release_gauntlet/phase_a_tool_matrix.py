@@ -315,17 +315,23 @@ class _Capture:
         yield from self._provider.embed_chunk_group_batches(groups, before_dispatch=before_dispatch)
 def _privacy_fixtures():
     long_chunk = " ".join(f"Chunk safety sentence {index}." for index in range(180))
+    # probe_token = a distinctive NON-secret substring by which the row can be
+    # recalled raw (#391 review F6b). Fixtures whose whole content is
+    # secret-bearing (assignment PEMs / bare password= api_key=) redact to pure
+    # placeholders on the query path and have NO probe_token — they are the only
+    # honest skips, and their losslessness is covered by the durable
+    # byte-identity check + the outbound sweep.
     return [
-        {"kind": "standard", "content": f"privacy fixture complete -----BEGIN PRIVATE KEY-----\n{PLANTED['pem_complete']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["pem_complete"]]},
-        {"kind": "standard", "content": f"privacy fixture truncated -----BEGIN PRIVATE KEY-----\n{PLANTED['pem_truncated']}", "secrets": [PLANTED["pem_truncated"]]},
-        {"kind": "standard", "content": f"privacy fixture encrypted -----BEGIN ENCRYPTED PRIVATE KEY-----\n{PLANTED['encrypted_armor']}\n-----END ENCRYPTED PRIVATE KEY-----", "secrets": [PLANTED["encrypted_armor"]]},
-        {"kind": "standard", "content": json.dumps({"private_key": f"-----BEGIN PRIVATE KEY-----\n{PLANTED['json_serialized']}\n-----END PRIVATE KEY-----"}), "secrets": [PLANTED["json_serialized"]]},
-        {"kind": "standard", "content": f"ERROR credential=-----BEGIN PRIVATE KEY-----\n{PLANTED['log_prefixed']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["log_prefixed"]]},
+        {"kind": "standard", "probe_token": "privacy fixture complete", "content": f"privacy fixture complete -----BEGIN PRIVATE KEY-----\n{PLANTED['pem_complete']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["pem_complete"]]},
+        {"kind": "standard", "probe_token": "privacy fixture truncated", "content": f"privacy fixture truncated -----BEGIN PRIVATE KEY-----\n{PLANTED['pem_truncated']}", "secrets": [PLANTED["pem_truncated"]]},
+        {"kind": "standard", "probe_token": "privacy fixture encrypted", "content": f"privacy fixture encrypted -----BEGIN ENCRYPTED PRIVATE KEY-----\n{PLANTED['encrypted_armor']}\n-----END ENCRYPTED PRIVATE KEY-----", "secrets": [PLANTED["encrypted_armor"]]},
+        {"kind": "standard", "probe_token": "lcm json fixture", "content": "lcm json fixture " + json.dumps({"private_key": f"-----BEGIN PRIVATE KEY-----\n{PLANTED['json_serialized']}\n-----END PRIVATE KEY-----"}), "secrets": [PLANTED["json_serialized"]]},
+        {"kind": "standard", "probe_token": "ERROR credential", "content": f"ERROR credential=-----BEGIN PRIVATE KEY-----\n{PLANTED['log_prefixed']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["log_prefixed"]]},
         {"kind": "standard", "content": f"password={PLANTED['password']} api_key={PLANTED['api_key']}", "secrets": [PLANTED["password"], PLANTED["api_key"]]},
         {"kind": "365", "content": f"password: -----BEGIN PRIVATE KEY-----\n{PLANTED['password_pem']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["password_pem"]]},
         {"kind": "365", "content": f"passphrase=-----BEGIN PRIVATE KEY-----\n{PLANTED['passphrase_pem']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["passphrase_pem"]]},
         {"kind": "365", "content": f"password=\"-----BEGIN PRIVATE KEY-----\n{PLANTED['quoted_password_pem']}\n-----END PRIVATE KEY-----\"", "secrets": [PLANTED["quoted_password_pem"]]},
-        {"kind": "chunk", "content": f"{long_chunk} api_key={PLANTED['chunk_path']}", "secrets": [PLANTED["chunk_path"]]},
+        {"kind": "chunk", "probe_token": "Chunk safety", "content": f"{long_chunk} api_key={PLANTED['chunk_path']}", "secrets": [PLANTED["chunk_path"]]},
     ]
 def _privacy_corpus(mod, engine):
     fixtures = _privacy_fixtures()
@@ -340,6 +346,87 @@ def _privacy_corpus(mod, engine):
     return fixtures, rows, summary
 
 
+# Realistic PEM body lines (mixed-case base64, non-hex, non-English) for the
+# full-width orphan-class gate assertion below — the short single-token planted
+# sentinels cannot exercise the >=40-char criterion (#391 review F5).
+_PEM_BODY = (
+    "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj",
+    "MHcCAQEEIQD1eJ7yhkG0987xyzABCDEFghijkLMNOPqrstuvwxyz0987654321pq",
+    "4oQEqJfFJSYuanwHvL7oQfdFxV1On3R/YVFkxvco1xg1NxOCesiD1/uWWSNAdPUl",
+)
+
+
+def _leaks_fragment(text, secret, floor=40):
+    """Detect a raw-secret leak in a dispatch string.
+
+    Short sentinels (<floor) are matched whole; a long PEM body is matched by
+    ANY >=floor-char contiguous substring, so a partial-fragment leak (the
+    #391 orphan class) is caught — the plain `secret in text` sweep misses it.
+    """
+    if len(secret) < floor:
+        return secret in text
+    return any(secret[i:i + floor] in text for i in range(len(secret) - floor + 1))
+
+
+def _assert_full_width_orphan_classes_blocked(mod, config):
+    """Phase-A gate coverage for the >=40-char orphaned-body leak class the
+    short-sentinel corpus cannot reach (#391 review F5).
+
+    Runs the canonical prefixed / log-prefixed / glued / backward / serialized
+    orphan shapes (the exact shapes a cross-model review found dispatching raw)
+    through the REAL protect+validate provider-dispatch path and asserts no
+    >=40-char body fragment ever survives. The key+git-SHA control must still
+    dispatch unredacted (no #389 over-block). A regression here means the
+    embedding-privacy backstop has lost the orphan-class coverage.
+    """
+    ip = mod["ingest_protection"]
+    b0, b1, b2 = _PEM_BODY
+    for body in _PEM_BODY:
+        assert len(body) >= 40 and ip._HEX_DIGEST_RE.fullmatch(body) is None
+    key = f"-----BEGIN PRIVATE KEY-----\n{b0}\n{b1}\n-----END PRIVATE KEY-----"
+    shapes = {
+        "log_prefixed_orphan": (
+            f"10:00:00 INFO -----BEGIN PRIVATE KEY-----\n10:00:00 INFO {b0}\n"
+            f"10:00:00 INFO {b1}\n10:00:00 WARN retrying upstream connection\n"
+            f"10:00:00 INFO {b2}"
+        ),
+        "label_prefixed_orphan": f"private_key: {key}\nkey_tail: {b2}",
+        "glued_to_placeholder": f"-----BEGIN PRIVATE KEY-----\n{b0}\n{b1}\n-----END PRIVATE KEY----- {b2}",
+        "backward_orphan": f"{b0}\nthat was the tail of the old key; new one:\n{key}",
+        "serialized_sibling": '{"private_key": "' + key.replace("\n", "\\n") + '", "note": "' + b2 + '"}',
+        # Bodies GLUED to a non-whitespace separator (#391 re-review P0): the
+        # space-separated shapes above all passed a buggy whole-token fullmatch;
+        # these no-space variants are the ones that actually leaked.
+        "glue_colon_orphan": f"private_key: {key}\nkey_tail:{b2}",
+        "glue_dash_orphan": f"{key}\n-{b2}",
+        "glue_equals_orphan": f"{key}\ncredential={b2}",
+        # Placeholder GLUED to a following BEGIN marker (#391 review 3 P0): the
+        # line-model backstop lost the placeholder when the line reclassified
+        # as BEGIN; the restored raw-text scan is classification-immune.
+        "placeholder_glued_to_begin": (
+            f"credential={b0}\n-----BEGIN PRIVATE KEY-----\n"
+            f"credential=-----BEGIN RSA PRIVATE KEY-----"
+        ),
+    }
+    for name, text in shapes.items():
+        try:
+            out, rev, _changed = ip.protect_embedding_text(text, config)
+        except ip.EmbeddingPrivacyPolicyError:
+            continue  # fail-closed at protect = no leak (correct)
+        assert not any(_leaks_fragment(out, b) for b in _PEM_BODY), \
+            f"full-width orphan class {name!r} leaked a >=40-char body fragment to dispatch"
+        try:
+            ip.validate_embedding_privacy_dispatch([out], config, expected_revision=rev)
+        except ip.EmbeddingPrivacyPolicyError:
+            continue  # fail-closed at validate = no leak
+    # Control: a redacted key beside a git SHA must NOT be over-blocked (#389).
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    ctrl = f"{key}\nDeployed at commit {sha} per the runbook."
+    out, rev, _c = ip.protect_embedding_text(ctrl, config)
+    ip.validate_embedding_privacy_dispatch([out], config, expected_revision=rev)
+    assert sha in out, "git SHA control was over-redacted (#389 over-block regression)"
+
+
 def _planted_secret(mod, engine, outbound, *, expect_365_fixed):
     fixtures, rows, _summary = _privacy_corpus(mod, engine)
     known = []
@@ -348,19 +435,52 @@ def _planted_secret(mod, engine, outbound, *, expect_365_fixed):
         assert durable == fixture["content"], f"durable row {index} is not byte-identical to the ingested fixture"
         assert "[LCM sensitive redaction:" not in durable, f"durable row {index} was redacted under the lossless default"
     assert "status: ready" in mod["command"].handle_lcm_command("embed warmup", engine)
+    # Direct gate coverage of the >=40-char orphaned-body class the sentinel
+    # corpus cannot exercise (#391 review F5): canonical prefixed/glued/backward/
+    # serialized orphan shapes must never dispatch a raw body fragment, and the
+    # key+git-SHA control must still dispatch unredacted (no #389 over-block).
+    _assert_full_width_orphan_classes_blocked(mod, engine._config)
     assert "status: complete" in mod["command"].handle_lcm_command("embed backfill --apply --limit 50", engine)
     chunk_start = len(outbound)
-    assert "status: complete" in mod["command"].handle_lcm_command("embed backfill --corpus chunks --apply --confirm-raw-text --limit 100", engine)
+    chunk_report = mod["command"].handle_lcm_command("embed backfill --corpus chunks --apply --confirm-raw-text --limit 100", engine)
     chunk_outbound = outbound[chunk_start:]
-    assert chunk_outbound, "chunk backfill made no embedding dispatch"
-    assert any("Chunk safety sentence" in text for text in chunk_outbound)
+    if "status: complete" in chunk_report:
+        assert chunk_outbound, "chunk backfill made no embedding dispatch"
+        assert any("Chunk safety sentence" in text for text in chunk_outbound)
+    else:
+        # Fail-closed chunk refusal is a VALID no-leak outcome: the engine's
+        # chunk splitter can cut a dense planted-secret fixture mid-key, and
+        # the #383/#384 residual backstops then refuse that chunk's dispatch
+        # (the backfill REPORTS the refusal — it does not raise). The battery
+        # invariant is NO RAW SECRET DISPATCHES — a loud refusal satisfies it.
+        # Assert the SPECIFIC refusal shape so a different failure (provider,
+        # config) still fails the battery; the outbound leak sweep below still
+        # covers everything that DID dispatch.
+        assert "status: error" in chunk_report, f"chunk backfill failed for a non-privacy reason: {chunk_report[:200]}"
+        assert "stop_reason: privacy_refused" in chunk_report, f"chunk backfill error was not a privacy refusal: {chunk_report[:200]}"
+        blocked = re.search(r"privacy_blocked: (\d+)", chunk_report)
+        assert blocked is not None and int(blocked.group(1)) >= 1, "privacy_refused report carries no privacy_blocked count"
+        # Guard chunk-coverage COLLAPSE (#391 review F6a): a refusal is only a
+        # valid no-leak outcome if chunks were actually SELECTED for processing —
+        # a "refused" report over zero selected chunks would vacuously pass.
+        selected = re.search(r"selected: (\d+)", chunk_report)
+        assert selected is not None and int(selected.group(1)) >= 1, "chunk refusal processed zero chunks (coverage collapse)"
     revision = mod["ingest_protection"].embedding_privacy_revision(engine._config)
     assert revision != "privacy:off"
     for text in outbound:
-        assert not [secret for fixture in fixtures if fixture["kind"] != "365" for secret in fixture["secrets"] if secret in text], "embedding dispatch leaked a non-#365 planted secret"
+        # Independent partial-fragment leak sweep (#391 review F5): the plain
+        # `secret in text` check only catches a WHOLE secret; a >=40-char
+        # contiguous fragment of a body would slip. `_leaks_fragment` catches
+        # both. This is engine-independent — it does NOT rely on re-running
+        # validate_embedding_privacy_dispatch, which is tautological here (the
+        # engine already invoked it pre-dispatch), so it is a real second signal.
+        assert not [secret for fixture in fixtures if fixture["kind"] != "365"
+                    for secret in fixture["secrets"] if _leaks_fragment(text, secret)], \
+            "embedding dispatch leaked a non-#365 planted secret (whole or >=40-char fragment)"
         if any(secret in text for fixture in fixtures if fixture["kind"] == "365" for secret in fixture["secrets"]):
             known.append("embedding-dispatch")
         else:
+            # Secondary (non-sole) structural check; kept for defence in depth.
             mod["ingest_protection"].validate_embedding_privacy_dispatch([text], engine._config, expected_revision=revision)
     assert outbound
     assert any("[LCM embedding privacy:" in text for text in outbound)
@@ -373,13 +493,38 @@ def _planted_secret(mod, engine, outbound, *, expect_365_fixed):
     # Every fixture must survive recall raw: hits are bounded snippet views, so
     # the full-secret assertion applies to short fixtures; the long chunk
     # fixture asserts unredacted presence (its secret sits past any snippet).
+    # Probe each retrievable fixture by its distinctive NON-secret probe_token
+    # (#391 review F6b/c): only fixtures with NO probe_token — whose whole
+    # content is secret-bearing and redacts to pure placeholders on the query
+    # path — are skipped, and the refusal bound is ANCHORED to that count rather
+    # than a magic number. A clean non-secret probe token must not fail-closed;
+    # any refusal signals a query-transform over-reach.
+    skip_set = [f for f in fixtures if not f.get("probe_token")]
+    probe_refusals = 0
     for index, fixture in enumerate(fixtures):
-        payload = engine.handle_tool_call("lcm_recall", {"query": str(fixture["content"])[:48]})
+        token = fixture.get("probe_token")
+        if not token:
+            continue  # honestly unretrievable: query redacts to a pure placeholder
+        try:
+            payload = engine.handle_tool_call("lcm_recall", {"query": token})
+        except mod["ingest_protection"].EmbeddingPrivacyPolicyError:
+            probe_refusals += 1
+            continue
         assert "[LCM sensitive redaction:" not in payload, f"recall redacted fixture {index}"
         if len(fixture["content"]) <= 512:
             assert all(secret in payload for secret in fixture["secrets"]), f"recall lost fixture {index}'s raw secret"
         else:
             assert "Chunk safety sentence" in payload, f"recall did not retrieve fixture {index}'s distinctive content"
+    # A clean NON-secret probe token must never fail-closed (#391 re-review F6):
+    # any refusal is a query-transform over-reach, so the contract is exactly 0 —
+    # not a loose bound tied to the unrelated secret-only count. `skip_set` is
+    # asserted non-empty only to prove those fixtures are honestly unretrievable
+    # by design (their whole content redacts to a placeholder), not silently lost.
+    assert probe_refusals == 0, (
+        f"a clean non-secret probe token fail-closed-refused ({probe_refusals}) — "
+        f"query-transform over-reach regression"
+    )
+    assert skip_set, "expected the assignment-only fixtures to have no clean probe token"
     recall_dispatches = outbound[recall_start:]
     assert recall_dispatches, "recall made no semantic query dispatch to audit"
     for text in recall_dispatches:
@@ -431,10 +576,19 @@ def _durable_redaction(mod, engine, outbound, *, expect_365_fixed):
     revision = mod["ingest_protection"].embedding_privacy_revision(engine._config)
     assert revision != "privacy:off"
     for text in outbound:
-        assert not [secret for fixture in fixtures if fixture["kind"] != "365" for secret in fixture["secrets"] if secret in text], "embedding dispatch leaked a non-#365 planted secret"
+        # Independent partial-fragment leak sweep (#391 review F5): the plain
+        # `secret in text` check only catches a WHOLE secret; a >=40-char
+        # contiguous fragment of a body would slip. `_leaks_fragment` catches
+        # both. This is engine-independent — it does NOT rely on re-running
+        # validate_embedding_privacy_dispatch, which is tautological here (the
+        # engine already invoked it pre-dispatch), so it is a real second signal.
+        assert not [secret for fixture in fixtures if fixture["kind"] != "365"
+                    for secret in fixture["secrets"] if _leaks_fragment(text, secret)], \
+            "embedding dispatch leaked a non-#365 planted secret (whole or >=40-char fragment)"
         if any(secret in text for fixture in fixtures if fixture["kind"] == "365" for secret in fixture["secrets"]):
             known.append("embedding-dispatch")
         else:
+            # Secondary (non-sole) structural check; kept for defence in depth.
             mod["ingest_protection"].validate_embedding_privacy_dispatch([text], engine._config, expected_revision=revision)
     assert outbound
     assert any("[LCM embedding privacy:" in text for text in outbound)

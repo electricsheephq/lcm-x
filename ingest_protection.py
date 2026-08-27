@@ -114,8 +114,11 @@ _BASE64_LINE_ALPHABET_RE = re.compile(r"^[A-Za-z0-9+/=_-]+$")
 # it beyond any realistic accidental paste/log/transcript shape. The dispatch
 # validator is the fail-closed second layer for the ACCIDENTAL-shape class: a
 # residual it recognizes as key structure (a marker beside a base64 run, a
-# fragment beside a private_key placeholder, or >=2 contiguous full-width body
-# lines) blocks the embedding dispatch instead of leaking. It does not claim to
+# 16+ base64 run in a private_key placeholder's raw-text adjacency window —
+# EXCLUDING pure-hex runs, i.e. git SHAs / hash digests, the one legitimate
+# common neighbor of a redacted key (#389/#391 owner decision) — or >=2
+# contiguous full-width body lines) blocks the embedding dispatch instead of
+# leaking. Sub-16 fragments are the accepted precision boundary. It does not claim to
 # block every conceivable unparseable arrangement — the deliberately
 # de-contiguated body above is out of declared scope, not a guaranteed block.
 # Base64 payload line: padding only ever trails (=/== suffix), so assignment
@@ -123,6 +126,12 @@ _BASE64_LINE_ALPHABET_RE = re.compile(r"^[A-Za-z0-9+/=_-]+$")
 # chars) lines anchor orphan-body detection; shorter lines join a run but
 # never start structure on their own.
 _PRIVATE_KEY_BODY_CHARS_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+# A pure-hex token (git SHA / hash digest) is a subset of the base64 charset,
+# which is exactly why the removed token backstop over-blocked "key + git SHA"
+# (#389). A real PEM base64 body effectively never renders as pure hex (it
+# carries mixed-case g-z/G-Z letters and/or `+` `/`), so excluding pure-hex
+# tokens keeps the #389 controls dispatching while still catching body lines.
+_HEX_DIGEST_RE = re.compile(r"[0-9a-fA-F]{32,128}")
 _PRIVATE_KEY_STRICT_MIN_CHARS = 16
 # A real inline key has a substantial contiguous base64 run between markers;
 # prose like "... -----BEGIN PRIVATE KEY----- and -----END PRIVATE KEY----- ..."
@@ -1785,42 +1794,6 @@ def _pem_marker_with_inline_body(text: str) -> bool:
     return False
 
 
-_PRIVATE_KEY_PLACEHOLDER_RE = re.compile(
-    r"\[LCM (?:sensitive redaction|embedding privacy):\s*name=private_key[^\]]*\]",
-    re.IGNORECASE,
-)
-
-
-def _pem_fragment_near_private_key_placeholder(text: str) -> bool:
-    """True when a 16+ base64-charset token sits near a PRIVATE_KEY placeholder.
-
-    Marker-independent backstop (#383 rounds 4-6): a private_key placeholder
-    proves a private key was redacted at that spot, so any surviving unbroken
-    16+ base64-alphabet token in its adjacency window is an orphaned key-body
-    fragment and blocks the dispatch fail-closed. Scoped to the private_key
-    placeholder name deliberately: a 16+ base64 token beside a NON-key
-    placeholder (e.g. a git SHA next to a redacted `api_key`) is ambiguous and
-    must NOT over-block — marker-independent MULTI-LINE key bodies are covered
-    instead by `_has_orphan_full_width_base64_run`, and a lone token beside a
-    non-key placeholder is the accepted precision boundary (like sub-16 tokens).
-    """
-    window = 160
-    for pm in _PRIVATE_KEY_PLACEHOLDER_RE.finditer(text):
-        lo = max(0, pm.start() - window)
-        # Bound the scan to the adjacency window plus 16 chars of headroom: a
-        # 16+ run STARTING anywhere inside the window still yields a >=16-char
-        # match within [lo, hi] (its first 16 chars land before hi), while an
-        # explicit endpos keeps each placeholder's scan O(window) instead of
-        # O(remaining text) — the latter is O(placeholders * text) on inputs
-        # with many placeholders and no nearby base64 (#383 round-6 perf fix).
-        hi = min(len(text), pm.end() + window + _PRIVATE_KEY_STRICT_MIN_CHARS)
-        for m in _PRIVATE_KEY_INLINE_RUN_RE.finditer(text, lo, hi):
-            run = m.group(0)
-            if len(run) >= _PRIVATE_KEY_STRICT_MIN_CHARS and run not in pm.group(0):
-                return True
-    return False
-
-
 def _has_orphan_full_width_base64_run(text: str) -> bool:
     """True when >=2 contiguous full-width base64 body lines survive, markerless.
 
@@ -1851,6 +1824,60 @@ def _has_orphan_full_width_base64_run(text: str) -> bool:
     return False
 
 
+_PRIVATE_KEY_PLACEHOLDER_RE = re.compile(
+    r"\[LCM (?:sensitive redaction|embedding privacy):\s*name=private_key[^\]]*\]",
+    re.IGNORECASE,
+)
+
+
+def _pem_fragment_near_private_key_placeholder(text: str) -> bool:
+    """True when a 16+ base64-charset token sits near a PRIVATE_KEY placeholder.
+
+    Marker-independent backstop (#383 rounds 4-6, RESTORED for #391): a
+    private_key placeholder proves a private key was redacted at that spot, so
+    any surviving unbroken 16+ base64-alphabet token in its adjacency window is
+    an orphaned key-body fragment and blocks the dispatch fail-closed. Scoped
+    to the private_key placeholder name deliberately: a 16+ base64 token beside
+    a NON-key placeholder (e.g. a git SHA next to a redacted `api_key`) is
+    ambiguous and must NOT over-block — marker-independent MULTI-LINE key
+    bodies are covered instead by `_has_orphan_full_width_base64_run`.
+
+    #391 history (owner-decided 2026-08-27): three successive line-model
+    rewrites of this backstop each re-opened a leak shape main blocked
+    (splitlines escape-blindness; whole-token fullmatch vs glued separators;
+    placeholder glued to a following BEGIN marker hiding it from the modeled
+    segment). Root cause: reconstructing adjacency through the line model
+    keeps introducing blind spots the RAW-TEXT scan never had — placeholders
+    and runs are found here by direct finditer over the text, immune to line
+    classification. The ONLY delta vs the original is the pure-hex exclusion
+    below, which surgically removes the one confirmed realistic over-block
+    (#389: a redacted key beside a nearby git SHA / hash digest refused to
+    embed). Hex is a base64-charset subset, and a real PEM body run
+    effectively never renders as pure hex (DER-in-base64 carries mixed-case
+    letters beyond a-f and/or `+` `/`), so excluding pure-hex runs keeps
+    key+SHA prose embedding while every key-body fragment still blocks.
+    Sub-16 fragments remain the documented precision boundary.
+    """
+    window = 160
+    for pm in _PRIVATE_KEY_PLACEHOLDER_RE.finditer(text):
+        lo = max(0, pm.start() - window)
+        # Bound the scan to the adjacency window plus 16 chars of headroom: a
+        # 16+ run STARTING anywhere inside the window still yields a >=16-char
+        # match within [lo, hi] (its first 16 chars land before hi), while an
+        # explicit endpos keeps each placeholder's scan O(window) instead of
+        # O(remaining text) — the latter is O(placeholders * text) on inputs
+        # with many placeholders and no nearby base64 (#383 round-6 perf fix).
+        hi = min(len(text), pm.end() + window + _PRIVATE_KEY_STRICT_MIN_CHARS)
+        for m in _PRIVATE_KEY_INLINE_RUN_RE.finditer(text, lo, hi):
+            run = m.group(0)
+            if _HEX_DIGEST_RE.fullmatch(run) is not None:
+                # Pure-hex run = git SHA / hash digest, not key material (#389).
+                continue
+            if len(run) >= _PRIVATE_KEY_STRICT_MIN_CHARS and run not in pm.group(0):
+                return True
+    return False
+
+
 def _embedding_privacy_residual_patterns(
     text: str, active_names: Sequence[str]
 ) -> list[str]:
@@ -1861,12 +1888,15 @@ def _embedding_privacy_residual_patterns(
             # an earlier pattern consumed the BEGIN marker the redactor keys on, so
             # the key body shipped. Flag it even though the BEGIN-based redactor is
             # now blind. (BEGIN redaction still flagged for truncated/no-END blocks.)
-            # Backstops (#383 rounds 4-6): a surviving marker beside a base64
-            # run, an orphan 16+ base64 token adjacent to ANY privacy
-            # placeholder, and >=2 contiguous full-width markerless base64 body
-            # lines — all block fail-closed, so the validator no longer shares
-            # the transform's marker/placeholder-keyed blind spot (round 6
-            # closed a truncated body split by a long non-base64 line).
+            # Backstops (#383 rounds 4-6, #391): a surviving marker beside a
+            # base64 run, >=2 contiguous full-width markerless base64 body
+            # lines, and a 16+ base64 run in a private_key placeholder's
+            # raw-text adjacency window — all block fail-closed, so the
+            # validator no longer shares the transform's marker/placeholder-
+            # keyed blind spot. The proximity backstop excludes pure-hex runs
+            # (git SHAs / digests) so "redacted key + nearby git SHA in prose"
+            # embeds (#389) — three line-model rewrites of it each re-opened a
+            # leak shape, so the raw-text scan is authoritative (#391).
             # The marker-independent backstops scan for base64 runs; escaped
             # solidi (\/, any depth) split a run into sub-16 chunks and hide it,
             # so also run them on the solidi-normalized text (#383 round-7,
@@ -1878,10 +1908,10 @@ def _embedding_privacy_residual_patterns(
                 or _has_orphaned_private_key_body(text)
                 or _pem_marker_with_inline_body(text)
                 or _pem_marker_with_inline_body(normalized)
-                or _pem_fragment_near_private_key_placeholder(text)
-                or _pem_fragment_near_private_key_placeholder(normalized)
                 or _has_orphan_full_width_base64_run(text)
                 or _has_orphan_full_width_base64_run(normalized)
+                or _pem_fragment_near_private_key_placeholder(text)
+                or _pem_fragment_near_private_key_placeholder(normalized)
             ):
                 residual.append(name)
             continue
