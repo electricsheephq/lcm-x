@@ -17,7 +17,7 @@ import os
 import re
 import stat
 import tempfile
-from collections import Counter
+from collections import Counter, deque
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
@@ -127,6 +127,12 @@ _BASE64_LINE_ALPHABET_RE = re.compile(r"^[A-Za-z0-9+/=_-]+$")
 # chars) lines anchor orphan-body detection; shorter lines join a run but
 # never start structure on their own.
 _PRIVATE_KEY_BODY_CHARS_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+# A pure-hex token (git SHA / hash digest) is a subset of the base64 charset,
+# which is exactly why the removed token backstop over-blocked "key + git SHA"
+# (#389). A real PEM base64 body effectively never renders as pure hex (it
+# carries mixed-case g-z/G-Z letters and/or `+` `/`), so excluding pure-hex
+# tokens keeps the #389 controls dispatching while still catching body lines.
+_HEX_DIGEST_RE = re.compile(r"[0-9a-fA-F]{32,128}")
 _PRIVATE_KEY_STRICT_MIN_CHARS = 16
 # A real inline key has a substantial contiguous base64 run between markers;
 # prose like "... -----BEGIN PRIVATE KEY----- and -----END PRIVATE KEY----- ..."
@@ -1820,19 +1826,31 @@ def _has_orphan_full_width_base64_run(text: str) -> bool:
 
 
 def _pem_full_width_line_near_placeholder(text: str) -> bool:
-    """True when a full-width base64 LINE sits near a private_key placeholder.
+    """True when a full-width base64 BODY token sits near a private_key placeholder.
 
     Marker-independent backstop (#383 round-8, replacing the removed
     proximity-token backstop that over-blocked "private key + nearby git SHA").
-    A private_key placeholder proves a key was redacted there; a whole LINE that
-    is pure base64 of full PEM wrap width (>=40 chars, non-English) within a few
-    lines of it is another (orphaned) body line — e.g. a truncated key whose
-    body was split by a non-base64 line, leaving one body line non-contiguous.
-    Keyed on a full-width base64 LINE, NOT any 16+ token, so a git SHA / hash
-    embedded in a prose line ("Deployed at commit <sha> per the runbook") does
-    NOT match — the common over-block that regression #389 removed. A base64
-    hash ON ITS OWN LINE right beside a redacted key is a rarer accepted
-    fail-closed over-block.
+    A private_key placeholder proves a key was redacted there; a full PEM
+    wrap-width base64 body token (>=40 chars, non-English) within a
+    bidirectional 160-CHAR window of it is another (orphaned) body fragment —
+    e.g. a truncated key whose body was split by a non-base64 line, or a body
+    line prefixed by a log timestamp / label, leaving the fragment on its own.
+
+    Semantics (#391, replacing the whole-LINE + forward-3-segment window that
+    re-opened the leak class): keyed on any whitespace-delimited base64 TOKEN
+    (a prefixed body line — "10:00:00 INFO <body>", "key_tail: <body>" — no
+    longer slips a whole-segment fullmatch), scanned in BOTH directions over a
+    160-char window (matching main's proven
+    _pem_fragment_near_private_key_placeholder window), and via a bounded ring
+    buffer so the pass stays LINEAR (eager per-segment classification with a
+    forward-only walk failed the linearity gates and missed backward/prefixed
+    bodies).
+
+    Pure-hex tokens (git SHAs / hash digests, incl. a placeholder's own sha256
+    field) are excluded via _HEX_DIGEST_RE: hex is a base64 subset, and a real
+    PEM body effectively never renders as pure hex, so excluding it keeps the
+    common "redacted key + nearby git SHA" pattern dispatching (#389) while
+    still catching genuine body fragments.
 
     Iterates the serialization-aware line model, NOT raw splitlines(): the
     body's line separators can be serialized escapes (\\n at any depth), and a
@@ -1840,30 +1858,54 @@ def _pem_full_width_line_near_placeholder(text: str) -> bool:
     (plain-vs-escaped spellings of the same content must verdict identically —
     the round-16 symmetry invariant; audit-caught P0, 2026-08-27).
     """
-    ph_window = 0
+    window = 160  # chars; matches main's _pem_fragment_near_private_key_placeholder
+
+    def _qualifying_body_token(seg: str) -> bool:
+        # True if ANY whitespace-delimited token in seg is a full-width PEM
+        # base64 body token (>=40 chars, non-English, not a pure-hex digest).
+        for tok in _normalize_escaped_solidus(seg).split():
+            tok = tok.strip()
+            if (
+                len(tok) >= 40
+                and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(tok) is not None
+                and _HEX_DIGEST_RE.fullmatch(tok) is None
+                and not _looks_like_english_token(tok)
+            ):
+                return True
+        return False
+
+    recent_bodies: deque[int] = deque()  # content_end of qualifying bodies in the trailing window
+    last_ph_end: int | None = None       # content_end of the most recent private_key placeholder
     for _kind, redact_start, content_end, _line_start, _marker_end in _pem_line_model(text):
         segment = text[redact_start:content_end]
         low = segment.lower()
-        if (
+        is_ph = (
             "[lcm embedding privacy: name=private_key]" in low
             or "[lcm sensitive redaction: name=private_key" in low
-        ):
-            ph_window = 3
-            continue
-        if ph_window > 0:
-            body = _normalize_escaped_solidus(segment.strip(" \t"))
-            if (
-                len(body) >= 40
-                and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(body) is not None
-                and not _looks_like_english_token(body)
-            ):
+        )
+        if is_ph:
+            # Backward check: a qualifying body within `window` chars before this
+            # placeholder (an orphan body line ABOVE the redacted key).
+            while recent_bodies and (redact_start - recent_bodies[0]) > window:
+                recent_bodies.popleft()
+            if recent_bodies:
                 return True
-            # Blank/near-empty segments (blank lines, serialization remnants)
-            # do not consume the window — otherwise interleaved blank lines
-            # shrink the adjacency budget far below the old 160-char window
-            # (audit P1, 2026-08-27).
-            if body:
-                ph_window -= 1
+            # Body glued to the placeholder on this same segment (e.g.
+            # "-----END PRIVATE KEY----- <body>" collapsed onto the placeholder).
+            if _qualifying_body_token(segment):
+                return True
+            last_ph_end = content_end
+            continue
+        # Forward check: within `window` chars after a placeholder.
+        if last_ph_end is not None and (redact_start - last_ph_end) <= window:
+            if _qualifying_body_token(segment):
+                return True
+        # Record a qualifying body for future backward checks; trim to the
+        # trailing window so the buffer stays bounded (keeps the pass linear).
+        if _qualifying_body_token(segment):
+            recent_bodies.append(content_end)
+        while recent_bodies and (content_end - recent_bodies[0]) > window:
+            recent_bodies.popleft()
     return False
 
 
