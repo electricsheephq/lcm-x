@@ -93,8 +93,10 @@ Core capabilities:
   glob patterns
 - **Large payload controls** - externalize oversized tool/media/raw payloads and
   protect SQLite from inline media-ish base64 blobs
-- **Sensitive-pattern controls** - optional named redaction of API keys, bearer
-  tokens, passwords, and private keys before LCM stores or summarizes them
+- **Sensitive-pattern controls** - two independent layers: opt-in durable redaction of API
+  keys, bearer tokens, passwords, and private keys before LCM stores or summarizes them
+  (off by default — the durable store is lossless), and automatic protection of the copies
+  sent to known cloud embedding providers
 - **Diagnostics** - runtime health, database checks, optional `/lcm` slash
   commands, backup-first repair/rotate paths
 
@@ -116,16 +118,19 @@ The latest stable release is
 fail-closed provider-input privacy boundary used by cloud summary/query
 embeddings while preserving the 15-tool surface, schema-5 core store, and
 default-off experimental features.
+(v0.23.1 coupled that boundary to durable redaction; main has since made the two
+independent — see "Sensitive-pattern redaction" below.)
 
 Stable release identity and the continuing `main` development line are
-separate proof planes. The source snapshot used for the current reconciliation
-is `main@3d4fbb4c979dc09aef0b831bb50d928e0e18d68f`; do not describe an
-arbitrary main checkout as the installed stable product.
+separate proof planes; do not describe an arbitrary `main` checkout as the
+installed stable product.
 
-That exact development baseline still identifies itself as
-`hermes-lcm v0.23.0-rc1 (15 tools)`. The stable tag identifies itself as
-`hermes-lcm v0.23.1 (15 tools)`. This is tracked as a deferred version-policy
-decision rather than being silently restamped by documentation changes.
+The reconciled `main` line now identifies itself as
+`hermes-lcm v0.23.2 (15 tools)` — aligned forward from the `v0.23.1` stable
+tag, which identifies itself as `hermes-lcm v0.23.1 (15 tools)`. This resolves
+the earlier drift where `main` declared an older release candidate than the
+shipped stable tag (#385); it is a forward bump, never a restamp of any past
+commit's own recorded identity.
 
 Eva has accepted exact stable v0.23.1 with hosted `voyage-4-large`,
 1024-dimensional float32 summary vectors under one privacy-bound identity.
@@ -249,7 +254,7 @@ Provider Plugins:
 ```
 
 An untagged checkout of the reconciled `main` baseline instead reports
-`hermes-lcm v0.23.0-rc1 (15 tools)`; verify the loaded commit before treating
+`hermes-lcm v0.23.2 (15 tools)`; verify the loaded commit before treating
 either string as release proof.
 
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
@@ -529,12 +534,16 @@ the digest to avoid making password-like values easier to dictionary-check.
 unknown names, source, and placeholder format without exposing raw secret values.
 
 Cloud embeddings add a separate provider-input-only privacy transform. It does
-not rewrite historical SQLite, FTS, summary, or payload data. Before cloud
-warmup, summary/chunk backfill, or semantic-query dispatch, LCM requires an
-enabled, nonempty, known policy; transforms matching provider input to
-pattern-only placeholders; rejects residual matches; and binds the transform
-version plus active-pattern-name hash into the vector profile revision. Policy
-drift refuses dispatch until `/lcm embed warmup` registers the new identity.
+not rewrite historical SQLite, FTS, summary, or payload data. It resolves ON
+automatically for known cloud providers and does not require
+`LCM_SENSITIVE_PATTERNS_ENABLED`. While it is on, cloud warmup, summary/chunk
+backfill, and semantic-query dispatch require a nonempty, known
+`LCM_SENSITIVE_PATTERNS` catalog; matching provider input becomes pattern-only
+placeholders, residual matches are rejected, and the transform version plus
+active-pattern-name hash bind into the vector profile revision.
+`LCM_EMBEDDING_PRIVACY_ENABLED=false` opts out explicitly and binds the
+distinguished `privacy:off` revision instead of blocking. Either way a posture or
+policy change refuses dispatch until `/lcm embed warmup` registers the new identity.
 FastEmbed is in-process. The shipped Ollama provider does not apply the cloud
 gate, so use it only with a trusted local/loopback endpoint; #337 tracks
 endpoint-aware locality for remote Ollama configurations.

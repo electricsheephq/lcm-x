@@ -3,8 +3,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
-RELEASE_VERSION = "0.23.0-rc1"
-RELEASE_NOTES = REPO_ROOT / ".github" / "release-notes" / f"v{RELEASE_VERSION}.md"
+IDENTITY_VERSION = "0.23.2"
+RC_TAG = "0.23.2-rc3"
+RELEASE_NOTES = REPO_ROOT / ".github" / "release-notes" / f"v{RC_TAG}.md"
 
 
 def test_release_workflow_requires_curated_tag_specific_notes():
@@ -35,11 +36,27 @@ def test_release_candidate_identity_surfaces_are_synchronized():
         REPO_ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml"
     ).read_text(encoding="utf-8")
 
-    assert f"version: {RELEASE_VERSION}" in manifest
-    assert f"hermes-lcm v{RELEASE_VERSION} (15 tools)" in readme
-    assert f"hermes-lcm v{RELEASE_VERSION} (15 tools)" in operator_guide
-    assert f"## v{RELEASE_VERSION} - " in changelog
-    assert f"Exact commit SHA for v{RELEASE_VERSION} or main" in bug_report
+    assert f"version: {IDENTITY_VERSION}" in manifest
+    assert f"hermes-lcm v{IDENTITY_VERSION} (15 tools)" in readme
+    assert f"hermes-lcm v{IDENTITY_VERSION} (15 tools)" in operator_guide
+    assert f"## v{IDENTITY_VERSION} - " in changelog
+    assert f"Exact commit SHA for v{IDENTITY_VERSION} or main" in bug_report
+
+
+def test_plugin_version_is_not_a_release_downgrade():
+    import re
+
+    manifest = (REPO_ROOT / "plugin.yaml").read_text(encoding="utf-8")
+    match = re.search(r"^version:\s*(\S+)", manifest, re.MULTILINE)
+    assert match is not None, "plugin.yaml declares no version"
+    declared = match.group(1)
+    # Parse the release core (drop any -rcN suffix) and assert it never regresses
+    # below the last shipped stable — a restored older RC (e.g. 0.23.0-rc1) fails
+    # this even if IDENTITY_VERSION were changed with it (not tautological).
+    core = tuple(int(part) for part in declared.split("-")[0].split("."))
+    assert core >= (0, 23, 1), f"plugin.yaml version {declared!r} is a downgrade below the 0.23.1 stable floor"
+    # And it must match the identity every other surface is synchronized to.
+    assert declared == IDENTITY_VERSION
 
 
 def test_issue_forms_stay_within_github_element_limit():
@@ -80,12 +97,14 @@ def test_preanswer_guide_discloses_inherited_embedding_provider_behavior():
 
 def test_release_candidate_notes_cover_only_the_merged_release_scope():
     notes = RELEASE_NOTES.read_text(encoding="utf-8")
+    lines = notes.splitlines()
+    section_headers = [line for line in lines if line.startswith("## ")]
 
-    assert notes.startswith(f"# hermes-lcm v{RELEASE_VERSION}\n")
-    assert "#177" in notes
-    assert "## Highlights" in notes
-    assert "## Changes" in notes
-    assert "## Contributors" in notes
-    assert "occurrence-bounded" in notes
-    assert "DORMANT" in notes
-    assert len(notes.splitlines()) <= 60
+    assert notes.startswith(f"# v{RC_TAG} — ")
+    assert any(header.startswith("## Lossless by default:") for header in section_headers)
+    assert any(header.startswith("## Security:") for header in section_headers)
+    assert any(header.startswith("## Instrument integrity:") for header in section_headers)
+    assert any(header.startswith("## Release process:") for header in section_headers)
+    assert any(header.startswith("## Known follow-ups") for header in section_headers)
+    assert "## Benchmark boundary" in section_headers
+    assert 60 <= len(lines) <= 100

@@ -22,7 +22,10 @@ runtime evidence.
 - **Source-aware retrieval** - filters raw rows and summaries by descendant source lineage
 - **Session controls** - ignore noisy sessions or keep sessions read-only with glob patterns
 - **Large payload controls** - optional ingest-time externalization for oversized tool/media/raw payloads, plus transcript GC for already-externalized tool results
-- **Sensitive-pattern controls** - optional named redaction of API keys, bearer tokens, passwords, and private keys before LCM stores or summarizes them
+- **Sensitive-pattern controls** - two independent layers: opt-in durable redaction of API
+  keys, bearer tokens, passwords, and private keys before LCM stores or summarizes them
+  (off by default — the durable store is lossless), and automatic protection of the copies
+  sent to known cloud embedding providers
 - **Storage-boundary payload guard** - media-ish `data:*;base64` and long base64-looking strings are externalized before LCM writes them to SQLite
 - **Diagnostics** - `lcm_status`, `lcm_inspect`, `lcm_doctor`, and optional `/lcm` slash commands
 
@@ -57,12 +60,13 @@ Raw messages remain source truth. Summaries, FTS indexes, embeddings, temporal
 rollups, query views, and assertions are derived layers and must retain explicit
 source/provenance relationships.
 
-In v0.23.1, known cloud embedding dispatch follows a separate provider-input
-privacy path:
+Known cloud embedding dispatch follows a separate provider-input privacy path (v0.23.1
+required durable redaction to be on; current main resolves it independently):
 
 ```text
 durable summary or semantic query (unchanged)
-  -> active named sensitive-pattern policy
+  -> embedding-privacy resolution (auto-ON for cloud; `privacy:off` opt-out)
+  -> active named sensitive-pattern catalog
   -> provider-input-only placeholder transform
   -> residual scan / fail closed
   -> cloud embedding provider
@@ -86,6 +90,11 @@ Raw-chunk embeddings are a separate outbound-data boundary because their
 documents derive from verbatim message/tool content. Cloud application requires
 explicit raw-text consent in addition to the sensitive-pattern policy. That
 gate does not claim all sensitive facts have been classified.
+
+Optional Voyage reranking is a third outbound boundary: the rerank query and candidate
+snippets are read from raw durable rows, so they are passed through the same provider-copy
+transform whenever the embedding-privacy resolution is ON, with ranking indices mapped back
+to the original untransformed hits (#371).
 
 Eva's accepted hosted-vector evidence proves this architecture for one exact
 profile/configuration only. It does not make trajectory embeddings, reranking,

@@ -148,7 +148,14 @@ def _load_inner(worktree, hermes_repo, release, snapshot, inserted_path):
         _restore_module_world(snapshot, inserted_path)
 
     return modules, engine_surface, hermes_identity, cleanup
-def _engine(mod, state: Path, posture: str, *, patterns: bool):
+def _engine(
+    mod,
+    state: Path,
+    posture: str,
+    *,
+    patterns: bool,
+    embedding_privacy: bool | None = None,
+):
     provider = "fastembed" if posture == "local" else os.getenv(
         "LCM_GAUNTLET_CLOUD_PROVIDER", "voyage"
     ).strip().lower()
@@ -159,7 +166,8 @@ def _engine(mod, state: Path, posture: str, *, patterns: bool):
     config = mod["config"].LCMConfig(
         database_path=str(state / "lcm.db"), embeddings_enabled=True,
         embedding_provider=provider, embedding_model=model,
-        sensitive_patterns_enabled=patterns, assertions_enabled=True,
+        sensitive_patterns_enabled=patterns,
+        embedding_privacy_enabled=embedding_privacy, assertions_enabled=True,
         adaptive_retrieval_enabled=True, proactive_recall_enabled=True,
     )
     return mod["engine"].LCMEngine(config=config, hermes_home=str(state / "home"))
@@ -222,7 +230,7 @@ def _exact(row, quote=None, **facets):
         "exact_ref": f"lcm:{row['store_id']}:{start}-{start + len(quote)}",
         "quote": quote, **facets,
     }
-def _scenario(engine, tool, ctx, *, patterns):
+def _scenario(engine, tool, ctx, *, patterns, posture):
     finance, atlas = ctx["finance"], ctx["atlas"]
     finance_text = str(finance["content"])
     taxi, train = "taxi costs $60", "train costs $20"
@@ -268,9 +276,9 @@ def _scenario(engine, tool, ctx, *, patterns):
         assert "Constellation anchor" in json.dumps(_payload(engine, tool, {"prompt": "Show the anchor", "node_ids": [ctx["node:gauntlet-c"]], "output": "evidence"})["evidence"])
     elif tool == "lcm_status":
         status = _payload(engine, tool, {})
-        # The cloud posture's privacy battery ingests 10 extra rows before
+        # The cloud-default posture's privacy battery ingests 10 extra rows before
         # the matrix runs, so totals are posture-aware exact values.
-        expected_total = 40 if patterns else 30
+        expected_total = 40 if posture == "cloud-default" else 30
         assert (
             status["store"]["messages"] == 10
             and status["lifecycle_fragmentation"]["messages_total"] == expected_total
@@ -307,25 +315,247 @@ class _Capture:
         yield from self._provider.embed_chunk_group_batches(groups, before_dispatch=before_dispatch)
 def _privacy_fixtures():
     long_chunk = " ".join(f"Chunk safety sentence {index}." for index in range(180))
+    # probe_token = a distinctive NON-secret substring by which the row can be
+    # recalled raw (#391 review F6b). Fixtures whose whole content is
+    # secret-bearing (assignment PEMs / bare password= api_key=) redact to pure
+    # placeholders on the query path and have NO probe_token — they are the only
+    # honest skips, and their losslessness is covered by the durable
+    # byte-identity check + the outbound sweep.
     return [
-        {"kind": "standard", "content": f"privacy fixture complete -----BEGIN PRIVATE KEY-----\n{PLANTED['pem_complete']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["pem_complete"]]},
-        {"kind": "standard", "content": f"privacy fixture truncated -----BEGIN PRIVATE KEY-----\n{PLANTED['pem_truncated']}", "secrets": [PLANTED["pem_truncated"]]},
-        {"kind": "standard", "content": f"privacy fixture encrypted -----BEGIN ENCRYPTED PRIVATE KEY-----\n{PLANTED['encrypted_armor']}\n-----END ENCRYPTED PRIVATE KEY-----", "secrets": [PLANTED["encrypted_armor"]]},
-        {"kind": "standard", "content": json.dumps({"private_key": f"-----BEGIN PRIVATE KEY-----\n{PLANTED['json_serialized']}\n-----END PRIVATE KEY-----"}), "secrets": [PLANTED["json_serialized"]]},
-        {"kind": "standard", "content": f"ERROR credential=-----BEGIN PRIVATE KEY-----\n{PLANTED['log_prefixed']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["log_prefixed"]]},
+        {"kind": "standard", "probe_token": "privacy fixture complete", "content": f"privacy fixture complete -----BEGIN PRIVATE KEY-----\n{PLANTED['pem_complete']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["pem_complete"]]},
+        {"kind": "standard", "probe_token": "privacy fixture truncated", "content": f"privacy fixture truncated -----BEGIN PRIVATE KEY-----\n{PLANTED['pem_truncated']}", "secrets": [PLANTED["pem_truncated"]]},
+        {"kind": "standard", "probe_token": "privacy fixture encrypted", "content": f"privacy fixture encrypted -----BEGIN ENCRYPTED PRIVATE KEY-----\n{PLANTED['encrypted_armor']}\n-----END ENCRYPTED PRIVATE KEY-----", "secrets": [PLANTED["encrypted_armor"]]},
+        {"kind": "standard", "probe_token": "lcm json fixture", "content": "lcm json fixture " + json.dumps({"private_key": f"-----BEGIN PRIVATE KEY-----\n{PLANTED['json_serialized']}\n-----END PRIVATE KEY-----"}), "secrets": [PLANTED["json_serialized"]]},
+        {"kind": "standard", "probe_token": "ERROR credential", "content": f"ERROR credential=-----BEGIN PRIVATE KEY-----\n{PLANTED['log_prefixed']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["log_prefixed"]]},
         {"kind": "standard", "content": f"password={PLANTED['password']} api_key={PLANTED['api_key']}", "secrets": [PLANTED["password"], PLANTED["api_key"]]},
         {"kind": "365", "content": f"password: -----BEGIN PRIVATE KEY-----\n{PLANTED['password_pem']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["password_pem"]]},
         {"kind": "365", "content": f"passphrase=-----BEGIN PRIVATE KEY-----\n{PLANTED['passphrase_pem']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["passphrase_pem"]]},
         {"kind": "365", "content": f"password=\"-----BEGIN PRIVATE KEY-----\n{PLANTED['quoted_password_pem']}\n-----END PRIVATE KEY-----\"", "secrets": [PLANTED["quoted_password_pem"]]},
-        {"kind": "chunk", "content": f"{long_chunk} api_key={PLANTED['chunk_path']}", "secrets": [PLANTED["chunk_path"]]},
+        {"kind": "chunk", "probe_token": "Chunk safety", "content": f"{long_chunk} api_key={PLANTED['chunk_path']}", "secrets": [PLANTED["chunk_path"]]},
     ]
-def _privacy(mod, engine, outbound, *, expect_365_fixed):
+def _privacy_corpus(mod, engine):
     fixtures = _privacy_fixtures()
     messages = [{"role": "user", "content": item["content"]} for item in fixtures]
     engine.on_session_start("gauntlet-secrets", conversation_id="conversation-secrets", platform="phase-a", context_length=200_000)
     engine._ingest_messages(messages)
     rows = engine._store.get_session_messages("gauntlet-secrets")
     assert len(rows) == len(fixtures), "privacy ingest did not preserve every planted turn"
+    summary = " ".join(str(row["content"]) for row in rows)
+    node = mod["dag"].SummaryNode(session_id="gauntlet-secrets", depth=0, summary=summary, token_count=60, source_token_count=120, source_ids=[row["store_id"] for row in rows], source_type="messages", created_at=time.time(), earliest_at=time.time(), latest_at=time.time(), expand_hint="Phase A privacy corpus")
+    engine._dag.add_node(node)
+    return fixtures, rows, summary
+
+
+# Realistic PEM body lines (mixed-case base64, non-hex, non-English) for the
+# full-width orphan-class gate assertion below — the short single-token planted
+# sentinels cannot exercise the >=40-char criterion (#391 review F5).
+_PEM_BODY = (
+    "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj",
+    "MHcCAQEEIQD1eJ7yhkG0987xyzABCDEFghijkLMNOPqrstuvwxyz0987654321pq",
+    "4oQEqJfFJSYuanwHvL7oQfdFxV1On3R/YVFkxvco1xg1NxOCesiD1/uWWSNAdPUl",
+)
+
+
+def _leaks_fragment(text, secret, floor=40):
+    """Detect a raw-secret leak in a dispatch string.
+
+    Short sentinels (<floor) are matched whole; a long PEM body is matched by
+    ANY >=floor-char contiguous substring, so a partial-fragment leak (the
+    #391 orphan class) is caught — the plain `secret in text` sweep misses it.
+    """
+    if len(secret) < floor:
+        return secret in text
+    return any(secret[i:i + floor] in text for i in range(len(secret) - floor + 1))
+
+
+def _assert_full_width_orphan_classes_blocked(mod, config):
+    """Phase-A gate coverage for the >=40-char orphaned-body leak class the
+    short-sentinel corpus cannot reach (#391 review F5).
+
+    Runs the canonical prefixed / log-prefixed / glued / backward / serialized
+    orphan shapes (the exact shapes a cross-model review found dispatching raw)
+    through the REAL protect+validate provider-dispatch path and asserts no
+    >=40-char body fragment ever survives. The key+git-SHA control must still
+    dispatch unredacted (no #389 over-block). A regression here means the
+    embedding-privacy backstop has lost the orphan-class coverage.
+    """
+    ip = mod["ingest_protection"]
+    b0, b1, b2 = _PEM_BODY
+    for body in _PEM_BODY:
+        assert len(body) >= 40 and ip._HEX_DIGEST_RE.fullmatch(body) is None
+    key = f"-----BEGIN PRIVATE KEY-----\n{b0}\n{b1}\n-----END PRIVATE KEY-----"
+    shapes = {
+        "log_prefixed_orphan": (
+            f"10:00:00 INFO -----BEGIN PRIVATE KEY-----\n10:00:00 INFO {b0}\n"
+            f"10:00:00 INFO {b1}\n10:00:00 WARN retrying upstream connection\n"
+            f"10:00:00 INFO {b2}"
+        ),
+        "label_prefixed_orphan": f"private_key: {key}\nkey_tail: {b2}",
+        "glued_to_placeholder": f"-----BEGIN PRIVATE KEY-----\n{b0}\n{b1}\n-----END PRIVATE KEY----- {b2}",
+        "backward_orphan": f"{b0}\nthat was the tail of the old key; new one:\n{key}",
+        "serialized_sibling": '{"private_key": "' + key.replace("\n", "\\n") + '", "note": "' + b2 + '"}',
+        # Bodies GLUED to a non-whitespace separator (#391 re-review P0): the
+        # space-separated shapes above all passed a buggy whole-token fullmatch;
+        # these no-space variants are the ones that actually leaked.
+        "glue_colon_orphan": f"private_key: {key}\nkey_tail:{b2}",
+        "glue_dash_orphan": f"{key}\n-{b2}",
+        "glue_equals_orphan": f"{key}\ncredential={b2}",
+        # Placeholder GLUED to a following BEGIN marker (#391 review 3 P0): the
+        # line-model backstop lost the placeholder when the line reclassified
+        # as BEGIN; the restored raw-text scan is classification-immune.
+        "placeholder_glued_to_begin": (
+            f"credential={b0}\n-----BEGIN PRIVATE KEY-----\n"
+            f"credential=-----BEGIN RSA PRIVATE KEY-----"
+        ),
+    }
+    for name, text in shapes.items():
+        try:
+            out, rev, _changed = ip.protect_embedding_text(text, config)
+        except ip.EmbeddingPrivacyPolicyError:
+            continue  # fail-closed at protect = no leak (correct)
+        assert not any(_leaks_fragment(out, b) for b in _PEM_BODY), \
+            f"full-width orphan class {name!r} leaked a >=40-char body fragment to dispatch"
+        try:
+            ip.validate_embedding_privacy_dispatch([out], config, expected_revision=rev)
+        except ip.EmbeddingPrivacyPolicyError:
+            continue  # fail-closed at validate = no leak
+    # Control: a redacted key beside a git SHA must NOT be over-blocked (#389).
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    ctrl = f"{key}\nDeployed at commit {sha} per the runbook."
+    out, rev, _c = ip.protect_embedding_text(ctrl, config)
+    ip.validate_embedding_privacy_dispatch([out], config, expected_revision=rev)
+    assert sha in out, "git SHA control was over-redacted (#389 over-block regression)"
+
+
+def _planted_secret(mod, engine, outbound, *, expect_365_fixed):
+    fixtures, rows, _summary = _privacy_corpus(mod, engine)
+    known = []
+    for index, (fixture, row) in enumerate(zip(fixtures, rows)):
+        durable = str(row["content"])
+        assert durable == fixture["content"], f"durable row {index} is not byte-identical to the ingested fixture"
+        assert "[LCM sensitive redaction:" not in durable, f"durable row {index} was redacted under the lossless default"
+    assert "status: ready" in mod["command"].handle_lcm_command("embed warmup", engine)
+    # Direct gate coverage of the >=40-char orphaned-body class the sentinel
+    # corpus cannot exercise (#391 review F5): canonical prefixed/glued/backward/
+    # serialized orphan shapes must never dispatch a raw body fragment, and the
+    # key+git-SHA control must still dispatch unredacted (no #389 over-block).
+    _assert_full_width_orphan_classes_blocked(mod, engine._config)
+    assert "status: complete" in mod["command"].handle_lcm_command("embed backfill --apply --limit 50", engine)
+    chunk_start = len(outbound)
+    chunk_report = mod["command"].handle_lcm_command("embed backfill --corpus chunks --apply --confirm-raw-text --limit 100", engine)
+    chunk_outbound = outbound[chunk_start:]
+    if "status: complete" in chunk_report:
+        assert chunk_outbound, "chunk backfill made no embedding dispatch"
+        assert any("Chunk safety sentence" in text for text in chunk_outbound)
+    else:
+        # Fail-closed chunk refusal is a VALID no-leak outcome: the engine's
+        # chunk splitter can cut a dense planted-secret fixture mid-key, and
+        # the #383/#384 residual backstops then refuse that chunk's dispatch
+        # (the backfill REPORTS the refusal — it does not raise). The battery
+        # invariant is NO RAW SECRET DISPATCHES — a loud refusal satisfies it.
+        # Assert the SPECIFIC refusal shape so a different failure (provider,
+        # config) still fails the battery; the outbound leak sweep below still
+        # covers everything that DID dispatch.
+        assert "status: error" in chunk_report, f"chunk backfill failed for a non-privacy reason: {chunk_report[:200]}"
+        assert "stop_reason: privacy_refused" in chunk_report, f"chunk backfill error was not a privacy refusal: {chunk_report[:200]}"
+        blocked = re.search(r"privacy_blocked: (\d+)", chunk_report)
+        assert blocked is not None and int(blocked.group(1)) >= 1, "privacy_refused report carries no privacy_blocked count"
+        # Guard chunk-coverage COLLAPSE (#391 review F6a): a refusal is only a
+        # valid no-leak outcome if chunks were actually SELECTED for processing —
+        # a "refused" report over zero selected chunks would vacuously pass.
+        selected = re.search(r"selected: (\d+)", chunk_report)
+        assert selected is not None and int(selected.group(1)) >= 1, "chunk refusal processed zero chunks (coverage collapse)"
+    revision = mod["ingest_protection"].embedding_privacy_revision(engine._config)
+    assert revision != "privacy:off"
+    for text in outbound:
+        # Independent partial-fragment leak sweep (#391 review F5): the plain
+        # `secret in text` check only catches a WHOLE secret; a >=40-char
+        # contiguous fragment of a body would slip. `_leaks_fragment` catches
+        # both. This is engine-independent — it does NOT rely on re-running
+        # validate_embedding_privacy_dispatch, which is tautological here (the
+        # engine already invoked it pre-dispatch), so it is a real second signal.
+        assert not [secret for fixture in fixtures if fixture["kind"] != "365"
+                    for secret in fixture["secrets"] if _leaks_fragment(text, secret)], \
+            "embedding dispatch leaked a non-#365 planted secret (whole or >=40-char fragment)"
+        if any(secret in text for fixture in fixtures if fixture["kind"] == "365" for secret in fixture["secrets"]):
+            known.append("embedding-dispatch")
+        else:
+            # Secondary (non-sole) structural check; kept for defence in depth.
+            mod["ingest_protection"].validate_embedding_privacy_dispatch([text], engine._config, expected_revision=revision)
+    assert outbound
+    assert any("[LCM embedding privacy:" in text for text in outbound)
+    recall_start = len(outbound)
+    recall_query = f"privacy fixture api_key={PLANTED['api_key']}"
+    recall = engine.handle_tool_call("lcm_recall", {"query": recall_query})
+    recall_hits = json.loads(recall)["hits"]
+    assert recall_hits
+    assert any(secret in recall for fixture in fixtures for secret in fixture["secrets"]), "recall did not return raw lossless durable text"
+    # Every fixture must survive recall raw: hits are bounded snippet views, so
+    # the full-secret assertion applies to short fixtures; the long chunk
+    # fixture asserts unredacted presence (its secret sits past any snippet).
+    # Probe each retrievable fixture by its distinctive NON-secret probe_token
+    # (#391 review F6b/c): only fixtures with NO probe_token — whose whole
+    # content is secret-bearing and redacts to pure placeholders on the query
+    # path — are skipped, and the refusal bound is ANCHORED to that count rather
+    # than a magic number. A clean non-secret probe token must not fail-closed;
+    # any refusal signals a query-transform over-reach.
+    skip_set = [f for f in fixtures if not f.get("probe_token")]
+    probe_refusals = 0
+    for index, fixture in enumerate(fixtures):
+        token = fixture.get("probe_token")
+        if not token:
+            continue  # honestly unretrievable: query redacts to a pure placeholder
+        try:
+            payload = engine.handle_tool_call("lcm_recall", {"query": token})
+        except mod["ingest_protection"].EmbeddingPrivacyPolicyError:
+            probe_refusals += 1
+            continue
+        assert "[LCM sensitive redaction:" not in payload, f"recall redacted fixture {index}"
+        if len(fixture["content"]) <= 512:
+            assert all(secret in payload for secret in fixture["secrets"]), f"recall lost fixture {index}'s raw secret"
+        else:
+            assert "Chunk safety sentence" in payload, f"recall did not retrieve fixture {index}'s distinctive content"
+    # A clean NON-secret probe token must never fail-closed (#391 re-review F6):
+    # any refusal is a query-transform over-reach, so the contract is exactly 0 —
+    # not a loose bound tied to the unrelated secret-only count. `skip_set` is
+    # asserted non-empty only to prove those fixtures are honestly unretrievable
+    # by design (their whole content redacts to a placeholder), not silently lost.
+    assert probe_refusals == 0, (
+        f"a clean non-secret probe token fail-closed-refused ({probe_refusals}) — "
+        f"query-transform over-reach regression"
+    )
+    assert skip_set, "expected the assignment-only fixtures to have no clean probe token"
+    recall_dispatches = outbound[recall_start:]
+    assert recall_dispatches, "recall made no semantic query dispatch to audit"
+    for text in recall_dispatches:
+        assert PLANTED["api_key"] not in text, "recall query dispatch leaked the planted secret"
+        mod["ingest_protection"].validate_embedding_privacy_dispatch([text], engine._config, expected_revision=revision)
+    if known and expect_365_fixed:
+        raise AssertionError("#365 defining composition leaked on: " + ", ".join(sorted(set(known))))
+    engine.on_session_start("gauntlet-c", conversation_id="conversation-gauntlet-c", platform="phase-a", context_length=200_000)
+    return bool(known)
+
+
+def _opt_out(mod, engine, outbound):
+    _fixtures, _rows, summary = _privacy_corpus(mod, engine)
+    revision = mod["ingest_protection"].embedding_privacy_revision(engine._config)
+    assert revision == "privacy:off"
+    assert "status: ready" in mod["command"].handle_lcm_command("embed warmup", engine)
+    assert "status: complete" in mod["command"].handle_lcm_command("embed backfill --apply --limit 50", engine)
+    assert outbound, "opt-out made no embedding dispatch"
+    assert summary in outbound, "opt-out provider input did not preserve the durable summary byte-for-byte"
+    query_start = len(outbound)
+    query_text = f"opt-out probe password={PLANTED['password']}"
+    hits = json.loads(engine.handle_tool_call("lcm_recall", {"query": query_text}))["hits"]
+    assert hits, "opt-out recall returned no hits"
+    query_dispatches = outbound[query_start:]
+    assert query_dispatches, "opt-out recall made no semantic query dispatch"
+    assert query_text in query_dispatches, "opt-out query dispatch was not the byte-identical raw query"
+    assert not any("[LCM embedding privacy:" in text for text in outbound)
+
+
+def _durable_redaction(mod, engine, outbound, *, expect_365_fixed):
+    fixtures, rows, _summary = _privacy_corpus(mod, engine)
     known = []
     for index, (fixture, row) in enumerate(zip(fixtures, rows)):
         durable = str(row["content"])
@@ -336,8 +566,6 @@ def _privacy(mod, engine, outbound, *, expect_365_fixed):
             known.append(f"durable-row-{index}")
         else:
             assert "[LCM sensitive redaction:" in durable, f"durable row {index} lacks its canonical per-turn placeholder"
-    node = mod["dag"].SummaryNode(session_id="gauntlet-secrets", depth=0, summary=" ".join(str(row["content"]) for row in rows), token_count=60, source_token_count=120, source_ids=[row["store_id"] for row in rows], source_type="messages", created_at=time.time(), earliest_at=time.time(), latest_at=time.time(), expand_hint="Phase A privacy corpus")
-    engine._dag.add_node(node)
     assert "status: ready" in mod["command"].handle_lcm_command("embed warmup", engine)
     assert "status: complete" in mod["command"].handle_lcm_command("embed backfill --apply --limit 50", engine)
     chunk_start = len(outbound)
@@ -346,11 +574,21 @@ def _privacy(mod, engine, outbound, *, expect_365_fixed):
     assert chunk_outbound, "chunk backfill made no embedding dispatch"
     assert any("Chunk safety sentence" in text for text in chunk_outbound)
     revision = mod["ingest_protection"].embedding_privacy_revision(engine._config)
+    assert revision != "privacy:off"
     for text in outbound:
-        assert not [secret for fixture in fixtures if fixture["kind"] != "365" for secret in fixture["secrets"] if secret in text], "embedding dispatch leaked a non-#365 planted secret"
+        # Independent partial-fragment leak sweep (#391 review F5): the plain
+        # `secret in text` check only catches a WHOLE secret; a >=40-char
+        # contiguous fragment of a body would slip. `_leaks_fragment` catches
+        # both. This is engine-independent — it does NOT rely on re-running
+        # validate_embedding_privacy_dispatch, which is tautological here (the
+        # engine already invoked it pre-dispatch), so it is a real second signal.
+        assert not [secret for fixture in fixtures if fixture["kind"] != "365"
+                    for secret in fixture["secrets"] if _leaks_fragment(text, secret)], \
+            "embedding dispatch leaked a non-#365 planted secret (whole or >=40-char fragment)"
         if any(secret in text for fixture in fixtures if fixture["kind"] == "365" for secret in fixture["secrets"]):
             known.append("embedding-dispatch")
         else:
+            # Secondary (non-sole) structural check; kept for defence in depth.
             mod["ingest_protection"].validate_embedding_privacy_dispatch([text], engine._config, expected_revision=revision)
     assert outbound
     assert any("[LCM embedding privacy:" in text for text in outbound)
@@ -367,11 +605,14 @@ def _privacy(mod, engine, outbound, *, expect_365_fixed):
     ), "recalled privacy-fixture hits carry no canonical redaction placeholder"
     if known and expect_365_fixed:
         raise AssertionError("#365 defining composition leaked on: " + ", ".join(sorted(set(known))))
-    engine.on_session_start("gauntlet-c", conversation_id="conversation-gauntlet-c", platform="phase-a", context_length=200_000)
     return bool(known)
-def _loud_fail(mod, state: Path):
-    engine = _engine(mod, state, "cloud", patterns=False)
+
+
+def _misconfiguration(mod, state: Path):
+    engine = _engine(mod, state, "cloud", patterns=False, embedding_privacy=True)
     try:
+        engine._config.sensitive_patterns = ["phase_a_unrecognized_pattern"]
+        engine._config.sensitive_patterns_source = "phase-a-misconfiguration"
         _seed(mod, engine)
         error = mod["ingest_protection"].EmbeddingPrivacyPolicyError
         try:
@@ -457,7 +698,7 @@ def _run_matrix(engine, registered, context, *, patterns, posture, missing):
         try:
             if tool in missing:
                 raise AssertionError("registered tool has no matrix scenario")
-            detail = _scenario(engine, tool, context, patterns=patterns)
+            detail = _scenario(engine, tool, context, patterns=patterns, posture=posture)
             if not detail:
                 raise AssertionError("scenario returned no postcondition evidence")
             records.append((posture, tool, "PASS", detail))
@@ -480,38 +721,69 @@ def _cloud_rows(mod, state_root, registered, missing, *, expect_365_fixed):
     if gate_error:
         reason = f"BLOCKED: {gate_error}"
         return [
-            ("cloud", tool, "BLOCKED", reason) for tool in registered
+            ("cloud-default", tool, "BLOCKED", reason) for tool in registered
         ], [
-            (name, "BLOCKED", reason) for name in ("planted-secret", "loud-fail")
+            (name, "BLOCKED", reason) for name in ("planted-secret", "opt-out", "durable-redaction", "misconfiguration")
         ]
     if not present:
         reason = f"SKIP: {key_name} is absent"
-        return [("cloud", tool, "SKIP", reason) for tool in registered], [(name, "SKIP", reason) for name in ("planted-secret", "loud-fail")]
+        return [("cloud-default", tool, "SKIP", reason) for tool in registered], [(name, "SKIP", reason) for name in ("planted-secret", "opt-out", "durable-redaction", "misconfiguration")]
     outbound, original = [], mod["embedding_provider"].resolve_provider
     def resolve(config, **kwargs):
         value = original(config, **kwargs)
         return _Capture(value, outbound) if value is not None else None
     mod["command"].resolve_provider = resolve
     mod["tools"].resolve_provider = resolve
-    cloud = _engine(mod, Path(tempfile.mkdtemp(prefix="cloud-", dir=state_root)), "cloud", patterns=True)
     batteries = []
     try:
-        context = _seed(mod, cloud)
+        outbound = []
+        cloud = _engine(mod, Path(tempfile.mkdtemp(prefix="cloud-default-", dir=state_root)), "cloud", patterns=False)
         try:
-            known = _privacy(mod, cloud, outbound, expect_365_fixed=expect_365_fixed)
-            batteries.append(("planted-secret", "KNOWN-LEAK-ON-BASE" if known else "PASS", "per-turn durable, summary/chunk dispatch, revision, recall checks passed"))
+            context = _seed(mod, cloud)
+            try:
+                known = _planted_secret(mod, cloud, outbound, expect_365_fixed=expect_365_fixed)
+                batteries.append(("planted-secret", "KNOWN-LEAK-ON-BASE" if known else "PASS", "lossless durable rows, protected dispatch, revision, raw recall checks passed"))
+            except Exception as exc:
+                batteries.append(("planted-secret", "FAIL", _safe_detail(exc)))
+            try:
+                assert "Constellation anchor" in json.dumps(_payload(cloud, "lcm_recall", {"query": "Constellation anchor"})["hits"])
+                default_control_error = None
+            except Exception as exc:
+                default_control_error = exc
+            records = _run_matrix(cloud, registered, context, patterns=False, posture="cloud-default", missing=missing)
+        finally:
+            cloud.shutdown()
+
+        outbound = []
+        opt_out = _engine(mod, Path(tempfile.mkdtemp(prefix="cloud-opt-out-", dir=state_root)), "cloud", patterns=False, embedding_privacy=False)
+        try:
+            _opt_out(mod, opt_out, outbound)
+            batteries.append(("opt-out", "PASS", "privacy:off revision and byte-identical raw provider input checks passed"))
         except Exception as exc:
-            batteries.append(("planted-secret", "FAIL", _safe_detail(exc)))
-        records = _run_matrix(cloud, registered, context, patterns=True, posture="cloud", missing=missing)
+            batteries.append(("opt-out", "FAIL", _safe_detail(exc)))
+        finally:
+            opt_out.shutdown()
+
+        outbound = []
+        redacted = _engine(mod, Path(tempfile.mkdtemp(prefix="cloud-durable-redaction-", dir=state_root)), "cloud", patterns=True)
+        try:
+            known = _durable_redaction(mod, redacted, outbound, expect_365_fixed=expect_365_fixed)
+            batteries.append(("durable-redaction", "KNOWN-LEAK-ON-BASE" if known else "PASS", "opt-in durable, dispatch, revision, recall checks passed"))
+        except Exception as exc:
+            batteries.append(("durable-redaction", "FAIL", _safe_detail(exc)))
+        finally:
+            redacted.shutdown()
+
+        try:
+            if default_control_error is not None:
+                raise AssertionError(f"shipped default recall failed: {_safe_detail(default_control_error)}")
+            _misconfiguration(mod, Path(tempfile.mkdtemp(prefix="cloud-misconfiguration-", dir=state_root)))
+            batteries.append(("misconfiguration", "PASS", "default recall success plus raise, counter, status, assembly checks passed"))
+        except Exception as exc:
+            batteries.append(("misconfiguration", "FAIL", _safe_detail(exc)))
     finally:
-        cloud.shutdown()
         mod["command"].resolve_provider = original
         mod["tools"].resolve_provider = original
-    try:
-        _loud_fail(mod, Path(tempfile.mkdtemp(prefix="cloud-loud-", dir=state_root)))
-        batteries.append(("loud-fail", "PASS", "raise, counter, status, assembly checks passed"))
-    except Exception as exc:
-        batteries.append(("loud-fail", "FAIL", _safe_detail(exc)))
     return records, batteries
 def run(worktree: Path, out: Path, *, release: bool = False, rc_tag: str | None = None, hermes_repo: Path | None = None, expect_365_fixed: bool = True):
     started = time.monotonic()
@@ -583,7 +855,7 @@ def run(worktree: Path, out: Path, *, release: bool = False, rc_tag: str | None 
     lines += [f"| {posture} | `{tool}` | {result} | {detail} |" for posture, tool, result, detail in records]
     lines += ["", "## Batteries", "", "| Battery | Result | Detail |", "|---|---|---|"]
     lines += [f"| {name} | {result} | {detail} |" for name, result, detail in batteries]
-    lines += ["", f"- Wall time: `{time.monotonic() - started:.3f}s`", f"- Exit verdict: `{verdict}`", "- Proof boundary: this receipt proves only the executed rows against this tree; skipped cloud rows are not release-readiness proof.", ""]
+    lines += ["", f"- Wall time: `{time.monotonic() - started:.3f}s`", f"- Exit verdict: `{verdict}`", "- Proof boundary: this receipt proves only the executed rows against this tree; skipped cloud rows are not release-readiness proof; rerank transform covered by product regressions, not a live battery.", ""]
     receipt = out / "PHASE-A-RECEIPT.md"
     receipt.write_text("\n".join(lines), encoding="utf-8")
     return (0 if verdict == "PASS" else 1), receipt

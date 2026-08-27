@@ -426,6 +426,198 @@ def test_summary_backfill_revalidates_policy_before_each_cloud_subdispatch(
 # --- #365: pattern-ordering bypass (password/passphrase prefix eats the PEM begin marker) ---
 
 _KEY_BODY = "MIIEvQIBADANBgkqSUPERSECRETKEYMATERIAL"
+_TRUNCATED_ARMOR_BODY = "GAUNTLETPEMTRUNCATEDB2"
+_ENCRYPTED_ARMOR_BODY = "GAUNTLETENCRYPTEDC3"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        (
+            "privacy fixture truncated -----BEGIN PRIVATE KEY-----\n"
+            + _TRUNCATED_ARMOR_BODY
+        ),
+        (
+            "privacy fixture complete -----BEGIN PRIVATE KEY-----\n"
+            "GAUNTLETPEMCOMPLETEA1\n-----END PRIVATE KEY-----\n"
+            "privacy fixture truncated -----BEGIN PRIVATE KEY-----\n"
+            + _TRUNCATED_ARMOR_BODY
+        ),
+        (
+            "privacy fixture truncated -----BEGIN PRIVATE KEY-----\n"
+            + _TRUNCATED_ARMOR_BODY
+            + " privacy fixture encrypted -----BEGIN ENCRYPTED PRIVATE KEY-----\n"
+            + _ENCRYPTED_ARMOR_BODY
+            + "\n-----END ENCRYPTED PRIVATE KEY-----"
+        ),
+        (
+            "privacy fixture complete -----BEGIN PRIVATE KEY-----\n"
+            "GAUNTLETPEMCOMPLETEA1\n-----END PRIVATE KEY-----\n"
+            "privacy fixture truncated -----BEGIN PRIVATE KEY-----\n"
+            + _TRUNCATED_ARMOR_BODY
+            + " privacy fixture encrypted -----BEGIN ENCRYPTED PRIVATE KEY-----\n"
+            + _ENCRYPTED_ARMOR_BODY
+            + "\n-----END ENCRYPTED PRIVATE KEY-----"
+        ),
+    ],
+    ids=[
+        "truncated-alone",
+        "complete-then-truncated",
+        "truncated-then-encrypted-armor",
+        "complete-then-truncated-then-encrypted-armor",
+    ],
+)
+def test_truncated_private_key_before_inline_begin_is_redacted(tmp_path, text):
+    cfg = _config(tmp_path, enabled=False)
+    with pytest.raises(EmbeddingPrivacyPolicyError, match="private_key"):
+        validate_embedding_privacy_dispatch(
+            [text], cfg, expected_revision=embedding_privacy_revision(cfg)
+        )
+
+    protected, revision, changed = protect_embedding_text(text, cfg)
+
+    assert changed is True
+    assert _TRUNCATED_ARMOR_BODY not in protected
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+
+
+@pytest.mark.parametrize(
+    ("secrets", "text"),
+    [
+        # multi-token body run before an inline BEGIN: every token must redact,
+        # not only the first (the leading-run generalization of #383).
+        (
+            ["AAAABBBB1111", "CCCCDDDD2222", "EEEEFFFF3333"],
+            "trunc -----BEGIN PRIVATE KEY-----\n"
+            "AAAABBBB1111 CCCCDDDD2222 EEEEFFFF3333 prose "
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\nZBODY9\n"
+            "-----END ENCRYPTED PRIVATE KEY-----",
+        ),
+        # short (<16-char) but digit-bearing leading token: the adjacent
+        # truncated BEGIN is the structural evidence.
+        (
+            ["SHORT99"],
+            "trunc -----BEGIN PRIVATE KEY-----\nSHORT99 "
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\nZBODY9\n"
+            "-----END ENCRYPTED PRIVATE KEY-----",
+        ),
+        # serialized (escaped-newline) variant of the same composition.
+        (
+            ["SERIALBODY5555"],
+            "trunc -----BEGIN PRIVATE KEY-----\\n"
+            "SERIALBODY5555 prose -----BEGIN ENCRYPTED PRIVATE KEY-----\\n"
+            "X\\n-----END ENCRYPTED PRIVATE KEY-----",
+        ),
+    ],
+    ids=["multi-token-run", "short-digit-token", "serialized-newline"],
+)
+def test_truncated_body_run_before_inline_begin_fully_redacts(tmp_path, secrets, text):
+    cfg = _config(tmp_path, enabled=False)
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+    for secret in secrets:
+        assert secret not in protected
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+
+
+@pytest.mark.parametrize(
+    ("secrets", "text"),
+    [
+        # truncated private-key body glued to a following CERTIFICATE BEGIN
+        # (the line has no "PRIVATE KEY-----" — finding #3).
+        (
+            ["MIIEvQIBADANBgkqSUPERSECRETKEY9"],
+            "trunc -----BEGIN PRIVATE KEY-----\n"
+            "MIIEvQIBADANBgkqSUPERSECRETKEY9 -----BEGIN CERTIFICATE-----\n"
+            "CB\n-----END CERTIFICATE-----",
+        ),
+        # …and a following PUBLIC KEY BEGIN.
+        (
+            ["MIIEvQIBADANBgkqSUPERSECRETKEY9"],
+            "trunc -----BEGIN PRIVATE KEY-----\n"
+            "MIIEvQIBADANBgkqSUPERSECRETKEY9 -----BEGIN PUBLIC KEY-----\n"
+            "PB\n-----END PUBLIC KEY-----",
+        ),
+        # …multi-token short-run body before a CERTIFICATE BEGIN.
+        (
+            ["MIIE1111", "BBBB2222", "CCCC3333"],
+            "trunc -----BEGIN PRIVATE KEY-----\n"
+            "MIIE1111 BBBB2222 CCCC3333 -----BEGIN CERTIFICATE-----\n"
+            "CB\n-----END CERTIFICATE-----",
+        ),
+    ],
+    ids=["cert-marker", "public-key-marker", "cert-multi-token"],
+)
+def test_truncated_body_before_non_private_key_marker_redacts(tmp_path, secrets, text):
+    cfg = _config(tmp_path, enabled=False)
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+    for secret in secrets:
+        assert secret not in protected
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+
+
+def test_standalone_certificate_body_is_not_redacted(tmp_path):
+    # A public certificate with no adjacent truncated private key must be left
+    # intact (the leading-run split only fires as a truncated-body continuation).
+    cfg = _config(tmp_path, enabled=False)
+    text = "-----BEGIN CERTIFICATE-----\nMIICPUBLICCERTBODY123\n-----END CERTIFICATE-----"
+    protected, _revision, _changed = protect_embedding_text(text, cfg)
+    assert "MIICPUBLICCERTBODY123" in protected
+
+
+def test_doc_heading_before_quoted_begin_is_not_over_redacted(tmp_path):
+    # An all-caps doc heading with no digit/base64 evidence before a BEGIN must
+    # NOT be swept as a truncated body run (round-21 precision preserved).
+    cfg = _config(tmp_path, enabled=False)
+    text = "IMPORTANT NOTICE -----BEGIN PRIVATE KEY-----"
+    protected, _revision, _changed = protect_embedding_text(text, cfg)
+    assert "IMPORTANT NOTICE" in protected
+
+
+def test_release_gauntlet_privacy_battery_join_has_no_standard_leak(tmp_path):
+    import json
+
+    cfg = _config(tmp_path, enabled=False)
+    planted = {
+        "pem_complete": "GAUNTLETPEMCOMPLETEA1",
+        "pem_truncated": _TRUNCATED_ARMOR_BODY,
+        "encrypted_armor": _ENCRYPTED_ARMOR_BODY,
+        "json_serialized": "GAUNTLETJSONSERIALIZEDD4",
+        "log_prefixed": "GAUNTLETLOGPREFIXE5",
+        "password": "GAUNTLETPASSWORDF6",
+        "api_key": "GAUNTLETAPIKEYG7",
+        "password_pem": "GAUNTLETPASSWORDPEMH8",
+        "passphrase_pem": "GAUNTLETPASSPHRASEPEMI9",
+        "quoted_password_pem": "GAUNTLETQUOTEDPASSWORDPEMJ0",
+        "chunk_path": "GAUNTLETCHUNKPATHK1",
+    }
+    long_chunk = " ".join(
+        f"Chunk safety sentence {index}." for index in range(180)
+    )
+    fixtures = [
+        ("standard", f"privacy fixture complete -----BEGIN PRIVATE KEY-----\n{planted['pem_complete']}\n-----END PRIVATE KEY-----", [planted["pem_complete"]]),
+        ("standard", f"privacy fixture truncated -----BEGIN PRIVATE KEY-----\n{planted['pem_truncated']}", [planted["pem_truncated"]]),
+        ("standard", f"privacy fixture encrypted -----BEGIN ENCRYPTED PRIVATE KEY-----\n{planted['encrypted_armor']}\n-----END ENCRYPTED PRIVATE KEY-----", [planted["encrypted_armor"]]),
+        ("standard", json.dumps({"private_key": f"-----BEGIN PRIVATE KEY-----\n{planted['json_serialized']}\n-----END PRIVATE KEY-----"}), [planted["json_serialized"]]),
+        ("standard", f"ERROR credential=-----BEGIN PRIVATE KEY-----\n{planted['log_prefixed']}\n-----END PRIVATE KEY-----", [planted["log_prefixed"]]),
+        ("standard", f"password={planted['password']} api_key={planted['api_key']}", [planted["password"], planted["api_key"]]),
+        ("365", f"password: -----BEGIN PRIVATE KEY-----\n{planted['password_pem']}\n-----END PRIVATE KEY-----", [planted["password_pem"]]),
+        ("365", f"passphrase=-----BEGIN PRIVATE KEY-----\n{planted['passphrase_pem']}\n-----END PRIVATE KEY-----", [planted["passphrase_pem"]]),
+        ("365", f"password=\"-----BEGIN PRIVATE KEY-----\n{planted['quoted_password_pem']}\n-----END PRIVATE KEY-----\"", [planted["quoted_password_pem"]]),
+        ("chunk", f"{long_chunk} api_key={planted['chunk_path']}", [planted["chunk_path"]]),
+    ]
+    joined = " ".join(content for _kind, content, _secrets in fixtures)
+    with pytest.raises(EmbeddingPrivacyPolicyError, match="private_key"):
+        validate_embedding_privacy_dispatch(
+            [joined], cfg, expected_revision=embedding_privacy_revision(cfg)
+        )
+
+    protected, revision, changed = protect_embedding_text(joined, cfg)
+
+    assert changed is True
+    for kind, _content, secrets in fixtures:
+        if kind != "365":
+            assert all(secret not in protected for secret in secrets), kind
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
 
 
 @pytest.mark.parametrize(
@@ -1217,3 +1409,356 @@ def test_round16_orphan_symmetry_and_escape_spellings(tmp_path):
         "INFO " + "a1b2c3d4" * 8 + "\nINFO " + "e5f6a7b8" * 8 + "\nno markers anywhere",
     ):
         assert redact_sensitive_text(keep, cfg) == keep
+
+
+@pytest.mark.parametrize(
+    ("label", "text", "fragment"),
+    [
+        (
+            "single-line-begin-body-marker",
+            "log: -----BEGIN PRIVATE KEY----- MIIEvQIB1111ADANBgkqSECRET "
+            "-----BEGIN CERTIFICATE-----",
+            "MIIEvQIB1111ADANBgkqSECRET",
+        ),
+        (
+            "escaped-tab-separators",
+            "trunc -----BEGIN PRIVATE KEY-----\\tTABBODY1111AAAA2222BBBB\\t"
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\\tX\\t-----END ENCRYPTED PRIVATE KEY-----",
+            "TABBODY1111AAAA2222BBBB",
+        ),
+    ],
+    ids=[
+        "single-line-composition",
+        "escaped-tab",
+    ],
+)
+def test_marker_adjacency_variants_never_dispatch_raw(tmp_path, label, text, fragment):
+    # The transform is best-effort precise; the VALIDATOR is the fail-closed
+    # layer (#383 rounds 4-5). Either the transform redacts the fragment, or
+    # one of the two layers raises — a raw dispatch is the only failure.
+    cfg = _config(tmp_path, enabled=False)
+    try:
+        protected, revision, _changed = protect_embedding_text(text, cfg)
+    except EmbeddingPrivacyPolicyError:
+        return  # blocked fail-closed at the transform layer
+    if fragment in protected:
+        with pytest.raises(EmbeddingPrivacyPolicyError):
+            validate_embedding_privacy_dispatch(
+                [protected], cfg, expected_revision=revision
+            )
+    else:
+        validate_embedding_privacy_dispatch(
+            [protected], cfg, expected_revision=revision
+        )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # A LONE 16+ base64 fragment near a redacted private-key placeholder
+        # BLOCKS fail-closed again (#391 owner decision, 2026-08-27): main's
+        # raw-text proximity backstop is RESTORED after three line-model
+        # rewrites each re-opened a leak shape. The over-block #389 tracked is
+        # removed surgically instead — pure-hex runs (git SHAs / digests) are
+        # excluded, see test_private_key_beside_nearby_git_sha_is_not_over_
+        # blocked. The accepted precision boundary narrows back to SUB-16
+        # fragments; these 16+ shapes are fail-closed (durable store lossless,
+        # only the embedding copy is withheld).
+        "trunc -----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq abcdefghijklmnop "
+        "-----BEGIN ENCRYPTED PRIVATE KEY-----\nZBODY9\n-----END ENCRYPTED PRIVATE KEY-----",
+        "trunc -----BEGIN PRIVATE KEY-----\nFIRSTBODY1111 prose RESUMEDBODY2222AA "
+        "-----BEGIN ENCRYPTED PRIVATE KEY-----\nZBODY9\n-----END ENCRYPTED PRIVATE KEY-----",
+        "trunc -----BEGIN PRIVATE KEY-----\n> MDBODY1111AAAA2222 "
+        "-----BEGIN ENCRYPTED PRIVATE KEY-----\nZBODY9\n-----END ENCRYPTED PRIVATE KEY-----",
+    ],
+    ids=["no-digit-tail", "interrupted-resumed", "markdown-prefixed"],
+)
+def test_single_fragment_near_placeholder_blocks_fail_closed(tmp_path, text):
+    # Restored-main semantics: a surviving 16+ base64 token beside a
+    # private_key placeholder is treated as an orphaned key-body fragment and
+    # the dispatch blocks (transform or validation layer).
+    cfg = _config(tmp_path, enabled=False)
+    try:
+        protected, revision, _changed = protect_embedding_text(text, cfg)
+    except EmbeddingPrivacyPolicyError:
+        return  # blocked fail-closed at the transform layer
+    with pytest.raises(EmbeddingPrivacyPolicyError):
+        validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+
+
+def test_private_key_beside_nearby_git_sha_is_not_over_blocked(tmp_path):
+    # Regression for the rc2-gauntlet-caught over-block: a redacted private key
+    # followed by a nearby git SHA (ubiquitous in deploy runbooks) must still
+    # embed — the removed proximity backstop used to block it fail-closed.
+    cfg = _config(tmp_path, enabled=False)
+    key = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj\n"
+        "-----END PRIVATE KEY-----"
+    )
+    text = f"{key}\nDeployed at commit 0123456789abcdef0123456789abcdef01234567 per the runbook."
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+    assert "0123456789abcdef0123456789abcdef01234567" in protected  # the SHA embeds
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+
+
+# --- #391: the placeholder-proximity backstop must catch orphaned body
+# fragments that the round-8 whole-LINE + forward-only window re-opened. Body
+# tokens borrowed from the cross-model repro (non-hex, so not excluded by the
+# git-SHA guard). Each shape must block fail-closed; the git-SHA control must
+# still dispatch (hex exclusion).
+_PEM_B0 = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj"
+_PEM_B1 = "MHcCAQEEIQD1eJ7yhkG0987xyzABCDEFghijkLMNOPqrstuvwxyz0987654321pq"
+_PEM_B2 = "4oQEqJfFJSYuanwHvL7oQfdFxV1On3R/YVFkxvco1xg1NxOCesiD1/uWWSNAdPUl"
+_PEM_KEY = f"-----BEGIN PRIVATE KEY-----\n{_PEM_B0}\n{_PEM_B1}\n-----END PRIVATE KEY-----"
+
+
+def _assert_key_fragment_blocks(tmp_path, text, *fragments):
+    # A #391 leak shape must never dispatch a raw body fragment: it blocks
+    # fail-closed either at the transform layer or at validation.
+    cfg = _config(tmp_path, enabled=False)
+    try:
+        protected, revision, _changed = protect_embedding_text(text, cfg)
+    except EmbeddingPrivacyPolicyError:
+        return  # blocked fail-closed at the transform layer
+    assert any(frag in protected for frag in fragments), "fragment vanished; test is vacuous"
+    with pytest.raises(EmbeddingPrivacyPolicyError):
+        validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+
+
+def test_prefixed_orphan_body_line_near_placeholder_blocks(tmp_path):
+    # L1/L2: an orphan body line carrying a leading log timestamp or a label
+    # ("10:00:00 INFO <body>", "key_tail: <body>") failed the old whole-segment
+    # fullmatch and slipped through. Token-level classification catches it.
+    log_collector = (
+        f"10:00:00 INFO -----BEGIN PRIVATE KEY-----\n10:00:00 INFO {_PEM_B0}\n"
+        f"10:00:00 INFO {_PEM_B1}\n10:00:00 WARN retrying upstream connection\n"
+        f"10:00:00 INFO {_PEM_B2}"
+    )
+    label_prefixed = f"private_key: {_PEM_KEY}\nkey_tail: {_PEM_B2}"
+    _assert_key_fragment_blocks(tmp_path, log_collector, _PEM_B0, _PEM_B1, _PEM_B2)
+    _assert_key_fragment_blocks(tmp_path, label_prefixed, _PEM_B2)
+
+
+def test_body_glued_to_placeholder_segment_blocks(tmp_path):
+    # L3: a body token glued to the END marker on the same modeled segment
+    # ("-----END PRIVATE KEY----- <body>") landed on the placeholder's own
+    # segment, which the old `continue` never body-checked.
+    text = (
+        f"-----BEGIN PRIVATE KEY-----\n{_PEM_B0}\n{_PEM_B1}\n"
+        f"-----END PRIVATE KEY----- {_PEM_B2}"
+    )
+    _assert_key_fragment_blocks(tmp_path, text, _PEM_B2)
+
+
+def test_placeholder_glued_to_following_begin_marker_blocks(tmp_path):
+    # #391 review 3 P0: a BEGIN with no body/END immediately followed by an
+    # assignment line ending in a second BEGIN made the redactor collapse
+    # BEGIN#1 + the prefix into a placeholder GLUED to BEGIN#2 — the line model
+    # then classified that line as BEGIN, slicing the placeholder out of the
+    # modeled segment and blinding the line-model backstop. The restored
+    # raw-text scan finds the placeholder by direct finditer regardless of
+    # line classification, so the >=40-char body on the prior line blocks.
+    for text in (
+        f"credential={_PEM_B0}\n-----BEGIN PRIVATE KEY-----\n"
+        f"credential=-----BEGIN RSA PRIVATE KEY-----",
+        f"2026-08-27 rotating keys\n  old_tail={_PEM_B0}\n"
+        f"  -----BEGIN PRIVATE KEY-----\n  new=-----BEGIN RSA PRIVATE KEY-----",
+    ):
+        _assert_key_fragment_blocks(tmp_path, text, _PEM_B0)
+
+
+def test_body_glued_to_nonwhitespace_separator_blocks(tmp_path):
+    # #391 re-review P0: a body glued to a NON-whitespace separator
+    # ("key_tail:<body>", "-<body>" (git-diff removed line), "credential=<body>")
+    # is one whitespace token whose mid-token separator defeated the whole-token
+    # fullmatch — the embedded-run scan detects the >=40-char run inside it.
+    # The one-character gap from the space-separated shapes above is the whole bug.
+    for text in (
+        f"private_key: {_PEM_KEY}\nkey_tail:{_PEM_B2}",
+        f"{_PEM_KEY}\n-{_PEM_B2}",
+        f"{_PEM_KEY}\ncredential={_PEM_B2}",
+        f"{_PEM_KEY}\n>{_PEM_B2}",
+    ):
+        _assert_key_fragment_blocks(tmp_path, text, _PEM_B2)
+
+
+def test_backward_orphan_body_above_placeholder_blocks(tmp_path):
+    # L4: an orphan body line ABOVE the redacted key never triggered under the
+    # forward-only window; the bidirectional 160-char window catches it.
+    text = f"{_PEM_B0}\nthat was the tail of the old key; new one:\n{_PEM_KEY}"
+    _assert_key_fragment_blocks(tmp_path, text, _PEM_B0)
+
+
+def test_json_serialized_sibling_body_near_placeholder_blocks(tmp_path):
+    # L7: a serialized (\n-escaped) key value with a sibling body value, where
+    # the window used to be eaten by punctuation-only serialization segments.
+    text = (
+        '{"private_key": "' + _PEM_KEY.replace("\n", "\\n") + '", '
+        '"note": "' + _PEM_B2 + '"}'
+    )
+    _assert_key_fragment_blocks(tmp_path, text, _PEM_B2)
+
+
+def test_key_plus_git_sha_still_dispatches(tmp_path):
+    # C1 (hex-exclusion guard): a redacted key beside a pure-hex git SHA must
+    # still embed — the #389 over-block the token backstop must NOT reintroduce.
+    cfg = _config(tmp_path, enabled=False)
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    text = f"{_PEM_KEY}\nDeployed at commit {sha} per the runbook."
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+    assert sha in protected  # the SHA embeds
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+
+
+def test_hyphenated_marker_labels_split_the_leading_body_run(tmp_path):
+    cfg = _config(tmp_path, enabled=False)
+    text = (
+        "trunc -----BEGIN PRIVATE KEY-----\nMIIEvQIB1111ADANBgkq "
+        "-----BEGIN CERTIFICATE-REQUEST-----\nCR\n-----END CERTIFICATE-REQUEST-----"
+    )
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+    assert "MIIEvQIB1111ADANBgkq" not in protected
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+
+
+def test_validator_backstops_preserve_prose_and_neighbor_hashes(tmp_path):
+    cfg = _config(tmp_path, enabled=False)
+    # A prose mention of a marker (English tokens, no 16+ base64 run) passes.
+    prose = "see -----BEGIN PRIVATE KEY----- for the format details"
+    protected, revision, _changed = protect_embedding_text(prose, cfg)
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+    # A git SHA near a NON-private-key placeholder passes (rule B is scoped
+    # to private_key placeholders only).
+    sha_text = (
+        "api_key=SECRETKEYVALUE00 deployed at "
+        "0123456789abcdef0123456789abcdef01234567"
+    )
+    protected, revision, _changed = protect_embedding_text(sha_text, cfg)
+    assert "SECRETKEYVALUE00" not in protected
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+
+
+def test_truncated_key_body_split_by_long_line_blocks_fail_closed(tmp_path):
+    # Round-6 (independent review): a truncated PRIVATE KEY whose body is split
+    # by one long non-base64 line leaves markerless full-width base64 body lines
+    # that every marker/placeholder-keyed check missed. The marker-independent
+    # orphan-run backstop (>=2 contiguous full-width base64 lines) blocks it.
+    cfg = _config(tmp_path, enabled=False)
+    note = (
+        "Note captured from the deployment console during the paste; the "
+        "following lines were emitted verbatim and are opaque payload text."
+    )
+    body = [
+        "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj",
+        "MHcCAQEEIQD1eJ7yhkG0987xyzABCDEFghijkLMNOPqrstuvwxyz0987654321pq",
+        "oAoGCCqGSM49AwEHoUQDQgAEZ9tRLsawNpSpw23cDEFghijkLMNOpqrstuvwXY12",
+    ]
+    text = "-----BEGIN PRIVATE KEY-----\n" + body[0] + "\n" + note + "\n" + "\n".join(body[1:])
+    try:
+        protected, revision, _changed = protect_embedding_text(text, cfg)
+    except EmbeddingPrivacyPolicyError:
+        return  # blocked fail-closed at the transform layer
+    if any(line in protected for line in body):
+        with pytest.raises(EmbeddingPrivacyPolicyError):
+            validate_embedding_privacy_dispatch(
+                [protected], cfg, expected_revision=revision
+            )
+
+
+def test_full_width_base64_backstop_stays_linear(tmp_path):
+    # The orphan-run + placeholder-proximity backstops must not reintroduce the
+    # quadratic scan the round-3 linearity test guards (20000 placeholders with
+    # no nearby base64 must not scan-to-EOF per placeholder).
+    import time as _time
+
+    cfg = _config(tmp_path)
+    revision = embedding_privacy_revision(cfg)
+    pathological = ("-----BEGIN PRIVATE KEY-----\n" + "A" * 64 + "\n") * 20000
+    started = _time.perf_counter()
+    protected, _r, _c = protect_embedding_text(pathological, cfg)
+    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+    assert _time.perf_counter() - started < 3.0
+    assert "AAAA" not in protected
+
+
+@pytest.mark.parametrize(
+    ("label", "text", "frag"),
+    [
+        (
+            "escaped-solidus-inline-body",
+            "-----BEGIN PRIVATE KEY----- AAAAAAABBBBBBB\\/CCCCCCCDDDDDDD\\/EEEEEEE "
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----",
+            "AAAAAAABBBBBBB",
+        ),
+        (
+            "underscore-marker-label",
+            "-----BEGIN PRIVATE KEY-----\nSHORT99AAAA1111BBBB2222 -----BEGIN FOO_BAR-----\n"
+            "X\n-----END FOO_BAR-----",
+            "SHORT99AAAA1111BBBB2222",
+        ),
+        (
+            "markdown-prefix-before-nonkey-marker",
+            "-----BEGIN PRIVATE KEY-----\n> SECRETBODY1234567890AB -----BEGIN CERTIFICATE-----\n"
+            "C\n-----END CERTIFICATE-----",
+            "SECRETBODY1234567890AB",
+        ),
+    ],
+    ids=["escaped-solidus", "underscore-marker", "markdown-prefix"],
+)
+def test_round7_marker_adjacency_variants_never_dispatch_raw(tmp_path, label, text, frag):
+    cfg = _config(tmp_path, enabled=False)
+    try:
+        protected, revision, _changed = protect_embedding_text(text, cfg)
+    except EmbeddingPrivacyPolicyError:
+        return  # blocked fail-closed at the transform layer
+    if frag in protected:
+        with pytest.raises(EmbeddingPrivacyPolicyError):
+            validate_embedding_privacy_dispatch(
+                [protected], cfg, expected_revision=revision
+            )
+
+
+@pytest.mark.parametrize("spelling", ["plain", "json-escaped"])
+def test_full_width_line_backstop_is_serialization_symmetric(tmp_path, spelling):
+    # Audit-caught P0 (2026-08-27): the placeholder-adjacent full-width-line
+    # backstop must verdict IDENTICALLY on plain and \n-escaped spellings of
+    # the same content (the round-16 symmetry invariant). The splitlines()
+    # walk was blind to serialized separators; it now iterates the
+    # serialization-aware line model.
+    import json as _json
+
+    cfg = _config(tmp_path, enabled=False)
+    b0 = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj"
+    b1 = "MHcCAQEEIQD1eJ7yhkG0987xyzABCDEFghijkLMNOPqrstuvwxyz0987654321pq"
+    plain = f"trunc -----BEGIN EC PRIVATE KEY-----\n{b0}\nok.\n{b1}"
+    text = plain if spelling == "plain" else _json.dumps({"content": plain})
+    # Both spellings must BLOCK (either layer) — a dispatch carrying b1 is the
+    # only failure.
+    try:
+        protected, revision, _changed = protect_embedding_text(text, cfg)
+    except EmbeddingPrivacyPolicyError:
+        return
+    if b1 in protected:
+        with pytest.raises(EmbeddingPrivacyPolicyError):
+            validate_embedding_privacy_dispatch(
+                [protected], cfg, expected_revision=revision
+            )
+
+
+def test_full_width_line_window_survives_blank_lines(tmp_path):
+    # Audit P1: blank lines between the placeholder and an orphaned full-width
+    # body line must not consume the adjacency window.
+    cfg = _config(tmp_path, enabled=False)
+    b0 = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj"
+    b1 = "MHcCAQEEIQD1eJ7yhkG0987xyzABCDEFghijkLMNOPqrstuvwxyz0987654321pq"
+    text = f"trunc -----BEGIN EC PRIVATE KEY-----\n{b0}\nok.\n\n\n\n{b1}"
+    try:
+        protected, revision, _changed = protect_embedding_text(text, cfg)
+    except EmbeddingPrivacyPolicyError:
+        return
+    if b1 in protected:
+        with pytest.raises(EmbeddingPrivacyPolicyError):
+            validate_embedding_privacy_dispatch(
+                [protected], cfg, expected_revision=revision
+            )

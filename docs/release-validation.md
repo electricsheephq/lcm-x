@@ -1,7 +1,12 @@
 # Release validation
 
-Use `scripts/validate_release.sh` as the local release-confidence lane before
-tagging or publishing LCM-X. The script is offline by default: it does not call
+Use `scripts/validate_release.sh` as the local, offline release-confidence lane. It is a
+pre-tag smoke lane, **not** the release gate: any release containing product code is
+rc-first and must pass the live gauntlet in `bench/specs/RELEASE-READINESS-V1.md`
+(Phase A all-tools matrix on a fresh isolated clone across privacy postures, Phase B
+multi-agent P0/P1 sweep of the full release diff, Phase C 30+ turn `hermes acp` soak)
+against a published `vX.Y.Z-rcN` prerelease before the GA tag. See AGENTS.md,
+"Releases are rc-first". The script is offline by default: it does not call
 model providers, does not mutate live Hermes config, forces `HERMES_HOME`,
 `LCM_DATABASE_PATH`, externalized payloads, temporary files, and caches below a
 fresh validation output directory, and writes all validation artifacts there.
@@ -79,6 +84,9 @@ The checklist is safe to paste into a release note or PR validation section afte
 - [ ] deterministic benchmark smoke passed
 - [ ] deterministic stress smoke/release passed
 - [ ] git status before/after validation reviewed
+- [ ] rc tag published as a prerelease (`vX.Y.Z-rcN`) — or release is non-product (only
+      `bench/`, `docs/`, `tests/`, and `.github/release-notes/` changes, per CONTRIBUTING.md)
+- [ ] Phase A / B / C gauntlet receipts linked for this exact rc tree
 
 ### Doctor triage
 - [ ] `lcm_doctor` warnings were classified as `safe/ignore`, `inspect`, or `backup-first cleanup`
