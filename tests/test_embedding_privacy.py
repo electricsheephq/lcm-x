@@ -1466,8 +1466,10 @@ def test_marker_adjacency_variants_never_dispatch_raw(tmp_path, label, text, fra
         "-----BEGIN ENCRYPTED PRIVATE KEY-----\nZBODY9\n-----END ENCRYPTED PRIVATE KEY-----",
         "trunc -----BEGIN PRIVATE KEY-----\nFIRSTBODY1111 prose RESUMEDBODY2222AA "
         "-----BEGIN ENCRYPTED PRIVATE KEY-----\nZBODY9\n-----END ENCRYPTED PRIVATE KEY-----",
+        "trunc -----BEGIN PRIVATE KEY-----\n> MDBODY1111AAAA2222 "
+        "-----BEGIN ENCRYPTED PRIVATE KEY-----\nZBODY9\n-----END ENCRYPTED PRIVATE KEY-----",
     ],
-    ids=["no-digit-tail", "interrupted-resumed"],
+    ids=["no-digit-tail", "interrupted-resumed", "markdown-prefixed"],
 )
 def test_single_fragment_near_placeholder_is_accepted_boundary(tmp_path, text):
     # These dispatch (documented #389 boundary). The point of the test is the
@@ -1599,6 +1601,51 @@ def test_round7_marker_adjacency_variants_never_dispatch_raw(tmp_path, label, te
     except EmbeddingPrivacyPolicyError:
         return  # blocked fail-closed at the transform layer
     if frag in protected:
+        with pytest.raises(EmbeddingPrivacyPolicyError):
+            validate_embedding_privacy_dispatch(
+                [protected], cfg, expected_revision=revision
+            )
+
+
+@pytest.mark.parametrize("spelling", ["plain", "json-escaped"])
+def test_full_width_line_backstop_is_serialization_symmetric(tmp_path, spelling):
+    # Audit-caught P0 (2026-08-27): the placeholder-adjacent full-width-line
+    # backstop must verdict IDENTICALLY on plain and \n-escaped spellings of
+    # the same content (the round-16 symmetry invariant). The splitlines()
+    # walk was blind to serialized separators; it now iterates the
+    # serialization-aware line model.
+    import json as _json
+
+    cfg = _config(tmp_path, enabled=False)
+    b0 = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj"
+    b1 = "MHcCAQEEIQD1eJ7yhkG0987xyzABCDEFghijkLMNOPqrstuvwxyz0987654321pq"
+    plain = f"trunc -----BEGIN EC PRIVATE KEY-----\n{b0}\nok.\n{b1}"
+    text = plain if spelling == "plain" else _json.dumps({"content": plain})
+    # Both spellings must BLOCK (either layer) — a dispatch carrying b1 is the
+    # only failure.
+    try:
+        protected, revision, _changed = protect_embedding_text(text, cfg)
+    except EmbeddingPrivacyPolicyError:
+        return
+    if b1 in protected:
+        with pytest.raises(EmbeddingPrivacyPolicyError):
+            validate_embedding_privacy_dispatch(
+                [protected], cfg, expected_revision=revision
+            )
+
+
+def test_full_width_line_window_survives_blank_lines(tmp_path):
+    # Audit P1: blank lines between the placeholder and an orphaned full-width
+    # body line must not consume the adjacency window.
+    cfg = _config(tmp_path, enabled=False)
+    b0 = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj"
+    b1 = "MHcCAQEEIQD1eJ7yhkG0987xyzABCDEFghijkLMNOPqrstuvwxyz0987654321pq"
+    text = f"trunc -----BEGIN EC PRIVATE KEY-----\n{b0}\nok.\n\n\n\n{b1}"
+    try:
+        protected, revision, _changed = protect_embedding_text(text, cfg)
+    except EmbeddingPrivacyPolicyError:
+        return
+    if b1 in protected:
         with pytest.raises(EmbeddingPrivacyPolicyError):
             validate_embedding_privacy_dispatch(
                 [protected], cfg, expected_revision=revision

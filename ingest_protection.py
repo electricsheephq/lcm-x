@@ -114,8 +114,12 @@ _BASE64_LINE_ALPHABET_RE = re.compile(r"^[A-Za-z0-9+/=_-]+$")
 # it beyond any realistic accidental paste/log/transcript shape. The dispatch
 # validator is the fail-closed second layer for the ACCIDENTAL-shape class: a
 # residual it recognizes as key structure (a marker beside a base64 run, a
-# fragment beside a private_key placeholder, or >=2 contiguous full-width body
-# lines) blocks the embedding dispatch instead of leaking. It does not claim to
+# full-width base64 LINE beside a private_key placeholder, or >=2 contiguous
+# full-width body lines) blocks the embedding dispatch instead of leaking.
+# (A lone sub-line-width base64 TOKEN beside a placeholder is deliberately NOT
+# blocked — it is indistinguishable from a git SHA/hash in prose, the common
+# legitimate neighbor of a redacted key; single partial fragments are the
+# accepted #389 precision boundary.) It does not claim to
 # block every conceivable unparseable arrangement — the deliberately
 # de-contiguated body above is out of declared scope, not a guaranteed block.
 # Base64 payload line: padding only ever trails (=/== suffix), so assignment
@@ -1829,27 +1833,37 @@ def _pem_full_width_line_near_placeholder(text: str) -> bool:
     NOT match — the common over-block that regression #389 removed. A base64
     hash ON ITS OWN LINE right beside a redacted key is a rarer accepted
     fail-closed over-block.
+
+    Iterates the serialization-aware line model, NOT raw splitlines(): the
+    body's line separators can be serialized escapes (\\n at any depth), and a
+    splitlines() walk is blind to them while every sibling backstop is not
+    (plain-vs-escaped spellings of the same content must verdict identically —
+    the round-16 symmetry invariant; audit-caught P0, 2026-08-27).
     """
-    lines = text.splitlines()
     ph_window = 0
-    for line in lines:
-        stripped = line.strip(" \t")
-        low = stripped.lower()
-        is_ph = "[lcm embedding privacy: name=private_key]" in low or (
-            "[lcm sensitive redaction: name=private_key" in low
-        )
-        if is_ph:
+    for _kind, redact_start, content_end, _line_start, _marker_end in _pem_line_model(text):
+        segment = text[redact_start:content_end]
+        low = segment.lower()
+        if (
+            "[lcm embedding privacy: name=private_key]" in low
+            or "[lcm sensitive redaction: name=private_key" in low
+        ):
             ph_window = 3
             continue
         if ph_window > 0:
-            body = _normalize_escaped_solidus(stripped)
+            body = _normalize_escaped_solidus(segment.strip(" \t"))
             if (
                 len(body) >= 40
                 and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(body) is not None
                 and not _looks_like_english_token(body)
             ):
                 return True
-            ph_window -= 1
+            # Blank/near-empty segments (blank lines, serialization remnants)
+            # do not consume the window — otherwise interleaved blank lines
+            # shrink the adjacency budget far below the old 160-char window
+            # (audit P1, 2026-08-27).
+            if body:
+                ph_window -= 1
     return False
 
 
@@ -1863,12 +1877,14 @@ def _embedding_privacy_residual_patterns(
             # an earlier pattern consumed the BEGIN marker the redactor keys on, so
             # the key body shipped. Flag it even though the BEGIN-based redactor is
             # now blind. (BEGIN redaction still flagged for truncated/no-END blocks.)
-            # Backstops (#383 rounds 4-6): a surviving marker beside a base64
-            # run, an orphan 16+ base64 token adjacent to ANY privacy
-            # placeholder, and >=2 contiguous full-width markerless base64 body
-            # lines — all block fail-closed, so the validator no longer shares
-            # the transform's marker/placeholder-keyed blind spot (round 6
-            # closed a truncated body split by a long non-base64 line).
+            # Backstops (#383 rounds 4-8): a surviving marker beside a base64
+            # run, >=2 contiguous full-width markerless base64 body lines, and
+            # a full-width base64 LINE within a few modeled lines of a
+            # private_key placeholder — all block fail-closed, so the validator
+            # no longer shares the transform's marker/placeholder-keyed blind
+            # spot. (The earlier ANY-16+-token proximity check was replaced by
+            # the full-width-LINE check: it over-blocked the common
+            # "redacted key + nearby git SHA in prose" pattern — #389.)
             # The marker-independent backstops scan for base64 runs; escaped
             # solidi (\/, any depth) split a run into sub-16 chunks and hide it,
             # so also run them on the solidi-normalized text (#383 round-7,
