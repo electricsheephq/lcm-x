@@ -21,6 +21,50 @@ version tags but does not have a destination GitHub Release object for RC2.
 - Releases containing product code are rc-first: `bench/specs/RELEASE-READINESS-V1.md` is
   the GA gate. (#373)
 
+## v0.23.1 - 2026-08-23
+
+Stable privacy-only release for hosted summary embeddings; runtime bytes unchanged from
+`v0.23.1-rc1`, no schema change.
+
+- Cloud summary-vector privacy: every supported cloud summary-vector dispatch fails closed
+  unless sensitive-pattern handling is enabled, nonempty, recognized, current, and
+  residual-clean; provider input uses pattern-only placeholders that reveal no raw value,
+  length, bytes, or secret-derived digest. Durable messages, summaries, FTS rows, and
+  payloads are unchanged. (#330)
+- Vector identity includes `privacy:v1:<active-pattern-hash>`; policy drift requires a fresh
+  warmup before cloud dispatch. Complete and truncated private-key blocks are conservatively
+  replaced before transport. (#332 #333 #338)
+- Immutable `v0.23.1-rc1` release preparation; dry-run/apply reports add aggregate selected,
+  transformed, blocked, and policy-revision fields with no content or identifiers. (#339)
+- Follow-ups tracked, off in the shipped config: #334 trajectory cloud privacy, #335
+  prescreen identity composition, #336 rerank payload privacy, #337 remote Ollama locality.
+
+## v0.23.0 - 2026-08-22
+
+Stable promotion of the isolation-only rc2 candidate; runtime and schema behavior
+byte-identical to `v0.23.0-rc2`. 17 adversarially reviewed PRs with RED/GREEN receipts; every
+score-sensitive change carries an architect verdict (#252) and a `bench/BASELINE-LEDGER.md`
+boundary row.
+
+- Replay-proof hardening: occurrence-bounded, tool-identified replay proofs (#177); out-of-band
+  block durability binds to unique row identity with ID-less rows failing closed (#203); the
+  vetoed fork-guard is removed with its drop contract fenced (#259). Ambiguity resolves to
+  visible duplication, never silent loss.
+- Retrieval: a slow full-text arm can no longer starve semantic recall (#173); cross-session
+  summary-DAG expansion with correct provenance (#183); per-session retrieval exclusion (#184);
+  a crashed search arm discloses instead of reporting 'ok' (#273); configurable Voyage reranker
+  (#172); bounded tool-extracted evidence provenance for expand-query (#196).
+- Integrity state publishes only with proof valid at publish time: verified-pass clearing and a
+  CAS-fenced background-scan publish (#261 #179 #168 #198).
+- Compaction's auto-derived focus keeps the newest user request authoritative for over-cap
+  host-composed turns (#297; P1 #90 fixed; summary-steering ledger row appended).
+- Teams slice 1 (AccessContextV1) lands DORMANT — pure additive, nothing consumes it,
+  single-user behavior unchanged; enablement stays pilot-gated (#286, #75/#83).
+- Governance: the main ruleset is satisfiable again — phantom CodeQL contexts dropped,
+  last-push-approval deadlock removed, `--admin` an exception not the path (#241).
+  Release-validation storage isolation (#325); regression coverage salvaged from closed PRs
+  (#254 #257); gpt-5.4 retirement note (#262).
+
 ## v0.23.0-rc1 - 2026-08-21
 
 The correctness batch: 17 product PRs, each adversarially reviewed with RED/GREEN receipts;
