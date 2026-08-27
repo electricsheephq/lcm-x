@@ -133,6 +133,15 @@ _PRIVATE_KEY_BODY_CHARS_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 # carries mixed-case g-z/G-Z letters and/or `+` `/`), so excluding pure-hex
 # tokens keeps the #389 controls dispatching while still catching body lines.
 _HEX_DIGEST_RE = re.compile(r"[0-9a-fA-F]{32,128}")
+# A full-width (>=40-char) base64 body RUN, matched ANYWHERE inside a whitespace
+# token — a body glued to a non-whitespace separator ("key_tail:<body>",
+# "-<body>", "credential=<body>") keeps the run intact even though the whole
+# token is not base64. Scanning for the embedded run (as main's removed
+# _pem_fragment backstop did via _PRIVATE_KEY_INLINE_RUN_RE) rather than
+# requiring a whole-token fullmatch is what closes the glued-separator leak
+# class (#391 re-review P0). The >=40 floor keeps sub-threshold fragments the
+# documented #389 accepted boundary; pure-hex runs are excluded separately.
+_PRIVATE_KEY_BODY_RUN_RE = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 _PRIVATE_KEY_STRICT_MIN_CHARS = 16
 # A real inline key has a substantial contiguous base64 run between markers;
 # prose like "... -----BEGIN PRIVATE KEY----- and -----END PRIVATE KEY----- ..."
@@ -1861,17 +1870,22 @@ def _pem_full_width_line_near_placeholder(text: str) -> bool:
     window = 160  # chars; matches main's _pem_fragment_near_private_key_placeholder
 
     def _qualifying_body_token(seg: str) -> bool:
-        # True if ANY whitespace-delimited token in seg is a full-width PEM
-        # base64 body token (>=40 chars, non-English, not a pure-hex digest).
+        # True if any whitespace token in seg CONTAINS a full-width (>=40-char)
+        # PEM base64 body run. Scans for the EMBEDDED run rather than requiring a
+        # whole-token fullmatch, so a body glued to a non-whitespace separator
+        # ("key_tail:<body>", "-<body>", "credential=<body>") is still detected —
+        # a whole-token fullmatch silently missed every glued separator (#391
+        # re-review P0). Pure-hex runs (git SHAs / hash digests) and English-shaped
+        # runs are excluded so the #389 key+SHA / prose controls keep dispatching.
         for tok in _normalize_escaped_solidus(seg).split():
-            tok = tok.strip()
-            if (
-                len(tok) >= 40
-                and _PRIVATE_KEY_BODY_CHARS_RE.fullmatch(tok) is not None
-                and _HEX_DIGEST_RE.fullmatch(tok) is None
-                and not _looks_like_english_token(tok)
-            ):
-                return True
+            for match in _PRIVATE_KEY_BODY_RUN_RE.finditer(tok):
+                run = match.group(0).rstrip("=")
+                if (
+                    len(run) >= 40
+                    and _HEX_DIGEST_RE.fullmatch(run) is None
+                    and not _looks_like_english_token(run)
+                ):
+                    return True
         return False
 
     recent_bodies: deque[int] = deque()  # content_end of qualifying bodies in the trailing window

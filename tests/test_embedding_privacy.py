@@ -1548,6 +1548,21 @@ def test_body_glued_to_placeholder_segment_blocks(tmp_path):
     _assert_key_fragment_blocks(tmp_path, text, _PEM_B2)
 
 
+def test_body_glued_to_nonwhitespace_separator_blocks(tmp_path):
+    # #391 re-review P0: a body glued to a NON-whitespace separator
+    # ("key_tail:<body>", "-<body>" (git-diff removed line), "credential=<body>")
+    # is one whitespace token whose mid-token separator defeated the whole-token
+    # fullmatch — the embedded-run scan detects the >=40-char run inside it.
+    # The one-character gap from the space-separated shapes above is the whole bug.
+    for text in (
+        f"private_key: {_PEM_KEY}\nkey_tail:{_PEM_B2}",
+        f"{_PEM_KEY}\n-{_PEM_B2}",
+        f"{_PEM_KEY}\ncredential={_PEM_B2}",
+        f"{_PEM_KEY}\n>{_PEM_B2}",
+    ):
+        _assert_key_fragment_blocks(tmp_path, text, _PEM_B2)
+
+
 def test_backward_orphan_body_above_placeholder_blocks(tmp_path):
     # L4: an orphan body line ABOVE the redacted key never triggered under the
     # forward-only window; the bidirectional 160-char window catches it.

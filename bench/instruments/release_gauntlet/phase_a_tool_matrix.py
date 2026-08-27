@@ -394,6 +394,12 @@ def _assert_full_width_orphan_classes_blocked(mod, config):
         "glued_to_placeholder": f"-----BEGIN PRIVATE KEY-----\n{b0}\n{b1}\n-----END PRIVATE KEY----- {b2}",
         "backward_orphan": f"{b0}\nthat was the tail of the old key; new one:\n{key}",
         "serialized_sibling": '{"private_key": "' + key.replace("\n", "\\n") + '", "note": "' + b2 + '"}',
+        # Bodies GLUED to a non-whitespace separator (#391 re-review P0): the
+        # space-separated shapes above all passed a buggy whole-token fullmatch;
+        # these no-space variants are the ones that actually leaked.
+        "glue_colon_orphan": f"private_key: {key}\nkey_tail:{b2}",
+        "glue_dash_orphan": f"{key}\n-{b2}",
+        "glue_equals_orphan": f"{key}\ncredential={b2}",
     }
     for name, text in shapes.items():
         try:
@@ -502,10 +508,16 @@ def _planted_secret(mod, engine, outbound, *, expect_365_fixed):
             assert all(secret in payload for secret in fixture["secrets"]), f"recall lost fixture {index}'s raw secret"
         else:
             assert "Chunk safety sentence" in payload, f"recall did not retrieve fixture {index}'s distinctive content"
-    assert probe_refusals <= len(skip_set), (
-        f"more clean-token probe refusals ({probe_refusals}) than genuinely "
-        f"secret-only fixtures ({len(skip_set)}) — investigate a query-transform regression"
+    # A clean NON-secret probe token must never fail-closed (#391 re-review F6):
+    # any refusal is a query-transform over-reach, so the contract is exactly 0 —
+    # not a loose bound tied to the unrelated secret-only count. `skip_set` is
+    # asserted non-empty only to prove those fixtures are honestly unretrievable
+    # by design (their whole content redacts to a placeholder), not silently lost.
+    assert probe_refusals == 0, (
+        f"a clean non-secret probe token fail-closed-refused ({probe_refusals}) — "
+        f"query-transform over-reach regression"
     )
+    assert skip_set, "expected the assignment-only fixtures to have no clean probe token"
     recall_dispatches = outbound[recall_start:]
     assert recall_dispatches, "recall made no semantic query dispatch to audit"
     for text in recall_dispatches:
