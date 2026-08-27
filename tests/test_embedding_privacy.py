@@ -1455,13 +1455,15 @@ def test_marker_adjacency_variants_never_dispatch_raw(tmp_path, label, text, fra
 @pytest.mark.parametrize(
     "text",
     [
-        # A LONE base64 fragment near a redacted private-key placeholder is an
-        # ACCEPTED precision boundary (#389): the round-6 placeholder-proximity
-        # backstop was REMOVED because it blocked the common, legitimate
-        # "private key + nearby git SHA" pattern (a git SHA is a 16+ base64
-        # token too, indistinguishable from a key fragment by proximity).
-        # Multi-line key bodies are still caught by _has_orphan_full_width_
-        # base64_run; only these single sub-threshold fragments dispatch.
+        # A LONE 16+ base64 fragment near a redacted private-key placeholder
+        # BLOCKS fail-closed again (#391 owner decision, 2026-08-27): main's
+        # raw-text proximity backstop is RESTORED after three line-model
+        # rewrites each re-opened a leak shape. The over-block #389 tracked is
+        # removed surgically instead — pure-hex runs (git SHAs / digests) are
+        # excluded, see test_private_key_beside_nearby_git_sha_is_not_over_
+        # blocked. The accepted precision boundary narrows back to SUB-16
+        # fragments; these 16+ shapes are fail-closed (durable store lossless,
+        # only the embedding copy is withheld).
         "trunc -----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq abcdefghijklmnop "
         "-----BEGIN ENCRYPTED PRIVATE KEY-----\nZBODY9\n-----END ENCRYPTED PRIVATE KEY-----",
         "trunc -----BEGIN PRIVATE KEY-----\nFIRSTBODY1111 prose RESUMEDBODY2222AA "
@@ -1471,16 +1473,17 @@ def test_marker_adjacency_variants_never_dispatch_raw(tmp_path, label, text, fra
     ],
     ids=["no-digit-tail", "interrupted-resumed", "markdown-prefixed"],
 )
-def test_single_fragment_near_placeholder_is_accepted_boundary(tmp_path, text):
-    # These dispatch (documented #389 boundary). The point of the test is the
-    # complementary GUARANTEE: removing the over-broad proximity backstop did
-    # NOT re-open the multi-line key-body class — see
-    # test_truncated_key_body_split_by_long_line_blocks_fail_closed (still
-    # blocks) — and it FIXES the common over-block below.
+def test_single_fragment_near_placeholder_blocks_fail_closed(tmp_path, text):
+    # Restored-main semantics: a surviving 16+ base64 token beside a
+    # private_key placeholder is treated as an orphaned key-body fragment and
+    # the dispatch blocks (transform or validation layer).
     cfg = _config(tmp_path, enabled=False)
-    protected, revision, _changed = protect_embedding_text(text, cfg)
-    # no exception = accepted boundary dispatch
-    validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+    try:
+        protected, revision, _changed = protect_embedding_text(text, cfg)
+    except EmbeddingPrivacyPolicyError:
+        return  # blocked fail-closed at the transform layer
+    with pytest.raises(EmbeddingPrivacyPolicyError):
+        validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
 
 
 def test_private_key_beside_nearby_git_sha_is_not_over_blocked(tmp_path):
@@ -1546,6 +1549,23 @@ def test_body_glued_to_placeholder_segment_blocks(tmp_path):
         f"-----END PRIVATE KEY----- {_PEM_B2}"
     )
     _assert_key_fragment_blocks(tmp_path, text, _PEM_B2)
+
+
+def test_placeholder_glued_to_following_begin_marker_blocks(tmp_path):
+    # #391 review 3 P0: a BEGIN with no body/END immediately followed by an
+    # assignment line ending in a second BEGIN made the redactor collapse
+    # BEGIN#1 + the prefix into a placeholder GLUED to BEGIN#2 — the line model
+    # then classified that line as BEGIN, slicing the placeholder out of the
+    # modeled segment and blinding the line-model backstop. The restored
+    # raw-text scan finds the placeholder by direct finditer regardless of
+    # line classification, so the >=40-char body on the prior line blocks.
+    for text in (
+        f"credential={_PEM_B0}\n-----BEGIN PRIVATE KEY-----\n"
+        f"credential=-----BEGIN RSA PRIVATE KEY-----",
+        f"2026-08-27 rotating keys\n  old_tail={_PEM_B0}\n"
+        f"  -----BEGIN PRIVATE KEY-----\n  new=-----BEGIN RSA PRIVATE KEY-----",
+    ):
+        _assert_key_fragment_blocks(tmp_path, text, _PEM_B0)
 
 
 def test_body_glued_to_nonwhitespace_separator_blocks(tmp_path):

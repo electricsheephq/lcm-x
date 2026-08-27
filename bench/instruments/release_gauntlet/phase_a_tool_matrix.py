@@ -400,6 +400,13 @@ def _assert_full_width_orphan_classes_blocked(mod, config):
         "glue_colon_orphan": f"private_key: {key}\nkey_tail:{b2}",
         "glue_dash_orphan": f"{key}\n-{b2}",
         "glue_equals_orphan": f"{key}\ncredential={b2}",
+        # Placeholder GLUED to a following BEGIN marker (#391 review 3 P0): the
+        # line-model backstop lost the placeholder when the line reclassified
+        # as BEGIN; the restored raw-text scan is classification-immune.
+        "placeholder_glued_to_begin": (
+            f"credential={b0}\n-----BEGIN PRIVATE KEY-----\n"
+            f"credential=-----BEGIN RSA PRIVATE KEY-----"
+        ),
     }
     for name, text in shapes.items():
         try:
