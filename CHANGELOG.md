@@ -21,17 +21,19 @@ version tags but does not have a destination GitHub Release object for RC2.
 - Releases containing product code are rc-first: `bench/specs/RELEASE-READINESS-V1.md` is
   the GA gate. (#373)
 - SECURITY: fixed a private-key redaction ordering bypass that could leak PEM key material to
-  cloud embedding providers (#365 → #366), then hardened the truncated-PEM/orphan-body scanners
-  through three adversarial review cycles (#383 #384 #391). The cloud-embedding redaction is
+  cloud embedding providers (#365 → #366); the rc gauntlet then caught and closed a truncated-PEM
+  leak (#383 → #384) and its over-block regression (#389 → #391) through successive adversarial
+  review rounds. The cloud-embedding redaction is
   best-effort by design (durable store is lossless regardless); boundary of record: #394.
-- Current-schema database clones now open read-only, protecting the primary store from
-  accidental writes through diagnostic clones (#364 — contributed by @Tosko4).
+- Current-schema database clones now open read-only, so a Hermes per-agent host clone no
+  longer fails against a concurrent WAL writer and silently falls back to the built-in lossy
+  compressor (#364 — contributed by @Tosko4).
 - Stable release identity: `0.23.2` across plugin manifest, README, and operator docs, with
   rc/GA expressed only in tags and notes filenames; non-tautological downgrade guard (#385 → #388).
 - Release/benchmark integrity: rc-first gauntlet is the GA gate (#373) with live-battery and
   runner hardening (#382 #390); privacy-trio/instrument boundary rows reconciled into the
   baseline ledger (#368); FINDING-F61 attribution result registered (#381); exact-head review
-  governance hardening (#352 #358).
+  governance hardening (#349 #358).
 - Contributors: external code this release: @Tosko4 (#364). Review signal:
   chatgpt-codex-connector, evaos-code-review-bot, CodeRabbit, CodeQL, plus independent
   cross-model adversarial reviews recorded on the PRs.
