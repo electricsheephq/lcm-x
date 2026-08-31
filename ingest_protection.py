@@ -19,7 +19,7 @@ import stat
 import tempfile
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Callable, Dict, List, Sequence
 
 from .externalize import (
     externalize_ingest_payload,
@@ -409,6 +409,10 @@ _PASSWORD_ASSIGNMENT_QUOTED_ATOM = (
 _PASSWORD_ASSIGNMENT_UNQUOTED_ATOM = (
     r"(?>(?:" + _SENSITIVE_PLACEHOLDER_SPAN_PATTERN + r")|[^\s,\"'\]\}])"
 )
+_PASSWORD_ASSIGNMENT_PREFIX_RE = re.compile(
+    r"\b(?:password|passwd|pwd|passphrase)\b\s*[\"']?\s*[:=]\s*(?P<quote>[\"']?)",
+    re.IGNORECASE,
+)
 # Includes the resolver's aliases (embedding_provider.resolve_provider maps
 # "openai"/"siliconflow" to the openai-compatible cloud provider): the
 # privacy predicate must hold for every spelling a CALLER might pass, not
@@ -490,6 +494,61 @@ def _regex_pattern_for(name: str) -> Any:
     return compiled
 
 
+def _redact_password_assignments_with_private_key_placeholder(
+    text: str,
+    placeholder_factory: Callable[[str], str],
+) -> str:
+    """Redact any assignment value containing a canonical private-key placeholder.
+
+    The placeholder independently proves that the value held sensitive key
+    material, so the normal six-atom password threshold does not apply. Scan
+    value boundaries directly to keep this composition linear and to treat a
+    complete LCM placeholder as one atom despite its closing bracket.
+    """
+    lowered = text.lower()
+    if not any(
+        assignment_name in lowered
+        for assignment_name in ("password", "passwd", "pwd", "passphrase")
+    ):
+        return text
+    parts: list[str] = []
+    copied_until = 0
+    search_from = 0
+    text_length = len(text)
+    while match := _PASSWORD_ASSIGNMENT_PREFIX_RE.search(text, search_from):
+        quote = str(match.group("quote") or "")
+        value_start = match.end()
+        value_end = value_start
+        saw_private_key_placeholder = False
+        while value_end < text_length:
+            char = text[value_end]
+            if char == "[":
+                placeholder = _EMBEDDING_PRIVACY_PLACEHOLDER_RE.match(text, value_end)
+                if placeholder is not None:
+                    if str(placeholder.group("name") or "").lower() == "private_key":
+                        saw_private_key_placeholder = True
+                    value_end = placeholder.end()
+                    continue
+            if quote:
+                if char == quote or char in "\r\n]}":
+                    break
+            elif char.isspace() or char in ",\"']}":
+                break
+            value_end += 1
+
+        if saw_private_key_placeholder:
+            secret = text[value_start:value_end]
+            parts.append(text[copied_until:value_start])
+            parts.append(placeholder_factory(secret))
+            copied_until = value_end
+        search_from = max(value_end, match.end() + 1)
+
+    if not parts:
+        return text
+    parts.append(text[copied_until:])
+    return "".join(parts)
+
+
 def _apply_sensitive_pattern(name: str, repl, text: str) -> str:
     """Substitute one sensitive pattern with a ReDoS-safe strategy.
 
@@ -504,6 +563,11 @@ def _apply_sensitive_pattern(name: str, repl, text: str) -> str:
     # pattern that genuinely requires it.
     if name == "private_key":
         return _redact_private_key_blocks(text)
+    if name == "password_assignment":
+        text = _redact_password_assignments_with_private_key_placeholder(
+            text,
+            lambda secret: _sensitive_placeholder("password_assignment", secret),
+        )
     if name in _BACKTRACKING_RISKY_SENSITIVE_PATTERNS:
         regex_pattern = _regex_pattern_for(name)
         if regex_pattern is not None:
@@ -1958,6 +2022,13 @@ def protect_embedding_text(
         if name == "private_key":
             protected = _embedding_privacy_redact_private_keys(protected)
         else:
+            if name == "password_assignment":
+                protected = _redact_password_assignments_with_private_key_placeholder(
+                    protected,
+                    lambda _secret: _embedding_privacy_placeholder(
+                        "password_assignment"
+                    ),
+                )
             protected = _SENSITIVE_PATTERN_CATALOG[name].sub(
                 lambda match, pattern_name=name: _embedding_privacy_redact_match(
                     pattern_name, match

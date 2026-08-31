@@ -675,6 +675,51 @@ def test_assignment_redaction_consumes_fragments_around_private_key_placeholder(
     )
 
 
+@pytest.mark.parametrize("quoted", [False, True], ids=["unquoted", "quoted"])
+@pytest.mark.parametrize(
+    "prefix,suffix",
+    [
+        ("", ""),
+        ("Q", ""),
+        ("Q", "Z"),
+        ("QZ", "Q"),
+        ("QZ", "ZQ"),
+    ],
+    ids=["zero-chars", "one-char", "two-chars", "three-chars", "four-chars"],
+)
+def test_private_key_placeholder_satisfies_password_assignment_minimum(
+    tmp_path,
+    quoted,
+    prefix,
+    suffix,
+):
+    cfg = _config(tmp_path)
+    private_key = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        f"{_KEY_BODY}\n"
+        "-----END PRIVATE KEY-----"
+    )
+    value = f"{prefix}{private_key}{suffix}"
+    text = f'password="{value}"' if quoted else f"password={value}"
+
+    durable = redact_sensitive_text(text, cfg)
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+
+    for output in (durable, protected):
+        assert _KEY_BODY not in output
+        assert "name=private_key" not in output
+        assert "name=password_assignment" in output
+        if prefix:
+            assert prefix not in output
+        if suffix:
+            assert suffix not in output
+    validate_embedding_privacy_dispatch(
+        [protected],
+        cfg,
+        expected_revision=revision,
+    )
+
+
 def test_embedding_privacy_residual_flags_orphaned_end_marker(tmp_path):
     """Transform-independent residual check: a surviving PEM END marker fails closed."""
     cfg = _config(tmp_path)
@@ -700,7 +745,8 @@ def test_durable_redaction_pem_after_password_survives_ordering(tmp_path):
     text = "password: -----BEGIN PRIVATE KEY-----\n%s\n-----END PRIVATE KEY-----" % _KEY_BODY
     out = redact_sensitive_text(text, cfg)
     assert _KEY_BODY not in out
-    assert "private_key" in out
+    assert "name=private_key" not in out
+    assert "name=password_assignment" in out
 
 
 def test_durable_redacts_truncated_pem_after_password(tmp_path):
