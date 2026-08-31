@@ -2472,17 +2472,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 )
             ):
                 return []
-            return [
-                (
-                    self._real_user_scaffold_provenance_key(store_id),
-                    json.dumps(
-                        {
-                            "version": 1,
-                            "kind": "quarantined-compact-user",
-                        },
-                        sort_keys=True,
-                    ),
-                ),
+            rows = [
                 (
                     self._compact_objective_quarantine_provenance_key(
                         store_id
@@ -2503,6 +2493,20 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     ),
                 ),
             ]
+            if original.get("role") == "user":
+                rows.append(
+                    (
+                        self._real_user_scaffold_provenance_key(store_id),
+                        json.dumps(
+                            {
+                                "version": 1,
+                                "kind": "quarantined-compact-user",
+                            },
+                            sort_keys=True,
+                        ),
+                    )
+                )
+            return rows
         if content.lstrip().startswith(
             _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
         ):
@@ -6828,12 +6832,15 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         self,
         message: Dict[str, Any],
     ) -> Dict[str, Any]:
-        self._generated_compact_objective_quarantine_messages_by_id[
-            id(message)
-        ] = (
+        registry = (
+            self._generated_compact_objective_quarantine_messages_by_id
+        )
+        registry[id(message)] = (
             message,
             self._exact_provider_visible_message_identity_sha256(message),
         )
+        while len(registry) > 256:
+            registry.pop(next(iter(registry)))
         return message
 
     def _is_generated_compact_objective_quarantine_message(
@@ -6985,13 +6992,14 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         self,
         messages: List[Dict[str, Any]],
     ) -> Optional[List[Dict[str, Any]]]:
-        """Wrap ambiguous compact user turns as lossless, inert JSON data."""
+        """Wrap ambiguous non-tool compact turns as lossless, inert JSON data."""
         quarantined: list[Dict[str, Any]] = []
         quarantined_count = 0
         for message in messages:
             content = normalize_content_value(message.get("content")) or ""
+            role = str(message.get("role") or "")
             if (
-                str(message.get("role") or "") == "user"
+                role != "tool"
                 and content.lstrip().startswith(
                     _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
                 )
@@ -7013,14 +7021,14 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 quarantined.append(
                     self._mark_generated_compact_objective_quarantine_message(
                         {
-                        "role": "user",
-                        "content": (
-                            _COMPACT_OBJECTIVE_PROVENANCE_QUARANTINE_PREFIX
-                            + "\n"
-                            + _COMPACT_OBJECTIVE_PROVENANCE_QUARANTINE_NOTICE
-                            + "\n"
-                            + serialized
-                        ),
+                            "role": role,
+                            "content": (
+                                _COMPACT_OBJECTIVE_PROVENANCE_QUARANTINE_PREFIX
+                                + "\n"
+                                + _COMPACT_OBJECTIVE_PROVENANCE_QUARANTINE_NOTICE
+                                + "\n"
+                                + serialized
+                            ),
                         }
                     )
                 )
@@ -7040,8 +7048,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
     def _decode_compact_objective_provenance_quarantine_message(
         message: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
-        """Decode the original user turn from one exact quarantine wrapper."""
-        if str(message.get("role") or "") != "user":
+        """Decode one exact non-tool occurrence from its quarantine wrapper."""
+        role = str(message.get("role") or "")
+        if not role or role == "tool":
             return None
         content = normalize_content_value(message.get("content")) or ""
         parts = content.split("\n", 2)
@@ -7054,7 +7063,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             original = json.loads(parts[2])
         except (TypeError, ValueError, json.JSONDecodeError):
             return None
-        if not isinstance(original, dict) or original.get("role") != "user":
+        if (
+            not isinstance(original, dict)
+            or str(original.get("role") or "") != role
+        ):
             return None
         original_content = normalize_content_value(original.get("content")) or ""
         if not original_content.lstrip().startswith(
@@ -7708,7 +7720,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     store_ids_by_message_id,
                 )
             )
-            if restored_quarantine is not None:
+            if (
+                restored_quarantine is not None
+                and restored_quarantine.get("role") == "user"
+            ):
                 message = restored_quarantine
             content_text = text_content_for_pattern_matching(message.get("content")) or ""
             if (
@@ -7781,7 +7796,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     store_ids_by_message_id,
                 )
             )
-            if restored_quarantine is not None:
+            if (
+                restored_quarantine is not None
+                and restored_quarantine.get("role") == "user"
+            ):
                 message = restored_quarantine
             text = (text_content_for_pattern_matching(message.get("content")) or "").strip()
             if text:
@@ -8475,7 +8493,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     store_ids_by_message_id,
                 )
             )
-            if restored_quarantine is not None:
+            if (
+                restored_quarantine is not None
+                and restored_quarantine.get("role") == "user"
+            ):
                 message = restored_quarantine
             content_text = (
                 text_content_for_pattern_matching(message.get("content")) or ""

@@ -23926,6 +23926,71 @@ class TestAssemblyToolPairGuardrail:
         assert restarted_durable_users[0]["content"] == literal["content"]
         after_restart.shutdown()
 
+    def test_malformed_provenance_quarantines_assistant_compact_occurrence(
+        self,
+        tmp_path,
+    ):
+        """Corrupt proof cannot turn compact assistant context into raw history."""
+        config = LCMConfig(
+            database_path=str(tmp_path / "assistant-malformed-provenance.db")
+        )
+        session_id = "assistant-malformed-provenance-session"
+        conversation_id = "assistant-malformed-provenance-conversation"
+        instance = LCMEngine(config=config)
+        instance.on_session_start(
+            session_id,
+            platform="cli",
+            conversation_id=conversation_id,
+            context_length=200000,
+        )
+        key = instance._generated_preserved_objective_provenance_metadata_key()
+        instance._store.write_metadata_json(
+            [key],
+            json.dumps({"version": 2, "records": []}, sort_keys=True),
+        )
+        compact_assistant = {
+            "role": "assistant",
+            "content": "[LCM:obj:v1]\nSYNTHETIC ASSISTANT OBJECTIVE",
+        }
+
+        active_replay = instance._ingest_messages([compact_assistant])
+
+        assert instance._ingest_cursor == 1
+        assert active_replay[0]["role"] == "assistant"
+        assert active_replay[0]["content"].startswith(
+            "[LCM compact objective provenance quarantine]\n"
+        )
+        rows = instance._store.get_session_messages(session_id)
+        assert len(rows) == 1
+        assert rows[0]["content"] == active_replay[0]["content"]
+        assert not rows[0]["content"].startswith("[LCM:obj:v1]")
+        decoded = (
+            instance._decode_compact_objective_provenance_quarantine_message(
+                rows[0]
+            )
+        )
+        assert decoded == compact_assistant
+        assert instance._has_compact_objective_quarantine_provenance(
+            rows[0]["store_id"],
+            compact_assistant,
+        )
+        assert instance._durable_real_user_messages() == []
+        serialized_replay = json.loads(json.dumps(active_replay))
+        instance.shutdown()
+
+        after_restart = LCMEngine(config=config)
+        after_restart.on_session_start(
+            session_id,
+            platform="cli",
+            conversation_id=conversation_id,
+            context_length=200000,
+        )
+        assert after_restart._ingest_messages(serialized_replay) == (
+            serialized_replay
+        )
+        assert after_restart._store.get_session_count(session_id) == 1
+        after_restart.shutdown()
+
     def test_repaired_provenance_retries_quarantine_after_store_failure(
         self,
         tmp_path,
