@@ -106,7 +106,6 @@ _OOB_DURABILITY_SCAN_LIMIT = 512
 # Host-supplied session-end history must never leak proof into normal ingest.
 _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX = "compacted_active_replay_snapshot_digests"
 _SESSION_END_REPLAY_METADATA_PREFIX = "session_end_replay_snapshot_digests"
-_MAX_REPLAY_SNAPSHOT_MESSAGE_DIGESTS = 8192
 
 
 def _contains_identity_window(
@@ -566,15 +565,15 @@ class ReconcileMixin:
     def _replay_snapshot_metadata_key(self, prefix: str) -> str:
         return f"{prefix}:{getattr(self, '_session_id', '')}"
 
-    def _load_replay_snapshot_records(self, prefix: str) -> list[dict[str, Any]]:
-        """Load bounded replay proofs, including optional occurrence digests.
+    def _load_replay_snapshot_digests(self, prefix: str) -> list[str]:
+        """Load bounded whole-snapshot proof, including legacy version 2.
 
         Any missing/corrupt/unreadable metadata resolves to an empty list, so a
         caller can never mistake a load failure for durable replay proof.
 
-        Version 1 stored only whole-snapshot digests. Version 2 also stores the
-        ordered per-message identity digests needed to recognize one complete
-        registered snapshot when genuinely new rows are interleaved through it.
+        Version 2 briefly persisted unused per-message digests. Read only its
+        whole-snapshot digests so the next write can compact it back to the
+        bounded version-1 representation without losing restart replay proof.
         """
         if not getattr(self, "_session_id", ""):
             return []
@@ -588,83 +587,47 @@ class ReconcileMixin:
             return []
         if not isinstance(data, dict):
             return []
-        version = data.get("version")
-        if version == 1:
+        if data.get("version") == 1:
             raw_digests = data.get("digests")
-            if not isinstance(raw_digests, list):
+        elif data.get("version") == 2:
+            snapshots = data.get("snapshots")
+            if not isinstance(snapshots, list):
                 return []
-            raw_records: Any = [
-                {"digest": digest, "message_digests": []}
-                for digest in raw_digests
+            raw_digests = [
+                snapshot.get("digest")
+                for snapshot in snapshots
+                if isinstance(snapshot, dict)
             ]
-        elif version == 2:
-            raw_records = data.get("snapshots")
         else:
             return []
-        if not isinstance(raw_records, list):
+        if not isinstance(raw_digests, list):
             return []
-        ordered: list[dict[str, Any]] = []
-        for raw_record in raw_records:
-            if not isinstance(raw_record, dict):
-                continue
-            digest = str(raw_record.get("digest") or "")
-            if not re.fullmatch(r"[0-9a-f]{64}", digest):
-                continue
-            raw_message_digests = raw_record.get("message_digests", [])
-            if not isinstance(raw_message_digests, list):
-                continue
-            message_digests = [str(item) for item in raw_message_digests]
-            if len(message_digests) > _MAX_REPLAY_SNAPSHOT_MESSAGE_DIGESTS or any(
-                not re.fullmatch(r"[0-9a-f]{64}", item)
-                for item in message_digests
-            ):
-                continue
-            ordered = [record for record in ordered if record["digest"] != digest]
-            ordered.append({"digest": digest, "message_digests": message_digests})
+        ordered: list[str] = []
+        for digest in raw_digests:
+            normalized = str(digest)
+            if re.fullmatch(r"[0-9a-f]{64}", normalized):
+                ordered = [item for item in ordered if item != normalized]
+                ordered.append(normalized)
         return ordered[-16:]
-
-    def _load_replay_snapshot_digests(self, prefix: str) -> list[str]:
-        """Load whole-snapshot digests from either metadata version."""
-        return [
-            str(record["digest"])
-            for record in self._load_replay_snapshot_records(prefix)
-        ]
 
     def _remember_replay_snapshot(
         self,
         prefix: str,
         digest: str,
-        messages: List[Dict[str, Any]],
     ) -> None:
         if not getattr(self, "_session_id", ""):
             return
         store = getattr(self, "_store", None)
         if store is None or not digest:
             return
-        ordered = self._load_replay_snapshot_records(prefix)
-        ordered = [record for record in ordered if record["digest"] != digest]
-        message_digests = (
-            [
-                self._replay_identity_sha256(message)
-                for message in messages
-            ]
-            if len(messages) <= _MAX_REPLAY_SNAPSHOT_MESSAGE_DIGESTS
-            else []
-        )
-        ordered.append(
-            {
-                "digest": digest,
-                # Oversized snapshots retain their whole-snapshot replay proof.
-                # Only mixed-order occurrence classification is omitted because
-                # the bounded loader cannot safely admit a larger identity list.
-                "message_digests": message_digests,
-            }
-        )
+        ordered = self._load_replay_snapshot_digests(prefix)
+        ordered = [item for item in ordered if item != digest]
+        ordered.append(digest)
         ordered = ordered[-16:]
         try:
             store.write_metadata_json(
                 [self._replay_snapshot_metadata_key(prefix)],
-                json.dumps({"version": 2, "snapshots": ordered}, sort_keys=True),
+                json.dumps({"version": 1, "digests": ordered}, sort_keys=True),
                 skip_unchanged=True,
             )
         except Exception:
@@ -688,7 +651,6 @@ class ReconcileMixin:
         self._remember_replay_snapshot(
             _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX,
             digest,
-            messages,
         )
         # Content equality is not occurrence provenance.  The only generic
         # mixed-order proof available inside the ContextEngine contract is the
@@ -800,7 +762,6 @@ class ReconcileMixin:
         self._remember_replay_snapshot(
             _SESSION_END_REPLAY_METADATA_PREFIX,
             self._session_end_replay_snapshot_digest(messages),
-            messages,
         )
 
     @staticmethod

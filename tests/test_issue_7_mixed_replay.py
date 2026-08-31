@@ -1,5 +1,7 @@
 """Issue #7: compaction replay must support mixed NEW/REPLAY ordering."""
 
+import json
+
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 
@@ -274,37 +276,54 @@ def test_complete_identity_equal_copied_snapshot_is_preserved_as_new(
         engine.shutdown()
 
 
-def test_snapshot_metadata_retains_whole_digest_across_occurrence_boundary(tmp_path):
-    config = LCMConfig(database_path=str(tmp_path / "snapshot-boundary.db"))
+def test_snapshot_metadata_migrates_to_bounded_whole_digests(tmp_path):
+    config = LCMConfig(database_path=str(tmp_path / "snapshot-metadata.db"))
     engine = LCMEngine(config=config, hermes_home=str(tmp_path))
     engine.on_session_start(
-        "snapshot-boundary-session",
+        "snapshot-metadata-session",
         platform="cli",
-        conversation_id="snapshot-boundary-conversation",
+        conversation_id="snapshot-metadata-conversation",
         context_length=200_000,
     )
-    prefix = "snapshot-boundary-proof"
-    at_limit_digest = "a" * 64
-    over_limit_digest = "b" * 64
-    at_limit = [
-        {"role": "assistant", "content": f"message-{index}"}
-        for index in range(8192)
-    ]
-    over_limit = [*at_limit, {"role": "assistant", "content": "message-8192"}]
+    prefix = "snapshot-metadata-proof"
+    legacy_digest = "a" * 64
+    new_digest = "b" * 64
+    metadata_key = engine._replay_snapshot_metadata_key(prefix)
+    legacy_message_digests = ["c" * 64 for _ in range(8192)]
 
     try:
-        engine._remember_replay_snapshot(prefix, at_limit_digest, at_limit)
-        engine._remember_replay_snapshot(prefix, over_limit_digest, over_limit)
+        engine._store.write_metadata_json(
+            [metadata_key],
+            json.dumps(
+                {
+                    "version": 2,
+                    "snapshots": [
+                        {
+                            "digest": legacy_digest,
+                            "message_digests": legacy_message_digests,
+                        },
+                    ],
+                },
+                sort_keys=True,
+            ),
+        )
+        assert engine._load_replay_snapshot_digests(prefix) == [legacy_digest]
 
-        records = {
-            record["digest"]: record
-            for record in engine._load_replay_snapshot_records(prefix)
+        engine._remember_replay_snapshot(prefix, new_digest)
+
+        metadata = engine._store.read_metadata_json(metadata_key)
+        assert metadata == {
+            "version": 1,
+            "digests": [legacy_digest, new_digest],
         }
-        assert len(records[at_limit_digest]["message_digests"]) == 8192
-        assert records[over_limit_digest]["message_digests"] == []
-        assert engine._load_replay_snapshot_digests(prefix) == [
-            at_limit_digest,
-            over_limit_digest,
-        ]
+        assert len(json.dumps(metadata)) < 256
+
+        for index in range(20):
+            engine._remember_replay_snapshot(prefix, f"{index:064x}")
+        metadata = engine._store.read_metadata_json(metadata_key)
+        assert metadata["version"] == 1
+        assert len(metadata["digests"]) == 16
+        assert all(len(digest) == 64 for digest in metadata["digests"])
+        assert len(json.dumps(metadata)) < 1200
     finally:
         engine.shutdown()
