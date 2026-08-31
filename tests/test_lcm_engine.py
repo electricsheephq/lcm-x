@@ -23859,6 +23859,56 @@ class TestAssemblyToolPairGuardrail:
             )
         verifier.shutdown()
 
+    def test_compact_provenance_survives_prepended_system_prefix(self, tmp_path):
+        """A host-added system prefix does not reclassify generated context."""
+        db_path = tmp_path / "system-prefixed-compact-provenance.db"
+        config = LCMConfig(database_path=str(db_path))
+        session_id = "system-prefixed-compact-provenance-session"
+        conversation_id = "system-prefixed-compact-provenance-conversation"
+        objective = "KEEP the durable objective across host prefix changes"
+        before_restart = LCMEngine(config=config)
+        before_restart.on_session_start(
+            session_id,
+            platform="cli",
+            conversation_id=conversation_id,
+            context_length=200000,
+        )
+        before_restart._ingest_messages(
+            [{"role": "user", "content": objective}]
+        )
+        compact_anchor = before_restart._mark_generated_preserved_objective_message(
+            {"role": "user", "content": f"[LCM:obj:v1]\n{objective}"}
+        )
+        published = before_restart._finalize_overflow_recovery_context_result(
+            [compact_anchor]
+        )
+        assert published[0]["content"].startswith("[LCM:obj:v1]")
+        serialized = json.loads(json.dumps(published))
+        before_restart.shutdown()
+
+        host_prefixed = [
+            {"role": "system", "content": "new host-managed system prefix"},
+            *serialized,
+        ]
+        after_restart = LCMEngine(config=config)
+        after_restart.on_session_start(
+            session_id,
+            platform="cli",
+            conversation_id=conversation_id,
+            context_length=200000,
+        )
+        after_restart._ingest_messages(host_prefixed)
+
+        assert after_restart._is_generated_preserved_objective_message(
+            host_prefixed[1]
+        )
+        rows = after_restart._store.get_session_messages(session_id)
+        contents = [row["content"] for row in rows]
+        assert contents.count(objective) == 1
+        assert host_prefixed[1]["content"] not in contents
+        assert "new host-managed system prefix" in contents
+        after_restart.shutdown()
+
     def test_overflow_recovery_restores_preupgrade_assistant_objective(self, tmp_path):
         """An exact legacy compacted snapshot keeps its assistant objective."""
         instance = LCMEngine(

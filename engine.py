@@ -6766,6 +6766,15 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _leading_system_message_count(messages: List[Dict[str, Any]]) -> int:
+        count = 0
+        for message in messages:
+            if str(message.get("role") or "") != "system":
+                break
+            count += 1
+        return count
+
     def _mark_generated_preserved_objective_message(
         self,
         message: Dict[str, Any],
@@ -6818,13 +6827,34 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 > _GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_OBJECTIVES
             ):
                 return [], False
+            has_non_system_snapshot = any(
+                key in raw_record
+                for key in (
+                    "non_system_snapshot_digest",
+                    "non_system_message_count",
+                )
+            )
+            non_system_snapshot_digest = str(
+                raw_record.get("non_system_snapshot_digest") or ""
+            )
+            non_system_message_count = raw_record.get("non_system_message_count")
+            if has_non_system_snapshot and (
+                not re.fullmatch(r"[0-9a-f]{64}", non_system_snapshot_digest)
+                or not isinstance(non_system_message_count, int)
+                or isinstance(non_system_message_count, bool)
+                or non_system_message_count <= 0
+                or non_system_message_count > message_count
+            ):
+                return [], False
             normalized_objectives: list[Dict[str, Any]] = []
             objective_indices: set[int] = set()
+            non_system_objective_indices: set[int] = set()
             for objective in objectives:
                 if not isinstance(objective, dict):
                     return [], False
                 index = objective.get("index")
                 identity_digest = str(objective.get("identity_sha256") or "")
+                non_system_index = objective.get("non_system_index")
                 if (
                     not isinstance(index, int)
                     or isinstance(index, bool)
@@ -6834,17 +6864,40 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     or not re.fullmatch(r"[0-9a-f]{64}", identity_digest)
                 ):
                     return [], False
+                if has_non_system_snapshot and (
+                    not isinstance(non_system_index, int)
+                    or isinstance(non_system_index, bool)
+                    or non_system_index < 0
+                    or non_system_index >= non_system_message_count
+                    or non_system_index in non_system_objective_indices
+                    or non_system_index
+                    != index - (message_count - non_system_message_count)
+                ):
+                    return [], False
+                if not has_non_system_snapshot and "non_system_index" in objective:
+                    return [], False
                 objective_indices.add(index)
-                normalized_objectives.append(
-                    {"index": index, "identity_sha256": identity_digest}
-                )
-            records.append(
-                {
-                    "snapshot_digest": snapshot_digest,
-                    "message_count": message_count,
-                    "objectives": normalized_objectives,
+                normalized_objective = {
+                    "index": index,
+                    "identity_sha256": identity_digest,
                 }
-            )
+                if has_non_system_snapshot:
+                    non_system_objective_indices.add(non_system_index)
+                    normalized_objective["non_system_index"] = non_system_index
+                normalized_objectives.append(normalized_objective)
+            normalized_record = {
+                "snapshot_digest": snapshot_digest,
+                "message_count": message_count,
+                "objectives": normalized_objectives,
+            }
+            if has_non_system_snapshot:
+                normalized_record["non_system_snapshot_digest"] = (
+                    non_system_snapshot_digest
+                )
+                normalized_record["non_system_message_count"] = (
+                    non_system_message_count
+                )
+            records.append(normalized_record)
         return records, True
 
     def _load_generated_preserved_objective_provenance_with_status(
@@ -6903,8 +6956,16 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 ):
                     return None
                 combined_records.append(candidate)
+            proposed_payload = {"version": 1, "records": combined_records}
+            _normalized_records, proposed_valid = (
+                self._normalize_generated_preserved_objective_provenance_payload(
+                    proposed_payload
+                )
+            )
+            if not proposed_valid:
+                return None
             merged_records.extend(combined_records)
-            return {"version": 1, "records": combined_records}
+            return proposed_payload
 
         try:
             updated = self._store.update_metadata_json(
@@ -6929,9 +6990,12 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         """Persist only exact generated-objective occurrences in one snapshot."""
         if not self._session_id or not messages:
             return True
+        leading_system_count = self._leading_system_message_count(messages)
+        non_system_messages = messages[leading_system_count:]
         objectives = [
             {
                 "index": index,
+                "non_system_index": index - leading_system_count,
                 "identity_sha256": (
                     self._exact_provider_visible_message_identity_sha256(message)
                 ),
@@ -6956,6 +7020,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 self._exact_provider_visible_snapshot_digest(messages)
             ),
             "message_count": len(messages),
+            "non_system_snapshot_digest": (
+                self._exact_provider_visible_snapshot_digest(non_system_messages)
+            ),
+            "non_system_message_count": len(non_system_messages),
             "objectives": objectives,
         }
         pending_records = [
@@ -6995,18 +7063,39 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             combined_records, read_completed = (
                 self._load_generated_preserved_objective_provenance_with_status()
             )
+        leading_system_count = self._leading_system_message_count(messages)
         for record in reversed(combined_records):
             message_count = int(record["message_count"])
-            if message_count > len(messages):
-                continue
             snapshot = messages[:message_count]
-            if (
-                self._exact_provider_visible_snapshot_digest(snapshot)
-                != record["snapshot_digest"]
-            ):
+            full_snapshot_matches = (
+                message_count <= len(messages)
+                and self._exact_provider_visible_snapshot_digest(snapshot)
+                == record["snapshot_digest"]
+            )
+            non_system_snapshot_matches = False
+            non_system_snapshot: list[Dict[str, Any]] = []
+            if "non_system_message_count" in record:
+                non_system_message_count = int(record["non_system_message_count"])
+                non_system_snapshot = messages[
+                    leading_system_count:
+                    leading_system_count + non_system_message_count
+                ]
+                non_system_snapshot_matches = (
+                    len(non_system_snapshot) == non_system_message_count
+                    and self._exact_provider_visible_snapshot_digest(
+                        non_system_snapshot
+                    )
+                    == record["non_system_snapshot_digest"]
+                )
+            if not full_snapshot_matches and not non_system_snapshot_matches:
                 continue
             for objective in record["objectives"]:
-                message = snapshot[int(objective["index"])]
+                if full_snapshot_matches:
+                    message = snapshot[int(objective["index"])]
+                else:
+                    message = non_system_snapshot[
+                        int(objective["non_system_index"])
+                    ]
                 if (
                     self._exact_provider_visible_message_identity_sha256(message)
                     == objective["identity_sha256"]
