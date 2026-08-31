@@ -10,7 +10,7 @@ def _close_without_session_end(engine: LCMEngine) -> None:
     engine._lifecycle.close()
 
 
-def _seed_compacted_session(tmp_path, monkeypatch, *, stem: str):
+def _seed_compacted_session(tmp_path, monkeypatch, *, stem: str, keep_open=False):
     session_id = f"{stem}-session"
     config = LCMConfig(
         database_path=str(tmp_path / f"{stem}.db"),
@@ -42,8 +42,9 @@ def _seed_compacted_session(tmp_path, monkeypatch, *, stem: str):
     original_count = engine._store.get_session_count(session_id)
     assert original_count == len(history)
     assert engine._load_compacted_active_replay_snapshot_digests()
-    _close_without_session_end(engine)
-    return config, session_id, compacted, original_count
+    if not keep_open:
+        _close_without_session_end(engine)
+    return config, session_id, compacted, original_count, engine
 
 
 def test_real_compress_rebind_deduplicates_interleaved_replay_occurrences(
@@ -58,21 +59,19 @@ def test_real_compress_rebind_deduplicates_interleaved_replay_occurrences(
     this ordering: the new row at index zero forces cursor zero, which used to
     append every durable snapshot row again.
     """
-    config, session_id, compacted, original_count = _seed_compacted_session(
+    _config, session_id, compacted, original_count, after = _seed_compacted_session(
         tmp_path,
         monkeypatch,
         stem="issue-7-mixed-replay",
+        keep_open=True,
     )
     for content in ("replay U1", "replay A1", "replay U2", "replay A2"):
         assert sum(message.get("content") == content for message in compacted) == 1
 
-    after = LCMEngine(config=config, hermes_home=str(tmp_path))
-    after.on_session_start(
-        session_id,
-        platform="cli",
-        conversation_id="issue-7-mixed-replay-conversation",
-        context_length=200_000,
-    )
+    # The next host batch reuses the exact compacted message objects and adds
+    # rows that arrived while compression was completing.  Force the ordinary
+    # existing-session reconciliation path that a rebind uses.
+    after._ingest_cursor_needs_reconcile = True
     new_rows = [
         {"role": "tool", "tool_call_id": "new-before", "content": "new N0a"},
         {"role": "assistant", "content": "new N0b"},
@@ -111,7 +110,7 @@ def test_incomplete_registered_snapshot_is_preserved_as_ambiguous(
     monkeypatch,
 ):
     """A partial snapshot is resemblance, not replay proof."""
-    config, session_id, compacted, original_count = _seed_compacted_session(
+    config, session_id, compacted, original_count, _closed = _seed_compacted_session(
         tmp_path,
         monkeypatch,
         stem="issue-7-incomplete-replay",
@@ -153,7 +152,7 @@ def test_identity_equal_occurrences_inside_snapshot_span_remain_ambiguous(
     monkeypatch,
 ):
     """A new byte-identical row cannot be mistaken for the replay occurrence."""
-    config, session_id, compacted, original_count = _seed_compacted_session(
+    config, session_id, compacted, original_count, _closed = _seed_compacted_session(
         tmp_path,
         monkeypatch,
         stem="issue-7-identity-equal",
@@ -178,19 +177,18 @@ def test_identity_equal_occurrences_inside_snapshot_span_remain_ambiguous(
 
         rows = after._store.get_session_messages(session_id)
         contents = [row["content"] for row in rows]
-        # Neither equal incoming occurrence is uniquely attributable. Preserve
-        # both rather than choosing one and potentially losing or reordering
-        # the genuinely new occurrence.
+        # A restarted engine has no process-local occurrence proof. Preserve
+        # the complete copied snapshot plus the equal new row rather than
+        # choosing one and potentially losing or reordering real input.
         assert contents.count("replay U1") == 3
         assert contents.count("new row forcing cursor zero") == 1
-        assert len(rows) == original_count + 3
+        assert len(rows) == original_count + len(incoming)
         assert (
-            after._last_ingest_reconciliation[
-                "replayed_compacted_snapshot_rows"
-            ]
-            == 5
+            after._last_ingest_reconciliation.get(
+                "replayed_compacted_snapshot_rows", 0
+            )
+            == 0
         )
-        assert after._last_ingest_reconciliation["ambiguous_rows_preserved"] == 3
     finally:
         after.shutdown()
 
@@ -200,7 +198,7 @@ def test_snapshot_proof_cannot_span_a_positive_reconciliation_cursor(
     monkeypatch,
 ):
     """A pre-cursor occurrence cannot prove away an equal post-cursor row."""
-    config, session_id, compacted, original_count = _seed_compacted_session(
+    config, session_id, compacted, original_count, _closed = _seed_compacted_session(
         tmp_path,
         monkeypatch,
         stem="issue-7-positive-cursor",
@@ -238,3 +236,39 @@ def test_snapshot_proof_cannot_span_a_positive_reconciliation_cursor(
         )
     finally:
         after.shutdown()
+
+
+def test_complete_identity_equal_copied_snapshot_is_preserved_as_new(
+    tmp_path,
+    monkeypatch,
+):
+    """A complete content match is not proof when every occurrence is new."""
+    _config, session_id, compacted, original_count, engine = _seed_compacted_session(
+        tmp_path,
+        monkeypatch,
+        stem="issue-7-copied-complete-snapshot",
+        keep_open=True,
+    )
+    split = max(1, len(compacted) // 2)
+    incoming = [
+        {"role": "assistant", "content": "new before copied snapshot"},
+        *[dict(message) for message in compacted[:split]],
+        {"role": "user", "content": "new inside copied snapshot"},
+        *[dict(message) for message in compacted[split:]],
+    ]
+    engine._ingest_cursor_needs_reconcile = True
+
+    try:
+        engine._ingest_messages(incoming)
+
+        assert engine._store.get_session_count(session_id) == (
+            original_count + len(incoming)
+        )
+        assert (
+            engine._last_ingest_reconciliation.get(
+                "replayed_compacted_snapshot_rows", 0
+            )
+            == 0
+        )
+    finally:
+        engine.shutdown()

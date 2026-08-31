@@ -5276,7 +5276,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             cursor + index
             for index in (
                 self._registered_compacted_snapshot_replay_indexes(
-                    reconcile_messages[cursor:]
+                    messages[cursor:]
                 )
                 if reconciled_existing_session
                 else set()

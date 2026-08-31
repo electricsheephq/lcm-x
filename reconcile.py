@@ -675,98 +675,98 @@ class ReconcileMixin:
         self,
         messages: List[Dict[str, Any]],
     ) -> None:
+        digest = self._compacted_active_replay_snapshot_digest(messages)
         self._remember_replay_snapshot(
             _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX,
-            self._compacted_active_replay_snapshot_digest(messages),
+            digest,
             messages,
         )
+        # Content equality is not occurrence provenance.  The only generic
+        # mixed-order proof available inside the ContextEngine contract is the
+        # exact object occurrence returned by this engine's own compress()
+        # call.  Keep that proof process-local and bounded.  Copies, restarts,
+        # aliases, and mutated messages deliberately fall back to ambiguity
+        # and are persisted duplicate-over-loss.
+        occurrence_ids = [id(message) for message in messages]
+        if not digest or len(set(occurrence_ids)) != len(occurrence_ids):
+            return
+        key = self._active_replay_snapshot_metadata_key()
+        records_by_key = dict(
+            getattr(self, "_compacted_active_replay_occurrence_records", {})
+        )
+        # Keep strong references, not bare ids: Python may reuse an id after
+        # collection, which would turn an unrelated equal message into false
+        # replay proof.  Only the latest snapshot per recent session is needed
+        # for the immediate post-compress race.
+        records_by_key.pop(key, None)
+        records_by_key[key] = [
+            {
+                "digest": digest,
+                "occurrences": [
+                    (message, self._replay_identity_sha256(message))
+                    for message in messages
+                ],
+            }
+        ]
+        while len(records_by_key) > 4:
+            records_by_key.pop(next(iter(records_by_key)))
+        self._compacted_active_replay_occurrence_records = records_by_key
 
     def _registered_compacted_snapshot_replay_indexes(
         self,
         messages: List[Dict[str, Any]],
     ) -> set[int]:
-        """Map one complete registered snapshot through an interleaved batch.
+        """Map exact process-local compress occurrences through a mixed batch.
 
-        A whole-snapshot digest proves replay only when the snapshot is
-        contiguous. The version-2 occurrence list preserves the same proof
-        boundary while allowing unrelated rows between snapshot occurrences.
-        Partial snapshots never qualify. Matching consumes one incoming
-        occurrence per registered occurrence and returns only those exact
-        positions; every unmatched row remains an ambiguous delta and is
-        persisted by the caller.
+        Per-message content digests are validation only.  Object identity is
+        the occurrence proof: a copied or reconstructed identity-equal message
+        is ambiguous and must be persisted.  Every registered object must
+        occur exactly once and in its original order; otherwise no row is
+        suppressed.
         """
         if not messages:
             return set()
-        incoming_digests = [
-            self._replay_identity_sha256(message)
-            for message in messages
-        ]
-        records = self._load_replay_snapshot_records(
-            _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX
-        )
+        positions_by_object_id: dict[int, list[int]] = {}
+        for index, message in enumerate(messages):
+            positions_by_object_id.setdefault(id(message), []).append(index)
+        key = self._active_replay_snapshot_metadata_key()
+        records = getattr(
+            self,
+            "_compacted_active_replay_occurrence_records",
+            {},
+        ).get(key, [])
         for record in reversed(records):
-            snapshot_digests = record.get("message_digests") or []
-            if not snapshot_digests or len(snapshot_digests) > len(messages):
+            occurrences = record.get("occurrences") or []
+            if not occurrences or len(occurrences) > len(messages):
                 continue
-            earliest_indexes: list[int] = []
-            incoming_index = 0
-            for snapshot_digest in snapshot_digests:
-                while (
-                    incoming_index < len(incoming_digests)
-                    and incoming_digests[incoming_index] != snapshot_digest
-                ):
-                    incoming_index += 1
-                if incoming_index >= len(incoming_digests):
-                    earliest_indexes = []
+            selected_indexes: list[int] = []
+            lower_bound = 0
+            for occurrence_message, occurrence_digest in occurrences:
+                possible_indexes = [
+                    index
+                    for index in positions_by_object_id.get(
+                        id(occurrence_message), []
+                    )
+                    if index >= lower_bound
+                    and messages[index] is occurrence_message
+                    and self._replay_identity_sha256(messages[index])
+                    == occurrence_digest
+                ]
+                if len(possible_indexes) != 1:
+                    selected_indexes = []
                     break
-                earliest_indexes.append(incoming_index)
-                incoming_index += 1
-            if not earliest_indexes:
+                selected_index = possible_indexes[0]
+                selected_indexes.append(selected_index)
+                lower_bound = selected_index + 1
+            if not selected_indexes:
                 continue
-            selected = [messages[index] for index in earliest_indexes]
+            selected = [messages[index] for index in selected_indexes]
             if (
                 self._compacted_active_replay_snapshot_digest(selected)
                 != record["digest"]
             ):
                 continue
-
-            latest_indexes = [0] * len(snapshot_digests)
-            incoming_index = len(incoming_digests) - 1
-            for snapshot_index in range(len(snapshot_digests) - 1, -1, -1):
-                snapshot_digest = snapshot_digests[snapshot_index]
-                while (
-                    incoming_index >= 0
-                    and incoming_digests[incoming_index] != snapshot_digest
-                ):
-                    incoming_index -= 1
-                if incoming_index < 0:
-                    latest_indexes = []
-                    break
-                latest_indexes[snapshot_index] = incoming_index
-                incoming_index -= 1
-            if not latest_indexes:
-                continue
-
-            proven_indexes: set[int] = set()
-            for snapshot_index, snapshot_digest in enumerate(snapshot_digests):
-                lower_bound = (
-                    earliest_indexes[snapshot_index - 1] + 1
-                    if snapshot_index > 0
-                    else 0
-                )
-                upper_bound = (
-                    latest_indexes[snapshot_index + 1]
-                    if snapshot_index + 1 < len(snapshot_digests)
-                    else len(incoming_digests)
-                )
-                possible_indexes = [
-                    index
-                    for index in range(lower_bound, upper_bound)
-                    if incoming_digests[index] == snapshot_digest
-                ]
-                if len(possible_indexes) == 1:
-                    proven_indexes.add(possible_indexes[0])
-            return proven_indexes
+            return set(selected_indexes)
         return set()
 
     # -- Session-end full-history proof (consumed ONLY by current-session
