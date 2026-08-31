@@ -25,6 +25,7 @@ from hermes_lcm.escalation import (
     _deterministic_truncate,
 )
 from hermes_lcm.lifecycle_state import LifecycleStateStore
+from hermes_lcm.maintenance import flush_engine_connections
 from hermes_lcm.db_bootstrap import (
     ExternalContentFtsSpec,
     SCHEMA_VERSION,
@@ -9227,6 +9228,83 @@ class TestLCMEngineSharedStorage:
                 assert prototype._dag.get_session_node_count(session_id) == 20
         finally:
             for engine in (*clones, prototype):
+                engine.shutdown()
+
+    def test_backup_flush_cannot_commit_clone_owned_transaction(
+        self, tmp_path, monkeypatch
+    ):
+        prototype = self._engine(tmp_path)
+        clone = prototype.clone_for_agent()
+        operation_lock = prototype._storage._operation_lock
+        real_connection = prototype._dag._conn
+        after_idle_check = threading.Event()
+        clone_attempted = threading.Event()
+        clone_transaction_started = threading.Event()
+        backup_commit_finished = threading.Event()
+        failures: list[BaseException] = []
+        metadata_key = "clone-owned-flush-transaction"
+
+        class CommitSignalConnection:
+            def commit(self):
+                real_connection.commit()
+                backup_commit_finished.set()
+
+            def __getattr__(self, name):
+                return getattr(real_connection, name)
+
+        signalled_connection = CommitSignalConnection()
+        prototype._dag._conn = signalled_connection
+        original_assert_idle = prototype._store.assert_transaction_idle
+
+        def coordinated_assert_idle():
+            original_assert_idle()
+            after_idle_check.set()
+            assert clone_attempted.wait(timeout=1)
+            # On the fixed path the flush owns the operation lock across every
+            # helper commit, so the clone is expected to be waiting here.  On
+            # the old path let the clone open its transaction before the raw
+            # DAG commit to deterministically reproduce the premature commit.
+            if not operation_lock._is_owned():
+                assert clone_transaction_started.wait(timeout=1)
+
+        monkeypatch.setattr(
+            prototype._store,
+            "assert_transaction_idle",
+            coordinated_assert_idle,
+        )
+
+        def run_clone_transaction():
+            try:
+                assert after_idle_check.wait(timeout=1)
+                clone_attempted.set()
+                with operation_lock:
+                    clone._dag._conn.execute(
+                        "INSERT INTO metadata(key, value) VALUES(?, ?)",
+                        (metadata_key, "must roll back"),
+                    )
+                    clone_transaction_started.set()
+                    assert backup_commit_finished.wait(timeout=2)
+                    clone._dag._conn.rollback()
+            except BaseException as exc:
+                failures.append(exc)
+
+        clone_thread = threading.Thread(target=run_clone_transaction)
+        try:
+            clone_thread.start()
+            flush_engine_connections(prototype)
+            clone_thread.join(timeout=3)
+
+            assert not clone_thread.is_alive()
+            assert failures == []
+            assert real_connection.execute(
+                "SELECT value FROM metadata WHERE key = ?",
+                (metadata_key,),
+            ).fetchone() is None
+        finally:
+            backup_commit_finished.set()
+            clone_thread.join(timeout=2)
+            prototype._dag._conn = real_connection
+            for engine in (clone, prototype):
                 engine.shutdown()
 
     @pytest.mark.parametrize("gc_commits", [False, True])
