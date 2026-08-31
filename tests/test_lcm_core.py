@@ -76,8 +76,23 @@ class TestFocusBriefFormatting:
         assert "cancellation, rejection, completion, supersession, or waiting for the user" in brief
         assert "overrides any older active-task, latest-directive, continuation, blocker, or handoff label" in brief
         assert "no active task / waiting for user" in brief
-        assert "only when the latest turns show it is still unresolved and actionable" in brief
+        assert "only when the latest turns for that same task show it is still unresolved and actionable" in brief
         assert "reconcile inherited active-task labels against newer child summaries" in brief
+
+    @pytest.mark.parametrize(
+        "builder",
+        [_build_l1_focus_brief, _build_l2_focus_brief],
+    )
+    def test_terminal_state_is_scoped_when_another_task_remains_blocked(self, builder):
+        brief = builder(
+            "Task A: production rollout remains blocked on access. "
+            "Task B: documentation handoff complete."
+        )
+
+        assert "only for the same task identity or topic" in brief
+        assert "Do not use the terminal state of one task to demote unrelated active work" in brief
+        assert "every identified task" in brief
+        assert "recent turns concern a different task" in brief
 
 
 class TestModelRouting:

@@ -385,15 +385,18 @@ _HISTORICAL_HEADING_MARKERS = (
 
 _TASK_STATE_PRECEDENCE_GUIDANCE = (
     "Task-state precedence:\n"
-    "Recent task-state changes have highest authority. Explicit cancellation, rejection, completion, "
+    "Recent task-state changes have highest authority for the task identity or topic they describe. "
+    "Explicit cancellation, rejection, completion, "
     "supersession, or waiting for the user overrides any older active-task, latest-directive, "
-    "continuation, blocker, or handoff label.\n"
-    "When that is the newest state, say 'no active task / waiting for user' and demote the older work; "
-    "do not invent continuity.\n"
-    "Keep a blocker or pending handoff active only when the latest turns show it is still unresolved "
-    "and actionable.\n"
+    "continuation, blocker, or handoff label only for the same task identity or topic.\n"
+    "Do not use the terminal state of one task to demote unrelated active work. When that is the newest "
+    "state for a task, demote that task's older state; say 'no active task / waiting for user' only after "
+    "evaluating every identified task independently and finding no remaining active work.\n"
+    "Keep a blocker or pending handoff active only when the latest turns for that same task show it is "
+    "still unresolved and actionable. If recent turns concern a different task, preserve unrelated "
+    "active blockers and handoffs.\n"
     "During hierarchical condensation, reconcile inherited active-task labels against newer child "
-    "summaries and recent turns before treating them as current.\n"
+    "summaries and recent turns for the same identity or topic before treating them as current.\n"
 )
 
 
