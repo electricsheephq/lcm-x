@@ -207,10 +207,11 @@ def _resolve_semantic_conversation_scope(
     if not conversation_id:
         return [search_session_id] if search_session_id is not None else None
     try:
-        rows = engine._store.connection.execute(
-            "SELECT DISTINCT session_id FROM messages WHERE conversation_id = ?",
-            (conversation_id,),
-        ).fetchall()
+        with engine._store.locked_connection() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT session_id FROM messages WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchall()
         conv_sessions = {str(row[0]) for row in rows if row and row[0] is not None}
     except Exception:  # pragma: no cover - defensive; degrade on any store error
         conv_sessions = set()

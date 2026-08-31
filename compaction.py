@@ -521,7 +521,6 @@ class CompactionMixin:
         context_is_assembled: bool = False,
     ) -> List[Dict[str, Any]]:
         """Return a replay-safe active view after publication cannot finish."""
-        self._store.rollback_pending_write()
         fallback = active_context
         if recovery_assembly_cap is not None and not context_is_assembled:
             leading_anchor_count = self._leading_anchor_count(active_context)

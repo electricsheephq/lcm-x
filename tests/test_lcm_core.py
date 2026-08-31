@@ -25,6 +25,7 @@ from hermes_lcm.escalation import (
     _deterministic_truncate,
 )
 from hermes_lcm.lifecycle_state import LifecycleStateStore
+from hermes_lcm.maintenance import flush_engine_connections
 from hermes_lcm.db_bootstrap import (
     ExternalContentFtsSpec,
     SCHEMA_VERSION,
@@ -8477,9 +8478,9 @@ class TestLCMEngineCloning:
 
             assert clone is not prototype
             assert isinstance(clone, LCMEngine)
-            assert clone._store is not prototype._store
-            assert clone._dag is not prototype._dag
-            assert clone._lifecycle is not prototype._lifecycle
+            assert clone._store is prototype._store
+            assert clone._dag is prototype._dag
+            assert clone._lifecycle is prototype._lifecycle
             assert clone._config.database_path == prototype._config.database_path
             assert clone._hermes_home == prototype._hermes_home
         finally:
@@ -8564,9 +8565,9 @@ class TestLCMEngineCloning:
             assert isinstance(clone, LCMEngine)
             assert clone.name == "lcm"
             assert clone is not prototype
-            assert clone._store is not prototype._store
-            assert clone._dag is not prototype._dag
-            assert clone._lifecycle is not prototype._lifecycle
+            assert clone._store is prototype._store
+            assert clone._dag is prototype._dag
+            assert clone._lifecycle is prototype._lifecycle
             assert clone._session_id == ""
             assert clone._conversation_id == ""
             assert clone.model == prototype.model
@@ -8802,6 +8803,774 @@ class TestLCMEngineCloning:
             shutdown = getattr(clone, "shutdown", None)
             if callable(shutdown):
                 shutdown()
+
+
+class TestLCMEngineSharedStorage:
+    def _engine(self, tmp_path):
+        from hermes_lcm.engine import LCMEngine
+
+        return LCMEngine(
+            config=LCMConfig(database_path=str(tmp_path / "shared-storage.db")),
+            hermes_home=str(tmp_path / "hermes"),
+        )
+
+    def test_clone_shares_bundle_but_keeps_runtime_and_model_metadata_local(self, tmp_path):
+        prototype = self._engine(tmp_path)
+        clone = None
+        try:
+            prototype.update_model(
+                model="prototype-model",
+                provider="prototype-provider",
+                base_url="https://prototype.invalid/v1",
+                api_key="prototype-key",
+                api_mode="chat",
+                context_length=128_000,
+            )
+            prototype.on_session_start("prototype", platform="alpha", conversation_id="alpha:1")
+            clone = prototype.clone_for_agent()
+
+            assert clone._storage is prototype._storage
+            assert clone._store is prototype._store
+            assert clone._dag is prototype._dag
+            assert clone._lifecycle is prototype._lifecycle
+            assert clone._session_id == ""
+            assert clone._conversation_id == ""
+            assert clone.model == "prototype-model"
+            assert clone.provider == "prototype-provider"
+
+            clone.on_session_start("clone", platform="beta", conversation_id="beta:1")
+            clone.update_model(model="clone-model", provider="clone-provider", context_length=16_000)
+            assert prototype._session_id == "prototype"
+            assert prototype._conversation_id == "alpha:1"
+            assert prototype.model == "prototype-model"
+            assert prototype.provider == "prototype-provider"
+        finally:
+            prototype.shutdown()
+            if clone is not None:
+                clone.shutdown()
+
+    def test_clone_preserves_sqlite_in_memory_sentinel(self, tmp_path, monkeypatch):
+        from hermes_lcm.engine import LCMEngine
+
+        monkeypatch.chdir(tmp_path)
+        prototype = LCMEngine(
+            config=LCMConfig(database_path=":memory:"),
+            hermes_home=str(tmp_path / "hermes"),
+        )
+        clone = None
+        try:
+            clone = prototype.clone_for_agent()
+
+            assert clone._storage is prototype._storage
+            assert str(prototype._storage.db_path) == ":memory:"
+            assert str(prototype._store.db_path) == ":memory:"
+            assert not (tmp_path / ":memory:").exists()
+        finally:
+            prototype.shutdown()
+            if clone is not None:
+                clone.shutdown()
+
+    def test_clone_preserves_legacy_subclass_constructor_contract(self, tmp_path):
+        from hermes_lcm.engine import LCMEngine
+
+        class LegacyEngine(LCMEngine):
+            def __init__(self, config=None, hermes_home=""):
+                super().__init__(config=config, hermes_home=hermes_home)
+                self.legacy_initialized = True
+
+        prototype = LegacyEngine(
+            config=LCMConfig(database_path=str(tmp_path / "legacy-subclass.db")),
+            hermes_home=str(tmp_path / "hermes"),
+        )
+        clone = None
+        try:
+            clone = prototype.clone_for_agent()
+
+            assert isinstance(clone, LegacyEngine)
+            assert clone.legacy_initialized is True
+            assert clone._storage is prototype._storage
+            assert clone._store is prototype._store
+        finally:
+            prototype.shutdown()
+            if clone is not None:
+                clone.shutdown()
+
+    def test_clone_measurement_uses_count_neutral_batch_label(self, tmp_path):
+        from scripts.measure_clone_storage import run
+
+        report = run(1, 3, tmp_path / "clone-measurement.db")
+
+        assert report["retained_clones"] == 3
+        assert "retained_clone_batch_setup_ms" in report
+        assert "ten_clone_setup_ms" not in report
+
+    def test_owner_first_shutdown_leaves_clone_operational_and_final_close_is_once(self, tmp_path, monkeypatch):
+        prototype = self._engine(tmp_path)
+        clone = prototype.clone_for_agent()
+        bundle = prototype._storage
+        close_calls = {"store": 0, "dag": 0, "lifecycle": 0}
+        try:
+            for name in close_calls:
+                helper = getattr(bundle, name)
+                original = helper.close
+
+                def close(original=original, name=name):
+                    close_calls[name] += 1
+                    return original()
+
+                monkeypatch.setattr(helper, "close", close)
+
+            prototype.shutdown()
+            clone._store.append("clone-session", {"role": "user", "content": "still open"})
+            assert close_calls == {"store": 0, "dag": 0, "lifecycle": 0}
+
+            clone.shutdown()
+            clone.shutdown()
+            assert close_calls == {"store": 1, "dag": 1, "lifecycle": 1}
+        finally:
+            prototype.shutdown()
+            clone.shutdown()
+
+    def test_independent_engines_with_equivalent_paths_keep_bundles_separate_but_share_lock(self, tmp_path):
+        db_path = tmp_path / "independent.db"
+        barrier = threading.Barrier(2)
+        engines = []
+        failures = []
+
+        def construct(path):
+            try:
+                barrier.wait()
+                from hermes_lcm.engine import LCMEngine
+
+                engines.append(LCMEngine(config=LCMConfig(database_path=str(path))))
+            except BaseException as exc:
+                failures.append(exc)
+
+        alternate_path = db_path.parent / "." / db_path.name
+        threads = [threading.Thread(target=construct, args=(path,)) for path in (db_path, alternate_path)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        try:
+            assert failures == []
+            assert len(engines) == 2
+            assert engines[0]._storage is not engines[1]._storage
+            assert engines[0]._store._write_lock is engines[1]._store._write_lock
+            assert engines[0]._dag._db_lock is engines[1]._dag._db_lock
+            assert engines[0]._lifecycle._lock is engines[1]._lifecycle._lock
+        finally:
+            for engine in engines:
+                engine.shutdown()
+
+    def test_configured_path_profile_rebind_detaches_one_clone(self, tmp_path):
+        db_path = tmp_path / "configured.db"
+        prototype = self._engine(tmp_path)
+        prototype._config.database_path = str(db_path)
+        prototype._rebind_storage_for_home(str(tmp_path / "profile-a"))
+        clone = prototype.clone_for_agent()
+        original_storage = prototype._storage
+        try:
+            assert clone._storage is original_storage
+            assert clone._rebind_storage_for_home(str(tmp_path / "profile-b")) is True
+            assert clone._storage is not original_storage
+            assert clone._store._write_lock is prototype._store._write_lock
+            assert prototype._hermes_home == str(tmp_path / "profile-a")
+            assert clone._hermes_home == str(tmp_path / "profile-b")
+            prototype._store.append("prototype", {"role": "user", "content": "still live"})
+        finally:
+            prototype.shutdown()
+            clone.shutdown()
+
+    def test_final_close_attempts_every_helper_and_raises_aggregate_failure(self, tmp_path, monkeypatch):
+        prototype = self._engine(tmp_path)
+        bundle = prototype._storage
+        attempted = []
+        for name in ("store", "dag", "lifecycle"):
+            helper = getattr(bundle, name)
+            original = helper.close
+
+            def close(original=original, name=name):
+                attempted.append(name)
+                if attempted.count(name) == 1:
+                    raise RuntimeError(name)
+                return original()
+
+            monkeypatch.setattr(helper, "close", close)
+
+        with pytest.raises(BaseExceptionGroup, match="LCM storage close failed") as exc_info:
+            prototype.shutdown()
+        assert attempted == ["store", "dag", "lifecycle"]
+        assert {str(error) for error in exc_info.value.exceptions} == {
+            "store",
+            "dag",
+            "lifecycle",
+        }
+        assert prototype._ownership is not None
+        assert bundle._closed is False
+
+        prototype.shutdown()
+        assert attempted == [
+            "store",
+            "dag",
+            "lifecycle",
+            "store",
+            "dag",
+            "lifecycle",
+        ]
+        assert prototype._ownership is None
+        assert bundle._closed is True
+
+    def test_rebind_failure_keeps_old_storage_live(self, tmp_path, monkeypatch):
+        import hermes_lcm.engine as engine_mod
+
+        prototype = self._engine(tmp_path)
+        old_storage = prototype._storage
+        old_home = prototype._hermes_home
+
+        def fail_replacement(*_args, **_kwargs):
+            raise RuntimeError("replacement failed")
+
+        monkeypatch.setattr(engine_mod, "_SharedStorage", fail_replacement)
+        try:
+            with pytest.raises(RuntimeError, match="replacement failed"):
+                prototype.on_session_start(
+                    "replacement",
+                    hermes_home=str(tmp_path / "other-profile"),
+                )
+            assert prototype._storage is old_storage
+            assert prototype._hermes_home == old_home
+            assert old_storage._owners == 1
+            prototype._store.append(
+                "still-live",
+                {"role": "user", "content": "old storage remains usable"},
+            )
+        finally:
+            prototype.shutdown()
+
+    def test_rebind_defers_failed_old_close_and_shutdown_retries_it(
+        self, tmp_path, monkeypatch
+    ):
+        prototype = self._engine(tmp_path)
+        old_storage = prototype._storage
+        old_close = old_storage.store.close
+        close_calls = 0
+
+        def fail_once():
+            nonlocal close_calls
+            close_calls += 1
+            if close_calls == 1:
+                raise RuntimeError("transient close failure")
+            return old_close()
+
+        monkeypatch.setattr(old_storage.store, "close", fail_once)
+        prototype.on_session_start(
+            "replacement",
+            hermes_home=str(tmp_path / "other-profile"),
+        )
+        new_storage = prototype._storage
+        assert new_storage is not old_storage
+        assert len(prototype._retired_storage_ownerships) == 1
+        assert old_storage._closed is False
+        prototype._store.append(
+            "replacement", {"role": "user", "content": "new storage is live"}
+        )
+
+        prototype.shutdown()
+        assert close_calls == 2
+        assert old_storage._closed is True
+        assert new_storage._closed is True
+        assert prototype._retired_storage_ownerships == []
+
+    def test_clone_waits_for_rebind_and_observes_one_complete_profile(
+        self, tmp_path, monkeypatch
+    ):
+        prototype = self._engine(tmp_path)
+        entered_rebind = threading.Event()
+        continue_rebind = threading.Event()
+        clone_finished = threading.Event()
+        failures = []
+        clones = []
+        original_replace = prototype._replace_storage
+
+        def blocked_replace(*args, **kwargs):
+            entered_rebind.set()
+            assert continue_rebind.wait(timeout=2)
+            return original_replace(*args, **kwargs)
+
+        monkeypatch.setattr(prototype, "_replace_storage", blocked_replace)
+
+        def rebind():
+            try:
+                prototype.on_session_start(
+                    "replacement",
+                    hermes_home=str(tmp_path / "other-profile"),
+                )
+            except BaseException as exc:
+                failures.append(exc)
+
+        def clone():
+            try:
+                clones.append(prototype.clone_for_agent())
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                clone_finished.set()
+
+        rebind_thread = threading.Thread(target=rebind)
+        clone_thread = threading.Thread(target=clone)
+        try:
+            rebind_thread.start()
+            assert entered_rebind.wait(timeout=1)
+            clone_thread.start()
+            assert not clone_finished.wait(timeout=0.05)
+            continue_rebind.set()
+            rebind_thread.join(timeout=2)
+            clone_thread.join(timeout=2)
+
+            assert failures == []
+            assert len(clones) == 1
+            assert clones[0]._storage is prototype._storage
+            assert clones[0]._hermes_home == prototype._hermes_home
+            assert clones[0]._store._hermes_home == prototype._store._hermes_home
+        finally:
+            continue_rebind.set()
+            rebind_thread.join(timeout=2)
+            clone_thread.join(timeout=2)
+            for clone_engine in clones:
+                clone_engine.shutdown()
+            prototype.shutdown()
+
+    def test_pre_storage_initialization_failure_does_not_acquire_lease(
+        self, tmp_path, monkeypatch
+    ):
+        import hermes_lcm.engine as engine_mod
+
+        acquire_calls = 0
+        original_acquire = engine_mod._SharedStorage.acquire
+
+        def record_acquire(storage):
+            nonlocal acquire_calls
+            acquire_calls += 1
+            return original_acquire(storage)
+
+        monkeypatch.setattr(engine_mod._SharedStorage, "acquire", record_acquire)
+        monkeypatch.setattr(
+            engine_mod,
+            "compile_message_patterns",
+            lambda _patterns: (_ for _ in ()).throw(RuntimeError("bad patterns")),
+        )
+
+        with pytest.raises(RuntimeError, match="bad patterns"):
+            engine_mod.LCMEngine(
+                config=LCMConfig(database_path=str(tmp_path / "never-opened.db"))
+            )
+        assert acquire_calls == 0
+
+    def test_partial_helper_initialization_closes_connection(
+        self, tmp_path, monkeypatch
+    ):
+        for index, helper_type in enumerate(
+            (MessageStore, SummaryDAG, LifecycleStateStore)
+        ):
+            opened = []
+
+            def fail_after_open(helper):
+                helper._conn = sqlite3.connect(str(helper.db_path))
+                opened.append(helper._conn)
+                raise RuntimeError("schema init failed")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(helper_type, "_init_db", fail_after_open)
+                with pytest.raises(RuntimeError, match="schema init failed"):
+                    helper_type(tmp_path / f"partial-{index}.db")
+
+            assert len(opened) == 1
+            with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+                opened[0].execute("SELECT 1")
+
+    def test_concurrent_clone_writes_and_dag_operations_are_serialized(self, tmp_path):
+        prototype = self._engine(tmp_path)
+        clones = [prototype.clone_for_agent() for _ in range(6)]
+        barrier = threading.Barrier(len(clones))
+        failures = []
+
+        def write(index, clone):
+            try:
+                barrier.wait()
+                session_id = f"session-{index}"
+                for ordinal in range(20):
+                    clone._store.append(
+                        session_id,
+                        {"role": "user", "content": f"message-{index}-{ordinal}"},
+                    )
+                    clone._dag.add_node(
+                        SummaryNode(session_id=session_id, summary=f"node-{index}-{ordinal}")
+                    )
+                    clone._dag.get_session_depth_stats(session_id)
+            except BaseException as exc:
+                failures.append(exc)
+
+        threads = [
+            threading.Thread(target=write, args=(index, clone))
+            for index, clone in enumerate(clones)
+        ]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            assert failures == []
+            for index in range(len(clones)):
+                session_id = f"session-{index}"
+                assert prototype._store.get_session_count(session_id) == 20
+                assert prototype._dag.get_session_node_count(session_id) == 20
+        finally:
+            for engine in (*clones, prototype):
+                engine.shutdown()
+
+    def test_backup_flush_cannot_commit_clone_owned_transaction(
+        self, tmp_path, monkeypatch
+    ):
+        prototype = self._engine(tmp_path)
+        clone = prototype.clone_for_agent()
+        operation_lock = prototype._storage._operation_lock
+        real_connection = prototype._dag._conn
+        after_idle_check = threading.Event()
+        clone_attempted = threading.Event()
+        clone_transaction_started = threading.Event()
+        backup_commit_finished = threading.Event()
+        failures: list[BaseException] = []
+        metadata_key = "clone-owned-flush-transaction"
+
+        class CommitSignalConnection:
+            def commit(self):
+                real_connection.commit()
+                backup_commit_finished.set()
+
+            def __getattr__(self, name):
+                return getattr(real_connection, name)
+
+        signalled_connection = CommitSignalConnection()
+        prototype._dag._conn = signalled_connection
+        original_assert_idle = prototype._store.assert_transaction_idle
+
+        def coordinated_assert_idle():
+            original_assert_idle()
+            after_idle_check.set()
+            assert clone_attempted.wait(timeout=1)
+            # On the fixed path the flush owns the operation lock across every
+            # helper commit, so the clone is expected to be waiting here.  On
+            # the old path let the clone open its transaction before the raw
+            # DAG commit to deterministically reproduce the premature commit.
+            if not operation_lock._is_owned():
+                assert clone_transaction_started.wait(timeout=1)
+
+        monkeypatch.setattr(
+            prototype._store,
+            "assert_transaction_idle",
+            coordinated_assert_idle,
+        )
+
+        def run_clone_transaction():
+            try:
+                assert after_idle_check.wait(timeout=1)
+                clone_attempted.set()
+                with operation_lock:
+                    clone._dag._conn.execute(
+                        "INSERT INTO metadata(key, value) VALUES(?, ?)",
+                        (metadata_key, "must roll back"),
+                    )
+                    clone_transaction_started.set()
+                    assert backup_commit_finished.wait(timeout=2)
+                    clone._dag._conn.rollback()
+            except BaseException as exc:
+                failures.append(exc)
+
+        clone_thread = threading.Thread(target=run_clone_transaction)
+        try:
+            clone_thread.start()
+            flush_engine_connections(prototype)
+            clone_thread.join(timeout=3)
+
+            assert not clone_thread.is_alive()
+            assert failures == []
+            assert real_connection.execute(
+                "SELECT value FROM metadata WHERE key = ?",
+                (metadata_key,),
+            ).fetchone() is None
+        finally:
+            backup_commit_finished.set()
+            clone_thread.join(timeout=2)
+            prototype._dag._conn = real_connection
+            for engine in (clone, prototype):
+                engine.shutdown()
+
+    @pytest.mark.parametrize("gc_commits", [False, True])
+    def test_clone_store_transaction_is_owned_through_commit_or_rollback(
+        self, tmp_path, gc_commits
+    ):
+        prototype = self._engine(tmp_path)
+        gc_clone = prototype.clone_for_agent()
+        writer_clone = prototype.clone_for_agent()
+        original = "durable tool output"
+        replacement = "[Externalized payload: kind=tool_result; ref=gc.json]"
+        store_id = prototype._store.append(
+            "gc-session",
+            {
+                "role": "tool",
+                "content": original,
+                "tool_call_id": "call-1",
+            },
+        )
+        gc_entered = threading.Event()
+        release_gc = threading.Event()
+        writer_finished = threading.Event()
+        failures: list[BaseException] = []
+
+        def before_commit(_connection, _store_id):
+            gc_entered.set()
+            assert release_gc.wait(timeout=2)
+            if not gc_commits:
+                raise RuntimeError("force GC rollback")
+
+        def run_gc():
+            try:
+                gc_clone._store.gc_externalized_tool_result(
+                    store_id,
+                    replacement,
+                    before_commit=before_commit,
+                )
+            except BaseException as exc:
+                failures.append(exc)
+
+        def run_writer():
+            try:
+                writer_clone._store.append(
+                    "writer-session",
+                    {"role": "user", "content": "independent durable write"},
+                )
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                writer_finished.set()
+
+        gc_thread = threading.Thread(target=run_gc)
+        writer_thread = threading.Thread(target=run_writer)
+        try:
+            gc_thread.start()
+            assert gc_entered.wait(timeout=1)
+            writer_thread.start()
+            assert not writer_finished.wait(timeout=0.05)
+            release_gc.set()
+            gc_thread.join(timeout=2)
+            writer_thread.join(timeout=2)
+
+            assert writer_finished.is_set()
+            assert prototype._store.get_session_count("writer-session") == 1
+            assert prototype._store.connection.in_transaction is False
+            stored = prototype._store.get(store_id)
+            if gc_commits:
+                assert failures == []
+                assert stored["content"] == replacement
+            else:
+                assert len(failures) == 1
+                assert str(failures[0]) == "force GC rollback"
+                assert stored["content"] == original
+        finally:
+            release_gc.set()
+            gc_thread.join(timeout=2)
+            writer_thread.join(timeout=2)
+            for engine in (gc_clone, writer_clone, prototype):
+                engine.shutdown()
+
+    def test_shared_lifecycle_reads_wait_for_path_lock(self, tmp_path):
+        prototype = self._engine(tmp_path)
+        clone = prototype.clone_for_agent()
+        started = threading.Event()
+        finished = threading.Event()
+        failures = []
+
+        def read_state():
+            try:
+                started.set()
+                clone._lifecycle.row_count()
+                clone._lifecycle.get_by_conversation("missing")
+                clone._lifecycle.get_by_session("missing")
+                clone._lifecycle.get_fragmentation_stats()
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                finished.set()
+
+        try:
+            with prototype._storage._operation_lock:
+                thread = threading.Thread(target=read_state)
+                thread.start()
+                assert started.wait(timeout=1)
+                assert not finished.wait(timeout=0.05)
+            thread.join(timeout=2)
+            assert finished.is_set()
+            assert failures == []
+        finally:
+            prototype.shutdown()
+            clone.shutdown()
+
+    def test_dag_delete_callback_runs_outside_path_lock(self, tmp_path):
+        prototype = self._engine(tmp_path)
+        prototype._dag.add_node(SummaryNode(session_id="delete", summary="node"))
+        callback_lock_state = []
+
+        def on_deleted_batch(_node_ids):
+            acquired = []
+
+            def acquire_lock():
+                with prototype._storage._operation_lock:
+                    acquired.append(True)
+
+            thread = threading.Thread(target=acquire_lock)
+            thread.start()
+            thread.join(timeout=1)
+            callback_lock_state.append(bool(acquired))
+
+        try:
+            assert prototype._dag.delete_session_nodes(
+                "delete", on_deleted_batch=on_deleted_batch
+            ) == 1
+            assert callback_lock_state == [True]
+        finally:
+            prototype.shutdown()
+
+    def test_concurrent_shutdown_releases_one_lease(self, tmp_path):
+        prototype = self._engine(tmp_path)
+        clone = prototype.clone_for_agent()
+        storage = prototype._storage
+        barrier = threading.Barrier(12)
+        threads = [
+            threading.Thread(target=lambda: (barrier.wait(), prototype.shutdown()))
+            for _ in range(12)
+        ]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            assert storage._owners == 1
+            clone._store.append("live", {"role": "user", "content": "still open"})
+            clone.shutdown()
+            assert storage._closed is True
+        finally:
+            prototype.shutdown()
+            clone.shutdown()
+
+    def test_clone_failure_rolls_back_acquired_lease(self, tmp_path, monkeypatch):
+        from hermes_lcm.engine import LCMEngine
+
+        prototype = self._engine(tmp_path)
+        storage = prototype._storage
+        prototype.raw_context_length = 1_000
+        prototype._context_length_source = "test"
+        monkeypatch.setattr(
+            LCMEngine,
+            "_set_context_length",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("copy failed")),
+        )
+        try:
+            with pytest.raises(RuntimeError, match="copy failed"):
+                prototype.clone_for_agent()
+            assert storage._owners == 1
+        finally:
+            prototype.shutdown()
+        assert storage._closed is True
+
+    def test_abandoned_clone_finalizer_releases_lease(self, tmp_path):
+        import gc
+        import weakref
+
+        prototype = self._engine(tmp_path)
+        storage = prototype._storage
+        clone = prototype.clone_for_agent()
+        clone_ref = weakref.ref(clone)
+        del clone
+        gc.collect()
+        try:
+            assert clone_ref() is None
+            assert storage._owners == 1
+        finally:
+            prototype.shutdown()
+        assert storage._closed is True
+
+    @staticmethod
+    def _open_fd_count() -> int:
+        import os
+
+        for fd_dir in ("/proc/self/fd", "/dev/fd"):
+            if os.path.isdir(fd_dir):
+                return len(os.listdir(fd_dir))
+        pytest.skip("no file-descriptor listing available on this platform")
+
+    def test_clone_churn_does_not_leak_fds(self, tmp_path):
+        # Warm up once so lazy imports/caches do not skew the baseline.
+        warmup = self._engine(tmp_path)
+        warmup.shutdown()
+
+        baseline = self._open_fd_count()
+        prototype = self._engine(tmp_path)
+        clones = []
+        try:
+            with_prototype = self._open_fd_count()
+
+            # Churn: repeatedly create and shut down clones.
+            for _ in range(10):
+                churn_clone = prototype.clone_for_agent()
+                churn_clone.shutdown()
+
+            # Hold live clones concurrently.
+            clones = [prototype.clone_for_agent() for _ in range(10)]
+            after_clones = self._open_fd_count()
+
+            # Clones share the prototype's storage bundle: zero new fds.
+            assert after_clones == with_prototype
+        finally:
+            for clone in clones:
+                clone.shutdown()
+            prototype.shutdown()
+
+        # Every descriptor opened by the engine family is returned.
+        assert self._open_fd_count() == baseline
+
+    def test_concurrent_clone_churn_is_thread_safe(self, tmp_path):
+        prototype = self._engine(tmp_path)
+        storage = prototype._storage
+        thread_count = 10
+        barrier = threading.Barrier(thread_count)
+        failures = []
+
+        def worker():
+            try:
+                barrier.wait()
+                for _ in range(10):
+                    clone = prototype.clone_for_agent()
+                    clone.shutdown()
+            except BaseException as exc:
+                failures.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(thread_count)]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            assert failures == []
+            # The prototype's lease survived the churn and storage still works.
+            assert storage._owners == 1
+            prototype._store.append("churn", {"role": "user", "content": "still open"})
+        finally:
+            prototype.shutdown()
+        assert storage._closed is True
 
 
 def test_like_fallback_relevance_prefers_multi_term_score_over_single_exact(tmp_path):

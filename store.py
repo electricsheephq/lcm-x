@@ -15,6 +15,7 @@ import math
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Collection, Dict, List, Optional
@@ -265,30 +266,26 @@ def build_message_fts_spec() -> ExternalContentFtsSpec:
 class MessageStore:
     """SQLite-backed immutable message store."""
 
-    def __init__(self, db_path: str | Path, *, ingest_protection_config=None, hermes_home: str = ""):
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        ingest_protection_config=None,
+        hermes_home: str = "",
+        db_lock: object | None = None,
+    ):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ingest_protection_config = ingest_protection_config or LCMConfig(database_path=str(self.db_path))
         self._hermes_home = hermes_home or str(self.db_path.parent)
         self._conn: Optional[sqlite3.Connection] = None
-        # ``self._conn`` is shared across threads (the connection is opened with
-        # ``check_same_thread=False``). SQLite's own C-level mutex serializes
-        # statements at the engine layer, but the Python ``sqlite3`` module
-        # releases the GIL while the C call runs. Under heavy thread contention
-        # with concurrent HTTPS clients in the same process, downstream
-        # operators have observed on-disk corruption that is consistent with
-        # external bytes landing inside SQLite's write path (e.g. the first
-        # 28 bytes of the database file replaced with a TLS record header +
-        # ciphertext while the "SQLit" magic remains intact).
-        #
-        # This re-entrant lock is defense-in-depth: it forces all write call
-        # sites that use ``self._conn`` to be serialized at the Python layer,
-        # eliminating any window where Python-side buffer reuse or memory
-        # aliasing could intersect SQLite's flush of a write. It does not
-        # change semantics for single-threaded callers and adds only a single
-        # uncontended ``RLock.acquire``/``release`` pair per operation.
-        self._write_lock = threading.RLock()
-        self._init_db()
+        # One canonical database path uses one lock across all helper bundles.
+        self._write_lock = db_lock or threading.RLock()
+        try:
+            self._init_db()
+        except BaseException:
+            self.close()
+            raise
 
     def _init_db(self):
         self._conn = sqlite3.connect(str(self.db_path), timeout=5.0, check_same_thread=False)
@@ -408,7 +405,7 @@ class MessageStore:
         observed_at = _normalize_observed_at(msg.get("timestamp"))
         ingested_at = time.time()
 
-        with self._write_lock:
+        with self._write_lock, self._conn:
             cur = self._conn.execute(
                 """INSERT INTO messages
                    (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
@@ -432,7 +429,6 @@ class MessageStore:
                     "host_message_timestamp" if observed_at is not None else None,
                 ),
             )
-            self._conn.commit()
             return cur.lastrowid
 
     def append_batch(self, session_id: str,
@@ -549,22 +545,20 @@ class MessageStore:
         """Move all persisted messages from one session_id to another."""
         if not old_session_id or not new_session_id or old_session_id == new_session_id:
             return 0
-        with self._write_lock:
+        with self._write_lock, self._conn:
             cur = self._conn.execute(
                 "UPDATE messages SET session_id = ? WHERE session_id = ?",
                 (new_session_id, old_session_id),
             )
-            self._conn.commit()
             return cur.rowcount if cur.rowcount is not None else 0
 
     def delete_session_messages(self, session_id: str) -> int:
         """Delete all messages for a session. Returns count deleted."""
-        with self._write_lock:
+        with self._write_lock, self._conn:
             cur = self._conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
                 (session_id,),
             )
-            self._conn.commit()
             deleted = cur.rowcount if cur.rowcount is not None else 0
             return deleted
 
@@ -584,7 +578,10 @@ class MessageStore:
         later batch archive would slice the new (short) content at the old chunk
         offsets, returning a garbled fragment (F2).
         """
-        with self._write_lock:
+        # The connection context owns commit/rollback before the shared lock is
+        # released. In particular, a failing ``before_commit`` callback must
+        # not leave this transaction pending for another clone to commit.
+        with self._write_lock, self._conn:
             row = self._conn.execute(
                 "SELECT role, pinned, content, tool_call_id FROM messages WHERE store_id = ?",
                 (store_id,),
@@ -607,24 +604,21 @@ class MessageStore:
             )
             if before_commit is not None:
                 before_commit(self._conn, store_id)
-            self._conn.commit()
             return True
 
     def pin(self, store_id: int) -> None:
 
         """Mark a message as pinned (protected from pruning)."""
-        with self._write_lock:
+        with self._write_lock, self._conn:
             self._conn.execute(
                 "UPDATE messages SET pinned = 1 WHERE store_id = ?", (store_id,)
             )
-            self._conn.commit()
 
     def unpin(self, store_id: int) -> None:
-        with self._write_lock:
+        with self._write_lock, self._conn:
             self._conn.execute(
                 "UPDATE messages SET pinned = 0 WHERE store_id = ?", (store_id,)
             )
-            self._conn.commit()
 
     # -- Read operations ----------------------------------------------------
 
@@ -1088,7 +1082,7 @@ class MessageStore:
         if conn is None:
             return False
         wrote = False
-        with self._write_lock:
+        with self._write_lock, conn:
             for key in keys:
                 if skip_unchanged:
                     existing = conn.execute(
@@ -1105,8 +1099,6 @@ class MessageStore:
                     (key, serialized),
                 )
                 wrote = True
-            if wrote:
-                conn.commit()
         return wrote
 
     # -- Compaction telemetry ------------------------------------------------
@@ -1717,20 +1709,28 @@ class MessageStore:
         """
         return self._conn
 
-    def rollback_pending_write(self) -> None:
-        """Roll back this store's transaction under its connection-owner lock."""
+    @contextmanager
+    def locked_connection(self):
+        """Yield the live connection for one complete externally-owned operation."""
         with self._write_lock:
-            if self._conn is not None and self._conn.in_transaction:
-                self._conn.rollback()
+            if self._conn is None:
+                raise RuntimeError("LCM message store is closed")
+            yield self._conn
 
-    def commit(self) -> None:
-        """Commit pending writes on the store connection.
+    def assert_transaction_idle(self) -> None:
+        """Refuse to cross an operation boundary with a pending transaction.
 
-        Used by the backup path's cross-connection flush so callers do not reach
-        the private connection. Requires a live connection: a closed store
-        raises, matching direct ``_conn.commit()`` use.
+        MessageStore write methods own commit or rollback before releasing the
+        shared connection lock. A pending transaction here therefore has no
+        safe clone owner and must never be committed or rolled back by a later
+        operation.
         """
-        self._conn.commit()
+        if self._conn is None:
+            raise RuntimeError("LCM message store is closed")
+        if self._conn.in_transaction:
+            raise RuntimeError(
+                "MessageStore transaction escaped its owning operation"
+            )
 
     def backup(self, dest: sqlite3.Connection) -> None:
         """Copy the store's database into the already-open ``dest`` connection.
@@ -1761,3 +1761,50 @@ class MessageStore:
             self.close()
         except Exception:
             pass
+
+
+def _synchronized(method):
+    """Serialize every operation on the shared SQLite connection."""
+    def locked(self, *args, **kwargs):
+        with self._write_lock:
+            return method(self, *args, **kwargs)
+
+    return locked
+
+
+for _method_name in (
+    "append",
+    "append_batch",
+    "_append_protected_batch",
+    "reassign_session_messages",
+    "delete_session_messages",
+    "gc_externalized_tool_result",
+    "pin",
+    "unpin",
+    "get",
+    "get_batch",
+    "scan_evidence_rows",
+    "get_range",
+    "count_session_load_messages",
+    "load_session_page",
+    "load_session_window",
+    "get_session_messages",
+    "get_session_messages_after",
+    "get_session_tail",
+    "get_session_count",
+    "get_session_token_total",
+    "get_source_stats",
+    "scan_session_cleanup_stats",
+    "scan_session_retention_stats",
+    "get_source_normalization_plan",
+    "normalize_legacy_blank_sources",
+    "get_time_bounds",
+    "read_metadata_json",
+    "write_metadata_json",
+    "assert_transaction_idle",
+    "backup",
+    "search",
+    "_search_like",
+    "close",
+):
+    setattr(MessageStore, _method_name, _synchronized(getattr(MessageStore, _method_name)))

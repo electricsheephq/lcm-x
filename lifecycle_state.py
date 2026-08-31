@@ -14,6 +14,7 @@ import functools
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -62,7 +63,7 @@ class LifecycleState:
 
 
 class LifecycleStateStore:
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, *, db_lock: Any | None = None):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: Optional[sqlite3.Connection] = None
@@ -70,8 +71,12 @@ class LifecycleStateStore:
         # and is shared across the gateway thread, dispatcher, and sub-agents.
         # Serialize read-modify-write flows so concurrent binds/frontier
         # advances cannot interleave and regress the checkpoint.
-        self._lock = threading.RLock()
-        self._init_db()
+        self._lock = db_lock or threading.RLock()
+        try:
+            self._init_db()
+        except BaseException:
+            self.close()
+            raise
 
     def _init_db(self) -> None:
         self._conn = sqlite3.connect(
@@ -87,14 +92,15 @@ class LifecycleStateStore:
         self._conn.commit()
 
     def close(self) -> None:
-        conn = getattr(self, "_conn", None)
-        if conn is not None:
-            try:
-                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            except sqlite3.Error:
-                pass
-            conn.close()
-            self._conn = None
+        with self._lock:
+            conn = getattr(self, "_conn", None)
+            if conn is not None:
+                try:
+                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                except sqlite3.Error:
+                    pass
+                conn.close()
+                self._conn = None
 
     def __del__(self) -> None:  # pragma: no cover - defensive resource cleanup
         try:
@@ -113,6 +119,15 @@ class LifecycleStateStore:
         """
         return getattr(self, "_conn", None)
 
+    @contextmanager
+    def locked_connection(self):
+        """Yield the live connection for one complete externally-owned operation."""
+        with self._lock:
+            if self._conn is None:
+                raise RuntimeError("LCM lifecycle store is closed")
+            yield self._conn
+
+    @_synchronized
     def row_count(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) AS count FROM lcm_lifecycle_state").fetchone()
         return int(row["count"] if row else 0)
@@ -137,6 +152,7 @@ class LifecycleStateStore:
             updated_at=float(row["updated_at"] or 0.0),
         )
 
+    @_synchronized
     def get_by_conversation(self, conversation_id: str | None) -> LifecycleState | None:
         if not conversation_id:
             return None
@@ -146,6 +162,7 @@ class LifecycleStateStore:
         ).fetchone()
         return self._row_to_state(row)
 
+    @_synchronized
     def get_by_session(self, session_id: str | None) -> LifecycleState | None:
         if not session_id:
             return None
@@ -378,6 +395,7 @@ class LifecycleStateStore:
         assert updated is not None
         return updated
 
+    @_synchronized
     def get_fragmentation_stats(self, state_db_path: str | Path | None = None) -> dict[str, Any]:
         """Return read-only lifecycle/session fragmentation diagnostics.
 
@@ -635,6 +653,7 @@ class LifecycleStateStore:
         self._conn.commit()
         return self.get_by_conversation(conversation_id)
 
+    @_synchronized
     def clear_debt(self, conversation_id: str | None) -> LifecycleState | None:
         if not conversation_id:
             return None
@@ -817,6 +836,7 @@ class LifecycleStateStore:
             conn.rollback()
             raise
 
+    @_synchronized
     def delete_safe_rows_for_sessions(
         self,
         session_ids: set[str] | list[str] | tuple[str, ...],

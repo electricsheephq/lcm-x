@@ -335,7 +335,10 @@ def _retrieval_candidate_session_ids(
         return None, False
     # Liveness gate only. The enumeration itself runs on its OWN connection
     # (below); a closed store still means "no eligible session", fail closed.
-    if engine._store.connection is None:
+    try:
+        with engine._store.locked_connection():
+            pass
+    except RuntimeError:
         return [], False
     # An already-lapsed budget fails closed before any DB work: the progress
     # handler only fires every N opcodes, so a short query could otherwise slip
@@ -2718,11 +2721,10 @@ def _session_has_window_content(
     the window (earliest < end AND latest >= start), matching the leaf-fallback's
     overlap semantics rather than newest-timestamp-only.
     """
-    connection = engine._dag.connection
-    if connection is None or not session_id:
+    if not session_id:
         return False
     try:
-        with engine._dag._db_lock:
+        with engine._dag.locked_connection() as connection:
             row = connection.execute(
                 """
                 SELECT 1
@@ -2821,16 +2823,14 @@ def _recent_leaf_sections(
     limit: int,
 ) -> list[dict[str, Any]]:
     """Load fallback nodes without retaining their TEMP-staging snapshot."""
-    with engine._dag._db_lock:
-        connection = engine._dag.connection
-        if connection is None:
-            return []
+    with engine._dag.locked_connection() as connection:
         with _sqlite_savepoint(connection):
             return _recent_leaf_sections_staged(
                 engine,
                 window,
                 requested_scope,
                 limit,
+                connection,
             )
 
 
@@ -2839,10 +2839,8 @@ def _recent_leaf_sections_staged(
     window: RecentPeriodWindow,
     requested_scope: str,
     limit: int,
+    connection: sqlite3.Connection,
 ) -> list[dict[str, Any]]:
-    connection = engine._dag.connection
-    if connection is None:
-        return []
     # Include retained higher-depth/carry-forward summaries, not just depth-0
     # current-session leaves, mirroring how lcm_grep/describe select across
     # depths and retained lineage (maintainer #389 blocker 2).
@@ -7358,9 +7356,13 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
 
 def _summary_quality_stats(engine: "LCMEngine", session_id: str) -> dict[str, Any]:
     """Return read-only summary compression quality diagnostics for one session."""
-    conn = engine._dag.connection
-    if conn is None:
-        raise RuntimeError("LCM DAG connection is not initialized")
+    with engine._dag.locked_connection() as conn:
+        return _summary_quality_stats_locked(session_id, conn)
+
+
+def _summary_quality_stats_locked(
+    session_id: str, conn: sqlite3.Connection
+) -> dict[str, Any]:
     rows = conn.execute(
         """
         SELECT node_id, session_id, depth, token_count, source_token_count
@@ -7526,8 +7528,17 @@ def _inspect_lifecycle_state(engine: "LCMEngine", session_id: str, conversation_
 
 
 def _inspect_highest_compacted_source_store_id(engine: "LCMEngine", session_id: str) -> int:
+    with engine._dag.locked_connection() as connection:
+        return _inspect_highest_compacted_source_store_id_locked(
+            connection, session_id
+        )
+
+
+def _inspect_highest_compacted_source_store_id_locked(
+    connection: sqlite3.Connection, session_id: str
+) -> int:
     highest = 0
-    rows = engine._dag.connection.execute(
+    rows = connection.execute(
         """
         SELECT source_ids
         FROM summary_nodes
@@ -7741,9 +7752,19 @@ def _temporal_rollups_status(engine: "LCMEngine") -> dict[str, Any]:
     if not enabled or not scope:
         return payload
 
-    conn = engine._dag.connection
-    if conn is None:
+    try:
+        with engine._dag.locked_connection() as conn:
+            return _temporal_rollups_status_locked(engine, payload, scope, conn)
+    except RuntimeError:
         return payload
+
+
+def _temporal_rollups_status_locked(
+    engine: "LCMEngine",
+    payload: dict[str, Any],
+    scope: str,
+    conn: sqlite3.Connection,
+) -> dict[str, Any]:
     try:
         rows = conn.execute(
             """
@@ -7852,14 +7873,15 @@ def lcm_inspect(args: Dict[str, Any], **kwargs) -> str:
     runtime_identity = full_status.get("runtime_identity") or engine.get_runtime_identity()
     lifecycle = _inspect_lifecycle_state(engine, session_id, conversation_id)
 
-    store_totals_row = engine._store.connection.execute(
-        """
-        SELECT COUNT(*), MIN(store_id), MAX(store_id), COALESCE(SUM(token_estimate), 0)
-        FROM messages
-        WHERE session_id = ?
-        """,
-        (session_id,),
-    ).fetchone()
+    with engine._store.locked_connection() as connection:
+        store_totals_row = connection.execute(
+            """
+            SELECT COUNT(*), MIN(store_id), MAX(store_id), COALESCE(SUM(token_estimate), 0)
+            FROM messages
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
     message_total = int(store_totals_row[0] or 0) if store_totals_row else 0
     min_store_id = store_totals_row[1] if store_totals_row else None
     max_store_id = store_totals_row[2] if store_totals_row else None
@@ -7876,17 +7898,18 @@ def lcm_inspect(args: Dict[str, Any], **kwargs) -> str:
     total_dag_nodes = sum(info["count"] for info in depth_stats.values())
     total_dag_tokens = sum(info["tokens"] for info in depth_stats.values())
     total_dag_source_tokens = sum(info["source_tokens"] for info in depth_stats.values())
-    latest_node_rows = engine._dag.connection.execute(
-        """
-        SELECT node_id, session_id, depth, token_count, source_token_count,
-               source_type, created_at, earliest_at, latest_at, expand_hint
-        FROM summary_nodes
-        WHERE session_id = ?
-        ORDER BY created_at DESC, node_id DESC
-        LIMIT ?
-        """,
-        (session_id, limit),
-    ).fetchall()
+    with engine._dag.locked_connection() as connection:
+        latest_node_rows = connection.execute(
+            """
+            SELECT node_id, session_id, depth, token_count, source_token_count,
+                   source_type, created_at, earliest_at, latest_at, expand_hint
+            FROM summary_nodes
+            WHERE session_id = ?
+            ORDER BY created_at DESC, node_id DESC
+            LIMIT ?
+            """,
+            (session_id, limit),
+        ).fetchall()
     latest_nodes = [
         {
             "node_id": int(row[0]),
@@ -8160,7 +8183,8 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
 
     # 1. Database integrity
     try:
-        result = engine._store.connection.execute("PRAGMA integrity_check").fetchone()
+        with engine._store.locked_connection() as connection:
+            result = connection.execute("PRAGMA integrity_check").fetchone()
         ok = result and result[0] == "ok"
         checks.append({
             "check": "database_integrity",
@@ -8210,13 +8234,11 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     })
 
     try:
-        conn = engine._store.connection
-        if conn is None:
-            raise RuntimeError("LCM store connection is not initialized")
-        schema_health = inspect_lcm_schema_health(
-            conn,
-            database_path=str(engine._store.db_path),
-        )
+        with engine._store.locked_connection() as connection:
+            schema_health = inspect_lcm_schema_health(
+                connection,
+                database_path=str(engine._store.db_path),
+            )
         missing_tables = schema_health.get("missing_tables")
         has_missing = isinstance(missing_tables, list) and bool(missing_tables)
         checks.append({
@@ -8233,68 +8255,83 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
 
     # 1b. FTS5 integrity, separated from generic SQLite integrity so malformed
     # inverted indexes point at the exact table and repair path.
-    for check_name, conn, spec in (
-        ("messages_fts_integrity", engine._store.connection, build_message_fts_spec()),
-        ("nodes_fts_integrity", engine._dag.connection, build_nodes_fts_spec()),
-    ):
-        try:
-            fts_integrity = check_external_content_fts_integrity(conn, spec)
-            status = fts_integrity["status"]
-            checks.append({
-                "check": check_name,
-                "status": "warn" if status == "unchecked" else status,
-                "detail": fts_integrity if status == "unchecked" else fts_integrity["detail"],
-            })
-        except Exception as e:
-            checks.append({
-                "check": check_name,
-                "status": "fail",
-                "detail": str(e),
-            })
-        # A prior non-blocking background integrity scan records a persisted
-        # ``fts_integrity_failed:<table>`` flag when it finds corruption
-        # without rebuilding. Surface it even when this run's live check is
-        # throttled/unchecked, mirroring the /lcm doctor text path.
-        try:
-            failed_flag = load_integrity_failed(conn, spec)
-        except Exception:  # pragma: no cover - defensive
-            failed_flag = None
-        if failed_flag:
-            checks.append({
-                "check": f"{check_name}_background_flag",
-                "status": "fail",
-                "detail": {
-                    "flagged_at": failed_flag.get("at"),
-                    "detail": failed_flag.get("detail"),
-                    "guidance": "background integrity scan flagged this index; run `/lcm doctor repair apply`",
-                },
-            })
+    with engine._store.locked_connection() as store_connection:
+        with engine._dag.locked_connection() as dag_connection:
+            for check_name, connection, spec in (
+                (
+                    "messages_fts_integrity",
+                    store_connection,
+                    build_message_fts_spec(),
+                ),
+                (
+                    "nodes_fts_integrity",
+                    dag_connection,
+                    build_nodes_fts_spec(),
+                ),
+            ):
+                try:
+                    fts_integrity = check_external_content_fts_integrity(
+                        connection, spec
+                    )
+                    status = fts_integrity["status"]
+                    checks.append({
+                        "check": check_name,
+                        "status": "warn" if status == "unchecked" else status,
+                        "detail": fts_integrity if status == "unchecked" else fts_integrity["detail"],
+                    })
+                except Exception as e:
+                    checks.append({
+                        "check": check_name,
+                        "status": "fail",
+                        "detail": str(e),
+                    })
+                # A prior non-blocking background integrity scan records a persisted
+                # ``fts_integrity_failed:<table>`` flag when it finds corruption
+                # without rebuilding. Surface it even when this run's live check is
+                # throttled/unchecked, mirroring the /lcm doctor text path.
+                try:
+                    failed_flag = load_integrity_failed(connection, spec)
+                except Exception:  # pragma: no cover - defensive
+                    failed_flag = None
+                if failed_flag:
+                    checks.append({
+                        "check": f"{check_name}_background_flag",
+                        "status": "fail",
+                        "detail": {
+                            "flagged_at": failed_flag.get("at"),
+                            "detail": failed_flag.get("detail"),
+                            "guidance": "background integrity scan flagged this index; run `/lcm doctor repair apply`",
+                        },
+                    })
 
     # 2. SQLite storage posture and payload diagnostics
     try:
-        journal_mode_row = engine._store.connection.execute("PRAGMA journal_mode").fetchone()
-        quick_check_row = engine._store.connection.execute("PRAGMA quick_check").fetchone()
-        db_path = Path(engine._store.db_path)
-        wal_path = Path(str(db_path) + "-wal")
-        checks.append({
-            "check": "sqlite_storage",
-            "status": "pass" if quick_check_row and quick_check_row[0] == "ok" else "fail",
-            "detail": {
-                "database_path": str(db_path),
-                "database_exists": db_path.exists(),
-                "journal_mode": journal_mode_row[0] if journal_mode_row else "unknown",
-                "quick_check": quick_check_row[0] if quick_check_row else "unknown",
-                "database_size_bytes": db_path.stat().st_size if db_path.exists() else 0,
-                "wal_size_bytes": wal_path.stat().st_size if wal_path.exists() else 0,
-            },
-        })
-        payload_risks = scan_sqlite_payload_risks(engine._store.connection)
-        externalized_stats = externalized_payload_stats(engine._config, hermes_home=engine._hermes_home)
-        externalized_integrity = scan_externalized_payload_integrity(
-            engine._store.connection,
-            engine._config,
-            hermes_home=engine._hermes_home,
-        )
+        with engine._store.locked_connection() as connection:
+            journal_mode_row = connection.execute("PRAGMA journal_mode").fetchone()
+            quick_check_row = connection.execute("PRAGMA quick_check").fetchone()
+            db_path = Path(engine._store.db_path)
+            wal_path = Path(str(db_path) + "-wal")
+            checks.append({
+                "check": "sqlite_storage",
+                "status": "pass" if quick_check_row and quick_check_row[0] == "ok" else "fail",
+                "detail": {
+                    "database_path": str(db_path),
+                    "database_exists": db_path.exists(),
+                    "journal_mode": journal_mode_row[0] if journal_mode_row else "unknown",
+                    "quick_check": quick_check_row[0] if quick_check_row else "unknown",
+                    "database_size_bytes": db_path.stat().st_size if db_path.exists() else 0,
+                    "wal_size_bytes": wal_path.stat().st_size if wal_path.exists() else 0,
+                },
+            })
+            payload_risks = scan_sqlite_payload_risks(connection)
+            externalized_stats = externalized_payload_stats(
+                engine._config, hermes_home=engine._hermes_home
+            )
+            externalized_integrity = scan_externalized_payload_integrity(
+                connection,
+                engine._config,
+                hermes_home=engine._hermes_home,
+            )
         suspicious_count = (
             len(payload_risks["suspicious_data_uri_content_rows"])
             + len(payload_risks["suspicious_data_uri_tool_calls_rows"])
@@ -8340,18 +8377,19 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
 
     # 3. FTS index sync
     try:
-        msg_count = engine._store.connection.execute(
-            "SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)
-        ).fetchone()[0]
-        fts_count = engine._store.connection.execute(
-            """
-            SELECT COUNT(*)
-            FROM messages_fts
-            JOIN messages ON messages_fts.rowid = messages.store_id
-            WHERE messages.session_id = ?
-            """,
-            (session_id,),
-        ).fetchone()[0]
+        with engine._store.locked_connection() as connection:
+            msg_count = connection.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)
+            ).fetchone()[0]
+            fts_count = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM messages_fts
+                JOIN messages ON messages_fts.rowid = messages.store_id
+                WHERE messages.session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()[0]
         checks.append({
             "check": "fts_index_sync",
             "status": "pass" if fts_count >= msg_count else "warn",

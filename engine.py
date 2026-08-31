@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import copy
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ import sqlite3
 import threading
 import time
 import uuid
+import weakref
 from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
@@ -376,6 +378,158 @@ def _normalize_total_compactions(value: Any) -> int:
     return value
 
 
+_STORAGE_REGISTRY_LOCK = threading.RLock()
+_STORAGE_LOCK_BY_DB_PATH: weakref.WeakValueDictionary[Path, threading.RLock] = (
+    weakref.WeakValueDictionary()
+)
+
+
+def _storage_lock_for(db_path: str | Path) -> threading.RLock:
+    """Return the process-wide operation lock for one canonical database."""
+    canonical_path = Path(db_path).expanduser().resolve()
+    with _STORAGE_REGISTRY_LOCK:
+        return _STORAGE_LOCK_BY_DB_PATH.setdefault(canonical_path, threading.RLock())
+
+
+class _SharedStorage:
+    """Reference-counted SQLite helpers shared by engines using one database."""
+
+    def __init__(self, db_path: str | Path, config: LCMConfig, hermes_home: str):
+        # Keep SQLite connection targets byte-for-byte meaningful. In
+        # particular, resolving ``:memory:`` would turn the sentinel into a
+        # persistent ``<cwd>/:memory:`` file. Only the process-lock registry
+        # needs a canonical filesystem identity.
+        self.db_path = Path(db_path).expanduser()
+        self._lock = threading.RLock()
+        self._operation_lock = _storage_lock_for(db_path)
+        self._owners = 0
+        self._closing = False
+        self._closed = False
+        self.store = self.dag = self.lifecycle = self.assertions = self.query_views = None
+        helpers = []
+        try:
+            # Constructors perform schema and WAL setup. Independent engines for
+            # one database must not race before their operation locks take over.
+            with self._operation_lock:
+                self.store = MessageStore(
+                    self.db_path,
+                    ingest_protection_config=config,
+                    hermes_home=hermes_home,
+                    db_lock=self._operation_lock,
+                )
+                helpers.append(self.store)
+                self.dag = SummaryDAG(self.db_path, db_lock=self._operation_lock)
+                helpers.append(self.dag)
+                if config.temporal_rollups_enabled:
+                    initialize_rollup_invalidation_outbox(self.dag)
+                self.lifecycle = LifecycleStateStore(
+                    self.db_path, db_lock=self._operation_lock
+                )
+                helpers.append(self.lifecycle)
+                if bool(getattr(config, "assertions_enabled", False)):
+                    self.assertions = AssertionStore(
+                        self.db_path, db_lock=self._operation_lock
+                    )
+                    helpers.append(self.assertions)
+                if bool(getattr(config, "query_views_enabled", False)) or bool(
+                    getattr(config, "adaptive_retrieval_enabled", False)
+                ):
+                    self.query_views = QueryViewStore(
+                        self.db_path, db_lock=self._operation_lock
+                    )
+                    helpers.append(self.query_views)
+        except BaseException:
+            for helper in reversed(helpers):
+                try:
+                    helper.close()
+                except BaseException:
+                    pass
+            raise
+
+    def acquire(self) -> "_SharedStorage":
+        # Increment the owner count. A closed or closing bundle must never be
+        # re-acquired: its SQLite helpers are (or are about to be) closed.
+        with self._lock:
+            if self._closed or self._closing:
+                raise RuntimeError("cannot acquire closed LCM storage")
+            self._owners += 1
+        return self
+
+    def release(self) -> None:
+        # Decrement the owner count; only the last release triggers teardown.
+        with self._lock:
+            if self._owners <= 0:
+                return
+            self._owners -= 1
+            if self._owners:
+                return  # Other engines still share this bundle; keep it open.
+            self._closing = True  # Last owner: block new acquires, then close.
+
+        failures: list[BaseException] = []
+        try:
+            # Teardown is one path-scoped operation: no independent bundle may
+            # initialize or use a same-database helper between these closes.
+            with self._operation_lock:
+                for attr in (
+                    "store",
+                    "dag",
+                    "lifecycle",
+                    "assertions",
+                    "query_views",
+                ):
+                    helper = getattr(self, attr)
+                    close = getattr(helper, "close", None)
+                    if callable(close):
+                        try:
+                            close()
+                        except BaseException as exc:
+                            failures.append(exc)
+                        else:
+                            setattr(self, attr, None)
+        finally:
+            with self._lock:
+                if failures:
+                    # Keep one non-acquirable retry lease. The releasing
+                    # ownership object restores its reference when this raises,
+                    # so an explicit second shutdown can retry failed helpers.
+                    self._owners = 1
+                else:
+                    self._closing = False
+                    self._closed = True
+        if failures:
+            raise BaseExceptionGroup("LCM storage close failed", failures)
+
+
+class _StorageOwnership:
+    """One idempotent storage lease for explicit and finalizer cleanup."""
+
+    def __init__(self, storage: _SharedStorage):
+        self._storage: _SharedStorage | None = storage
+        self._lock = threading.Lock()
+
+    def release(self) -> None:
+        with self._lock:
+            storage = self._storage
+            if storage is None:
+                return
+            self._storage = None
+        try:
+            storage.release()
+        except BaseException:
+            with self._lock:
+                if self._storage is None:
+                    self._storage = storage
+            raise
+
+
+def _release_storage_finalizer(ownership: _StorageOwnership) -> None:
+    """Best-effort GC fallback; explicit shutdown remains the retryable path."""
+    try:
+        ownership.release()
+    except BaseException:
+        logger.warning("LCM storage finalizer cleanup failed", exc_info=True)
+
+
 class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessionMixin, PlaceholderLedgerMixin, BypassMixin, ContextEngine):
     """Lossless Context Management engine.
 
@@ -394,13 +548,26 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
       5. Active context = system prompt + DAG summaries + fresh tail
     """
 
-    def __init__(self, config: LCMConfig | None = None,
-                 hermes_home: str = ""):
+    def __init__(
+        self,
+        config: LCMConfig | None = None,
+        hermes_home: str = "",
+        *,
+        _storage: _SharedStorage | None = None,
+    ):
         self._config = config or LCMConfig.from_env()
         self._hermes_home = hermes_home
         self._stable_use_lock = threading.Lock()
         self._stable_use_owner_thread: int | None = None
         self._stable_use_closed = False
+        self._shutdown_cleanup_pending = False
+        self._storage: _SharedStorage | None = None
+        self._ownership: _StorageOwnership | None = None
+        self._ownership_lock = threading.Lock()
+        self._ownership_finalizer: weakref.finalize | None = None
+        self._retired_storage_ownerships: list[
+            tuple[_StorageOwnership, weakref.finalize | None]
+        ] = []
         self._assertion_extraction_metrics_lock = threading.RLock()
         self._assertion_extraction_idle = threading.Event()
         self._assertion_extraction_idle.set()
@@ -415,9 +582,6 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         self._assertion_extraction_last_duration_ms = 0.0
         self._assertion_extraction_last_error = ""
         self._assertion_extraction_last_model = ""
-
-        db_path = self._resolve_db_path(hermes_home)
-        self._bind_storage(db_path, hermes_home)
 
         self._session_id: str = ""
         self._session_platform: str = ""
@@ -671,6 +835,15 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         # diagnostic drains do not retain every historical session key forever.
         self._rollup_maintenance_owner = object()
 
+        # Storage acquisition comes last. Pattern compilation and the other
+        # fallible runtime initialization above therefore cannot strand a
+        # reference-counted lease before clone_for_agent() gets a clone object
+        # it can deterministically clean up.
+        if _storage is None:
+            self._bind_storage(self._resolve_db_path(hermes_home), hermes_home)
+        else:
+            self._adopt_storage(_storage.acquire())
+
     def clone_for_agent(self) -> "LCMEngine":
         """Return a fresh runtime engine for one AIAgent instance.
 
@@ -681,41 +854,77 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         sharing one registered instance across agents can let one conversation
         rebind another conversation's raw-message ingest and lifecycle state.
 
-        The clone shares the same durable SQLite database path/configuration,
+        The clone shares the process-owned SQLite storage helpers,
         but gets independent session/cursor/lifecycle runtime state. Runtime
         model and context-window metadata is copied so the clone is immediately
         budget-aware even before a compatible Hermes host calls update_model().
         """
-        clone = type(self)(
-            config=copy.deepcopy(self._config),
-            hermes_home=self._hermes_home,
-        )
-        clone.model = self.model
-        clone.base_url = self.base_url
-        clone.api_key = self.api_key
-        clone.provider = self.provider
-        clone.api_mode = self.api_mode
-        if self._context_length_source:
-            clone._set_context_length(
-                self.raw_context_length,
-                source=self._context_length_source,
-                model=self.model,
-                provider=self.provider,
+        with self._exclusive_lifecycle("clone"):
+            if self._stable_use_closed:
+                raise RuntimeError("cannot clone an LCM engine after it has shut down")
+            storage = self._storage
+            if storage is None:
+                raise RuntimeError("cannot clone an LCM engine without bound storage")
+            clone_type = type(self)
+            clone_config = copy.deepcopy(self._config)
+            try:
+                parameters = inspect.signature(clone_type.__init__).parameters
+            except (TypeError, ValueError):
+                parameters = {}
+            accepts_storage = (
+                "_storage" in parameters
+                or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters.values()
+                )
             )
-        elif self.raw_context_length or self.context_length:
-            clone._set_context_length(
-                self.raw_context_length or self.context_length,
-                source="clone_for_agent",
-                model=self.model,
-                provider=self.provider,
-            )
-        # ``update_model()`` authority is a per-runtime lifecycle edge, not
-        # durable metadata.  Compatible hosts call update_model() on the clone
-        # before binding it; hosts that bind only through on_session_start()
-        # must still be able to replace the copied prototype route.
-        clone._update_model_pending_session_start = False
-        clone._lcm_current_start_allows_bypass_lineage = False
-        return clone
+            if accepts_storage:
+                clone = clone_type(
+                    config=clone_config,
+                    hermes_home=self._hermes_home,
+                    _storage=storage,
+                )
+            else:
+                # Backward compatibility for subclasses that implemented the
+                # historical (config, hermes_home) constructor contract.  Let
+                # the subclass initialize its own state, then atomically swap
+                # its temporary bundle for this clone family's shared bundle.
+                clone = clone_type(
+                    config=clone_config,
+                    hermes_home=self._hermes_home,
+                )
+            if clone._storage is not storage:
+                clone._install_storage_replacement(storage.acquire())
+            try:
+                clone.model = self.model
+                clone.base_url = self.base_url
+                clone.api_key = self.api_key
+                clone.provider = self.provider
+                clone.api_mode = self.api_mode
+                if self._context_length_source:
+                    clone._set_context_length(
+                        self.raw_context_length,
+                        source=self._context_length_source,
+                        model=self.model,
+                        provider=self.provider,
+                    )
+                elif self.raw_context_length or self.context_length:
+                    clone._set_context_length(
+                        self.raw_context_length or self.context_length,
+                        source="clone_for_agent",
+                        model=self.model,
+                        provider=self.provider,
+                    )
+                # ``update_model()`` authority is a per-runtime lifecycle edge, not
+                # durable metadata. Compatible hosts call update_model() on the clone
+                # before binding it; hosts that bind only through on_session_start()
+                # must still be able to replace the copied prototype route.
+                clone._update_model_pending_session_start = False
+                clone._lcm_current_start_allows_bypass_lineage = False
+                return clone
+            except BaseException:
+                clone._close_storage()
+                raise
 
     def __deepcopy__(self, memo: dict[int, object]) -> "LCMEngine":
         """Copy the plugin runtime without pickling SQLite-backed helpers.
@@ -724,8 +933,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         AIAgent instances. A default object deepcopy walks into MessageStore,
         SummaryDAG, and LifecycleStateStore sqlite3.Connection handles, which
         cannot be pickled. LCM already exposes clone_for_agent() as the safe
-        boundary: share durable configuration/database path, but allocate fresh
-        per-agent runtime/storage helper objects.
+        boundary: share durable storage, but allocate fresh per-agent runtime
+        state.
         """
         clone = self.clone_for_agent()
         memo[id(self)] = clone
@@ -739,72 +948,155 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             return Path(hermes_home) / "lcm.db"
         return Path.home() / ".hermes" / "lcm.db"
 
-    def _bind_storage(self, db_path: str | Path, hermes_home: str = "") -> None:
-        """Bind store/DAG/lifecycle helpers to one SQLite database."""
-        self._assertions = None
-        self._query_views = None
-        self._adaptive_retrieval = None
-        self._assertion_extractor = None
+    def _adopt_storage(self, storage: _SharedStorage) -> None:
+        ownership = _StorageOwnership(storage)
+        self._storage = storage
+        self._ownership = ownership
         try:
-            self._store = MessageStore(
-                db_path,
-                ingest_protection_config=self._config,
-                hermes_home=hermes_home,
-            )
-            self._dag = SummaryDAG(db_path)
-            if self._config.temporal_rollups_enabled:
-                # Install the transaction-coupled summary mutation triggers before
-                # this engine can publish or delete a DAG node.
-                initialize_rollup_invalidation_outbox(self._dag)
-            self._lifecycle = LifecycleStateStore(db_path)
-            self._assertions = (
-                AssertionStore(db_path)
-                if bool(getattr(self._config, "assertions_enabled", False))
-                else None
-            )
-            self._query_views = (
-                QueryViewStore(db_path)
-                if bool(getattr(self._config, "query_views_enabled", False))
-                or bool(getattr(self._config, "adaptive_retrieval_enabled", False))
-                else None
-            )
+            self._store = storage.store
+            self._dag = storage.dag
+            self._lifecycle = storage.lifecycle
+            self._assertions = storage.assertions
+            self._query_views = storage.query_views
             self._adaptive_retrieval = (
                 AdaptiveRetrievalRegistry(self._query_views)
-                if bool(
-                    getattr(self._config, "adaptive_retrieval_enabled", False)
-                )
+                if bool(getattr(self._config, "adaptive_retrieval_enabled", False))
                 else None
             )
-            if (
-                self._assertions is not None
-                and bool(getattr(self._config, "assertion_extraction_enabled", False))
+            self._assertion_extractor = None
+            if self._assertions is not None and bool(
+                getattr(self._config, "assertion_extraction_enabled", False)
             ):
                 self._assertion_extractor = ModelAssertionExtractor(
                     self._assertions,
                     model=self._assertion_extraction_model(),
                     timeout_seconds=self._assertion_extraction_timeout(),
                 )
-        except Exception:
-            self._close_storage()
+        except BaseException:
+            self._storage = None
+            self._ownership = None
+            ownership.release()
+            raise
+        self._ownership_finalizer = weakref.finalize(
+            self, _release_storage_finalizer, ownership
+        )
+
+    def _install_storage_replacement(self, replacement: _SharedStorage) -> None:
+        """Install one acquired bundle before releasing the current lease."""
+        replacement_ownership = _StorageOwnership(replacement)
+        try:
+            replacement_adaptive = (
+                AdaptiveRetrievalRegistry(replacement.query_views)
+                if bool(getattr(self._config, "adaptive_retrieval_enabled", False))
+                else None
+            )
+            replacement_extractor = None
+            if replacement.assertions is not None and bool(
+                getattr(self._config, "assertion_extraction_enabled", False)
+            ):
+                replacement_extractor = ModelAssertionExtractor(
+                    replacement.assertions,
+                    model=self._assertion_extraction_model(),
+                    timeout_seconds=self._assertion_extraction_timeout(),
+                )
+        except BaseException:
+            replacement_ownership.release()
             raise
 
+        with self._ownership_lock:
+            old_ownership = self._ownership
+            old_finalizer = self._ownership_finalizer
+            old_adaptive = getattr(self, "_adaptive_retrieval", None)
+            self._storage = replacement
+            self._ownership = replacement_ownership
+            self._store = replacement.store
+            self._dag = replacement.dag
+            self._lifecycle = replacement.lifecycle
+            self._assertions = replacement.assertions
+            self._query_views = replacement.query_views
+            self._adaptive_retrieval = replacement_adaptive
+            self._assertion_extractor = replacement_extractor
+            self._ownership_finalizer = weakref.finalize(
+                self, _release_storage_finalizer, replacement_ownership
+            )
+        if old_adaptive is not None:
+            try:
+                old_adaptive.close()
+            except BaseException:
+                logger.warning(
+                    "LCM failed to clear replaced adaptive retrieval state",
+                    exc_info=True,
+                )
+        if old_ownership is not None:
+            try:
+                old_ownership.release()
+            except BaseException:
+                # The replacement is already complete and usable. Preserve the
+                # old retryable lease (and its GC finalizer) so shutdown can
+                # finish a transient helper-close failure without rolling the
+                # live engine back to half-released storage.
+                with self._ownership_lock:
+                    self._retired_storage_ownerships.append(
+                        (old_ownership, old_finalizer)
+                    )
+                logger.warning(
+                    "LCM deferred cleanup of replaced storage until shutdown",
+                    exc_info=True,
+                )
+            else:
+                if old_finalizer is not None:
+                    old_finalizer.detach()
+
+    def _replace_storage(self, db_path: str | Path, hermes_home: str) -> None:
+        """Install a fully initialized replacement before releasing the old lease."""
+        replacement = _SharedStorage(db_path, self._config, hermes_home).acquire()
+        self._install_storage_replacement(replacement)
+
+    def _bind_storage(self, db_path: str | Path, hermes_home: str = "") -> None:
+        """Bind a new clone-family bundle using the lock for ``db_path``."""
+        self._adopt_storage(_SharedStorage(db_path, self._config, hermes_home).acquire())
+
     def _close_storage(self) -> None:
-        """Best-effort close of currently bound SQLite helpers."""
-        for attr in (
-            "_adaptive_retrieval",
-            "_store",
-            "_dag",
-            "_lifecycle",
-            "_assertions",
-            "_query_views",
-        ):
-            helper = getattr(self, attr, None)
-            close = getattr(helper, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    logger.debug("LCM failed closing %s during profile rebind", attr, exc_info=True)
+        """Atomically detach and release this engine's storage lease."""
+        with self._ownership_lock:
+            ownership = self._ownership
+            if ownership is None:
+                return
+            finalizer = self._ownership_finalizer
+        ownership.release()
+        with self._ownership_lock:
+            if self._ownership is not ownership:
+                return
+            self._ownership = None
+            self._storage = None
+            self._ownership_finalizer = None
+        if finalizer is not None:
+            finalizer.detach()
+
+    def _close_retired_storage(self) -> None:
+        """Retry cleanup for replaced bundles whose final close once failed."""
+        with self._ownership_lock:
+            retired = self._retired_storage_ownerships
+            self._retired_storage_ownerships = []
+        failures: list[BaseException] = []
+        retry: list[tuple[_StorageOwnership, weakref.finalize | None]] = []
+        for ownership, finalizer in retired:
+            try:
+                ownership.release()
+            except BaseException as exc:
+                failures.append(exc)
+                retry.append((ownership, finalizer))
+            else:
+                if finalizer is not None:
+                    finalizer.detach()
+        if retry:
+            with self._ownership_lock:
+                self._retired_storage_ownerships.extend(retry)
+        if failures:
+            raise BaseExceptionGroup(
+                "LCM replaced storage close failed",
+                failures,
+            )
 
     def _assertion_extraction_model(self) -> str:
         return str(
@@ -883,10 +1175,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             current_store_home = str(getattr(getattr(self, "_store", None), "_hermes_home", "") or "")
             if current_home == str(hermes_home) and current_store_home == str(hermes_home):
                 return False
+            db_path = self._resolve_db_path(hermes_home)
+            self._replace_storage(db_path, hermes_home)
             self._hermes_home = hermes_home
-            store = getattr(self, "_store", None)
-            if store is not None:
-                store._hermes_home = hermes_home
             self._reset_profile_runtime_state()
             logger.info("LCM rebound Hermes home for configured database path %s", hermes_home)
             return True
@@ -896,9 +1187,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         if current_db == db_path and str(self._hermes_home or "") == str(hermes_home):
             return False
 
-        self._close_storage()
+        self._replace_storage(db_path, hermes_home)
         self._hermes_home = hermes_home
-        self._bind_storage(db_path, hermes_home)
         self._reset_profile_runtime_state()
         logger.info("LCM rebound storage for Hermes home %s", hermes_home)
         return True
@@ -7630,10 +7920,22 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
 
     def shutdown(self):
         with self._exclusive_lifecycle("shutdown"):
-            if self._stable_use_closed:
+            if (
+                self._stable_use_closed
+                and not self._shutdown_cleanup_pending
+                and self._ownership is None
+                and not self._retired_storage_ownerships
+            ):
                 return
-            self._shutdown_unlocked()
-            self._stable_use_closed = True
+            try:
+                self._shutdown_unlocked()
+            except BaseException:
+                self._shutdown_cleanup_pending = True
+                raise
+            else:
+                self._shutdown_cleanup_pending = False
+            finally:
+                self._stable_use_closed = True
 
     def _shutdown_unlocked(self):
         cleanup = [
@@ -7643,11 +7945,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 if self._adaptive_retrieval is not None
                 else []
             ),
-            self._store.close,
-            self._dag.close,
-            self._lifecycle.close,
-            *([self._assertions.close] if self._assertions is not None else []),
-            *([self._query_views.close] if self._query_views is not None else []),
+            self._close_storage,
+            self._close_retired_storage,
         ]
         failures = []
         for close in cleanup:

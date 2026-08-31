@@ -16,26 +16,33 @@ from typing import Any
 
 
 def flush_engine_connections(engine) -> None:
-    """Commit pending writes on every SQLite connection the engine owns.
+    """Quiesce every SQLite connection before taking a backup.
 
     Shared by ``backup_database`` (timestamped backup) and
     ``rotate_backup_database`` (rolling backup) so the connection-flush
-    contract stays in one place.
+    contract stays in one place. MessageStore writes are operation-owned and
+    must already be committed or rolled back; the other helpers retain their
+    existing explicit flush APIs.
     """
-    engine._store.commit()
-    engine._dag._conn.commit()
-    lifecycle_conn = getattr(getattr(engine, "_lifecycle", None), "_conn", None)
-    if lifecycle_conn is not None:
-        lifecycle_conn.commit()
-    assertion_store = getattr(engine, "_assertions", None)
-    if assertion_store is not None:
-        # AssertionStore owns a multi-statement publication transaction. Its
-        # lock-taking API must serialize this flush with publish_source() so a
-        # backup cannot commit a half-written receipt behind the publisher.
-        assertion_store.commit()
-    query_views = getattr(engine, "_query_views", None)
-    if query_views is not None:
-        query_views.commit()
+    # Clones share every helper connection and the path-wide operation lock.
+    # Keep that lock from the transaction-idle check through the final helper
+    # commit; otherwise a clone can open a transaction after the check and have
+    # this maintenance path commit its partial work behind its back.
+    with engine._store.locked_connection():
+        engine._store.assert_transaction_idle()
+        engine._dag._conn.commit()
+        lifecycle_conn = getattr(getattr(engine, "_lifecycle", None), "_conn", None)
+        if lifecycle_conn is not None:
+            lifecycle_conn.commit()
+        assertion_store = getattr(engine, "_assertions", None)
+        if assertion_store is not None:
+            # AssertionStore owns a multi-statement publication transaction. Its
+            # lock-taking API must serialize this flush with publish_source() so a
+            # backup cannot commit a half-written receipt behind the publisher.
+            assertion_store.commit()
+        query_views = getattr(engine, "_query_views", None)
+        if query_views is not None:
+            query_views.commit()
 
 
 def backup_database(engine) -> dict[str, Any]:

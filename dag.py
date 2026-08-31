@@ -16,6 +16,7 @@ import logging
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -162,11 +163,15 @@ class SummaryDAG:
 
     DELETE_SESSION_SCOPE_TABLE = _DELETE_SESSION_SCOPE_TABLE
 
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, *, db_lock: object | None = None):
         self.db_path = Path(db_path)
         self._conn: Optional[sqlite3.Connection] = None
-        self._db_lock = threading.RLock()
-        self._init_db()
+        self._db_lock = db_lock or threading.RLock()
+        try:
+            self._init_db()
+        except BaseException:
+            self.close()
+            raise
 
     @property
     def connection(self) -> Optional[sqlite3.Connection]:
@@ -179,6 +184,14 @@ class SummaryDAG:
         methods so the ``_db_lock`` contract stays in one place.
         """
         return self._conn
+
+    @contextmanager
+    def locked_connection(self):
+        """Yield the live connection for one complete externally-owned operation."""
+        with self._db_lock:
+            if self._conn is None:
+                raise RuntimeError("LCM summary DAG is closed")
+            yield self._conn
 
     def _init_db(self):
         self._conn = sqlite3.connect(str(self.db_path), timeout=5.0, check_same_thread=False)
@@ -916,3 +929,33 @@ class SummaryDAG:
             self.close()
         except Exception:
             pass
+
+
+def _synchronized(method):
+    """Serialize every operation on the shared SQLite connection."""
+    def locked(self, *args, **kwargs):
+        with self._db_lock:
+            return method(self, *args, **kwargs)
+
+    return locked
+
+
+for _method_name in (
+    "reassign_session_nodes",
+    "get_node",
+    "get_session_nodes",
+    "get_session_node_ids_below_depth",
+    "count_at_depth",
+    "get_session_node_count",
+    "get_session_depth_stats",
+    "get_session_depth_samples",
+    "get_uncondensed_at_depth",
+    "search",
+    "_search_like",
+    "get_source_nodes",
+    "source_message_ids",
+    "_node_matches_source",
+    "get_source_time_window",
+    "close",
+):
+    setattr(SummaryDAG, _method_name, _synchronized(getattr(SummaryDAG, _method_name)))

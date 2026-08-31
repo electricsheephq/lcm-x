@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date, datetime, timezone
-from enum import Enum
-from pathlib import Path
 import dataclasses
 import json
 import math
@@ -13,8 +9,13 @@ import os
 import re
 import sqlite3
 import time
-from typing import Any
 import uuid
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from enum import Enum
+from pathlib import Path
+from typing import Any
 
 from .db_bootstrap import (
     check_external_content_fts_integrity,
@@ -934,13 +935,31 @@ def _rotate_apply_text(engine) -> str:
     return "\n".join(lines)
 
 
+@contextmanager
+def _locked_helper_connection(helper):
+    """Use the shared helper lock, with a narrow legacy/test-double fallback."""
+    locked = getattr(helper, "locked_connection", None)
+    if callable(locked):
+        with locked() as connection:
+            yield connection
+        return
+    connection = getattr(helper, "connection", None)
+    if connection is None:
+        raise RuntimeError("LCM SQLite helper connection is not initialized")
+    yield connection
+
+
 def _scan_fts_repair(engine) -> dict[str, Any]:
+    with _locked_helper_connection(engine._store) as conn:
+        return _scan_fts_repair_locked(conn)
+
+
+def _scan_fts_repair_locked(conn) -> dict[str, Any]:
     checks: dict[str, dict[str, Any]] = {}
     specs = {
         "messages_fts": build_message_fts_spec(),
         "nodes_fts": build_nodes_fts_spec(),
     }
-    conn = engine._store.connection
     for label, spec in specs.items():
         try:
             structural_needs_repair = external_content_fts_needs_repair(conn, spec)
@@ -1017,10 +1036,14 @@ def _doctor_repair_apply_text(engine) -> str:
     # via a race (F3).
     join_background_integrity_scans()
 
-    conn = engine._store.connection
     try:
-        messages_result = repair_external_content_fts(conn, build_message_fts_spec())
-        nodes_result = repair_external_content_fts(conn, build_nodes_fts_spec())
+        with _locked_helper_connection(engine._store) as conn:
+            messages_result = repair_external_content_fts(
+                conn, build_message_fts_spec()
+            )
+            nodes_result = repair_external_content_fts(
+                conn, build_nodes_fts_spec()
+            )
     except sqlite3.Error as exc:
         return "\n".join([
             "LCM doctor repair apply",
@@ -1302,10 +1325,32 @@ def _doctor_source_apply_text(engine) -> str:
 
 
 def _doctor_text(engine) -> str:
+    # Catch only helper acquisition failures.  A RuntimeError raised by a
+    # diagnostic body or context-manager exit is a real doctor failure and
+    # must surface once rather than being retried with progressively fewer
+    # connections.
+    with ExitStack() as stack:
+        try:
+            store_conn = stack.enter_context(
+                _locked_helper_connection(engine._store)
+            )
+        except RuntimeError:
+            store_conn = None
+        if store_conn is None:
+            return _doctor_text_locked(engine, None, None)
+
+        try:
+            dag_conn = stack.enter_context(
+                _locked_helper_connection(engine._dag)
+            )
+        except RuntimeError:
+            dag_conn = None
+        return _doctor_text_locked(engine, store_conn, dag_conn)
+
+
+def _doctor_text_locked(engine, store_conn, dag_conn) -> str:
     db_path = Path(engine._store.db_path)
     runtime_identity = engine.get_runtime_identity()
-    store_conn = engine._store.connection
-    dag_conn = engine._dag.connection
 
     issues: list[str] = []
     recommended_actions: list[str] = []
@@ -1876,7 +1921,13 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
     apply is destructive, so do the coordinated deletes on one connection to
     avoid half-cleaned state if a later table delete fails.
     """
-    conn = engine._store.connection
+    with _locked_helper_connection(engine._store) as conn:
+        return _delete_clean_candidates_atomically_locked(engine, session_ids, conn)
+
+
+def _delete_clean_candidates_atomically_locked(
+    engine, session_ids: set[str], conn
+) -> dict[str, int]:
     # Protect the actively-bound session id, not current_session_id. While a
     # cron tick has rebound the engine, _session_id is the row the engine is
     # actively writing to via lifecycle hooks; deleting it during cleanup
@@ -2071,7 +2122,13 @@ def _doctor_clean_lifecycle_text(engine) -> str:
     protected = {str(getattr(engine, "_session_id", "") or "")}
     protected = {s for s in protected if s}
 
-    conn = engine._lifecycle.connection
+    with _locked_helper_connection(engine._lifecycle) as conn:
+        return _doctor_clean_lifecycle_text_locked(count, protected, conn)
+
+
+def _doctor_clean_lifecycle_text_locked(
+    count: int, protected: set[str], conn
+) -> str:
     sessions_with_data: set[str] = set()
     for row in conn.execute("SELECT DISTINCT session_id FROM messages").fetchall():
         sessions_with_data.add(str(row[0]))

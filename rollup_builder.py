@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import sqlite3
 from calendar import monthrange
 from datetime import date, datetime, timedelta, timezone
 from time import monotonic
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 Summarizer = Callable[..., tuple[str, int]]
 _FAILED_ROLLUP_BACKOFF = timedelta(seconds=30)
 _FRONTIER_WORK_LIMIT = 4_096
+_DAG_CLOSED_DEFER_REASON = "deferred: summary DAG closed"
 
 _PENDING_ROLLUPS_SQL = """
     SELECT period_kind, period_start
@@ -71,6 +73,12 @@ class RollupWorkLimitExceeded(RuntimeError):
     """Raised when correctness would require more than one bounded work pass."""
 
 
+def _dag_is_closed(dag: SummaryDAG) -> bool:
+    """Read the DAG lifecycle state under the same lock as connection users."""
+    with dag._db_lock:
+        return dag.connection is None
+
+
 def initialize_rollup_invalidation_outbox(dag: SummaryDAG) -> None:
     """Enable mutation triggers before the feature can publish summary nodes."""
     store = RollupStore(dag.db_path)
@@ -97,11 +105,11 @@ def _scope_frontier(dag: SummaryDAG, scope: str) -> list[dict[str, object]]:
         if connection is None:
             return []
         with _sqlite_savepoint(connection):
-            return _scope_frontier_staged(dag, scope)
+            return _scope_frontier_staged(dag, scope, connection)
 
 
 def _scope_frontier_staged(
-    dag: SummaryDAG, scope: str
+    dag: SummaryDAG, scope: str, connection: sqlite3.Connection
 ) -> list[dict[str, object]]:
     """The scope's canonical frontier nodes with normalized interval bounds.
 
@@ -117,9 +125,6 @@ def _scope_frontier_staged(
     # walk under one DAG lock so concurrent scopes cannot clear or replace one
     # another's staged IDs.
     with dag._db_lock:
-        connection = dag.connection
-        if connection is None:
-            return []
         # Probe without an expression ORDER BY first. The session index can stop
         # at the sentinel row, so an oversized scope never scans/sorts its corpus.
         id_rows = connection.execute(
@@ -328,6 +333,9 @@ def build_day(
         # blocker: capture-token-first).
         token = store.upsert_building("day", day.isoformat(), scope)
         sources = _daily_sources(dag, scope, day)
+        if _dag_is_closed(dag):
+            store.defer_incomplete(token, _DAG_CLOSED_DEFER_REASON)
+            return None
         if not sources:
             # A stale day with no summary node to build from must resolve, not
             # linger stale forever consuming a per-pass build slot (maintainer
@@ -471,11 +479,15 @@ def _canonical_aggregate_sources(
         if connection is None:
             return []
         with _sqlite_savepoint(connection):
-            return _canonical_aggregate_sources_staged(dag, source_ids)
+            return _canonical_aggregate_sources_staged(
+                dag, source_ids, connection
+            )
 
 
 def _canonical_aggregate_sources_staged(
-    dag: SummaryDAG, source_ids: Sequence[int]
+    dag: SummaryDAG,
+    source_ids: Sequence[int],
+    connection: sqlite3.Connection,
 ) -> list[dict[str, object]]:
     """Resolve one bounded canonical node frontier for aggregate publication."""
     unique_ids = list(dict.fromkeys(int(node_id) for node_id in source_ids))
@@ -488,9 +500,6 @@ def _canonical_aggregate_sources_staged(
     # Aggregate staging and the shared lineage temp walk use the same connection
     # and therefore participate in the same serialization contract as scopes.
     with dag._db_lock:
-        connection = dag.connection
-        if connection is None:
-            return []
         connection.execute(
             "CREATE TEMP TABLE IF NOT EXISTS lcm_aggregate_source_ids "
             "(node_id INTEGER PRIMARY KEY) WITHOUT ROWID"
@@ -577,6 +586,9 @@ def _build_aggregate(
         # recorded reason so it rebuilds once the daily catches up. Days with no
         # content do not block.
         content_days = _days_with_content(dag, scope, start, end)
+        if _dag_is_closed(dag):
+            store.defer_incomplete(token, _DAG_CLOSED_DEFER_REASON)
+            return None
         pending_days = sorted(
             day_key
             for day_key in content_days
@@ -617,6 +629,9 @@ def _build_aggregate(
             [int(row["rollup_id"]) for _day_key, row in ready],
         )
         frontier_sources = _canonical_aggregate_sources(dag, constituent_source_ids)
+        if _dag_is_closed(dag):
+            store.defer_incomplete(token, _DAG_CLOSED_DEFER_REASON)
+            return None
         if not frontier_sources:
             store.defer_incomplete(token, "incomplete: no canonical aggregate sources")
             return None
@@ -752,8 +767,9 @@ def run_rollup_maintenance(
     try:
         limit = max(0, int(config.rollup_builds_per_pass))
         budget_ms = max(0, int(config.rollup_maintenance_budget_ms))
-        connection = dag.connection
-        if limit <= 0 or budget_ms <= 0 or connection is None:
+        if limit <= 0 or budget_ms <= 0:
+            return 0
+        if _dag_is_closed(dag):
             return 0
         store = RollupStore(dag.db_path)
         if (monotonic() - started_at) * 1000 >= budget_ms:
@@ -768,32 +784,36 @@ def run_rollup_maintenance(
         if (monotonic() - started_at) * 1000 >= budget_ms:
             return 0
         retry_before = (datetime.now(timezone.utc) - _FAILED_ROLLUP_BACKOFF).isoformat()
-        stale_rows = connection.execute(
-            _PENDING_ROLLUPS_SQL,
-            (scope, limit),
-        ).fetchall()
-        rows = list(stale_rows)
-        if len(rows) < limit and (monotonic() - started_at) * 1000 < budget_ms:
-            rows.extend(
-                connection.execute(
-                    _FAILED_ROLLUPS_SQL,
-                    (scope, retry_before, limit - len(rows)),
-                ).fetchall()
-            )
-        if len(rows) < limit and (monotonic() - started_at) * 1000 < budget_ms:
-            rows.extend(
-                connection.execute(
-                    _PENDING_AGGREGATES_SQL,
-                    (scope, limit - len(rows)),
-                ).fetchall()
-            )
-        if len(rows) < limit and (monotonic() - started_at) * 1000 < budget_ms:
-            rows.extend(
-                connection.execute(
-                    _FAILED_AGGREGATES_SQL,
-                    (scope, retry_before, limit - len(rows)),
-                ).fetchall()
-            )
+        with dag._db_lock:
+            connection = dag.connection
+            if connection is None:
+                return 0
+            stale_rows = connection.execute(
+                _PENDING_ROLLUPS_SQL,
+                (scope, limit),
+            ).fetchall()
+            rows = list(stale_rows)
+            if len(rows) < limit and (monotonic() - started_at) * 1000 < budget_ms:
+                rows.extend(
+                    connection.execute(
+                        _FAILED_ROLLUPS_SQL,
+                        (scope, retry_before, limit - len(rows)),
+                    ).fetchall()
+                )
+            if len(rows) < limit and (monotonic() - started_at) * 1000 < budget_ms:
+                rows.extend(
+                    connection.execute(
+                        _PENDING_AGGREGATES_SQL,
+                        (scope, limit - len(rows)),
+                    ).fetchall()
+                )
+            if len(rows) < limit and (monotonic() - started_at) * 1000 < budget_ms:
+                rows.extend(
+                    connection.execute(
+                        _FAILED_AGGREGATES_SQL,
+                        (scope, retry_before, limit - len(rows)),
+                    ).fetchall()
+                )
         if not rows:
             return 0
         builders: dict[str, Callable[..., dict[str, object] | None]] = {
@@ -805,6 +825,8 @@ def run_rollup_maintenance(
         for row in rows:
             if (monotonic() - started_at) * 1000 >= budget_ms:
                 break
+            if _dag_is_closed(dag):
+                break
             builder = builders[str(row[0])]
             builder(
                 store,
@@ -815,6 +837,8 @@ def run_rollup_maintenance(
                 circuit_breaker=circuit_breaker,
                 spend_guard=spend_guard,
             )
+            if _dag_is_closed(dag):
+                break
             builds_started += 1
         return builds_started
     except Exception:
