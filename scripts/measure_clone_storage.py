@@ -75,7 +75,7 @@ def run(samples: int, clones: int, database: Path) -> dict[str, float | int]:
 
         started = time.perf_counter_ns()
         retained = [prototype.clone_for_agent() for _ in range(clones)]
-        ten_clone_ms = (time.perf_counter_ns() - started) / 1_000_000
+        retained_clone_batch_ms = (time.perf_counter_ns() - started) / 1_000_000
         fd_after = _open_fd_count()
     finally:
         _shutdown_all(retained)
@@ -86,7 +86,7 @@ def run(samples: int, clones: int, database: Path) -> dict[str, float | int]:
         "fd_after_retained_clones": fd_after,
         "retained_clone_fd_delta": fd_after - fd_before if fd_before >= 0 and fd_after >= 0 else -1,
         "median_clone_setup_ms": statistics.median(clone_ms),
-        "ten_clone_setup_ms": ten_clone_ms,
+        "retained_clone_batch_setup_ms": retained_clone_batch_ms,
         "median_initial_startup_ms": statistics.median(startup_ms),
         "samples": samples,
         "retained_clones": clones,

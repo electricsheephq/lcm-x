@@ -8848,6 +8848,40 @@ class TestLCMEngineSharedStorage:
             if clone is not None:
                 clone.shutdown()
 
+    def test_clone_preserves_legacy_subclass_constructor_contract(self, tmp_path):
+        from hermes_lcm.engine import LCMEngine
+
+        class LegacyEngine(LCMEngine):
+            def __init__(self, config=None, hermes_home=""):
+                super().__init__(config=config, hermes_home=hermes_home)
+                self.legacy_initialized = True
+
+        prototype = LegacyEngine(
+            config=LCMConfig(database_path=str(tmp_path / "legacy-subclass.db")),
+            hermes_home=str(tmp_path / "hermes"),
+        )
+        clone = None
+        try:
+            clone = prototype.clone_for_agent()
+
+            assert isinstance(clone, LegacyEngine)
+            assert clone.legacy_initialized is True
+            assert clone._storage is prototype._storage
+            assert clone._store is prototype._store
+        finally:
+            prototype.shutdown()
+            if clone is not None:
+                clone.shutdown()
+
+    def test_clone_measurement_uses_count_neutral_batch_label(self, tmp_path):
+        from scripts.measure_clone_storage import run
+
+        report = run(1, 3, tmp_path / "clone-measurement.db")
+
+        assert report["retained_clones"] == 3
+        assert "retained_clone_batch_setup_ms" in report
+        assert "ten_clone_setup_ms" not in report
+
     def test_owner_first_shutdown_leaves_clone_operational_and_final_close_is_once(self, tmp_path, monkeypatch):
         prototype = self._engine(tmp_path)
         clone = prototype.clone_for_agent()

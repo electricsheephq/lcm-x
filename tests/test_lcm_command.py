@@ -710,6 +710,22 @@ def test_lcm_doctor_handles_closed_store_connection(engine):
     assert "LCM store connection is not initialized" in result
 
 
+def test_lcm_doctor_surfaces_body_runtime_error_once(engine, monkeypatch):
+    calls = 0
+
+    def fail_diagnostic(_engine, _store_conn, _dag_conn):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("diagnostic body failed")
+
+    monkeypatch.setattr(command_mod, "_doctor_text_locked", fail_diagnostic)
+
+    with pytest.raises(RuntimeError, match="diagnostic body failed"):
+        command_mod._doctor_text(engine)
+
+    assert calls == 1
+
+
 def test_lcm_doctor_prioritizes_schema_inspection_error(engine, monkeypatch):
     def _schema_error(_conn, *, database_path="", required_tables=()):
         return {

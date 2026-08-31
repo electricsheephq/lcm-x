@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import copy
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -860,11 +861,36 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             storage = self._storage
             if storage is None:
                 raise RuntimeError("cannot clone an LCM engine without bound storage")
-            clone = type(self)(
-                config=copy.deepcopy(self._config),
-                hermes_home=self._hermes_home,
-                _storage=storage,
+            clone_type = type(self)
+            clone_config = copy.deepcopy(self._config)
+            try:
+                parameters = inspect.signature(clone_type.__init__).parameters
+            except (TypeError, ValueError):
+                parameters = {}
+            accepts_storage = (
+                "_storage" in parameters
+                or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters.values()
+                )
             )
+            if accepts_storage:
+                clone = clone_type(
+                    config=clone_config,
+                    hermes_home=self._hermes_home,
+                    _storage=storage,
+                )
+            else:
+                # Backward compatibility for subclasses that implemented the
+                # historical (config, hermes_home) constructor contract.  Let
+                # the subclass initialize its own state, then atomically swap
+                # its temporary bundle for this clone family's shared bundle.
+                clone = clone_type(
+                    config=clone_config,
+                    hermes_home=self._hermes_home,
+                )
+            if clone._storage is not storage:
+                clone._install_storage_replacement(storage.acquire())
             try:
                 clone.model = self.model
                 clone.base_url = self.base_url
@@ -951,9 +977,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             self, _release_storage_finalizer, ownership
         )
 
-    def _replace_storage(self, db_path: str | Path, hermes_home: str) -> None:
-        """Install a fully initialized replacement before releasing the old lease."""
-        replacement = _SharedStorage(db_path, self._config, hermes_home).acquire()
+    def _install_storage_replacement(self, replacement: _SharedStorage) -> None:
+        """Install one acquired bundle before releasing the current lease."""
         replacement_ownership = _StorageOwnership(replacement)
         try:
             replacement_adaptive = (
@@ -1017,6 +1042,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             else:
                 if old_finalizer is not None:
                     old_finalizer.detach()
+
+    def _replace_storage(self, db_path: str | Path, hermes_home: str) -> None:
+        """Install a fully initialized replacement before releasing the old lease."""
+        replacement = _SharedStorage(db_path, self._config, hermes_home).acquire()
+        self._install_storage_replacement(replacement)
 
     def _bind_storage(self, db_path: str | Path, hermes_home: str = "") -> None:
         """Bind a new clone-family bundle using the lock for ``db_path``."""

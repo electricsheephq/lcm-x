@@ -2,11 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date, datetime, timezone
-from enum import Enum
-from pathlib import Path
-from contextlib import contextmanager
 import dataclasses
 import json
 import math
@@ -14,8 +9,13 @@ import os
 import re
 import sqlite3
 import time
-from typing import Any
 import uuid
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from enum import Enum
+from pathlib import Path
+from typing import Any
 
 from .db_bootstrap import (
     check_external_content_fts_integrity,
@@ -1325,15 +1325,27 @@ def _doctor_source_apply_text(engine) -> str:
 
 
 def _doctor_text(engine) -> str:
-    try:
-        with _locked_helper_connection(engine._store) as store_conn:
-            try:
-                with _locked_helper_connection(engine._dag) as dag_conn:
-                    return _doctor_text_locked(engine, store_conn, dag_conn)
-            except RuntimeError:
-                return _doctor_text_locked(engine, store_conn, None)
-    except RuntimeError:
-        return _doctor_text_locked(engine, None, None)
+    # Catch only helper acquisition failures.  A RuntimeError raised by a
+    # diagnostic body or context-manager exit is a real doctor failure and
+    # must surface once rather than being retried with progressively fewer
+    # connections.
+    with ExitStack() as stack:
+        try:
+            store_conn = stack.enter_context(
+                _locked_helper_connection(engine._store)
+            )
+        except RuntimeError:
+            store_conn = None
+        if store_conn is None:
+            return _doctor_text_locked(engine, None, None)
+
+        try:
+            dag_conn = stack.enter_context(
+                _locked_helper_connection(engine._dag)
+            )
+        except RuntimeError:
+            dag_conn = None
+        return _doctor_text_locked(engine, store_conn, dag_conn)
 
 
 def _doctor_text_locked(engine, store_conn, dag_conn) -> str:
