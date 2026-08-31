@@ -5268,15 +5268,19 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             if reconciled_existing_session and cursor > 0
             else set()
         )
-        replayed_compacted_snapshot_indexes = (
-            self._registered_compacted_snapshot_replay_indexes(reconcile_messages)
-            if reconciled_existing_session
-            else set()
-        )
+        # Snapshot proof must be complete within the unreconciled suffix. A
+        # pre-cursor occurrence is already consumed by a different proof and
+        # cannot vouch for an identity-equal occurrence after the cursor: doing
+        # so would turn a partial snapshot into authority to drop a new row.
         replayed_compacted_snapshot_indexes = {
-            index
-            for index in replayed_compacted_snapshot_indexes
-            if index >= cursor
+            cursor + index
+            for index in (
+                self._registered_compacted_snapshot_replay_indexes(
+                    reconcile_messages[cursor:]
+                )
+                if reconciled_existing_session
+                else set()
+            )
         }
         if replayed_compacted_snapshot_indexes:
             self._last_ingest_reconciliation.update({

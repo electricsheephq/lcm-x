@@ -159,6 +159,7 @@ def test_identity_equal_occurrences_inside_snapshot_span_remain_ambiguous(
         stem="issue-7-identity-equal",
     )
     incoming = [
+        {"role": "assistant", "content": "new row forcing cursor zero"},
         compacted[0],
         compacted[1],
         {"role": "user", "content": "replay U1"},
@@ -181,13 +182,59 @@ def test_identity_equal_occurrences_inside_snapshot_span_remain_ambiguous(
         # both rather than choosing one and potentially losing or reordering
         # the genuinely new occurrence.
         assert contents.count("replay U1") == 3
-        assert len(rows) == original_count + 2
+        assert contents.count("new row forcing cursor zero") == 1
+        assert len(rows) == original_count + 3
         assert (
             after._last_ingest_reconciliation[
                 "replayed_compacted_snapshot_rows"
             ]
-            == 3
+            == 5
         )
-        assert after._last_ingest_reconciliation["ambiguous_rows_preserved"] == 2
+        assert after._last_ingest_reconciliation["ambiguous_rows_preserved"] == 3
+    finally:
+        after.shutdown()
+
+
+def test_snapshot_proof_cannot_span_a_positive_reconciliation_cursor(
+    tmp_path,
+    monkeypatch,
+):
+    """A pre-cursor occurrence cannot prove away an equal post-cursor row."""
+    config, session_id, compacted, original_count = _seed_compacted_session(
+        tmp_path,
+        monkeypatch,
+        stem="issue-7-positive-cursor",
+    )
+    incoming = [dict(message) for message in compacted]
+
+    after = LCMEngine(config=config, hermes_home=str(tmp_path))
+    after.on_session_start(
+        session_id,
+        platform="cli",
+        conversation_id="issue-7-positive-cursor-conversation",
+        context_length=200_000,
+    )
+    # Isolate the cursor/snapshot interaction: row zero has already been
+    # reconciled by a separate durable-prefix proof. The remaining rows are
+    # only a partial registered snapshot. Even if they are byte-identical to
+    # the old snapshot, one can be a genuinely new occurrence, so all must be
+    # preserved rather than letting the pre-cursor row complete the proof.
+    monkeypatch.setattr(
+        after,
+        "_reconcile_ingest_cursor_from_store",
+        lambda *_args, **_kwargs: 1,
+    )
+    try:
+        after._ingest_messages(incoming)
+
+        assert after._store.get_session_count(session_id) == (
+            original_count + len(incoming) - 1
+        )
+        assert (
+            after._last_ingest_reconciliation.get(
+                "replayed_compacted_snapshot_rows", 0
+            )
+            == 0
+        )
     finally:
         after.shutdown()
