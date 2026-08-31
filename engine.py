@@ -8155,6 +8155,15 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     and count_messages_tokens(recovery)
                     > assembly_cap_override
                 ):
+                    # The derived suffix may contain the only preserved
+                    # objective. Before dropping it for budget, move that
+                    # trusted scaffold into the required user anchor and size
+                    # the anchor against the remaining prefix alone.
+                    recovery_anchor = self._overflow_recovery_user_anchor(
+                        generated_suffix,
+                        required_prefix,
+                        assembly_cap_override,
+                    )
                     recovery = self._sanitize_active_context_messages(
                         [*required_prefix, recovery_anchor]
                     )

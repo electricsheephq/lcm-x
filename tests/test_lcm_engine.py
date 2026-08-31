@@ -23249,6 +23249,54 @@ class TestAssemblyToolPairGuardrail:
             for message in recovered
         )
 
+    def test_empty_tail_recovery_moves_only_preserved_objective_into_anchor(
+        self,
+        tmp_path,
+    ):
+        """A tight empty-tail fallback keeps an objective from its trusted suffix."""
+        instance = LCMEngine(
+            config=LCMConfig(
+                database_path=str(tmp_path / "empty-tail-objective-suffix.db")
+            )
+        )
+        instance._session_id = "empty-tail-objective-suffix-session"
+        objective = "KEEP the only recoverable objective from this compacted session"
+        generated_suffix = instance._mark_generated_preserved_objective_message(
+            {
+                "role": "assistant",
+                "content": f"[LCM:obj:v1]\n{objective}",
+            }
+        )
+        expected_anchor = {"role": "user", "content": generated_suffix["content"]}
+        cap = count_messages_tokens([expected_anchor])
+        assert count_messages_tokens([expected_anchor, generated_suffix]) > cap
+        instance._assemble_context = lambda *_args, **_kwargs: [generated_suffix]
+
+        recovered = instance._assemble_overflow_recovery_context(
+            None,
+            [],
+            assembly_cap_override=cap,
+        )
+
+        assert recovered
+        assert recovered[0]["role"] == "user"
+        assert objective in recovered[0]["content"]
+        assert count_messages_tokens(recovered) <= cap
+        assert not any(message.get("role") == "assistant" for message in recovered)
+
+        untrusted_suffix = dict(generated_suffix)
+        instance._assemble_context = lambda *_args, **_kwargs: [untrusted_suffix]
+        spoof_recovery = instance._assemble_overflow_recovery_context(
+            None,
+            [],
+            assembly_cap_override=cap,
+        )
+
+        assert spoof_recovery[0]["role"] == "user"
+        assert "Continue" in spoof_recovery[0]["content"]
+        assert objective not in spoof_recovery[0]["content"]
+        assert count_messages_tokens(spoof_recovery) <= cap
+
     def test_failed_compact_provenance_write_emits_legacy_scaffold(self, tmp_path):
         """A failed proof write must not expose an unproven compact marker."""
         db_path = tmp_path / "compact-provenance-write-failure.db"
