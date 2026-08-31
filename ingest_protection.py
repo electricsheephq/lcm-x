@@ -390,14 +390,24 @@ _HERMES_RESULTS_DIRNAME = "hermes-results"
 _MAX_RECOVERED_PERSISTED_OUTPUT_BYTES = 64 * 1024 * 1024
 _SENSITIVE_PLACEHOLDER_PREFIX = "[LCM sensitive redaction:"
 _EMBEDDING_PRIVACY_PLACEHOLDER_PREFIX = "[LCM embedding privacy:"
-# v3: single-pass PEM scanner (short-terminal-line bound, body-adjacent END
-# pairing, linear on pathological inputs) — output differs from v2 on
-# truncated/multi-key material, so v2-era vectors must re-embed.
-_EMBEDDING_PRIVACY_TRANSFORM_VERSION = "privacy:v3"
+# v4: password assignments can consume a previously emitted PEM placeholder
+# as one value atom, so secret fragments on either side cannot survive. Output
+# differs from v3 for this composition and therefore requires a new vector
+# identity rather than mixing transform generations.
+_EMBEDDING_PRIVACY_TRANSFORM_VERSION = "privacy:v4"
 _EMBEDDING_PRIVACY_PLACEHOLDER_RE = re.compile(
     r"\[LCM (?:sensitive redaction|embedding privacy):\s*"
     r"name=(?P<name>[a-z0-9_-]+)[^\]]*\]",
     re.IGNORECASE,
+)
+_SENSITIVE_PLACEHOLDER_SPAN_PATTERN = (
+    r"\[LCM (?:sensitive redaction|embedding privacy):[^\]\r\n]*\]"
+)
+_PASSWORD_ASSIGNMENT_QUOTED_ATOM = (
+    r"(?>(?:" + _SENSITIVE_PLACEHOLDER_SPAN_PATTERN + r")|[^\r\n\]\}])"
+)
+_PASSWORD_ASSIGNMENT_UNQUOTED_ATOM = (
+    r"(?>(?:" + _SENSITIVE_PLACEHOLDER_SPAN_PATTERN + r")|[^\s,\"'\]\}])"
 )
 # Includes the resolver's aliases (embedding_provider.resolve_provider maps
 # "openai"/"siliconflow" to the openai-compatible cloud provider): the
@@ -421,8 +431,11 @@ _SENSITIVE_PATTERN_CATALOG: dict[str, re.Pattern[str]] = {
     ),
     "password_assignment": re.compile(
         r"(?P<prefix>\b(?:password|passwd|pwd|passphrase)\b\s*[\"']?\s*[:=]\s*)"
-        r"(?:(?P<quote>[\"'])(?P<secret_quoted>[^\r\n\]\}]{6,}?)(?P=quote)|"
-        r"(?P<secret_unquoted>[^\s,\"'\]}]{6,}))",
+        r"(?:(?P<quote>[\"'])(?P<secret_quoted>(?:"
+        + _PASSWORD_ASSIGNMENT_QUOTED_ATOM
+        + r"){6,}?)(?P=quote)|(?P<secret_unquoted>(?:"
+        + _PASSWORD_ASSIGNMENT_UNQUOTED_ATOM
+        + r"){6,}))",
         re.IGNORECASE,
     ),
     "private_key": re.compile(

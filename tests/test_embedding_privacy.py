@@ -91,7 +91,7 @@ def _engine_with_summary(tmp_path, text: str):
 
 def test_cloud_privacy_is_independent_of_durable_redaction_and_validates_catalog(tmp_path):
     revision = embedding_privacy_revision(_config(tmp_path, enabled=False))
-    assert revision.startswith("privacy:v3:")
+    assert revision.startswith("privacy:v4:")
     with pytest.raises(EmbeddingPrivacyPolicyError, match="nonempty"):
         embedding_privacy_revision(_config(tmp_path, enabled=False, patterns=[]))
     with pytest.raises(EmbeddingPrivacyPolicyError, match="unknown"):
@@ -114,7 +114,7 @@ def test_default_cloud_posture_keeps_durable_text_raw_and_protects_provider_copy
     protected, revision, changed = protect_embedding_text(raw, config)
     assert changed is True
     assert secret not in protected
-    assert revision.startswith("privacy:v3:")
+    assert revision.startswith("privacy:v4:")
     validate_embedding_privacy_dispatch([protected], config, expected_revision=revision)
     status = ingest_protection_mod.sensitive_pattern_status(config)
     assert status["sensitive_patterns_enabled"] is False
@@ -175,8 +175,8 @@ def test_provider_transform_removes_secret_metadata_and_canonicalizes_placeholde
     protected, revision, changed = protect_embedding_text(raw, config)
 
     assert changed is True
-    assert revision.startswith("privacy:v3:")
-    assert not revision.startswith("privacy:v2:")
+    assert revision.startswith("privacy:v4:")
+    assert not revision.startswith("privacy:v3:")
     assert "abcdefghijklmnop" not in protected
     assert "correct-horse-battery" not in protected
     assert "deadbeefdeadbeef" not in protected
@@ -223,7 +223,7 @@ def test_truncated_private_key_is_redacted_before_semantic_cloud_call(tmp_path):
     assert key_body not in provider.queries[0]
 
 
-def test_privacy_v3_revision_makes_prior_vectors_pending(tmp_path):
+def test_privacy_v4_revision_makes_prior_vectors_pending(tmp_path):
     config = _config(tmp_path)
     dag = SummaryDAG(config.database_path)
     try:
@@ -240,7 +240,7 @@ def test_privacy_v3_revision_makes_prior_vectors_pending(tmp_path):
         dag.close()
 
     current_revision = embedding_privacy_revision(config)
-    old_revision = current_revision.replace("privacy:v3:", "privacy:v2:", 1)
+    old_revision = current_revision.replace("privacy:v4:", "privacy:v3:", 1)
     store = VectorStore(config.database_path, config=config)
     try:
         old_identity_hash = store.register_profile(
@@ -638,6 +638,41 @@ def test_embedding_privacy_redacts_pem_after_password_assignment(tmp_path, prefi
     # dispatch validation must also pass on the protected text (no residual)
     revision = embedding_privacy_revision(cfg)
     validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        'password="prefixSECRET%suffixSECRET"',
+        "password=prefixSECRET%suffixSECRET",
+    ],
+    ids=["quoted", "unquoted"],
+)
+def test_assignment_redaction_consumes_fragments_around_private_key_placeholder(
+    tmp_path,
+    template,
+):
+    cfg = _config(tmp_path)
+    private_key = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        f"{_KEY_BODY}\n"
+        "-----END PRIVATE KEY-----"
+    )
+    text = template % private_key
+
+    durable = redact_sensitive_text(text, cfg)
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+
+    for output in (durable, protected):
+        assert "prefixSECRET" not in output
+        assert "suffixSECRET" not in output
+        assert _KEY_BODY not in output
+        assert "name=password_assignment" in output
+    validate_embedding_privacy_dispatch(
+        [protected],
+        cfg,
+        expected_revision=revision,
+    )
 
 
 def test_embedding_privacy_residual_flags_orphaned_end_marker(tmp_path):
