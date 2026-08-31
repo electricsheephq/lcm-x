@@ -6786,6 +6786,67 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             "generated_preserved_objective_provenance"
         )
 
+    def _normalize_generated_preserved_objective_provenance_payload(
+        self,
+        payload: Any,
+    ) -> tuple[list[Dict[str, Any]], bool]:
+        """Validate the complete proof payload without skipping corruption."""
+        if payload is None:
+            return [], True
+        if not isinstance(payload, dict) or payload.get("version") != 1:
+            return [], False
+        raw_records = payload.get("records")
+        if not isinstance(raw_records, list) or not raw_records:
+            return [], False
+        if len(raw_records) > _GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_RECORDS:
+            return [], False
+        records: list[Dict[str, Any]] = []
+        for raw_record in raw_records:
+            if not isinstance(raw_record, dict):
+                return [], False
+            snapshot_digest = str(raw_record.get("snapshot_digest") or "")
+            message_count = raw_record.get("message_count")
+            objectives = raw_record.get("objectives")
+            if (
+                not re.fullmatch(r"[0-9a-f]{64}", snapshot_digest)
+                or not isinstance(message_count, int)
+                or isinstance(message_count, bool)
+                or message_count <= 0
+                or not isinstance(objectives, list)
+                or not objectives
+                or len(objectives)
+                > _GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_OBJECTIVES
+            ):
+                return [], False
+            normalized_objectives: list[Dict[str, Any]] = []
+            objective_indices: set[int] = set()
+            for objective in objectives:
+                if not isinstance(objective, dict):
+                    return [], False
+                index = objective.get("index")
+                identity_digest = str(objective.get("identity_sha256") or "")
+                if (
+                    not isinstance(index, int)
+                    or isinstance(index, bool)
+                    or index < 0
+                    or index >= message_count
+                    or index in objective_indices
+                    or not re.fullmatch(r"[0-9a-f]{64}", identity_digest)
+                ):
+                    return [], False
+                objective_indices.add(index)
+                normalized_objectives.append(
+                    {"index": index, "identity_sha256": identity_digest}
+                )
+            records.append(
+                {
+                    "snapshot_digest": snapshot_digest,
+                    "message_count": message_count,
+                    "objectives": normalized_objectives,
+                }
+            )
+        return records, True
+
     def _load_generated_preserved_objective_provenance_with_status(
         self,
     ) -> tuple[list[Dict[str, Any]], bool]:
@@ -6802,63 +6863,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 exc_info=True,
             )
             return [], False
-        if not isinstance(payload, dict) or payload.get("version") != 1:
-            return [], True
-        raw_records = payload.get("records")
-        if not isinstance(raw_records, list):
-            return [], True
-        if len(raw_records) > _GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_RECORDS:
-            # An over-cap payload cannot be safely truncated: every persisted
-            # record may authenticate a compact marker that was already
-            # published. Treat it as unreadable so ingest defers ambiguous
-            # compact occurrences instead of evicting proof.
-            return [], False
-        records: list[Dict[str, Any]] = []
-        for raw_record in raw_records:
-            if not isinstance(raw_record, dict):
-                continue
-            snapshot_digest = str(raw_record.get("snapshot_digest") or "")
-            message_count = raw_record.get("message_count")
-            objectives = raw_record.get("objectives")
-            if (
-                not re.fullmatch(r"[0-9a-f]{64}", snapshot_digest)
-                or not isinstance(message_count, int)
-                or isinstance(message_count, bool)
-                or message_count <= 0
-                or not isinstance(objectives, list)
-                or not objectives
-                or len(objectives)
-                > _GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_OBJECTIVES
-            ):
-                continue
-            normalized_objectives: list[Dict[str, Any]] = []
-            for objective in objectives:
-                if not isinstance(objective, dict):
-                    normalized_objectives = []
-                    break
-                index = objective.get("index")
-                identity_digest = str(objective.get("identity_sha256") or "")
-                if (
-                    not isinstance(index, int)
-                    or isinstance(index, bool)
-                    or index < 0
-                    or index >= message_count
-                    or not re.fullmatch(r"[0-9a-f]{64}", identity_digest)
-                ):
-                    normalized_objectives = []
-                    break
-                normalized_objectives.append(
-                    {"index": index, "identity_sha256": identity_digest}
-                )
-            if normalized_objectives:
-                records.append(
-                    {
-                        "snapshot_digest": snapshot_digest,
-                        "message_count": message_count,
-                        "objectives": normalized_objectives,
-                    }
-                )
-        return records, True
+        return self._normalize_generated_preserved_objective_provenance_payload(
+            payload
+        )
 
     def _load_generated_preserved_objective_provenance(
         self,
@@ -6868,6 +6875,52 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             self._load_generated_preserved_objective_provenance_with_status()
         )
         return records
+
+    def _merge_generated_preserved_objective_provenance_records(
+        self,
+        records_to_add: list[Dict[str, Any]],
+    ) -> tuple[list[Dict[str, Any]], bool]:
+        """Merge proof records under one SQLite write reservation."""
+        if not self._session_id:
+            return [], False
+        merged_records: list[Dict[str, Any]] = []
+
+        def merge_payload(payload: Any) -> Dict[str, Any] | None:
+            records, read_completed = (
+                self._normalize_generated_preserved_objective_provenance_payload(
+                    payload
+                )
+            )
+            if not read_completed:
+                return None
+            combined_records = list(records)
+            for candidate in records_to_add:
+                if candidate in combined_records:
+                    continue
+                if (
+                    len(combined_records)
+                    >= _GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_RECORDS
+                ):
+                    return None
+                combined_records.append(candidate)
+            merged_records.extend(combined_records)
+            return {"version": 1, "records": combined_records}
+
+        try:
+            updated = self._store.update_metadata_json(
+                self._generated_preserved_objective_provenance_metadata_key(),
+                merge_payload,
+                skip_unchanged=True,
+            )
+        except Exception:
+            logger.debug(
+                "LCM generated objective provenance atomic merge failed",
+                exc_info=True,
+            )
+            return [], False
+        if updated is None:
+            return [], False
+        return merged_records, True
 
     def _remember_generated_preserved_objective_provenance(
         self,
@@ -6905,51 +6958,19 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             "message_count": len(messages),
             "objectives": objectives,
         }
-        records, read_completed = (
-            self._load_generated_preserved_objective_provenance_with_status()
-        )
         pending_records = [
             item
             for item in self._pending_generated_preserved_objective_provenance_records
             if item != record
         ]
-        combined_records = list(records)
-        for pending_record in pending_records:
-            if pending_record not in combined_records:
-                combined_records.append(pending_record)
-        if record not in combined_records:
-            if (
-                len(combined_records)
-                >= _GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_RECORDS
-            ):
-                # Never evict proof for a compact marker that has already been
-                # published. The caller will convert this new occurrence to
-                # the migration-safe legacy marker instead.
-                self._pending_generated_preserved_objective_provenance_records = (
-                    pending_records
-                )
-                return False
-            pending_records.append(record)
-            combined_records.append(record)
-        self._pending_generated_preserved_objective_provenance_records = (
-            pending_records
+        pending_records.append(record)
+        self._pending_generated_preserved_objective_provenance_records = pending_records
+        _merged_records, merge_completed = (
+            self._merge_generated_preserved_objective_provenance_records(
+                pending_records
+            )
         )
-        if not read_completed:
-            return False
-        try:
-            self._store.write_metadata_json(
-                [self._generated_preserved_objective_provenance_metadata_key()],
-                json.dumps(
-                    {"version": 1, "records": combined_records},
-                    sort_keys=True,
-                ),
-                skip_unchanged=True,
-            )
-        except Exception:
-            logger.debug(
-                "LCM generated objective provenance write failed",
-                exc_info=True,
-            )
+        if not merge_completed:
             return False
         self._pending_generated_preserved_objective_provenance_records = []
         return True
@@ -6959,46 +6980,21 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         messages: List[Dict[str, Any]],
     ) -> bool:
         """Restore trust only for exact positions in a proven snapshot prefix."""
-        records, read_completed = (
-            self._load_generated_preserved_objective_provenance_with_status()
-        )
         pending_records = list(
             self._pending_generated_preserved_objective_provenance_records
         )
-        combined_records = list(records)
-        for pending_record in pending_records:
-            if pending_record not in combined_records:
-                combined_records.append(pending_record)
-        pending_write_safe = (
-            len(combined_records)
-            <= _GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_RECORDS
-        )
-        if (
-            pending_records
-            and self._session_id
-            and read_completed
-            and pending_write_safe
-        ):
-            try:
-                self._store.write_metadata_json(
-                    [self._generated_preserved_objective_provenance_metadata_key()],
-                    json.dumps(
-                        {"version": 1, "records": combined_records},
-                        sort_keys=True,
-                    ),
-                    skip_unchanged=True,
+        if pending_records:
+            combined_records, read_completed = (
+                self._merge_generated_preserved_objective_provenance_records(
+                    pending_records
                 )
-            except Exception:
-                logger.debug(
-                    "LCM pending generated objective provenance retry failed",
-                    exc_info=True,
-                )
-            else:
+            )
+            if read_completed:
                 self._pending_generated_preserved_objective_provenance_records = []
-        elif pending_records and not pending_write_safe:
-            # Do not claim a complete provenance read while an over-cap retry
-            # cannot be persisted without eviction.
-            read_completed = False
+        else:
+            combined_records, read_completed = (
+                self._load_generated_preserved_objective_provenance_with_status()
+            )
         for record in reversed(combined_records):
             message_count = int(record["message_count"])
             if message_count > len(messages):

@@ -23145,27 +23145,24 @@ class TestAssemblyToolPairGuardrail:
         instance._session_id = "overflow-anchor-round-trip-test"
         instance.compression_count = 1
 
-        original_write_metadata_json = instance._store.write_metadata_json
+        original_update_metadata_json = instance._store.update_metadata_json
         blocked_provenance_writes = 0
 
-        def block_initial_provenance_writes(keys, value_json, *, skip_unchanged=False):
+        def block_initial_provenance_writes(key, updater, *, skip_unchanged=False):
             nonlocal blocked_provenance_writes
             if (
                 blocked_provenance_writes < 2
-                and any(
-                    "generated_preserved_objective_provenance" in key
-                    for key in keys
-                )
+                and "generated_preserved_objective_provenance" in key
             ):
                 blocked_provenance_writes += 1
                 raise RuntimeError("database is locked")
-            return original_write_metadata_json(
-                keys,
-                value_json,
+            return original_update_metadata_json(
+                key,
+                updater,
                 skip_unchanged=skip_unchanged,
             )
 
-        instance._store.write_metadata_json = block_initial_provenance_writes
+        instance._store.update_metadata_json = block_initial_provenance_writes
 
         first = instance._assemble_overflow_recovery_context(
             None,
@@ -23204,7 +23201,7 @@ class TestAssemblyToolPairGuardrail:
             ],
             assembly_cap_override=20,
         )
-        instance._store.write_metadata_json = original_write_metadata_json
+        instance._store.update_metadata_json = original_update_metadata_json
 
         assert blocked_provenance_writes == 2
         assert "KEEP" in second[0]["content"]
@@ -23322,21 +23319,18 @@ class TestAssemblyToolPairGuardrail:
         )
         assert compact_anchor["content"].startswith("[LCM:obj:v1]")
 
-        original_write_metadata_json = before_restart._store.write_metadata_json
+        original_update_metadata_json = before_restart._store.update_metadata_json
 
-        def fail_provenance_write(keys, value_json, *, skip_unchanged=False):
-            if any(
-                "generated_preserved_objective_provenance" in key
-                for key in keys
-            ):
+        def fail_provenance_write(key, updater, *, skip_unchanged=False):
+            if "generated_preserved_objective_provenance" in key:
                 raise RuntimeError("database is locked")
-            return original_write_metadata_json(
-                keys,
-                value_json,
+            return original_update_metadata_json(
+                key,
+                updater,
                 skip_unchanged=skip_unchanged,
             )
 
-        before_restart._store.write_metadata_json = fail_provenance_write
+        before_restart._store.update_metadata_json = fail_provenance_write
         recovered = before_restart._finalize_overflow_recovery_context_result(
             [compact_anchor],
             cap,
@@ -23391,21 +23385,18 @@ class TestAssemblyToolPairGuardrail:
         )
         assert compact_anchor["content"].startswith("[LCM:obj:v1]")
 
-        original_write_metadata_json = before_restart._store.write_metadata_json
+        original_update_metadata_json = before_restart._store.update_metadata_json
 
-        def fail_provenance_write(keys, value_json, *, skip_unchanged=False):
-            if any(
-                "generated_preserved_objective_provenance" in key
-                for key in keys
-            ):
+        def fail_provenance_write(key, updater, *, skip_unchanged=False):
+            if "generated_preserved_objective_provenance" in key:
                 raise RuntimeError("database is locked")
-            return original_write_metadata_json(
-                keys,
-                value_json,
+            return original_update_metadata_json(
+                key,
+                updater,
                 skip_unchanged=skip_unchanged,
             )
 
-        before_restart._store.write_metadata_json = fail_provenance_write
+        before_restart._store.update_metadata_json = fail_provenance_write
         assembled = before_restart._assemble_context(
             None,
             [compact_anchor],
@@ -23713,6 +23704,160 @@ class TestAssemblyToolPairGuardrail:
             "compact-provenance-read-failure-session"
         )
         assert [row["content"] for row in rows_after_retry] == [objective]
+
+    @pytest.mark.parametrize("malformation", ["version", "record", "empty"])
+    def test_malformed_compact_provenance_defers_ingest(
+        self,
+        tmp_path,
+        malformation,
+    ):
+        """Corrupt proof never reclassifies a generated compact occurrence."""
+        db_path = tmp_path / f"malformed-compact-provenance-{malformation}.db"
+        config = LCMConfig(database_path=str(db_path))
+        session_id = f"malformed-compact-provenance-{malformation}-session"
+        conversation_id = (
+            f"malformed-compact-provenance-{malformation}-conversation"
+        )
+        objective = "KEEP the durable objective while proof is malformed"
+        before_restart = LCMEngine(config=config)
+        before_restart.on_session_start(
+            session_id,
+            platform="cli",
+            conversation_id=conversation_id,
+            context_length=200000,
+        )
+        before_restart._ingest_messages(
+            [{"role": "user", "content": objective}]
+        )
+        compact_anchor = before_restart._mark_generated_preserved_objective_message(
+            {"role": "user", "content": f"[LCM:obj:v1]\n{objective}"}
+        )
+        published = before_restart._finalize_overflow_recovery_context_result(
+            [compact_anchor]
+        )
+        assert published[0]["content"].startswith("[LCM:obj:v1]")
+        serialized = json.loads(json.dumps(published))
+        key = (
+            before_restart._generated_preserved_objective_provenance_metadata_key()
+        )
+        payload = before_restart._store.read_metadata_json(key)
+        if malformation == "version":
+            payload["version"] = 2
+        elif malformation == "record":
+            payload["records"][0]["objectives"][0]["identity_sha256"] = "bad"
+        else:
+            payload["records"] = []
+        before_restart._store.write_metadata_json(
+            [key],
+            json.dumps(payload, sort_keys=True),
+        )
+        before_restart.shutdown()
+
+        after_restart = LCMEngine(config=config)
+        after_restart.on_session_start(
+            session_id,
+            platform="cli",
+            conversation_id=conversation_id,
+            context_length=200000,
+        )
+        active_replay = after_restart._ingest_messages(serialized)
+
+        assert active_replay == serialized
+        assert after_restart._ingest_cursor == 0
+        rows = after_restart._store.get_session_messages(session_id)
+        assert [row["content"] for row in rows] == [objective]
+        after_restart.shutdown()
+
+    def test_concurrent_compact_provenance_writers_retain_both_records(
+        self,
+        tmp_path,
+    ):
+        """Two SQLite connections cannot overwrite published proof."""
+        db_path = tmp_path / "concurrent-compact-provenance.db"
+        config = LCMConfig(database_path=str(db_path))
+        engines = [LCMEngine(config=config), LCMEngine(config=config)]
+        for instance in engines:
+            instance._session_id = "concurrent-compact-provenance-session"
+        messages = [
+            [
+                instance._mark_generated_preserved_objective_message(
+                    {
+                        "role": "user",
+                        "content": f"[LCM:obj:v1]\nconcurrent objective {index}",
+                    }
+                )
+            ]
+            for index, instance in enumerate(engines)
+        ]
+
+        # On the pre-fix read-then-write path, hold both writers after their
+        # separate reads so each serializes from the same empty record set.
+        write_barrier = threading.Barrier(2)
+        for instance in engines:
+            original_write = instance._store.write_metadata_json
+
+            def interleaved_write(
+                keys,
+                serialized,
+                *,
+                skip_unchanged=False,
+                _original_write=original_write,
+            ):
+                if any(
+                    "generated_preserved_objective_provenance" in key
+                    for key in keys
+                ):
+                    write_barrier.wait(timeout=5)
+                return _original_write(
+                    keys,
+                    serialized,
+                    skip_unchanged=skip_unchanged,
+                )
+
+            instance._store.write_metadata_json = interleaved_write
+
+        results = []
+        errors = []
+
+        def remember(index):
+            try:
+                results.append(
+                    engines[index]._remember_generated_preserved_objective_provenance(
+                        messages[index]
+                    )
+                )
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=remember, args=(index,)) for index in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+
+        assert not any(thread.is_alive() for thread in threads)
+        assert errors == []
+        assert results == [True, True]
+        records = engines[0]._load_generated_preserved_objective_provenance()
+        assert len(records) == 2
+        assert {record["snapshot_digest"] for record in records} == {
+            engines[index]._exact_provider_visible_snapshot_digest(messages[index])
+            for index in range(2)
+        }
+        for instance in engines:
+            instance.shutdown()
+
+        verifier = LCMEngine(config=config)
+        verifier._session_id = "concurrent-compact-provenance-session"
+        for snapshot in messages:
+            serialized_snapshot = json.loads(json.dumps(snapshot))
+            assert verifier._restore_generated_preserved_objective_provenance(
+                serialized_snapshot
+            )
+            assert verifier._is_generated_preserved_objective_message(
+                serialized_snapshot[0]
+            )
+        verifier.shutdown()
 
     def test_overflow_recovery_restores_preupgrade_assistant_objective(self, tmp_path):
         """An exact legacy compacted snapshot keeps its assistant objective."""

@@ -1109,6 +1109,56 @@ class MessageStore:
                 conn.commit()
         return wrote
 
+    def update_metadata_json(
+        self,
+        key: str,
+        updater: Callable[[Any], Any | None],
+        *,
+        skip_unchanged: bool = False,
+    ) -> Any | None:
+        """Atomically transform one JSON metadata value across connections.
+
+        ``BEGIN IMMEDIATE`` reserves SQLite's writer slot before the current
+        value is read, so separate ``MessageStore`` instances cannot both
+        derive a replacement from the same stale snapshot. ``updater`` may
+        return ``None`` to abort without changing the row. Invalid stored JSON
+        is deliberately propagated to the caller so correctness-sensitive
+        metadata can fail closed instead of silently replacing corruption.
+        """
+        conn = self._conn
+        if conn is None:
+            return None
+        with self._write_lock:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT value FROM metadata WHERE key = ?",
+                    (key,),
+                ).fetchone()
+                current = json.loads(str(row[0])) if row and row[0] else None
+                updated = updater(current)
+                if updated is None:
+                    conn.rollback()
+                    return None
+                serialized = json.dumps(updated, sort_keys=True)
+                if skip_unchanged and row is not None and row[0] == serialized:
+                    conn.commit()
+                    return updated
+                conn.execute(
+                    """
+                    INSERT INTO metadata(key, value)
+                    VALUES(?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (key, serialized),
+                )
+                conn.commit()
+                return updated
+            except Exception:
+                if conn.in_transaction:
+                    conn.rollback()
+                raise
+
     # -- Compaction telemetry ------------------------------------------------
 
     @staticmethod
