@@ -106,6 +106,7 @@ _OOB_DURABILITY_SCAN_LIMIT = 512
 # Host-supplied session-end history must never leak proof into normal ingest.
 _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX = "compacted_active_replay_snapshot_digests"
 _SESSION_END_REPLAY_METADATA_PREFIX = "session_end_replay_snapshot_digests"
+_MAX_REPLAY_SNAPSHOT_MESSAGE_DIGESTS = 8192
 
 
 def _contains_identity_window(
@@ -613,7 +614,7 @@ class ReconcileMixin:
             if not isinstance(raw_message_digests, list):
                 continue
             message_digests = [str(item) for item in raw_message_digests]
-            if len(message_digests) > 8192 or any(
+            if len(message_digests) > _MAX_REPLAY_SNAPSHOT_MESSAGE_DIGESTS or any(
                 not re.fullmatch(r"[0-9a-f]{64}", item)
                 for item in message_digests
             ):
@@ -642,13 +643,21 @@ class ReconcileMixin:
             return
         ordered = self._load_replay_snapshot_records(prefix)
         ordered = [record for record in ordered if record["digest"] != digest]
+        message_digests = (
+            [
+                self._replay_identity_sha256(message)
+                for message in messages
+            ]
+            if len(messages) <= _MAX_REPLAY_SNAPSHOT_MESSAGE_DIGESTS
+            else []
+        )
         ordered.append(
             {
                 "digest": digest,
-                "message_digests": [
-                    self._replay_identity_sha256(message)
-                    for message in messages
-                ],
+                # Oversized snapshots retain their whole-snapshot replay proof.
+                # Only mixed-order occurrence classification is omitted because
+                # the bounded loader cannot safely admit a larger identity list.
+                "message_digests": message_digests,
             }
         )
         ordered = ordered[-16:]

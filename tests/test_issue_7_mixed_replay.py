@@ -272,3 +272,39 @@ def test_complete_identity_equal_copied_snapshot_is_preserved_as_new(
         )
     finally:
         engine.shutdown()
+
+
+def test_snapshot_metadata_retains_whole_digest_across_occurrence_boundary(tmp_path):
+    config = LCMConfig(database_path=str(tmp_path / "snapshot-boundary.db"))
+    engine = LCMEngine(config=config, hermes_home=str(tmp_path))
+    engine.on_session_start(
+        "snapshot-boundary-session",
+        platform="cli",
+        conversation_id="snapshot-boundary-conversation",
+        context_length=200_000,
+    )
+    prefix = "snapshot-boundary-proof"
+    at_limit_digest = "a" * 64
+    over_limit_digest = "b" * 64
+    at_limit = [
+        {"role": "assistant", "content": f"message-{index}"}
+        for index in range(8192)
+    ]
+    over_limit = [*at_limit, {"role": "assistant", "content": "message-8192"}]
+
+    try:
+        engine._remember_replay_snapshot(prefix, at_limit_digest, at_limit)
+        engine._remember_replay_snapshot(prefix, over_limit_digest, over_limit)
+
+        records = {
+            record["digest"]: record
+            for record in engine._load_replay_snapshot_records(prefix)
+        }
+        assert len(records[at_limit_digest]["message_digests"]) == 8192
+        assert records[over_limit_digest]["message_digests"] == []
+        assert engine._load_replay_snapshot_digests(prefix) == [
+            at_limit_digest,
+            over_limit_digest,
+        ]
+    finally:
+        engine.shutdown()
