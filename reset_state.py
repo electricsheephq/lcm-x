@@ -30,6 +30,10 @@ class ResetStateMixin:
         self._context_probed = False
         self._context_probe_persistable = False
         self._last_overflow_recovery_failed = False
+        self._last_overflow_recovery_failure_reason = ""
+        self._last_overflow_recovery_result_digest = ""
+        self._last_overflow_recovery_configured_cap = None
+        self._last_overflow_recovery_assembly_cap = None
         self._last_condensation_suppressed_reason = ""
         self._last_compression_status = "idle"
         self._last_compression_noop_reason = ""
@@ -56,6 +60,7 @@ class ResetStateMixin:
         self._clear_fresh_tail_pressure_yield_state()
         self._generated_ignored_active_replay_placeholder_hashes = set()
         self._generated_ignored_active_replay_placeholder_message_ids = set()
+        self._generated_preserved_objective_messages_by_id = {}
         self._compression_boundary_ingest_pending = False
         self._compression_boundary_active_placeholder_digest_budget = {}
         self._compression_boundary_active_placeholder_digest_ordinals = {}
