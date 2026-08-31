@@ -757,6 +757,32 @@ def test_quoted_password_scans_delimiters_through_closing_quote(
     )
 
 
+def test_quoted_password_detects_placeholder_after_escaped_start(tmp_path):
+    """An odd backslash before a PEM placeholder must not hide short fragments."""
+    cfg = _config(tmp_path)
+    private_key = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        f"{_KEY_BODY}\n"
+        "-----END PRIVATE KEY-----"
+    )
+    text = f'password="Q\\{private_key}Z"'
+
+    durable = redact_sensitive_text(text, cfg)
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+
+    for output in (durable, protected):
+        assert _KEY_BODY not in output
+        assert "name=private_key" not in output
+        assert "name=password_assignment" in output
+        assert "Q\\" not in output
+        assert "Z\"" not in output
+    validate_embedding_privacy_dispatch(
+        [protected],
+        cfg,
+        expected_revision=revision,
+    )
+
+
 def test_noncanonical_private_key_marker_cannot_cross_newline(tmp_path):
     cfg = _config(tmp_path)
     trailing = "ordinary user text must remain"

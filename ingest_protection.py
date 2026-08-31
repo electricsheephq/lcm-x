@@ -560,6 +560,13 @@ def _redact_password_assignments_with_private_key_placeholder(
                     break
                 if char == "\\":
                     escaped_index = value_end + 1
+                    escaped_placeholder_end = (
+                        private_key_placeholder_ends.get(escaped_index)
+                    )
+                    if escaped_placeholder_end is not None:
+                        saw_private_key_placeholder = True
+                        value_end = escaped_placeholder_end
+                        continue
                     if (
                         escaped_index < text_length
                         and text[escaped_index] not in "\r\n"
