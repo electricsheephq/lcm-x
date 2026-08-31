@@ -5247,7 +5247,29 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             )
             return self._redact_active_replay_messages(messages)
 
-        self._restore_generated_preserved_objective_provenance(messages)
+        provenance_read_completed = (
+            self._restore_generated_preserved_objective_provenance(messages)
+        )
+        if not provenance_read_completed and any(
+            str(message.get("role") or "") != "tool"
+            and (
+                normalize_content_value(message.get("content")) or ""
+            ).lstrip().startswith(
+                _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+            )
+            and not self._is_generated_preserved_objective_message(message)
+            for message in messages
+        ):
+            # A transient metadata read failure is not proof that a compact
+            # marker is user-authored. Leave the cursor untouched so the exact
+            # batch can be retried after provenance becomes readable instead
+            # of durably ingesting a potentially synthetic objective.
+            logger.warning(
+                "LCM deferred ingest while compact objective provenance was "
+                "unavailable: session=%s",
+                self._session_id,
+            )
+            return self._redact_active_replay_messages(messages)
 
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
@@ -6762,12 +6784,12 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             "generated_preserved_objective_provenance"
         )
 
-    def _load_generated_preserved_objective_provenance(
+    def _load_generated_preserved_objective_provenance_with_status(
         self,
-    ) -> list[Dict[str, Any]]:
-        """Load bounded occurrence proof for engine-generated objectives."""
+    ) -> tuple[list[Dict[str, Any]], bool]:
+        """Load bounded occurrence proof and report whether the read completed."""
         if not self._session_id:
-            return []
+            return [], True
         try:
             payload = self._store.read_metadata_json(
                 self._generated_preserved_objective_provenance_metadata_key()
@@ -6777,12 +6799,12 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 "LCM generated objective provenance load failed",
                 exc_info=True,
             )
-            return []
+            return [], False
         if not isinstance(payload, dict) or payload.get("version") != 1:
-            return []
+            return [], True
         raw_records = payload.get("records")
         if not isinstance(raw_records, list):
-            return []
+            return [], True
         records: list[Dict[str, Any]] = []
         for raw_record in raw_records[-16:]:
             if not isinstance(raw_record, dict):
@@ -6827,7 +6849,16 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                         "objectives": normalized_objectives,
                     }
                 )
-        return records[-16:]
+        return records[-16:], True
+
+    def _load_generated_preserved_objective_provenance(
+        self,
+    ) -> list[Dict[str, Any]]:
+        """Load bounded occurrence proof for engine-generated objectives."""
+        records, _read_completed = (
+            self._load_generated_preserved_objective_provenance_with_status()
+        )
+        return records
 
     def _remember_generated_preserved_objective_provenance(
         self,
@@ -6856,7 +6887,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             "message_count": len(messages),
             "objectives": objectives,
         }
-        records = self._load_generated_preserved_objective_provenance()
+        records, read_completed = (
+            self._load_generated_preserved_objective_provenance_with_status()
+        )
         pending_records = [
             item
             for item in self._pending_generated_preserved_objective_provenance_records
@@ -6869,6 +6902,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         for pending_record in pending_records:
             records = [item for item in records if item != pending_record]
             records.append(pending_record)
+        if not read_completed:
+            return False
         try:
             self._store.write_metadata_json(
                 [self._generated_preserved_objective_provenance_metadata_key()],
@@ -6890,16 +6925,18 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
     def _restore_generated_preserved_objective_provenance(
         self,
         messages: List[Dict[str, Any]],
-    ) -> None:
+    ) -> bool:
         """Restore trust only for exact positions in a proven snapshot prefix."""
-        records = self._load_generated_preserved_objective_provenance()
+        records, read_completed = (
+            self._load_generated_preserved_objective_provenance_with_status()
+        )
         pending_records = list(
             self._pending_generated_preserved_objective_provenance_records
         )
         for pending_record in pending_records:
             records = [item for item in records if item != pending_record]
             records.append(pending_record)
-        if pending_records and self._session_id:
+        if pending_records and self._session_id and read_completed:
             try:
                 self._store.write_metadata_json(
                     [self._generated_preserved_objective_provenance_metadata_key()],
@@ -6935,6 +6972,51 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 ):
                     self._mark_generated_preserved_objective_message(message)
 
+        # Before exact occurrence provenance existed, generated objective
+        # scaffolds were still covered by the durable fingerprint of the exact
+        # engine-assembled compacted snapshot. Restore only assistant
+        # occurrences from that exact registered snapshot. A prefix-shaped
+        # assistant message in any other batch remains untrusted.
+        compacted_snapshot_digest = (
+            self._compacted_active_replay_snapshot_digest(messages)
+        )
+        if (
+            compacted_snapshot_digest
+            and compacted_snapshot_digest
+            in set(self._load_compacted_active_replay_snapshot_digests())
+        ):
+            try:
+                store_ids_by_message_id = self._get_store_id_map_for_messages(
+                    messages
+                )
+            except Exception:
+                logger.debug(
+                    "LCM legacy objective replay lineage lookup failed",
+                    exc_info=True,
+                )
+                store_ids_by_message_id = {}
+            for message in messages:
+                content = normalize_content_value(message.get("content")) or ""
+                has_durable_raw_occurrence = bool(
+                    int(
+                        message.get("store_id")
+                        or store_ids_by_message_id.get(id(message))
+                        or 0
+                    )
+                )
+                if (
+                    str(message.get("role") or "") == "assistant"
+                    and content.lstrip().startswith(
+                        _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+                    )
+                    and (
+                        not has_durable_raw_occurrence
+                        or self._is_registered_folded_tail_message(message)
+                    )
+                ):
+                    self._mark_generated_preserved_objective_message(message)
+        return read_completed
+
     def _has_trusted_preserved_objective_provenance(
         self,
         message: Dict[str, Any],
@@ -6945,6 +7027,13 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             return True
         if message.get("role") != "user":
             return False
+        content = normalize_content_value(message.get("content")) or ""
+        if content.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
+            # The legacy namespace is intrinsically recognizable on replay.
+            # Treating a literal user collision as the objective preserves the
+            # complete turn as well; only assistant/tool occurrences need
+            # additional generated provenance before they can steer recovery.
+            return True
         store_id = int(
             message.get("store_id")
             or store_ids_by_message_id.get(id(message))
@@ -7824,10 +7913,105 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
     def _finalize_overflow_recovery_context_result(
         self,
         messages: List[Dict[str, Any]],
+        assembly_cap_override: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Persist exact provenance for generated anchors in a recovery result."""
-        self._remember_generated_preserved_objective_provenance(messages)
-        return messages
+        if self._remember_generated_preserved_objective_provenance(messages):
+            return messages
+
+        failed_snapshot_digest = (
+            self._exact_provider_visible_snapshot_digest(messages)
+        )
+        self._pending_generated_preserved_objective_provenance_records = [
+            record
+            for record in self._pending_generated_preserved_objective_provenance_records
+            if record.get("snapshot_digest") != failed_snapshot_digest
+        ]
+
+        # Compact markers are safe only with durable exact-occurrence proof.
+        # If that write fails, fall back to the migration-safe legacy marker.
+        # Truncate its payload when that can satisfy the cap. If even the
+        # marker cannot fit, keep a minimal legacy scaffold and let the outer
+        # recovery status report the cap failure rather than emit an unproven
+        # compact marker that a restart could ingest as a real user turn.
+        fallback = list(messages)
+        for index, message in enumerate(fallback):
+            if not self._is_generated_preserved_objective_message(message):
+                continue
+            content = normalize_content_value(message.get("content")) or ""
+            stripped_content = content.lstrip()
+            if not stripped_content.startswith(
+                _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+            ):
+                continue
+            leading_whitespace = content[: len(content) - len(stripped_content)]
+            legacy_message = dict(message)
+            legacy_message["content"] = (
+                leading_whitespace
+                + _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+                + stripped_content[
+                    len(_COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
+                ]
+            )
+            candidate = [
+                *fallback[:index],
+                legacy_message,
+                *fallback[index + 1:],
+            ]
+            if (
+                assembly_cap_override is None
+                or count_messages_tokens(candidate) <= assembly_cap_override
+            ):
+                fallback = candidate
+                self._mark_generated_preserved_objective_message(
+                    fallback[index]
+                )
+                continue
+            legacy_suffix = legacy_message["content"][
+                len(leading_whitespace + _PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
+            ].lstrip()
+            low = 1
+            high = len(legacy_suffix)
+            best_legacy_message: Optional[Dict[str, Any]] = None
+            while low <= high:
+                midpoint = (low + high) // 2
+                bounded_suffix = legacy_suffix[:midpoint].rstrip()
+                bounded_message = dict(legacy_message)
+                bounded_message["content"] = (
+                    leading_whitespace
+                    + _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+                    + "\n"
+                    + bounded_suffix
+                )
+                bounded_candidate = [
+                    *fallback[:index],
+                    bounded_message,
+                    *fallback[index + 1:],
+                ]
+                if (
+                    bounded_suffix
+                    and count_messages_tokens(bounded_candidate)
+                    <= assembly_cap_override
+                ):
+                    best_legacy_message = bounded_message
+                    low = midpoint + 1
+                else:
+                    high = midpoint - 1
+            fallback_message = best_legacy_message or {
+                "role": "user",
+                "content": (
+                    leading_whitespace
+                    + _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+                    + "\nContinue."
+                ),
+            }
+            fallback = [
+                *fallback[:index],
+                fallback_message,
+                *fallback[index + 1:],
+            ]
+            self._mark_generated_preserved_objective_message(fallback[index])
+        return fallback
 
     def _assemble_overflow_recovery_context(
         self,
@@ -7888,7 +8072,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     for msg in (candidate[1:] if system_msg is not None else candidate)
                 ):
                     return self._finalize_overflow_recovery_context_result(
-                        candidate
+                        candidate,
+                        assembly_cap_override,
                     )
 
         candidate = self._assemble_context(
@@ -7909,13 +8094,24 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 generated_suffix = candidate[len(required_prefix):]
                 recovery_anchor = self._overflow_recovery_user_anchor(
                     [],
-                    required_prefix,
+                    [*required_prefix, *generated_suffix],
                     assembly_cap_override,
                 )
-                return self._finalize_overflow_recovery_context_result(
-                    self._sanitize_active_context_messages(
-                        [*required_prefix, recovery_anchor, *generated_suffix]
+                recovery = self._sanitize_active_context_messages(
+                    [*required_prefix, recovery_anchor, *generated_suffix]
+                )
+                if (
+                    generated_suffix
+                    and assembly_cap_override is not None
+                    and count_messages_tokens(recovery)
+                    > assembly_cap_override
+                ):
+                    recovery = self._sanitize_active_context_messages(
+                        [*required_prefix, recovery_anchor]
                     )
+                return self._finalize_overflow_recovery_context_result(
+                    recovery,
+                    assembly_cap_override,
                 )
         minimum_candidate_len = (
             (1 if system_msg is not None else 0)
@@ -7937,7 +8133,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 and count_messages_tokens(fallback) > assembly_cap_override
             ):
                 return self._finalize_overflow_recovery_context_result(
-                    candidate
+                    candidate,
+                    assembly_cap_override,
                 )
             sanitized_fallback = self._sanitize_active_context_messages(fallback)
             provider_offset = (
@@ -7949,7 +8146,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             provider_visible = sanitized_fallback[provider_offset:]
             if provider_visible and provider_visible[0].get("role") == "user":
                 return self._finalize_overflow_recovery_context_result(
-                    sanitized_fallback
+                    sanitized_fallback,
+                    assembly_cap_override,
                 )
 
             prefix_messages = (
@@ -7978,10 +8176,17 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 # smallest valid user anchor only fits by itself, keep that
                 # anchor rather than silently returning an over-cap transcript.
                 return self._finalize_overflow_recovery_context_result(
-                    self._sanitize_active_context_messages([recovery_anchor])
+                    self._sanitize_active_context_messages([recovery_anchor]),
+                    assembly_cap_override,
                 )
-            return self._finalize_overflow_recovery_context_result(recovery)
-        return self._finalize_overflow_recovery_context_result(candidate)
+            return self._finalize_overflow_recovery_context_result(
+                recovery,
+                assembly_cap_override,
+            )
+        return self._finalize_overflow_recovery_context_result(
+            candidate,
+            assembly_cap_override,
+        )
 
     @staticmethod
     def _looks_like_active_summary_blob(content: str) -> bool:

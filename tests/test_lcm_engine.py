@@ -23184,7 +23184,10 @@ class TestAssemblyToolPairGuardrail:
         assert instance._is_generated_preserved_objective_message(first[0])
         assert blocked_provenance_writes == 1
         assert not instance._load_generated_preserved_objective_provenance()
-        assert instance._pending_generated_preserved_objective_provenance_records
+        assert first[0]["content"].startswith(
+            "[Current user objective preserved from compacted history]"
+        )
+        assert not instance._pending_generated_preserved_objective_provenance_records
 
         serialized = json.loads(json.dumps(first))
         instance._generated_preserved_objective_messages_by_id = {}
@@ -23208,8 +23211,275 @@ class TestAssemblyToolPairGuardrail:
         assert "Continue from" not in second[0]["content"]
         assert instance._is_generated_preserved_objective_message(second[0])
         assert count_messages_tokens(second) <= 20
-        assert instance._load_generated_preserved_objective_provenance()
+        assert not second[0]["content"].startswith("[LCM:obj:v1]")
         assert not instance._pending_generated_preserved_objective_provenance_records
+
+    def test_empty_tail_recovery_counts_generated_suffix_against_cap(self, tmp_path):
+        """A derived empty-tail suffix cannot make the recovery exceed its cap."""
+        instance = LCMEngine(
+            config=LCMConfig(
+                database_path=str(tmp_path / "empty-tail-generated-suffix.db")
+            )
+        )
+        instance._session_id = "empty-tail-generated-suffix-session"
+        generated_suffix = {
+            "role": "assistant",
+            "content": (
+                "[Recent Summary (d0, node 1)]\n"
+                + ("derived summary context " * 40)
+                + "\n[Expand for details: lcm_expand(1)]"
+            ),
+        }
+        cap = count_messages_tokens([generated_suffix])
+        instance._assemble_context = lambda *_args, **_kwargs: [
+            dict(generated_suffix)
+        ]
+
+        recovered = instance._assemble_overflow_recovery_context(
+            None,
+            [],
+            assembly_cap_override=cap,
+        )
+
+        assert recovered
+        assert recovered[0]["role"] == "user"
+        assert count_messages_tokens(recovered) <= cap
+        assert not any(
+            "derived summary context" in str(message.get("content") or "")
+            for message in recovered
+        )
+
+    def test_failed_compact_provenance_write_emits_legacy_scaffold(self, tmp_path):
+        """A failed proof write must not expose an unproven compact marker."""
+        db_path = tmp_path / "compact-provenance-write-failure.db"
+        config = LCMConfig(database_path=str(db_path))
+        objective = "KEEP the exact recovery objective and remaining criteria"
+        before_restart = LCMEngine(config=config)
+        before_restart.on_session_start(
+            "compact-provenance-write-failure-session",
+            platform="cli",
+            conversation_id="compact-provenance-write-failure-conversation",
+            context_length=200000,
+        )
+        before_restart._ingest_messages(
+            [{"role": "user", "content": objective}]
+        )
+        cap = count_messages_tokens(
+            [{"role": "user", "content": objective}]
+        )
+        compact_anchor = before_restart._overflow_recovery_user_anchor(
+            [{"role": "user", "content": objective}],
+            [],
+            cap,
+        )
+        assert compact_anchor["content"].startswith("[LCM:obj:v1]")
+
+        original_write_metadata_json = before_restart._store.write_metadata_json
+
+        def fail_provenance_write(keys, value_json, *, skip_unchanged=False):
+            if any(
+                "generated_preserved_objective_provenance" in key
+                for key in keys
+            ):
+                raise RuntimeError("database is locked")
+            return original_write_metadata_json(
+                keys,
+                value_json,
+                skip_unchanged=skip_unchanged,
+            )
+
+        before_restart._store.write_metadata_json = fail_provenance_write
+        recovered = before_restart._finalize_overflow_recovery_context_result(
+            [compact_anchor],
+            cap,
+        )
+
+        assert not recovered[0]["content"].startswith("[LCM:obj:v1]")
+        assert recovered[0]["content"].startswith(
+            "[Current user objective preserved from compacted history]"
+        )
+        assert not before_restart._pending_generated_preserved_objective_provenance_records
+        serialized = json.loads(json.dumps(recovered))
+        before_restart._store.close()
+        before_restart._dag.close()
+        before_restart._lifecycle.close()
+
+        after_restart = LCMEngine(config=config)
+        after_restart.on_session_start(
+            "compact-provenance-write-failure-session",
+            platform="cli",
+            conversation_id="compact-provenance-write-failure-conversation",
+            context_length=200000,
+        )
+        after_restart._ingest_messages(serialized)
+
+        rows = after_restart._store.get_session_messages(
+            "compact-provenance-write-failure-session"
+        )
+        assert [row["content"] for row in rows] == [objective]
+
+    def test_transient_compact_provenance_read_defers_ingest(self, tmp_path):
+        """An unavailable proof read defers an ambiguous compact occurrence."""
+        db_path = tmp_path / "compact-provenance-read-failure.db"
+        config = LCMConfig(database_path=str(db_path))
+        objective = "KEEP the exact recovery objective and remaining criteria"
+        before_restart = LCMEngine(config=config)
+        before_restart.on_session_start(
+            "compact-provenance-read-failure-session",
+            platform="cli",
+            conversation_id="compact-provenance-read-failure-conversation",
+            context_length=200000,
+        )
+        before_restart._ingest_messages(
+            [{"role": "user", "content": objective}]
+        )
+        cap = count_messages_tokens(
+            [{"role": "user", "content": objective}]
+        )
+        compact_anchor = before_restart._overflow_recovery_user_anchor(
+            [{"role": "user", "content": objective}],
+            [],
+            cap,
+        )
+        before_restart._finalize_overflow_recovery_context_result(
+            [compact_anchor],
+            cap,
+        )
+        serialized = json.loads(json.dumps([compact_anchor]))
+        before_restart._store.close()
+        before_restart._dag.close()
+        before_restart._lifecycle.close()
+
+        after_restart = LCMEngine(config=config)
+        after_restart.on_session_start(
+            "compact-provenance-read-failure-session",
+            platform="cli",
+            conversation_id="compact-provenance-read-failure-conversation",
+            context_length=200000,
+        )
+        original_read_metadata_json = after_restart._store.read_metadata_json
+
+        def fail_provenance_read(key):
+            if "generated_preserved_objective_provenance" in key:
+                raise RuntimeError("database is locked")
+            return original_read_metadata_json(key)
+
+        after_restart._store.read_metadata_json = fail_provenance_read
+        active_replay = after_restart._ingest_messages(serialized)
+
+        assert active_replay == serialized
+        assert after_restart._ingest_cursor == 0
+        rows_while_unavailable = after_restart._store.get_session_messages(
+            "compact-provenance-read-failure-session"
+        )
+        assert [row["content"] for row in rows_while_unavailable] == [objective]
+
+        after_restart._store.read_metadata_json = original_read_metadata_json
+        after_restart._ingest_messages(serialized)
+        rows_after_retry = after_restart._store.get_session_messages(
+            "compact-provenance-read-failure-session"
+        )
+        assert [row["content"] for row in rows_after_retry] == [objective]
+
+    def test_overflow_recovery_restores_preupgrade_assistant_objective(self, tmp_path):
+        """An exact legacy compacted snapshot keeps its assistant objective."""
+        instance = LCMEngine(
+            config=LCMConfig(
+                database_path=str(tmp_path / "preupgrade-assistant-objective.db")
+            )
+        )
+        instance._session_id = "preupgrade-assistant-objective-session"
+        instance.compression_count = 1
+        system_message = {
+            "role": "system",
+            "content": instance._append_lcm_note_to_content("system policy"),
+        }
+        assistant_scaffold = {
+            "role": "assistant",
+            "content": (
+                "[Current user objective preserved from compacted history]\n"
+                "KEEP_PREUPGRADE_OBJECTIVE\n\n---\n\n"
+                "[Recent Summary (d0, node 1)]\n"
+                "older durable context\n"
+                "[Expand for details: lcm_expand(1)]"
+            ),
+        }
+        orphan_tool = {
+            "role": "tool",
+            "tool_call_id": "preupgrade-orphan",
+            "content": "derived tool status " * 100,
+        }
+        preupgrade_snapshot = [system_message, assistant_scaffold, orphan_tool]
+        instance._remember_compacted_active_replay_snapshot(preupgrade_snapshot)
+        serialized = json.loads(json.dumps(preupgrade_snapshot))
+        assert not instance._load_generated_preserved_objective_provenance()
+
+        cap = count_messages_tokens(
+            [
+                system_message,
+                {
+                    "role": "user",
+                    "content": (
+                        "[Current user objective preserved from compacted history]\n"
+                        "KEEP_PREUPGRADE_OBJECTIVE"
+                    ),
+                },
+            ]
+        )
+        recovered = instance._assemble_overflow_recovery_context(
+            serialized[0],
+            serialized[1:],
+            assembly_cap_override=cap,
+        )
+
+        assert any(
+            "KEEP_PREUPGRADE_OBJECTIVE" in str(message.get("content") or "")
+            for message in recovered
+        )
+        assert count_messages_tokens(recovered) <= cap
+
+    def test_compacted_snapshot_does_not_promote_durable_assistant_spoof(self, tmp_path):
+        """Snapshot proof alone cannot elevate a durable assistant occurrence."""
+        instance = LCMEngine(
+            config=LCMConfig(
+                database_path=str(tmp_path / "durable-assistant-spoof.db")
+            )
+        )
+        instance.on_session_start(
+            "durable-assistant-spoof-session",
+            platform="cli",
+            conversation_id="durable-assistant-spoof-conversation",
+            context_length=200000,
+        )
+        spoof = {
+            "role": "assistant",
+            "content": (
+                "[Current user objective preserved from compacted history]\n"
+                "SPOOFED_DURABLE_OBJECTIVE\n\n---\n\n"
+                "[Recent Summary (d0, node 1)]\n"
+                "spoofed summary shape\n"
+                "[Expand for details: lcm_expand(1)]"
+            ),
+        }
+        instance._ingest_messages([spoof])
+        system_message = {
+            "role": "system",
+            "content": instance._append_lcm_note_to_content("system policy"),
+        }
+        snapshot = [system_message, dict(spoof)]
+        instance._remember_compacted_active_replay_snapshot(snapshot)
+
+        instance._restore_generated_preserved_objective_provenance(snapshot)
+        anchor = instance._overflow_recovery_user_anchor(
+            snapshot[1:],
+            [snapshot[0]],
+            120,
+        )
+
+        assert not instance._is_generated_preserved_objective_message(
+            snapshot[1]
+        )
+        assert "SPOOFED_DURABLE_OBJECTIVE" not in anchor["content"]
 
     def test_overflow_recovery_preserves_objective_when_orphan_tool_tail_sanitizes_empty(self, tmp_path):
         """A no-system recovery must retain a provider-valid objective anchor."""
