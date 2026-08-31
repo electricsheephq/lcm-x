@@ -639,6 +639,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             int,
             tuple[Dict[str, Any], str],
         ] = {}
+        self._pending_generated_preserved_objective_provenance_records: list[
+            Dict[str, Any]
+        ] = []
         self._logged_filter_config = False
         self._pending_reset_session_id: str = ""
         self._pending_reset_conversation_id: str = ""
@@ -6753,10 +6756,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
     def _remember_generated_preserved_objective_provenance(
         self,
         messages: List[Dict[str, Any]],
-    ) -> None:
+    ) -> bool:
         """Persist only exact generated-objective occurrences in one snapshot."""
         if not self._session_id or not messages:
-            return
+            return True
         objectives = [
             {
                 "index": index,
@@ -6769,7 +6772,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             and self._preserved_objective_context_content(message)
         ][:8]
         if not objectives:
-            return
+            return True
         record = {
             "snapshot_digest": (
                 self._exact_provider_visible_snapshot_digest(messages)
@@ -6778,8 +6781,18 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             "objectives": objectives,
         }
         records = self._load_generated_preserved_objective_provenance()
-        records = [item for item in records if item != record]
-        records.append(record)
+        pending_records = [
+            item
+            for item in self._pending_generated_preserved_objective_provenance_records
+            if item != record
+        ]
+        pending_records.append(record)
+        self._pending_generated_preserved_objective_provenance_records = (
+            pending_records[-16:]
+        )
+        for pending_record in pending_records:
+            records = [item for item in records if item != pending_record]
+            records.append(pending_record)
         try:
             self._store.write_metadata_json(
                 [self._generated_preserved_objective_provenance_metadata_key()],
@@ -6794,15 +6807,40 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 "LCM generated objective provenance write failed",
                 exc_info=True,
             )
+            return False
+        self._pending_generated_preserved_objective_provenance_records = []
+        return True
 
     def _restore_generated_preserved_objective_provenance(
         self,
         messages: List[Dict[str, Any]],
     ) -> None:
         """Restore trust only for exact positions in a proven snapshot prefix."""
-        for record in reversed(
-            self._load_generated_preserved_objective_provenance()
-        ):
+        records = self._load_generated_preserved_objective_provenance()
+        pending_records = list(
+            self._pending_generated_preserved_objective_provenance_records
+        )
+        for pending_record in pending_records:
+            records = [item for item in records if item != pending_record]
+            records.append(pending_record)
+        if pending_records and self._session_id:
+            try:
+                self._store.write_metadata_json(
+                    [self._generated_preserved_objective_provenance_metadata_key()],
+                    json.dumps(
+                        {"version": 1, "records": records[-16:]},
+                        sort_keys=True,
+                    ),
+                    skip_unchanged=True,
+                )
+            except Exception:
+                logger.debug(
+                    "LCM pending generated objective provenance retry failed",
+                    exc_info=True,
+                )
+            else:
+                self._pending_generated_preserved_objective_provenance_records = []
+        for record in reversed(records):
             message_count = int(record["message_count"])
             if message_count > len(messages):
                 continue
@@ -7621,7 +7659,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 "Continue from the recoverable LCM session state."
             )
 
-        anchor = {"role": "user", "content": anchor_content}
+        anchor = self._mark_generated_preserved_objective_message(
+            {"role": "user", "content": anchor_content}
+        )
         if (
             assembly_cap_override is None
             or count_messages_tokens([*prefix_messages, anchor])
@@ -7646,12 +7686,22 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             else:
                 high = midpoint - 1
         if best_content:
-            return {"role": "user", "content": best_content}
+            return self._mark_generated_preserved_objective_message(
+                {"role": "user", "content": best_content}
+            )
 
         # A cap smaller than provider message overhead cannot be met. Prefer a
         # minimal valid recovery request over returning an empty transcript and
         # trapping the host in the same forced-overflow loop.
         return {"role": "user", "content": "Continue."}
+
+    def _finalize_overflow_recovery_context_result(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Persist exact provenance for generated anchors in a recovery result."""
+        self._remember_generated_preserved_objective_provenance(messages)
+        return messages
 
     def _assemble_overflow_recovery_context(
         self,
@@ -7711,7 +7761,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     (msg.get("content") or "") == content
                     for msg in (candidate[1:] if system_msg is not None else candidate)
                 ):
-                    return candidate
+                    return self._finalize_overflow_recovery_context_result(
+                        candidate
+                    )
 
         candidate = self._assemble_context(
             system_msg,
@@ -7734,8 +7786,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     required_prefix,
                     assembly_cap_override,
                 )
-                return self._sanitize_active_context_messages(
-                    [*required_prefix, recovery_anchor, *generated_suffix]
+                return self._finalize_overflow_recovery_context_result(
+                    self._sanitize_active_context_messages(
+                        [*required_prefix, recovery_anchor, *generated_suffix]
+                    )
                 )
         minimum_candidate_len = (
             (1 if system_msg is not None else 0)
@@ -7756,7 +7810,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 and assembly_cap_override is not None
                 and count_messages_tokens(fallback) > assembly_cap_override
             ):
-                return candidate
+                return self._finalize_overflow_recovery_context_result(
+                    candidate
+                )
             sanitized_fallback = self._sanitize_active_context_messages(fallback)
             provider_offset = (
                 1
@@ -7766,7 +7822,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             )
             provider_visible = sanitized_fallback[provider_offset:]
             if provider_visible and provider_visible[0].get("role") == "user":
-                return sanitized_fallback
+                return self._finalize_overflow_recovery_context_result(
+                    sanitized_fallback
+                )
 
             prefix_messages = (
                 ([system_msg] if system_msg is not None else [])
@@ -7793,9 +7851,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 # Assistant/tool suffixes are derived context. If even the
                 # smallest valid user anchor only fits by itself, keep that
                 # anchor rather than silently returning an over-cap transcript.
-                return self._sanitize_active_context_messages([recovery_anchor])
-            return recovery
-        return candidate
+                return self._finalize_overflow_recovery_context_result(
+                    self._sanitize_active_context_messages([recovery_anchor])
+                )
+            return self._finalize_overflow_recovery_context_result(recovery)
+        return self._finalize_overflow_recovery_context_result(candidate)
 
     @staticmethod
     def _looks_like_active_summary_blob(content: str) -> bool:

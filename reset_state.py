@@ -61,6 +61,7 @@ class ResetStateMixin:
         self._generated_ignored_active_replay_placeholder_hashes = set()
         self._generated_ignored_active_replay_placeholder_message_ids = set()
         self._generated_preserved_objective_messages_by_id = {}
+        self._pending_generated_preserved_objective_provenance_records = []
         self._compression_boundary_ingest_pending = False
         self._compression_boundary_active_placeholder_digest_budget = {}
         self._compression_boundary_active_placeholder_digest_ordinals = {}

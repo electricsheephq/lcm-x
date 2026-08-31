@@ -559,10 +559,12 @@ class CompactionMixin:
             time.perf_counter() - compress_started
         ) * 1000.0
         if recovery_assembly_cap is not None:
-            self._remember_overflow_recovery_result(
-                fallback,
-                assembly_cap_override=recovery_assembly_cap,
-            )
+            # Publication failures are transient. Do not settle this fallback
+            # as a completed recovery result, and discard any older settlement
+            # that could suppress a retry for the same provider-visible input.
+            self._last_overflow_recovery_result_digest = ""
+            self._last_overflow_recovery_configured_cap = None
+            self._last_overflow_recovery_assembly_cap = None
             self._last_overflow_recovery_failed = (
                 count_messages_tokens(fallback) > recovery_assembly_cap
             )

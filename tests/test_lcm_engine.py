@@ -23101,6 +23101,116 @@ class TestAssemblyToolPairGuardrail:
             messages=grown,
         )
 
+    def test_overflow_recovery_retries_after_transient_publication_failure(self, tmp_path):
+        """A fail-open publication result must not settle an over-cap request."""
+        config = LCMConfig(
+            fresh_tail_count=10,
+            database_path=str(tmp_path / "lcm_overflow_publication_retry.db"),
+            max_assembly_tokens=20,
+        )
+        instance = LCMEngine(config=config)
+        instance._session_id = "overflow-publication-retry-test"
+        instance.compression_count = 1
+
+        original = [
+            {"role": "system", "content": "mandatory system policy"},
+            {"role": "assistant", "content": "oversized derived context " * 100},
+        ]
+        fallback = instance._fail_open_after_publication_failure(
+            original,
+            RuntimeError("database is locked"),
+            compress_started=time.perf_counter(),
+            threshold_full_sweep_active=False,
+            recovery_assembly_cap=20,
+            leaf_passes=0,
+            context_is_assembled=False,
+        )
+
+        fallback_tokens = count_messages_tokens(fallback)
+        assert fallback_tokens > 20
+        assert instance.get_status()["overflow_recovery_failed"] is True
+        assert instance._last_overflow_recovery_result_digest == ""
+        assert instance._should_force_overflow_recovery(
+            observed_tokens=fallback_tokens,
+            messages=fallback,
+        )
+
+    def test_overflow_recovery_preserves_generated_anchor_after_serialization(self, tmp_path):
+        """Two serialized recovery passes must retain the generated objective."""
+        config = LCMConfig(
+            fresh_tail_count=10,
+            database_path=str(tmp_path / "lcm_overflow_anchor_round_trip.db"),
+        )
+        instance = LCMEngine(config=config)
+        instance._session_id = "overflow-anchor-round-trip-test"
+        instance.compression_count = 1
+
+        original_write_metadata_json = instance._store.write_metadata_json
+        blocked_provenance_writes = 0
+
+        def block_initial_provenance_writes(keys, value_json, *, skip_unchanged=False):
+            nonlocal blocked_provenance_writes
+            if (
+                blocked_provenance_writes < 2
+                and any(
+                    "generated_preserved_objective_provenance" in key
+                    for key in keys
+                )
+            ):
+                blocked_provenance_writes += 1
+                raise RuntimeError("database is locked")
+            return original_write_metadata_json(
+                keys,
+                value_json,
+                skip_unchanged=skip_unchanged,
+            )
+
+        instance._store.write_metadata_json = block_initial_provenance_writes
+
+        first = instance._assemble_overflow_recovery_context(
+            None,
+            [
+                {"role": "user", "content": "KEEP objective report"},
+                {"role": "assistant", "content": "x" * 1000},
+                {
+                    "role": "tool",
+                    "tool_call_id": "first-orphan",
+                    "content": "orphan result",
+                },
+            ],
+            assembly_cap_override=20,
+        )
+        assert "KEEP" in first[0]["content"]
+        assert instance._is_generated_preserved_objective_message(first[0])
+        assert blocked_provenance_writes == 1
+        assert not instance._load_generated_preserved_objective_provenance()
+        assert instance._pending_generated_preserved_objective_provenance_records
+
+        serialized = json.loads(json.dumps(first))
+        instance._generated_preserved_objective_messages_by_id = {}
+        second = instance._assemble_overflow_recovery_context(
+            None,
+            [
+                *serialized,
+                {"role": "assistant", "content": "y" * 1000},
+                {
+                    "role": "tool",
+                    "tool_call_id": "second-orphan",
+                    "content": "orphan result",
+                },
+            ],
+            assembly_cap_override=20,
+        )
+        instance._store.write_metadata_json = original_write_metadata_json
+
+        assert blocked_provenance_writes == 2
+        assert "KEEP" in second[0]["content"]
+        assert "Continue from" not in second[0]["content"]
+        assert instance._is_generated_preserved_objective_message(second[0])
+        assert count_messages_tokens(second) <= 20
+        assert instance._load_generated_preserved_objective_provenance()
+        assert not instance._pending_generated_preserved_objective_provenance_records
+
     def test_overflow_recovery_preserves_objective_when_orphan_tool_tail_sanitizes_empty(self, tmp_path):
         """A no-system recovery must retain a provider-valid objective anchor."""
         config = LCMConfig(
