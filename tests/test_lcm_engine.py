@@ -22955,6 +22955,63 @@ class TestAssemblyToolPairGuardrail:
         ]
         assert len(orphan_ids) == 0, f"Overflow fallback leaked orphan tool result: {orphan_ids}"
 
+    def test_overflow_recovery_preserves_objective_when_orphan_tool_tail_sanitizes_empty(self, tmp_path):
+        """A no-system recovery must retain a provider-valid objective anchor."""
+        config = LCMConfig(
+            fresh_tail_count=10,
+            database_path=str(tmp_path / "lcm_overflow_objective_anchor.db"),
+        )
+        instance = LCMEngine(config=config)
+        instance._session_id = "overflow-objective-anchor-test"
+        instance.compression_count = 1
+        instance.context_length = 200000
+
+        result = instance._assemble_overflow_recovery_context(
+            None,
+            [
+                {
+                    "role": "assistant",
+                    "content": (
+                        "[Current user objective preserved from compacted history]\n"
+                        "KEEP_OBJECTIVE: continue the active plan."
+                    ),
+                },
+                {
+                    "role": "assistant",
+                    "content": "oversized assistant/tool chatter " * 400,
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "orphan-call",
+                    "content": "latest tool status",
+                },
+            ],
+            assembly_cap_override=120,
+        )
+
+        assert result
+        assert result[0]["role"] == "user"
+        assert "KEEP_OBJECTIVE: continue the active plan." in result[0]["content"]
+        assert count_messages_tokens(result) <= 120
+
+        result_from_real_user = instance._assemble_overflow_recovery_context(
+            None,
+            [
+                {"role": "user", "content": "Finish the recovery report."},
+                {"role": "assistant", "content": "oversized chatter " * 400},
+                {
+                    "role": "tool",
+                    "tool_call_id": "another-orphan-call",
+                    "content": "latest tool status",
+                },
+            ],
+            assembly_cap_override=120,
+        )
+
+        assert result_from_real_user[0]["role"] == "user"
+        assert "Finish the recovery report." in result_from_real_user[0]["content"]
+        assert count_messages_tokens(result_from_real_user) <= 120
+
     def test_overflow_recovery_fallback_inserts_stub_for_missing_tool_result(self, tmp_path):
         """Overflow recovery fallback must sanitize an assistant tool_call-only tail."""
         config = LCMConfig(

@@ -7192,6 +7192,87 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
 
     # -- Internal: helpers -------------------------------------------------
 
+    def _overflow_recovery_user_anchor(
+        self,
+        tail_messages: List[Dict[str, Any]],
+        prefix_messages: List[Dict[str, Any]],
+        assembly_cap_override: Optional[int],
+    ) -> Dict[str, Any]:
+        """Build a bounded provider-valid anchor for an otherwise empty recovery."""
+        anchor_content = ""
+        for message in reversed(tail_messages):
+            if not isinstance(message, dict):
+                continue
+            anchor_content = self._sanitized_preserved_objective_context_content(
+                message
+            )
+            if anchor_content:
+                break
+
+        if not anchor_content:
+            for message in reversed(tail_messages):
+                if not isinstance(message, dict) or message.get("role") != "user":
+                    continue
+                content_text = (
+                    text_content_for_pattern_matching(message.get("content")) or ""
+                )
+                if (
+                    self._matches_ignore_message_patterns(message)
+                    or self._mapped_stored_row_matches_ignore_message_patterns(message)
+                    or self._is_volatile_ignored_quarantine_placeholder(
+                        message,
+                        content_text,
+                    )
+                    or self._is_ignored_active_replay_placeholder(
+                        message,
+                        content_text,
+                    )
+                    or self._is_preserved_todo_context_message(message)
+                ):
+                    continue
+                anchor_content = self._build_preserved_objective_summary_part(
+                    message
+                )
+                break
+
+        if not anchor_content:
+            anchor_content = (
+                f"{_PRESERVED_OBJECTIVE_CONTEXT_PREFIX}\n"
+                "Continue from the recoverable LCM session state."
+            )
+
+        anchor = {"role": "user", "content": anchor_content}
+        if (
+            assembly_cap_override is None
+            or count_messages_tokens([*prefix_messages, anchor])
+            <= assembly_cap_override
+        ):
+            return anchor
+
+        low = 1
+        high = len(anchor_content)
+        best_content = ""
+        while low <= high:
+            midpoint = (low + high) // 2
+            candidate_content = anchor_content[:midpoint].rstrip()
+            candidate = {"role": "user", "content": candidate_content}
+            if (
+                candidate_content
+                and count_messages_tokens([*prefix_messages, candidate])
+                <= assembly_cap_override
+            ):
+                best_content = candidate_content
+                low = midpoint + 1
+            else:
+                high = midpoint - 1
+        if best_content:
+            return {"role": "user", "content": best_content}
+
+        # A cap smaller than provider message overhead cannot be met. Prefer a
+        # minimal valid recovery request over returning an empty transcript and
+        # trapping the host in the same forced-overflow loop.
+        return {"role": "user", "content": "Continue."}
+
     def _assemble_overflow_recovery_context(
         self,
         system_msg: Optional[Dict[str, Any]],
@@ -7244,7 +7325,34 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 and count_messages_tokens(fallback) > assembly_cap_override
             ):
                 return candidate
-            return self._sanitize_active_context_messages(fallback)
+            sanitized_fallback = self._sanitize_active_context_messages(fallback)
+            provider_offset = (
+                1
+                if sanitized_fallback
+                and sanitized_fallback[0].get("role") == "system"
+                else 0
+            )
+            provider_visible = sanitized_fallback[provider_offset:]
+            if provider_visible and provider_visible[0].get("role") == "user":
+                return sanitized_fallback
+
+            prefix_messages = (
+                ([system_msg] if system_msg is not None else [])
+                + (
+                    [retained_user_message]
+                    if retained_user_message is not None
+                    else []
+                )
+            )
+            sanitized_suffix = sanitized_fallback[len(prefix_messages):]
+            recovery_anchor = self._overflow_recovery_user_anchor(
+                tail_messages,
+                [*prefix_messages, *sanitized_suffix],
+                assembly_cap_override,
+            )
+            return self._sanitize_active_context_messages(
+                [*prefix_messages, recovery_anchor, *sanitized_suffix]
+            )
         return candidate
 
     @staticmethod
