@@ -1228,6 +1228,19 @@ class ReconcileMixin:
                 and self._is_quarantined_assistant_replay_identity(candidate_prefix[0])
                 and self._is_quarantined_assistant_replay_identity(sanitized_replay_tail[0])
             )
+            has_compact_objective_quarantine_singleton_replay = (
+                matches_raw_tail
+                and len(candidate_prefix) == 1
+                and raw_session_count == 1
+                and bool(stored_tail_rows)
+                and self._is_compact_objective_provenance_quarantine_message(
+                    candidate_identity_messages[0]
+                )
+                and self._restore_compact_objective_provenance_quarantine_message(
+                    stored_tail_rows[-1]
+                )
+                is not None
+            )
             candidate_singleton_original_content = (
                 normalize_content_value(candidate_identity_messages[0].get("content")) or ""
                 if len(candidate_identity_messages) == 1
@@ -1358,6 +1371,7 @@ class ReconcileMixin:
                     candidate_has_system
                     or (effective_session_count > 1 and not sanitized_tail_collapsed)
                     or has_quarantined_singleton_replay
+                    or has_compact_objective_quarantine_singleton_replay
                     or has_filtered_full_replay
                 )
             )
