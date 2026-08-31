@@ -276,6 +276,45 @@ def test_complete_identity_equal_copied_snapshot_is_preserved_as_new(
         engine.shutdown()
 
 
+def test_out_of_order_exact_alias_keeps_snapshot_ambiguous(
+    tmp_path,
+    monkeypatch,
+):
+    """One registered object appearing twice cannot prove exact replay."""
+    _config, session_id, compacted, original_count, engine = _seed_compacted_session(
+        tmp_path,
+        monkeypatch,
+        stem="issue-7-out-of-order-alias",
+        keep_open=True,
+    )
+    # Reuse the final registered object before the otherwise ordered snapshot.
+    # The second occurrence must make the whole mapping ambiguous.  Counting
+    # matches only after the moving lower bound would overlook the first alias
+    # and incorrectly suppress the complete suffix as replay.
+    incoming = [compacted[-1], *compacted]
+    engine._ingest_cursor_needs_reconcile = True
+    monkeypatch.setattr(
+        engine,
+        "_reconcile_ingest_cursor_from_store",
+        lambda *_args, **_kwargs: 0,
+    )
+
+    try:
+        engine._ingest_messages(incoming)
+
+        assert engine._store.get_session_count(session_id) == (
+            original_count + len(incoming)
+        )
+        assert (
+            engine._last_ingest_reconciliation.get(
+                "replayed_compacted_snapshot_rows", 0
+            )
+            == 0
+        )
+    finally:
+        engine.shutdown()
+
+
 def test_snapshot_metadata_migrates_to_bounded_whole_digests(tmp_path):
     config = LCMConfig(database_path=str(tmp_path / "snapshot-metadata.db"))
     engine = LCMEngine(config=config, hermes_home=str(tmp_path))

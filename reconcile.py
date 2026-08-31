@@ -718,8 +718,7 @@ class ReconcileMixin:
                     for index in positions_by_object_id.get(
                         id(occurrence_message), []
                     )
-                    if index >= lower_bound
-                    and messages[index] is occurrence_message
+                    if messages[index] is occurrence_message
                     and self._replay_identity_sha256(messages[index])
                     == occurrence_digest
                 ]
@@ -727,6 +726,9 @@ class ReconcileMixin:
                     selected_indexes = []
                     break
                 selected_index = possible_indexes[0]
+                if selected_index < lower_bound:
+                    selected_indexes = []
+                    break
                 selected_indexes.append(selected_index)
                 lower_bound = selected_index + 1
             if not selected_indexes:
