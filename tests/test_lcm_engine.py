@@ -22955,6 +22955,48 @@ class TestAssemblyToolPairGuardrail:
         ]
         assert len(orphan_ids) == 0, f"Overflow fallback leaked orphan tool result: {orphan_ids}"
 
+    def test_overflow_recovery_normalizes_cap_below_provider_message_overhead(self, tmp_path):
+        """An impossible cap must settle at one provider-valid recovery turn."""
+        config = LCMConfig(
+            fresh_tail_count=10,
+            database_path=str(tmp_path / "lcm_overflow_minimum_cap.db"),
+            max_assembly_tokens=1,
+        )
+        instance = LCMEngine(config=config)
+        instance._session_id = "overflow-minimum-cap-test"
+        instance.compression_count = 1
+
+        original = [
+            {"role": "assistant", "content": "oversized derived context " * 40},
+        ]
+        result = instance._assemble_overflow_recovery_context(
+            None,
+            original,
+            assembly_cap_override=1,
+        )
+
+        minimum_cap = count_messages_tokens(
+            [{"role": "user", "content": "Continue."}]
+        )
+        assert result == [{"role": "user", "content": "Continue."}]
+        assert count_messages_tokens(result) <= minimum_cap
+        assert instance._overflow_recovery_assembly_cap(
+            observed_tokens=count_messages_tokens(result),
+            messages=result,
+        ) == minimum_cap
+
+        finalized = instance._finalize_forced_overflow_result(
+            original,
+            result,
+            assembly_cap_override=1,
+        )
+        assert finalized == result
+        assert not instance.get_status()["overflow_recovery_failed"]
+        assert not instance._should_force_overflow_recovery(
+            observed_tokens=count_messages_tokens(result),
+            messages=result,
+        )
+
     def test_overflow_recovery_preserves_objective_when_orphan_tool_tail_sanitizes_empty(self, tmp_path):
         """A no-system recovery must retain a provider-valid objective anchor."""
         config = LCMConfig(

@@ -7099,7 +7099,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 "forced overflow recovery found no droppable active-context messages"
             )
 
-        effective_cap = (
+        effective_cap = self._normalize_overflow_recovery_cap(
             assembly_cap_override
             if assembly_cap_override is not None
             else self._effective_assembly_token_cap()
@@ -7121,15 +7121,22 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         observed_tokens: Optional[int] = None,
         messages: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
-        assembly_cap = self._effective_assembly_token_cap()
-        if assembly_cap is None:
+        configured_cap = self._effective_assembly_token_cap()
+        if configured_cap is None:
             return False
+        assembly_cap = self._normalize_overflow_recovery_cap(configured_cap)
+        assert assembly_cap is not None
 
         tokens = self._overflow_recovery_signal_tokens(
             observed_tokens=observed_tokens,
             messages=messages,
         )
         if tokens is None:
+            return False
+        # A configured cap below provider message overhead is normalized to the
+        # smallest valid recovery turn. Once that exact turn is reached, do not
+        # force the same recovery again on every host invocation.
+        if configured_cap < assembly_cap and tokens <= assembly_cap:
             return False
         return tokens >= assembly_cap
 
@@ -7156,11 +7163,30 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         if assembly_cap is None:
             return None
         if messages is None or observed_tokens is None or observed_tokens <= 0:
-            return assembly_cap
+            return self._normalize_overflow_recovery_cap(assembly_cap)
 
         message_tokens = count_messages_tokens(messages)
         overhead_tokens = max(0, observed_tokens - message_tokens)
-        return max(1, assembly_cap - overhead_tokens)
+        return self._normalize_overflow_recovery_cap(
+            max(1, assembly_cap - overhead_tokens)
+        )
+
+    @staticmethod
+    def _minimum_viable_overflow_recovery_cap() -> int:
+        """Return the token floor for one provider-valid recovery request."""
+        return count_messages_tokens([{"role": "user", "content": "Continue."}])
+
+    def _normalize_overflow_recovery_cap(
+        self,
+        assembly_cap: Optional[int],
+    ) -> Optional[int]:
+        """Raise an impossible recovery cap to one provider-valid message."""
+        if assembly_cap is None:
+            return None
+        return max(
+            assembly_cap,
+            self._minimum_viable_overflow_recovery_cap(),
+        )
 
     def _effective_assembly_token_cap(self) -> Optional[int]:
         """Return the active assembly cap, if any.
@@ -7280,6 +7306,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         assembly_cap_override: Optional[int] = None,
         retained_user_message: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
+        assembly_cap_override = self._normalize_overflow_recovery_cap(
+            assembly_cap_override
+        )
         if tail_messages:
             first = tail_messages[0]
             content = first.get("content") or ""
@@ -7350,9 +7379,19 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 [*prefix_messages, *sanitized_suffix],
                 assembly_cap_override,
             )
-            return self._sanitize_active_context_messages(
+            recovery = self._sanitize_active_context_messages(
                 [*prefix_messages, recovery_anchor, *sanitized_suffix]
             )
+            if (
+                not prefix_messages
+                and assembly_cap_override is not None
+                and count_messages_tokens(recovery) > assembly_cap_override
+            ):
+                # Assistant/tool suffixes are derived context. If even the
+                # smallest valid user anchor only fits by itself, keep that
+                # anchor rather than silently returning an over-cap transcript.
+                return self._sanitize_active_context_messages([recovery_anchor])
+            return recovery
         return candidate
 
     @staticmethod
