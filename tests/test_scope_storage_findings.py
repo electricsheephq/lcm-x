@@ -422,3 +422,70 @@ def test_session_backfill_work_scales_linearly_with_store_size() -> None:
     large = measured_steps(800)
 
     assert large < small * 2.6, (small, large)
+
+
+def test_keyset_backfills_include_zero_and_negative_rowids() -> None:
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE sessions(
+                item_id INTEGER PRIMARY KEY,
+                session_id TEXT,
+                access_scope TEXT
+            );
+            CREATE TABLE sources(
+                source_id INTEGER PRIMARY KEY,
+                access_scope TEXT
+            );
+            CREATE TABLE derived(
+                item_id INTEGER PRIMARY KEY,
+                source_id INTEGER,
+                access_scope TEXT
+            );
+            CREATE TABLE rollups(
+                item_id INTEGER PRIMARY KEY,
+                scope TEXT,
+                access_scope TEXT
+            );
+            """
+        )
+        conn.executemany(
+            "INSERT INTO sessions(item_id, session_id) VALUES(?, ?)",
+            [(-1, "negative"), (0, "zero"), (1, "positive")],
+        )
+        conn.executemany(
+            "INSERT INTO sources(source_id, access_scope) VALUES(?, ?)",
+            [(10, "owner:negative"), (11, "owner:zero")],
+        )
+        conn.executemany(
+            "INSERT INTO derived(item_id, source_id) VALUES(?, ?)",
+            [(-1, 10), (0, 11)],
+        )
+        conn.executemany(
+            "INSERT INTO rollups(item_id, scope) VALUES(?, ?)",
+            [(-1, "negative"), (0, "zero")],
+        )
+        conn.commit()
+
+        assert scope_storage._backfill_session_table(
+            conn, "sessions", _resolver, batch_size=1
+        ) == 3
+        assert scope_storage._backfill_joined_table(
+            conn,
+            table="derived",
+            source_table="sources",
+            join_sql="target.source_id = source.source_id",
+            batch_size=1,
+        ) == 2
+        assert scope_storage._backfill_rollup_table(
+            conn, "rollups", _resolver, batch_size=1
+        ) == 2
+
+        for table in ("sessions", "derived", "rollups"):
+            remaining = conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE access_scope IS NULL"
+            ).fetchone()[0]
+            assert remaining == 0, table
+    finally:
+        conn.close()
