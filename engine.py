@@ -7554,7 +7554,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
 
         # Persist proof only for the exact provider-visible compacted snapshot
         # assembled by this engine. Ingested input is not trusted replay proof.
-        self._remember_generated_preserved_objective_provenance(result)
+        if not self._remember_generated_preserved_objective_provenance(result):
+            result = self._fallback_unpersisted_generated_objectives(
+                result,
+                assembly_cap,
+            )
         self._remember_compacted_active_replay_snapshot(result)
         return result
 
@@ -7910,15 +7914,12 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         # trapping the host in the same forced-overflow loop.
         return {"role": "user", "content": "Continue."}
 
-    def _finalize_overflow_recovery_context_result(
+    def _fallback_unpersisted_generated_objectives(
         self,
         messages: List[Dict[str, Any]],
         assembly_cap_override: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Persist exact provenance for generated anchors in a recovery result."""
-        if self._remember_generated_preserved_objective_provenance(messages):
-            return messages
-
+        """Replace compact generated markers whose exact proof was not persisted."""
         failed_snapshot_digest = (
             self._exact_provider_visible_snapshot_digest(messages)
         )
@@ -7997,14 +7998,14 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     low = midpoint + 1
                 else:
                     high = midpoint - 1
-            fallback_message = best_legacy_message or {
-                "role": "user",
-                "content": (
+            fallback_message = best_legacy_message
+            if fallback_message is None:
+                fallback_message = dict(legacy_message)
+                fallback_message["content"] = (
                     leading_whitespace
                     + _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
                     + "\nContinue."
-                ),
-            }
+                )
             fallback = [
                 *fallback[:index],
                 fallback_message,
@@ -8012,6 +8013,19 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             ]
             self._mark_generated_preserved_objective_message(fallback[index])
         return fallback
+
+    def _finalize_overflow_recovery_context_result(
+        self,
+        messages: List[Dict[str, Any]],
+        assembly_cap_override: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Persist exact provenance for generated anchors in a recovery result."""
+        if self._remember_generated_preserved_objective_provenance(messages):
+            return messages
+        return self._fallback_unpersisted_generated_objectives(
+            messages,
+            assembly_cap_override,
+        )
 
     def _assemble_overflow_recovery_context(
         self,

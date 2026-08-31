@@ -23318,6 +23318,78 @@ class TestAssemblyToolPairGuardrail:
         )
         assert [row["content"] for row in rows] == [objective]
 
+    def test_regular_assembly_write_failure_emits_legacy_scaffold(self, tmp_path):
+        """Regular context assembly also fails closed before publication."""
+        db_path = tmp_path / "regular-assembly-provenance-failure.db"
+        config = LCMConfig(database_path=str(db_path))
+        objective = "KEEP the direct assembly objective and remaining criteria"
+        before_restart = LCMEngine(config=config)
+        before_restart.on_session_start(
+            "regular-assembly-provenance-failure-session",
+            platform="cli",
+            conversation_id="regular-assembly-provenance-failure-conversation",
+            context_length=200000,
+        )
+        before_restart._ingest_messages(
+            [{"role": "user", "content": objective}]
+        )
+        cap = count_messages_tokens(
+            [{"role": "user", "content": objective}]
+        )
+        compact_anchor = before_restart._overflow_recovery_user_anchor(
+            [{"role": "user", "content": objective}],
+            [],
+            cap,
+        )
+        assert compact_anchor["content"].startswith("[LCM:obj:v1]")
+
+        original_write_metadata_json = before_restart._store.write_metadata_json
+
+        def fail_provenance_write(keys, value_json, *, skip_unchanged=False):
+            if any(
+                "generated_preserved_objective_provenance" in key
+                for key in keys
+            ):
+                raise RuntimeError("database is locked")
+            return original_write_metadata_json(
+                keys,
+                value_json,
+                skip_unchanged=skip_unchanged,
+            )
+
+        before_restart._store.write_metadata_json = fail_provenance_write
+        assembled = before_restart._assemble_context(
+            None,
+            [compact_anchor],
+            assembly_cap_override=cap,
+            include_lcm_note=False,
+        )
+
+        assert assembled
+        assert not assembled[0]["content"].startswith("[LCM:obj:v1]")
+        assert assembled[0]["content"].startswith(
+            "[Current user objective preserved from compacted history]"
+        )
+        assert not before_restart._pending_generated_preserved_objective_provenance_records
+        serialized = json.loads(json.dumps(assembled))
+        before_restart._store.close()
+        before_restart._dag.close()
+        before_restart._lifecycle.close()
+
+        after_restart = LCMEngine(config=config)
+        after_restart.on_session_start(
+            "regular-assembly-provenance-failure-session",
+            platform="cli",
+            conversation_id="regular-assembly-provenance-failure-conversation",
+            context_length=200000,
+        )
+        after_restart._ingest_messages(serialized)
+
+        rows = after_restart._store.get_session_messages(
+            "regular-assembly-provenance-failure-session"
+        )
+        assert [row["content"] for row in rows] == [objective]
+
     def test_transient_compact_provenance_read_defers_ingest(self, tmp_path):
         """An unavailable proof read defers an ambiguous compact occurrence."""
         db_path = tmp_path / "compact-provenance-read-failure.db"
