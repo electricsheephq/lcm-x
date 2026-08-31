@@ -176,6 +176,127 @@ def test_session_contiguity_allows_interleaved_global_store_ids(
     assert engine.last_compression_status == "compacted"
 
 
+def test_multisession_publication_uses_conversation_ownership(tmp_path) -> None:
+    conversation_id = "issue-247-multisession"
+    old_session_id = "issue-247-old-session"
+    current_session_id = "issue-247-current-session"
+    engine = _engine(
+        tmp_path / "issue-247-multisession.db",
+        old_session_id,
+    )
+    first_id = engine._store.append(
+        old_session_id,
+        {"role": "assistant", "content": "first old-session turn"},
+        conversation_id=conversation_id,
+    )
+    engine._store.append(
+        "unrelated-session",
+        {"role": "assistant", "content": "unrelated interleaved turn"},
+        conversation_id="unrelated-conversation",
+    )
+    second_id = engine._store.append(
+        old_session_id,
+        {"role": "assistant", "content": "second old-session turn"},
+        conversation_id=conversation_id,
+    )
+    engine._lifecycle.record_rollover(
+        conversation_id,
+        old_session_id=old_session_id,
+        new_session_id=current_session_id,
+    )
+    node = SummaryNode(
+        session_id=current_session_id,
+        summary="summary published by the resumed session",
+        token_count=1,
+        source_token_count=2,
+        source_ids=[first_id, second_id],
+    )
+
+    def stage(conn, node_id) -> None:
+        engine._lifecycle.stage_compaction_publication(
+            conn,
+            conversation_id,
+            current_session_id,
+            node_id,
+            0,
+            [first_id, second_id],
+        )
+
+    try:
+        engine._dag.add_node(node, before_commit=stage)
+        nodes = engine._dag.get_session_nodes(current_session_id)
+        state = engine._lifecycle.get_by_conversation(conversation_id)
+    finally:
+        engine.shutdown()
+
+    assert state is not None
+    assert state.current_frontier_store_id == second_id
+    assert len(nodes) == 1
+    assert nodes[0].source_ids == [first_id, second_id]
+
+
+def test_multisession_source_lineage_cannot_be_claimed_again(tmp_path) -> None:
+    conversation_id = "issue-247-multisession-lineage"
+    first_session_id = "issue-247-first-session"
+    second_session_id = "issue-247-second-session"
+    third_session_id = "issue-247-third-session"
+    engine = _engine(
+        tmp_path / "issue-247-multisession-lineage.db",
+        first_session_id,
+    )
+    source_id = engine._store.append(
+        first_session_id,
+        {"role": "assistant", "content": "durable source"},
+        conversation_id=conversation_id,
+    )
+
+    def publish(session_id: str) -> None:
+        node = SummaryNode(
+            session_id=session_id,
+            summary="must be claimed once across session rollover",
+            token_count=1,
+            source_token_count=1,
+            source_ids=[source_id],
+        )
+
+        def stage(conn, node_id) -> None:
+            engine._lifecycle.stage_compaction_publication(
+                conn,
+                conversation_id,
+                session_id,
+                node_id,
+                0,
+                [source_id],
+            )
+
+        engine._dag.add_node(node, before_commit=stage)
+
+    engine._lifecycle.record_rollover(
+        conversation_id,
+        old_session_id=first_session_id,
+        new_session_id=second_session_id,
+    )
+    try:
+        publish(second_session_id)
+        engine._lifecycle.record_rollover(
+            conversation_id,
+            old_session_id=second_session_id,
+            new_session_id=third_session_id,
+        )
+        with pytest.raises(
+            LifecyclePublicationConflictError,
+            match="already claimed",
+        ):
+            publish(third_session_id)
+        nodes = engine._dag.get_session_nodes(
+            second_session_id,
+        ) + engine._dag.get_session_nodes(third_session_id)
+    finally:
+        engine.shutdown()
+
+    assert len(nodes) == 1
+
+
 def test_stale_expected_frontier_rolls_back_node_publication(
     tmp_path,
     monkeypatch,
