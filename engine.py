@@ -372,6 +372,7 @@ _AUTO_FOCUS_MAX_CHARS = 700
 
 _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across context compression]"
 _LCM_MESSAGE_PREFIX_FINGERPRINT_LIMIT = 8
+_GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_RECORDS = 256
 
 
 def _normalize_total_compactions(value: Any) -> int:
@@ -6805,8 +6806,14 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         raw_records = payload.get("records")
         if not isinstance(raw_records, list):
             return [], True
+        if len(raw_records) > _GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_RECORDS:
+            # An over-cap payload cannot be safely truncated: every persisted
+            # record may authenticate a compact marker that was already
+            # published. Treat it as unreadable so ingest defers ambiguous
+            # compact occurrences instead of evicting proof.
+            return [], False
         records: list[Dict[str, Any]] = []
-        for raw_record in raw_records[-16:]:
+        for raw_record in raw_records:
             if not isinstance(raw_record, dict):
                 continue
             snapshot_digest = str(raw_record.get("snapshot_digest") or "")
@@ -6849,7 +6856,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                         "objectives": normalized_objectives,
                     }
                 )
-        return records[-16:], True
+        return records, True
 
     def _load_generated_preserved_objective_provenance(
         self,
@@ -6895,20 +6902,34 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             for item in self._pending_generated_preserved_objective_provenance_records
             if item != record
         ]
-        pending_records.append(record)
-        self._pending_generated_preserved_objective_provenance_records = (
-            pending_records[-16:]
-        )
+        combined_records = list(records)
         for pending_record in pending_records:
-            records = [item for item in records if item != pending_record]
-            records.append(pending_record)
+            if pending_record not in combined_records:
+                combined_records.append(pending_record)
+        if record not in combined_records:
+            if (
+                len(combined_records)
+                >= _GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_RECORDS
+            ):
+                # Never evict proof for a compact marker that has already been
+                # published. The caller will convert this new occurrence to
+                # the migration-safe legacy marker instead.
+                self._pending_generated_preserved_objective_provenance_records = (
+                    pending_records
+                )
+                return False
+            pending_records.append(record)
+            combined_records.append(record)
+        self._pending_generated_preserved_objective_provenance_records = (
+            pending_records
+        )
         if not read_completed:
             return False
         try:
             self._store.write_metadata_json(
                 [self._generated_preserved_objective_provenance_metadata_key()],
                 json.dumps(
-                    {"version": 1, "records": records[-16:]},
+                    {"version": 1, "records": combined_records},
                     sort_keys=True,
                 ),
                 skip_unchanged=True,
@@ -6933,15 +6954,25 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         pending_records = list(
             self._pending_generated_preserved_objective_provenance_records
         )
+        combined_records = list(records)
         for pending_record in pending_records:
-            records = [item for item in records if item != pending_record]
-            records.append(pending_record)
-        if pending_records and self._session_id and read_completed:
+            if pending_record not in combined_records:
+                combined_records.append(pending_record)
+        pending_write_safe = (
+            len(combined_records)
+            <= _GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_RECORDS
+        )
+        if (
+            pending_records
+            and self._session_id
+            and read_completed
+            and pending_write_safe
+        ):
             try:
                 self._store.write_metadata_json(
                     [self._generated_preserved_objective_provenance_metadata_key()],
                     json.dumps(
-                        {"version": 1, "records": records[-16:]},
+                        {"version": 1, "records": combined_records},
                         sort_keys=True,
                     ),
                     skip_unchanged=True,
@@ -6953,7 +6984,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 )
             else:
                 self._pending_generated_preserved_objective_provenance_records = []
-        for record in reversed(records):
+        elif pending_records and not pending_write_safe:
+            # Do not claim a complete provenance read while an over-cap retry
+            # cannot be persisted without eviction.
+            read_completed = False
+        for record in reversed(combined_records):
             message_count = int(record["message_count"])
             if message_count > len(messages):
                 continue

@@ -23390,6 +23390,163 @@ class TestAssemblyToolPairGuardrail:
         )
         assert [row["content"] for row in rows] == [objective]
 
+    def test_seventeen_provenance_records_keep_old_proof(self, tmp_path):
+        """The seventeenth snapshot cannot evict the first published proof."""
+        db_path = tmp_path / "compact-provenance-capacity.db"
+        config = LCMConfig(database_path=str(db_path))
+        before_restart = LCMEngine(config=config)
+        before_restart.on_session_start(
+            "compact-provenance-capacity-session",
+            platform="cli",
+            conversation_id="compact-provenance-capacity-conversation",
+            context_length=200000,
+        )
+
+        snapshots = []
+        for index in range(17):
+            compact_anchor = (
+                before_restart._mark_generated_preserved_objective_message(
+                    {
+                        "role": "user",
+                        "content": f"[LCM:obj:v1]\nobjective {index}",
+                    }
+                )
+            )
+            snapshots.append(
+                json.loads(
+                    json.dumps(
+                        before_restart._finalize_overflow_recovery_context_result(
+                            [compact_anchor]
+                        )
+                    )
+                )
+            )
+
+        assert snapshots[0][0]["content"].startswith("[LCM:obj:v1]")
+        assert snapshots[-1][0]["content"].startswith("[LCM:obj:v1]")
+        before_restart._store.close()
+        before_restart._dag.close()
+        before_restart._lifecycle.close()
+
+        after_restart = LCMEngine(config=config)
+        after_restart.on_session_start(
+            "compact-provenance-capacity-session",
+            platform="cli",
+            conversation_id="compact-provenance-capacity-conversation",
+            context_length=200000,
+        )
+        after_restart._ingest_messages(snapshots[0])
+
+        rows = after_restart._store.get_session_messages(
+            "compact-provenance-capacity-session"
+        )
+        assert rows == []
+
+    def test_provenance_capacity_falls_back_without_evicting(self, tmp_path):
+        """Capacity saturation changes new output, never old published proof."""
+        config = LCMConfig(
+            database_path=str(tmp_path / "compact-provenance-saturation.db")
+        )
+        instance = LCMEngine(config=config)
+        instance._session_id = "compact-provenance-saturation-session"
+        first_anchor = instance._mark_generated_preserved_objective_message(
+            {"role": "user", "content": "[LCM:obj:v1]\nfirst objective"}
+        )
+        first_snapshot = instance._finalize_overflow_recovery_context_result(
+            [first_anchor]
+        )
+        first_record = instance._load_generated_preserved_objective_provenance()[0]
+        records = [first_record]
+        for index in range(
+            1,
+            lcm_engine._GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_RECORDS,
+        ):
+            records.append(
+                {
+                    "snapshot_digest": hashlib.sha256(
+                        f"snapshot {index}".encode()
+                    ).hexdigest(),
+                    "message_count": 1,
+                    "objectives": [
+                        {
+                            "index": 0,
+                            "identity_sha256": hashlib.sha256(
+                                f"objective {index}".encode()
+                            ).hexdigest(),
+                        }
+                    ],
+                }
+            )
+        instance._store.write_metadata_json(
+            [instance._generated_preserved_objective_provenance_metadata_key()],
+            json.dumps({"version": 1, "records": records}, sort_keys=True),
+        )
+
+        next_anchor = instance._mark_generated_preserved_objective_message(
+            {"role": "user", "content": "[LCM:obj:v1]\nnext objective"}
+        )
+        saturated_snapshot = (
+            instance._finalize_overflow_recovery_context_result([next_anchor])
+        )
+
+        assert first_snapshot[0]["content"].startswith("[LCM:obj:v1]")
+        assert not saturated_snapshot[0]["content"].startswith("[LCM:obj:v1]")
+        persisted = instance._load_generated_preserved_objective_provenance()
+        assert len(persisted) == len(records)
+        assert persisted[0] == first_record
+
+    def test_oversized_provenance_payload_defers_compact_ingest(self, tmp_path):
+        """Over-cap metadata is unavailable proof, never a truncation signal."""
+        db_path = tmp_path / "oversized-compact-provenance.db"
+        config = LCMConfig(database_path=str(db_path))
+        before_restart = LCMEngine(config=config)
+        before_restart.on_session_start(
+            "oversized-compact-provenance-session",
+            platform="cli",
+            conversation_id="oversized-compact-provenance-conversation",
+            context_length=200000,
+        )
+        compact_anchor = before_restart._mark_generated_preserved_objective_message(
+            {"role": "user", "content": "[LCM:obj:v1]\nobjective"}
+        )
+        before_restart._finalize_overflow_recovery_context_result([compact_anchor])
+        payload = json.loads(
+            json.dumps(
+                before_restart._store.read_metadata_json(
+                    before_restart._generated_preserved_objective_provenance_metadata_key()
+                )
+            )
+        )
+        payload["records"] = payload["records"] * (
+            lcm_engine._GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_RECORDS + 1
+        )
+        before_restart._store.write_metadata_json(
+            [
+                before_restart._generated_preserved_objective_provenance_metadata_key()
+            ],
+            json.dumps(payload, sort_keys=True),
+        )
+        serialized = json.loads(json.dumps([compact_anchor]))
+        before_restart._store.close()
+        before_restart._dag.close()
+        before_restart._lifecycle.close()
+
+        after_restart = LCMEngine(config=config)
+        after_restart.on_session_start(
+            "oversized-compact-provenance-session",
+            platform="cli",
+            conversation_id="oversized-compact-provenance-conversation",
+            context_length=200000,
+        )
+        active_replay = after_restart._ingest_messages(serialized)
+
+        assert active_replay == serialized
+        assert after_restart._ingest_cursor == 0
+        rows = after_restart._store.get_session_messages(
+            "oversized-compact-provenance-session"
+        )
+        assert rows == []
+
     def test_transient_compact_provenance_read_defers_ingest(self, tmp_path):
         """An unavailable proof read defers an ambiguous compact occurrence."""
         db_path = tmp_path / "compact-provenance-read-failure.db"
