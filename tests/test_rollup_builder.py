@@ -1674,6 +1674,117 @@ def test_scope_frontier_serializes_connection_temp_tables_between_threads(
     ]
 
 
+@pytest.mark.parametrize("operation", ["scope", "aggregate", "maintenance"])
+def test_rollup_read_queued_behind_close_preserves_empty_contract(
+    rollup_parts,
+    operation,
+    monkeypatch,
+):
+    _store, dag, config = rollup_parts
+    scope = f"closed-{operation}"
+    day = date(2026, 7, 15)
+    node_id = _add_node(dag, scope, day, "queued maintenance source")
+    queued = threading.Event()
+    results: list[object] = []
+    errors: list[BaseException] = []
+    stores_opened: list[bool] = []
+    if operation == "maintenance":
+        real_rollup_store = builder_module.RollupStore
+
+        def track_rollup_store(*args, **kwargs):
+            stores_opened.append(True)
+            return real_rollup_store(*args, **kwargs)
+
+        monkeypatch.setattr(builder_module, "RollupStore", track_rollup_store)
+
+    def read_after_close() -> None:
+        queued.set()
+        try:
+            if operation == "scope":
+                results.append(builder_module._scope_frontier(dag, scope))
+            elif operation == "aggregate":
+                results.append(
+                    builder_module._canonical_aggregate_sources(dag, [node_id])
+                )
+            else:
+                results.append(run_rollup_maintenance(dag, config, scope))
+        except BaseException as exc:  # surfaced below instead of lost in the thread
+            errors.append(exc)
+
+    thread = threading.Thread(target=read_after_close)
+    with dag._db_lock:
+        thread.start()
+        assert queued.wait(timeout=2)
+        dag.close()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert errors == []
+    assert results == ([0] if operation == "maintenance" else [[]])
+    assert stores_opened == []
+
+
+@pytest.mark.parametrize("period_kind", ["day", "week", "month"])
+def test_close_after_maintenance_selection_defers_claimed_job(
+    rollup_parts,
+    monkeypatch,
+    period_kind,
+):
+    store, dag, config = rollup_parts
+    scope = f"close-after-selection-{period_kind}"
+    target_day = date(2026, 7, 15)
+    node_id = _add_node(dag, scope, target_day, "source must remain queued")
+    if period_kind == "day":
+        period_start = target_day
+        original_sources = builder_module._daily_sources
+
+        def close_before_sources(*args, **kwargs):
+            dag.close()
+            return original_sources(*args, **kwargs)
+
+        monkeypatch.setattr(builder_module, "_daily_sources", close_before_sources)
+    else:
+        _ready(
+            store,
+            "day",
+            target_day.isoformat(),
+            scope,
+            summary="ready daily",
+            source_ids=[node_id],
+            fingerprint="ready-daily",
+        )
+        store.connection.execute(
+            "DELETE FROM lcm_rollups WHERE scope = ? "
+            "AND period_kind IN ('week', 'month')",
+            (scope,),
+        )
+        store.connection.commit()
+        period_start = (
+            target_day - timedelta(days=target_day.weekday())
+            if period_kind == "week"
+            else target_day.replace(day=1)
+        )
+        original_content_days = builder_module._days_with_content
+
+        def close_before_content_days(*args, **kwargs):
+            dag.close()
+            return original_content_days(*args, **kwargs)
+
+        monkeypatch.setattr(
+            builder_module,
+            "_days_with_content",
+            close_before_content_days,
+        )
+    store.upsert_stale(period_kind, period_start.isoformat(), scope)
+    config.rollup_builds_per_pass = 1
+
+    assert run_rollup_maintenance(dag, config, scope) == 0
+    row = store.get_rollup(period_kind, period_start.isoformat(), scope)
+    assert row is not None
+    assert row["status"] == "stale"
+    assert row["error"] == builder_module._DAG_CLOSED_DEFER_REASON
+
+
 def test_committed_mutation_event_survives_hook_gap_and_reconciles(rollup_parts):
     store, dag, _config = rollup_parts
     scope = "crash-gap"
