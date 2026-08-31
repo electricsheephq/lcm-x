@@ -23438,6 +23438,62 @@ class TestAssemblyToolPairGuardrail:
         )
         assert [row["content"] for row in rows] == [objective]
 
+    def test_nine_compact_objectives_fall_back_before_restart(self, tmp_path):
+        """Every published compact occurrence must have durable proof."""
+        db_path = tmp_path / "nine-compact-objectives.db"
+        config = LCMConfig(database_path=str(db_path))
+        before_restart = LCMEngine(config=config)
+        before_restart.on_session_start(
+            "nine-compact-objectives-session",
+            platform="cli",
+            conversation_id="nine-compact-objectives-conversation",
+            context_length=200000,
+        )
+        objectives = [f"durable objective {index}" for index in range(9)]
+        before_restart._ingest_messages(
+            [{"role": "user", "content": objective} for objective in objectives]
+        )
+        compact_objectives = [
+            before_restart._mark_generated_preserved_objective_message(
+                {
+                    "role": "user",
+                    "content": f"[LCM:obj:v1]\n{objective}",
+                }
+            )
+            for objective in objectives
+        ]
+
+        published = before_restart._finalize_overflow_recovery_context_result(
+            compact_objectives
+        )
+
+        assert len(published) == 9
+        assert all(
+            message["content"].startswith(
+                "[Current user objective preserved from compacted history]"
+            )
+            for message in published
+        )
+        assert not before_restart._load_generated_preserved_objective_provenance()
+        serialized = json.loads(json.dumps(published))
+        before_restart._store.close()
+        before_restart._dag.close()
+        before_restart._lifecycle.close()
+
+        after_restart = LCMEngine(config=config)
+        after_restart.on_session_start(
+            "nine-compact-objectives-session",
+            platform="cli",
+            conversation_id="nine-compact-objectives-conversation",
+            context_length=200000,
+        )
+        after_restart._ingest_messages(serialized)
+
+        rows = after_restart._store.get_session_messages(
+            "nine-compact-objectives-session"
+        )
+        assert [row["content"] for row in rows] == objectives
+
     def test_seventeen_provenance_records_keep_old_proof(self, tmp_path):
         """The seventeenth snapshot cannot evict the first published proof."""
         db_path = tmp_path / "compact-provenance-capacity.db"

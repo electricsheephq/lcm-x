@@ -373,6 +373,7 @@ _AUTO_FOCUS_MAX_CHARS = 700
 _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across context compression]"
 _LCM_MESSAGE_PREFIX_FINGERPRINT_LIMIT = 8
 _GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_RECORDS = 256
+_GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_OBJECTIVES = 8
 
 
 def _normalize_total_compactions(value: Any) -> int:
@@ -6826,7 +6827,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 or message_count <= 0
                 or not isinstance(objectives, list)
                 or not objectives
-                or len(objectives) > 8
+                or len(objectives)
+                > _GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_OBJECTIVES
             ):
                 continue
             normalized_objectives: list[Dict[str, Any]] = []
@@ -6884,9 +6886,18 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             for index, message in enumerate(messages)
             if self._is_generated_preserved_objective_message(message)
             and self._preserved_objective_context_content(message)
-        ][:8]
+        ]
         if not objectives:
             return True
+        if (
+            len(objectives)
+            > _GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_OBJECTIVES
+        ):
+            # Never publish a compact occurrence that the bounded record
+            # cannot authenticate after serialization. The caller converts
+            # every new compact marker in this snapshot to the replay-safe
+            # legacy namespace instead.
+            return False
         record = {
             "snapshot_digest": (
                 self._exact_provider_visible_snapshot_digest(messages)
