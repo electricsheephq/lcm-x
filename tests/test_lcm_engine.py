@@ -23698,6 +23698,37 @@ class TestAssemblyToolPairGuardrail:
         assert "Continue from the recoverable" not in anchor["content"]
         assert instance._is_generated_preserved_objective_message(anchor)
 
+    def test_only_proven_compact_scaffold_is_protected_from_budget_drop(
+        self,
+        tmp_path,
+    ):
+        """A literal compact marker cannot pin arbitrary derived context."""
+        instance = LCMEngine(
+            config=LCMConfig(
+                database_path=str(tmp_path / "compact-marker-budget-drop.db")
+            )
+        )
+        content = "[LCM:obj:v1]\n" + ("oversized derived content " * 200)
+        unmarked = {"role": "assistant", "content": content}
+        marked = instance._mark_generated_preserved_objective_message(
+            {"role": "assistant", "content": content}
+        )
+
+        assert instance._is_budget_droppable_tail_message(unmarked)
+        assert not instance._is_budget_droppable_tail_message(marked)
+        assert instance._is_budget_droppable_tail_message(
+            {"role": "tool", "content": content}
+        )
+        assert not instance._is_budget_droppable_tail_message(
+            {
+                "role": "assistant",
+                "content": (
+                    "[Current user objective preserved from compacted history]"
+                    "\nlegacy objective"
+                ),
+            }
+        )
+
     def test_restart_keeps_compact_anchor_provenance_when_sibling_is_quarantined(
         self,
         tmp_path,

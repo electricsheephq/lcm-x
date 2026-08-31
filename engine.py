@@ -7483,11 +7483,12 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         content = normalize_content_value(message.get("content")) or ""
         if _PRESERVED_TODO_CONTEXT_PREFIX in content:
             return False
-        if any(
-            prefix in content
-            for prefix in _PRESERVED_OBJECTIVE_CONTEXT_PREFIXES
-        ):
+        if _PRESERVED_OBJECTIVE_CONTEXT_PREFIX in content:
             return False
+        if _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX in content:
+            return not self._is_preserved_objective_replay_scaffold_message(
+                message
+            )
         return True
 
     def _finalize_forced_overflow_result(
