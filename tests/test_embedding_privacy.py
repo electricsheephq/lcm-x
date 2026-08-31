@@ -720,6 +720,83 @@ def test_private_key_placeholder_satisfies_password_assignment_minimum(
     )
 
 
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "prefix]brace}",
+        'prefix\\"quoted]brace}',
+    ],
+    ids=["delimiters", "escaped-quote-and-delimiters"],
+)
+def test_quoted_password_scans_delimiters_through_closing_quote(
+    tmp_path,
+    prefix,
+):
+    cfg = _config(tmp_path)
+    private_key = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        f"{_KEY_BODY}\n"
+        "-----END PRIVATE KEY-----"
+    )
+    suffix = "]tail}suffixSECRET"
+    text = f'password="{prefix}{private_key}{suffix}" trailing prose'
+
+    durable = redact_sensitive_text(text, cfg)
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+
+    for output in (durable, protected):
+        assert prefix not in output
+        assert suffix not in output
+        assert _KEY_BODY not in output
+        assert "name=password_assignment" in output
+        assert output.endswith('" trailing prose')
+    validate_embedding_privacy_dispatch(
+        [protected],
+        cfg,
+        expected_revision=revision,
+    )
+
+
+def test_noncanonical_private_key_marker_cannot_cross_newline(tmp_path):
+    cfg = _config(tmp_path)
+    trailing = "ordinary user text must remain"
+    text = (
+        "password=x[LCM embedding privacy: name=private_key\n"
+        f"{trailing}]"
+    )
+
+    durable = redact_sensitive_text(text, cfg)
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+
+    assert trailing in durable
+    assert trailing in protected
+    validate_embedding_privacy_dispatch(
+        [protected],
+        cfg,
+        expected_revision=revision,
+    )
+
+
+def test_unterminated_placeholder_prefixes_stay_linear(tmp_path):
+    cfg = _config(tmp_path)
+    repeated = "[LCM embedding privacy: name=private_key" * 10_000
+    text = f'password="{repeated}" trailing prose'
+
+    started = time.perf_counter()
+    durable = redact_sensitive_text(text, cfg)
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 3.0
+    assert durable.endswith('" trailing prose')
+    assert protected.endswith('" trailing prose')
+    validate_embedding_privacy_dispatch(
+        [protected],
+        cfg,
+        expected_revision=revision,
+    )
+
+
 def test_embedding_privacy_residual_flags_orphaned_end_marker(tmp_path):
     """Transform-independent residual check: a surviving PEM END marker fails closed."""
     cfg = _config(tmp_path)

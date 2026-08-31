@@ -395,13 +395,34 @@ _EMBEDDING_PRIVACY_PLACEHOLDER_PREFIX = "[LCM embedding privacy:"
 # differs from v3 for this composition and therefore requires a new vector
 # identity rather than mixing transform generations.
 _EMBEDDING_PRIVACY_TRANSFORM_VERSION = "privacy:v4"
+_LCM_PLACEHOLDER_NAME_PATTERN = r"[a-z0-9_-]+"
+_LCM_PLACEHOLDER_METADATA_PATTERN = (
+    r"(?:;[ \t]*chars=\d+;[ \t]*bytes=\d+"
+    r"(?:;[ \t]*sha256=[0-9a-f]{16})?)?"
+)
 _EMBEDDING_PRIVACY_PLACEHOLDER_RE = re.compile(
-    r"\[LCM (?:sensitive redaction|embedding privacy):\s*"
-    r"name=(?P<name>[a-z0-9_-]+)[^\]]*\]",
+    r"\[LCM (?:sensitive redaction|embedding privacy):[ \t]*"
+    r"name=(?P<name>"
+    + _LCM_PLACEHOLDER_NAME_PATTERN
+    + r")"
+    + _LCM_PLACEHOLDER_METADATA_PATTERN
+    + r"\]",
     re.IGNORECASE,
 )
 _SENSITIVE_PLACEHOLDER_SPAN_PATTERN = (
-    r"\[LCM (?:sensitive redaction|embedding privacy):[^\]\r\n]*\]"
+    r"\[LCM (?:sensitive redaction|embedding privacy):[ \t]*name="
+    + _LCM_PLACEHOLDER_NAME_PATTERN
+    + _LCM_PLACEHOLDER_METADATA_PATTERN
+    + r"\]"
+)
+_CANONICAL_PRIVATE_KEY_PLACEHOLDER_RE = re.compile(
+    r"(?:"
+    r"\[LCM embedding privacy:[ \t]*name=private_key\]"
+    r"|"
+    r"\[LCM sensitive redaction:[ \t]*name=private_key;[ \t]*"
+    r"chars=\d+;[ \t]*bytes=\d+;[ \t]*sha256=[0-9a-f]{16}\]"
+    r")",
+    re.IGNORECASE,
 )
 _PASSWORD_ASSIGNMENT_QUOTED_ATOM = (
     r"(?>(?:" + _SENSITIVE_PLACEHOLDER_SPAN_PATTERN + r")|[^\r\n\]\}])"
@@ -511,6 +532,13 @@ def _redact_password_assignments_with_private_key_placeholder(
         for assignment_name in ("password", "passwd", "pwd", "passphrase")
     ):
         return text
+    private_key_placeholder_ends = {
+        placeholder.start(): placeholder.end()
+        for placeholder in _CANONICAL_PRIVATE_KEY_PLACEHOLDER_RE.finditer(text)
+    }
+    if not private_key_placeholder_ends:
+        return text
+
     parts: list[str] = []
     copied_until = 0
     search_from = 0
@@ -522,15 +550,25 @@ def _redact_password_assignments_with_private_key_placeholder(
         saw_private_key_placeholder = False
         while value_end < text_length:
             char = text[value_end]
-            if char == "[":
-                placeholder = _EMBEDDING_PRIVACY_PLACEHOLDER_RE.match(text, value_end)
-                if placeholder is not None:
-                    if str(placeholder.group("name") or "").lower() == "private_key":
-                        saw_private_key_placeholder = True
-                    value_end = placeholder.end()
-                    continue
+            placeholder_end = private_key_placeholder_ends.get(value_end)
+            if placeholder_end is not None:
+                saw_private_key_placeholder = True
+                value_end = placeholder_end
+                continue
             if quote:
-                if char == quote or char in "\r\n]}":
+                if char in "\r\n":
+                    break
+                if char == "\\":
+                    escaped_index = value_end + 1
+                    if (
+                        escaped_index < text_length
+                        and text[escaped_index] not in "\r\n"
+                    ):
+                        value_end = escaped_index + 1
+                        continue
+                    value_end += 1
+                    continue
+                if char == quote:
                     break
             elif char.isspace() or char in ",\"']}":
                 break
@@ -1901,12 +1939,6 @@ def _has_orphan_full_width_base64_run(text: str) -> bool:
     return False
 
 
-_PRIVATE_KEY_PLACEHOLDER_RE = re.compile(
-    r"\[LCM (?:sensitive redaction|embedding privacy):\s*name=private_key[^\]]*\]",
-    re.IGNORECASE,
-)
-
-
 def _pem_fragment_near_private_key_placeholder(text: str) -> bool:
     """True when a 16+ base64-charset token sits near a PRIVATE_KEY placeholder.
 
@@ -1936,7 +1968,7 @@ def _pem_fragment_near_private_key_placeholder(text: str) -> bool:
     Sub-16 fragments remain the documented precision boundary.
     """
     window = 160
-    for pm in _PRIVATE_KEY_PLACEHOLDER_RE.finditer(text):
+    for pm in _CANONICAL_PRIVATE_KEY_PLACEHOLDER_RE.finditer(text):
         lo = max(0, pm.start() - window)
         # Bound the scan to the adjacency window plus 16 chars of headroom: a
         # 16+ run STARTING anywhere inside the window still yields a >=16-char
