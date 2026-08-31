@@ -395,9 +395,13 @@ class _SharedStorage:
     """Reference-counted SQLite helpers shared by engines using one database."""
 
     def __init__(self, db_path: str | Path, config: LCMConfig, hermes_home: str):
-        self.db_path = Path(db_path).expanduser().resolve()
+        # Keep SQLite connection targets byte-for-byte meaningful. In
+        # particular, resolving ``:memory:`` would turn the sentinel into a
+        # persistent ``<cwd>/:memory:`` file. Only the process-lock registry
+        # needs a canonical filesystem identity.
+        self.db_path = Path(db_path).expanduser()
         self._lock = threading.RLock()
-        self._operation_lock = _storage_lock_for(self.db_path)
+        self._operation_lock = _storage_lock_for(db_path)
         self._owners = 0
         self._closing = False
         self._closed = False

@@ -8848,6 +8848,27 @@ class TestLCMEngineSharedStorage:
             if clone is not None:
                 clone.shutdown()
 
+    def test_clone_preserves_sqlite_in_memory_sentinel(self, tmp_path, monkeypatch):
+        from hermes_lcm.engine import LCMEngine
+
+        monkeypatch.chdir(tmp_path)
+        prototype = LCMEngine(
+            config=LCMConfig(database_path=":memory:"),
+            hermes_home=str(tmp_path / "hermes"),
+        )
+        clone = None
+        try:
+            clone = prototype.clone_for_agent()
+
+            assert clone._storage is prototype._storage
+            assert str(prototype._storage.db_path) == ":memory:"
+            assert str(prototype._store.db_path) == ":memory:"
+            assert not (tmp_path / ":memory:").exists()
+        finally:
+            prototype.shutdown()
+            if clone is not None:
+                clone.shutdown()
+
     def test_clone_preserves_legacy_subclass_constructor_contract(self, tmp_path):
         from hermes_lcm.engine import LCMEngine
 
