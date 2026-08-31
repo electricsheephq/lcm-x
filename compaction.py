@@ -559,9 +559,22 @@ class CompactionMixin:
             time.perf_counter() - compress_started
         ) * 1000.0
         if recovery_assembly_cap is not None:
+            # Publication failures are transient. Do not settle this fallback
+            # as a completed recovery result, and discard any older settlement
+            # that could suppress a retry for the same provider-visible input.
+            self._last_overflow_recovery_result_digest = ""
+            self._last_overflow_recovery_configured_cap = None
+            self._last_overflow_recovery_assembly_cap = None
             self._last_overflow_recovery_failed = (
                 count_messages_tokens(fallback) > recovery_assembly_cap
             )
+            if self._last_overflow_recovery_failed:
+                if not self._last_overflow_recovery_failure_reason:
+                    self._last_overflow_recovery_failure_reason = (
+                        "recovery context exceeds assembly cap"
+                    )
+            else:
+                self._last_overflow_recovery_failure_reason = ""
         if threshold_full_sweep_active:
             self._last_threshold_full_sweep = {
                 **self._last_threshold_full_sweep,
@@ -1450,14 +1463,10 @@ class CompactionMixin:
         self._note_fresh_tail_pressure_relieved()
         if recovery_assembly_cap is None:
             self._last_overflow_recovery_failed = False
-        else:
-            self._last_overflow_recovery_failed = count_messages_tokens(compressed) > recovery_assembly_cap
-            if self._last_overflow_recovery_failed:
-                logger.warning(
-                    "LCM overflow recovery could not get under cap=%d after compaction; returning best-effort context (%d tokens)",
-                    recovery_assembly_cap,
-                    count_messages_tokens(compressed),
-                )
+            self._last_overflow_recovery_failure_reason = ""
+            self._last_overflow_recovery_result_digest = ""
+            self._last_overflow_recovery_configured_cap = None
+            self._last_overflow_recovery_assembly_cap = None
         # Reset cursor to the length of the compressed context so that
         # only messages appended *after* this point get ingested next time.
         self._ingest_cursor = len(compressed)
@@ -1480,6 +1489,26 @@ class CompactionMixin:
         # compress() output is consumed directly by the main loop in some
         # edge cases (e.g. forced overflow recovery bypassing _assemble_context).
         compressed = self._sanitize_active_context_messages(compressed)
+        if recovery_assembly_cap is not None:
+            self._remember_overflow_recovery_result(
+                compressed,
+                assembly_cap_override=recovery_assembly_cap,
+            )
+            self._last_overflow_recovery_failed = (
+                count_messages_tokens(compressed) > recovery_assembly_cap
+            )
+            if self._last_overflow_recovery_failed:
+                if not self._last_overflow_recovery_failure_reason:
+                    self._last_overflow_recovery_failure_reason = (
+                        "recovery context exceeds assembly cap"
+                    )
+                logger.warning(
+                    "LCM overflow recovery could not get under cap=%d after compaction; returning best-effort context (%d tokens)",
+                    recovery_assembly_cap,
+                    count_messages_tokens(compressed),
+                )
+            else:
+                self._last_overflow_recovery_failure_reason = ""
         if threshold_full_sweep_active:
             total_passes = leaf_passes + condensation_passes
             duration_ms = (time.perf_counter() - _compress_started) * 1000.0

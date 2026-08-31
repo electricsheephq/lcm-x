@@ -52,6 +52,12 @@ import logging
 logger = logging.getLogger(__name__)
 
 _PRESERVED_OBJECTIVE_CONTEXT_PREFIX = "[Current user objective preserved from compacted history]"
+# Reserved provider-visible namespace for a generated tight-budget scaffold.
+_COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX = "[LCM:obj:v1]"
+_PRESERVED_OBJECTIVE_CONTEXT_PREFIXES = (
+    _PRESERVED_OBJECTIVE_CONTEXT_PREFIX,
+    _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX,
+)
 _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across context compression]"
 _MODEL_SWITCH_NOTIFICATION_PREFIX = "[Note: model was just switched from "
 # When the user sends a message mid-turn (/steer), the host appends it to a
@@ -1222,6 +1228,19 @@ class ReconcileMixin:
                 and self._is_quarantined_assistant_replay_identity(candidate_prefix[0])
                 and self._is_quarantined_assistant_replay_identity(sanitized_replay_tail[0])
             )
+            has_compact_objective_quarantine_singleton_replay = (
+                matches_raw_tail
+                and len(candidate_prefix) == 1
+                and raw_session_count == 1
+                and bool(stored_tail_rows)
+                and self._is_compact_objective_provenance_quarantine_message(
+                    candidate_identity_messages[0]
+                )
+                and self._restore_compact_objective_provenance_quarantine_message(
+                    stored_tail_rows[-1]
+                )
+                is not None
+            )
             candidate_singleton_original_content = (
                 normalize_content_value(candidate_identity_messages[0].get("content")) or ""
                 if len(candidate_identity_messages) == 1
@@ -1352,6 +1371,7 @@ class ReconcileMixin:
                     candidate_has_system
                     or (effective_session_count > 1 and not sanitized_tail_collapsed)
                     or has_quarantined_singleton_replay
+                    or has_compact_objective_quarantine_singleton_replay
                     or has_filtered_full_replay
                 )
             )
@@ -1369,8 +1389,9 @@ class ReconcileMixin:
             has_preserved_objective_scaffold = any(
                 str(msg.get("role") or "") != "system"
                 and (normalize_content_value(msg.get("content")) or "").lstrip().startswith(
-                    _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+                    _PRESERVED_OBJECTIVE_CONTEXT_PREFIXES
                 )
+                and self._is_preserved_objective_replay_scaffold_message(msg)
                 for msg in candidate_messages
             )
             candidate_suffix_has_user_turn = any(identity[0] == "user" for identity in candidate_prefix)

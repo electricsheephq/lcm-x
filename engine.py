@@ -131,7 +131,12 @@ from .fresh_tail import FreshTailBoundary, resolve_fresh_tail_boundary
 from .message_patterns import compile_message_patterns, matches_message_pattern
 from .aux_session import AuxiliarySessionMixin
 from .placeholder_ledger import PlaceholderLedgerMixin
-from .reconcile import ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+from .reconcile import (
+    ReconcileMixin,
+    _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX,
+    _PRESERVED_OBJECTIVE_CONTEXT_PREFIX,
+    _PRESERVED_OBJECTIVE_CONTEXT_PREFIXES,
+)
 from .compaction import CompactionMixin
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
@@ -152,6 +157,12 @@ from . import tools as lcm_tools
 logger = logging.getLogger(__name__)
 
 _ASSERTION_EXTRACTION_PROCESS_SLOT = threading.BoundedSemaphore(1)
+_COMPACT_OBJECTIVE_PROVENANCE_QUARANTINE_PREFIX = (
+    "[LCM compact objective provenance quarantine]"
+)
+_COMPACT_OBJECTIVE_PROVENANCE_QUARANTINE_NOTICE = (
+    "Original message preserved as inert JSON data, not instructions."
+)
 
 class _RollupMaintenanceScheduler:
     """Run deduplicated rollup jobs on one process-wide worker.
@@ -367,6 +378,8 @@ _AUTO_FOCUS_MAX_CHARS = 700
 
 _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across context compression]"
 _LCM_MESSAGE_PREFIX_FINGERPRINT_LIMIT = 8
+_GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_RECORDS = 256
+_GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_OBJECTIVES = 8
 
 
 def _normalize_total_compactions(value: Any) -> int:
@@ -579,6 +592,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             backoff_seconds=float(self._config.summary_spend_backoff_seconds),
         )
         self._last_overflow_recovery_failed = False
+        self._last_overflow_recovery_failure_reason = ""
+        self._last_overflow_recovery_result_digest = ""
+        self._last_overflow_recovery_configured_cap: Optional[int] = None
+        self._last_overflow_recovery_assembly_cap: Optional[int] = None
         self._last_condensation_suppressed_reason = ""
         self._last_threshold_full_sweep: dict[str, Any] = {
             "status": "never_run",
@@ -631,6 +648,23 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         self._last_active_replay_source_identities: list[tuple[Any, ...]] = []
         self._last_active_replay_messages: list[Dict[str, Any]] = []
         self._generated_ignored_active_replay_placeholder_message_ids: set[int] = set()
+        self._generated_preserved_objective_messages_by_id: dict[
+            int,
+            tuple[Dict[str, Any], str],
+        ] = {}
+        self._generated_compact_objective_quarantine_messages_by_id: dict[
+            int,
+            tuple[Dict[str, Any], str],
+        ] = {}
+        self._pending_generated_preserved_objective_provenance_records: list[
+            Dict[str, Any]
+        ] = []
+        self._last_generated_preserved_objective_provenance_read_state = (
+            "complete"
+        )
+        self._last_invalid_generated_preserved_objective_provenance: (
+            Optional[Dict[str, Any]]
+        ) = None
         self._logged_filter_config = False
         self._pending_reset_session_id: str = ""
         self._pending_reset_conversation_id: str = ""
@@ -2403,9 +2437,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
 
     def _is_scaffold_shaped_user_message(self, message: Dict[str, Any]) -> bool:
         """Return whether a user message has the shape of generated context."""
+        if not isinstance(message, dict):
+            return False
         return bool(
-            isinstance(message, dict)
-            and message.get("role") == "user"
+            message.get("role") == "user"
             and (
                 self._is_context_summary_content(message.get("content"))
                 or self._is_replayed_context_scaffold_message(message)
@@ -2423,6 +2458,59 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         store_id: int,
     ) -> List[tuple[str, str]]:
         """Build metadata committed atomically with a scaffold-shaped user row."""
+        content = normalize_content_value(message.get("content")) or ""
+        if self._is_compact_objective_provenance_quarantine_message(message):
+            original = (
+                self._decode_compact_objective_provenance_quarantine_message(
+                    message
+                )
+            )
+            if (
+                original is None
+                or not self._is_generated_compact_objective_quarantine_message(
+                    message
+                )
+            ):
+                return []
+            rows = [
+                (
+                    self._compact_objective_quarantine_provenance_key(
+                        store_id
+                    ),
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "kind": (
+                                "compact-objective-provenance-quarantine"
+                            ),
+                            "original_identity_sha256": (
+                                self._exact_provider_visible_message_identity_sha256(
+                                    original
+                                )
+                            ),
+                        },
+                        sort_keys=True,
+                    ),
+                ),
+            ]
+            if original.get("role") == "user":
+                rows.append(
+                    (
+                        self._real_user_scaffold_provenance_key(store_id),
+                        json.dumps(
+                            {
+                                "version": 1,
+                                "kind": "quarantined-compact-user",
+                            },
+                            sort_keys=True,
+                        ),
+                    )
+                )
+            return rows
+        if content.lstrip().startswith(
+            _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+        ):
+            return []
         if not self._is_scaffold_shaped_user_message(message):
             return []
         return [
@@ -2449,7 +2537,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         return bool(
             isinstance(payload, dict)
             and payload.get("version") == 1
-            and payload.get("kind") == "user-authored-scaffold"
+            and payload.get("kind")
+            in {"user-authored-scaffold", "quarantined-compact-user"}
         )
 
     def _durable_real_user_messages(
@@ -2477,6 +2566,21 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     store_id = int(row.get("store_id") or 0)
                     cursor_store_id = max(cursor_store_id, store_id)
                     content = normalize_content_value(row.get("content")) or ""
+                    restored_quarantine = None
+                    if self._is_compact_objective_provenance_quarantine_message(
+                        row
+                    ):
+                        restored_quarantine = (
+                            self._restore_compact_objective_provenance_quarantine_message(
+                                row
+                            )
+                        )
+                        if restored_quarantine is not None:
+                            row = restored_quarantine
+                            content = (
+                                normalize_content_value(row.get("content"))
+                                or ""
+                            )
                     if (
                         not content.strip()
                         or self._matches_ignore_message_patterns(row, stored_row=True)
@@ -3394,6 +3498,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     self._ingest_cursor = 0
                     self._last_compacted_store_id = 0
                     self._last_overflow_recovery_failed = False
+                    self._last_overflow_recovery_failure_reason = ""
+                    self._last_overflow_recovery_result_digest = ""
+                    self._last_overflow_recovery_configured_cap = None
+                    self._last_overflow_recovery_assembly_cap = None
                     self._last_condensation_suppressed_reason = ""
                 self._lcm_current_start_allows_bypass_lineage = True
                 self._apply_session_start_metadata(session_id, kwargs)
@@ -3461,6 +3569,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             self._ingest_cursor = 0
             self._last_compacted_store_id = 0
             self._last_overflow_recovery_failed = False
+            self._last_overflow_recovery_failure_reason = ""
+            self._last_overflow_recovery_result_digest = ""
+            self._last_overflow_recovery_configured_cap = None
+            self._last_overflow_recovery_assembly_cap = None
             self._last_condensation_suppressed_reason = ""
         self._apply_session_start_metadata(session_id, kwargs)
         self._bind_lifecycle_state(
@@ -4657,6 +4769,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             status["ignore_pattern_dropped_count"] = self._ignore_pattern_dropped_count
             status["ingest_reconciliation"] = dict(self._last_ingest_reconciliation)
             status["overflow_recovery_failed"] = self._last_overflow_recovery_failed
+            status["overflow_recovery_failure_reason"] = (
+                self._last_overflow_recovery_failure_reason
+            )
             status["condensation_suppressed_reason"] = self._last_condensation_suppressed_reason
             status["conversation_id"] = conversation_id
             if lifecycle_state is not None:
@@ -4924,6 +5039,16 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             copied_message = dict(message)
             if id(message) in generated_message_ids:
                 self._generated_ignored_active_replay_placeholder_message_ids.add(id(copied_message))
+            if self._is_generated_preserved_objective_message(message):
+                self._mark_generated_preserved_objective_message(
+                    copied_message
+                )
+            if self._is_generated_compact_objective_quarantine_message(
+                message
+            ):
+                self._mark_generated_compact_objective_quarantine_message(
+                    copied_message
+                )
             copied_replay_messages.append(copied_message)
         return copied_replay_messages
 
@@ -4976,7 +5101,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 "[Note: This conversation uses Lossless Context Management (LCM)." in content
                 and "Earlier turns have been compacted into hierarchical summaries below." in content
             )
-        if content.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
+        if self._is_preserved_objective_replay_scaffold_message(msg):
             return True
         if content.lstrip().startswith(_PRESERVED_TODO_CONTEXT_PREFIX):
             return True
@@ -4987,6 +5112,24 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d\d+, node \d+\)\]",
                 content,
             )
+        )
+
+    def _is_preserved_objective_replay_scaffold_message(
+        self,
+        message: Dict[str, Any],
+    ) -> bool:
+        """Recognize legacy or provenance-verified compact scaffolds."""
+        if str(message.get("role") or "") == "tool":
+            return False
+        content = normalize_content_value(message.get("content")) or ""
+        stripped_content = content.lstrip()
+        if stripped_content.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
+            return True
+        return bool(
+            stripped_content.startswith(
+                _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+            )
+            and self._is_generated_preserved_objective_message(message)
         )
 
     def _restore_ingest_payload_placeholders_in_value(self, value: Any, *, session_id: str) -> Any:
@@ -5155,6 +5298,24 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 )
             if id(message) in generated_message_ids:
                 self._generated_ignored_active_replay_placeholder_message_ids.add(id(redacted_message))
+            if self._is_generated_preserved_objective_message(message):
+                self._mark_generated_preserved_objective_message(
+                    redacted_message
+                )
+            if (
+                self._is_generated_compact_objective_quarantine_message(
+                    message
+                )
+                and self._exact_provider_visible_message_identity_sha256(
+                    message
+                )
+                == self._exact_provider_visible_message_identity_sha256(
+                    redacted_message
+                )
+            ):
+                self._mark_generated_compact_objective_quarantine_message(
+                    redacted_message
+                )
             redacted_replay_messages.append(redacted_message)
         return redacted_replay_messages
 
@@ -5188,6 +5349,60 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             )
             return self._redact_active_replay_messages(messages)
 
+        provenance_read_completed = (
+            self._restore_generated_preserved_objective_provenance(messages)
+        )
+        has_ambiguous_compact_objective = any(
+            str(message.get("role") or "") != "tool"
+            and (
+                normalize_content_value(message.get("content")) or ""
+            ).lstrip().startswith(
+                _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+            )
+            and not self._is_generated_preserved_objective_message(message)
+            for message in messages
+        )
+        if not provenance_read_completed and has_ambiguous_compact_objective:
+            repaired_messages: Optional[List[Dict[str, Any]]] = None
+            if (
+                self._last_generated_preserved_objective_provenance_read_state
+                == "invalid"
+            ):
+                repaired_messages = (
+                    self._quarantine_unproven_compact_objective_messages(
+                        messages
+                    )
+                )
+                if (
+                    repaired_messages is not None
+                    and self._repair_invalid_generated_preserved_objective_provenance()
+                ):
+                    messages = repaired_messages
+                else:
+                    repaired_messages = None
+            elif (
+                self._last_generated_preserved_objective_provenance_read_state
+                == "repaired"
+            ):
+                repaired_messages = (
+                    self._quarantine_unproven_compact_objective_messages(
+                        messages
+                    )
+                )
+                if repaired_messages is not None:
+                    messages = repaired_messages
+            if repaired_messages is None:
+                # A transient metadata read failure is not proof that a compact
+                # marker is user-authored. Leave the cursor untouched so the
+                # exact batch can be retried after provenance becomes readable
+                # instead of durably ingesting a potentially synthetic objective.
+                logger.warning(
+                    "LCM deferred ingest while compact objective provenance was "
+                    "unavailable: session=%s",
+                    self._session_id,
+                )
+                return self._redact_active_replay_messages(messages)
+
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
         scan_start = 0 if self._ingest_cursor_needs_reconcile else cursor
@@ -5218,6 +5433,31 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             externalize=externalize_messages,
             prefer_existing_externalized=prefer_existing_externalized,
         )
+        for original_message, replay_message in zip(messages, replay_messages):
+            if (
+                self._is_generated_preserved_objective_message(original_message)
+                and self._exact_provider_visible_message_identity_sha256(
+                    original_message
+                )
+                == self._exact_provider_visible_message_identity_sha256(
+                    replay_message
+                )
+            ):
+                self._mark_generated_preserved_objective_message(replay_message)
+            if (
+                self._is_generated_compact_objective_quarantine_message(
+                    original_message
+                )
+                and self._exact_provider_visible_message_identity_sha256(
+                    original_message
+                )
+                == self._exact_provider_visible_message_identity_sha256(
+                    replay_message
+                )
+            ):
+                self._mark_generated_compact_objective_quarantine_message(
+                    replay_message
+                )
         replay_messages = self._redact_active_replay_messages(replay_messages)
         replay_messages = self._apply_ignored_active_replay_placeholders(
             messages,
@@ -5393,6 +5633,22 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     continue
                 replay_text = text_content_for_pattern_matching(replay_msg.get("content")) or ""
                 original_text = text_content_for_pattern_matching(original_msg.get("content")) or ""
+                if (
+                    str(replay_msg.get("role") or "") != "tool"
+                    and replay_text.lstrip().startswith(
+                        _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+                    )
+                    and self._is_generated_preserved_objective_message(
+                        replay_msg
+                    )
+                ):
+                    logger.debug(
+                        "LCM suppressed reserved compact objective scaffold: "
+                        "session=%s index=%d",
+                        self._session_id,
+                        absolute_idx,
+                    )
+                    continue
                 volatile_placeholder = self._is_volatile_ignored_quarantine_placeholder(
                     replay_msg,
                     replay_text,
@@ -5411,7 +5667,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     replay_text_stripped = replay_text.strip()
                     if (
                         self._is_context_summary_content(replay_text)
-                        or replay_text_stripped.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX)
+                        or self._is_preserved_objective_replay_scaffold_message(
+                            replay_msg
+                        )
                         or replay_text_stripped.startswith(_PRESERVED_TODO_CONTEXT_PREFIX)
                     ):
                         boundary_seen_synthetic_summary_before = True
@@ -6562,9 +6820,53 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         return content.lstrip().startswith(_PRESERVED_TODO_CONTEXT_PREFIX)
 
     @staticmethod
+    def _is_compact_objective_provenance_quarantine_message(
+        message: Dict[str, Any],
+    ) -> bool:
+        content = text_content_for_pattern_matching(message.get("content")) or ""
+        return content.lstrip().startswith(
+            _COMPACT_OBJECTIVE_PROVENANCE_QUARANTINE_PREFIX
+        )
+
+    def _mark_generated_compact_objective_quarantine_message(
+        self,
+        message: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        registry = (
+            self._generated_compact_objective_quarantine_messages_by_id
+        )
+        registry[id(message)] = (
+            message,
+            self._exact_provider_visible_message_identity_sha256(message),
+        )
+        while len(registry) > 256:
+            registry.pop(next(iter(registry)))
+        return message
+
+    def _is_generated_compact_objective_quarantine_message(
+        self,
+        message: Dict[str, Any],
+    ) -> bool:
+        registered = (
+            self._generated_compact_objective_quarantine_messages_by_id.get(
+                id(message)
+            )
+        )
+        return bool(
+            registered
+            and registered[0] is message
+            and registered[1]
+            == self._exact_provider_visible_message_identity_sha256(message)
+        )
+
+    @staticmethod
     def _preserved_objective_context_content(message: Dict[str, Any]) -> str:
         content = text_content_for_pattern_matching(message.get("content")) or ""
-        return content if content.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else ""
+        return (
+            content
+            if content.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIXES)
+            else ""
+        )
 
     def _sanitized_preserved_objective_context_content(self, message: Dict[str, Any]) -> str:
         preserved_objective = self._preserved_objective_context_content(message)
@@ -6576,12 +6878,781 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         )
 
     def _sanitize_active_preserved_objective_message(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        content = text_content_for_pattern_matching(message.get("content")) or ""
+        if (
+            content.lstrip().startswith(
+                _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+            )
+            and not self._is_generated_preserved_objective_message(message)
+        ):
+            # The compact namespace is recognizable as generated context only
+            # with exact occurrence provenance.  An unmarked collision is an
+            # ordinary user or assistant message and must stay byte-for-byte
+            # provider-visible rather than being sanitized as engine output.
+            return message
         sanitized_content = self._sanitized_preserved_objective_context_content(message)
         if not sanitized_content or sanitized_content == message.get("content"):
             return message
         sanitized = dict(message)
         sanitized["content"] = sanitized_content
+        if self._is_generated_preserved_objective_message(message):
+            self._mark_generated_preserved_objective_message(sanitized)
         return sanitized
+
+    def _is_generated_preserved_objective_message(
+        self,
+        message: Dict[str, Any],
+    ) -> bool:
+        """Verify one generated occurrence and its mark-time identity."""
+        registered = self._generated_preserved_objective_messages_by_id.get(
+            id(message)
+        )
+        return bool(
+            registered
+            and registered[0] is message
+            and registered[1]
+            == self._exact_provider_visible_message_identity_sha256(message)
+        )
+
+    def _exact_provider_visible_message_identity_sha256(
+        self,
+        message: Dict[str, Any],
+    ) -> str:
+        """Hash exact provider-visible fields without replay normalization."""
+        identity = (
+            str(message.get("role") or "unknown"),
+            normalize_content_value(message.get("content")) or "",
+            str(message.get("tool_call_id") or ""),
+            self._stable_tool_calls_identity(message.get("tool_calls")),
+            str(message.get("name") or ""),
+            str(message.get("tool_name") or ""),
+        )
+        serialized = json.dumps(
+            list(identity),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    def _exact_provider_visible_snapshot_digest(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> str:
+        identities = [
+            self._exact_provider_visible_message_identity_sha256(message)
+            for message in messages
+        ]
+        payload = json.dumps(
+            {"version": 1, "message_identity_sha256": identities},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _leading_system_message_count(messages: List[Dict[str, Any]]) -> int:
+        count = 0
+        for message in messages:
+            if str(message.get("role") or "") != "system":
+                break
+            count += 1
+        return count
+
+    def _mark_generated_preserved_objective_message(
+        self,
+        message: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Bind one generated objective scaffold to its in-process occurrence."""
+        if self._preserved_objective_context_content(message):
+            registry = self._generated_preserved_objective_messages_by_id
+            registry[id(message)] = (
+                message,
+                self._exact_provider_visible_message_identity_sha256(message),
+            )
+            while len(registry) > 256:
+                registry.pop(next(iter(registry)))
+        return message
+
+    def _generated_preserved_objective_provenance_metadata_key(self) -> str:
+        return self._replay_snapshot_metadata_key(
+            "generated_preserved_objective_provenance"
+        )
+
+    def _invalid_generated_preserved_objective_provenance_metadata_key(
+        self,
+        payload_digest: str,
+    ) -> str:
+        return self._replay_snapshot_metadata_key(
+            "generated_preserved_objective_provenance_quarantine:"
+            + payload_digest
+        )
+
+    def _quarantine_unproven_compact_objective_messages(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Wrap ambiguous non-tool compact turns as lossless, inert JSON data."""
+        quarantined: list[Dict[str, Any]] = []
+        quarantined_count = 0
+        for message in messages:
+            content = normalize_content_value(message.get("content")) or ""
+            role = str(message.get("role") or "")
+            if (
+                role != "tool"
+                and content.lstrip().startswith(
+                    _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+                )
+                and not self._is_generated_preserved_objective_message(message)
+            ):
+                try:
+                    serialized = json.dumps(
+                        message,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                except (TypeError, ValueError):
+                    logger.debug(
+                        "LCM compact objective quarantine serialization failed",
+                        exc_info=True,
+                    )
+                    return None
+                quarantined.append(
+                    self._mark_generated_compact_objective_quarantine_message(
+                        {
+                            "role": role,
+                            "content": (
+                                _COMPACT_OBJECTIVE_PROVENANCE_QUARANTINE_PREFIX
+                                + "\n"
+                                + _COMPACT_OBJECTIVE_PROVENANCE_QUARANTINE_NOTICE
+                                + "\n"
+                                + serialized
+                            ),
+                        }
+                    )
+                )
+                quarantined_count += 1
+                continue
+            quarantined.append(message)
+        if quarantined_count:
+            logger.warning(
+                "LCM quarantined %d ambiguous compact objective message(s) "
+                "after durable provenance corruption: session=%s",
+                quarantined_count,
+                self._session_id,
+            )
+        return quarantined
+
+    @staticmethod
+    def _decode_compact_objective_provenance_quarantine_message(
+        message: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Decode one exact non-tool occurrence from its quarantine wrapper."""
+        role = str(message.get("role") or "")
+        if not role or role == "tool":
+            return None
+        content = normalize_content_value(message.get("content")) or ""
+        parts = content.split("\n", 2)
+        if parts[:2] != [
+            _COMPACT_OBJECTIVE_PROVENANCE_QUARANTINE_PREFIX,
+            _COMPACT_OBJECTIVE_PROVENANCE_QUARANTINE_NOTICE,
+        ] or len(parts) != 3:
+            return None
+        try:
+            original = json.loads(parts[2])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if (
+            not isinstance(original, dict)
+            or str(original.get("role") or "") != role
+        ):
+            return None
+        original_content = normalize_content_value(original.get("content")) or ""
+        if not original_content.lstrip().startswith(
+            _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+        ):
+            return None
+        return original
+
+    @staticmethod
+    def _compact_objective_quarantine_provenance_key(store_id: int) -> str:
+        return f"compact_objective_quarantine_store_id:{int(store_id)}"
+
+    def _has_compact_objective_quarantine_provenance(
+        self,
+        store_id: int,
+        original: Dict[str, Any],
+    ) -> bool:
+        try:
+            payload = self._store.read_metadata_json(
+                self._compact_objective_quarantine_provenance_key(store_id)
+            )
+        except Exception:
+            logger.debug(
+                "LCM compact objective quarantine provenance read failed",
+                exc_info=True,
+            )
+            return False
+        return bool(
+            isinstance(payload, dict)
+            and payload.get("version") == 1
+            and payload.get("kind")
+            == "compact-objective-provenance-quarantine"
+            and payload.get("original_identity_sha256")
+            == self._exact_provider_visible_message_identity_sha256(original)
+        )
+
+    def _restore_compact_objective_provenance_quarantine_message(
+        self,
+        message: Dict[str, Any],
+        store_ids_by_message_id: Optional[Dict[int, int]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Restore a quarantined user turn only with atomic durable proof."""
+        original = (
+            self._decode_compact_objective_provenance_quarantine_message(
+                message
+            )
+        )
+        if original is None:
+            return None
+        store_id = int(
+            message.get("store_id")
+            or (store_ids_by_message_id or {}).get(id(message))
+            or 0
+        )
+        if store_id <= 0 or not self._has_compact_objective_quarantine_provenance(
+            store_id,
+            original,
+        ):
+            return None
+        restored = dict(message)
+        restored.update(original)
+        restored["store_id"] = store_id
+        return restored
+
+    def _repair_invalid_generated_preserved_objective_provenance(self) -> bool:
+        """Archive one invalid payload and compare-and-replace its canonical row."""
+        invalid = self._last_invalid_generated_preserved_objective_provenance
+        if not self._session_id or not isinstance(invalid, dict):
+            return False
+        try:
+            serialized_invalid = json.dumps(
+                invalid,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        except (TypeError, ValueError):
+            return False
+        payload_digest = hashlib.sha256(
+            serialized_invalid.encode("utf-8")
+        ).hexdigest()
+        repaired_payload = {
+            "version": 1,
+            "records": [],
+            "quarantined_invalid_payload_sha256": payload_digest,
+        }
+        archive_payload = {
+            "version": 1,
+            "kind": "invalid-generated-objective-provenance",
+            "payload_sha256": payload_digest,
+            "invalid": invalid,
+        }
+        canonical_key = (
+            self._generated_preserved_objective_provenance_metadata_key()
+        )
+        try:
+            self._store.write_metadata_json(
+                [
+                    self._invalid_generated_preserved_objective_provenance_metadata_key(
+                        payload_digest
+                    )
+                ],
+                json.dumps(archive_payload, ensure_ascii=False, sort_keys=True),
+                skip_unchanged=True,
+            )
+            kind = str(invalid.get("kind") or "")
+            repaired = False
+            if kind == "invalid-json":
+                raw = invalid.get("raw")
+                if isinstance(raw, str):
+                    repaired = self._store.replace_metadata_raw_if_unchanged(
+                        canonical_key,
+                        raw,
+                        repaired_payload,
+                    )
+            elif kind == "invalid-structure":
+                expected_payload = invalid.get("payload")
+
+                def replace_if_same(current: Any) -> Any | None:
+                    if current != expected_payload:
+                        return None
+                    return repaired_payload
+
+                updated = self._store.update_metadata_json(
+                    canonical_key,
+                    replace_if_same,
+                    skip_unchanged=True,
+                )
+                repaired = updated == repaired_payload
+        except Exception:
+            logger.debug(
+                "LCM invalid compact objective provenance repair failed",
+                exc_info=True,
+            )
+            return False
+        if not repaired:
+            return False
+        self._last_generated_preserved_objective_provenance_read_state = (
+            "complete"
+        )
+        self._last_invalid_generated_preserved_objective_provenance = None
+        logger.warning(
+            "LCM archived and repaired invalid compact objective provenance: "
+            "session=%s payload_sha256=%s",
+            self._session_id,
+            payload_digest,
+        )
+        return True
+
+    def _normalize_generated_preserved_objective_provenance_payload(
+        self,
+        payload: Any,
+    ) -> tuple[list[Dict[str, Any]], bool]:
+        """Validate the complete proof payload without skipping corruption."""
+        if payload is None:
+            return [], True
+        if not isinstance(payload, dict) or payload.get("version") != 1:
+            return [], False
+        raw_records = payload.get("records")
+        if isinstance(raw_records, list) and not raw_records:
+            quarantine_digest = str(
+                payload.get("quarantined_invalid_payload_sha256") or ""
+            )
+            if (
+                set(payload)
+                == {
+                    "version",
+                    "records",
+                    "quarantined_invalid_payload_sha256",
+                }
+                and re.fullmatch(r"[0-9a-f]{64}", quarantine_digest)
+            ):
+                return [], True
+            return [], False
+        if not isinstance(raw_records, list):
+            return [], False
+        if len(raw_records) > _GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_RECORDS:
+            return [], False
+        records: list[Dict[str, Any]] = []
+        for raw_record in raw_records:
+            if not isinstance(raw_record, dict):
+                return [], False
+            snapshot_digest = str(raw_record.get("snapshot_digest") or "")
+            message_count = raw_record.get("message_count")
+            objectives = raw_record.get("objectives")
+            if (
+                not re.fullmatch(r"[0-9a-f]{64}", snapshot_digest)
+                or not isinstance(message_count, int)
+                or isinstance(message_count, bool)
+                or message_count <= 0
+                or not isinstance(objectives, list)
+                or not objectives
+                or len(objectives)
+                > _GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_OBJECTIVES
+            ):
+                return [], False
+            has_non_system_snapshot = any(
+                key in raw_record
+                for key in (
+                    "non_system_snapshot_digest",
+                    "non_system_message_count",
+                )
+            )
+            non_system_snapshot_digest = str(
+                raw_record.get("non_system_snapshot_digest") or ""
+            )
+            non_system_message_count = raw_record.get("non_system_message_count")
+            if has_non_system_snapshot and (
+                not re.fullmatch(r"[0-9a-f]{64}", non_system_snapshot_digest)
+                or not isinstance(non_system_message_count, int)
+                or isinstance(non_system_message_count, bool)
+                or non_system_message_count <= 0
+                or non_system_message_count > message_count
+            ):
+                return [], False
+            normalized_objectives: list[Dict[str, Any]] = []
+            objective_indices: set[int] = set()
+            non_system_objective_indices: set[int] = set()
+            for objective in objectives:
+                if not isinstance(objective, dict):
+                    return [], False
+                index = objective.get("index")
+                identity_digest = str(objective.get("identity_sha256") or "")
+                non_system_index = objective.get("non_system_index")
+                if (
+                    not isinstance(index, int)
+                    or isinstance(index, bool)
+                    or index < 0
+                    or index >= message_count
+                    or index in objective_indices
+                    or not re.fullmatch(r"[0-9a-f]{64}", identity_digest)
+                ):
+                    return [], False
+                if has_non_system_snapshot and (
+                    not isinstance(non_system_index, int)
+                    or isinstance(non_system_index, bool)
+                    or non_system_index < 0
+                    or non_system_index >= non_system_message_count
+                    or non_system_index in non_system_objective_indices
+                    or non_system_index
+                    != index - (message_count - non_system_message_count)
+                ):
+                    return [], False
+                if not has_non_system_snapshot and "non_system_index" in objective:
+                    return [], False
+                objective_indices.add(index)
+                normalized_objective = {
+                    "index": index,
+                    "identity_sha256": identity_digest,
+                }
+                if has_non_system_snapshot:
+                    non_system_objective_indices.add(non_system_index)
+                    normalized_objective["non_system_index"] = non_system_index
+                normalized_objectives.append(normalized_objective)
+            normalized_record = {
+                "snapshot_digest": snapshot_digest,
+                "message_count": message_count,
+                "objectives": normalized_objectives,
+            }
+            if has_non_system_snapshot:
+                normalized_record["non_system_snapshot_digest"] = (
+                    non_system_snapshot_digest
+                )
+                normalized_record["non_system_message_count"] = (
+                    non_system_message_count
+                )
+            records.append(normalized_record)
+        return records, True
+
+    def _load_generated_preserved_objective_provenance_with_status(
+        self,
+    ) -> tuple[list[Dict[str, Any]], bool]:
+        """Load bounded occurrence proof and report whether the read completed."""
+        if not self._session_id:
+            self._last_generated_preserved_objective_provenance_read_state = (
+                "complete"
+            )
+            self._last_invalid_generated_preserved_objective_provenance = None
+            return [], True
+        key = self._generated_preserved_objective_provenance_metadata_key()
+        try:
+            raw = self._store.read_metadata_raw(key)
+        except Exception:
+            self._last_generated_preserved_objective_provenance_read_state = (
+                "unavailable"
+            )
+            self._last_invalid_generated_preserved_objective_provenance = None
+            logger.debug(
+                "LCM generated objective provenance load failed",
+                exc_info=True,
+            )
+            return [], False
+        try:
+            payload = None if raw is None else json.loads(raw)
+        except json.JSONDecodeError:
+            self._last_generated_preserved_objective_provenance_read_state = (
+                "invalid"
+            )
+            self._last_invalid_generated_preserved_objective_provenance = {
+                "kind": "invalid-json",
+                "raw": raw,
+            }
+            logger.debug(
+                "LCM generated objective provenance JSON was invalid",
+                exc_info=True,
+            )
+            return [], False
+        records, read_completed = (
+            self._normalize_generated_preserved_objective_provenance_payload(
+                payload
+            )
+        )
+        repaired_quarantine_marker = bool(
+            read_completed
+            and not records
+            and isinstance(payload, dict)
+            and set(payload)
+            == {
+                "version",
+                "records",
+                "quarantined_invalid_payload_sha256",
+            }
+        )
+        self._last_generated_preserved_objective_provenance_read_state = (
+            "repaired"
+            if repaired_quarantine_marker
+            else ("complete" if read_completed else "invalid")
+        )
+        self._last_invalid_generated_preserved_objective_provenance = (
+            None
+            if read_completed
+            else {"kind": "invalid-structure", "payload": payload}
+        )
+        return records, read_completed and not repaired_quarantine_marker
+
+    def _load_generated_preserved_objective_provenance(
+        self,
+    ) -> list[Dict[str, Any]]:
+        """Load bounded occurrence proof for engine-generated objectives."""
+        records, _read_completed = (
+            self._load_generated_preserved_objective_provenance_with_status()
+        )
+        return records
+
+    def _merge_generated_preserved_objective_provenance_records(
+        self,
+        records_to_add: list[Dict[str, Any]],
+    ) -> tuple[list[Dict[str, Any]], bool]:
+        """Merge proof records under one SQLite write reservation."""
+        if not self._session_id:
+            return [], False
+        merged_records: list[Dict[str, Any]] = []
+
+        def merge_payload(payload: Any) -> Dict[str, Any] | None:
+            records, read_completed = (
+                self._normalize_generated_preserved_objective_provenance_payload(
+                    payload
+                )
+            )
+            if not read_completed:
+                return None
+            combined_records = list(records)
+            for candidate in records_to_add:
+                if candidate in combined_records:
+                    continue
+                if (
+                    len(combined_records)
+                    >= _GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_RECORDS
+                ):
+                    return None
+                combined_records.append(candidate)
+            proposed_payload = {"version": 1, "records": combined_records}
+            _normalized_records, proposed_valid = (
+                self._normalize_generated_preserved_objective_provenance_payload(
+                    proposed_payload
+                )
+            )
+            if not proposed_valid:
+                return None
+            merged_records.extend(combined_records)
+            return proposed_payload
+
+        try:
+            updated = self._store.update_metadata_json(
+                self._generated_preserved_objective_provenance_metadata_key(),
+                merge_payload,
+                skip_unchanged=True,
+            )
+        except Exception:
+            logger.debug(
+                "LCM generated objective provenance atomic merge failed",
+                exc_info=True,
+            )
+            return [], False
+        if updated is None:
+            return [], False
+        return merged_records, True
+
+    def _remember_generated_preserved_objective_provenance(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> bool:
+        """Persist only exact generated-objective occurrences in one snapshot."""
+        if not self._session_id or not messages:
+            return True
+        leading_system_count = self._leading_system_message_count(messages)
+        non_system_messages = messages[leading_system_count:]
+        objectives = [
+            {
+                "index": index,
+                "non_system_index": index - leading_system_count,
+                "identity_sha256": (
+                    self._exact_provider_visible_message_identity_sha256(message)
+                ),
+            }
+            for index, message in enumerate(messages)
+            if self._is_generated_preserved_objective_message(message)
+            and self._preserved_objective_context_content(message)
+        ]
+        if not objectives:
+            return True
+        if (
+            len(objectives)
+            > _GENERATED_PRESERVED_OBJECTIVE_PROVENANCE_MAX_OBJECTIVES
+        ):
+            # Never publish a compact occurrence that the bounded record
+            # cannot authenticate after serialization. The caller converts
+            # every new compact marker in this snapshot to the replay-safe
+            # legacy namespace instead.
+            return False
+        record = {
+            "snapshot_digest": (
+                self._exact_provider_visible_snapshot_digest(messages)
+            ),
+            "message_count": len(messages),
+            "non_system_snapshot_digest": (
+                self._exact_provider_visible_snapshot_digest(non_system_messages)
+            ),
+            "non_system_message_count": len(non_system_messages),
+            "objectives": objectives,
+        }
+        pending_records = [
+            item
+            for item in self._pending_generated_preserved_objective_provenance_records
+            if item != record
+        ]
+        pending_records.append(record)
+        self._pending_generated_preserved_objective_provenance_records = pending_records
+        _merged_records, merge_completed = (
+            self._merge_generated_preserved_objective_provenance_records(
+                pending_records
+            )
+        )
+        if not merge_completed:
+            return False
+        self._pending_generated_preserved_objective_provenance_records = []
+        return True
+
+    def _restore_generated_preserved_objective_provenance(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> bool:
+        """Restore trust only for exact positions in a proven snapshot prefix."""
+        pending_records = list(
+            self._pending_generated_preserved_objective_provenance_records
+        )
+        if pending_records:
+            combined_records, read_completed = (
+                self._merge_generated_preserved_objective_provenance_records(
+                    pending_records
+                )
+            )
+            if read_completed:
+                self._pending_generated_preserved_objective_provenance_records = []
+        else:
+            combined_records, read_completed = (
+                self._load_generated_preserved_objective_provenance_with_status()
+            )
+        leading_system_count = self._leading_system_message_count(messages)
+        for record in reversed(combined_records):
+            message_count = int(record["message_count"])
+            snapshot = messages[:message_count]
+            full_snapshot_matches = (
+                message_count <= len(messages)
+                and self._exact_provider_visible_snapshot_digest(snapshot)
+                == record["snapshot_digest"]
+            )
+            non_system_snapshot_matches = False
+            non_system_snapshot: list[Dict[str, Any]] = []
+            if "non_system_message_count" in record:
+                non_system_message_count = int(record["non_system_message_count"])
+                non_system_snapshot = messages[
+                    leading_system_count:
+                    leading_system_count + non_system_message_count
+                ]
+                non_system_snapshot_matches = (
+                    len(non_system_snapshot) == non_system_message_count
+                    and self._exact_provider_visible_snapshot_digest(
+                        non_system_snapshot
+                    )
+                    == record["non_system_snapshot_digest"]
+                )
+            if not full_snapshot_matches and not non_system_snapshot_matches:
+                continue
+            for objective in record["objectives"]:
+                if full_snapshot_matches:
+                    message = snapshot[int(objective["index"])]
+                else:
+                    message = non_system_snapshot[
+                        int(objective["non_system_index"])
+                    ]
+                if (
+                    self._exact_provider_visible_message_identity_sha256(message)
+                    == objective["identity_sha256"]
+                    and self._preserved_objective_context_content(message)
+                ):
+                    self._mark_generated_preserved_objective_message(message)
+
+        # Before exact occurrence provenance existed, generated objective
+        # scaffolds were still covered by the durable fingerprint of the exact
+        # engine-assembled compacted snapshot. Restore only assistant
+        # occurrences from that exact registered snapshot. A prefix-shaped
+        # assistant message in any other batch remains untrusted.
+        compacted_snapshot_digest = (
+            self._compacted_active_replay_snapshot_digest(messages)
+        )
+        if (
+            compacted_snapshot_digest
+            and compacted_snapshot_digest
+            in set(self._load_compacted_active_replay_snapshot_digests())
+        ):
+            try:
+                store_ids_by_message_id = self._get_store_id_map_for_messages(
+                    messages
+                )
+            except Exception:
+                logger.debug(
+                    "LCM legacy objective replay lineage lookup failed",
+                    exc_info=True,
+                )
+                store_ids_by_message_id = {}
+            for message in messages:
+                content = normalize_content_value(message.get("content")) or ""
+                has_durable_raw_occurrence = bool(
+                    int(
+                        message.get("store_id")
+                        or store_ids_by_message_id.get(id(message))
+                        or 0
+                    )
+                )
+                if (
+                    str(message.get("role") or "") == "assistant"
+                    and content.lstrip().startswith(
+                        _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+                    )
+                    and (
+                        not has_durable_raw_occurrence
+                        or self._is_registered_folded_tail_message(message)
+                    )
+                ):
+                    self._mark_generated_preserved_objective_message(message)
+        return read_completed
+
+    def _has_trusted_preserved_objective_provenance(
+        self,
+        message: Dict[str, Any],
+        store_ids_by_message_id: Dict[int, int],
+    ) -> bool:
+        """Accept generated identity or durable user-authored scaffold proof."""
+        if self._is_generated_preserved_objective_message(message):
+            return True
+        if message.get("role") != "user":
+            return False
+        content = normalize_content_value(message.get("content")) or ""
+        if content.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
+            # The legacy namespace is intrinsically recognizable on replay.
+            # Treating a literal user collision as the objective preserves the
+            # complete turn as well; only assistant/tool occurrences need
+            # additional generated provenance before they can steer recovery.
+            return True
+        store_id = int(
+            message.get("store_id")
+            or store_ids_by_message_id.get(id(message))
+            or 0
+        )
+        return store_id > 0 and self._has_real_user_scaffold_provenance(store_id)
 
     def _sanitize_preserved_objective_content(self, content: str, role: str = "user") -> str:
         content = strip_injected_context_blocks(content)
@@ -6622,9 +7693,38 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         synthetic continuity marker and must not be promoted as current intent.
         """
         selected_tail_messages = [msg for msg in selected_tail if isinstance(msg, dict)]
+        store_ids_by_message_id: Dict[int, int] = {}
+        if any(
+            isinstance(message, dict)
+            and self._is_compact_objective_provenance_quarantine_message(
+                message
+            )
+            for message in messages
+        ):
+            try:
+                store_ids_by_message_id = self._get_store_id_map_for_messages(
+                    messages
+                )
+            except Exception:
+                logger.debug(
+                    "LCM latest-user quarantine provenance lookup failed",
+                    exc_info=True,
+                )
         for message in reversed(messages):
             if not isinstance(message, dict):
                 continue
+            source_message = message
+            restored_quarantine = (
+                self._restore_compact_objective_provenance_quarantine_message(
+                    message,
+                    store_ids_by_message_id,
+                )
+            )
+            if (
+                restored_quarantine is not None
+                and restored_quarantine.get("role") == "user"
+            ):
+                message = restored_quarantine
             content_text = text_content_for_pattern_matching(message.get("content")) or ""
             if (
                 self._matches_ignore_message_patterns(message)
@@ -6636,28 +7736,71 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 or self._is_ignored_active_replay_placeholder(message, content_text)
             ):
                 continue
-            if self._preserved_objective_context_content(message):
-                return None
+            if self._is_preserved_objective_replay_scaffold_message(message):
+                store_id = int(
+                    message.get("store_id")
+                    or store_ids_by_message_id.get(id(source_message))
+                    or 0
+                )
+                if not (
+                    message.get("role") == "user"
+                    and store_id > 0
+                    and self._has_real_user_scaffold_provenance(store_id)
+                ):
+                    return None
             if message.get("role") != "user":
                 continue
             if self._is_preserved_todo_context_message(message):
                 continue
-            if any(message == selected for selected in selected_tail_messages):
+            if any(
+                message == selected or source_message == selected
+                for selected in selected_tail_messages
+            ):
                 return None
             return self._build_preserved_objective_summary_part(message)
         return None
 
-    @staticmethod
-    def _newest_user_message_text(messages: List[Dict[str, Any]]) -> str:
+    def _newest_user_message_text(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> str:
         """Return the newest real user turn's text (SPEC F injection query).
 
         Scans from the tail so the block reflects the turn the host is about to
         answer. Returns "" when the tail carries no user text (e.g. a tool-only
         continuation) — the caller then leaves the feature inert.
         """
+        store_ids_by_message_id: Dict[int, int] = {}
+        if any(
+            isinstance(message, dict)
+            and self._is_compact_objective_provenance_quarantine_message(
+                message
+            )
+            for message in messages
+        ):
+            try:
+                store_ids_by_message_id = self._get_store_id_map_for_messages(
+                    messages
+                )
+            except Exception:
+                logger.debug(
+                    "LCM newest-user quarantine provenance lookup failed",
+                    exc_info=True,
+                )
         for message in reversed(messages):
             if not isinstance(message, dict) or message.get("role") != "user":
                 continue
+            restored_quarantine = (
+                self._restore_compact_objective_provenance_quarantine_message(
+                    message,
+                    store_ids_by_message_id,
+                )
+            )
+            if (
+                restored_quarantine is not None
+                and restored_quarantine.get("role") == "user"
+            ):
+                message = restored_quarantine
             text = (text_content_for_pattern_matching(message.get("content")) or "").strip()
             if text:
                 return text
@@ -6946,7 +8089,15 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 if retained_user_msg is not None:
                     retained_generated_context_parts.append(combined)
                 else:
-                    result.append({"role": summary_role, "content": combined})
+                    generated_summary = {
+                        "role": summary_role,
+                        "content": combined,
+                    }
+                    if anchor_part is not None and anchor_part in selected_parts:
+                        self._mark_generated_preserved_objective_message(
+                            generated_summary
+                        )
+                    result.append(generated_summary)
 
         # Proactive memory injection (SPEC F, default-off). One bounded block is
         # placed adjacent to the summary prefix — a stable position below the
@@ -6989,11 +8140,22 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 if folded_source_store_id > 0:
                     folded_original_tail = tail_selected[0]
                     folded_result_index = len(result)
+                    folded_tail = self._prepend_generated_context_to_message(
+                        folded_original_tail,
+                        generated_context,
+                    )
+                    if (
+                        anchor_part is not None
+                        and any(
+                            anchor_part in part
+                            for part in retained_generated_context_parts
+                        )
+                    ):
+                        self._mark_generated_preserved_objective_message(
+                            folded_tail
+                        )
                     tail_selected = [
-                        self._prepend_generated_context_to_message(
-                            folded_original_tail,
-                            generated_context,
-                        ),
+                        folded_tail,
                         *tail_selected[1:],
                     ]
                 else:
@@ -7002,9 +8164,21 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                         "tail occurrence lacked durable lineage"
                     )
             else:
-                result.append(
-                    {"role": summary_role, "content": generated_context}
-                )
+                generated_summary = {
+                    "role": summary_role,
+                    "content": generated_context,
+                }
+                if (
+                    anchor_part is not None
+                    and any(
+                        anchor_part in part
+                        for part in retained_generated_context_parts
+                    )
+                ):
+                    self._mark_generated_preserved_objective_message(
+                        generated_summary
+                    )
+                result.append(generated_summary)
 
         # Fresh tail
         result.extend(tail_selected)
@@ -7024,12 +8198,22 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             trimmed_result: list[Dict[str, Any]] = []
             for msg in result:
                 content = normalize_content_value(msg.get("content")) or ""
-                if _PRESERVED_OBJECTIVE_CONTEXT_PREFIX not in content:
+                if not self._is_preserved_objective_replay_scaffold_message(msg):
                     trimmed_result.append(msg)
                     continue
                 parts = [
                     part for part in content.split("\n\n---\n\n")
-                    if not part.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX)
+                    if not (
+                        part.lstrip().startswith(
+                            _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+                        )
+                        or (
+                            part.lstrip().startswith(
+                                _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+                            )
+                            and self._is_generated_preserved_objective_message(msg)
+                        )
+                    )
                 ]
                 if parts:
                     trimmed = msg.copy()
@@ -7055,6 +8239,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
 
         # Persist proof only for the exact provider-visible compacted snapshot
         # assembled by this engine. Ingested input is not trusted replay proof.
+        if not self._remember_generated_preserved_objective_provenance(result):
+            result = self._fallback_unpersisted_generated_objectives(
+                result,
+                assembly_cap,
+            )
         self._remember_compacted_active_replay_snapshot(result)
         return result
 
@@ -7074,6 +8263,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             return False
         if _PRESERVED_OBJECTIVE_CONTEXT_PREFIX in content:
             return False
+        if _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX in content:
+            return not self._is_preserved_objective_replay_scaffold_message(
+                message
+            )
         return True
 
     def _finalize_forced_overflow_result(
@@ -7099,37 +8292,98 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 "forced overflow recovery found no droppable active-context messages"
             )
 
-        effective_cap = (
+        effective_cap = self._normalize_overflow_recovery_cap(
             assembly_cap_override
             if assembly_cap_override is not None
             else self._effective_assembly_token_cap()
         )
+        self._remember_overflow_recovery_result(
+            compressed,
+            assembly_cap_override=effective_cap,
+        )
         if effective_cap is None:
             self._last_overflow_recovery_failed = False
+            self._last_overflow_recovery_failure_reason = ""
         else:
             self._last_overflow_recovery_failed = count_messages_tokens(compressed) > effective_cap
             if self._last_overflow_recovery_failed:
+                if not self._last_overflow_recovery_failure_reason:
+                    self._last_overflow_recovery_failure_reason = (
+                        "recovery context exceeds assembly cap"
+                    )
                 logger.warning(
                     "LCM overflow recovery could not get under cap=%d; returning best-effort context (%d tokens)",
                     effective_cap,
                     count_messages_tokens(compressed),
                 )
+            else:
+                self._last_overflow_recovery_failure_reason = ""
         return compressed
+
+    def _overflow_recovery_result_digest(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> str:
+        return self._exact_provider_visible_snapshot_digest(messages)
+
+    def _remember_overflow_recovery_result(
+        self,
+        messages: List[Dict[str, Any]],
+        assembly_cap_override: Optional[int] = None,
+    ) -> None:
+        self._last_overflow_recovery_result_digest = (
+            self._overflow_recovery_result_digest(messages)
+        )
+        self._last_overflow_recovery_configured_cap = (
+            self._effective_assembly_token_cap()
+        )
+        self._last_overflow_recovery_assembly_cap = (
+            self._normalize_overflow_recovery_cap(
+                assembly_cap_override
+                if assembly_cap_override is not None
+                else self._effective_assembly_token_cap()
+            )
+        )
 
     def _should_force_overflow_recovery(
         self,
         observed_tokens: Optional[int] = None,
         messages: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
-        assembly_cap = self._effective_assembly_token_cap()
-        if assembly_cap is None:
+        configured_cap = self._effective_assembly_token_cap()
+        if configured_cap is None:
             return False
+        assembly_cap = self._normalize_overflow_recovery_cap(configured_cap)
+        assert assembly_cap is not None
 
         tokens = self._overflow_recovery_signal_tokens(
             observed_tokens=observed_tokens,
             messages=messages,
         )
         if tokens is None:
+            return False
+        current_recovery_cap = self._overflow_recovery_assembly_cap(
+            observed_tokens=observed_tokens,
+            messages=messages,
+        )
+        if (
+            messages is not None
+            and self._last_overflow_recovery_result_digest
+            and self._last_overflow_recovery_configured_cap == configured_cap
+            and self._last_overflow_recovery_assembly_cap is not None
+            and current_recovery_cap is not None
+            and current_recovery_cap >= self._last_overflow_recovery_assembly_cap
+            and self._overflow_recovery_result_digest(messages)
+            == self._last_overflow_recovery_result_digest
+        ):
+            # Recovery is deterministic for an unchanged provider-visible
+            # request. Re-running it cannot remove provider overhead or shrink
+            # a mandatory prefix, so wait for new input or a cap change.
+            return False
+        # A configured cap below provider message overhead is normalized to the
+        # smallest valid recovery turn. Once that exact turn is reached, do not
+        # force the same recovery again on every host invocation.
+        if configured_cap < assembly_cap and tokens <= assembly_cap:
             return False
         return tokens >= assembly_cap
 
@@ -7156,11 +8410,30 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         if assembly_cap is None:
             return None
         if messages is None or observed_tokens is None or observed_tokens <= 0:
-            return assembly_cap
+            return self._normalize_overflow_recovery_cap(assembly_cap)
 
         message_tokens = count_messages_tokens(messages)
         overhead_tokens = max(0, observed_tokens - message_tokens)
-        return max(1, assembly_cap - overhead_tokens)
+        return self._normalize_overflow_recovery_cap(
+            max(1, assembly_cap - overhead_tokens)
+        )
+
+    @staticmethod
+    def _minimum_viable_overflow_recovery_cap() -> int:
+        """Return the token floor for one provider-valid recovery request."""
+        return count_messages_tokens([{"role": "user", "content": "Continue."}])
+
+    def _normalize_overflow_recovery_cap(
+        self,
+        assembly_cap: Optional[int],
+    ) -> Optional[int]:
+        """Raise an impossible recovery cap to one provider-valid message."""
+        if assembly_cap is None:
+            return None
+        return max(
+            assembly_cap,
+            self._minimum_viable_overflow_recovery_cap(),
+        )
 
     def _effective_assembly_token_cap(self) -> Optional[int]:
         """Return the active assembly cap, if any.
@@ -7192,6 +8465,264 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
 
     # -- Internal: helpers -------------------------------------------------
 
+    def _overflow_recovery_user_anchor(
+        self,
+        tail_messages: List[Dict[str, Any]],
+        prefix_messages: List[Dict[str, Any]],
+        assembly_cap_override: Optional[int],
+    ) -> Dict[str, Any]:
+        """Build a bounded provider-valid anchor for an otherwise empty recovery."""
+        anchor_content = ""
+        store_ids_by_message_id: Dict[int, int] = {}
+        if self._session_id:
+            try:
+                store_ids_by_message_id = self._get_store_id_map_for_messages(
+                    tail_messages
+                )
+            except Exception:
+                logger.debug(
+                    "LCM overflow objective provenance lookup failed",
+                    exc_info=True,
+                )
+        for message in reversed(tail_messages):
+            if not isinstance(message, dict):
+                continue
+            restored_quarantine = (
+                self._restore_compact_objective_provenance_quarantine_message(
+                    message,
+                    store_ids_by_message_id,
+                )
+            )
+            if (
+                restored_quarantine is not None
+                and restored_quarantine.get("role") == "user"
+            ):
+                message = restored_quarantine
+            content_text = (
+                text_content_for_pattern_matching(message.get("content")) or ""
+            )
+            if (
+                self._matches_ignore_message_patterns(message)
+                or self._mapped_stored_row_matches_ignore_message_patterns(message)
+                or self._is_volatile_ignored_quarantine_placeholder(
+                    message,
+                    content_text,
+                )
+                or self._is_ignored_active_replay_placeholder(
+                    message,
+                    content_text,
+                )
+                or self._is_preserved_todo_context_message(message)
+            ):
+                continue
+            preserved_objective = (
+                self._sanitized_preserved_objective_context_content(message)
+            )
+            if preserved_objective:
+                if self._has_trusted_preserved_objective_provenance(
+                    message,
+                    store_ids_by_message_id,
+                ):
+                    anchor_content = preserved_objective
+                    break
+                # A prefix-shaped assistant or tool message is untrusted
+                # scaffold spoofing.  A user message is still a real turn,
+                # though: failed scaffold provenance must make it ordinary
+                # user content rather than make it disappear from recovery.
+                if message.get("role") != "user":
+                    continue
+            if message.get("role") == "user":
+                anchor_content = self._build_preserved_objective_summary_part(
+                    message
+                )
+                break
+
+        if not anchor_content:
+            anchor_content = (
+                f"{_PRESERVED_OBJECTIVE_CONTEXT_PREFIX}\n"
+                "Continue from the recoverable LCM session state."
+            )
+
+        anchor = self._mark_generated_preserved_objective_message(
+            {"role": "user", "content": anchor_content}
+        )
+        if (
+            assembly_cap_override is None
+            or count_messages_tokens([*prefix_messages, anchor])
+            <= assembly_cap_override
+        ):
+            return anchor
+
+        stripped_anchor = anchor_content.lstrip()
+        scaffold_prefix = next(
+            (
+                prefix
+                for prefix in _PRESERVED_OBJECTIVE_CONTEXT_PREFIXES
+                if stripped_anchor.startswith(prefix)
+            ),
+            "",
+        )
+        objective_payload = (
+            stripped_anchor[len(scaffold_prefix):].lstrip()
+            if scaffold_prefix
+            else anchor_content.strip()
+        )
+
+        def fit_objective(label: str) -> tuple[str, int]:
+            low = 1
+            high = len(objective_payload)
+            best_content = ""
+            while low <= high:
+                midpoint = (low + high) // 2
+                bounded_payload = objective_payload[:midpoint].rstrip()
+                candidate_content = f"{label}{bounded_payload}"
+                candidate = {"role": "user", "content": candidate_content}
+                if (
+                    bounded_payload
+                    and count_messages_tokens([*prefix_messages, candidate])
+                    <= assembly_cap_override
+                ):
+                    best_content = candidate_content
+                    low = midpoint + 1
+                else:
+                    high = midpoint - 1
+            retained_payload_length = max(0, len(best_content) - len(label))
+            return best_content, retained_payload_length
+
+        labels = (
+            f"{_PRESERVED_OBJECTIVE_CONTEXT_PREFIX}\n",
+            f"{_COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX}\n",
+        ) if scaffold_prefix else ("",)
+        best_content = ""
+        best_payload_length = 0
+        for label in labels:
+            candidate_content, retained_payload_length = fit_objective(label)
+            if retained_payload_length > best_payload_length:
+                best_content = candidate_content
+                best_payload_length = retained_payload_length
+        if best_content:
+            return self._mark_generated_preserved_objective_message(
+                {"role": "user", "content": best_content}
+            )
+
+        # A cap smaller than provider message overhead cannot be met. Prefer a
+        # minimal valid recovery request over returning an empty transcript and
+        # trapping the host in the same forced-overflow loop.
+        return {"role": "user", "content": "Continue."}
+
+    def _fallback_unpersisted_generated_objectives(
+        self,
+        messages: List[Dict[str, Any]],
+        assembly_cap_override: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Replace compact generated markers whose exact proof was not persisted."""
+        failed_snapshot_digest = (
+            self._exact_provider_visible_snapshot_digest(messages)
+        )
+        self._pending_generated_preserved_objective_provenance_records = [
+            record
+            for record in self._pending_generated_preserved_objective_provenance_records
+            if record.get("snapshot_digest") != failed_snapshot_digest
+        ]
+
+        # Compact markers are safe only with durable exact-occurrence proof.
+        # If that write fails, fall back to the migration-safe legacy marker.
+        # Truncate its payload when that can satisfy the cap. If even the
+        # marker cannot fit, keep a minimal legacy scaffold and let the outer
+        # recovery status report the cap failure rather than emit an unproven
+        # compact marker that a restart could ingest as a real user turn.
+        fallback = list(messages)
+        for index, message in enumerate(fallback):
+            if not self._is_generated_preserved_objective_message(message):
+                continue
+            content = normalize_content_value(message.get("content")) or ""
+            stripped_content = content.lstrip()
+            if not stripped_content.startswith(
+                _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+            ):
+                continue
+            leading_whitespace = content[: len(content) - len(stripped_content)]
+            legacy_message = dict(message)
+            legacy_message["content"] = (
+                leading_whitespace
+                + _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+                + stripped_content[
+                    len(_COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
+                ]
+            )
+            candidate = [
+                *fallback[:index],
+                legacy_message,
+                *fallback[index + 1:],
+            ]
+            if (
+                assembly_cap_override is None
+                or count_messages_tokens(candidate) <= assembly_cap_override
+            ):
+                fallback = candidate
+                self._mark_generated_preserved_objective_message(
+                    fallback[index]
+                )
+                continue
+            legacy_suffix = legacy_message["content"][
+                len(leading_whitespace + _PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
+            ].lstrip()
+            low = 1
+            high = len(legacy_suffix)
+            best_legacy_message: Optional[Dict[str, Any]] = None
+            while low <= high:
+                midpoint = (low + high) // 2
+                bounded_suffix = legacy_suffix[:midpoint].rstrip()
+                bounded_message = dict(legacy_message)
+                bounded_message["content"] = (
+                    leading_whitespace
+                    + _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+                    + "\n"
+                    + bounded_suffix
+                )
+                bounded_candidate = [
+                    *fallback[:index],
+                    bounded_message,
+                    *fallback[index + 1:],
+                ]
+                if (
+                    bounded_suffix
+                    and count_messages_tokens(bounded_candidate)
+                    <= assembly_cap_override
+                ):
+                    best_legacy_message = bounded_message
+                    low = midpoint + 1
+                else:
+                    high = midpoint - 1
+            fallback_message = best_legacy_message
+            if fallback_message is None:
+                fallback_message = dict(legacy_message)
+                fallback_message["content"] = (
+                    leading_whitespace
+                    + _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+                    + "\nContinue."
+                )
+            fallback = [
+                *fallback[:index],
+                fallback_message,
+                *fallback[index + 1:],
+            ]
+            self._mark_generated_preserved_objective_message(fallback[index])
+        return fallback
+
+    def _finalize_overflow_recovery_context_result(
+        self,
+        messages: List[Dict[str, Any]],
+        assembly_cap_override: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Persist exact provenance for generated anchors in a recovery result."""
+        if self._remember_generated_preserved_objective_provenance(messages):
+            return messages
+        return self._fallback_unpersisted_generated_objectives(
+            messages,
+            assembly_cap_override,
+        )
+
     def _assemble_overflow_recovery_context(
         self,
         system_msg: Optional[Dict[str, Any]],
@@ -7199,6 +8730,41 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         assembly_cap_override: Optional[int] = None,
         retained_user_message: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
+        assembly_cap_override = self._normalize_overflow_recovery_cap(
+            assembly_cap_override
+        )
+        required_prefix = (
+            ([system_msg] if system_msg is not None else [])
+            + (
+                [retained_user_message]
+                if retained_user_message is not None
+                else []
+            )
+        )
+        self._restore_generated_preserved_objective_provenance(
+            [*required_prefix, *tail_messages]
+        )
+        self._last_overflow_recovery_failure_reason = ""
+        if (
+            required_prefix
+            and assembly_cap_override is not None
+            and count_messages_tokens(
+                [
+                    *required_prefix,
+                    {"role": "user", "content": "Continue."},
+                ]
+            )
+            > assembly_cap_override
+        ):
+            self._last_overflow_recovery_failed = True
+            self._last_overflow_recovery_failure_reason = (
+                "mandatory prefix and minimum recovery anchor exceed assembly cap"
+            )
+            logger.warning(
+                "LCM overflow recovery mandatory prefix cannot fit with a "
+                "minimum user anchor under cap=%d",
+                assembly_cap_override,
+            )
         if tail_messages:
             first = tail_messages[0]
             content = first.get("content") or ""
@@ -7215,7 +8781,43 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     (msg.get("content") or "") == content
                     for msg in (candidate[1:] if system_msg is not None else candidate)
                 ):
-                    return candidate
+                    provider_offset = (
+                        1
+                        if candidate and candidate[0].get("role") == "system"
+                        else 0
+                    )
+                    provider_visible = candidate[provider_offset:]
+                    if (
+                        not provider_visible
+                        or provider_visible[0].get("role") != "user"
+                    ):
+                        generated_suffix = candidate[len(required_prefix):]
+                        recovery_anchor = self._overflow_recovery_user_anchor(
+                            tail_messages,
+                            [*required_prefix, *generated_suffix],
+                            assembly_cap_override,
+                        )
+                        candidate = self._sanitize_active_context_messages(
+                            [*required_prefix, recovery_anchor, *generated_suffix]
+                        )
+                        if (
+                            generated_suffix
+                            and assembly_cap_override is not None
+                            and count_messages_tokens(candidate)
+                            > assembly_cap_override
+                        ):
+                            recovery_anchor = self._overflow_recovery_user_anchor(
+                                tail_messages,
+                                required_prefix,
+                                assembly_cap_override,
+                            )
+                            candidate = self._sanitize_active_context_messages(
+                                [*required_prefix, recovery_anchor]
+                            )
+                    return self._finalize_overflow_recovery_context_result(
+                        candidate,
+                        assembly_cap_override,
+                    )
 
         candidate = self._assemble_context(
             system_msg,
@@ -7224,6 +8826,45 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             include_lcm_note=False,
             retained_user_message=retained_user_message,
         )
+        if not tail_messages:
+            provider_offset = (
+                1
+                if candidate and candidate[0].get("role") == "system"
+                else 0
+            )
+            provider_visible = candidate[provider_offset:]
+            if not provider_visible or provider_visible[0].get("role") != "user":
+                generated_suffix = candidate[len(required_prefix):]
+                recovery_anchor = self._overflow_recovery_user_anchor(
+                    [],
+                    [*required_prefix, *generated_suffix],
+                    assembly_cap_override,
+                )
+                recovery = self._sanitize_active_context_messages(
+                    [*required_prefix, recovery_anchor, *generated_suffix]
+                )
+                if (
+                    generated_suffix
+                    and assembly_cap_override is not None
+                    and count_messages_tokens(recovery)
+                    > assembly_cap_override
+                ):
+                    # The derived suffix may contain the only preserved
+                    # objective. Before dropping it for budget, move that
+                    # trusted scaffold into the required user anchor and size
+                    # the anchor against the remaining prefix alone.
+                    recovery_anchor = self._overflow_recovery_user_anchor(
+                        generated_suffix,
+                        required_prefix,
+                        assembly_cap_override,
+                    )
+                    recovery = self._sanitize_active_context_messages(
+                        [*required_prefix, recovery_anchor]
+                    )
+                return self._finalize_overflow_recovery_context_result(
+                    recovery,
+                    assembly_cap_override,
+                )
         minimum_candidate_len = (
             (1 if system_msg is not None else 0)
             + (1 if retained_user_message is not None else 0)
@@ -7243,9 +8884,61 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 and assembly_cap_override is not None
                 and count_messages_tokens(fallback) > assembly_cap_override
             ):
-                return candidate
-            return self._sanitize_active_context_messages(fallback)
-        return candidate
+                return self._finalize_overflow_recovery_context_result(
+                    candidate,
+                    assembly_cap_override,
+                )
+            sanitized_fallback = self._sanitize_active_context_messages(fallback)
+            provider_offset = (
+                1
+                if sanitized_fallback
+                and sanitized_fallback[0].get("role") == "system"
+                else 0
+            )
+            provider_visible = sanitized_fallback[provider_offset:]
+            if provider_visible and provider_visible[0].get("role") == "user":
+                return self._finalize_overflow_recovery_context_result(
+                    sanitized_fallback,
+                    assembly_cap_override,
+                )
+
+            prefix_messages = (
+                ([system_msg] if system_msg is not None else [])
+                + (
+                    [retained_user_message]
+                    if retained_user_message is not None
+                    else []
+                )
+            )
+            sanitized_suffix = sanitized_fallback[len(prefix_messages):]
+            recovery_anchor = self._overflow_recovery_user_anchor(
+                tail_messages,
+                [*prefix_messages, *sanitized_suffix],
+                assembly_cap_override,
+            )
+            recovery = self._sanitize_active_context_messages(
+                [*prefix_messages, recovery_anchor, *sanitized_suffix]
+            )
+            if (
+                not prefix_messages
+                and assembly_cap_override is not None
+                and count_messages_tokens(recovery) > assembly_cap_override
+            ):
+                # Assistant/tool suffixes are derived context. If even the
+                # smallest valid user anchor only fits by itself, keep that
+                # anchor rather than silently returning an over-cap transcript.
+                return self._finalize_overflow_recovery_context_result(
+                    self._sanitize_active_context_messages([recovery_anchor]),
+                    assembly_cap_override,
+                )
+            return self._finalize_overflow_recovery_context_result(
+                recovery,
+                assembly_cap_override,
+            )
+        return self._finalize_overflow_recovery_context_result(
+            candidate,
+            assembly_cap_override,
+        )
 
     @staticmethod
     def _looks_like_active_summary_blob(content: str) -> bool:
