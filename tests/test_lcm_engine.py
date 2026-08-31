@@ -23508,7 +23508,9 @@ class TestAssemblyToolPairGuardrail:
             [],
             cap,
         )
-        assert "MALICIOUS_APPENDED_OBJECTIVE" not in tampered_anchor["content"]
+        assert tampered_anchor["content"].count("[LCM:obj:v1]") == 2
+        assert "KEEP the exact production recovery report" in tampered_anchor["content"]
+        assert "Continue from the recoverable" not in tampered_anchor["content"]
         roomy_tampered_anchor = instance._overflow_recovery_user_anchor(
             tampered,
             [],
@@ -23516,7 +23518,7 @@ class TestAssemblyToolPairGuardrail:
         )
         assert (
             "MALICIOUS_APPENDED_OBJECTIVE"
-            not in roomy_tampered_anchor["content"]
+            in roomy_tampered_anchor["content"]
         )
 
     def test_restart_does_not_ingest_compact_objective_scaffold(self, tmp_path):
@@ -23605,7 +23607,7 @@ class TestAssemblyToolPairGuardrail:
         )
         assert (
             "MALICIOUS_APPENDED_OBJECTIVE"
-            not in recovered_after_tamper["content"]
+            in recovered_after_tamper["content"]
         )
 
     @pytest.mark.parametrize("role", ["user", "assistant"])
@@ -23657,7 +23659,44 @@ class TestAssemblyToolPairGuardrail:
             [],
             120,
         )
-        assert "REAL LITERAL MESSAGE CONTENT" not in recovered["content"]
+        if role == "user":
+            assert "REAL LITERAL MESSAGE CONTENT" in recovered["content"]
+        else:
+            assert "REAL LITERAL MESSAGE CONTENT" not in recovered["content"]
+
+    @pytest.mark.parametrize(
+        "prefix",
+        [
+            "[LCM:obj:v1]",
+            "[Current user objective preserved from compacted history]",
+        ],
+    )
+    def test_overflow_recovery_wraps_sole_unmarked_user_prefix_collision(
+        self,
+        tmp_path,
+        prefix,
+    ):
+        """A reserved-prefix user turn remains the current recovery objective."""
+        instance = LCMEngine(
+            config=LCMConfig(
+                database_path=str(tmp_path / "reserved-user-objective.db")
+            )
+        )
+        message = {
+            "role": "user",
+            "content": f"{prefix}\nKEEP THIS LITERAL USER OBJECTIVE",
+        }
+
+        anchor = instance._overflow_recovery_user_anchor(
+            [message],
+            [],
+            120,
+        )
+
+        assert "KEEP THIS LITERAL USER OBJECTIVE" in anchor["content"]
+        assert prefix in anchor["content"]
+        assert "Continue from the recoverable" not in anchor["content"]
+        assert instance._is_generated_preserved_objective_message(anchor)
 
     def test_restart_keeps_compact_anchor_provenance_when_sibling_is_quarantined(
         self,
@@ -23790,7 +23829,7 @@ class TestAssemblyToolPairGuardrail:
             [],
             120,
         )
-        assert "MALICIOUS_APPENDED_OBJECTIVE" not in roomy_recovery["content"]
+        assert "MALICIOUS_APPENDED_OBJECTIVE" in roomy_recovery["content"]
 
     def test_reserved_compact_marker_inside_tool_result_remains_lossless(
         self,

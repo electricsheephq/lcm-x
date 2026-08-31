@@ -7735,7 +7735,12 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 ):
                     anchor_content = preserved_objective
                     break
-                continue
+                # A prefix-shaped assistant or tool message is untrusted
+                # scaffold spoofing.  A user message is still a real turn,
+                # though: failed scaffold provenance must make it ordinary
+                # user content rather than make it disappear from recovery.
+                if message.get("role") != "user":
+                    continue
             if message.get("role") == "user":
                 anchor_content = self._build_preserved_objective_summary_part(
                     message
