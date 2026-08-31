@@ -1470,12 +1470,22 @@ def recover_hermes_persisted_output_with_file_stat(text: str | None) -> tuple[st
     if recovered_with_stat is None:
         return None
     recovered, file_stat = recovered_with_stat
-    if len(recovered) != expected_chars:
-        return None
     preview_prefix = _persisted_output_preview_prefix(text)
-    if not preview_prefix or not recovered.startswith(preview_prefix):
+    if not preview_prefix:
         return None
-    return recovered, file_stat
+    candidates = [recovered]
+    # Hermes counts the in-memory text before a Windows text-mode write may
+    # expand LF to CRLF. Keep exact content authoritative when it already
+    # matches; only try the canonical LF form when the on-disk representation
+    # cannot satisfy the marker's character contract.
+    if "\r\n" in recovered:
+        canonical = recovered.replace("\r\n", "\n")
+        if canonical != recovered:
+            candidates.append(canonical)
+    for candidate in candidates:
+        if len(candidate) == expected_chars and candidate.startswith(preview_prefix):
+            return candidate, file_stat
+    return None
 
 
 def recover_hermes_persisted_output(text: str | None) -> str | None:

@@ -5813,6 +5813,85 @@ class TestIngestExternalization:
         expanded = json.loads(lcm_tools.lcm_expand({"externalized_ref": by_store_id["externalized_ref"], "max_tokens": 20_000}, engine=engine))
         assert expanded["content"] == full_result
 
+    def test_recovers_windows_translated_crlf_file_against_canonical_marker_count(
+        self, tmp_path, monkeypatch
+    ):
+        import tempfile
+        from hermes_lcm.ingest_protection import (
+            recover_hermes_persisted_output_with_file_stat,
+        )
+
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        host_storage = tmp_path / "hermes-results"
+        host_storage.mkdir()
+        full_result = "WINDOWS_RECOVERY_NEEDLE:\nline two\n" + ("abcdef\n" * 40)
+        persisted_path = host_storage / "call_windows_crlf.txt"
+        windows_bytes = full_result.replace("\n", "\r\n").encode("utf-8")
+        persisted_path.write_bytes(windows_bytes)
+        marker = (
+            "<persisted-output>\n"
+            f"This tool result was too large ({len(full_result):,} characters, 0.4 KB).\n"
+            f"Full output saved to: {persisted_path}\n"
+            "Use the read_file tool with offset and limit to access specific sections of this output.\n\n"
+            "Preview (first 40 chars):\n"
+            f"{full_result[:40]}\n...\n"
+            "</persisted-output>"
+        )
+
+        recovered = recover_hermes_persisted_output_with_file_stat(marker)
+
+        assert recovered is not None
+        content, file_stat = recovered
+        assert content == full_result
+        assert file_stat["size"] == len(windows_bytes)
+
+    def test_recovery_preserves_intentional_crlf_when_exact_marker_contract_matches(
+        self, tmp_path, monkeypatch
+    ):
+        import tempfile
+        from hermes_lcm.ingest_protection import recover_hermes_persisted_output
+
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        host_storage = tmp_path / "hermes-results"
+        host_storage.mkdir()
+        full_result = "INTENTIONAL_CRLF:\r\nline two\r\n"
+        persisted_path = host_storage / "call_intentional_crlf.txt"
+        persisted_path.write_bytes(full_result.encode("utf-8"))
+        marker = (
+            "<persisted-output>\n"
+            f"This tool result was too large ({len(full_result):,} characters, 0.1 KB).\n"
+            f"Full output saved to: {persisted_path}\n\n"
+            "Preview (first 32 chars):\n"
+            f"{full_result}\n"
+            "</persisted-output>"
+        )
+
+        assert recover_hermes_persisted_output(marker) == full_result
+
+    def test_recovers_windows_translation_of_intentional_crlf_without_weakening_preview(
+        self, tmp_path, monkeypatch
+    ):
+        import tempfile
+        from hermes_lcm.ingest_protection import recover_hermes_persisted_output
+
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        host_storage = tmp_path / "hermes-results"
+        host_storage.mkdir()
+        full_result = "INTENTIONAL_TRANSLATED_CRLF:\r\nline two\r\n"
+        persisted_path = host_storage / "call_translated_intentional_crlf.txt"
+        windows_bytes = full_result.replace("\n", "\r\n").encode("utf-8")
+        persisted_path.write_bytes(windows_bytes)
+        marker = (
+            "<persisted-output>\n"
+            f"This tool result was too large ({len(full_result):,} characters, 0.1 KB).\n"
+            f"Full output saved to: {persisted_path}\n\n"
+            "Preview (first 48 chars):\n"
+            f"{full_result}\n"
+            "</persisted-output>"
+        )
+
+        assert recover_hermes_persisted_output(marker) == full_result
+
     def test_ingest_preserves_marker_when_recovered_file_preview_does_not_match(self, tmp_path, monkeypatch):
         import tempfile
 
