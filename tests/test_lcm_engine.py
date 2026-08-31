@@ -22012,6 +22012,44 @@ class TestAssemblyGuardrails:
         assert joined.count("[Expand for details:") == 1
         assert not instance.get_status()["overflow_recovery_failed"]
 
+    def test_forced_overflow_recovery_exact_cap_requires_user_anchor(self, tmp_path):
+        """An exact-cap assistant summary fast path must stay provider-valid."""
+        config = LCMConfig(
+            fresh_tail_count=10,
+            database_path=str(tmp_path / "lcm_guardrail_exact_cap_summary.db"),
+        )
+        instance = LCMEngine(config=config)
+        instance._session_id = "guardrail-exact-cap-summary"
+        instance.compression_count = 1
+
+        summary_blob = (
+            "[Recent Summary (d0, node 1)]\n"
+            + ("prior compressed details " * 20)
+            + "\n[Expand for details: prior]"
+        )
+        system = {"role": "system", "content": "mandatory system policy"}
+        summary = {"role": "assistant", "content": summary_blob}
+        exact_cap = count_messages_tokens([system, summary])
+
+        recovered = instance._assemble_overflow_recovery_context(
+            system,
+            [summary, dict(summary)],
+            assembly_cap_override=exact_cap,
+        )
+        finalized = instance._finalize_forced_overflow_result(
+            [system, summary, dict(summary)],
+            recovered,
+            assembly_cap_override=exact_cap,
+        )
+
+        assert finalized[0] == system
+        assert finalized[1]["role"] == "user"
+        assert count_messages_tokens(finalized) <= exact_cap
+        assert not instance._should_force_overflow_recovery(
+            observed_tokens=count_messages_tokens(finalized),
+            messages=finalized,
+        )
+
     def test_forced_overflow_recovery_flags_irreducible_single_tail_overflow(self, tmp_path, monkeypatch):
         import importlib
 

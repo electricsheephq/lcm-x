@@ -8216,6 +8216,39 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     (msg.get("content") or "") == content
                     for msg in (candidate[1:] if system_msg is not None else candidate)
                 ):
+                    provider_offset = (
+                        1
+                        if candidate and candidate[0].get("role") == "system"
+                        else 0
+                    )
+                    provider_visible = candidate[provider_offset:]
+                    if (
+                        not provider_visible
+                        or provider_visible[0].get("role") != "user"
+                    ):
+                        generated_suffix = candidate[len(required_prefix):]
+                        recovery_anchor = self._overflow_recovery_user_anchor(
+                            tail_messages,
+                            [*required_prefix, *generated_suffix],
+                            assembly_cap_override,
+                        )
+                        candidate = self._sanitize_active_context_messages(
+                            [*required_prefix, recovery_anchor, *generated_suffix]
+                        )
+                        if (
+                            generated_suffix
+                            and assembly_cap_override is not None
+                            and count_messages_tokens(candidate)
+                            > assembly_cap_override
+                        ):
+                            recovery_anchor = self._overflow_recovery_user_anchor(
+                                tail_messages,
+                                required_prefix,
+                                assembly_cap_override,
+                            )
+                            candidate = self._sanitize_active_context_messages(
+                                [*required_prefix, recovery_anchor]
+                            )
                     return self._finalize_overflow_recovery_context_result(
                         candidate,
                         assembly_cap_override,
