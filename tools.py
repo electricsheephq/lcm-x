@@ -3741,6 +3741,20 @@ def _lcm_active_embedding_revision(
     return str(row[0] or "")
 
 
+def _embedding_privacy_retrieval_error(
+    exc: EmbeddingPrivacyPolicyError,
+) -> dict[str, Any]:
+    """Return a loud, JSON-safe error for the public retrieval tool boundary."""
+    return {
+        "error": f"Embedding privacy policy blocked semantic retrieval: {exc}",
+        "error_code": "embedding_privacy_policy",
+        "remediation": (
+            "Run `/lcm embed warmup` to register vectors under the active "
+            "embedding privacy revision, then retry."
+        ),
+    }
+
+
 def _lcm_grep_embed_query(
     provider: Any,
     query: str,
@@ -4061,6 +4075,8 @@ def _lcm_grep_semantic(
         return degraded(f"semantic capacity exhausted: {exc}")
     except TimeoutError:
         return _lcm_grep_deadline_error(mode, "provider_resolution")
+    except EmbeddingPrivacyPolicyError as exc:
+        return _embedding_privacy_retrieval_error(exc)
     except Exception as exc:
         return degraded(f"embedding provider unavailable: {exc}")
     if provider is None:
@@ -4074,6 +4090,8 @@ def _lcm_grep_semantic(
             task="summary",
             remaining_s=deadline - time.monotonic(),
         )
+    except EmbeddingPrivacyPolicyError as exc:
+        return _embedding_privacy_retrieval_error(exc)
     except VoyageError as exc:
         if exc.kind == "auth":
             return {
@@ -6005,9 +6023,10 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     embedding_query_metrics.append(
                         _lcm_embedding_query_metric(provider)
                     )
-            except EmbeddingPrivacyPolicyError:
-                # Deterministic configuration error — never degrade (#367).
-                raise
+            except EmbeddingPrivacyPolicyError as exc:
+                # Deterministic configuration error: loud, but still honor the
+                # public tool's JSON-string return contract (#367/#387).
+                return json.dumps(_embedding_privacy_retrieval_error(exc))
             except VoyageError as exc:
                 provider = None
                 degraded_reasons.append(f"query embedding failed: {exc}")
@@ -6048,9 +6067,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         embedding_query_metrics.append(
                             _lcm_embedding_query_metric(chunk_provider)
                         )
-                except EmbeddingPrivacyPolicyError:
-                    # Deterministic configuration error — never degrade (#367).
-                    raise
+                except EmbeddingPrivacyPolicyError as exc:
+                    return json.dumps(_embedding_privacy_retrieval_error(exc))
                 except VoyageError as exc:
                     degraded_reasons.append(f"chunk query embedding failed: {exc}")
                 except TimeoutError:
@@ -6088,9 +6106,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     except TimeoutError:
                         timed_out = True
                         coverage["summary"] = "none"
-                    except EmbeddingPrivacyPolicyError:
-                        # Deterministic configuration error — never degrade (#367).
-                        raise
+                    except EmbeddingPrivacyPolicyError as exc:
+                        return json.dumps(_embedding_privacy_retrieval_error(exc))
                     except Exception as exc:  # noqa: BLE001
                         coverage["summary"] = "none"
                         degraded_reasons.append(f"summary arm failed: {exc}")
@@ -6120,9 +6137,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     except TimeoutError:
                         timed_out = True
                         coverage["chunk"] = "none"
-                    except EmbeddingPrivacyPolicyError:
-                        # Deterministic configuration error — never degrade (#367).
-                        raise
+                    except EmbeddingPrivacyPolicyError as exc:
+                        return json.dumps(_embedding_privacy_retrieval_error(exc))
                     except Exception as exc:  # noqa: BLE001
                         coverage["chunk"] = "none"
                         degraded_reasons.append(f"chunk arm failed: {exc}")
@@ -6221,9 +6237,17 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
 
     # -- Optional rerank stage (default OFF): a pure rank-REORDER within the top
     #    window of the post-prior order (no score splicing onto the RRF scale). --
-    ordered, rerank_status, rerank_scores = _lcm_recall_rerank(
-        provider, query, ordered, window=rerank_window, deadline=deadline, config=engine._config
-    )
+    try:
+        ordered, rerank_status, rerank_scores = _lcm_recall_rerank(
+            provider,
+            query,
+            ordered,
+            window=rerank_window,
+            deadline=deadline,
+            config=engine._config,
+        )
+    except EmbeddingPrivacyPolicyError as exc:
+        return json.dumps(_embedding_privacy_retrieval_error(exc))
 
     # -- Response shaping (char-capped). The default snippets path retains the
     # historical order and serialized response exactly. answer_ready applies
