@@ -65,6 +65,20 @@ class TestFocusBriefFormatting:
         assert "## Historical Remaining Work" in brief
         assert "Place non-current work under:" in brief
 
+    @pytest.mark.parametrize(
+        "builder",
+        [_build_l1_focus_brief, _build_l2_focus_brief],
+    )
+    def test_recent_terminal_state_overrides_stale_task_authority(self, builder):
+        brief = builder("handoff complete; waiting for user direction")
+
+        assert "Recent task-state changes have highest authority" in brief
+        assert "cancellation, rejection, completion, supersession, or waiting for the user" in brief
+        assert "overrides any older active-task, latest-directive, continuation, blocker, or handoff label" in brief
+        assert "no active task / waiting for user" in brief
+        assert "only when the latest turns show it is still unresolved and actionable" in brief
+        assert "reconcile inherited active-task labels against newer child summaries" in brief
+
 
 class TestModelRouting:
     def _install_fake_provider_modules(self, monkeypatch, *, named_custom=None, registry=None):
@@ -4713,9 +4727,9 @@ class TestEscalation:
             "'## Historical Task Snapshot' / '## Historical In-Progress State' / "
             "'## Historical Pending User Asks' / '## Historical Remaining Work'"
         ) in prompt
-        # Blocker / handoff exception
-        assert "Exception: active blockers or handoff state should NOT be demoted" in prompt
-        assert "Keep blockers and pending handoffs outside historical headings" in prompt
+        assert "Recent task-state changes have highest authority" in prompt
+        assert "no active task / waiting for user" in prompt
+        assert "still unresolved and actionable" in prompt
 
     def test_focus_topic_builds_structured_l2_brief(self):
         from hermes_lcm.escalation import _build_l2_prompt
@@ -4727,15 +4741,16 @@ class TestEscalation:
         assert "Primary focus: release blockers" in prompt
         assert "Prefer bullets that preserve decisions, blockers, files, commands, identifiers, and current state for this focus." in prompt
         assert "Keep other active tasks only when they are current blockers or handoff state." in prompt
-        # Demote + blocker exception
+        # Demote + current-state precedence
         assert "Demote old / completed topics:" in prompt
         assert "## Completed Actions (historical)" not in prompt
         assert (
             "'## Historical Task Snapshot' / '## Historical In-Progress State' / "
             "'## Historical Pending User Asks' / '## Historical Remaining Work'"
         ) in prompt
-        assert "Exception: active blockers and pending handoff state should NOT be demoted" in prompt
-        assert "Keep them outside historical headings so the agent retains awareness" in prompt
+        assert "Recent task-state changes have highest authority" in prompt
+        assert "no active task / waiting for user" in prompt
+        assert "still unresolved and actionable" in prompt
 
     def test_focus_topic_is_normalized_and_bounded_in_prompts(self):
         from hermes_lcm.escalation import _build_l1_prompt
