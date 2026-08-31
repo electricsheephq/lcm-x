@@ -198,6 +198,26 @@ prepends the policy. The canonical file and digest source is
 
 ## Troubleshooting
 
+### WebUI breaks after `hermes update`
+
+A separately managed WebUI is a separate Python process. If it remains alive
+across `hermes update`, it can retain old agent modules in `sys.modules` while
+lazy imports load newer files from disk. Frontend-only import errors,
+constructor-signature errors, or an `lcm` fallback can be symptoms of that
+mixed in-memory/on-disk version state.
+
+Restart the gateway and every separate frontend process after an agent update.
+For the standalone Hermex WebUI, use:
+
+```bash
+~/hermes-webui/ctl.sh restart
+```
+
+Use the installation's normal service command for the gateway, then run
+`hermes plugins` in the affected runtime. Browser-cache cleanup and LCM-X
+database changes cannot replace a process restart because they do not unload
+Python modules.
+
 ### `hermes plugins` shows `lcm (not found)` but LCM tools exist
 
 If `plugins.enabled` contains `hermes-lcm`, `context.engine: lcm` is set, and
