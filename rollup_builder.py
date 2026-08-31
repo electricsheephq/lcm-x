@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import sqlite3
 from calendar import monthrange
 from datetime import date, datetime, timedelta, timezone
 from time import monotonic
@@ -92,16 +93,13 @@ def _stable_hash(value: object) -> str:
 
 def _scope_frontier(dag: SummaryDAG, scope: str) -> list[dict[str, object]]:
     """Load a scope frontier without retaining its TEMP-staging snapshot."""
-    with dag._db_lock:
-        connection = dag.connection
-        if connection is None:
-            return []
+    with dag.locked_connection() as connection:
         with _sqlite_savepoint(connection):
-            return _scope_frontier_staged(dag, scope)
+            return _scope_frontier_staged(dag, scope, connection)
 
 
 def _scope_frontier_staged(
-    dag: SummaryDAG, scope: str
+    dag: SummaryDAG, scope: str, connection: sqlite3.Connection
 ) -> list[dict[str, object]]:
     """The scope's canonical frontier nodes with normalized interval bounds.
 
@@ -117,9 +115,6 @@ def _scope_frontier_staged(
     # walk under one DAG lock so concurrent scopes cannot clear or replace one
     # another's staged IDs.
     with dag._db_lock:
-        connection = dag.connection
-        if connection is None:
-            return []
         # Probe without an expression ORDER BY first. The session index can stop
         # at the sentinel row, so an oversized scope never scans/sorts its corpus.
         id_rows = connection.execute(
@@ -466,16 +461,17 @@ def _canonical_aggregate_sources(
     dag: SummaryDAG, source_ids: Sequence[int]
 ) -> list[dict[str, object]]:
     """Resolve aggregate sources without retaining a TEMP-staging snapshot."""
-    with dag._db_lock:
-        connection = dag.connection
-        if connection is None:
-            return []
+    with dag.locked_connection() as connection:
         with _sqlite_savepoint(connection):
-            return _canonical_aggregate_sources_staged(dag, source_ids)
+            return _canonical_aggregate_sources_staged(
+                dag, source_ids, connection
+            )
 
 
 def _canonical_aggregate_sources_staged(
-    dag: SummaryDAG, source_ids: Sequence[int]
+    dag: SummaryDAG,
+    source_ids: Sequence[int],
+    connection: sqlite3.Connection,
 ) -> list[dict[str, object]]:
     """Resolve one bounded canonical node frontier for aggregate publication."""
     unique_ids = list(dict.fromkeys(int(node_id) for node_id in source_ids))
@@ -488,9 +484,6 @@ def _canonical_aggregate_sources_staged(
     # Aggregate staging and the shared lineage temp walk use the same connection
     # and therefore participate in the same serialization contract as scopes.
     with dag._db_lock:
-        connection = dag.connection
-        if connection is None:
-            return []
         connection.execute(
             "CREATE TEMP TABLE IF NOT EXISTS lcm_aggregate_source_ids "
             "(node_id INTEGER PRIMARY KEY) WITHOUT ROWID"
@@ -752,8 +745,7 @@ def run_rollup_maintenance(
     try:
         limit = max(0, int(config.rollup_builds_per_pass))
         budget_ms = max(0, int(config.rollup_maintenance_budget_ms))
-        connection = dag.connection
-        if limit <= 0 or budget_ms <= 0 or connection is None:
+        if limit <= 0 or budget_ms <= 0:
             return 0
         store = RollupStore(dag.db_path)
         if (monotonic() - started_at) * 1000 >= budget_ms:
@@ -768,32 +760,33 @@ def run_rollup_maintenance(
         if (monotonic() - started_at) * 1000 >= budget_ms:
             return 0
         retry_before = (datetime.now(timezone.utc) - _FAILED_ROLLUP_BACKOFF).isoformat()
-        stale_rows = connection.execute(
-            _PENDING_ROLLUPS_SQL,
-            (scope, limit),
-        ).fetchall()
-        rows = list(stale_rows)
-        if len(rows) < limit and (monotonic() - started_at) * 1000 < budget_ms:
-            rows.extend(
-                connection.execute(
-                    _FAILED_ROLLUPS_SQL,
-                    (scope, retry_before, limit - len(rows)),
-                ).fetchall()
-            )
-        if len(rows) < limit and (monotonic() - started_at) * 1000 < budget_ms:
-            rows.extend(
-                connection.execute(
-                    _PENDING_AGGREGATES_SQL,
-                    (scope, limit - len(rows)),
-                ).fetchall()
-            )
-        if len(rows) < limit and (monotonic() - started_at) * 1000 < budget_ms:
-            rows.extend(
-                connection.execute(
-                    _FAILED_AGGREGATES_SQL,
-                    (scope, retry_before, limit - len(rows)),
-                ).fetchall()
-            )
+        with dag.locked_connection() as connection:
+            stale_rows = connection.execute(
+                _PENDING_ROLLUPS_SQL,
+                (scope, limit),
+            ).fetchall()
+            rows = list(stale_rows)
+            if len(rows) < limit and (monotonic() - started_at) * 1000 < budget_ms:
+                rows.extend(
+                    connection.execute(
+                        _FAILED_ROLLUPS_SQL,
+                        (scope, retry_before, limit - len(rows)),
+                    ).fetchall()
+                )
+            if len(rows) < limit and (monotonic() - started_at) * 1000 < budget_ms:
+                rows.extend(
+                    connection.execute(
+                        _PENDING_AGGREGATES_SQL,
+                        (scope, limit - len(rows)),
+                    ).fetchall()
+                )
+            if len(rows) < limit and (monotonic() - started_at) * 1000 < budget_ms:
+                rows.extend(
+                    connection.execute(
+                        _FAILED_AGGREGATES_SQL,
+                        (scope, retry_before, limit - len(rows)),
+                    ).fetchall()
+                )
         if not rows:
             return 0
         builders: dict[str, Callable[..., dict[str, object] | None]] = {

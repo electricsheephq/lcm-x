@@ -231,7 +231,12 @@ def test_shutdown_attempts_all_cleanup_and_remains_retryable_after_failure(tmp_p
     with pytest.raises(RuntimeError, match="synthetic cleanup failure"):
         engine.shutdown()
 
-    assert not engine._stable_use_closed
+    assert engine._stable_use_closed
+    assert engine._shutdown_cleanup_pending
+    assert (
+        engine._run_stably(lambda selected: selected).status
+        is ActiveEngineUseStatus.CLOSED_ENGINE
+    )
     assert engine._store._conn is None
     assert engine._dag._conn is None
     assert engine._lifecycle._conn is None
@@ -239,6 +244,7 @@ def test_shutdown_attempts_all_cleanup_and_remains_retryable_after_failure(tmp_p
     engine.shutdown()
     assert attempts == 2
     assert engine._stable_use_closed
+    assert not engine._shutdown_cleanup_pending
 
 
 def test_assertion_store_is_default_off_and_closes_when_enabled(tmp_path):
