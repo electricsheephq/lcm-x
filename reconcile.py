@@ -565,11 +565,15 @@ class ReconcileMixin:
     def _replay_snapshot_metadata_key(self, prefix: str) -> str:
         return f"{prefix}:{getattr(self, '_session_id', '')}"
 
-    def _load_replay_snapshot_digests(self, prefix: str) -> list[str]:
-        """Load a bounded, versioned digest list from a replay-proof namespace.
+    def _load_replay_snapshot_records(self, prefix: str) -> list[dict[str, Any]]:
+        """Load bounded replay proofs, including optional occurrence digests.
 
         Any missing/corrupt/unreadable metadata resolves to an empty list, so a
         caller can never mistake a load failure for durable replay proof.
+
+        Version 1 stored only whole-snapshot digests. Version 2 also stores the
+        ordered per-message identity digests needed to recognize one complete
+        registered snapshot when genuinely new rows are interleaved through it.
         """
         if not getattr(self, "_session_id", ""):
             return []
@@ -581,36 +585,77 @@ class ReconcileMixin:
         except Exception:
             logger.debug("LCM replay snapshot metadata load failed", exc_info=True)
             return []
-        if not isinstance(data, dict) or data.get("version") != 1:
+        if not isinstance(data, dict):
             return []
-        raw_digests = data.get("digests")
-        if not isinstance(raw_digests, list):
+        version = data.get("version")
+        if version == 1:
+            raw_digests = data.get("digests")
+            if not isinstance(raw_digests, list):
+                return []
+            raw_records: Any = [
+                {"digest": digest, "message_digests": []}
+                for digest in raw_digests
+            ]
+        elif version == 2:
+            raw_records = data.get("snapshots")
+        else:
             return []
-        ordered: list[str] = []
-        for digest in raw_digests:
-            normalized = str(digest)
-            if re.fullmatch(r"[0-9a-f]{64}", normalized) and normalized not in ordered:
-                ordered.append(normalized)
+        if not isinstance(raw_records, list):
+            return []
+        ordered: list[dict[str, Any]] = []
+        for raw_record in raw_records:
+            if not isinstance(raw_record, dict):
+                continue
+            digest = str(raw_record.get("digest") or "")
+            if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                continue
+            raw_message_digests = raw_record.get("message_digests", [])
+            if not isinstance(raw_message_digests, list):
+                continue
+            message_digests = [str(item) for item in raw_message_digests]
+            if len(message_digests) > 8192 or any(
+                not re.fullmatch(r"[0-9a-f]{64}", item)
+                for item in message_digests
+            ):
+                continue
+            ordered = [record for record in ordered if record["digest"] != digest]
+            ordered.append({"digest": digest, "message_digests": message_digests})
         return ordered[-16:]
+
+    def _load_replay_snapshot_digests(self, prefix: str) -> list[str]:
+        """Load whole-snapshot digests from either metadata version."""
+        return [
+            str(record["digest"])
+            for record in self._load_replay_snapshot_records(prefix)
+        ]
 
     def _remember_replay_snapshot(
         self,
         prefix: str,
         digest: str,
+        messages: List[Dict[str, Any]],
     ) -> None:
         if not getattr(self, "_session_id", ""):
             return
         store = getattr(self, "_store", None)
         if store is None or not digest:
             return
-        ordered = self._load_replay_snapshot_digests(prefix)
-        ordered = [item for item in ordered if item != digest]
-        ordered.append(digest)
+        ordered = self._load_replay_snapshot_records(prefix)
+        ordered = [record for record in ordered if record["digest"] != digest]
+        ordered.append(
+            {
+                "digest": digest,
+                "message_digests": [
+                    self._replay_identity_sha256(message)
+                    for message in messages
+                ],
+            }
+        )
         ordered = ordered[-16:]
         try:
             store.write_metadata_json(
                 [self._replay_snapshot_metadata_key(prefix)],
-                json.dumps({"version": 1, "digests": ordered}, sort_keys=True),
+                json.dumps({"version": 2, "snapshots": ordered}, sort_keys=True),
                 skip_unchanged=True,
             )
         except Exception:
@@ -633,7 +678,96 @@ class ReconcileMixin:
         self._remember_replay_snapshot(
             _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX,
             self._compacted_active_replay_snapshot_digest(messages),
+            messages,
         )
+
+    def _registered_compacted_snapshot_replay_indexes(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> set[int]:
+        """Map one complete registered snapshot through an interleaved batch.
+
+        A whole-snapshot digest proves replay only when the snapshot is
+        contiguous. The version-2 occurrence list preserves the same proof
+        boundary while allowing unrelated rows between snapshot occurrences.
+        Partial snapshots never qualify. Matching consumes one incoming
+        occurrence per registered occurrence and returns only those exact
+        positions; every unmatched row remains an ambiguous delta and is
+        persisted by the caller.
+        """
+        if not messages:
+            return set()
+        incoming_digests = [
+            self._replay_identity_sha256(message)
+            for message in messages
+        ]
+        records = self._load_replay_snapshot_records(
+            _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX
+        )
+        for record in reversed(records):
+            snapshot_digests = record.get("message_digests") or []
+            if not snapshot_digests or len(snapshot_digests) > len(messages):
+                continue
+            earliest_indexes: list[int] = []
+            incoming_index = 0
+            for snapshot_digest in snapshot_digests:
+                while (
+                    incoming_index < len(incoming_digests)
+                    and incoming_digests[incoming_index] != snapshot_digest
+                ):
+                    incoming_index += 1
+                if incoming_index >= len(incoming_digests):
+                    earliest_indexes = []
+                    break
+                earliest_indexes.append(incoming_index)
+                incoming_index += 1
+            if not earliest_indexes:
+                continue
+            selected = [messages[index] for index in earliest_indexes]
+            if (
+                self._compacted_active_replay_snapshot_digest(selected)
+                != record["digest"]
+            ):
+                continue
+
+            latest_indexes = [0] * len(snapshot_digests)
+            incoming_index = len(incoming_digests) - 1
+            for snapshot_index in range(len(snapshot_digests) - 1, -1, -1):
+                snapshot_digest = snapshot_digests[snapshot_index]
+                while (
+                    incoming_index >= 0
+                    and incoming_digests[incoming_index] != snapshot_digest
+                ):
+                    incoming_index -= 1
+                if incoming_index < 0:
+                    latest_indexes = []
+                    break
+                latest_indexes[snapshot_index] = incoming_index
+                incoming_index -= 1
+            if not latest_indexes:
+                continue
+
+            proven_indexes: set[int] = set()
+            for snapshot_index, snapshot_digest in enumerate(snapshot_digests):
+                lower_bound = (
+                    earliest_indexes[snapshot_index - 1] + 1
+                    if snapshot_index > 0
+                    else 0
+                )
+                upper_bound = (
+                    latest_indexes[snapshot_index + 1]
+                    if snapshot_index + 1 < len(snapshot_digests)
+                    else len(incoming_digests)
+                )
+                possible_indexes = [
+                    index
+                    for index in range(lower_bound, upper_bound)
+                    if incoming_digests[index] == snapshot_digest
+                ]
+                if len(possible_indexes) == 1:
+                    proven_indexes.add(possible_indexes[0])
+            return proven_indexes
+        return set()
 
     # -- Session-end full-history proof (consumed ONLY by current-session
     #    full-history session-end ingest) --
@@ -657,6 +791,7 @@ class ReconcileMixin:
         self._remember_replay_snapshot(
             _SESSION_END_REPLAY_METADATA_PREFIX,
             self._session_end_replay_snapshot_digest(messages),
+            messages,
         )
 
     @staticmethod

@@ -5268,6 +5268,41 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             if reconciled_existing_session and cursor > 0
             else set()
         )
+        replayed_compacted_snapshot_indexes = (
+            self._registered_compacted_snapshot_replay_indexes(reconcile_messages)
+            if reconciled_existing_session
+            else set()
+        )
+        replayed_compacted_snapshot_indexes = {
+            index
+            for index in replayed_compacted_snapshot_indexes
+            if index >= cursor
+        }
+        if replayed_compacted_snapshot_indexes:
+            self._last_ingest_reconciliation.update({
+                "action": "persisted mixed batch",
+                "reason": "filtered registered compacted snapshot replay",
+                "replayed_compacted_snapshot_rows": len(
+                    replayed_compacted_snapshot_indexes
+                ),
+                "ambiguous_rows_preserved": max(
+                    0,
+                    n
+                    - cursor
+                    - len(
+                        replayed_compacted_snapshot_indexes
+                        | replayed_tool_segment_indexes
+                    ),
+                ),
+            })
+            logger.debug(
+                "LCM suppressed %d registered compacted-snapshot rows in mixed "
+                "batch: session=%s cursor=%d incoming=%d",
+                len(replayed_compacted_snapshot_indexes),
+                self._session_id,
+                cursor,
+                n,
+            )
         if replayed_tool_segment_indexes:
             self._last_ingest_reconciliation["replayed_tool_segment_rows"] = len(
                 replayed_tool_segment_indexes
@@ -5389,7 +5424,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             )
             for offset, (original_msg, replay_msg) in enumerate(zip(original_new_messages, new_messages)):
                 absolute_idx = cursor + offset
-                if absolute_idx in replayed_tool_segment_indexes:
+                if (
+                    absolute_idx in replayed_tool_segment_indexes
+                    or absolute_idx in replayed_compacted_snapshot_indexes
+                ):
                     continue
                 replay_text = text_content_for_pattern_matching(replay_msg.get("content")) or ""
                 original_text = text_content_for_pattern_matching(original_msg.get("content")) or ""
