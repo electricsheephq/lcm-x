@@ -466,6 +466,7 @@ def test_tight_reassembly_keeps_existing_fold_lineage(
             first[0],
             first[2:],
             assembly_cap_override=count_messages_tokens(first),
+            include_lcm_note=False,
             retained_user_message=first[1],
         )
         remapped = engine._get_store_id_map_for_messages(reassembled[1:])

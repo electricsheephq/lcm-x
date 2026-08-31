@@ -21442,7 +21442,7 @@ class TestDeferredMaintenanceDebt:
         monkeypatch.setattr(
             engine,
             "_assemble_context",
-            lambda system_msg, tail_messages, assembly_cap_override=None: [system_msg, *tail_messages],
+            lambda system_msg, tail_messages, assembly_cap_override=None, include_lcm_note=True: [system_msg, *tail_messages],
         )
 
         compressed = engine.compress(self._make_backlog_messages())
@@ -21469,7 +21469,7 @@ class TestDeferredMaintenanceDebt:
         monkeypatch.setattr(
             engine,
             "_assemble_context",
-            lambda system_msg, tail_messages, assembly_cap_override=None: [system_msg, *tail_messages],
+            lambda system_msg, tail_messages, assembly_cap_override=None, include_lcm_note=True: [system_msg, *tail_messages],
         )
 
         first = engine.compress(self._make_backlog_messages())
@@ -21504,7 +21504,7 @@ class TestDeferredMaintenanceDebt:
         monkeypatch.setattr(
             engine,
             "_assemble_context",
-            lambda system_msg, tail_messages, assembly_cap_override=None: [system_msg, *tail_messages],
+            lambda system_msg, tail_messages, assembly_cap_override=None, include_lcm_note=True: [system_msg, *tail_messages],
         )
 
         engine.compress(self._make_backlog_messages())
@@ -21536,7 +21536,7 @@ class TestDeferredMaintenanceDebt:
         monkeypatch.setattr(
             engine,
             "_assemble_context",
-            lambda system_msg, tail_messages, assembly_cap_override=None: [system_msg, *tail_messages],
+            lambda system_msg, tail_messages, assembly_cap_override=None, include_lcm_note=True: [system_msg, *tail_messages],
         )
 
         compressed = engine.compress(messages, current_tokens=90)
@@ -21571,7 +21571,7 @@ class TestDeferredMaintenanceDebt:
         monkeypatch.setattr(
             engine,
             "_assemble_context",
-            lambda system_msg, tail_messages, assembly_cap_override=None: [system_msg, *tail_messages],
+            lambda system_msg, tail_messages, assembly_cap_override=None, include_lcm_note=True: [system_msg, *tail_messages],
         )
 
         engine.compress(messages, current_tokens=90)

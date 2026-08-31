@@ -6834,6 +6834,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         system_msg: Optional[Dict[str, Any]],
         tail_messages: List[Dict[str, Any]],
         assembly_cap_override: Optional[int] = None,
+        include_lcm_note: bool = True,
         retained_user_message: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Build the active context from DAG summaries + fresh tail.
@@ -6858,11 +6859,16 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 append_note = (
                     self._append_summary_precedence_note_to_content
                     if all_nodes
-                    else self._append_lcm_note_to_content
+                    else (
+                        self._append_lcm_note_to_content
+                        if include_lcm_note
+                        else None
+                    )
                 )
-                leading_msg["content"] = append_note(
-                    leading_msg.get("content", "")
-                )
+                if append_note is not None:
+                    leading_msg["content"] = append_note(
+                        leading_msg.get("content", "")
+                    )
             result.append(leading_msg)
         leading_has_summary_note = bool(
             leading_msg is not None
@@ -7266,6 +7272,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     system_msg,
                     tail_messages[1:],
                     assembly_cap_override=assembly_cap_override,
+                    include_lcm_note=False,
                     retained_user_message=retained_user_message,
                 )
                 if any(
@@ -7278,6 +7285,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             system_msg,
             tail_messages,
             assembly_cap_override=assembly_cap_override,
+            include_lcm_note=False,
             retained_user_message=retained_user_message,
         )
         minimum_candidate_len = (
