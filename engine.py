@@ -5030,15 +5030,18 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         self,
         message: Dict[str, Any],
     ) -> bool:
-        """Recognize the legacy and reserved compact objective markers."""
+        """Recognize legacy or provenance-verified compact scaffolds."""
         if str(message.get("role") or "") == "tool":
             return False
         content = normalize_content_value(message.get("content")) or ""
         stripped_content = content.lstrip()
         if stripped_content.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
             return True
-        return stripped_content.startswith(
-            _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+        return bool(
+            stripped_content.startswith(
+                _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+            )
+            and self._is_generated_preserved_objective_message(message)
         )
 
     def _restore_ingest_payload_placeholders_in_value(self, value: Any, *, session_id: str) -> Any:
@@ -5466,6 +5469,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     str(replay_msg.get("role") or "") != "tool"
                     and replay_text.lstrip().startswith(
                         _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+                    )
+                    and self._is_generated_preserved_objective_message(
+                        replay_msg
                     )
                 ):
                     logger.debug(
@@ -6664,6 +6670,18 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         )
 
     def _sanitize_active_preserved_objective_message(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        content = text_content_for_pattern_matching(message.get("content")) or ""
+        if (
+            content.lstrip().startswith(
+                _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+            )
+            and not self._is_generated_preserved_objective_message(message)
+        ):
+            # The compact namespace is recognizable as generated context only
+            # with exact occurrence provenance.  An unmarked collision is an
+            # ordinary user or assistant message and must stay byte-for-byte
+            # provider-visible rather than being sanitized as engine output.
+            return message
         sanitized_content = self._sanitized_preserved_objective_context_content(message)
         if not sanitized_content or sanitized_content == message.get("content"):
             return message
