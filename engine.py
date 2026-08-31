@@ -131,7 +131,12 @@ from .fresh_tail import FreshTailBoundary, resolve_fresh_tail_boundary
 from .message_patterns import compile_message_patterns, matches_message_pattern
 from .aux_session import AuxiliarySessionMixin
 from .placeholder_ledger import PlaceholderLedgerMixin
-from .reconcile import ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+from .reconcile import (
+    ReconcileMixin,
+    _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX,
+    _PRESERVED_OBJECTIVE_CONTEXT_PREFIX,
+    _PRESERVED_OBJECTIVE_CONTEXT_PREFIXES,
+)
 from .compaction import CompactionMixin
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
@@ -2414,9 +2419,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
 
     def _is_scaffold_shaped_user_message(self, message: Dict[str, Any]) -> bool:
         """Return whether a user message has the shape of generated context."""
+        if not isinstance(message, dict):
+            return False
         return bool(
-            isinstance(message, dict)
-            and message.get("role") == "user"
+            message.get("role") == "user"
             and (
                 self._is_context_summary_content(message.get("content"))
                 or self._is_replayed_context_scaffold_message(message)
@@ -2434,6 +2440,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         store_id: int,
     ) -> List[tuple[str, str]]:
         """Build metadata committed atomically with a scaffold-shaped user row."""
+        content = normalize_content_value(message.get("content")) or ""
+        if content.lstrip().startswith(
+            _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+        ):
+            return []
         if not self._is_scaffold_shaped_user_message(message):
             return []
         return [
@@ -5002,7 +5013,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 "[Note: This conversation uses Lossless Context Management (LCM)." in content
                 and "Earlier turns have been compacted into hierarchical summaries below." in content
             )
-        if content.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
+        if self._is_preserved_objective_replay_scaffold_message(msg):
             return True
         if content.lstrip().startswith(_PRESERVED_TODO_CONTEXT_PREFIX):
             return True
@@ -5013,6 +5024,21 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d\d+, node \d+\)\]",
                 content,
             )
+        )
+
+    def _is_preserved_objective_replay_scaffold_message(
+        self,
+        message: Dict[str, Any],
+    ) -> bool:
+        """Recognize the legacy and reserved compact objective markers."""
+        if str(message.get("role") or "") == "tool":
+            return False
+        content = normalize_content_value(message.get("content")) or ""
+        stripped_content = content.lstrip()
+        if stripped_content.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
+            return True
+        return stripped_content.startswith(
+            _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
         )
 
     def _restore_ingest_payload_placeholders_in_value(self, value: Any, *, session_id: str) -> Any:
@@ -5218,6 +5244,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             )
             return self._redact_active_replay_messages(messages)
 
+        self._restore_generated_preserved_objective_provenance(messages)
+
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
         scan_start = 0 if self._ingest_cursor_needs_reconcile else cursor
@@ -5248,6 +5276,17 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             externalize=externalize_messages,
             prefer_existing_externalized=prefer_existing_externalized,
         )
+        for original_message, replay_message in zip(messages, replay_messages):
+            if (
+                self._is_generated_preserved_objective_message(original_message)
+                and self._exact_provider_visible_message_identity_sha256(
+                    original_message
+                )
+                == self._exact_provider_visible_message_identity_sha256(
+                    replay_message
+                )
+            ):
+                self._mark_generated_preserved_objective_message(replay_message)
         replay_messages = self._redact_active_replay_messages(replay_messages)
         replay_messages = self._apply_ignored_active_replay_placeholders(
             messages,
@@ -5423,6 +5462,19 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     continue
                 replay_text = text_content_for_pattern_matching(replay_msg.get("content")) or ""
                 original_text = text_content_for_pattern_matching(original_msg.get("content")) or ""
+                if (
+                    str(replay_msg.get("role") or "") != "tool"
+                    and replay_text.lstrip().startswith(
+                        _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+                    )
+                ):
+                    logger.debug(
+                        "LCM suppressed reserved compact objective scaffold: "
+                        "session=%s index=%d",
+                        self._session_id,
+                        absolute_idx,
+                    )
+                    continue
                 volatile_placeholder = self._is_volatile_ignored_quarantine_placeholder(
                     replay_msg,
                     replay_text,
@@ -5441,7 +5493,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     replay_text_stripped = replay_text.strip()
                     if (
                         self._is_context_summary_content(replay_text)
-                        or replay_text_stripped.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX)
+                        or self._is_preserved_objective_replay_scaffold_message(
+                            replay_msg
+                        )
                         or replay_text_stripped.startswith(_PRESERVED_TODO_CONTEXT_PREFIX)
                     ):
                         boundary_seen_synthetic_summary_before = True
@@ -6594,7 +6648,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
     @staticmethod
     def _preserved_objective_context_content(message: Dict[str, Any]) -> str:
         content = text_content_for_pattern_matching(message.get("content")) or ""
-        return content if content.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else ""
+        return (
+            content
+            if content.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIXES)
+            else ""
+        )
 
     def _sanitized_preserved_objective_context_content(self, message: Dict[str, Any]) -> str:
         preserved_objective = self._preserved_objective_context_content(message)
@@ -6929,7 +6987,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 or self._is_ignored_active_replay_placeholder(message, content_text)
             ):
                 continue
-            if self._preserved_objective_context_content(message):
+            if self._is_preserved_objective_replay_scaffold_message(message):
                 return None
             if message.get("role") != "user":
                 continue
@@ -7348,12 +7406,22 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             trimmed_result: list[Dict[str, Any]] = []
             for msg in result:
                 content = normalize_content_value(msg.get("content")) or ""
-                if _PRESERVED_OBJECTIVE_CONTEXT_PREFIX not in content:
+                if not self._is_preserved_objective_replay_scaffold_message(msg):
                     trimmed_result.append(msg)
                     continue
                 parts = [
                     part for part in content.split("\n\n---\n\n")
-                    if not part.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX)
+                    if not (
+                        part.lstrip().startswith(
+                            _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+                        )
+                        or (
+                            part.lstrip().startswith(
+                                _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+                            )
+                            and self._is_generated_preserved_objective_message(msg)
+                        )
+                    )
                 ]
                 if parts:
                     trimmed = msg.copy()
@@ -7397,7 +7465,10 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         content = normalize_content_value(message.get("content")) or ""
         if _PRESERVED_TODO_CONTEXT_PREFIX in content:
             return False
-        if _PRESERVED_OBJECTIVE_CONTEXT_PREFIX in content:
+        if any(
+            prefix in content
+            for prefix in _PRESERVED_OBJECTIVE_CONTEXT_PREFIXES
+        ):
             return False
         return True
 
@@ -7669,22 +7740,53 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         ):
             return anchor
 
-        low = 1
-        high = len(anchor_content)
+        stripped_anchor = anchor_content.lstrip()
+        scaffold_prefix = next(
+            (
+                prefix
+                for prefix in _PRESERVED_OBJECTIVE_CONTEXT_PREFIXES
+                if stripped_anchor.startswith(prefix)
+            ),
+            "",
+        )
+        objective_payload = (
+            stripped_anchor[len(scaffold_prefix):].lstrip()
+            if scaffold_prefix
+            else anchor_content.strip()
+        )
+
+        def fit_objective(label: str) -> tuple[str, int]:
+            low = 1
+            high = len(objective_payload)
+            best_content = ""
+            while low <= high:
+                midpoint = (low + high) // 2
+                bounded_payload = objective_payload[:midpoint].rstrip()
+                candidate_content = f"{label}{bounded_payload}"
+                candidate = {"role": "user", "content": candidate_content}
+                if (
+                    bounded_payload
+                    and count_messages_tokens([*prefix_messages, candidate])
+                    <= assembly_cap_override
+                ):
+                    best_content = candidate_content
+                    low = midpoint + 1
+                else:
+                    high = midpoint - 1
+            retained_payload_length = max(0, len(best_content) - len(label))
+            return best_content, retained_payload_length
+
+        labels = (
+            f"{_PRESERVED_OBJECTIVE_CONTEXT_PREFIX}\n",
+            f"{_COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX}\n",
+        ) if scaffold_prefix else ("",)
         best_content = ""
-        while low <= high:
-            midpoint = (low + high) // 2
-            candidate_content = anchor_content[:midpoint].rstrip()
-            candidate = {"role": "user", "content": candidate_content}
-            if (
-                candidate_content
-                and count_messages_tokens([*prefix_messages, candidate])
-                <= assembly_cap_override
-            ):
+        best_payload_length = 0
+        for label in labels:
+            candidate_content, retained_payload_length = fit_objective(label)
+            if retained_payload_length > best_payload_length:
                 best_content = candidate_content
-                low = midpoint + 1
-            else:
-                high = midpoint - 1
+                best_payload_length = retained_payload_length
         if best_content:
             return self._mark_generated_preserved_objective_message(
                 {"role": "user", "content": best_content}

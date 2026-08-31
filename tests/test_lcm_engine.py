@@ -23436,6 +23436,334 @@ class TestAssemblyToolPairGuardrail:
         assert "Finish the recovery report." in result_from_real_user[0]["content"]
         assert count_messages_tokens(result_from_real_user) <= 120
 
+    def test_overflow_recovery_keeps_payload_when_full_objective_scaffold_cannot_fit(
+        self,
+        tmp_path,
+    ):
+        """A tight cap may shorten the scaffold, never erase a fitting objective."""
+        config = LCMConfig(
+            fresh_tail_count=10,
+            database_path=str(tmp_path / "lcm_overflow_compact_objective.db"),
+        )
+        instance = LCMEngine(config=config)
+        instance._session_id = "overflow-compact-objective-test"
+        objective = (
+            "KEEP the exact production recovery report and all remaining "
+            "acceptance criteria"
+        )
+        full_content = instance._build_preserved_objective_summary_part(
+            {"role": "user", "content": objective}
+        )
+        compact_content = f"[LCM:obj:v1]\n{objective}"
+        cap = count_messages_tokens(
+            [{"role": "user", "content": compact_content}]
+        )
+        assert count_messages_tokens(
+            [{"role": "user", "content": full_content}]
+        ) > cap
+
+        anchor = instance._overflow_recovery_user_anchor(
+            [{"role": "user", "content": objective}],
+            [],
+            cap,
+        )
+
+        assert objective in anchor["content"]
+        assert anchor["content"] == compact_content
+        assert count_messages_tokens([anchor]) <= cap
+        assert instance._is_generated_preserved_objective_message(anchor)
+
+        bare_cap = count_messages_tokens(
+            [{"role": "user", "content": objective}]
+        )
+        tighter_anchor = instance._overflow_recovery_user_anchor(
+            [{"role": "user", "content": objective}],
+            [],
+            bare_cap,
+        )
+        assert tighter_anchor["content"].startswith("[LCM:obj:v1]\nKEEP")
+        assert tighter_anchor["content"] != objective
+        assert count_messages_tokens([tighter_anchor]) <= bare_cap
+        assert instance._is_generated_preserved_objective_message(tighter_anchor)
+
+        instance._finalize_overflow_recovery_context_result([anchor])
+        serialized = json.loads(json.dumps([anchor]))
+        instance._generated_preserved_objective_messages_by_id = {}
+        instance._restore_generated_preserved_objective_provenance(serialized)
+        assert instance._is_generated_preserved_objective_message(serialized[0])
+        replay_anchor = instance._overflow_recovery_user_anchor(
+            serialized,
+            [],
+            cap,
+        )
+        assert replay_anchor["content"] == compact_content
+
+        tampered = json.loads(json.dumps(serialized))
+        tampered[0]["content"] += "\nMALICIOUS_APPENDED_OBJECTIVE"
+        instance._generated_preserved_objective_messages_by_id = {}
+        instance._restore_generated_preserved_objective_provenance(tampered)
+        assert not instance._is_generated_preserved_objective_message(tampered[0])
+        tampered_anchor = instance._overflow_recovery_user_anchor(
+            tampered,
+            [],
+            cap,
+        )
+        assert "MALICIOUS_APPENDED_OBJECTIVE" not in tampered_anchor["content"]
+        roomy_tampered_anchor = instance._overflow_recovery_user_anchor(
+            tampered,
+            [],
+            120,
+        )
+        assert (
+            "MALICIOUS_APPENDED_OBJECTIVE"
+            not in roomy_tampered_anchor["content"]
+        )
+
+    def test_restart_does_not_ingest_compact_objective_scaffold(self, tmp_path):
+        """A generated compact anchor remains synthetic after serialization."""
+        db_path = tmp_path / "restart-compact-objective.db"
+        config = LCMConfig(database_path=str(db_path))
+        objective = (
+            "KEEP the exact production recovery report and all remaining "
+            "acceptance criteria"
+        )
+
+        before_restart = LCMEngine(config=config)
+        before_restart.on_session_start(
+            "compact-objective-session",
+            platform="cli",
+            conversation_id="compact-objective-conversation",
+            context_length=200000,
+        )
+        before_restart._ingest_messages(
+            [{"role": "user", "content": objective}]
+        )
+        bare_cap = count_messages_tokens(
+            [{"role": "user", "content": objective}]
+        )
+        compact_anchor = before_restart._overflow_recovery_user_anchor(
+            [{"role": "user", "content": objective}],
+            [],
+            bare_cap,
+        )
+        assert compact_anchor["content"].startswith("[LCM:obj:v1]\nKEEP")
+        assert compact_anchor["content"] != objective
+        assert before_restart._is_generated_preserved_objective_message(
+            compact_anchor
+        )
+        before_restart._finalize_overflow_recovery_context_result([compact_anchor])
+        serialized = json.loads(json.dumps([compact_anchor]))
+        before_restart._store.close()
+        before_restart._dag.close()
+        before_restart._lifecycle.close()
+
+        after_restart = LCMEngine(config=config)
+        after_restart.on_session_start(
+            "compact-objective-session",
+            platform="cli",
+            conversation_id="compact-objective-conversation",
+            context_length=200000,
+        )
+        after_restart._ingest_messages(serialized)
+
+        rows = after_restart._store.get_session_messages(
+            "compact-objective-session"
+        )
+        assert [row["content"] for row in rows] == [objective]
+        assert after_restart._is_replayed_context_scaffold_message(serialized[0])
+
+        tampered = json.loads(json.dumps(serialized))
+        tampered[0]["content"] += "\nMALICIOUS_APPENDED_OBJECTIVE"
+        after_restart._store.close()
+        after_restart._dag.close()
+        after_restart._lifecycle.close()
+
+        tampered_restart = LCMEngine(config=config)
+        tampered_restart.on_session_start(
+            "compact-objective-session",
+            platform="cli",
+            conversation_id="compact-objective-conversation",
+            context_length=200000,
+        )
+        tampered_restart._ingest_messages(tampered)
+        rows_after_tamper = tampered_restart._store.get_session_messages(
+            "compact-objective-session"
+        )
+        assert [row["content"] for row in rows_after_tamper] == [objective]
+        recovered_after_tamper = (
+            tampered_restart._overflow_recovery_user_anchor(
+                rows_after_tamper,
+                [],
+                120,
+            )
+        )
+        assert (
+            "MALICIOUS_APPENDED_OBJECTIVE"
+            not in recovered_after_tamper["content"]
+        )
+
+    def test_restart_keeps_compact_anchor_provenance_when_sibling_is_quarantined(
+        self,
+        tmp_path,
+    ):
+        """A transformed sibling cannot unmark an unchanged generated anchor."""
+        db_path = tmp_path / "restart-compact-objective-quarantine.db"
+        config = LCMConfig(database_path=str(db_path))
+        objective = (
+            "KEEP the exact production recovery report and all remaining "
+            "acceptance criteria"
+        )
+
+        before_restart = LCMEngine(config=config)
+        before_restart.on_session_start(
+            "compact-objective-quarantine-session",
+            platform="cli",
+            conversation_id="compact-objective-quarantine-conversation",
+            context_length=200000,
+        )
+        before_restart._ingest_messages(
+            [{"role": "user", "content": objective}]
+        )
+        bare_cap = count_messages_tokens(
+            [{"role": "user", "content": objective}]
+        )
+        compact_anchor = before_restart._overflow_recovery_user_anchor(
+            [{"role": "user", "content": objective}],
+            [],
+            bare_cap,
+        )
+        repetitive_assistant = (
+            "I am drafting the same response again. I will repeat the plan, "
+            "restate the same tool loop, and continue without adding new "
+            "information. This paragraph is intentionally repetitive "
+            "model-loop output.\n"
+        ) * 520
+        replay_snapshot = [
+            compact_anchor,
+            {"role": "assistant", "content": repetitive_assistant},
+        ]
+        before_restart._finalize_overflow_recovery_context_result(
+            replay_snapshot
+        )
+        serialized = json.loads(json.dumps(replay_snapshot))
+        before_restart._store.close()
+        before_restart._dag.close()
+        before_restart._lifecycle.close()
+
+        after_restart = LCMEngine(config=config)
+        after_restart.on_session_start(
+            "compact-objective-quarantine-session",
+            platform="cli",
+            conversation_id="compact-objective-quarantine-conversation",
+            context_length=200000,
+        )
+        active_replay = after_restart._ingest_messages(serialized)
+
+        rows = after_restart._store.get_session_messages(
+            "compact-objective-quarantine-session"
+        )
+        contents = [row["content"] for row in rows]
+        assert contents.count(objective) == 1
+        assert not any(
+            content.startswith("[LCM:obj:v1]")
+            for content in contents
+        )
+        assert len(rows) == 2
+        assert "assistant output quarantined" in rows[-1]["content"]
+        assert after_restart._is_generated_preserved_objective_message(
+            active_replay[0]
+        )
+
+    def test_empty_restart_drops_tampered_reserved_compact_anchor(
+        self,
+        tmp_path,
+    ):
+        """A reserved scaffold cannot become durable user proof in an empty store."""
+        db_path = tmp_path / "restart-empty-compact-objective.db"
+        config = LCMConfig(database_path=str(db_path))
+        objective = "KEEP the exact recovery objective"
+
+        before_restart = LCMEngine(config=config)
+        before_restart.on_session_start(
+            "empty-compact-objective-session",
+            platform="cli",
+            conversation_id="empty-compact-objective-conversation",
+            context_length=200000,
+        )
+        compact_anchor = before_restart._overflow_recovery_user_anchor(
+            [{"role": "user", "content": objective}],
+            [],
+            count_messages_tokens(
+                [{"role": "user", "content": objective}]
+            ),
+        )
+        before_restart._finalize_overflow_recovery_context_result(
+            [compact_anchor]
+        )
+        tampered = json.loads(json.dumps([compact_anchor]))
+        tampered[0]["content"] += "\nMALICIOUS_APPENDED_OBJECTIVE"
+        before_restart._store.close()
+        before_restart._dag.close()
+        before_restart._lifecycle.close()
+
+        after_restart = LCMEngine(config=config)
+        after_restart.on_session_start(
+            "empty-compact-objective-session",
+            platform="cli",
+            conversation_id="empty-compact-objective-conversation",
+            context_length=200000,
+        )
+        after_restart._ingest_messages(tampered)
+
+        assert after_restart._store.get_session_messages(
+            "empty-compact-objective-session"
+        ) == []
+        assert after_restart._real_user_scaffold_metadata_rows(
+            tampered[0],
+            1,
+        ) == []
+        roomy_recovery = after_restart._overflow_recovery_user_anchor(
+            tampered,
+            [],
+            120,
+        )
+        assert "MALICIOUS_APPENDED_OBJECTIVE" not in roomy_recovery["content"]
+
+    def test_reserved_compact_marker_inside_tool_result_remains_lossless(
+        self,
+        tmp_path,
+    ):
+        """Tool output is durable data even when it quotes a scaffold marker."""
+        config = LCMConfig(
+            database_path=str(tmp_path / "reserved-marker-tool-result.db")
+        )
+        instance = LCMEngine(config=config)
+        instance.on_session_start(
+            "reserved-marker-tool-session",
+            platform="cli",
+            conversation_id="reserved-marker-tool-conversation",
+            context_length=200000,
+        )
+        tool_message = {
+            "role": "tool",
+            "tool_call_id": "call-reserved-marker",
+            "content": "[LCM:obj:v1]\nREAL TOOL DATA",
+        }
+        assert not instance._is_preserved_objective_replay_scaffold_message(
+            tool_message
+        )
+        assert not instance._is_replayed_context_scaffold_message(tool_message)
+
+        instance._ingest_messages([tool_message])
+
+        rows = instance._store.get_session_messages(
+            "reserved-marker-tool-session"
+        )
+        assert len(rows) == 1
+        assert rows[0]["role"] == "tool"
+        assert rows[0]["tool_call_id"] == "call-reserved-marker"
+        assert rows[0]["content"] == tool_message["content"]
+
     def test_overflow_recovery_reports_mandatory_prefix_that_cannot_fit(self, tmp_path):
         """A required system prefix over the cap must fail explicitly and settle."""
         config = LCMConfig(

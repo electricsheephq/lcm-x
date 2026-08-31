@@ -52,6 +52,12 @@ import logging
 logger = logging.getLogger(__name__)
 
 _PRESERVED_OBJECTIVE_CONTEXT_PREFIX = "[Current user objective preserved from compacted history]"
+# Reserved provider-visible namespace for a generated tight-budget scaffold.
+_COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX = "[LCM:obj:v1]"
+_PRESERVED_OBJECTIVE_CONTEXT_PREFIXES = (
+    _PRESERVED_OBJECTIVE_CONTEXT_PREFIX,
+    _COMPACT_PRESERVED_OBJECTIVE_CONTEXT_PREFIX,
+)
 _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across context compression]"
 _MODEL_SWITCH_NOTIFICATION_PREFIX = "[Note: model was just switched from "
 # When the user sends a message mid-turn (/steer), the host appends it to a
@@ -1369,8 +1375,9 @@ class ReconcileMixin:
             has_preserved_objective_scaffold = any(
                 str(msg.get("role") or "") != "system"
                 and (normalize_content_value(msg.get("content")) or "").lstrip().startswith(
-                    _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+                    _PRESERVED_OBJECTIVE_CONTEXT_PREFIXES
                 )
+                and self._is_preserved_objective_replay_scaffold_message(msg)
                 for msg in candidate_messages
             )
             candidate_suffix_has_user_turn = any(identity[0] == "user" for identity in candidate_prefix)
