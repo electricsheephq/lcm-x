@@ -405,7 +405,7 @@ class MessageStore:
         observed_at = _normalize_observed_at(msg.get("timestamp"))
         ingested_at = time.time()
 
-        with self._write_lock:
+        with self._write_lock, self._conn:
             cur = self._conn.execute(
                 """INSERT INTO messages
                    (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
@@ -429,7 +429,6 @@ class MessageStore:
                     "host_message_timestamp" if observed_at is not None else None,
                 ),
             )
-            self._conn.commit()
             return cur.lastrowid
 
     def append_batch(self, session_id: str,
@@ -546,22 +545,20 @@ class MessageStore:
         """Move all persisted messages from one session_id to another."""
         if not old_session_id or not new_session_id or old_session_id == new_session_id:
             return 0
-        with self._write_lock:
+        with self._write_lock, self._conn:
             cur = self._conn.execute(
                 "UPDATE messages SET session_id = ? WHERE session_id = ?",
                 (new_session_id, old_session_id),
             )
-            self._conn.commit()
             return cur.rowcount if cur.rowcount is not None else 0
 
     def delete_session_messages(self, session_id: str) -> int:
         """Delete all messages for a session. Returns count deleted."""
-        with self._write_lock:
+        with self._write_lock, self._conn:
             cur = self._conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
                 (session_id,),
             )
-            self._conn.commit()
             deleted = cur.rowcount if cur.rowcount is not None else 0
             return deleted
 
@@ -581,7 +578,10 @@ class MessageStore:
         later batch archive would slice the new (short) content at the old chunk
         offsets, returning a garbled fragment (F2).
         """
-        with self._write_lock:
+        # The connection context owns commit/rollback before the shared lock is
+        # released. In particular, a failing ``before_commit`` callback must
+        # not leave this transaction pending for another clone to commit.
+        with self._write_lock, self._conn:
             row = self._conn.execute(
                 "SELECT role, pinned, content, tool_call_id FROM messages WHERE store_id = ?",
                 (store_id,),
@@ -604,24 +604,21 @@ class MessageStore:
             )
             if before_commit is not None:
                 before_commit(self._conn, store_id)
-            self._conn.commit()
             return True
 
     def pin(self, store_id: int) -> None:
 
         """Mark a message as pinned (protected from pruning)."""
-        with self._write_lock:
+        with self._write_lock, self._conn:
             self._conn.execute(
                 "UPDATE messages SET pinned = 1 WHERE store_id = ?", (store_id,)
             )
-            self._conn.commit()
 
     def unpin(self, store_id: int) -> None:
-        with self._write_lock:
+        with self._write_lock, self._conn:
             self._conn.execute(
                 "UPDATE messages SET pinned = 0 WHERE store_id = ?", (store_id,)
             )
-            self._conn.commit()
 
     # -- Read operations ----------------------------------------------------
 
@@ -1085,7 +1082,7 @@ class MessageStore:
         if conn is None:
             return False
         wrote = False
-        with self._write_lock:
+        with self._write_lock, conn:
             for key in keys:
                 if skip_unchanged:
                     existing = conn.execute(
@@ -1102,8 +1099,6 @@ class MessageStore:
                     (key, serialized),
                 )
                 wrote = True
-            if wrote:
-                conn.commit()
         return wrote
 
     # -- Compaction telemetry ------------------------------------------------
@@ -1722,20 +1717,20 @@ class MessageStore:
                 raise RuntimeError("LCM message store is closed")
             yield self._conn
 
-    def rollback_pending_write(self) -> None:
-        """Roll back this store's transaction under its connection-owner lock."""
-        with self._write_lock:
-            if self._conn is not None and self._conn.in_transaction:
-                self._conn.rollback()
+    def assert_transaction_idle(self) -> None:
+        """Refuse to cross an operation boundary with a pending transaction.
 
-    def commit(self) -> None:
-        """Commit pending writes on the store connection.
-
-        Used by the backup path's cross-connection flush so callers do not reach
-        the private connection. Requires a live connection: a closed store
-        raises, matching direct ``_conn.commit()`` use.
+        MessageStore write methods own commit or rollback before releasing the
+        shared connection lock. A pending transaction here therefore has no
+        safe clone owner and must never be committed or rolled back by a later
+        operation.
         """
-        self._conn.commit()
+        if self._conn is None:
+            raise RuntimeError("LCM message store is closed")
+        if self._conn.in_transaction:
+            raise RuntimeError(
+                "MessageStore transaction escaped its owning operation"
+            )
 
     def backup(self, dest: sqlite3.Connection) -> None:
         """Copy the store's database into the already-open ``dest`` connection.
@@ -1806,7 +1801,7 @@ for _method_name in (
     "get_time_bounds",
     "read_metadata_json",
     "write_metadata_json",
-    "commit",
+    "assert_transaction_idle",
     "backup",
     "search",
     "_search_like",

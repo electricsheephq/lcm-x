@@ -16,13 +16,15 @@ from typing import Any
 
 
 def flush_engine_connections(engine) -> None:
-    """Commit pending writes on every SQLite connection the engine owns.
+    """Quiesce every SQLite connection before taking a backup.
 
     Shared by ``backup_database`` (timestamped backup) and
     ``rotate_backup_database`` (rolling backup) so the connection-flush
-    contract stays in one place.
+    contract stays in one place. MessageStore writes are operation-owned and
+    must already be committed or rolled back; the other helpers retain their
+    existing explicit flush APIs.
     """
-    engine._store.commit()
+    engine._store.assert_transaction_idle()
     engine._dag._conn.commit()
     lifecycle_conn = getattr(getattr(engine, "_lifecycle", None), "_conn", None)
     if lifecycle_conn is not None:

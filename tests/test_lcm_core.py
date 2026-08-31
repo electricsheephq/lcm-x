@@ -9229,6 +9229,84 @@ class TestLCMEngineSharedStorage:
             for engine in (*clones, prototype):
                 engine.shutdown()
 
+    @pytest.mark.parametrize("gc_commits", [False, True])
+    def test_clone_store_transaction_is_owned_through_commit_or_rollback(
+        self, tmp_path, gc_commits
+    ):
+        prototype = self._engine(tmp_path)
+        gc_clone = prototype.clone_for_agent()
+        writer_clone = prototype.clone_for_agent()
+        original = "durable tool output"
+        replacement = "[Externalized payload: kind=tool_result; ref=gc.json]"
+        store_id = prototype._store.append(
+            "gc-session",
+            {
+                "role": "tool",
+                "content": original,
+                "tool_call_id": "call-1",
+            },
+        )
+        gc_entered = threading.Event()
+        release_gc = threading.Event()
+        writer_finished = threading.Event()
+        failures: list[BaseException] = []
+
+        def before_commit(_connection, _store_id):
+            gc_entered.set()
+            assert release_gc.wait(timeout=2)
+            if not gc_commits:
+                raise RuntimeError("force GC rollback")
+
+        def run_gc():
+            try:
+                gc_clone._store.gc_externalized_tool_result(
+                    store_id,
+                    replacement,
+                    before_commit=before_commit,
+                )
+            except BaseException as exc:
+                failures.append(exc)
+
+        def run_writer():
+            try:
+                writer_clone._store.append(
+                    "writer-session",
+                    {"role": "user", "content": "independent durable write"},
+                )
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                writer_finished.set()
+
+        gc_thread = threading.Thread(target=run_gc)
+        writer_thread = threading.Thread(target=run_writer)
+        try:
+            gc_thread.start()
+            assert gc_entered.wait(timeout=1)
+            writer_thread.start()
+            assert not writer_finished.wait(timeout=0.05)
+            release_gc.set()
+            gc_thread.join(timeout=2)
+            writer_thread.join(timeout=2)
+
+            assert writer_finished.is_set()
+            assert prototype._store.get_session_count("writer-session") == 1
+            assert prototype._store.connection.in_transaction is False
+            stored = prototype._store.get(store_id)
+            if gc_commits:
+                assert failures == []
+                assert stored["content"] == replacement
+            else:
+                assert len(failures) == 1
+                assert str(failures[0]) == "force GC rollback"
+                assert stored["content"] == original
+        finally:
+            release_gc.set()
+            gc_thread.join(timeout=2)
+            writer_thread.join(timeout=2)
+            for engine in (gc_clone, writer_clone, prototype):
+                engine.shutdown()
+
     def test_shared_lifecycle_reads_wait_for_path_lock(self, tmp_path):
         prototype = self._engine(tmp_path)
         clone = prototype.clone_for_agent()
