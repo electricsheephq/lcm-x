@@ -418,6 +418,36 @@ class TestProviderPrefixedAuxiliaryCalls:
         assert "nonce=" not in result
         assert [message["role"] for message in seen["messages"]] == ["system", "user"]
 
+    @pytest.mark.parametrize("wrapper", ["summary", "summary body"])
+    def test_summary_call_accepts_single_outer_summary_wrapper(self, monkeypatch, wrapper):
+        from hermes_lcm.escalation import _build_l1_prompt, _call_llm_for_summary
+
+        body = (
+            "- Decision: retain the owner gate and current operational state.\n"
+            "- Recovery: raw history remains available for exact inspection.\n"
+            "Expand for details about: owner gate and recovery state"
+        )
+
+        def fake_call_llm(**kwargs):
+            system_content = kwargs["messages"][0]["content"]
+            match = re.search(r'<lcm-summary nonce="([0-9a-f]{32})">', system_content)
+            assert match is not None
+            nonce = match.group(1)
+            return self._fake_response(
+                f'<lcm-summary nonce="{nonce}">\n'
+                f'<{wrapper}>\n{body}\n</summary>\n'
+                '</lcm-summary>'
+            )
+
+        self._install_fake_auxiliary_client(monkeypatch, fake_call_llm)
+
+        result = _call_llm_for_summary(
+            _build_l1_prompt("ordinary historical transcript " * 30, token_budget=80, depth=0),
+            160,
+        )
+
+        assert result == body
+
     def test_summary_body_may_quote_the_closing_tag(self, monkeypatch):
         """A summary that quotes `</lcm-summary>` in its body must be accepted.
 
@@ -455,7 +485,10 @@ class TestProviderPrefixedAuxiliaryCalls:
 
         assert result == body
 
-    @pytest.mark.parametrize("variant", ["wrong_nonce", "outside_text", "missing_footer"])
+    @pytest.mark.parametrize(
+        "variant",
+        ["wrong_nonce", "outside_text", "missing_footer", "wrapped_missing_footer"],
+    )
     def test_summary_call_rejects_malformed_integrity_contract(self, monkeypatch, variant):
         from hermes_lcm.escalation import _build_l1_prompt, _call_llm_for_summary
 
@@ -478,10 +511,18 @@ class TestProviderPrefixedAuxiliaryCalls:
                     f'preamble\n<lcm-summary nonce="{nonce}">\n'
                     f'{valid_body}\n</lcm-summary>'
                 )
-            else:
+            elif variant == "missing_footer":
                 content = (
                     f'<lcm-summary nonce="{nonce}">\n'
                     "A long but footer-free body preserving decisions, blockers, files, and state.\n"
+                    "</lcm-summary>"
+                )
+            else:
+                content = (
+                    f'<lcm-summary nonce="{nonce}">\n'
+                    "<summary>\n"
+                    "A long but footer-free body preserving decisions, blockers, files, and state.\n"
+                    "</summary>\n"
                     "</lcm-summary>"
                 )
             return self._fake_response(content)

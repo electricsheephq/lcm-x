@@ -291,6 +291,17 @@ def _unwrap_summary_contract(content: str, nonce: str, max_tokens: int) -> str:
     ):
         return ""
     body = stripped[len(opening_tag) : -len(closing_tag)].strip()
+    body_lines = body.splitlines()
+    if (
+        len(body_lines) >= 3
+        and body_lines[0].strip() in {"<summary>", "<summary body>"}
+        and body_lines[-1].strip() == "</summary>"
+    ):
+        # Some otherwise-compliant auxiliary models echo the human-readable
+        # placeholder as one harmless outer wrapper. Strip only that exact,
+        # balanced whole-body shape; the nonce envelope and every other
+        # integrity check remain unchanged.
+        body = "\n".join(body_lines[1:-1]).strip()
     minimum_body_tokens = max(4, min(16, max(1, int(max_tokens) // 16)))
     if count_tokens(body) < minimum_body_tokens:
         return ""
