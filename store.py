@@ -1068,6 +1068,55 @@ class MessageStore:
             return None
         return json.loads(str(row[0]))
 
+    def read_metadata_raw(self, key: str) -> str | None:
+        """Return one metadata value without decoding it."""
+        conn = self._conn
+        if conn is None:
+            return None
+        row = conn.execute(
+            "SELECT value FROM metadata WHERE key = ?",
+            (key,),
+        ).fetchone()
+        if not row or not row[0]:
+            return None
+        return str(row[0])
+
+    def replace_metadata_raw_if_unchanged(
+        self,
+        key: str,
+        expected_raw: str,
+        replacement: Any,
+    ) -> bool:
+        """Compare and replace one raw metadata value under a write reservation."""
+        conn = self._conn
+        if conn is None:
+            return False
+        serialized = json.dumps(replacement, sort_keys=True)
+        with self._write_lock:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT value FROM metadata WHERE key = ?",
+                    (key,),
+                ).fetchone()
+                current_raw = str(row[0]) if row and row[0] else None
+                if current_raw != expected_raw:
+                    conn.rollback()
+                    return False
+                conn.execute(
+                    """
+                    INSERT INTO metadata(key, value)
+                    VALUES(?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (key, serialized),
+                )
+                conn.commit()
+                return True
+            except Exception:
+                conn.rollback()
+                raise
+
     def write_metadata_json(
         self,
         keys: list[str],
