@@ -161,6 +161,11 @@ jobs:
                     throw Error('invalid peer final validation failed');
                   currentPeer = currentValidated.result.peers[0];
                 } catch (error) {
+                  // snapshot() carries the tuple it observed before a later read failed;
+                  // that live head fails below exactly as a completed re-snapshot's would.
+                  if (!currentTuple && error?.liveTuple)
+                    currentTuple = {pr_number: peer.pr_number, base_sha: error.liveTuple.base_sha,
+                      head_sha: error.liveTuple.head_sha};
                   const writeFailures = [];
                   if (original?.base_sha && original?.head_sha) {
                     try {
@@ -209,6 +214,11 @@ jobs:
                       finalValidated.result.peers?.length !== 1 || !finalValidated.result.peers[0].preserve)
                     throw Error('preserved peer final validation failed');
                 } catch (error) {
+                  // snapshot() carries the tuple it observed before a later read failed;
+                  // that live head fails below exactly as a completed re-snapshot's would.
+                  if (!currentTuple && error?.liveTuple)
+                    currentTuple = {pr_number: peer.pr_number, base_sha: error.liveTuple.base_sha,
+                      head_sha: error.liveTuple.head_sha};
                   const writeFailures = [];
                   try {
                     await emit(original.pr_number, original.base_sha, original.head_sha, 'failure',

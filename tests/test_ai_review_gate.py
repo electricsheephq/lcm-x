@@ -84,6 +84,8 @@ def _run_workflow_scenario(
         "s14": {"dispatch": True, "prs": [1, 2], "target": 1},
         "s14b": {"dispatch": False, "prs": [1, 2]},
         "s15": {"dispatch": True, "prs": [1, 2], "target": 1},
+        "s16": {"dispatch": True, "prs": [1, 2], "target": 1},
+        "s16b": {"dispatch": True, "prs": [1, 2], "target": 1, "invalidPr": 2},
     }
     config = {"name": name, **scenarios[name]}
     script = _extract_reconcile_script(workflow_path or _workflow_under_test())
@@ -143,6 +145,8 @@ const pullsApi = {{
     if ((cfg.name === 's5' || cfg.name === 's7') && pull_number === cfg.target && count >= 4)
       data.head.sha = `head-${{pull_number}}-live`;
     if (['s13', 's14', 's14b'].includes(cfg.name) && pull_number === 2) data.head.sha = 'head-2-live';
+    // A peer's SECOND read is its final-read re-snapshot.
+    if ((cfg.name === 's16' || cfg.name === 's16b') && pull_number === 2 && count === 2) data.head.sha = 'head-2-live';
     return {{data}};
   }},
   listFiles: async ({{pull_number}}) => {{
@@ -152,6 +156,8 @@ const pullsApi = {{
     // The target's SECOND files read is the one inside the re-snapshot.
     if (cfg.name === 's15' && pull_number === cfg.target && fcount === 2)
       throw Error('synthetic target re-snapshot files failure');
+    if ((cfg.name === 's16' || cfg.name === 's16b') && pull_number === 2 && fcount === 2)
+      throw Error('synthetic peer final-read files failure');
     if ((cfg.name === 's14' || cfg.name === 's14b') && pull_number === 2) throw null;
     return [{{filename: `file-${{pull_number}}`}}];
   }},
@@ -217,6 +223,9 @@ async function fakeRunValidator(input) {{
           peers: input.peers.map(peer => peerResult(peer, true))}}}}
       : {{run: {{status: 0}}, result: {{decision: 'PASS', packet: {{scenario: cfg.name}},
           peers: input.peers.map(peer => peerResult(peer, true))}}}};
+  if (cfg.name === 's16b' && input.target)
+    return {{run: {{status: 0}}, result: {{decision: 'PASS', packet: {{scenario: cfg.name}},
+      peers: input.peers.map(peer => peerResult(peer, peer.pr_number !== cfg.invalidPr))}}}};
   if (input.target)
     return {{run: {{status: 0}}, result: {{decision: 'PASS', packet: {{scenario: cfg.name}},
       peers: input.peers.map(peer => peerResult(peer, true))}}}};
@@ -357,6 +366,39 @@ def test_behavioral_s15_partial_target_resnapshot_fails_the_observed_live_tuple(
         (2, "base-2", "head-2"),
     }
     assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
+
+
+_PARTIAL_PEER_FINAL_READ_FAILURES = {
+    (1, "base-1", "head-1"),
+    (2, "base-2", "head-2"),
+    (2, "base-2", "head-2-live"),
+}
+
+
+def test_behavioral_s16_partial_preserved_peer_final_read_fails_the_observed_live_tuple():
+    # A preserved peer's final-read snapshot observes a force-pushed head, then a
+    # later read inside snapshot() fails: the original AND the observed tuple
+    # fail, and the helper's throw still resets every known snapshot.
+    result = _run_workflow_scenario("s16")
+    assert _failure_tuples(result) == _PARTIAL_PEER_FINAL_READ_FAILURES
+    assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
+
+
+def test_behavioral_s16b_partial_invalid_peer_final_read_fails_the_observed_live_tuple():
+    # Same partial failure inside the invalid-peer final read.
+    result = _run_workflow_scenario("s16b")
+    assert _failure_tuples(result) == _PARTIAL_PEER_FINAL_READ_FAILURES
+    assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
+
+
+def test_final_read_helpers_recover_the_carried_live_tuple():
+    workflow = _workflow_under_test().read_text(encoding="utf-8")
+    needle = "if (!currentTuple && error?.liveTuple)"
+    invalid = workflow.index("const finalReadInvalidPeers")
+    preserved = workflow.index("const finalReadPreservedPeers")
+    after = workflow.index("const repository = await github.rest.repos.get")
+    assert workflow.count(needle) == 2
+    assert invalid < workflow.index(needle) < preserved < workflow.rindex(needle) < after
 
 
 def test_behavioral_s12_state_invalidated_prior_packet_still_blocks_replay():
