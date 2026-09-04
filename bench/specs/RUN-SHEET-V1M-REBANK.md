@@ -27,8 +27,9 @@ empirically, and is the single discharge event named by the OPEN rows in `bench/
   registration (RUN-SHEET-V1M-RERANK-ON lineage).
 
 ## 2. Design (= F53's declared config; nothing else moves)
-- Dataset `longmemeval_m` (sha fb5413e3…, HF revision 2ec2a557…, prepared-m manifest 300cf936… — pinned in
-  PREP-V1-MEDIUM-DATASET.md; the prepared-dir manifest verifies per-question shas fail-closed). 500 questions.
+- Dataset `longmemeval_m` (sha fb5413e3… and HF revision 2ec2a557… pinned in PREP-V1-MEDIUM-DATASET.md; prepared-m
+  manifest 300cf936… pinned in FINDING-F53's pins and the scoreboard row; the prepared-dir manifest verifies
+  per-question shas fail-closed). 500 questions.
 - 6 shards, fixed interleave qid[i::6] (`prepared-m-shards/shard-K`), 5-minute launch stagger, own
   `HERMES_HOME` / `TMPDIR` / output dir per shard (the F53 `run_shard.sh` topology, re-parametrised for the
   new worktree — shard topology is operational, not measured surface).
@@ -57,7 +58,8 @@ Keychain at runtime, never in configs or logs; embed-cache path + size + mtime b
    `protect_embedding_text` returned `changed=True` or raised, measured by a full prewarm pass over
    `prepared-m` under the declared posture (input-hash parity with the F53-era cache). This is the ledger
    discharge measurement for the #366 / #374 / #384-#391 rows: **0 ⇒ inert for this corpus**; >0 ⇒ the
-   boundary is live and the metric delta is attributed to it.
+   boundary is live and the metric delta is attributed to it. Only prepared-corpus DOCUMENTS count: query-text
+   transforms are tracked in separate `queries*` counters, reported alongside but never part of this bar.
 3. Reproducibility verdict vs the banked F53 row, three pre-declared outcomes:
    - **REPRODUCED** — transform-change count 0 AND per-question results identical to F53's on-disk outputs
      (`lme-runs/m-full2-shard-*`) — then the F53 row is confirmed on the current instrument and the successor
@@ -66,8 +68,15 @@ Keychain at runtime, never in configs or logs; embed-cache path + size + mtime b
      whose corpus documents changed — successor row banked; F53 annotated "pre-#332, superseded" (#380).
    - **MOVED-UNEXPLAINED** — deltas on questions with no changed documents — instrument drift: STOP, do not
      bank, root-cause first (compare candidates via `--dump-candidates`).
-4. Corpus-count parity vs F53 (#203/#177 rows): per-question ingested message/node/chunk counts must match
-   F53's per-question outputs exactly; any delta is disclosed and blocks the #203/#177 discharge.
+4. Corpus identity vs F53 (#203/#177 rows). F53 recorded NO per-question message/node/chunk counts (its checkpoint
+   records carry only abstention/arms/category/ingest_ms/question_id/rerank_mode, and each question database was
+   deleted after scoring), so per-question count parity CANNOT be executed against F53. The executable identity
+   check is the embed-cache pair, at two levels: (a) prewarm — every unique post-transform request unit hits the
+   F53 cache (misses 0; the F53 cache holds 505,695 entries), which proves corpus identity AND a no-op transform in
+   one number; (b) run — each shard's `ingest.embed_cache` {hits, misses} equals F53's per-shard pair (shards 0–5:
+   398,139 / 397,857 / 390,572 / 389,980 / 394,388 / 390,617 hits, 2,361,553 total, 0 misses everywhere). Any miss
+   is a changed or new document and must reconcile with §4.2. This run's per-question `corpus_counts` are recorded
+   as the FORWARD baseline for future rows; the #203/#177 discharge = the cache-pair result + that baseline.
 5. A/A′: discordance count + aggregate spread; given a deterministic retrieval metric any discordance is a
    finding, not noise.
 6. Negative results ship at the same resolution as positive.
@@ -87,14 +96,18 @@ only. OpenRouter: not used.
 - `#332/#333/#338` trio row → posture recorded (durable lossless + provider-copy transform on) and F53
   reproducibility settled per §4.3.
 - `#199` → full-500 confirmation (subset already bitwise).  `#245` → zero-moved-rows confirmation.
-- `#203` / `#177` → corpus-count parity check result (§4.4).  `#173` / `#183` / `#297` → next full-500 row.
+- `#203` / `#177` → cache-pair identity result + forward `corpus_counts` baseline (§4.4).  `#173` / `#183` / `#297` →
+  next full-500 row.
 - `#366`, `#374`, `#384/#391` (v0.23.2 train rows) → transform-change count (§4.2).
 - `#364` → expected-inert: compaction counts unchanged vs F53 (single-writer harness).
 
 ## 7. Abort / park criteria
 - >2 shards dead of the same cause → park, root-cause first (no blind restarts).
 - Voyage 429 sustained >30 min → halve the shard count, document, continue (operational).
-- Any `EmbeddingPrivacyPolicyError` instrument failure → disclosed row-level; >1% of questions → park.
+- Any `EmbeddingPrivacyPolicyError` is fail-loud by design: the pre-launch `prewarm-cache` / `determinism-probe`
+  commands print a `{"status": "blocked", "privacy": …}` report and exit non-zero (park before launch, root-cause);
+  a block inside a shard aborts that shard uncaught, and a `--resume` re-hits the same question → park, root-cause,
+  disclose row-level. There is no percentage threshold: one block is a park.
 - Projected spend > $40 → park before launch (§5).
 - Host reboot / kill → resume with `--resume` per shard (checkpoint verified); no partial results carry
   over across a re-registration.
@@ -111,19 +124,22 @@ only. OpenRouter: not used.
 
 ## 8. Procedure
 1. Merge this sheet (gate: acceptance + independent factual audit). 2. New worktree at `origin/main`;
-record pins (§3). 3. `scripts/lcm_longmemeval.py probe --sample-size 20` → transform-change count + cache
-hit rate on the sample. 4. Full prewarm pass over `prepared-m` → corpus transform-change count, reported by the instrument-only
+record pins (§3). 3. `scripts/lcm_longmemeval.py probe --sample-size 20` → determinism verdict + SAMPLE-scoped privacy
+counts (`privacy_scope: sample`; the probe runs with the embed cache disabled and reports no cache statistics).
+4. Full prewarm pass over `prepared-m` → CORPUS transform-change count (`privacy_scope: corpus`), reported by the instrument-only
 `privacy` counters this registration PR adds to the harness (today every `protect_embedding_text` call site
 discards `changed`, and `EmbeddingPrivacyPolicyError` is never referenced in the harness or driver — a block would
 abort a shard uncounted): `changed` / `blocked` counts in the prewarm and determinism reports and in
 `ingest_report["privacy"]` (NOT the checkpoint header — a new header key breaks resume), plus per-question
 `corpus_counts` (messages / summary nodes / chunks ingested) in each per-question record so future rows have
-a per-question parity field. **Cache-parity proxy for this row:** because the cache key is the sha256 of the
-post-transform text and the F53 cache is fully warm (F53 `ingest.embed_cache = {hits: 398139, misses: 0}`),
-an identical hits/misses pair on this run proves corpus identity AND a no-op transform in one number; any miss
-is a changed or new document and must reconcile with the transform-change count. 5. Six shards via
+a per-question parity field (the forward baseline — F53 has none, §4.4). **Cache-parity proxy for this row:** the
+cache key is the sha256 of the post-transform text and the F53 cache (505,695 entries) is fully warm, so the prewarm
+report's miss count must be 0 (every unique request unit hits), and at run time each shard's `ingest.embed_cache`
+pair must equal F53's per-shard pair (§4.4 — the 398,139 figure is shard 0's, not the run's); any miss is a
+changed or new document and must reconcile with the transform-change count. 5. Six shards via
 the re-parametrised `run_shard.sh`, 5-minute stagger. 6. A/A′ on `prepared-m-aprime100`. 7. **Snapshot raw
 outputs to the session-notes artifacts dir before anything else runs.** 8. Recompute every metric from
-`per_question_checkpoint.jsonl` — never the run's own aggregate. 9. Corpus-count parity vs
-`lme-runs/m-full2-shard-*`. 10. FINDING-F62 + scoreboard row + §6 ledger rows + F53 annotation, one PR
+`per_question_checkpoint.jsonl` — never the run's own aggregate (the aggregate `ingest.privacy` is restored across
+`--resume`, but the checkpoint rows are the record). 9. Per-shard cache-pair parity vs `lme-runs/m-full2-shard-*/`
+`longmemeval_metrics.json` `ingest.embed_cache`; record `corpus_counts` as the forward baseline. 10. FINDING-F62 + scoreboard row + §6 ledger rows + F53 annotation, one PR
 through the gate with an independent audit; #380/#367 close on merge; #252 verdict record.
