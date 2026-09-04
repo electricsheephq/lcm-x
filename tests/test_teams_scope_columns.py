@@ -619,7 +619,10 @@ def test_the_doctor_names_the_stray_stamp_and_its_repair(tmp_path):
         assert "setup_teams_scope" in repair
         assert "persist_teams_enabled(conn, True)" in repair
         assert "persist_teams_enabled(conn, False)" in repair
-        assert "import_lossless_claw" in repair
+        # No shipped importer writes access_scope (import_lossless_claw.py uses
+        # explicit column lists that omit it), so the repair must not name one.
+        assert "import_lossless_claw" not in repair
+        assert "no shipped importer writes access_scope" in repair
     finally:
         dag.close()
         store.close()

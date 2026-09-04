@@ -234,7 +234,13 @@ def read_persisted_teams_enabled(conn: sqlite3.Connection) -> bool | None:
 
 
 def persist_teams_enabled(conn: sqlite3.Connection, enabled: bool) -> None:
-    """Record the operator's enable/disable decision so a restart keeps it."""
+    """Record the operator's enable/disable decision so a restart keeps it.
+
+    The decision is read once, at engine binding. An engine that was already
+    bound when the decision changed keeps the policy it started with for its
+    lifetime -- restart every engine on the store after enabling or disabling
+    Teams.
+    """
 
     ensure_metadata_table(conn)
     conn.execute(
@@ -378,6 +384,12 @@ def bind_startup_teams_state(conn: sqlite3.Connection) -> tuple[bool, str]:
     Only the `never-enabled` answer is cached, and only after the probe proved
     it. Every other answer is already cheap: it comes from the recorded
     decision, or from a probe that stopped at the first stamped row.
+
+    The answer binds the engine for its lifetime: an engine bound before an
+    enable keeps the permissive policy it started with until it is restarted.
+    Every row it can reach is a row it could already reach before the enable
+    began, so this is staleness, not exposure -- but it is why enabling Teams
+    ends with restarting the engines on the store.
     """
 
     enabled, reason = resolve_startup_teams_state(conn)
@@ -1373,9 +1385,9 @@ STRAY_STAMP_REPAIR = (
     "(`hermes_lcm.scope_storage.setup_teams_scope`, which is resumable and "
     "leaves already-stamped rows untouched) and then record the completed "
     "enable with `persist_teams_enabled(conn, True)`, or -- if these stamps "
-    "arrived "
-    "from an importer rather than an enable, `scripts/import_lossless_claw.py` "
-    "being the known one -- record the decision that was never made with "
+    "were written by something other than an enable (no shipped importer "
+    "writes access_scope; look for manual SQL or an external tool) -- record "
+    "the decision that was never made with "
     "`persist_teams_enabled(conn, False)`. Disabling retains the stamps, so a "
     "later enable keeps their attribution. Back the database up first."
 )
