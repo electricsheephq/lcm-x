@@ -311,6 +311,8 @@ def test_cache_cli_subcommands_parse_without_execution():
             "shards",
             "--model",
             "voyage-3-large",
+            "--changed-manifest",
+            "changed.jsonl",
         ]
     )
     probe = cli._parse_args(
@@ -326,6 +328,7 @@ def test_cache_cli_subcommands_parse_without_execution():
     )
 
     assert prewarm.command == "prewarm-cache"
+    assert prewarm.changed_manifest == "changed.jsonl"
     assert probe.command == "determinism-probe"
     assert probe.sample_size == 20
 
@@ -416,9 +419,14 @@ def test_fastembed_prewarm_resolves_with_run_path_warmup(tmp_path, monkeypatch):
             "--model",
             "local-model",
             "--dry-run",
+            "--changed-manifest",
+            str(tmp_path / "changed.jsonl"),
         ]
     )
 
     assert cli._cmd_prewarm_cache(args) == 0
     assert calls == [(("fastembed", "local-model"), {"timeout": 300.0, "warmup": True})]
     assert prewarm_calls and prewarm_calls[0][1]["dry_run"] is True
+    assert prewarm_calls[0][1]["changed_manifest"] == str(
+        tmp_path / "changed.jsonl"
+    )

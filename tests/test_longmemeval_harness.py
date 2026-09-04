@@ -1327,6 +1327,189 @@ class _ProductionContextualIdentityEmbedder(_ContextualIdentityEmbedder):
             )
 
 
+class _FlatOnlyContextualIdentityEmbedder(_ContextualIdentityEmbedder):
+    def embed_chunk_group_batches(self, groups, *, before_dispatch=None):
+        raise AssertionError("grouped embedding must not be called in flat mode")
+
+
+def _chunk_mode_question(question_id="q-chunk-mode"):
+    return parse_question(
+        _make_raw(
+            question_id,
+            "single-session-user",
+            sessions={
+                "s-evidence": [
+                    {
+                        "role": "user",
+                        "content": "chunk embedding mode evidence " * 40,
+                        "has_answer": True,
+                    }
+                ]
+            },
+            answer_session_ids=["s-evidence"],
+            question="where is the chunk embedding mode evidence",
+        )
+    )
+
+
+def _install_provider_set(monkeypatch, summary, chunk):
+    import benchmarking.longmemeval as lme
+
+    provider_set = lme.HarnessProviderSet(
+        summary=summary,
+        chunk=chunk,
+        summary_binding=("voyage", summary.model_id),
+        chunk_binding=("voyage", chunk.model_id),
+    )
+    monkeypatch.setattr(
+        lme, "resolve_harness_providers", lambda *_args, **_kwargs: provider_set
+    )
+
+
+def test_flat_mode_forces_grouping_provider_through_flat_cacheable_path(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, "flat")
+    monkeypatch.setattr(lme, "production_recall_hits", lambda *_args, **_kwargs: [])
+    summary = _IdentityEmbedder("voyage-4-large")
+    chunk = _FlatOnlyContextualIdentityEmbedder("voyage-context-4")
+    _install_provider_set(monkeypatch, summary, chunk)
+
+    report = run_harness(
+        [_chunk_mode_question()],
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path,
+        reuse_db_template=False,
+    )
+
+    assert chunk.document_calls > 0
+    assert report["ingest"]["chunk_embedding_mode"] == "flat"
+
+
+def test_auto_mode_uses_contextual_grouping_without_cache(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, "auto")
+    monkeypatch.setattr(lme, "production_recall_hits", lambda *_args, **_kwargs: [])
+    summary = _IdentityEmbedder("voyage-4-large")
+    chunk = _ContextualIdentityEmbedder("voyage-context-4")
+    _install_provider_set(monkeypatch, summary, chunk)
+
+    report = run_harness(
+        [_chunk_mode_question()],
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path,
+        reuse_db_template=False,
+    )
+
+    assert chunk.contextual_groups
+    assert chunk.document_calls == 0
+    assert report["ingest"]["chunk_embedding_mode"] == "contextual"
+
+
+@pytest.mark.parametrize("mode", ["auto", "contextual"])
+def test_contextual_cache_conflict_fails_loud(tmp_path, monkeypatch, mode):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, mode)
+    raw = _FlatOnlyContextualIdentityEmbedder("voyage-context-4")
+    cached = lme.ContentHashEmbeddingCache(raw, tmp_path / f"{mode}.sqlite3")
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "contextual chunk grouping is not cache-backed: set "
+            "LCM_LONGMEMEVAL_CHUNK_EMBEDDING_MODE=flat or unset "
+            "LCM_LONGMEMEVAL_EMBED_CACHE"
+        ),
+    ):
+        evaluate_question(
+            _chunk_mode_question(f"q-{mode}-cache"),
+            _IdentityEmbedder("voyage-4-large"),
+            chunk_provider=cached,
+            provider_name="voyage",
+            tmp_dir=tmp_path,
+            embeddings_enabled=True,
+        )
+
+    assert raw.document_calls == 0
+    assert cached.hits == 0
+    assert cached.misses == 0
+
+
+def test_flat_mode_uses_wrapped_contextual_provider_cache(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+
+    cache_path = tmp_path / "flat.sqlite3"
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, "flat")
+    monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(cache_path))
+    monkeypatch.setattr(lme, "production_recall_hits", lambda *_args, **_kwargs: [])
+    summary = _IdentityEmbedder("voyage-4-large")
+    raw = _FlatOnlyContextualIdentityEmbedder("voyage-context-4")
+    cached = lme.ContentHashEmbeddingCache(raw, cache_path)
+    _install_provider_set(monkeypatch, summary, cached)
+
+    report = run_harness(
+        [_chunk_mode_question("q-flat-cache")],
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path,
+        reuse_db_template=False,
+    )
+
+    assert raw.document_calls > 0
+    assert cached.misses > 0
+    assert report["ingest"]["embed_cache"]["misses"] == cached.misses
+    assert report["ingest"]["chunk_embedding_mode"] == "flat"
+
+
+def test_contextual_mode_requires_grouping_capability(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, "contextual")
+    with pytest.raises(
+        ValueError,
+        match=(
+            "contextual chunk embedding requested but the chunk provider does not "
+            "support contextualized grouping"
+        ),
+    ):
+        evaluate_question(
+            _chunk_mode_question("q-contextual-unsupported"),
+            _IdentityEmbedder("voyage-4-large"),
+            provider_name="voyage",
+            tmp_dir=tmp_path,
+            embeddings_enabled=True,
+        )
+
+
+def test_bad_chunk_embedding_mode_fails_loud(monkeypatch):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, "surprise")
+    with pytest.raises(ValueError, match="auto, flat, contextual"):
+        lme._chunk_embedding_mode()
+
+
+def test_prewarm_rejects_contextual_mode(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, "contextual")
+    cached = lme.ContentHashEmbeddingCache(
+        _ContextualIdentityEmbedder("voyage-context-4"),
+        tmp_path / "prewarm-contextual.sqlite3",
+    )
+    with pytest.raises(
+        ValueError,
+        match="prewarm-cache populates flat chunk units; contextual mode is not cache-backed",
+    ):
+        lme.prewarm_embedding_cache([_chunk_mode_question()], cached)
+
+
 class _CapturingIdentityEmbedder(_IdentityEmbedder):
     def __init__(self, model_id, *, provider_id="voyage"):
         super().__init__(model_id)
@@ -1497,6 +1680,37 @@ def test_cloud_query_is_protected_before_provider_dispatch(tmp_path, monkeypatch
     assert scored["privacy"]["queries_changed"] == 2
 
 
+def test_query_dispatch_validator_block_increments_query_counter(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+    from hermes_lcm import ingest_protection
+    from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
+
+    query = "query validator refusal token"
+
+    def _validator(texts, *_args, **_kwargs):
+        if list(texts) == [query]:
+            raise EmbeddingPrivacyPolicyError("privacy policy blocked query dispatch")
+
+    monkeypatch.setattr(
+        ingest_protection, "validate_embedding_privacy_dispatch", _validator
+    )
+    provider = _CapturingIdentityEmbedder("voyage-4-large")
+
+    with pytest.raises(EmbeddingPrivacyPolicyError) as raised:
+        evaluate_question(
+            _privacy_question("q-query-validator-block", question=query),
+            provider,
+            chunk_provider=provider,
+            provider_name="voyage",
+            tmp_dir=tmp_path,
+            embeddings_enabled=True,
+        )
+
+    assert raised.value.privacy_counts["queries_blocked"] == 1
+    assert raised.value.privacy_counts["blocked"] == 0
+    assert provider.captured_queries == []
+
+
 def test_stub_query_reaches_provider_byte_identical(tmp_path, monkeypatch):
     import benchmarking.longmemeval as lme
 
@@ -1563,6 +1777,74 @@ def test_prewarm_reports_privacy_transform_counts(tmp_path, monkeypatch):
     outbound = _flatten_document_calls(raw)
     assert _PRIVACY_PLACEHOLDER in outbound[1]
     assert _PRIVACY_SECRET not in outbound[1]
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_prewarm_changed_manifest_records_exact_transformed_unit(
+    tmp_path, monkeypatch, dry_run
+):
+    import benchmarking.longmemeval as lme
+    from hermes_lcm.ingest_protection import protect_embedding_text
+
+    documents = ["ordinary document", "password: hunter2000abc"]
+    monkeypatch.setattr(
+        lme,
+        "iter_ingest_embedding_request_units",
+        lambda _question: iter(documents),
+    )
+    raw = _CapturingIdentityEmbedder("voyage-context-4")
+    cached = lme.ContentHashEmbeddingCache(raw, tmp_path / "manifest-cache.sqlite3")
+    manifest = tmp_path / "nested" / "changed.jsonl"
+
+    report = lme.prewarm_embedding_cache(
+        [_privacy_question("q-changed-manifest")],
+        cached,
+        dry_run=dry_run,
+        changed_manifest=manifest,
+    )
+
+    rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()]
+    privacy_config, privacy_revision = lme._embedding_privacy_context(
+        "voyage", "voyage-context-4"
+    )
+    protected, _revision, changed = protect_embedding_text(
+        documents[1],
+        privacy_config,
+        expected_revision=privacy_revision,
+    )
+    assert changed is True
+    assert rows == [
+        {
+            "question_id": "q-changed-manifest",
+            "unit_index": 1,
+            "raw_sha256": cached.content_sha256(documents[1]),
+            "protected_sha256": cached.content_sha256(protected),
+        }
+    ]
+    assert report["changed_manifest"] == str(manifest)
+    assert report["changed_units"] == report["privacy"]["changed"] == 1
+    assert report["chunk_embedding_mode"] == "flat"
+
+
+def test_prewarm_changed_manifest_stays_empty_without_transform(tmp_path):
+    import benchmarking.longmemeval as lme
+
+    manifest = tmp_path / "unchanged.jsonl"
+    cached = lme.ContentHashEmbeddingCache(
+        lme.StubEmbedder(),
+        tmp_path / "unchanged-cache.sqlite3",
+        provider_id="stub",
+        model_id="stub-hash-64",
+    )
+
+    report = lme.prewarm_embedding_cache(
+        [_chunk_mode_question("q-unchanged-manifest")],
+        cached,
+        changed_manifest=manifest,
+    )
+
+    assert report["changed_units"] == report["privacy"]["changed"] == 0
+    assert manifest.read_text(encoding="utf-8") == ""
 
 
 def test_prewarm_privacy_block_is_counted_and_reraised(tmp_path, monkeypatch):
@@ -1647,6 +1929,40 @@ def test_determinism_probe_privacy_counts_are_sample_scoped(tmp_path):
     assert report["privacy_scope"] == "sample"
     assert report["privacy"]["documents"] == 1
     assert report["privacy"]["changed"] == 1
+
+
+def test_determinism_validator_block_counts_sample_batch(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+    from hermes_lcm import ingest_protection
+    from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
+
+    question = parse_question(
+        _make_raw(
+            "q-determinism-validator-block",
+            "single-session-user",
+            sessions={
+                f"s{index}": [
+                    {"role": "user", "content": f"unique session {index}"}
+                ]
+                for index in range(3)
+            },
+            answer_session_ids=["s0"],
+        )
+    )
+
+    def _blocked(*_args, **_kwargs):
+        raise EmbeddingPrivacyPolicyError("privacy policy blocked probe dispatch")
+
+    monkeypatch.setattr(
+        ingest_protection, "validate_embedding_privacy_dispatch", _blocked
+    )
+    with pytest.raises(EmbeddingPrivacyPolicyError) as raised:
+        lme.embedding_determinism_report(
+            [question], _CapturingIdentityEmbedder("voyage-4-large"), sample_size=3
+        )
+
+    assert raised.value.privacy_counts["blocked"] == 3
+    assert raised.value.privacy_counts["documents"] == 3
 
 
 def test_determinism_probe_block_counts_even_during_uncounted_scan(tmp_path, monkeypatch):
@@ -1753,6 +2069,54 @@ def test_per_question_privacy_and_corpus_counts_resume_without_header_change(tmp
     resumed_header_line = checkpoint.read_text(encoding="utf-8").splitlines()[0]
     assert resumed_header_line == header_line
     assert set(json.loads(resumed_header_line)) == {"__checkpoint_header__"}
+
+
+@pytest.mark.parametrize(
+    ("error_message", "should_raise"),
+    [("no such table: lcm_chunk_meta", False), ("database is locked", True)],
+)
+def test_chunk_count_only_swallows_missing_table_operational_error(
+    tmp_path, monkeypatch, error_message, should_raise
+):
+    import benchmarking.longmemeval as lme
+    import hermes_lcm.vector_store as vector_store_module
+
+    real_vector_store = vector_store_module.VectorStore
+
+    class _ConnectionProxy:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, sql, *args, **kwargs):
+            if "lcm_chunk_meta" in str(sql):
+                raise sqlite3.OperationalError(error_message)
+            return self._connection.execute(sql, *args, **kwargs)
+
+    class _VectorStoreProxy:
+        def __init__(self, *args, **kwargs):
+            self._inner = real_vector_store(*args, **kwargs)
+            self.connection = _ConnectionProxy(self._inner.connection)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def close(self):
+            self._inner.close()
+
+    monkeypatch.setattr(vector_store_module, "VectorStore", _VectorStoreProxy)
+    question = _chunk_mode_question(f"q-operational-{should_raise}")
+    kwargs = {
+        "provider_name": "stub",
+        "tmp_dir": tmp_path,
+        "embeddings_enabled": False,
+    }
+
+    if should_raise:
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            evaluate_question(question, lme.StubEmbedder(), **kwargs)
+    else:
+        scored = evaluate_question(question, lme.StubEmbedder(), **kwargs)
+        assert scored["corpus_counts"]["chunks"] == 0
 
 
 def test_resume_restores_legacy_three_key_privacy_rows(tmp_path):

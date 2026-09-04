@@ -167,6 +167,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Report uncached embedding units without populating the cache.",
     )
+    prewarm.add_argument(
+        "--changed-manifest",
+        metavar="PATH",
+        help="Append one JSONL record for each privacy-transformed request unit.",
+    )
 
     probe = sub.add_parser(
         "determinism-probe",
@@ -418,6 +423,7 @@ def _cmd_prewarm_cache(args: argparse.Namespace) -> int:
                 f"prewarm processed={processed}", flush=True
             ),
             dry_run=args.dry_run,
+            changed_manifest=args.changed_manifest,
         )
     except EmbeddingPrivacyPolicyError as exc:
         privacy = getattr(exc, "privacy_counts", None)

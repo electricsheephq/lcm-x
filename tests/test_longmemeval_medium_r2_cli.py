@@ -233,6 +233,11 @@ def test_dispatch_validator_block_report_contains_all_privacy_keys(tmp_path, mon
     )
     monkeypatch.setattr(cli, "_prepared_shard_questions", lambda _args: iter([question]))
     monkeypatch.setattr(
+        lme,
+        "iter_ingest_embedding_request_units",
+        lambda _question: iter(["first", "second", "third"]),
+    )
+    monkeypatch.setattr(
         cli,
         "resolve_harness_provider",
         lambda *_args, **_kwargs: lme.ContentHashEmbeddingCache(
@@ -266,6 +271,7 @@ def test_dispatch_validator_block_report_contains_all_privacy_keys(tmp_path, mon
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "blocked"
     assert set(payload["privacy"]) == set(lme._PRIVACY_KEYS)
+    assert payload["privacy"]["blocked"] == 3
 
 
 def test_determinism_privacy_block_is_a_durable_cli_report(tmp_path, monkeypatch, capsys):

@@ -2,7 +2,7 @@
 
 Status: REGISTERED before spend — this sheet is the registration (#380; closes the remaining scope of
 #367). Verdict channel: #252. Architect: registration written under the owner's delegation rule
-(2026-09-05): re-running a registered design on the shipped tree cannot move a banked row (append-only
+(2026-09-05, Asia/Bangkok calendar — UTC+7; commit timestamps carry the UTC instant): re-running a registered design on the shipped tree cannot move a banked row (append-only
 successor row), so the ≥95% bar is met for benchmark integrity; the sequencing choice (re-bank before B3-A
 productization) is a product-priority call the owner may override.
 
@@ -19,12 +19,21 @@ empirically, and is the single discharge event named by the OPEN rows in `bench/
 - **(a) Production path.** Harness constructs `LCMConfig(sensitive_patterns_enabled=False,
   embedding_privacy_enabled=None)` — durable store lossless, provider copies protected because the provider
   is cloud (`voyage`). This is the only posture the harness supports (there is no raw switch); it is also the
-  posture production ships. Row label: **post-#352 instrument · production privacy posture · privacy:v3**.
+  posture production ships. Row label: **post-#352 tree · F53 chunk semantics (flat) · production privacy posture · privacy:v3**.
 - The privacy revision (`privacy:v3:<sha256 of the sorted active pattern names>`) is written into the
   checkpoint header by the harness and validated on resume; the run's pins record the exact string.
 - **Rerank-protection boundary (#371/#374): NOT exercised.** The primary arm runs without `--recall-rerank`,
   exactly as F53's primary arm did, so the row stays comparable to F53. A rerank-protected row is a separate
   registration (RUN-SHEET-V1M-RERANK-ON lineage).
+- **Chunk-embedding mode (F53 semantics): `LCM_LONGMEMEVAL_CHUNK_EMBEDDING_MODE=flat`, recorded by the harness as
+  `ingest.chunk_embedding_mode`.** F53 (2026-08-19) embedded every chunk independently through the content-hash cache.
+  The #352 instrument change (e38ac74b, 2026-08-24) added contextualized chunk grouping (`embed_chunk_group_batches`)
+  for Voyage context models — `voyage-context-3` advertises it — which the cache wrapper cannot serve: an unpinned
+  cached run would have taken the grouped path on the raw provider (paid, invisible to the cache pair) and embedded
+  contextual vectors F53 never had, breaking §4.4 and §5 by construction. This row therefore holds chunk semantics
+  constant and varies ONE thing — the privacy posture; the harness refuses (fails loud) any cached run that would need
+  the grouped path, in every mode. Contextual grouping is a separate registration (it needs cache support for grouped
+  requests and its own cost basis).
 
 ## 2. Design (= F53's declared config; nothing else moves)
 - Dataset `longmemeval_m` (sha fb5413e3… and HF revision 2ec2a557… pinned in PREP-V1-MEDIUM-DATASET.md; prepared-m
@@ -67,9 +76,14 @@ Keychain at runtime, never in configs or logs; embed-cache path + size + mtime b
    - **REPRODUCED-TRANSFORM-INERT** — transform-change count >0 AND per-question results identical to F53's
      on-disk outputs — the F53 row is confirmed on the current instrument and the boundary is recorded as
      live-but-inert for retrieval on this corpus; the successor row records "post-#352 · reproduced; transform
-     live, retrieval-inert" and the finding publishes the changed-document list so the inertness is checkable.
-   - **MOVED-EXPLAINED** — transform-change count >0 and the per-question deltas are confined to questions
-     whose corpus documents changed — successor row banked; F53 annotated "pre-#332, superseded" (#380).
+     live, retrieval-inert" and the finding publishes the changed-document manifest (question id + raw/protected unit
+     digests per changed unit, written by `prewarm-cache --changed-manifest` during the dry run) so the inertness is checkable.
+   - **MOVED-EXPLAINED** — transform-change count >0, at least one per-question delta, and every delta is on a question
+     whose own checkpoint row shows a live transform (`privacy.changed > 0` — a corpus document changed — or
+     `privacy.queries_changed > 0` — its provider-bound query text changed; query transforms never touch the embed
+     cache pair but can move retrieval, so they are an explanation, not drift), cross-checked against the dry-run's
+     changed-document manifest (`prewarm-cache --changed-manifest`) — successor row banked; F53 annotated
+     "pre-#332, superseded" (#380).
    - **MOVED-UNEXPLAINED** — deltas on questions with no changed documents — instrument drift: STOP, do not
      bank, root-cause first (compare candidates via `--dump-candidates`).
 4. Corpus identity vs F53 (#203/#177 rows). F53 recorded NO per-question message/node/chunk counts (its checkpoint
@@ -96,7 +110,8 @@ post-transform text, so cost is driven entirely by the transform-change count: 0
 questions). **Cost cap: $40 Voyage.** Order of operations enforces it: the 20-sample determinism probe (sample-scoped
 transform count; runs without the cache and reports no hit rate) and then `prewarm-cache --dry-run` (cache lookups + privacy validation only — no embedding call, no spend) run
 FIRST and report the transform-change count and `would_populate`, the exact number of request units the real
-prewarm would embed; projected spend = `would_populate` × the per-unit basis above. If it exceeds the cap the
+prewarm would embed; projected spend = `would_populate` × **$40 / 505,695 ≈ $0.0000791 per request unit** (the cap divided
+by the full-corpus worst case — conservative: it prices a full re-embed at exactly the cap). If it exceeds the cap the
 run is PARKED and reported before the real prewarm or any shard launches — the real `prewarm-cache` embeds
 every miss as it goes, so it is never the first spend-bearing step. Only after the dry-run clears the cap does
 the real prewarm run (expected `populated == 0`). Public V1-M data
@@ -138,9 +153,9 @@ only. OpenRouter: not used.
 record pins (§3). 3. `scripts/lcm_longmemeval.py determinism-probe --sample-size 20` → determinism verdict + SAMPLE-scoped privacy
 counts (`privacy_scope: sample`; the probe runs with the embed cache disabled and reports no cache statistics).
 4. Full prewarm pass over `prepared-m` → CORPUS transform-change count (`privacy_scope: corpus`), reported by the instrument-only
-`privacy` counters this registration PR adds to the harness (today every `protect_embedding_text` call site
-discards `changed`, and `EmbeddingPrivacyPolicyError` is never referenced in the harness or driver — a block would
-abort a shard uncounted): `changed` / `blocked` counts in the prewarm and determinism reports and in
+`privacy` counters this registration PR adds to the harness (baseline at the merge-base 0301405b, BEFORE this PR: every
+`protect_embedding_text` call site discarded `changed`, and `EmbeddingPrivacyPolicyError` was never referenced in the
+harness or driver — a block would have aborted a shard uncounted; this PR replaces that state): `changed` / `blocked` counts in the prewarm and determinism reports and in
 `ingest_report["privacy"]` (NOT the checkpoint header — a new header key breaks resume), plus per-question
 `corpus_counts` (messages / summary nodes / chunks ingested) and per-question `embed_cache` {hits, misses}
 deltas in each per-question record so future rows have per-question parity fields (the forward baseline —
