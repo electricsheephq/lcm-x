@@ -332,6 +332,11 @@ jobs:
                   await finalReadInvalidPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
                   await finalReadPreservedPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
                 } catch (error) {
+                  // A re-snapshot that observed a drifted target head before a later
+                  // read failed still carries that tuple; it fails with the dispatch
+                  // tuple below instead of keeping whatever check it already holds.
+                  if (error?.liveTuple && !resnapshotTuple)
+                    resnapshotTuple = [error.liveTuple.base_sha, error.liveTuple.head_sha];
                   const writeFailures = await failKnownSnapshots(snapshots.concat(reconciled.listedTuples),
                     `Peer reconciliation validation failed closed: ${error.message}`);
                   const suffix = writeFailures.length ? `; failure writes: ${writeFailures.join(',')}` : '';

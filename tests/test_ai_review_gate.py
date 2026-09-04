@@ -83,6 +83,7 @@ def _run_workflow_scenario(
         "s13": {"dispatch": True, "prs": [1, 2], "target": 1},
         "s14": {"dispatch": True, "prs": [1, 2], "target": 1},
         "s14b": {"dispatch": False, "prs": [1, 2]},
+        "s15": {"dispatch": True, "prs": [1, 2], "target": 1},
     }
     config = {"name": name, **scenarios[name]}
     script = _extract_reconcile_script(workflow_path or _workflow_under_test())
@@ -103,6 +104,7 @@ if (cfg.name === 's12')
     head_sha: 'head-1', status: 'completed', conclusion: 'success', app: {{id: 15368}},
     output: {{summary: JSON.stringify({{dispatch_id: 'dispatch-fresh'}})}}}});
 const pullCalls = new Map();
+const filesCalls = new Map();
 let branchCalls = 0;
 let nextCheckId = 1;
 const original = number => ({{number, base: {{ref: 'main', sha: `base-${{number}}`}},
@@ -136,7 +138,7 @@ const pullsApi = {{
     if (cfg.name === 's9' && pull_number === cfg.target && count === 3)
       throw Error('synthetic target re-snapshot failure');
     const data = original(pull_number);
-    if (cfg.name === 's11' && pull_number === cfg.target && count === 3)
+    if (['s11', 's15'].includes(cfg.name) && pull_number === cfg.target && count === 3)
       data.head.sha = `head-${{pull_number}}-live`;
     if ((cfg.name === 's5' || cfg.name === 's7') && pull_number === cfg.target && count >= 4)
       data.head.sha = `head-${{pull_number}}-live`;
@@ -144,7 +146,12 @@ const pullsApi = {{
     return {{data}};
   }},
   listFiles: async ({{pull_number}}) => {{
+    const fcount = (filesCalls.get(pull_number) || 0) + 1;
+    filesCalls.set(pull_number, fcount);
     if (cfg.name === 's13' && pull_number === 2) throw Error('synthetic peer files failure');
+    // The target's SECOND files read is the one inside the re-snapshot.
+    if (cfg.name === 's15' && pull_number === cfg.target && fcount === 2)
+      throw Error('synthetic target re-snapshot files failure');
     if ((cfg.name === 's14' || cfg.name === 's14b') && pull_number === 2) throw null;
     return [{{filename: `file-${{pull_number}}`}}];
   }},
@@ -334,6 +341,20 @@ def test_behavioral_s11_resnapshot_drifted_tuple_is_failed_on_rejection():
     assert _failure_tuples(result) == {
         (1, "base-1", "head-1"),
         (1, "base-1", "head-1-live"),
+    }
+    assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
+
+
+def test_behavioral_s15_partial_target_resnapshot_fails_the_observed_live_tuple():
+    # The target re-snapshot's pulls.get observes a force-pushed head, then a
+    # later read inside snapshot() fails. Infra class: every known snapshot
+    # resets, AND the drifted tuple the re-snapshot observed must fail too,
+    # rather than keeping whatever exact-head check that head already holds.
+    result = _run_workflow_scenario("s15")
+    assert _failure_tuples(result) == {
+        (1, "base-1", "head-1"),
+        (1, "base-1", "head-1-live"),
+        (2, "base-2", "head-2"),
     }
     assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
 
