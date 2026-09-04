@@ -86,35 +86,50 @@ jobs:
             const snapshot = async (prNumber, defaultBranch) => {
               const live = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
               const pr = live.data;
-              const files = await listFiles(prNumber);
-              const unresolved = await unresolvedThreads(prNumber);
-              const timeline = await listTimeline(prNumber);
-              const checks = await listTrustedChecks(pr.head.sha);
-              return {repository: `${owner}/${repo}`, pr_number: pr.number,
-                base_ref: pr.base.ref, base_sha: pr.base.sha, head_sha: pr.head.sha,
-                changed_paths: files, timeline_events: timeline,
-                unresolved_threads: unresolved, check_runs: checks,
-                api_complete: true, pagination_complete: true,
-                draft: pr.draft, state: pr.state, default_branch: defaultBranch};
+              try {
+                const files = await listFiles(prNumber);
+                const unresolved = await unresolvedThreads(prNumber);
+                const timeline = await listTimeline(prNumber);
+                const checks = await listTrustedChecks(pr.head.sha);
+                return {repository: `${owner}/${repo}`, pr_number: pr.number,
+                  base_ref: pr.base.ref, base_sha: pr.base.sha, head_sha: pr.head.sha,
+                  changed_paths: files, timeline_events: timeline,
+                  unresolved_threads: unresolved, check_runs: checks,
+                  api_complete: true, pagination_complete: true,
+                  draft: pr.draft, state: pr.state, default_branch: defaultBranch};
+              } catch (error) {
+                // The live tuple was already read: carry it so a partial failure
+                // fails the head that is actually live, not only the listed one.
+                if (error && typeof error === 'object')
+                  error.liveTuple = {base_ref: pr.base.ref, base_sha: pr.base.sha,
+                    head_sha: pr.head.sha, state: pr.state, draft: pr.draft};
+                throw error;
+              }
             };
             const reconcileOpenPullRequests = async (defaultBranch) => {
               const open = await github.paginate(github.rest.pulls.list,
                 {owner, repo, state: 'open', base: defaultBranch, per_page: 100});
-              const snapshots = [], failures = [];
+              const snapshots = [], failures = [], listedTuples = [];
               for (const candidate of open) {
                 try { snapshots.push(await snapshot(candidate.number, defaultBranch)); }
                 catch (error) {
                   failures.push(`${candidate.number}:${error.message}`);
+                  // Prefer the tuple pulls.get observed over the (possibly stale)
+                  // list entry; when they differ, the listed tuple is failed too.
+                  const live = error?.liveTuple;
                   snapshots.push({repository: `${owner}/${repo}`, pr_number: candidate.number,
-                    base_ref: candidate.base?.ref, base_sha: candidate.base?.sha,
-                    head_sha: candidate.head?.sha, state: candidate.state,
-                    draft: candidate.draft, default_branch: defaultBranch,
+                    base_ref: live?.base_ref ?? candidate.base?.ref, base_sha: live?.base_sha ?? candidate.base?.sha,
+                    head_sha: live?.head_sha ?? candidate.head?.sha, state: live?.state ?? candidate.state,
+                    draft: live?.draft ?? candidate.draft, default_branch: defaultBranch,
                     api_complete: false, pagination_complete: false, api_error: true,
                     changed_paths: [], timeline_events: [], check_runs: []});
+                  if (live && candidate.base?.sha && candidate.head?.sha &&
+                      (live.base_sha !== candidate.base.sha || live.head_sha !== candidate.head.sha))
+                    listedTuples.push({pr_number: candidate.number, base_sha: candidate.base.sha, head_sha: candidate.head.sha});
                 }
               }
               if (failures.length) core.setFailed(`Failed to reset PRs: ${failures.join(',')}`);
-              return {snapshots, failures};
+              return {snapshots, failures, listedTuples};
             };
             const failKnownSnapshots = async (snapshots, reason) => {
               const writeFailures = [];
@@ -252,7 +267,7 @@ jobs:
                 if (envelopeValidated.run.status !== 0 || envelopeValidated.result.decision !== 'PASS')
                   throw Error('dispatch packet invalid');
                 if (reconciled.failures.length) {
-                  const writeFailures = await failKnownSnapshots(snapshots,
+                  const writeFailures = await failKnownSnapshots(snapshots.concat(reconciled.listedTuples),
                     'Open PR reconciliation failed closed.');
                   const suffix = writeFailures.length ? `; failure writes: ${writeFailures.join(',')}` : '';
                   throw Error(`open PR reconciliation incomplete${suffix}`);
@@ -316,7 +331,7 @@ jobs:
                   await finalReadInvalidPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
                   await finalReadPreservedPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
                 } catch (error) {
-                  const writeFailures = await failKnownSnapshots(snapshots,
+                  const writeFailures = await failKnownSnapshots(snapshots.concat(reconciled.listedTuples),
                     `Peer reconciliation validation failed closed: ${error.message}`);
                   const suffix = writeFailures.length ? `; failure writes: ${writeFailures.join(',')}` : '';
                   throw Error(`peer reconciliation validation failed: ${error.message}${suffix}`);
@@ -351,7 +366,7 @@ jobs:
                   await finalReadInvalidPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
                   await finalReadPreservedPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
                 } catch (error) {
-                  const writeFailures = await failKnownSnapshots(snapshots,
+                  const writeFailures = await failKnownSnapshots(snapshots.concat(reconciled.listedTuples),
                     `Peer reconciliation validation failed closed: ${error.message}`);
                   const suffix = writeFailures.length ? `; failure writes: ${writeFailures.join(',')}` : '';
                   throw Error(`peer reconciliation validation failed: ${error.message}${suffix}`);

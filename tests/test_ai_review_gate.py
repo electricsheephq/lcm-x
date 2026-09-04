@@ -80,6 +80,7 @@ def _run_workflow_scenario(
         "s10": {"dispatch": True, "prs": [1, 2], "target": 1},
         "s11": {"dispatch": True, "prs": [1, 2], "target": 1},
         "s12": {"dispatch": True, "prs": [1, 2], "target": 1},
+        "s13": {"dispatch": True, "prs": [1, 2], "target": 1},
     }
     config = {"name": name, **scenarios[name]}
     script = _extract_reconcile_script(workflow_path or _workflow_under_test())
@@ -137,9 +138,13 @@ const pullsApi = {{
       data.head.sha = `head-${{pull_number}}-live`;
     if ((cfg.name === 's5' || cfg.name === 's7') && pull_number === cfg.target && count >= 4)
       data.head.sha = `head-${{pull_number}}-live`;
+    if (cfg.name === 's13' && pull_number === 2) data.head.sha = 'head-2-live';
     return {{data}};
   }},
-  listFiles: async ({{pull_number}}) => [{{filename: `file-${{pull_number}}`}}],
+  listFiles: async ({{pull_number}}) => {{
+    if (cfg.name === 's13' && pull_number === 2) throw Error('synthetic peer files failure');
+    return [{{filename: `file-${{pull_number}}`}}];
+  }},
 }};
 const github = {{
   rest: {{
@@ -337,6 +342,19 @@ def test_behavioral_s12_state_invalidated_prior_packet_still_blocks_replay():
     result = _run_workflow_scenario("s12")
     assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
     assert _failure_tuples(result) == {(1, "base-1", "head-1")}
+
+
+def test_behavioral_s13_partial_peer_snapshot_fails_live_and_listed_tuples():
+    # A peer's pulls.get observes a force-pushed head, then a later read in the
+    # same snapshot rejects. The incomplete reconciliation must fail the head
+    # that is actually live (not only the stale list entry) and the listed one.
+    result = _run_workflow_scenario("s13")
+    assert _failure_tuples(result) == {
+        (1, "base-1", "head-1"),
+        (2, "base-2", "head-2-live"),
+        (2, "base-2", "head-2"),
+    }
+    assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
 
 
 def receipt(lane: str, *, risk: str = "routine", reviewer: str | None = None):
@@ -628,7 +646,7 @@ def test_workflow_reconciles_all_open_prs_before_dispatch_evaluation():
     assert "return;" in workflow[dispatch_guard:]
 
 
-def test_incomplete_snapshot_preserves_the_listed_candidate_tuple():
+def test_incomplete_snapshot_prefers_the_observed_live_tuple_over_the_listed_one():
     workflow = (
         REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
     ).read_text(encoding="utf-8")
@@ -641,11 +659,16 @@ def test_incomplete_snapshot_preserves_the_listed_candidate_tuple():
     helper = workflow.index("const failKnownSnapshots = async", failure_snapshot)
     failure_section = workflow[failure_snapshot:helper]
 
-    assert "base_ref: candidate.base?.ref" in failure_section
-    assert "base_sha: candidate.base?.sha" in failure_section
-    assert "head_sha: candidate.head?.sha" in failure_section
-    assert "state: candidate.state" in failure_section
-    assert "draft: candidate.draft" in failure_section
+    # The tuple pulls.get observed wins; the list entry is only the fallback,
+    # and when the two differ the listed tuple is queued to fail as well.
+    assert "base_ref: live?.base_ref ?? candidate.base?.ref" in failure_section
+    assert "base_sha: live?.base_sha ?? candidate.base?.sha" in failure_section
+    assert "head_sha: live?.head_sha ?? candidate.head?.sha" in failure_section
+    assert "state: live?.state ?? candidate.state" in failure_section
+    assert "draft: live?.draft ?? candidate.draft" in failure_section
+    assert "listedTuples.push({pr_number: candidate.number" in failure_section
+    assert "error.liveTuple = {base_ref: pr.base.ref" in workflow[:reconcile]
+    assert workflow.count("failKnownSnapshots(snapshots.concat(reconciled.listedTuples)") == 3
 
 
 def test_dispatch_reconciliation_failure_resets_every_known_snapshot():
