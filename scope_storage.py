@@ -8,6 +8,7 @@ state into an owner attribution for historical rows.
 from __future__ import annotations
 
 import ast
+import logging
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -20,6 +21,9 @@ from .db_bootstrap import (
     ensure_metadata_table,
     mark_migration_step_complete,
 )
+from .sqlite_util import _is_sqlite_locked_error
+
+logger = logging.getLogger(__name__)
 
 # The migration-step name this module owns.  It lived in db_bootstrap on the
 # source branch, but nothing there ever read it -- every use is below.  Keeping
@@ -154,7 +158,13 @@ def teams_enabled(engine: object) -> bool:
 def mark_teams_enabled(engine: object) -> None:
     """Publish the Teams setup completion flag after backfill succeeds."""
 
-    setattr(engine, TEAMS_ENABLED_ATTR, True)
+    _set_teams_enabled(engine, True)
+
+
+def _set_teams_enabled(engine: object, enabled: bool) -> None:
+    """Set the exact policy flag in either direction during storage binding."""
+
+    setattr(engine, TEAMS_ENABLED_ATTR, bool(enabled))
 
 
 # The DURABLE record of the operator's decision. Deliberately not a
@@ -372,14 +382,48 @@ def bind_startup_teams_state(conn: sqlite3.Connection) -> tuple[bool, str]:
 
     enabled, reason = resolve_startup_teams_state(conn)
     if reason == "never-enabled" and not read_never_enabled_cache(conn):
-        ensure_metadata_table(conn)
-        conn.execute(
-            "INSERT INTO metadata(key, value) VALUES(?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (TEAMS_NEVER_ENABLED_METADATA_KEY, "true"),
-        )
-        conn.commit()
+        # Never commit or roll back a transaction owned by the caller. Engine
+        # binding arrives on a committed MessageStore connection; other callers
+        # merely miss this optional cache when they are already in a transaction.
+        if conn.in_transaction:
+            logger.debug("Skipping Teams never-enabled cache inside an active transaction")
+            return enabled, reason
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            if _is_sqlite_locked_error(exc):
+                logger.debug("Skipping Teams never-enabled cache while database is locked")
+                return enabled, reason
+            raise
+        try:
+            marker = read_persisted_teams_marker(conn)
+            stamps_exist = access_scope_stamps_exist(conn)
+            if marker == "absent" and not stamps_exist:
+                ensure_metadata_table(conn)
+                conn.execute(
+                    "INSERT INTO metadata(key, value) VALUES(?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (TEAMS_NEVER_ENABLED_METADATA_KEY, "true"),
+                )
+                conn.execute("COMMIT")
+                return False, "never-enabled"
+            conn.execute("ROLLBACK")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        return resolve_startup_teams_state(conn)
     return enabled, reason
+
+
+def _invalidate_never_enabled_cache_in_transaction(conn: sqlite3.Connection) -> None:
+    """Invalidate the startup observation before a stamp batch commits."""
+
+    if _table_exists(conn, "metadata"):
+        conn.execute(
+            "DELETE FROM metadata WHERE key = ?",
+            (TEAMS_NEVER_ENABLED_METADATA_KEY,),
+        )
 
 
 @dataclass(frozen=True)
@@ -732,6 +776,7 @@ def _backfill_session_table(
             f'UPDATE "{table}" SET {ACCESS_SCOPE_COLUMN}=? WHERE rowid=? '
             f'AND {ACCESS_SCOPE_COLUMN} IS NULL', values
         )
+        _invalidate_never_enabled_cache_in_transaction(conn)
         conn.commit()
         # Rows WRITTEN, not rows selected. The UPDATE carries
         # `AND access_scope IS NULL`, so a row a concurrent writer stamped
@@ -829,6 +874,7 @@ def _backfill_joined_table(
             f"AND {ACCESS_SCOPE_COLUMN} IS NULL",
             [(str(row[1]), int(row[0])) for row in rows],
         )
+        _invalidate_never_enabled_cache_in_transaction(conn)
         conn.commit()
         # Progress is guaranteed by the SELECT's own `IS NULL` predicate, not
         # by this count: a row stamped concurrently drops out of the next
@@ -863,6 +909,7 @@ def _backfill_rollup_table(
             f'AND {ACCESS_SCOPE_COLUMN} IS NULL',
             values,
         )
+        _invalidate_never_enabled_cache_in_transaction(conn)
         conn.commit()
         updated += _rows_written(cursor)
 

@@ -323,10 +323,6 @@ _KNOWN_FEATURE_TABLE_PREFIXES = (
     "lcm_assertion",
     "lcm_query",
     "lcm_trajectory",
-    # The Teams catalog is an opt-in family like the rest. Without this entry a
-    # Teams-enabled store reads as carrying tables no known build owns, and the
-    # repair path refuses to repair it.
-    "lcm_teams",
 )
 
 # The known opt-in feature families whose derived tables an interim build may
@@ -1427,7 +1423,14 @@ def ensure_embedding_tables(conn: sqlite3.Connection) -> None:
     )
     from .scope_storage import ensure_scope_columns
 
-    ensure_scope_columns(conn)
+    ensure_scope_columns(
+        conn,
+        tables=(
+            "lcm_embedding_meta",
+            "lcm_embedding_vectors",
+            "lcm_embedding_binary",
+        ),
+    )
 
 
 # The tables and indexes ``ensure_embedding_tables`` is responsible for. Used to
@@ -1692,7 +1695,15 @@ def ensure_chunk_tables(conn: sqlite3.Connection) -> None:
     # Chunk writes also read the source message's scope. A legacy/in-memory
     # caller can create ``messages`` after the core marker, so repair that one
     # source column with a targeted probe rather than reopening the full sweep.
-    ensure_scope_columns(conn, tables=("messages",))
+    ensure_scope_columns(
+        conn,
+        tables=(
+            "messages",
+            "lcm_chunk_meta",
+            "lcm_chunk_vectors",
+            "lcm_chunk_binary",
+        ),
+    )
 
 
 # The tables and indexes ``ensure_chunk_tables`` owns. Verified on chunk-corpus

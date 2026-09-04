@@ -22,10 +22,13 @@ from hermes_lcm.scope_storage import (
     SCOPE_DOCTOR_CHECK,
     TEAMS_NEVER_ENABLED_METADATA_KEY,
     bind_startup_teams_state,
+    clear_never_enabled_cache,
     doctor_scope_check,
     persist_teams_enabled,
     read_never_enabled_cache,
     resolve_startup_teams_state,
+    teams_enabled,
+    verify_scope_storage,
 )
 from hermes_lcm.store import MessageStore
 
@@ -281,6 +284,115 @@ def test_a_never_enabled_store_probes_once_and_never_again(tmp_path):
         store.close()
 
 
+def test_engine_bind_publishes_cache_and_fails_closed_after_a_stamp(tmp_path):
+    """The production bind owns both the cache and the engine policy flag."""
+
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+
+    db_path = tmp_path / "engine-bind.db"
+    engine = LCMEngine(config=LCMConfig(database_path=str(db_path)))
+    engine._store.append("s1", {"role": "user", "content": "hello"})
+    engine.shutdown()
+
+    reopened = LCMEngine(config=LCMConfig(database_path=str(db_path)))
+    try:
+        assert teams_enabled(reopened) is False
+        assert isinstance(policy_for_engine(reopened), TrustedOwnerPolicy)
+        assert reopened._store.connection.execute(
+            "SELECT COUNT(*) FROM metadata WHERE key = ?",
+            (TEAMS_NEVER_ENABLED_METADATA_KEY,),
+        ).fetchone()[0] == 1
+    finally:
+        reopened.shutdown()
+
+    with sqlite3.connect(db_path) as writer:
+        clear_never_enabled_cache(writer)
+        writer.execute("UPDATE messages SET access_scope = 'principal-a'")
+        writer.commit()
+
+    stamped = LCMEngine(config=LCMConfig(database_path=str(db_path)))
+    try:
+        assert teams_enabled(stamped) is True
+        assert isinstance(policy_for_engine(stamped), FailClosedPolicy)
+        assert read_never_enabled_cache(stamped._store.connection) is False
+    finally:
+        stamped.shutdown()
+
+
+def test_cache_publication_and_stamp_commit_are_serialized(tmp_path):
+    """Neither ordering can leave a published cache over a committed stamp."""
+
+    db_path = tmp_path / "interleaving.db"
+    store, dag = _open_stock(db_path)
+    store.append("s1", {"role": "user", "content": "hello"})
+    store.close()
+    dag.close()
+
+    writer = sqlite3.connect(db_path, timeout=0.01)
+    binder = sqlite3.connect(db_path, timeout=0.01)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute("UPDATE messages SET access_scope = 'principal-a'")
+        assert bind_startup_teams_state(binder) == (False, "never-enabled")
+        assert read_never_enabled_cache(binder) is False
+
+        writer.commit()
+        assert bind_startup_teams_state(binder) == (
+            True,
+            "stamped-without-marker",
+        )
+
+        writer.execute("UPDATE messages SET access_scope = NULL")
+        writer.commit()
+        assert bind_startup_teams_state(binder) == (False, "never-enabled")
+        assert read_never_enabled_cache(binder) is True
+
+        assert scope_storage._backfill_session_table(
+            writer,
+            "messages",
+            lambda session_id: "principal-a",
+            batch_size=1,
+        ) == 1
+        assert read_never_enabled_cache(binder) is False
+    finally:
+        binder.close()
+        writer.close()
+
+
+def test_profile_rebind_refreshes_the_teams_flag_in_both_directions(tmp_path):
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+
+    never_home = tmp_path / "never"
+    enabled_home = tmp_path / "enabled"
+    enabled_store, enabled_dag = _open_stock(enabled_home / "lcm.db")
+    persist_teams_enabled(enabled_store.connection, True)
+    enabled_dag.close()
+    enabled_store.close()
+
+    engine = LCMEngine(config=LCMConfig(database_path=""), hermes_home=str(never_home))
+    try:
+        assert teams_enabled(engine) is False
+        engine.on_session_start(
+            "enabled-session",
+            hermes_home=str(enabled_home),
+            platform="cli",
+            context_length=200_000,
+        )
+        assert teams_enabled(engine) is True
+
+        engine.on_session_start(
+            "never-session",
+            hermes_home=str(never_home),
+            platform="cli",
+            context_length=200_000,
+        )
+        assert teams_enabled(engine) is False
+    finally:
+        engine.shutdown()
+
+
 def test_the_cached_answer_is_not_an_operator_decision(tmp_path):
     """It must not be readable as "an operator disabled Teams".
 
@@ -476,6 +588,7 @@ def test_the_check_reaches_lcm_doctor_with_its_guidance(tmp_path):
     engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db")))
     try:
         engine._store.append("imported-session", {"role": "user", "content": "hello"})
+        clear_never_enabled_cache(engine._store.connection)
         engine._store.connection.execute("UPDATE messages SET access_scope = 'principal-a'")
         engine._store.connection.commit()
 
@@ -512,5 +625,48 @@ def test_every_scope_bearing_table_the_module_names_is_migrated(tmp_path):
             assert "access_scope" in _columns(conn, table), table
     finally:
         rollups.close()
+        dag.close()
+        store.close()
+
+
+def test_lazy_tables_are_target_repaired_after_the_core_marker(tmp_path):
+    """Lazy families bypass the completed core marker for their own tables."""
+
+    db_path = tmp_path / "lazy-scope.db"
+    store, dag = _open_stock(db_path)
+    conn = store.connection
+    lazy_groups = (
+        (
+            db_bootstrap.ensure_embedding_tables,
+            ("lcm_embedding_meta", "lcm_embedding_vectors", "lcm_embedding_binary"),
+        ),
+        (
+            db_bootstrap.ensure_chunk_tables,
+            ("lcm_chunk_meta", "lcm_chunk_vectors", "lcm_chunk_binary"),
+        ),
+    )
+    try:
+        assert conn.execute(
+            "SELECT 1 FROM lcm_migration_state WHERE step_name = ?",
+            (scope_storage.SCOPE_MIGRATION_STEP,),
+        ).fetchone() is not None
+        assert not any(_tables(conn) & set(tables) for _, tables in lazy_groups)
+
+        for initializer, tables in lazy_groups:
+            initializer(conn)
+            for table in tables:
+                conn.execute(f"ALTER TABLE {table} DROP COLUMN access_scope")
+            conn.commit()
+
+            initializer(conn)
+            assert all("access_scope" in _columns(conn, table) for table in tables)
+            assert "missing access_scope column" not in str(
+                verify_scope_storage(conn, teams_enabled=False)
+            )
+
+            schema_version = conn.execute("PRAGMA schema_version").fetchone()[0]
+            initializer(conn)
+            assert conn.execute("PRAGMA schema_version").fetchone()[0] == schema_version
+    finally:
         dag.close()
         store.close()
