@@ -27,6 +27,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import benchmarking.longmemeval as _longmemeval  # noqa: E402
+
 from benchmarking.longmemeval import (  # noqa: E402
     DATASET_COORDS,
     EMBED_CACHE_ENV,
@@ -393,6 +395,9 @@ def _cmd_prewarm_cache(args: argparse.Namespace) -> int:
         raise SystemExit(f"{EMBED_CACHE_ENV} must name the SQLite cache file")
     if args.timeout <= 0:
         raise SystemExit("--timeout must be positive")
+    _longmemeval._ensure_hermes_lcm_package()
+    from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
+
     try:
         questions = _prepared_shard_questions(args)
         provider = resolve_harness_provider(
@@ -408,6 +413,19 @@ def _cmd_prewarm_cache(args: argparse.Namespace) -> int:
                 f"prewarm processed={processed}", flush=True
             ),
         )
+    except EmbeddingPrivacyPolicyError as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "privacy": getattr(exc, "privacy_counts", {}),
+                    "error": str(exc),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 2
     except (OSError, RuntimeError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
     print(json.dumps(report, indent=2, sort_keys=True))
@@ -419,6 +437,9 @@ def _cmd_determinism_probe(args: argparse.Namespace) -> int:
         raise SystemExit("--sample-size must be positive")
     if args.timeout <= 0:
         raise SystemExit("--timeout must be positive")
+    _longmemeval._ensure_hermes_lcm_package()
+    from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
+
     try:
         questions = _prepared_shard_questions(args)
         # Measurement-neutrality requires two fresh live API passes. Ignore the
@@ -436,6 +457,19 @@ def _cmd_determinism_probe(args: argparse.Namespace) -> int:
             sample_size=args.sample_size,
             seed=args.seed,
         )
+    except EmbeddingPrivacyPolicyError as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "privacy": getattr(exc, "privacy_counts", {}),
+                    "error": str(exc),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 2
     except (OSError, RuntimeError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
     print(json.dumps(report, indent=2, sort_keys=True))

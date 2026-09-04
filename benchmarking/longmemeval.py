@@ -475,35 +475,69 @@ def _configured_chunk_binding(provider: str, model: str) -> tuple[str, str]:
     return normalized_provider, default_chunk_model(normalized_provider, model)
 
 
-_PRIVACY_COUNTS = {"documents": 0, "changed": 0, "blocked": 0}
-_PRIVACY_QUESTION = {"documents": 0, "changed": 0, "blocked": 0}
+_PRIVACY_KEYS = (
+    "documents",
+    "changed",
+    "blocked",
+    "queries",
+    "queries_changed",
+    "queries_blocked",
+)
+_PRIVACY_COUNTS = {key: 0 for key in _PRIVACY_KEYS}
+_PRIVACY_QUESTION = {key: 0 for key in _PRIVACY_KEYS}
 
 
 def _reset_privacy_counts() -> None:
-    _PRIVACY_COUNTS.update(documents=0, changed=0, blocked=0)
+    _PRIVACY_COUNTS.update({key: 0 for key in _PRIVACY_KEYS})
+    _PRIVACY_QUESTION.update({key: 0 for key in _PRIVACY_KEYS})
 
 
-def _protected(text: str, config, *, expected_revision: str | None = None) -> str:
-    """Protect one provider-bound document and record transform outcomes."""
+def _protected(
+    text: str,
+    config,
+    *,
+    expected_revision: str | None = None,
+    kind: str = "document",
+    count: bool = True,
+) -> str:
+    """Protect one provider-bound value and record transform outcomes."""
+    if kind not in {"document", "query"}:
+        raise ValueError(f"unsupported privacy protection kind: {kind!r}")
     _ensure_hermes_lcm_package()
     from hermes_lcm.ingest_protection import (
         EmbeddingPrivacyPolicyError,
         protect_embedding_text,
     )
 
-    _PRIVACY_COUNTS["documents"] += 1
-    _PRIVACY_QUESTION["documents"] += 1
+    if kind == "document":
+        total_key, changed_key, blocked_key = (
+            "documents",
+            "changed",
+            "blocked",
+        )
+    else:
+        total_key, changed_key, blocked_key = (
+            "queries",
+            "queries_changed",
+            "queries_blocked",
+        )
+    if count:
+        _PRIVACY_COUNTS[total_key] += 1
+        _PRIVACY_QUESTION[total_key] += 1
     try:
         protected, _revision, changed = protect_embedding_text(
             text, config, expected_revision=expected_revision
         )
-    except EmbeddingPrivacyPolicyError:
-        _PRIVACY_COUNTS["blocked"] += 1
-        _PRIVACY_QUESTION["blocked"] += 1
+    except EmbeddingPrivacyPolicyError as exc:
+        if count:
+            _PRIVACY_COUNTS[blocked_key] += 1
+            _PRIVACY_QUESTION[blocked_key] += 1
+        if not hasattr(exc, "privacy_counts"):
+            exc.privacy_counts = dict(_PRIVACY_COUNTS)
         raise
-    if changed:
-        _PRIVACY_COUNTS["changed"] += 1
-        _PRIVACY_QUESTION["changed"] += 1
+    if count and changed:
+        _PRIVACY_COUNTS[changed_key] += 1
+        _PRIVACY_QUESTION[changed_key] += 1
     return protected
 
 
@@ -1670,6 +1704,7 @@ def prewarm_embedding_cache(
         "already_cached": already_cached,
         "populated": len(seen) - already_cached,
         "privacy": dict(_PRIVACY_COUNTS),
+        "privacy_scope": "corpus",
     }
 
 
@@ -1700,24 +1735,41 @@ def embedding_determinism_report(
             )
 
     unique: dict[str, str] = {}
+    unique_raw: dict[str, str] = {}
     for question in questions:
         for session in question.haystack_sessions:
-            text = deterministic_session_summary(session)
+            raw = deterministic_session_summary(session)
+            text = raw
             if privacy_revision is not None:
                 text = _protected(
-                    text,
+                    raw,
                     privacy_config,
                     expected_revision=privacy_revision,
+                    count=False,
                 )
             digest = ContentHashEmbeddingCache.content_sha256(text)
             unique.setdefault(digest, text)
+            unique_raw.setdefault(digest, raw)
     if len(unique) < sample_size:
         raise ValueError(
             f"determinism probe needs {sample_size} unique sessions; found {len(unique)}"
         )
 
     sampled_digests = random.Random(seed).sample(list(unique), sample_size)
-    sampled_texts = [unique[digest] for digest in sampled_digests]
+    sampled_texts: list[str] = []
+    for digest in sampled_digests:
+        if privacy_revision is None:
+            sampled_texts.append(unique[digest])
+            continue
+        protected = _protected(
+            unique_raw[digest],
+            privacy_config,
+            expected_revision=privacy_revision,
+            count=True,
+        )
+        if protected != unique[digest]:
+            raise ValueError("determinism probe privacy protection is not deterministic")
+        sampled_texts.append(protected)
     first = _embed_in_batches(
         provider, sampled_texts, before_dispatch=before_dispatch
     )
@@ -1751,6 +1803,7 @@ def embedding_determinism_report(
         "non_identical_count": sample_size - identical,
         "max_abs_diff": max_abs_diff,
         "privacy": dict(_PRIVACY_COUNTS),
+        "privacy_scope": "sample",
     }
 
 
@@ -2276,16 +2329,19 @@ def rerank_sessions_voyage(
         # Production protects rerank payloads under the embedding-privacy
         # resolution (#371); the harness mirrors it — only the provider-bound
         # copies are transformed, ordering still applies to the originals.
-        _ensure_hermes_lcm_package()
-        from hermes_lcm.ingest_protection import protect_embedding_text
-
-        query = protect_embedding_text(
-            query, privacy_config, expected_revision=privacy_revision
-        )[0]
+        query = _protected(
+            query,
+            privacy_config,
+            expected_revision=privacy_revision,
+            kind="query",
+        )
         documents = [
-            protect_embedding_text(
-                doc, privacy_config, expected_revision=privacy_revision
-            )[0]
+            _protected(
+                doc,
+                privacy_config,
+                expected_revision=privacy_revision,
+                kind="document",
+            )
             for doc in documents
         ]
     try:
@@ -2374,7 +2430,7 @@ def evaluate_question(
     ``session_granularity`` flag. ``ingest_ms`` (per-question ingest wall time) and,
     for ``hybrid_rerank``, ``rerank_mode`` ride alongside for aggregation.
     """
-    _PRIVACY_QUESTION.update(documents=0, changed=0, blocked=0)
+    _PRIVACY_QUESTION.update({key: 0 for key in _PRIVACY_KEYS})
     _ensure_hermes_lcm_package()
     from hermes_lcm.chunking import group_by_store_id, iter_message_chunks
     from hermes_lcm.config import LCMConfig
@@ -2719,6 +2775,7 @@ def evaluate_question(
                 summary_query,
                 config,
                 expected_revision=summary_revision,
+                kind="query",
             )
             validate_embedding_privacy_dispatch(
                 [summary_query],
@@ -2796,6 +2853,7 @@ def evaluate_question(
                         chunk_query,
                         config,
                         expected_revision=chunk_revision,
+                        kind="query",
                     )
                     validate_embedding_privacy_dispatch(
                         [chunk_query],
@@ -3372,6 +3430,7 @@ def _validate_restored_checkpoint_metrics(
 def _question_checkpoint_record(
     question: Question, scored: dict[str, Any] | None
 ) -> dict[str, Any]:
+    zero_privacy = {key: 0 for key in _PRIVACY_KEYS}
     if scored is None:
         return {
             "question_id": question.question_id,
@@ -3379,7 +3438,7 @@ def _question_checkpoint_record(
             "abstention": True,
             "rerank_mode": None,
             "ingest_ms": 0.0,
-            "privacy": {"documents": 0, "changed": 0, "blocked": 0},
+            "privacy": zero_privacy,
             "corpus_counts": {"messages": 0, "summary_nodes": 0, "chunks": 0},
             "arms": {},
         }
@@ -3387,7 +3446,7 @@ def _question_checkpoint_record(
     checkpoint_scored.pop("_candidate_rankings", None)
     ingest_ms = checkpoint_scored.pop("ingest_ms", 0.0)
     privacy = checkpoint_scored.pop(
-        "privacy", {"documents": 0, "changed": 0, "blocked": 0}
+        "privacy", zero_privacy
     )
     corpus_counts = checkpoint_scored.pop(
         "corpus_counts", {"messages": 0, "summary_nodes": 0, "chunks": 0}
@@ -3405,6 +3464,18 @@ def _question_checkpoint_record(
         "corpus_counts": corpus_counts,
         "arms": checkpoint_scored,
     }
+
+
+def _restore_privacy_counts(records: Iterable[dict[str, Any]]) -> None:
+    """Restore additive privacy totals from old or new checkpoint rows."""
+    for record in records:
+        privacy = record.get("privacy") if isinstance(record, dict) else None
+        if not isinstance(privacy, dict):
+            continue
+        for key in _PRIVACY_KEYS:
+            value = privacy.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                _PRIVACY_COUNTS[key] += value
 
 
 def _accumulate_question_checkpoint(
@@ -3580,6 +3651,7 @@ def run_harness(
                 selected_question_ids=selected_ids,
                 expected_header=expected_checkpoint_header,
             )
+            _restore_privacy_counts(checkpoint_records)
 
     by_category: dict[str, dict[str, ArmSamples]] = {}
     overall = _new_arm_samples()

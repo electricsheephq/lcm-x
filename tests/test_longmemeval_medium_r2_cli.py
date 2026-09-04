@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import benchmarking.longmemeval as lme
+from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
 from tests.conftest import load_cli as _load_cli
 
 
@@ -180,3 +181,78 @@ def test_direct_dataset_digest_change_fails_closed_on_resume(tmp_path):
 
     with pytest.raises(SystemExit, match=r"configuration mismatch.*source_sha256"):
         cli.main([*base_args, "--resume"])
+
+
+def test_prewarm_privacy_block_is_a_durable_cli_report(tmp_path, monkeypatch, capsys):
+    cli = _load_cli()
+    monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "cache.sqlite3"))
+    monkeypatch.setattr(cli, "_prepared_shard_questions", lambda _args: iter(()))
+    monkeypatch.setattr(cli, "resolve_harness_provider", lambda *_args, **_kwargs: object())
+
+    def _blocked(*_args, **_kwargs):
+        error = EmbeddingPrivacyPolicyError("privacy policy blocked dispatch")
+        error.privacy_counts = {
+            "documents": 1,
+            "changed": 0,
+            "blocked": 1,
+            "queries": 0,
+            "queries_changed": 0,
+            "queries_blocked": 0,
+        }
+        raise error
+
+    monkeypatch.setattr(cli, "prewarm_embedding_cache", _blocked)
+    result = cli.main(
+        [
+            "prewarm-cache",
+            "--prepared-dir",
+            str(tmp_path / "prepared"),
+            "--shards-manifest",
+            str(tmp_path / "shards"),
+            "--model",
+            "voyage-context-4",
+        ]
+    )
+
+    assert result == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "blocked"
+    assert payload["privacy"]["blocked"] == 1
+
+
+def test_determinism_privacy_block_is_a_durable_cli_report(tmp_path, monkeypatch, capsys):
+    cli = _load_cli()
+    monkeypatch.setattr(cli, "_prepared_shard_questions", lambda _args: iter(()))
+    monkeypatch.setattr(cli, "resolve_harness_provider", lambda *_args, **_kwargs: object())
+
+    def _blocked(*_args, **_kwargs):
+        error = EmbeddingPrivacyPolicyError("privacy policy blocked dispatch")
+        error.privacy_counts = {
+            "documents": 0,
+            "changed": 0,
+            "blocked": 0,
+            "queries": 0,
+            "queries_changed": 0,
+            "queries_blocked": 1,
+        }
+        raise error
+
+    monkeypatch.setattr(cli, "embedding_determinism_report", _blocked)
+    result = cli.main(
+        [
+            "determinism-probe",
+            "--prepared-dir",
+            str(tmp_path / "prepared"),
+            "--shards-manifest",
+            str(tmp_path / "shards"),
+            "--model",
+            "voyage-4-large",
+            "--sample-size",
+            "1",
+        ]
+    )
+
+    assert result == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "blocked"
+    assert payload["privacy"]["queries_blocked"] == 1

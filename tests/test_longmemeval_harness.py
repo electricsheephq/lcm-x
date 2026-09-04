@@ -24,6 +24,7 @@ from benchmarking.longmemeval import (
     Question,
     chunk_sessions,
     deterministic_session_summary,
+    embedding_determinism_report,
     evaluate_question,
     evidence_sessions,
     evidence_turns,
@@ -692,7 +693,14 @@ def test_stub_run_end_to_end_produces_report_and_fts_recovers_evidence(tmp_path)
     assert report["rerank"]["mode"] == RERANK_MODE_PLACEHOLDER
     assert report["ingest"]["reuse_db_template"] is True
     assert "per_question_ms" in report["ingest"]
-    assert report["ingest"]["privacy"] == {"documents": 0, "changed": 0, "blocked": 0}
+    assert report["ingest"]["privacy"] == {
+        "documents": 0,
+        "changed": 0,
+        "blocked": 0,
+        "queries": 0,
+        "queries_changed": 0,
+        "queries_blocked": 0,
+    }
 
 
 def test_dump_candidates_off_leaves_checkpoint_byte_identical(tmp_path, monkeypatch):
@@ -1472,7 +1480,7 @@ def test_cloud_query_is_protected_before_provider_dispatch(tmp_path, monkeypatch
     summary = _CapturingIdentityEmbedder("voyage-4-large")
     chunk = _CapturingIdentityEmbedder("voyage-context-4")
 
-    evaluate_question(
+    scored = evaluate_question(
         _privacy_question("q-private-query", question=_PRIVACY_TEXT),
         summary,
         chunk_provider=chunk,
@@ -1485,6 +1493,8 @@ def test_cloud_query_is_protected_before_provider_dispatch(tmp_path, monkeypatch
     assert outbound
     assert all(_PRIVACY_PLACEHOLDER in text for text in outbound)
     assert all(_PRIVACY_SECRET not in text for text in outbound)
+    assert scored["privacy"]["queries"] == 2
+    assert scored["privacy"]["queries_changed"] == 2
 
 
 def test_stub_query_reaches_provider_byte_identical(tmp_path, monkeypatch):
@@ -1542,7 +1552,14 @@ def test_prewarm_reports_privacy_transform_counts(tmp_path, monkeypatch):
         [_privacy_question("q-private-prewarm-counts")], cached, progress_every=100
     )
 
-    assert report["privacy"] == {"documents": 3, "changed": 1, "blocked": 0}
+    assert report["privacy"] == {
+        "documents": 3,
+        "changed": 1,
+        "blocked": 0,
+        "queries": 0,
+        "queries_changed": 0,
+        "queries_blocked": 0,
+    }
     outbound = _flatten_document_calls(raw)
     assert _PRIVACY_PLACEHOLDER in outbound[1]
     assert _PRIVACY_SECRET not in outbound[1]
@@ -1571,7 +1588,14 @@ def test_prewarm_privacy_block_is_counted_and_reraised(tmp_path, monkeypatch):
             [_privacy_question("q-private-prewarm-blocked")], cached
         )
 
-    assert lme._PRIVACY_COUNTS == {"documents": 1, "changed": 0, "blocked": 1}
+    assert lme._PRIVACY_COUNTS == {
+        "documents": 1,
+        "changed": 0,
+        "blocked": 1,
+        "queries": 0,
+        "queries_changed": 0,
+        "queries_blocked": 0,
+    }
     assert raw.captured_documents == []
 
 
@@ -1588,10 +1612,41 @@ def test_determinism_probe_cloud_documents_are_protected_before_dispatch(tmp_pat
 
     outbound = _flatten_document_calls(provider)
     assert report["sample_size"] == 1
-    assert report["privacy"] == {"documents": 1, "changed": 1, "blocked": 0}
+    assert report["privacy"] == {
+        "documents": 1,
+        "changed": 1,
+        "blocked": 0,
+        "queries": 0,
+        "queries_changed": 0,
+        "queries_blocked": 0,
+    }
     assert outbound
     assert all(_PRIVACY_PLACEHOLDER in text for text in outbound)
     assert all(_PRIVACY_SECRET not in text for text in outbound)
+
+
+def test_determinism_probe_privacy_counts_are_sample_scoped(tmp_path):
+    question = parse_question(
+        _make_raw(
+            "q-private-determinism-sample",
+            "single-session-user",
+            sessions={
+                "s0": [{"role": "user", "content": "password: alpha-secret"}],
+                "s1": [{"role": "user", "content": "password: bravo-secret"}],
+                "s2": [{"role": "user", "content": "password: charlie-secret"}],
+            },
+            answer_session_ids=["s0"],
+        )
+    )
+    provider = _CapturingIdentityEmbedder("voyage-4-large")
+
+    report = embedding_determinism_report(
+        [question], provider, sample_size=1, seed=0
+    )
+
+    assert report["privacy_scope"] == "sample"
+    assert report["privacy"]["documents"] == 1
+    assert report["privacy"]["changed"] == 1
 
 
 def test_per_question_privacy_and_corpus_counts_resume_without_header_change(tmp_path):
@@ -1624,8 +1679,24 @@ def test_per_question_privacy_and_corpus_counts_resume_without_header_change(tmp
     header_line = lines[0]
     row = json.loads(lines[1])
     assert set(header) == {"__checkpoint_header__"}
-    assert row["privacy"] == {"documents": 0, "changed": 0, "blocked": 0}
+    assert row["privacy"] == {
+        "documents": 0,
+        "changed": 0,
+        "blocked": 0,
+        "queries": 0,
+        "queries_changed": 0,
+        "queries_blocked": 0,
+    }
     assert row["corpus_counts"] == {"messages": 2, "summary_nodes": 1, "chunks": 0}
+
+    # Simulate a previously completed privacy-accounted question. Missing query
+    # sub-keys must continue to restore as zero on the resume path.
+    row["privacy"]["documents"] = 3
+    row["privacy"]["changed"] = 1
+    checkpoint.write_text(
+        header_line + "\n" + json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
 
     resumed = run_harness(
         [question],
@@ -1637,6 +1708,14 @@ def test_per_question_privacy_and_corpus_counts_resume_without_header_change(tmp
         selected_question_ids=[question.question_id],
     )
     assert resumed["question_count"] == 1
+    assert resumed["ingest"]["privacy"] == {
+        "documents": 3,
+        "changed": 1,
+        "blocked": 0,
+        "queries": 0,
+        "queries_changed": 0,
+        "queries_blocked": 0,
+    }
     resumed_header_line = checkpoint.read_text(encoding="utf-8").splitlines()[0]
     assert resumed_header_line == header_line
     assert set(json.loads(resumed_header_line)) == {"__checkpoint_header__"}

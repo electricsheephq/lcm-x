@@ -71,9 +71,9 @@ Keychain at runtime, never in configs or logs; embed-cache path + size + mtime b
 4. Corpus identity vs F53 (#203/#177 rows). F53 recorded NO per-question message/node/chunk counts (its checkpoint
    records carry only abstention/arms/category/ingest_ms/question_id/rerank_mode, and each question database was
    deleted after scoring), so per-question count parity CANNOT be executed against F53. The executable identity
-   check is the embed-cache pair, at two levels: (a) prewarm — every unique post-transform request unit hits the
-   F53 cache (misses 0; the F53 cache holds 505,695 entries), which proves corpus identity AND a no-op transform in
-   one number; (b) run — each shard's `ingest.embed_cache` {hits, misses} equals F53's per-shard pair (shards 0–5:
+   check is the embed-cache pair, at two levels: (a) prewarm — every unique post-transform request unit is already
+   in the F53 cache (`prewarm-cache` report: `populated == 0`, `already_cached == unique_request_units`; the F53 cache
+   holds 505,695 entries), which proves corpus identity AND a no-op transform in one number; (b) run — each shard's `ingest.embed_cache` {hits, misses} equals F53's per-shard pair (shards 0–5:
    398,139 / 397,857 / 390,572 / 389,980 / 394,388 / 390,617 hits, 2,361,553 total, 0 misses everywhere). Any miss
    is a changed or new document and must reconcile with §4.2. This run's per-question `corpus_counts` are recorded
    as the FORWARD baseline for future rows; the #203/#177 discharge = the cache-pair result + that baseline.
@@ -124,7 +124,7 @@ only. OpenRouter: not used.
 
 ## 8. Procedure
 1. Merge this sheet (gate: acceptance + independent factual audit). 2. New worktree at `origin/main`;
-record pins (§3). 3. `scripts/lcm_longmemeval.py probe --sample-size 20` → determinism verdict + SAMPLE-scoped privacy
+record pins (§3). 3. `scripts/lcm_longmemeval.py determinism-probe --sample-size 20` → determinism verdict + SAMPLE-scoped privacy
 counts (`privacy_scope: sample`; the probe runs with the embed cache disabled and reports no cache statistics).
 4. Full prewarm pass over `prepared-m` → CORPUS transform-change count (`privacy_scope: corpus`), reported by the instrument-only
 `privacy` counters this registration PR adds to the harness (today every `protect_embedding_text` call site
@@ -133,8 +133,8 @@ abort a shard uncounted): `changed` / `blocked` counts in the prewarm and determ
 `ingest_report["privacy"]` (NOT the checkpoint header — a new header key breaks resume), plus per-question
 `corpus_counts` (messages / summary nodes / chunks ingested) in each per-question record so future rows have
 a per-question parity field (the forward baseline — F53 has none, §4.4). **Cache-parity proxy for this row:** the
-cache key is the sha256 of the post-transform text and the F53 cache (505,695 entries) is fully warm, so the prewarm
-report's miss count must be 0 (every unique request unit hits), and at run time each shard's `ingest.embed_cache`
+cache key is the sha256 of the post-transform text and the F53 cache (505,695 entries) is fully warm, so the
+`prewarm-cache` report must show `populated == 0` and `already_cached == unique_request_units`, and at run time each shard's `ingest.embed_cache`
 pair must equal F53's per-shard pair (§4.4 — the 398,139 figure is shard 0's, not the run's); any miss is a
 changed or new document and must reconcile with the transform-change count. 5. Six shards via
 the re-parametrised `run_shard.sh`, 5-minute stagger. 6. A/A′ on `prepared-m-aprime100`. 7. **Snapshot raw

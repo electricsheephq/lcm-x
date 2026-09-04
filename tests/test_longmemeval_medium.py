@@ -634,5 +634,5 @@ def test_small_default_cli_report_is_byte_identical_to_golden(tmp_path, monkeypa
     # CLI on the pinned platform, verify the dataset block field-by-field, then re-bank
     # the hash and golden file together in the same commit.
     assert hashlib.sha256(report_bytes).hexdigest() == (
-        "b8952714d53f1ae819770c513d42421cdf6396bced2dc03f2aa8ca8b2209bc07"
+        "1bfe3f036a0b3eb4dbbdbb24b2f5a43dc44618aeb15752e07b4a133059134e18"
     )
