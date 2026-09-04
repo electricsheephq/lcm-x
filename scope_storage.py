@@ -390,12 +390,6 @@ def bind_startup_teams_state(conn: sqlite3.Connection) -> tuple[bool, str]:
             return enabled, reason
         try:
             conn.execute("BEGIN IMMEDIATE")
-        except sqlite3.OperationalError as exc:
-            if _is_sqlite_locked_error(exc):
-                logger.debug("Skipping Teams never-enabled cache while database is locked")
-                return enabled, reason
-            raise
-        try:
             marker = read_persisted_teams_marker(conn)
             stamps_exist = access_scope_stamps_exist(conn)
             if marker == "absent" and not stamps_exist:
@@ -408,6 +402,17 @@ def bind_startup_teams_state(conn: sqlite3.Connection) -> tuple[bool, str]:
                 conn.execute("COMMIT")
                 return False, "never-enabled"
             conn.execute("ROLLBACK")
+        except sqlite3.Error as exc:
+            if not conn.in_transaction and _is_sqlite_locked_error(exc):
+                logger.debug("Skipping Teams never-enabled cache while database is locked")
+                return enabled, reason
+            try:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            logger.debug("Skipping Teams never-enabled cache due to SQLite error: %s", exc)
+            return enabled, reason
         except BaseException:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")

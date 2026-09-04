@@ -9,6 +9,8 @@ an eleven-table scan on every bind for the privilege.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import sqlite3
 
 import pytest
@@ -372,6 +374,53 @@ def test_engine_bind_publishes_cache_and_fails_closed_after_a_stamp(tmp_path):
         assert read_never_enabled_cache(stamped._store.connection) is False
     finally:
         stamped.shutdown()
+
+
+def test_read_only_never_enabled_cache_publish_degrades_startup(tmp_path, caplog):
+    """A read-only database cannot make optional cache publication fatal."""
+
+    if os.geteuid() == 0:
+        pytest.skip("chmod-based read-only regression is not enforceable as root")
+
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+
+    db_path = tmp_path / "read-only-never-enabled.db"
+    engine = LCMEngine(config=LCMConfig(database_path=str(db_path)))
+    try:
+        clear_never_enabled_cache(engine._store.connection)
+        assert read_never_enabled_cache(engine._store.connection) is False
+    finally:
+        engine.shutdown()
+
+    original_mode = db_path.stat().st_mode
+    db_path.chmod(original_mode & ~0o222)
+    try:
+        with caplog.at_level(logging.DEBUG, logger=scope_storage.logger.name):
+            reopened = LCMEngine(config=LCMConfig(database_path=str(db_path)))
+        try:
+            assert teams_enabled(reopened) is False
+            assert bind_startup_teams_state(reopened._store.connection) == (
+                False,
+                "never-enabled",
+            )
+            assert reopened._store.connection.execute(
+                "SELECT COUNT(*) FROM metadata WHERE key = ?",
+                (TEAMS_NEVER_ENABLED_METADATA_KEY,),
+            ).fetchone()[0] == 0
+        finally:
+            reopened.shutdown()
+
+        cache_skips = [
+            record
+            for record in caplog.records
+            if record.levelno == logging.DEBUG
+            and "Skipping Teams never-enabled cache" in record.getMessage()
+        ]
+        assert cache_skips
+        assert any("readonly" in record.getMessage().lower() for record in cache_skips)
+    finally:
+        db_path.chmod(original_mode)
 
 
 def test_cache_publication_and_stamp_commit_are_serialized(tmp_path):

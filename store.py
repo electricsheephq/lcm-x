@@ -1714,6 +1714,9 @@ class MessageStore:
         queries the store does not wrap in a purpose-built method. Callers must
         treat it as read-only and tolerate ``None``; writes still go through the
         store's own methods so the ``_write_lock`` contract stays in one place.
+        The sole startup exception is ``bind_startup_teams_state``, which publishes
+        the never-enabled cache through this connection inside ``_bind_storage``
+        before the store is exposed to any other thread.
         """
         return self._conn
 
