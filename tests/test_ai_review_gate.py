@@ -59,7 +59,9 @@ def _extract_reconcile_script(workflow_path: Path) -> str:
     return script
 
 
-def _run_workflow_scenario(name: str) -> dict[str, object]:
+def _run_workflow_scenario(
+    name: str, workflow_path: Path | None = None
+) -> dict[str, object]:
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is required to execute ai-review-gate behavioral tests")
@@ -71,9 +73,12 @@ def _run_workflow_scenario(name: str) -> dict[str, object]:
         "s4": {"dispatch": False, "prs": [1, 2, 3], "throwPr": 2},
         "s5": {"dispatch": True, "prs": [1], "target": 1},
         "s6": {"dispatch": True, "prs": [1, 2], "target": 1},
+        "s7": {"dispatch": True, "prs": [1, 2, 3], "target": 1},
+        "s8": {"dispatch": True, "prs": [1, 2, 3], "target": 1},
+        "s8b": {"dispatch": False, "prs": [1, 2, 3]},
     }
     config = {"name": name, **scenarios[name]}
-    script = _extract_reconcile_script(_workflow_under_test())
+    script = _extract_reconcile_script(workflow_path or _workflow_under_test())
     validator_start = script.index("const runValidator = async")
     validator_end = script.index("const snapshot = async", validator_start)
     script = (
@@ -85,6 +90,7 @@ def _run_workflow_scenario(name: str) -> dict[str, object]:
 const cfg = {json.dumps(config)};
 const emissions = [], failures = [], checks = [];
 const pullCalls = new Map();
+let branchCalls = 0;
 let nextCheckId = 1;
 const original = number => ({{number, base: {{ref: 'main', sha: `base-${{number}}`}},
   head: {{sha: `head-${{number}}`}}, state: 'open', draft: false}});
@@ -113,7 +119,7 @@ const pullsApi = {{
     pullCalls.set(pull_number, count);
     if (cfg.throwPr === pull_number && count === 2) throw Error('synthetic final-read failure');
     const data = original(pull_number);
-    if (cfg.name === 's5' && pull_number === cfg.target && count >= 4)
+    if ((cfg.name === 's5' || cfg.name === 's7') && pull_number === cfg.target && count >= 4)
       data.head.sha = `head-${{pull_number}}-live`;
     return {{data}};
   }},
@@ -126,7 +132,12 @@ const github = {{
     issues: {{listEventsForTimeline: async () => []}},
     repos: {{
       get: async () => ({{data: {{default_branch: 'main'}}}}),
-      getBranch: async () => ({{data: {{commit: {{sha: 'protected'}}}}}}),
+      getBranch: async () => {{
+        branchCalls += 1;
+        if (cfg.name === 's7' && branchCalls === 2)
+          throw Error('synthetic live follow-up failure');
+        return {{data: {{commit: {{sha: 'protected'}}}}}};
+      }},
       getContent: async () => {{ throw Error('real validator must not run'); }},
     }},
   }},
@@ -156,6 +167,12 @@ async function fakeRunValidator(input) {{
       peers: input.peers.map(peer => peerResult(peer, peer.pr_number !== cfg.invalidPr))}}}};
   if (cfg.name === 's4' && input.peers.length === cfg.prs.length)
     return {{run: {{status: 0}}, result: {{decision: 'PASS',
+      peers: input.peers.map(peer => peerResult(peer, true))}}}};
+  if (cfg.name === 's8' && input.target)
+    return {{run: {{status: 1}}, result: {{decision: 'PASS', packet: {{scenario: cfg.name}},
+      peers: input.peers.map(peer => peerResult(peer, true))}}}};
+  if (cfg.name === 's8b' && !input.target && input.peers.length === cfg.prs.length)
+    return {{run: {{status: 1}}, result: {{decision: 'PASS',
       peers: input.peers.map(peer => peerResult(peer, true))}}}};
   if (input.target)
     return {{run: {{status: 0}}, result: {{decision: 'PASS', packet: {{scenario: cfg.name}},
@@ -225,6 +242,31 @@ def test_behavioral_s6_consistent_dispatch_succeeds_only_target():
     ]
     assert all(emit["pr"] == 1 for emit in result["emissions"])
     assert result["failures"] == []
+
+
+def test_behavioral_s7_live_tuple_is_failed_when_follow_up_read_throws():
+    result = _run_workflow_scenario("s7")
+    assert _failure_tuples(result) == {
+        (1, "base-1", "head-1"),
+        (1, "base-1", "head-1-live"),
+    }
+    assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
+
+
+def test_behavioral_s8_pass_payload_with_nonzero_validator_fails_closed():
+    result = _run_workflow_scenario("s8")
+    assert _failure_tuples(result) == {
+        (number, f"base-{number}", f"head-{number}") for number in (1, 2, 3)
+    }
+    assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
+
+
+def test_behavioral_s8b_peer_only_pass_payload_with_nonzero_validator_fails_closed():
+    result = _run_workflow_scenario("s8b")
+    assert _failure_tuples(result) == {
+        (number, f"base-{number}", f"head-{number}") for number in (1, 2, 3)
+    }
+    assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
 
 
 def receipt(lane: str, *, risk: str = "routine", reviewer: str | None = None):
@@ -1008,7 +1050,5 @@ def test_workflow_identifies_dispatch_target_before_peer_enumeration():
     # fail-closed emit for an event-identified dispatch target: the target's
     # number and tuple are captured before reconciliation can abort.
     assert target_number < target_tuple < enumeration
-    assert (
-        "if (prNumber && base && head) await emit(prNumber, base, head, conclusion, summary);"
-        in workflow
-    )
+    assert "if (prNumber && base && head) {" in workflow
+    assert "if (prNumber && liveTuple &&" in workflow

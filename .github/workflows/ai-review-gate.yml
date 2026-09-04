@@ -216,6 +216,7 @@ jobs:
             const protectedSha = branch.data.commit.sha;
             const dispatchEvent = context.eventName === 'repository_dispatch';
             let prNumber = null, base = null, head = null, result = null;
+            let liveTuple = null;
             let conclusion = 'failure', summary = 'Validation failed closed.';
             try {
               if (dispatchEvent) {
@@ -301,6 +302,8 @@ jobs:
                   if (!result?.decision || !Array.isArray(result.peers) ||
                       result.peers.length !== input.peers.length)
                     throw Error('peer reconciliation validation incomplete');
+                  if (result.decision === 'PASS' && validated.run?.status !== 0)
+                    throw Error('validator exited non-zero with a PASS payload');
                   await finalReadInvalidPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
                   await finalReadPreservedPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
                 } catch (error) {
@@ -311,20 +314,18 @@ jobs:
                 }
                 if (result.decision !== 'PASS') throw Error('receipt validation failed');
                 const live = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
+                liveTuple = [live.data.base.sha, live.data.head.sha];
                 const liveBranch = await github.rest.repos.getBranch({owner, repo, branch: defaultBranch});
                 const liveFiles = await listFiles(prNumber);
                 const liveTimeline = await listTimeline(prNumber);
                 const liveUnresolved = await unresolvedThreads(prNumber);
-                if (live.data.head.sha !== head || live.data.base.sha !== base ||
+                if (target.head_sha !== head || target.base_sha !== base ||
+                    live.data.head.sha !== head || live.data.base.sha !== base ||
                     live.data.base.ref !== defaultBranch || live.data.state !== 'open' || live.data.draft ||
                     liveBranch.data.commit.sha !== protectedSha || context.ref !== `refs/heads/${defaultBranch}` ||
                     context.sha !== protectedSha || JSON.stringify(liveFiles) !== JSON.stringify(target.changed_paths) ||
                     JSON.stringify(liveTimeline) !== JSON.stringify(target.timeline_events) ||
                     liveUnresolved !== 0 || target.unresolved_threads !== 0) {
-                  if (live?.data?.base?.sha && live?.data?.head?.sha &&
-                      (live.data.base.sha !== base || live.data.head.sha !== head))
-                    await emit(prNumber, live.data.base.sha, live.data.head.sha, 'failure',
-                      'PR, protected-base, files, or threads drift');
                   throw Error('PR, protected-base, files, or threads drift');
                 }
                 conclusion = 'success'; summary = JSON.stringify(result.packet);
@@ -335,6 +336,8 @@ jobs:
                   if (!validated.result?.decision || !Array.isArray(validated.result.peers) ||
                       validated.result.peers.length !== snapshots.length)
                     throw Error('peer reconciliation validation incomplete');
+                  if (validated.result.decision === 'PASS' && validated.run?.status !== 0)
+                    throw Error('validator exited non-zero with a PASS payload');
                   result = validated.result;
                   await finalReadInvalidPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
                   await finalReadPreservedPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
@@ -350,5 +353,22 @@ jobs:
             } catch (error) {
               summary = `Validation failed closed: ${error.message}`;
             }
-            if (prNumber && base && head) await emit(prNumber, base, head, conclusion, summary);
+            const writeFailures = [];
+            if (prNumber && base && head) {
+              try {
+                await emit(prNumber, base, head, conclusion, summary);
+              } catch (error) {
+                writeFailures.push(error.message);
+              }
+            }
+            if (prNumber && liveTuple &&
+                (liveTuple[0] !== base || liveTuple[1] !== head)) {
+              try {
+                await emit(prNumber, liveTuple[0], liveTuple[1], 'failure', summary);
+              } catch (error) {
+                writeFailures.push(error.message);
+              }
+            }
+            if (writeFailures.length)
+              summary = `${summary}; failure writes: ${writeFailures.join(',')}`;
             if (conclusion !== 'success') core.setFailed(summary);
