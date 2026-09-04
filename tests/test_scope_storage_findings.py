@@ -351,7 +351,7 @@ def test_conflicting_source_scopes_fail_the_derived_backfill(
     store.commit()
 
     with pytest.raises(ScopeBackfillIncompleteError) as raised:
-        backfill_scopes(store, _resolver)
+        backfill_scopes(store, _resolver, batch_size=1)
 
     assert "lcm_chunk_vectors" in raised.value.report["failures"]
     stamped = store.execute(
@@ -384,3 +384,108 @@ def test_one_source_scope_still_stamps_the_derived_row(
     assert store.execute(
         "SELECT access_scope FROM lcm_chunk_vectors"
     ).fetchone()[0] == "owner:s1"
+
+
+def test_session_backfill_work_scales_linearly_with_store_size() -> None:
+    def measured_steps(row_count: int) -> int:
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute(
+                "CREATE TABLE messages("
+                "store_id INTEGER PRIMARY KEY, session_id TEXT, access_scope TEXT)"
+            )
+            conn.executemany(
+                "INSERT INTO messages(session_id) VALUES(?)",
+                [(f"session-{index}",) for index in range(row_count)],
+            )
+            conn.commit()
+            steps = 0
+
+            def count_step() -> int:
+                nonlocal steps
+                steps += 1
+                return 0
+
+            conn.set_progress_handler(count_step, 1)
+            updated = scope_storage._backfill_session_table(
+                conn,
+                "messages",
+                _resolver,
+                batch_size=20,
+            )
+            assert updated == row_count
+            return steps
+        finally:
+            conn.close()
+
+    small = measured_steps(400)
+    large = measured_steps(800)
+
+    assert large < small * 2.6, (small, large)
+
+
+def test_keyset_backfills_include_zero_and_negative_rowids() -> None:
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE sessions(
+                item_id INTEGER PRIMARY KEY,
+                session_id TEXT,
+                access_scope TEXT
+            );
+            CREATE TABLE sources(
+                source_id INTEGER PRIMARY KEY,
+                access_scope TEXT
+            );
+            CREATE TABLE derived(
+                item_id INTEGER PRIMARY KEY,
+                source_id INTEGER,
+                access_scope TEXT
+            );
+            CREATE TABLE rollups(
+                item_id INTEGER PRIMARY KEY,
+                scope TEXT,
+                access_scope TEXT
+            );
+            """
+        )
+        conn.executemany(
+            "INSERT INTO sessions(item_id, session_id) VALUES(?, ?)",
+            [(-1, "negative"), (0, "zero"), (1, "positive")],
+        )
+        conn.executemany(
+            "INSERT INTO sources(source_id, access_scope) VALUES(?, ?)",
+            [(10, "owner:negative"), (11, "owner:zero")],
+        )
+        conn.executemany(
+            "INSERT INTO derived(item_id, source_id) VALUES(?, ?)",
+            [(-1, 10), (0, 11)],
+        )
+        conn.executemany(
+            "INSERT INTO rollups(item_id, scope) VALUES(?, ?)",
+            [(-1, "negative"), (0, "zero")],
+        )
+        conn.commit()
+
+        assert scope_storage._backfill_session_table(
+            conn, "sessions", _resolver, batch_size=1
+        ) == 3
+        assert scope_storage._backfill_joined_table(
+            conn,
+            table="derived",
+            source_table="sources",
+            join_sql="target.source_id = source.source_id",
+            batch_size=1,
+        ) == 2
+        assert scope_storage._backfill_rollup_table(
+            conn, "rollups", _resolver, batch_size=1
+        ) == 2
+
+        for table in ("sessions", "derived", "rollups"):
+            remaining = conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE access_scope IS NULL"
+            ).fetchone()[0]
+            assert remaining == 0, table
+    finally:
+        conn.close()

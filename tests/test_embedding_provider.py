@@ -416,6 +416,15 @@ class FakeFastembedModel:
         return ([2.0, float(index)] for index, _text in enumerate(texts))
 
 
+class CachedFastembedModel(FakeFastembedModel):
+    constructions = []
+
+    def __init__(self, **kwargs):
+        self.constructions.append(kwargs)
+        self.embed_calls = []
+        self.query_calls = []
+
+
 def test_fastembed_not_warmed_never_downloads(monkeypatch, tmp_path):
     FakeFastembedModel.constructions = []
     monkeypatch.setattr(provider_mod, "_load_fastembed", lambda: FakeFastembedModel)
@@ -439,7 +448,23 @@ def test_fastembed_warmup_is_only_download_path(monkeypatch, tmp_path):
     # warmup() embeds a query, so it goes through the query-specific API.
     assert provider.warmup() == [2.0, 0.0]
     assert provider.dim == 2
-    assert FakeFastembedModel.constructions[0]["local_files_only"] is False
+    assert [
+        construction["local_files_only"]
+        for construction in FakeFastembedModel.constructions
+    ] == [True, False]
+
+
+def test_fastembed_warmup_prefers_cached_model_without_download(monkeypatch, tmp_path):
+    CachedFastembedModel.constructions = []
+    monkeypatch.setattr(provider_mod, "_load_fastembed", lambda: CachedFastembedModel)
+    provider = FastembedProvider("cached-model", cache_dir=tmp_path)
+
+    assert provider.warmup() == [2.0, 0.0]
+    assert CachedFastembedModel.constructions == [{
+        "model_name": "cached-model",
+        "cache_dir": str(tmp_path),
+        "local_files_only": True,
+    }]
 
 
 def test_fastembed_documents_and_queries_use_distinct_apis(monkeypatch, tmp_path):
@@ -743,7 +768,10 @@ def test_warmup_command_fastembed_uses_explicit_download(monkeypatch, tmp_path):
     assert "download: ready" in result
     assert "provider: fastembed" in result
     assert "no per-call API charge" in result
-    assert FakeFastembedModel.constructions[0]["local_files_only"] is False
+    assert [
+        construction["local_files_only"]
+        for construction in FakeFastembedModel.constructions
+    ] == [True, False]
 
 
 def test_circuit_breaker_opens_then_cools_down():
