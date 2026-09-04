@@ -76,6 +76,8 @@ def _run_workflow_scenario(
         "s7": {"dispatch": True, "prs": [1, 2, 3], "target": 1},
         "s8": {"dispatch": True, "prs": [1, 2, 3], "target": 1},
         "s8b": {"dispatch": False, "prs": [1, 2, 3]},
+        "s9": {"dispatch": True, "prs": [1, 2, 3], "target": 1},
+        "s10": {"dispatch": True, "prs": [1, 2], "target": 1},
     }
     config = {"name": name, **scenarios[name]}
     script = _extract_reconcile_script(workflow_path or _workflow_under_test())
@@ -107,6 +109,8 @@ const checksApi = {{
     return {{data: run}};
   }},
   update: async payload => {{
+    if (cfg.name === 's10' && payload.conclusion === 'success')
+      throw Error('synthetic success write failure');
     const run = checks.find(item => item.id === payload.check_run_id);
     record(run, payload.conclusion, payload.output.summary, 'update');
     Object.assign(run, payload); return {{data: run}};
@@ -118,6 +122,8 @@ const pullsApi = {{
     const count = (pullCalls.get(pull_number) || 0) + 1;
     pullCalls.set(pull_number, count);
     if (cfg.throwPr === pull_number && count === 2) throw Error('synthetic final-read failure');
+    if (cfg.name === 's9' && pull_number === cfg.target && count === 3)
+      throw Error('synthetic target re-snapshot failure');
     const data = original(pull_number);
     if ((cfg.name === 's5' || cfg.name === 's7') && pull_number === cfg.target && count >= 4)
       data.head.sha = `head-${{pull_number}}-live`;
@@ -267,6 +273,27 @@ def test_behavioral_s8b_peer_only_pass_payload_with_nonzero_validator_fails_clos
         (number, f"base-{number}", f"head-{number}") for number in (1, 2, 3)
     }
     assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
+
+
+def test_behavioral_s9_target_resnapshot_failure_resets_every_snapshot():
+    # The target re-snapshot is an API call between reconciliation and the
+    # validator; if it rejects, no peer was reconciled, so all known
+    # snapshots reset (not just the dispatch target).
+    result = _run_workflow_scenario("s9")
+    assert _failure_tuples(result) == {
+        (number, f"base-{number}", f"head-{number}") for number in (1, 2, 3)
+    }
+    assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
+
+
+def test_behavioral_s10_success_write_failure_fails_the_job():
+    # A success verdict whose check write is rejected must not leave the job
+    # green: the trusted check stays at the pre-validation failure, and the
+    # step reports the swallowed write failure.
+    result = _run_workflow_scenario("s10")
+    assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
+    assert len(result["failures"]) == 1
+    assert "failure writes: synthetic success write failure" in result["failures"][0]
 
 
 def receipt(lane: str, *, risk: str = "routine", reviewer: str | None = None):
@@ -592,7 +619,7 @@ def test_dispatch_reconciliation_failure_resets_every_known_snapshot():
         "throw Error(`open PR reconciliation incomplete", reconciliation_guard
     )
     target_snapshot = workflow.index(
-        "const target = await snapshot(prNumber, defaultBranch);", reconciliation_guard
+        "target = await snapshot(prNumber, defaultBranch);", reconciliation_guard
     )
 
     assert reconciliation_guard < peer_resets < terminal < target_snapshot
@@ -677,7 +704,7 @@ def test_workflow_reconciliation_failure_is_terminal_before_target_promotion():
         "throw Error(`open PR reconciliation incomplete"
     )
     target_snapshot = workflow.index(
-        "const target = await snapshot(prNumber, defaultBranch);"
+        "target = await snapshot(prNumber, defaultBranch);"
     )
     target_success = workflow.index("conclusion = 'success';")
 
@@ -715,7 +742,7 @@ def test_workflow_captures_exact_target_dispatch_id_before_reset():
         "await emit(prNumber, base, head, 'failure', 'Protected base changed"
     )
     target_snapshot = workflow.index(
-        "const target = await snapshot(prNumber, defaultBranch);"
+        "target = await snapshot(prNumber, defaultBranch);"
     )
 
     assert (
@@ -759,7 +786,7 @@ def test_workflow_invalid_prior_target_does_not_abort_fresh_renewal():
         optional_history,
     )
     target_snapshot = workflow.index(
-        "const target = await snapshot(prNumber, defaultBranch);",
+        "target = await snapshot(prNumber, defaultBranch);",
         target_reset,
     )
 
@@ -866,9 +893,18 @@ def test_workflow_dispatch_validation_failure_is_terminal_before_target_promotio
     ).read_text(encoding="utf-8")
 
     input_packet = workflow.index("const input = {schema_version: '2', target")
-    wrapping = workflow.index("try {", input_packet)
+    # The fail-closed try opens BEFORE the pre-validation reset and the target
+    # re-snapshot: an API rejection of either leaves every peer un-reconciled
+    # and must reach the reset-all catch, not the target-only outer catch.
+    wrapping = workflow.rindex("try {", 0, input_packet)
+    target_reset = workflow.index(
+        "await emit(prNumber, base, head, 'failure', 'Protected base changed", wrapping
+    )
+    target_snapshot = workflow.index(
+        "target = await snapshot(prNumber, defaultBranch);", target_reset
+    )
     validator = workflow.index(
-        "const validated = await runValidator(input, protectedSha);", wrapping
+        "const validated = await runValidator(input, protectedSha);", input_packet
     )
     invalid_read = workflow.index("await finalReadInvalidPeers(result.peers", validator)
     preserved_read = workflow.index(
@@ -883,6 +919,9 @@ def test_workflow_dispatch_validation_failure_is_terminal_before_target_promotio
 
     assert (
         wrapping
+        < target_reset
+        < target_snapshot
+        < input_packet
         < validator
         < invalid_read
         < preserved_read

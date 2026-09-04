@@ -285,18 +285,21 @@ jobs:
                     }
                   }
                 }
-                await emit(prNumber, base, head, 'failure', 'Protected base changed or stored packet invalid; validation started and fails closed until complete.');
-                const target = await snapshot(prNumber, defaultBranch);
-                const input = {schema_version: '2', target, peers: snapshots.filter(item => item.pr_number !== prNumber),
-                  receipts: dispatch.receipts, producer: {login: sender.login, id: Number(sender.id), type: sender.type},
-                  run: {id: process.env.GITHUB_RUN_ID, attempt: run_attempt},
-                  dispatch_id: dispatch.dispatch_id, prior_dispatch_ids: priorDispatchIds};
+                let target = null;
                 try {
-                  // Infra failures only: a validator crash, malformed output, or an
-                  // incomplete peer-result set leaves peer state UNKNOWN, so every
+                  // Infra failures only: a validator crash, malformed output, an
+                  // incomplete peer-result set, or an API rejection of the
+                  // pre-validation reset / target re-snapshot leaves peer state
+                  // UNKNOWN (the validator never reconciled the peers), so every
                   // known snapshot resets. A clean FAIL decision is NOT in this
                   // class — the validator evaluated every peer, so peers keep their
                   // own verdicts and only the dispatch target fails (below).
+                  await emit(prNumber, base, head, 'failure', 'Protected base changed or stored packet invalid; validation started and fails closed until complete.');
+                  target = await snapshot(prNumber, defaultBranch);
+                  const input = {schema_version: '2', target, peers: snapshots.filter(item => item.pr_number !== prNumber),
+                    receipts: dispatch.receipts, producer: {login: sender.login, id: Number(sender.id), type: sender.type},
+                    run: {id: process.env.GITHUB_RUN_ID, attempt: run_attempt},
+                    dispatch_id: dispatch.dispatch_id, prior_dispatch_ids: priorDispatchIds};
                   const validated = await runValidator(input, protectedSha);
                   result = validated.result;
                   if (!result?.decision || !Array.isArray(result.peers) ||
@@ -371,4 +374,4 @@ jobs:
             }
             if (writeFailures.length)
               summary = `${summary}; failure writes: ${writeFailures.join(',')}`;
-            if (conclusion !== 'success') core.setFailed(summary);
+            if (conclusion !== 'success' || writeFailures.length) core.setFailed(summary);
