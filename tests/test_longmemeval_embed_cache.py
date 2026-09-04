@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -228,6 +229,14 @@ def test_prewarm_refuses_changed_manifest_that_aliases_the_cache(tmp_path, monke
     with pytest.raises(ValueError, match="changed-manifest must not be the embedding cache"):
         lme.prewarm_embedding_cache(
             [_question("q-alias-seed")], cached, dry_run=True, changed_manifest=alias
+        )
+    assert cache_path.read_bytes() == before
+
+    hard_link = tmp_path / "manifest-hardlink.jsonl"
+    os.link(cache_path, hard_link)
+    with pytest.raises(ValueError, match="changed-manifest must not be the embedding cache"):
+        lme.prewarm_embedding_cache(
+            [_question("q-alias-seed")], cached, dry_run=True, changed_manifest=hard_link
         )
     assert cache_path.read_bytes() == before
     assert raw.calls == calls_after_seed

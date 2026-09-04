@@ -1765,7 +1765,13 @@ def prewarm_embedding_cache(
     )
     changed_manifest_file = None
     if changed_manifest_path is not None:
-        if changed_manifest_path.resolve() == provider.cache_path.resolve():
+        cache_file = provider.cache_path
+        aliases_cache = changed_manifest_path.resolve() == cache_file.resolve() or (
+            changed_manifest_path.exists()
+            and cache_file.exists()
+            and os.path.samefile(changed_manifest_path, cache_file)
+        )
+        if aliases_cache:
             raise ValueError(
                 "--changed-manifest must not be the embedding cache file: opening "
                 f"{changed_manifest_path} for writing would truncate the cache"

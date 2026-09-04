@@ -113,16 +113,19 @@ F53's full 500-question run took **43 minutes** wall across 6 shards on the warm
 (505,695 entries; 4.1 GB, present on disk) versus a ~45 h cold projection. The cache key is the sha256 of the
 post-transform text, so cost is driven entirely by the transform-change count: 0 ⇒ query embeddings only
 (single-digit dollars); a full re-embed worst case is estimated $15–40 (scaling AMENDMENT-2's $5–15 per ~190
-questions). **Cost cap: $40 Voyage.** Order of operations enforces it: the 20-sample determinism probe (sample-scoped
+questions). **Cost cap: $40 Voyage, scoped to the prewarm (re-embed) spend — the one step whose volume is unknown before the
+dry run.** Order of operations enforces it: the 20-sample determinism probe (sample-scoped
 transform count; runs without the cache and reports no hit rate) and then `prewarm-cache --dry-run` (cache lookups + privacy validation only — no embedding call, no spend; for cloud
 providers the CLI also skips provider warmup, so the dry run makes no provider call of any kind) run
 FIRST and report the transform-change count and `would_populate`, the exact number of request units the real
 prewarm would embed; projected spend = `would_populate` × **$40 / 505,695 ≈ $0.0000791 per request unit** (the cap divided
-by the full-corpus worst case — conservative: it prices a full re-embed at exactly the cap). If it exceeds the cap the
-run is PARKED and reported before the real prewarm or any shard launches — the real `prewarm-cache` embeds
+by the full-corpus worst case — conservative: it prices a full re-embed at exactly the cap). If the projection reaches the
+cap (≥ $40) the run is PARKED and reported before the real prewarm or any shard launches — the real `prewarm-cache` embeds
 every miss as it goes, so it is never the first spend-bearing step. Only after the dry-run clears the cap does
-the real prewarm run (expected `populated == 0`). Public V1-M data
-only. OpenRouter: not used.
+the real prewarm run (expected `populated == 0`). Non-prewarm Voyage calls are bounded by construction and are disclosed
+rather than capped: the determinism probe embeds 2 × 20 documents, each shard issues one provider warmup, and the run embeds
+≤ 500 query texts (A′: ≤ 100); F53 measured this class at well under one dollar, and every run report records provider usage
+for it. Public V1-M data only. OpenRouter: not used.
 
 ## 6. Ledger discharges (appended at banking, never edited)
 - `#352` → RECORDED (finding records "post-#352 instrument").
