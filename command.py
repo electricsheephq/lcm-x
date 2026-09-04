@@ -59,6 +59,7 @@ from .assertion_store import AssertionSchemaUnavailableError, AssertionStore
 from . import rollup_builder
 from .rollup_store import RollupStore
 from .session_patterns import build_session_match_keys, matches_session_pattern
+from .scope_storage import SCOPE_DOCTOR_CHECK, doctor_scope_check
 from .store import build_message_fts_spec
 from .chunking import (
     VALID_CONTENT_POLICIES,
@@ -1645,7 +1646,33 @@ def _doctor_text(engine) -> str:
             "run `/lcm doctor repair`, then `/lcm backup` and `/lcm doctor repair apply` to rebuild nodes_fts"
         )
 
-    triage_checks: list[dict[str, Any]] = []
+    try:
+        scope_check = doctor_scope_check(store_conn)
+    except Exception as exc:  # pragma: no cover - defensive
+        scope_check = {
+            "check": SCOPE_DOCTOR_CHECK,
+            "status": "fail",
+            "detail": str(exc),
+        }
+    scope_status = str(scope_check.get("status") or "fail")
+    scope_detail = scope_check.get("detail")
+    if scope_status == "fail":
+        issues.append(SCOPE_DOCTOR_CHECK)
+    elif scope_status == "warn":
+        recommended_actions.append("inspect Teams scope-storage doctor guidance")
+    if isinstance(scope_detail, dict):
+        observations.append(
+            f"{SCOPE_DOCTOR_CHECK}: {scope_status}; "
+            f"startup_state={scope_detail.get('startup_state', '(unknown)')}; "
+            f"storage_status={scope_detail.get('storage_status', '(unknown)')}; "
+            f"message={scope_detail.get('message', '(none)')}"
+        )
+    else:
+        observations.append(
+            f"{SCOPE_DOCTOR_CHECK}: {scope_status}; detail={scope_detail}"
+        )
+
+    triage_checks: list[dict[str, Any]] = [scope_check]
     if integrity != "ok":
         triage_checks.append({"check": "database_integrity", "status": "fail", "detail": integrity})
     if schema_health.get("error") or schema_missing_tables:

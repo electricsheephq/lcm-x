@@ -16,6 +16,7 @@ import pytest
 from hermes_lcm import db_bootstrap, scope_storage
 from hermes_lcm.access_policy import FailClosedPolicy, TrustedOwnerPolicy, policy_for_engine
 from hermes_lcm.dag import SummaryDAG, SummaryNode
+from hermes_lcm.lifecycle_state import LifecycleStateStore
 from hermes_lcm.rollup_store import RollupStore
 from hermes_lcm.scope_storage import (
     SCOPE_BEARING_TABLES,
@@ -71,6 +72,13 @@ def _tables(conn: sqlite3.Connection) -> set[str]:
 
 def _columns(conn: sqlite3.Connection, table: str) -> list[str]:
     return [str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")]
+
+
+def _scope_marker_exists(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM lcm_migration_state WHERE step_name = ?",
+        (scope_storage.SCOPE_MIGRATION_STEP,),
+    ).fetchone() is not None
 
 
 # -- Inertness -------------------------------------------------------------
@@ -143,6 +151,52 @@ def test_reopening_a_stock_database_changes_nothing(tmp_path):
     finally:
         dag.close()
         store.close()
+
+
+def test_summary_dag_first_defers_the_scope_marker_until_messages_exist(tmp_path):
+    """A partial core initializer must not make the later core sweep a no-op."""
+
+    db_path = tmp_path / "dag-first.db"
+    dag = SummaryDAG(db_path)
+    store = None
+    try:
+        assert not _scope_marker_exists(dag.connection)
+        store = MessageStore(db_path)
+        conn = store.connection
+        assert "access_scope" in _columns(conn, "messages")
+        assert _scope_marker_exists(conn)
+        report = verify_scope_storage(conn, teams_enabled=False)
+        assert "missing access_scope column" not in str(report)
+    finally:
+        if store is not None:
+            store.close()
+        dag.close()
+
+
+def test_lifecycle_first_defers_the_scope_marker_until_both_core_tables_exist(tmp_path):
+    """Lifecycle bootstrap may precede both core scope-bearing stores."""
+
+    db_path = tmp_path / "lifecycle-first.db"
+    lifecycle = LifecycleStateStore(db_path)
+    store = None
+    dag = None
+    try:
+        assert not _scope_marker_exists(lifecycle.connection)
+        store = MessageStore(db_path)
+        assert not _scope_marker_exists(store.connection)
+        dag = SummaryDAG(db_path)
+        conn = store.connection
+        assert "access_scope" in _columns(conn, "messages")
+        assert "access_scope" in _columns(conn, "summary_nodes")
+        assert _scope_marker_exists(conn)
+        report = verify_scope_storage(conn, teams_enabled=False)
+        assert "missing access_scope column" not in str(report)
+    finally:
+        if dag is not None:
+            dag.close()
+        if store is not None:
+            store.close()
+        lifecycle.close()
 
 
 def test_a_pre_scope_database_is_migrated_once(tmp_path):
@@ -514,7 +568,8 @@ def test_the_doctor_names_the_stray_stamp_and_its_repair(tmp_path):
         repair = str(detail["repair"])
         # Both origins, because the repair differs between them.
         assert "setup_teams_scope" in repair
-        assert "persist_teams_enabled" in repair
+        assert "persist_teams_enabled(conn, True)" in repair
+        assert "persist_teams_enabled(conn, False)" in repair
         assert "import_lossless_claw" in repair
     finally:
         dag.close()

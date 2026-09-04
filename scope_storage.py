@@ -521,7 +521,10 @@ def ensure_scope_columns(
             missing_tables = _tables_missing_scope_column(conn, materialized_tables)
         except sqlite3.Error:
             missing_tables = list(materialized_tables)
-        if not missing_tables:
+        core_tables_ready = all(
+            _table_exists(conn, table) for table in _SESSION_SCOPE_TABLES
+        )
+        if not missing_tables and core_tables_ready:
             mark_migration_step_complete(conn, SCOPE_MIGRATION_STEP)
             return {"added": [], "existing": [], "absent": []}
 
@@ -562,7 +565,9 @@ def ensure_scope_columns(
             f'ALTER TABLE "{table}" ADD COLUMN {ACCESS_SCOPE_COLUMN} TEXT',
         )
         added.append(table)
-    if tables is None:
+    if tables is None and not any(
+        table in absent for table in _SESSION_SCOPE_TABLES
+    ):
         mark_migration_step_complete(conn, SCOPE_MIGRATION_STEP)
     return {"added": added, "existing": existing, "absent": absent}
 
@@ -1361,7 +1366,9 @@ STRAY_STAMP_REPAIR = (
     "access_scope stamps exist with no recorded Teams decision, so the store "
     "fails closed and refuses all work. Either finish the enable "
     "(`hermes_lcm.scope_storage.setup_teams_scope`, which is resumable and "
-    "leaves already-stamped rows untouched), or -- if these stamps arrived "
+    "leaves already-stamped rows untouched) and then record the completed "
+    "enable with `persist_teams_enabled(conn, True)`, or -- if these stamps "
+    "arrived "
     "from an importer rather than an enable, `scripts/import_lossless_claw.py` "
     "being the known one -- record the decision that was never made with "
     "`persist_teams_enabled(conn, False)`. Disabling retains the stamps, so a "
