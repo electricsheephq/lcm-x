@@ -171,6 +171,38 @@ def test_prewarm_is_resumable_and_skips_all_warm_units(tmp_path):
     assert raw.calls == calls_after_first
 
 
+def test_prewarm_changed_manifest_truncates_to_current_scan(tmp_path, monkeypatch):
+    documents = ["ordinary document", "password: hunter2000abc"]
+    monkeypatch.setattr(
+        lme,
+        "iter_ingest_embedding_request_units",
+        lambda _question: iter(documents),
+    )
+    raw = _CountingProvider("voyage-context-4")
+    cached = lme.ContentHashEmbeddingCache(raw, tmp_path / "manifest-cache.sqlite3")
+    manifest = tmp_path / "nested" / "changed.jsonl"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"unrelated":true}\n', encoding="utf-8")
+
+    dry_run = lme.prewarm_embedding_cache(
+        [_question("q-manifest-rebank")],
+        cached,
+        dry_run=True,
+        changed_manifest=manifest,
+    )
+    real_run = lme.prewarm_embedding_cache(
+        [_question("q-manifest-rebank")],
+        cached,
+        changed_manifest=manifest,
+    )
+
+    rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["question_id"] == "q-manifest-rebank"
+    assert dry_run["changed_units"] == real_run["changed_units"] == 1
+    assert dry_run["privacy"]["changed"] == real_run["privacy"]["changed"] == 1
+
+
 def test_evaluate_question_reports_exact_embed_cache_delta(tmp_path):
     raw = _CountingProvider()
     cached = lme.ContentHashEmbeddingCache(

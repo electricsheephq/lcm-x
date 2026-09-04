@@ -1766,7 +1766,7 @@ def prewarm_embedding_cache(
     changed_manifest_file = None
     if changed_manifest_path is not None:
         changed_manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        changed_manifest_file = changed_manifest_path.open("a", encoding="utf-8")
+        changed_manifest_file = changed_manifest_path.open("w", encoding="utf-8")
 
     def flush_batch() -> None:
         nonlocal already_cached, processed, would_populate
@@ -3952,6 +3952,22 @@ def run_harness(
         resolved_chunk_embedding_mode = _resolved_chunk_embedding_mode(
             provider_set.chunk
         )
+        if resume:
+            for record in checkpoint_records:
+                question_id = record["question_id"]
+                if "chunk_embedding_mode" not in record:
+                    raise ValueError(
+                        f"checkpoint row {question_id}: missing chunk_embedding_mode; "
+                        "rows written before this instrument cannot be partially "
+                        "resumed — start a fresh output root"
+                    )
+                recorded_mode = record["chunk_embedding_mode"]
+                if recorded_mode != resolved_chunk_embedding_mode:
+                    raise ValueError(
+                        f"checkpoint row {question_id}: "
+                        f"chunk_embedding_mode={recorded_mode!r} but the resumed run "
+                        f"resolves {resolved_chunk_embedding_mode!r}"
+                    )
         if reuse_db_template:
             _ensure_hermes_lcm_package()
             from hermes_lcm.config import LCMConfig
@@ -4128,6 +4144,10 @@ def run_harness(
             resolved_chunk_embedding_mode = recorded_modes.pop()
         elif len(recorded_modes) > 1:
             raise ValueError("checkpoint rows contain mixed chunk embedding modes")
+        elif fully_completed_resume and not any(
+            "chunk_embedding_mode" in record for record in checkpoint_records
+        ):
+            resolved_chunk_embedding_mode = "unknown"
         else:
             legacy_provider_set = resolve_harness_providers(
                 provider_name, model, accounting=accounting

@@ -2683,6 +2683,199 @@ def test_content_cache_exposes_internal_split_dispatches_and_usage(tmp_path):
     assert row["usage_tokens_complete"] is True
 
 
+def test_partial_resume_rejects_mismatched_chunk_embedding_mode_before_evaluation(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, "auto")
+    monkeypatch.setattr(lme, "production_recall_hits", lambda *_args, **_kwargs: [])
+    summary = _IdentityEmbedder("voyage-4-large")
+    chunk = _ContextualIdentityEmbedder("voyage-context-4")
+    _install_provider_set(monkeypatch, summary, chunk)
+    questions = [
+        _chunk_mode_question("q-partial-mismatch-1"),
+        _chunk_mode_question("q-partial-mismatch-2"),
+    ]
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        [questions[0]],
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path / "initial",
+        checkpoint_path=checkpoint,
+        reuse_db_template=False,
+    )
+    lines = checkpoint.read_text(encoding="utf-8").splitlines()
+    row = json.loads(lines[1])
+    row["chunk_embedding_mode"] = "flat"
+    checkpoint.write_text(
+        lines[0] + "\n" + json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    before = checkpoint.read_bytes()
+    calls = 0
+    original_evaluate = lme.evaluate_question
+
+    def counting_evaluate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(lme, "evaluate_question", counting_evaluate)
+    with pytest.raises(
+        ValueError,
+        match=(
+            "checkpoint row q-partial-mismatch-1: "
+            "chunk_embedding_mode='flat' but the resumed run resolves 'contextual'"
+        ),
+    ):
+        run_harness(
+            questions,
+            provider_name="voyage",
+            model="voyage-4-large",
+            tmp_dir=tmp_path / "resume",
+            checkpoint_path=checkpoint,
+            resume=True,
+            selected_question_ids=[question.question_id for question in questions],
+            reuse_db_template=False,
+        )
+    assert calls == 0
+    assert checkpoint.read_bytes() == before
+
+
+def test_partial_resume_rejects_legacy_row_without_chunk_embedding_mode(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, "contextual")
+    monkeypatch.setattr(lme, "production_recall_hits", lambda *_args, **_kwargs: [])
+    summary = _IdentityEmbedder("voyage-4-large")
+    chunk = _ContextualIdentityEmbedder("voyage-context-4")
+    _install_provider_set(monkeypatch, summary, chunk)
+    questions = [
+        _chunk_mode_question("q-partial-missing-1"),
+        _chunk_mode_question("q-partial-missing-2"),
+    ]
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        [questions[0]],
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path / "initial",
+        checkpoint_path=checkpoint,
+        reuse_db_template=False,
+    )
+    lines = checkpoint.read_text(encoding="utf-8").splitlines()
+    row = json.loads(lines[1])
+    row.pop("chunk_embedding_mode")
+    checkpoint.write_text(
+        lines[0] + "\n" + json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    before = checkpoint.read_bytes()
+    calls = 0
+    original_evaluate = lme.evaluate_question
+
+    def counting_evaluate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(lme, "evaluate_question", counting_evaluate)
+    with pytest.raises(
+        ValueError,
+        match="checkpoint row q-partial-missing-1: missing chunk_embedding_mode",
+    ):
+        run_harness(
+            questions,
+            provider_name="voyage",
+            model="voyage-4-large",
+            tmp_dir=tmp_path / "resume",
+            checkpoint_path=checkpoint,
+            resume=True,
+            selected_question_ids=[question.question_id for question in questions],
+            reuse_db_template=False,
+        )
+    assert calls == 0
+    assert checkpoint.read_bytes() == before
+
+
+def test_partial_resume_matching_chunk_embedding_mode_proceeds(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, "flat")
+    monkeypatch.setattr(lme, "production_recall_hits", lambda *_args, **_kwargs: [])
+    summary = _IdentityEmbedder("voyage-4-large")
+    chunk = _ContextualIdentityEmbedder("voyage-context-4")
+    _install_provider_set(monkeypatch, summary, chunk)
+    questions = [
+        _chunk_mode_question("q-partial-match-1"),
+        _chunk_mode_question("q-partial-match-2"),
+    ]
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        [questions[0]],
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path / "initial",
+        checkpoint_path=checkpoint,
+        reuse_db_template=False,
+    )
+    report = run_harness(
+        questions,
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path / "resume",
+        checkpoint_path=checkpoint,
+        resume=True,
+        selected_question_ids=[question.question_id for question in questions],
+        reuse_db_template=False,
+    )
+    assert report["ingest"]["chunk_embedding_mode"] == "flat"
+
+
+def test_completed_resume_of_legacy_rows_records_unknown_without_provider_resolution(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as lme
+
+    question = _chunk_mode_question("q-completed-legacy-mode")
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "initial",
+        checkpoint_path=checkpoint,
+        reuse_db_template=False,
+    )
+    lines = checkpoint.read_text(encoding="utf-8").splitlines()
+    row = json.loads(lines[1])
+    row.pop("chunk_embedding_mode")
+    checkpoint.write_text(
+        lines[0] + "\n" + json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    def forbidden_resolution(*_args, **_kwargs):
+        raise AssertionError("must not be called")
+
+    monkeypatch.setattr(lme, "resolve_harness_providers", forbidden_resolution)
+    report = run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "resume",
+        checkpoint_path=checkpoint,
+        resume=True,
+        selected_question_ids=[question.question_id],
+        reuse_db_template=False,
+    )
+    assert report["ingest"]["chunk_embedding_mode"] == "unknown"
+
+
 def test_completed_resume_and_binding_mismatch_do_not_resolve_provider(
     tmp_path, monkeypatch
 ):
