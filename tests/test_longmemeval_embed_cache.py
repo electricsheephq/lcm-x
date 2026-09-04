@@ -203,6 +203,36 @@ def test_prewarm_changed_manifest_truncates_to_current_scan(tmp_path, monkeypatc
     assert dry_run["privacy"]["changed"] == real_run["privacy"]["changed"] == 1
 
 
+def test_prewarm_refuses_changed_manifest_that_aliases_the_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        lme,
+        "iter_ingest_embedding_request_units",
+        lambda _question: iter(["ordinary document"]),
+    )
+    raw = _CountingProvider("voyage-context-4")
+    cache_path = tmp_path / "alias-cache.sqlite3"
+    cached = lme.ContentHashEmbeddingCache(raw, cache_path)
+    lme.prewarm_embedding_cache([_question("q-alias-seed")], cached)
+    before = cache_path.read_bytes()
+    calls_after_seed = raw.calls
+    assert before
+
+    with pytest.raises(ValueError, match="changed-manifest must not be the embedding cache"):
+        lme.prewarm_embedding_cache(
+            [_question("q-alias-seed")], cached, dry_run=True, changed_manifest=cache_path
+        )
+    assert cache_path.read_bytes() == before
+
+    alias = tmp_path / "manifest-alias.jsonl"
+    alias.symlink_to(cache_path)
+    with pytest.raises(ValueError, match="changed-manifest must not be the embedding cache"):
+        lme.prewarm_embedding_cache(
+            [_question("q-alias-seed")], cached, dry_run=True, changed_manifest=alias
+        )
+    assert cache_path.read_bytes() == before
+    assert raw.calls == calls_after_seed
+
+
 def test_evaluate_question_reports_exact_embed_cache_delta(tmp_path):
     raw = _CountingProvider()
     cached = lme.ContentHashEmbeddingCache(

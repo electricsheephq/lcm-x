@@ -1765,6 +1765,11 @@ def prewarm_embedding_cache(
     )
     changed_manifest_file = None
     if changed_manifest_path is not None:
+        if changed_manifest_path.resolve() == provider.cache_path.resolve():
+            raise ValueError(
+                "--changed-manifest must not be the embedding cache file: opening "
+                f"{changed_manifest_path} for writing would truncate the cache"
+            )
         changed_manifest_path.parent.mkdir(parents=True, exist_ok=True)
         changed_manifest_file = changed_manifest_path.open("w", encoding="utf-8")
 
