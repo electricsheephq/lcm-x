@@ -162,6 +162,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     prewarm.add_argument("--provider", default="voyage", choices=PROVIDERS)
     prewarm.add_argument("--model", required=True)
     prewarm.add_argument("--timeout", type=float, default=300.0)
+    prewarm.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report uncached embedding units without populating the cache.",
+    )
 
     probe = sub.add_parser(
         "determinism-probe",
@@ -412,13 +417,17 @@ def _cmd_prewarm_cache(args: argparse.Namespace) -> int:
             progress=lambda processed: print(
                 f"prewarm processed={processed}", flush=True
             ),
+            dry_run=args.dry_run,
         )
     except EmbeddingPrivacyPolicyError as exc:
+        privacy = getattr(exc, "privacy_counts", None)
+        if privacy is None:
+            privacy = dict(_longmemeval._PRIVACY_COUNTS)
         print(
             json.dumps(
                 {
                     "status": "blocked",
-                    "privacy": getattr(exc, "privacy_counts", {}),
+                    "privacy": privacy,
                     "error": str(exc),
                 },
                 indent=2,
@@ -458,11 +467,14 @@ def _cmd_determinism_probe(args: argparse.Namespace) -> int:
             seed=args.seed,
         )
     except EmbeddingPrivacyPolicyError as exc:
+        privacy = getattr(exc, "privacy_counts", None)
+        if privacy is None:
+            privacy = dict(_longmemeval._PRIVACY_COUNTS)
         print(
             json.dumps(
                 {
                     "status": "blocked",
-                    "privacy": getattr(exc, "privacy_counts", {}),
+                    "privacy": privacy,
                     "error": str(exc),
                 },
                 indent=2,

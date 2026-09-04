@@ -1649,6 +1649,36 @@ def test_determinism_probe_privacy_counts_are_sample_scoped(tmp_path):
     assert report["privacy"]["changed"] == 1
 
 
+def test_determinism_probe_block_counts_even_during_uncounted_scan(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+    from hermes_lcm import ingest_protection
+    from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
+
+    question = parse_question(
+        _make_raw(
+            "q-private-determinism-blocked-scan",
+            "single-session-user",
+            sessions={
+                "s0": [{"role": "user", "content": "first scanned session"}],
+                "s1": [{"role": "user", "content": "second scanned session"}],
+            },
+            answer_session_ids=["s0"],
+        )
+    )
+
+    def _blocked(*_args, **_kwargs):
+        raise EmbeddingPrivacyPolicyError("privacy policy blocked scan")
+
+    monkeypatch.setattr(ingest_protection, "protect_embedding_text", _blocked)
+    with pytest.raises(EmbeddingPrivacyPolicyError) as raised:
+        lme.embedding_determinism_report(
+            [question], _CapturingIdentityEmbedder("voyage-4-large"), sample_size=1
+        )
+
+    assert raised.value.privacy_counts["blocked"] == 1
+    assert raised.value.privacy_counts["documents"] == 0
+
+
 def test_per_question_privacy_and_corpus_counts_resume_without_header_change(tmp_path):
     question = parse_question(
         _make_raw(
@@ -1688,9 +1718,13 @@ def test_per_question_privacy_and_corpus_counts_resume_without_header_change(tmp
         "queries_blocked": 0,
     }
     assert row["corpus_counts"] == {"messages": 2, "summary_nodes": 1, "chunks": 0}
+    assert row["embed_cache"] == {"hits": 0, "misses": 0}
+    assert "corpus_counts" not in row["arms"]
+    assert "embed_cache" not in row["arms"]
+    assert set(row["arms"]) == set(ARMS)
 
-    # Simulate a previously completed privacy-accounted question. Missing query
-    # sub-keys must continue to restore as zero on the resume path.
+    # Simulate a previously completed privacy-accounted question (all six keys
+    # present). The legacy three-key row shape is covered by the next test.
     row["privacy"]["documents"] = 3
     row["privacy"]["changed"] = 1
     checkpoint.write_text(
@@ -1719,6 +1753,57 @@ def test_per_question_privacy_and_corpus_counts_resume_without_header_change(tmp
     resumed_header_line = checkpoint.read_text(encoding="utf-8").splitlines()[0]
     assert resumed_header_line == header_line
     assert set(json.loads(resumed_header_line)) == {"__checkpoint_header__"}
+
+
+def test_resume_restores_legacy_three_key_privacy_rows(tmp_path):
+    question = parse_question(
+        _make_raw(
+            "q-legacy-privacy-row",
+            "single-session-user",
+            sessions={
+                "s-legacy": [
+                    {"role": "user", "content": "first toy message"},
+                    {"role": "assistant", "content": "second toy message", "has_answer": True},
+                ]
+            },
+            answer_session_ids=["s-legacy"],
+            question="what was in the toy message",
+        )
+    )
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "initial",
+        checkpoint_path=checkpoint,
+    )
+    lines = checkpoint.read_text(encoding="utf-8").splitlines()
+    row = json.loads(lines[1])
+    # A pre-r2 row carried only the three document counters.
+    row["privacy"] = {"documents": 5, "changed": 2, "blocked": 0}
+    checkpoint.write_text(
+        lines[0] + "\n" + json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    resumed = run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "resume",
+        checkpoint_path=checkpoint,
+        resume=True,
+        selected_question_ids=[question.question_id],
+    )
+    assert resumed["question_count"] == 1
+    assert resumed["ingest"]["privacy"] == {
+        "documents": 5,
+        "changed": 2,
+        "blocked": 0,
+        "queries": 0,
+        "queries_changed": 0,
+        "queries_blocked": 0,
+    }
 
 
 def test_embeddings_disabled_preserves_raw_corpus_text_in_fts(tmp_path):

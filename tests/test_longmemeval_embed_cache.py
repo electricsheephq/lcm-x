@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 
@@ -130,9 +132,9 @@ class TestCacheConcurrentWriters:
             assert connection.execute("SELECT count(*) FROM embedding_cache").fetchone()[0] == 1
 
 
-def _question() -> lme.Question:
+def _question(question_id: str = "q0") -> lme.Question:
     return lme.Question(
-        question_id="q0",
+        question_id=question_id,
         question_type="single-session-user",
         question="what was said?",
         haystack_session_ids=["s0"],
@@ -143,19 +145,148 @@ def _question() -> lme.Question:
 
 def test_prewarm_is_resumable_and_skips_all_warm_units(tmp_path):
     raw = _CountingProvider()
+    cache_path = tmp_path / "embeddings.db"
     cached = lme.ContentHashEmbeddingCache(
-        raw, tmp_path / "embeddings.db", provider_id="stub", model_id="stub-hash-64"
+        raw, cache_path, provider_id="stub", model_id="stub-hash-64"
     )
+
+    dry_run = lme.prewarm_embedding_cache([_question()], cached, dry_run=True)
+    assert dry_run["would_populate"] == dry_run["unique_request_units"]
+    assert dry_run["populated"] == 0
+    assert dry_run["dry_run"] is True
+    assert raw.calls == 0
+    with sqlite3.connect(cache_path) as connection:
+        assert connection.execute("SELECT count(*) FROM embedding_cache").fetchone()[0] == 0
 
     first = lme.prewarm_embedding_cache([_question()], cached)
     calls_after_first = raw.calls
-    second = lme.prewarm_embedding_cache([_question()], cached)
+    second = lme.prewarm_embedding_cache([_question()], cached, dry_run=True)
 
     assert first["unique_request_units"] >= 1
     assert first["populated"] == first["unique_request_units"]
     assert second["already_cached"] == second["unique_request_units"]
     assert second["populated"] == 0
+    assert second["would_populate"] == 0
+    assert second["dry_run"] is True
     assert raw.calls == calls_after_first
+
+
+def test_evaluate_question_reports_exact_embed_cache_delta(tmp_path):
+    raw = _CountingProvider()
+    cached = lme.ContentHashEmbeddingCache(
+        raw, tmp_path / "embeddings.db", provider_id="stub", model_id="stub-hash-64"
+    )
+
+    first = lme.evaluate_question(
+        _question("q-first"),
+        cached,
+        provider_name="stub",
+        tmp_dir=tmp_path / "first",
+        embeddings_enabled=True,
+        chunk_provider=cached,
+    )
+    assert first["embed_cache"] == {"hits": 0, "misses": cached.misses}
+    before_hits, before_misses = cached.hits, cached.misses
+
+    second = lme.evaluate_question(
+        _question("q-second"),
+        cached,
+        provider_name="stub",
+        tmp_dir=tmp_path / "second",
+        embeddings_enabled=True,
+        chunk_provider=cached,
+    )
+    assert second["embed_cache"] == {
+        "hits": cached.hits - before_hits,
+        "misses": cached.misses - before_misses,
+    }
+    assert second["embed_cache"]["hits"] > 0
+    assert second["embed_cache"]["misses"] == 0
+
+
+def test_resume_aggregate_adds_restored_and_live_embed_cache_counts(tmp_path, monkeypatch):
+    questions = [_question("q-first"), _question("q-second")]
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "cache.sqlite3"))
+
+    def _scored(embed_cache):
+        metric = {
+            "recall@1": 1.0,
+            "recall@5": 1.0,
+            "recall@10": 1.0,
+            "ndcg@10": 1.0,
+            "latency_ms": 1.0,
+            "turn": {
+                "recall@1": 1.0,
+                "recall@5": 1.0,
+                "recall@10": 1.0,
+                "ndcg@10": 1.0,
+                "session_granularity": False,
+            },
+        }
+        return {
+            **{arm: dict(metric) for arm in lme.ARMS},
+            "hybrid_rerank": {**metric, "rerank_mode": lme.RERANK_MODE_PLACEHOLDER},
+            "ingest_ms": 1.0,
+            "privacy": {key: 0 for key in lme._PRIVACY_KEYS},
+            "corpus_counts": {"messages": 1, "summary_nodes": 1, "chunks": 0},
+            "embed_cache": dict(embed_cache),
+        }
+
+    resolved = []
+
+    def _resolve(*_args, **_kwargs):
+        provider = SimpleNamespace(
+            provider_id="stub",
+            model_id="stub-hash-64",
+            hits=0,
+            misses=0,
+        )
+        resolved.append(provider)
+        return lme.HarnessProviderSet(
+            summary=provider,
+            chunk=provider,
+            summary_binding=("stub", "stub-hash-64"),
+            chunk_binding=("stub", "stub-hash-64"),
+        )
+
+    def _evaluate(_question, provider, **_kwargs):
+        provider.hits += 2
+        provider.misses += 1
+        return _scored({"hits": 2, "misses": 1})
+
+    monkeypatch.setattr(lme, "resolve_harness_providers", _resolve)
+    monkeypatch.setattr(lme, "evaluate_question", _evaluate)
+    lme.run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "initial",
+        reuse_db_template=False,
+        checkpoint_path=checkpoint,
+    )
+
+    lines = checkpoint.read_text(encoding="utf-8").splitlines()
+    header_line = lines[0]
+    first_row = json.loads(lines[1])
+    first_row["embed_cache"] = {"hits": 10, "misses": 20}
+    checkpoint.write_text(
+        header_line + "\n" + json.dumps(first_row, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    resumed = lme.run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "resume",
+        reuse_db_template=False,
+        checkpoint_path=checkpoint,
+        resume=True,
+        selected_question_ids=[question.question_id for question in questions],
+    )
+
+    assert resumed["ingest"]["embed_cache"] == {"hits": 12, "misses": 21}
 
 
 def test_prewarm_rejects_split_summary_chunk_identity_before_embedding(tmp_path):
@@ -257,6 +388,7 @@ def test_fastembed_prewarm_resolves_with_run_path_warmup(tmp_path, monkeypatch):
     monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "cache.db"))
     monkeypatch.setattr(cli, "_prepared_shard_questions", lambda _args: [])
     calls = []
+    prewarm_calls = []
 
     class _Provider:
         pass
@@ -266,7 +398,12 @@ def test_fastembed_prewarm_resolves_with_run_path_warmup(tmp_path, monkeypatch):
         return _Provider()
 
     monkeypatch.setattr(cli, "resolve_harness_provider", _resolve)
-    monkeypatch.setattr(cli, "prewarm_embedding_cache", lambda *_args, **_kwargs: {})
+
+    def _prewarm(*args, **kwargs):
+        prewarm_calls.append((args, kwargs))
+        return {}
+
+    monkeypatch.setattr(cli, "prewarm_embedding_cache", _prewarm)
     args = cli._parse_args(
         [
             "prewarm-cache",
@@ -278,8 +415,10 @@ def test_fastembed_prewarm_resolves_with_run_path_warmup(tmp_path, monkeypatch):
             "fastembed",
             "--model",
             "local-model",
+            "--dry-run",
         ]
     )
 
     assert cli._cmd_prewarm_cache(args) == 0
     assert calls == [(("fastembed", "local-model"), {"timeout": 300.0, "warmup": True})]
+    assert prewarm_calls and prewarm_calls[0][1]["dry_run"] is True

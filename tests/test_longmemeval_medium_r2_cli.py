@@ -220,6 +220,54 @@ def test_prewarm_privacy_block_is_a_durable_cli_report(tmp_path, monkeypatch, ca
     assert payload["privacy"]["blocked"] == 1
 
 
+def test_dispatch_validator_block_report_contains_all_privacy_keys(tmp_path, monkeypatch, capsys):
+    cli = _load_cli()
+    monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "cache.sqlite3"))
+    question = lme.Question(
+        question_id="q-dispatch-block",
+        question_type="single-session-user",
+        question="what was said?",
+        haystack_session_ids=["s0"],
+        haystack_sessions=[[{"role": "user", "content": "ordinary text"}]],
+        answer_session_ids=["s0"],
+    )
+    monkeypatch.setattr(cli, "_prepared_shard_questions", lambda _args: iter([question]))
+    monkeypatch.setattr(
+        cli,
+        "resolve_harness_provider",
+        lambda *_args, **_kwargs: lme.ContentHashEmbeddingCache(
+            lme.StubEmbedder(),
+            tmp_path / "cache.sqlite3",
+            provider_id="voyage",
+            model_id="voyage-context-4",
+        ),
+    )
+    cli._longmemeval._ensure_hermes_lcm_package()
+    from hermes_lcm import ingest_protection
+
+    def _blocked(*_args, **_kwargs):
+        raise EmbeddingPrivacyPolicyError("privacy policy blocked dispatch")
+
+    monkeypatch.setattr(ingest_protection, "validate_embedding_privacy_dispatch", _blocked)
+
+    result = cli.main(
+        [
+            "prewarm-cache",
+            "--prepared-dir",
+            str(tmp_path / "prepared"),
+            "--shards-manifest",
+            str(tmp_path / "shards"),
+            "--model",
+            "voyage-context-4",
+        ]
+    )
+
+    assert result == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "blocked"
+    assert set(payload["privacy"]) == set(lme._PRIVACY_KEYS)
+
+
 def test_determinism_privacy_block_is_a_durable_cli_report(tmp_path, monkeypatch, capsys):
     cli = _load_cli()
     monkeypatch.setattr(cli, "_prepared_shard_questions", lambda _args: iter(()))
@@ -230,10 +278,11 @@ def test_determinism_privacy_block_is_a_durable_cli_report(tmp_path, monkeypatch
         error.privacy_counts = {
             "documents": 0,
             "changed": 0,
-            "blocked": 0,
+            # The probe protects documents only, so `blocked` is the reachable counter.
+            "blocked": 1,
             "queries": 0,
             "queries_changed": 0,
-            "queries_blocked": 1,
+            "queries_blocked": 0,
         }
         raise error
 
@@ -255,4 +304,5 @@ def test_determinism_privacy_block_is_a_durable_cli_report(tmp_path, monkeypatch
     assert result == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "blocked"
-    assert payload["privacy"]["queries_blocked"] == 1
+    assert payload["privacy"]["blocked"] == 1
+    assert payload["privacy"]["queries_blocked"] == 0
