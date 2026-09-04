@@ -146,7 +146,7 @@ itself: ≈ 1,050 request units ≈ $0.08 at the cap-basis price above. Public V
   commands print a `{"status": "blocked", "privacy": …}` report and exit non-zero (park before launch, root-cause);
   a block inside a shard aborts that shard uncaught, and a `--resume` re-hits the same question → park, root-cause,
   disclose row-level. There is no percentage threshold: one block is a park.
-- Projected spend > $40 → park before launch (§5).
+- Projected prewarm spend ≥ $40 → park before launch (§5; the same threshold as §5 — one observable outcome).
 - Host reboot / kill → resume with `--resume` per shard (checkpoint verified); no partial results carry
   over across a re-registration.
 - Known blockers named by #380, both verified DOES-NOT-APPLY to this run (2026-09-05, read-only trace):

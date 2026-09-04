@@ -457,6 +457,51 @@ def test_report_discloses_cache_stats_only_when_env_is_set(tmp_path, monkeypatch
     assert with_cache["ingest"]["embed_cache"] == {"hits": 0, "misses": 0}
 
 
+def test_prewarm_cli_refuses_changed_manifest_that_aliases_an_input(tmp_path, monkeypatch):
+    cli = _load_cli()
+    monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "cache.db"))
+    prepared_dir = tmp_path / "prepared"
+    prepared_dir.mkdir()
+    prepared_manifest = prepared_dir / "manifest.json"
+    prepared_manifest.write_text("{}", encoding="utf-8")
+    shards_dir = tmp_path / "shards"
+    (shards_dir / "shard-0").mkdir(parents=True)
+    shard_manifest = shards_dir / "shard-0" / "manifest.json"
+    shard_manifest.write_text('{"question_ids": []}', encoding="utf-8")
+    before = {path: path.read_bytes() for path in (prepared_manifest, shard_manifest)}
+    monkeypatch.setattr(
+        cli, "_prepared_shard_questions", lambda _args: pytest.fail("inputs must not be read")
+    )
+    monkeypatch.setattr(
+        cli, "prewarm_embedding_cache", lambda *_a, **_k: pytest.fail("prewarm must not run")
+    )
+    hard_link = tmp_path / "hardlink.jsonl"
+    os.link(shard_manifest, hard_link)
+
+    def _args(changed_manifest):
+        return SimpleNamespace(
+            prepared_dir=str(prepared_dir),
+            shards_manifest=str(shards_dir),
+            dataset_label="m",
+            provider="stub",
+            model="stub",
+            timeout=30.0,
+            dry_run=True,
+            changed_manifest=str(changed_manifest),
+        )
+
+    for alias in (
+        shard_manifest,
+        prepared_manifest,
+        shards_dir / "shard-0" / "changed.jsonl",
+        prepared_dir / "changed.jsonl",
+        hard_link,
+    ):
+        with pytest.raises(SystemExit, match="Refusing --changed-manifest"):
+            cli._cmd_prewarm_cache(_args(alias))
+    assert {path: path.read_bytes() for path in before} == before
+
+
 def test_fastembed_prewarm_resolves_with_run_path_warmup(tmp_path, monkeypatch):
     cli = _load_cli()
     monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "cache.db"))

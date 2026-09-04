@@ -170,7 +170,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     prewarm.add_argument(
         "--changed-manifest",
         metavar="PATH",
-        help="Append one JSONL record for each privacy-transformed request unit.",
+        help=(
+            "Write one JSONL record per privacy-transformed request unit for this scan "
+            "(the file is rewritten each scan and must not alias the cache or any input)."
+        ),
     )
 
     probe = sub.add_parser(
@@ -400,11 +403,46 @@ def _prepared_shard_questions(args: argparse.Namespace):
     return prepared.iter_question_ids(question_ids)
 
 
+def _refuse_changed_manifest_input_alias(
+    changed_manifest: Path, args: argparse.Namespace
+) -> None:
+    """Refuse a --changed-manifest that names or sits inside one of the command's inputs.
+
+    The manifest is opened for writing before the scan; an alias of the prepared
+    corpus manifest or a shard manifest (path, symlink or hard link) would destroy
+    the run's own provenance. The harness separately refuses the cache file.
+    """
+    target = changed_manifest.resolve()
+    shards = Path(args.shards_manifest)
+    guarded_dirs = [
+        Path(args.prepared_dir).resolve(),
+        shards.resolve() if shards.is_dir() else shards.resolve().parent,
+    ]
+    for directory in guarded_dirs:
+        if target == directory or target.is_relative_to(directory):
+            raise SystemExit(
+                "Refusing --changed-manifest inside an input location "
+                f"(it is rewritten each scan): {changed_manifest}"
+            )
+    if not changed_manifest.exists():
+        return
+    inputs = [shards, Path(args.prepared_dir) / "manifest.json"]
+    if shards.is_dir():
+        inputs.extend(sorted(shards.glob("shard-*/manifest.json")))
+    for candidate in inputs:
+        if candidate.exists() and os.path.samefile(changed_manifest, candidate):
+            raise SystemExit(
+                f"Refusing --changed-manifest that is the same file as an input: {candidate}"
+            )
+
+
 def _cmd_prewarm_cache(args: argparse.Namespace) -> int:
     if os.environ.get(EMBED_CACHE_ENV) is None:
         raise SystemExit(f"{EMBED_CACHE_ENV} must name the SQLite cache file")
     if args.timeout <= 0:
         raise SystemExit("--timeout must be positive")
+    if args.changed_manifest is not None:
+        _refuse_changed_manifest_input_alias(Path(args.changed_manifest), args)
     _longmemeval._ensure_hermes_lcm_package()
     from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
 
