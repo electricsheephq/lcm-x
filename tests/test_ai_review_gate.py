@@ -1130,6 +1130,28 @@ def test_preserved_peer_does_not_overwrite_fresh_target_packet():
     assert result["peers"][0]["preserve"] is True
 
 
+def test_expired_receipts_do_not_revoke_a_promoted_packet_but_block_a_fresh_dispatch():
+    # Freshness is an acceptance-time property: a stored packet stays
+    # preservable after its receipts age out (its lifetime is governed by the
+    # state fingerprint), while the same receipts cannot promote a new dispatch.
+    from scripts.ai_review_gate import evaluate as _evaluate
+
+    later = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
+    peer_only = _evaluate(
+        {"schema_version": "2", "mode": "peer_only", "peers": [_v2_snapshot(351)]},
+        later,
+    )
+    assert peer_only["decision"] == "PASS"
+    assert peer_only["peers"][0]["preserve"] is True
+
+    result = evaluate_reconciliation(
+        _v2_dispatch(_v2_snapshot(350), peers=[_v2_snapshot(351)]), later
+    )
+    assert result["decision"] == "FAIL"
+    assert "ACCEPTANCE_RECEIPT_STALE" in result["blockers"]
+    assert result["peers"][0]["preserve"] is True
+
+
 def test_red_base_accepts_dispatch_without_authenticated_producer_or_attempt_guard():
     target = _v2_snapshot(350)
     data = _v2_dispatch(target, producer={"login": "100yenadmin", "id": 239388517})

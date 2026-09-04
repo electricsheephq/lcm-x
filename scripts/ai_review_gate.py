@@ -192,7 +192,12 @@ def _receipt_blockers(
     now: datetime,
     *,
     bind_risk: bool = True,
+    check_freshness: bool = True,
 ) -> list[str]:
+    # Receipt freshness is an acceptance-time property: a new dispatch must
+    # carry unexpired receipts, but a packet that was already promoted keeps
+    # its exact-head verdict until the state fingerprint changes; passage of
+    # time alone never revokes it (check_freshness=False for stored packets).
     blockers: list[str] = []
     if not isinstance(receipts, list) or len(receipts) != 2:
         return ["RECEIPT_SET_INVALID"]
@@ -232,7 +237,8 @@ def _receipt_blockers(
         if type(receipt.get("findings")) is not int or receipt.get("findings") != 0:
             blockers.append(f"{lane.upper()}_FINDINGS_UNRESOLVED")
         try:
-            if _time(receipt.get("issued_at")) > now or _time(receipt.get("expires_at")) <= now:
+            issued, expires = _time(receipt.get("issued_at")), _time(receipt.get("expires_at"))
+            if check_freshness and (issued > now or expires <= now):
                 blockers.append(f"{lane.upper()}_RECEIPT_STALE")
         except (TypeError, ValueError):
             blockers.append(f"{lane.upper()}_TIMESTAMP_INVALID")
@@ -300,7 +306,7 @@ def _packet_blockers(packet: Any, live: dict[str, Any], now: datetime) -> list[s
     encoded = _canonical(packet).encode("utf-8")
     if len(encoded) > MAX_PACKET_BYTES:
         blockers.append("PACKET_OVERSIZED")
-    blockers.extend(_receipt_blockers(packet.get("receipts"), live, now))
+    blockers.extend(_receipt_blockers(packet.get("receipts"), live, now, check_freshness=False))
     return blockers
 
 
