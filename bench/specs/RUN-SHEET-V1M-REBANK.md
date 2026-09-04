@@ -123,9 +123,11 @@ by the full-corpus worst case — conservative: it prices a full re-embed at exa
 cap (≥ $40) the run is PARKED and reported before the real prewarm or any shard launches — the real `prewarm-cache` embeds
 every miss as it goes, so it is never the first spend-bearing step. Only after the dry-run clears the cap does
 the real prewarm run (expected `populated == 0`). Non-prewarm Voyage calls are bounded by construction and are disclosed
-rather than capped: the determinism probe embeds 2 × 20 documents, each shard issues one provider warmup, and the run embeds
-≤ 500 query texts (A′: ≤ 100); F53 measured this class at well under one dollar, and every run report records provider usage
-for it. Public V1-M data only. OpenRouter: not used.
+rather than capped: the determinism probe embeds 2 × 20 documents (no warmup, no query); each shard process issues one
+provider warmup (one more per `--resume` restart); and the run embeds each question text twice — once by the harness and once
+by the production `lcm_recall` arm, never cache-served — ≈ 1,000 query embeddings for the 500 questions (A′: ≈ 200). The
+harness does not record these dispatches (provider accounting is transient and unwired in the CLI); the bound is the count
+itself: ≈ 1,050 request units ≈ $0.08 at the cap-basis price above. Public V1-M data only. OpenRouter: not used.
 
 ## 6. Ledger discharges (appended at banking, never edited)
 - `#352` → RECORDED (finding records "post-#352 instrument").
