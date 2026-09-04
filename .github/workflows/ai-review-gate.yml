@@ -297,9 +297,9 @@ jobs:
                   // class — the validator evaluated every peer, so peers keep their
                   // own verdicts and only the dispatch target fails (below).
                   const validated = await runValidator(input, protectedSha);
-                  const run = validated.run; result = validated.result;
-                  if (run.status !== 0 ||
-                      !Array.isArray(result.peers) || result.peers.length !== input.peers.length)
+                  result = validated.result;
+                  if (!result?.decision || !Array.isArray(result.peers) ||
+                      result.peers.length !== input.peers.length)
                     throw Error('peer reconciliation validation incomplete');
                   await finalReadInvalidPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
                   await finalReadPreservedPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
@@ -320,27 +320,31 @@ jobs:
                     liveBranch.data.commit.sha !== protectedSha || context.ref !== `refs/heads/${defaultBranch}` ||
                     context.sha !== protectedSha || JSON.stringify(liveFiles) !== JSON.stringify(target.changed_paths) ||
                     JSON.stringify(liveTimeline) !== JSON.stringify(target.timeline_events) ||
-                    liveUnresolved !== 0 || target.unresolved_threads !== 0)
+                    liveUnresolved !== 0 || target.unresolved_threads !== 0) {
+                  if (live?.data?.base?.sha && live?.data?.head?.sha &&
+                      (live.data.base.sha !== base || live.data.head.sha !== head))
+                    await emit(prNumber, live.data.base.sha, live.data.head.sha, 'failure',
+                      'PR, protected-base, files, or threads drift');
                   throw Error('PR, protected-base, files, or threads drift');
+                }
                 conclusion = 'success'; summary = JSON.stringify(result.packet);
               } else {
                 let validated;
                 try {
                   validated = await runValidator({schema_version: '2', mode: 'peer_only', peers: snapshots}, protectedSha);
-                  if (validated.run.status !== 0 || validated.result.decision !== 'PASS' ||
-                      !Array.isArray(validated.result.peers) ||
+                  if (!validated.result?.decision || !Array.isArray(validated.result.peers) ||
                       validated.result.peers.length !== snapshots.length)
                     throw Error('peer reconciliation validation incomplete');
+                  result = validated.result;
+                  await finalReadInvalidPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
+                  await finalReadPreservedPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
                 } catch (error) {
                   const writeFailures = await failKnownSnapshots(snapshots,
                     `Peer reconciliation validation failed closed: ${error.message}`);
                   const suffix = writeFailures.length ? `; failure writes: ${writeFailures.join(',')}` : '';
                   throw Error(`peer reconciliation validation failed: ${error.message}${suffix}`);
                 }
-                const run = validated.run; result = validated.result;
-                await finalReadInvalidPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
-                await finalReadPreservedPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
-                if (run.status !== 0 || result.decision !== 'PASS') throw Error('peer reconciliation incomplete');
+                if (result.decision !== 'PASS') throw Error('peer reconciliation found invalid peers');
                 return;
               }
             } catch (error) {

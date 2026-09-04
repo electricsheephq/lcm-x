@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 from scripts.ai_review_gate import (
     build_packet,
@@ -18,6 +23,208 @@ HEAD = "1" * 40
 BASE = "2" * 40
 DIGEST = "3" * 64
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _workflow_under_test() -> Path:
+    return Path(
+        os.environ.get(
+            "AI_REVIEW_GATE_WORKFLOW",
+            REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml",
+        )
+    )
+
+
+def _extract_reconcile_script(workflow_path: Path) -> str:
+    lines = workflow_path.read_text(encoding="utf-8").splitlines()
+    anchors = [index for index, line in enumerate(lines) if "const runValidator" in line]
+    assert len(anchors) == 1
+    anchor = anchors[0]
+    script_line = max(
+        index for index in range(anchor) if lines[index].strip() == "script: |"
+    )
+    script_indent = len(lines[script_line]) - len(lines[script_line].lstrip())
+    content_indent = next(
+        len(line) - len(line.lstrip())
+        for line in lines[script_line + 1 :]
+        if line.strip()
+    )
+    block = []
+    for line in lines[script_line + 1 :]:
+        indent = len(line) - len(line.lstrip())
+        if line.strip() and indent <= script_indent:
+            break
+        block.append(line[content_indent:] if line.strip() else "")
+    script = "\n".join(block)
+    assert "const runValidator" in script
+    return script
+
+
+def _run_workflow_scenario(name: str) -> dict[str, object]:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required to execute ai-review-gate behavioral tests")
+
+    scenarios = {
+        "s1": {"dispatch": True, "prs": [1, 2, 3], "target": 1},
+        "s2": {"dispatch": True, "prs": [1, 2, 3], "target": 1},
+        "s3": {"dispatch": False, "prs": [1, 2, 3], "invalidPr": 2},
+        "s4": {"dispatch": False, "prs": [1, 2, 3], "throwPr": 2},
+        "s5": {"dispatch": True, "prs": [1], "target": 1},
+        "s6": {"dispatch": True, "prs": [1, 2], "target": 1},
+    }
+    config = {"name": name, **scenarios[name]}
+    script = _extract_reconcile_script(_workflow_under_test())
+    validator_start = script.index("const runValidator = async")
+    validator_end = script.index("const snapshot = async", validator_start)
+    script = (
+        script[:validator_start]
+        + "const runValidator = async input => fakeRunValidator(input);\n"
+        + script[validator_end:]
+    )
+    driver = f"""
+const cfg = {json.dumps(config)};
+const emissions = [], failures = [], checks = [];
+const pullCalls = new Map();
+let nextCheckId = 1;
+const original = number => ({{number, base: {{ref: 'main', sha: `base-${{number}}`}},
+  head: {{sha: `head-${{number}}`}}, state: 'open', draft: false}});
+const record = (run, conclusion, summary, operation) => {{
+  const match = run.external_id.match(/^ai-review-gate:(\\d+):([^:]+):(.+)$/);
+  emissions.push({{pr: Number(match[1]), base: match[2], head: match[3], conclusion,
+    summary, operation}});
+}};
+const checksApi = {{
+  listForRef: async ({{ref}}) => checks.filter(run => run.head_sha === ref),
+  create: async payload => {{
+    const run = {{...payload, id: nextCheckId++, app: {{id: 15368}}}};
+    checks.push(run); record(run, payload.conclusion, payload.output.summary, 'create');
+    return {{data: run}};
+  }},
+  update: async payload => {{
+    const run = checks.find(item => item.id === payload.check_run_id);
+    record(run, payload.conclusion, payload.output.summary, 'update');
+    Object.assign(run, payload); return {{data: run}};
+  }},
+}};
+const pullsApi = {{
+  list: async () => cfg.prs.map(original),
+  get: async ({{pull_number}}) => {{
+    const count = (pullCalls.get(pull_number) || 0) + 1;
+    pullCalls.set(pull_number, count);
+    if (cfg.throwPr === pull_number && count === 2) throw Error('synthetic final-read failure');
+    const data = original(pull_number);
+    if (cfg.name === 's5' && pull_number === cfg.target && count >= 4)
+      data.head.sha = `head-${{pull_number}}-live`;
+    return {{data}};
+  }},
+  listFiles: async ({{pull_number}}) => [{{filename: `file-${{pull_number}}`}}],
+}};
+const github = {{
+  rest: {{
+    checks: checksApi,
+    pulls: pullsApi,
+    issues: {{listEventsForTimeline: async () => []}},
+    repos: {{
+      get: async () => ({{data: {{default_branch: 'main'}}}}),
+      getBranch: async () => ({{data: {{commit: {{sha: 'protected'}}}}}}),
+      getContent: async () => {{ throw Error('real validator must not run'); }},
+    }},
+  }},
+  paginate: async (fn, args) => fn(args),
+  graphql: async () => ({{repository: {{pullRequest: {{reviewThreads: {{nodes: [],
+    pageInfo: {{hasNextPage: false, endCursor: null}}}}}}}}}}),
+}};
+const context = {{repo: {{owner: 'electricsheephq', repo: 'lcm-x'}},
+  eventName: cfg.dispatch ? 'repository_dispatch' : 'push',
+  payload: cfg.dispatch ? {{client_payload: {{pr_number: cfg.target, receipts: [],
+    dispatch_id: 'dispatch-fresh'}}, sender: {{login: '100yenadmin', id: 239388517,
+    type: 'User'}}}} : {{}}, actor: '100yenadmin', ref: 'refs/heads/main', sha: 'protected'}};
+const core = {{setFailed: message => failures.push(message)}};
+Object.assign(process.env, {{GITHUB_RUN_ATTEMPT: '1', GITHUB_ACTOR_ID: '239388517',
+  GITHUB_RUN_ID: 'run-1'}});
+const peerResult = (peer, preserve) => ({{pr_number: peer.pr_number, preserve}});
+async function fakeRunValidator(input) {{
+  if (input.mode === 'dispatch_envelope')
+    return {{run: {{status: 0}}, result: {{decision: 'PASS'}}}};
+  if (cfg.name === 's1' && input.target)
+    return {{run: {{status: 1}}, result: {{decision: 'FAIL',
+      peers: input.peers.map(peer => peerResult(peer, true))}}}};
+  if (cfg.name === 's2' && input.target)
+    return {{run: {{status: 1}}, result: {{decision: 'FAIL', peers: []}}}};
+  if (cfg.name === 's3' && input.peers.length === cfg.prs.length)
+    return {{run: {{status: 1}}, result: {{decision: 'FAIL',
+      peers: input.peers.map(peer => peerResult(peer, peer.pr_number !== cfg.invalidPr))}}}};
+  if (cfg.name === 's4' && input.peers.length === cfg.prs.length)
+    return {{run: {{status: 0}}, result: {{decision: 'PASS',
+      peers: input.peers.map(peer => peerResult(peer, true))}}}};
+  if (input.target)
+    return {{run: {{status: 0}}, result: {{decision: 'PASS', packet: {{scenario: cfg.name}},
+      peers: input.peers.map(peer => peerResult(peer, true))}}}};
+  return {{run: {{status: 0}}, result: {{decision: 'PASS',
+    peers: input.peers.map(peer => peerResult(peer, peer.pr_number !== cfg.invalidPr))}}}};
+}}
+async function main() {{
+{script}
+}}
+main().then(() => console.log(JSON.stringify({{emissions, failures}}))).catch(error => {{
+  console.error(error.stack); process.exitCode = 1;
+}});
+"""
+    run = subprocess.run([node, "-e", driver], text=True, capture_output=True)
+    assert run.returncode == 0, run.stderr
+    return json.loads(run.stdout)
+
+
+def _failure_tuples(result: dict[str, object]) -> set[tuple[int, str, str]]:
+    return {
+        (emit["pr"], emit["base"], emit["head"])
+        for emit in result["emissions"]
+        if emit["conclusion"] == "failure"
+    }
+
+
+def test_behavioral_s1_clean_dispatch_fail_resets_only_target():
+    result = _run_workflow_scenario("s1")
+    assert _failure_tuples(result) == {(1, "base-1", "head-1")}
+
+
+def test_behavioral_s2_incomplete_dispatch_validation_resets_every_snapshot():
+    result = _run_workflow_scenario("s2")
+    assert _failure_tuples(result) == {
+        (number, f"base-{number}", f"head-{number}") for number in (1, 2, 3)
+    }
+
+
+def test_behavioral_s3_clean_peer_only_fail_resets_only_invalid_peer():
+    result = _run_workflow_scenario("s3")
+    assert _failure_tuples(result) == {(2, "base-2", "head-2")}
+
+
+def test_behavioral_s4_final_read_failure_resets_every_snapshot():
+    result = _run_workflow_scenario("s4")
+    assert _failure_tuples(result) == {
+        (number, f"base-{number}", f"head-{number}") for number in (1, 2, 3)
+    }
+
+
+def test_behavioral_s5_drift_fails_original_and_live_tuples():
+    result = _run_workflow_scenario("s5")
+    assert _failure_tuples(result) == {
+        (1, "base-1", "head-1"),
+        (1, "base-1", "head-1-live"),
+    }
+
+
+def test_behavioral_s6_consistent_dispatch_succeeds_only_target():
+    result = _run_workflow_scenario("s6")
+    successes = [
+        emit for emit in result["emissions"] if emit["conclusion"] == "success"
+    ]
+    assert [(emit["pr"], emit["base"], emit["head"]) for emit in successes] == [
+        (1, "base-1", "head-1")
+    ]
+    assert all(emit["pr"] == 1 for emit in result["emissions"])
+    assert result["failures"] == []
 
 
 def receipt(lane: str, *, risk: str = "routine", reviewer: str | None = None):
@@ -609,74 +816,6 @@ def test_workflow_rechecks_invalid_peers_before_failure_write():
     peer_preserve = workflow.index(preserve_call, peer_only)
     assert dispatch_invalid < dispatch_preserve
     assert peer_invalid < peer_preserve
-
-
-def test_workflow_resets_every_known_peer_when_peer_validation_fails():
-    workflow = (
-        REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
-    ).read_text(encoding="utf-8")
-
-    helper = workflow.index("const failKnownSnapshots = async")
-    dispatch = workflow.index("if (dispatchEvent) {")
-    peer_only = workflow.index("} else {", dispatch)
-    validator = workflow.index(
-        "validated = await runValidator({schema_version: '2', "
-        "mode: 'peer_only', peers: snapshots}, protectedSha);",
-        peer_only,
-    )
-    reset = workflow.index("await failKnownSnapshots(snapshots", validator)
-    final_read = workflow.index("await finalReadInvalidPeers", reset)
-
-    assert helper < dispatch
-    assert "for (const candidate of snapshots)" in workflow[helper:dispatch]
-    assert "if (!candidate?.pr_number || !candidate?.base_sha || !candidate?.head_sha)" in workflow[
-        helper:dispatch
-    ]
-    assert "continue;" in workflow[helper:dispatch]
-    assert "await emit(candidate.pr_number, candidate.base_sha, candidate.head_sha, 'failure'" in workflow[
-        helper:dispatch
-    ]
-    assert "writeFailures.push" in workflow[helper:dispatch]
-    assert validator < reset < final_read
-    assert "validated.run.status !== 0" in workflow[validator:reset]
-    assert "validated.result.decision !== 'PASS'" in workflow[validator:reset]
-    assert "!Array.isArray(validated.result.peers)" in workflow[validator:reset]
-    assert "validated.result.peers.length !== snapshots.length" in workflow[
-        validator:reset
-    ]
-
-
-def test_workflow_dispatch_resets_every_known_peer_when_validation_fails():
-    workflow = (
-        REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
-    ).read_text(encoding="utf-8")
-
-    helper = workflow.index("const failKnownSnapshots = async")
-    dispatch = workflow.index("if (dispatchEvent) {")
-    input_packet = workflow.index("const input = {schema_version: '2', target", dispatch)
-    validator = workflow.index(
-        "const validated = await runValidator(input, protectedSha);", input_packet
-    )
-    reset = workflow.index("await failKnownSnapshots(snapshots", validator)
-    live_target = workflow.index(
-        "const live = await github.rest.pulls.get({owner, repo, pull_number: prNumber});",
-        reset,
-    )
-
-    assert helper < dispatch < input_packet < validator < reset < live_target
-    # The reset-all guard covers INFRA failures only (crash, malformed output,
-    # incomplete peer results). A clean FAIL decision means the validator
-    # evaluated every peer, so peers keep their own verdicts and only the
-    # dispatch target fails — the decision check sits AFTER the catch block.
-    assert "run.status !== 0" in workflow[validator:reset]
-    assert "!Array.isArray(result.peers)" in workflow[validator:reset]
-    assert "result.peers.length !== input.peers.length" in workflow[validator:reset]
-    assert "result.decision !== 'PASS'" not in workflow[validator:reset]
-    decision_check = workflow.index(
-        "if (result.decision !== 'PASS') throw Error('receipt validation failed');", reset
-    )
-    assert reset < decision_check < live_target
-    assert "for (const candidate of snapshots)" in workflow[helper:dispatch]
 
 
 def test_workflow_dispatch_validation_failure_is_terminal_before_target_promotion():
