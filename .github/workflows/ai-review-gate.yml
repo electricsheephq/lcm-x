@@ -100,10 +100,11 @@ jobs:
               } catch (error) {
                 // The live tuple was already read: carry it so a partial failure
                 // fails the head that is actually live, not only the listed one.
-                if (error && typeof error === 'object')
-                  error.liveTuple = {base_ref: pr.base.ref, base_sha: pr.base.sha,
-                    head_sha: pr.head.sha, state: pr.state, draft: pr.draft};
-                throw error;
+                // A non-object throw is wrapped so the tuple and a message survive.
+                const carrier = (error && typeof error === 'object') ? error : new Error(String(error));
+                carrier.liveTuple = {base_ref: pr.base.ref, base_sha: pr.base.sha,
+                  head_sha: pr.head.sha, state: pr.state, draft: pr.draft};
+                throw carrier;
               }
             };
             const reconcileOpenPullRequests = async (defaultBranch) => {
@@ -113,7 +114,7 @@ jobs:
               for (const candidate of open) {
                 try { snapshots.push(await snapshot(candidate.number, defaultBranch)); }
                 catch (error) {
-                  failures.push(`${candidate.number}:${error.message}`);
+                  failures.push(`${candidate.number}:${error?.message ?? String(error)}`);
                   // Prefer the tuple pulls.get observed over the (possibly stale)
                   // list entry; when they differ, the listed tuple is failed too.
                   const live = error?.liveTuple;

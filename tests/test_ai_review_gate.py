@@ -81,6 +81,8 @@ def _run_workflow_scenario(
         "s11": {"dispatch": True, "prs": [1, 2], "target": 1},
         "s12": {"dispatch": True, "prs": [1, 2], "target": 1},
         "s13": {"dispatch": True, "prs": [1, 2], "target": 1},
+        "s14": {"dispatch": True, "prs": [1, 2], "target": 1},
+        "s14b": {"dispatch": False, "prs": [1, 2]},
     }
     config = {"name": name, **scenarios[name]}
     script = _extract_reconcile_script(workflow_path or _workflow_under_test())
@@ -138,11 +140,12 @@ const pullsApi = {{
       data.head.sha = `head-${{pull_number}}-live`;
     if ((cfg.name === 's5' || cfg.name === 's7') && pull_number === cfg.target && count >= 4)
       data.head.sha = `head-${{pull_number}}-live`;
-    if (cfg.name === 's13' && pull_number === 2) data.head.sha = 'head-2-live';
+    if (['s13', 's14', 's14b'].includes(cfg.name) && pull_number === 2) data.head.sha = 'head-2-live';
     return {{data}};
   }},
   listFiles: async ({{pull_number}}) => {{
     if (cfg.name === 's13' && pull_number === 2) throw Error('synthetic peer files failure');
+    if ((cfg.name === 's14' || cfg.name === 's14b') && pull_number === 2) throw null;
     return [{{filename: `file-${{pull_number}}`}}];
   }},
 }};
@@ -349,6 +352,28 @@ def test_behavioral_s13_partial_peer_snapshot_fails_live_and_listed_tuples():
     # same snapshot rejects. The incomplete reconciliation must fail the head
     # that is actually live (not only the stale list entry) and the listed one.
     result = _run_workflow_scenario("s13")
+    assert _failure_tuples(result) == {
+        (1, "base-1", "head-1"),
+        (2, "base-2", "head-2-live"),
+        (2, "base-2", "head-2"),
+    }
+    assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
+
+
+def test_behavioral_s14_falsy_throw_in_peer_snapshot_still_fails_live_and_listed_tuples():
+    # A non-object rejection (throw null) must not escape the reconciliation
+    # catch through an `error.message` read; the live tuple is still carried.
+    result = _run_workflow_scenario("s14")
+    assert _failure_tuples(result) == {
+        (1, "base-1", "head-1"),
+        (2, "base-2", "head-2-live"),
+        (2, "base-2", "head-2"),
+    }
+    assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
+
+
+def test_behavioral_s14b_falsy_throw_in_peer_only_mode_resets_known_tuples():
+    result = _run_workflow_scenario("s14b")
     assert _failure_tuples(result) == {
         (1, "base-1", "head-1"),
         (2, "base-2", "head-2-live"),
@@ -667,7 +692,8 @@ def test_incomplete_snapshot_prefers_the_observed_live_tuple_over_the_listed_one
     assert "state: live?.state ?? candidate.state" in failure_section
     assert "draft: live?.draft ?? candidate.draft" in failure_section
     assert "listedTuples.push({pr_number: candidate.number" in failure_section
-    assert "error.liveTuple = {base_ref: pr.base.ref" in workflow[:reconcile]
+    assert "carrier.liveTuple = {base_ref: pr.base.ref" in workflow[:reconcile]
+    assert "${error?.message ?? String(error)}" in workflow[reconcile:helper]
     assert workflow.count("failKnownSnapshots(snapshots.concat(reconciled.listedTuples)") == 3
 
 
