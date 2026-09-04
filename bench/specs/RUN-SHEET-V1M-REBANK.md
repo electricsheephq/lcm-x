@@ -84,8 +84,10 @@ Keychain at runtime, never in configs or logs; embed-cache path + size + mtime b
      cache pair but can move retrieval, so they are an explanation, not drift), cross-checked against the dry-run's
      changed-document manifest (`prewarm-cache --changed-manifest`) — successor row banked; F53 annotated
      "pre-#332, superseded" (#380).
-   - **MOVED-UNEXPLAINED** — deltas on questions with no changed documents — instrument drift: STOP, do not
-     bank, root-cause first (compare candidates via `--dump-candidates`).
+   - **MOVED-UNEXPLAINED** — any delta on a question whose own row shows NO live transform of either kind
+     (`privacy.changed == 0` AND `privacy.queries_changed == 0`) — instrument drift: STOP, do not bank, root-cause
+     first (compare candidates via `--dump-candidates`). The two MOVED outcomes partition the delta set by that
+     per-row test; a run with deltas of both kinds is MOVED-UNEXPLAINED.
 4. Corpus identity vs F53 (#203/#177 rows). F53 recorded NO per-question message/node/chunk counts (its checkpoint
    records carry only abstention/arms/category/ingest_ms/question_id/rerank_mode, and each question database was
    deleted after scoring), so per-question count parity CANNOT be executed against F53. The executable identity
