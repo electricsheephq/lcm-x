@@ -475,6 +475,38 @@ def _configured_chunk_binding(provider: str, model: str) -> tuple[str, str]:
     return normalized_provider, default_chunk_model(normalized_provider, model)
 
 
+_PRIVACY_COUNTS = {"documents": 0, "changed": 0, "blocked": 0}
+_PRIVACY_QUESTION = {"documents": 0, "changed": 0, "blocked": 0}
+
+
+def _reset_privacy_counts() -> None:
+    _PRIVACY_COUNTS.update(documents=0, changed=0, blocked=0)
+
+
+def _protected(text: str, config, *, expected_revision: str | None = None) -> str:
+    """Protect one provider-bound document and record transform outcomes."""
+    _ensure_hermes_lcm_package()
+    from hermes_lcm.ingest_protection import (
+        EmbeddingPrivacyPolicyError,
+        protect_embedding_text,
+    )
+
+    _PRIVACY_COUNTS["documents"] += 1
+    _PRIVACY_QUESTION["documents"] += 1
+    try:
+        protected, _revision, changed = protect_embedding_text(
+            text, config, expected_revision=expected_revision
+        )
+    except EmbeddingPrivacyPolicyError:
+        _PRIVACY_COUNTS["blocked"] += 1
+        _PRIVACY_QUESTION["blocked"] += 1
+        raise
+    if changed:
+        _PRIVACY_COUNTS["changed"] += 1
+        _PRIVACY_QUESTION["changed"] += 1
+    return protected
+
+
 def _embedding_privacy_context(
     provider: str, model: str, *, embeddings_enabled: bool = True
 ) -> tuple[Any | None, str | None]:
@@ -1572,6 +1604,7 @@ def prewarm_embedding_cache(
     progress: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
     """Populate all unique ingest document units, skipping already-cached keys."""
+    _reset_privacy_counts()
     if not isinstance(provider, ContentHashEmbeddingCache):
         raise ValueError(f"{EMBED_CACHE_ENV} must be set for prewarm-cache")
     if progress_every <= 0:
@@ -1589,10 +1622,7 @@ def prewarm_embedding_cache(
         provider.provider_id, provider.model_id
     )
     if privacy_revision is not None:
-        from hermes_lcm.ingest_protection import (
-            protect_embedding_text,
-            validate_embedding_privacy_dispatch,
-        )
+        from hermes_lcm.ingest_protection import validate_embedding_privacy_dispatch
 
     seen: set[str] = set()
     batch: list[str] = []
@@ -1619,11 +1649,11 @@ def prewarm_embedding_cache(
     for question in questions:
         for text in iter_ingest_embedding_request_units(question):
             if privacy_revision is not None:
-                text = protect_embedding_text(
+                text = _protected(
                     text,
                     privacy_config,
                     expected_revision=privacy_revision,
-                )[0]
+                )
             digest = provider.content_sha256(text)
             if digest in seen:
                 continue
@@ -1639,6 +1669,7 @@ def prewarm_embedding_cache(
         "unique_request_units": len(seen),
         "already_cached": already_cached,
         "populated": len(seen) - already_cached,
+        "privacy": dict(_PRIVACY_COUNTS),
     }
 
 
@@ -1650,6 +1681,7 @@ def embedding_determinism_report(
     seed: int = 0,
 ) -> dict[str, Any]:
     """Embed random unique session summaries twice and compare float bits."""
+    _reset_privacy_counts()
     if sample_size <= 0:
         raise ValueError("sample_size must be positive")
     privacy_config, privacy_revision = _embedding_privacy_context(
@@ -1658,10 +1690,7 @@ def embedding_determinism_report(
     )
     before_dispatch = None
     if privacy_revision is not None:
-        from hermes_lcm.ingest_protection import (
-            protect_embedding_text,
-            validate_embedding_privacy_dispatch,
-        )
+        from hermes_lcm.ingest_protection import validate_embedding_privacy_dispatch
 
         def before_dispatch(texts: Sequence[str]) -> None:
             validate_embedding_privacy_dispatch(
@@ -1675,11 +1704,11 @@ def embedding_determinism_report(
         for session in question.haystack_sessions:
             text = deterministic_session_summary(session)
             if privacy_revision is not None:
-                text = protect_embedding_text(
+                text = _protected(
                     text,
                     privacy_config,
                     expected_revision=privacy_revision,
-                )[0]
+                )
             digest = ContentHashEmbeddingCache.content_sha256(text)
             unique.setdefault(digest, text)
     if len(unique) < sample_size:
@@ -1721,6 +1750,7 @@ def embedding_determinism_report(
         "bitwise_identical_count": identical,
         "non_identical_count": sample_size - identical,
         "max_abs_diff": max_abs_diff,
+        "privacy": dict(_PRIVACY_COUNTS),
     }
 
 
@@ -2344,6 +2374,7 @@ def evaluate_question(
     ``session_granularity`` flag. ``ingest_ms`` (per-question ingest wall time) and,
     for ``hybrid_rerank``, ``rerank_mode`` ride alongside for aggregation.
     """
+    _PRIVACY_QUESTION.update(documents=0, changed=0, blocked=0)
     _ensure_hermes_lcm_package()
     from hermes_lcm.chunking import group_by_store_id, iter_message_chunks
     from hermes_lcm.config import LCMConfig
@@ -2404,7 +2435,6 @@ def evaluate_question(
     from hermes_lcm.ingest_protection import (
         embedding_privacy_revision,
         embedding_provider_requires_privacy,
-        protect_embedding_text,
         validate_embedding_privacy_dispatch,
     )
 
@@ -2495,11 +2525,11 @@ def evaluate_question(
             before_dispatch = None
             if chunk_revision is not None:
                 chunk_texts = [
-                    protect_embedding_text(
+                    _protected(
                         text,
                         config,
                         expected_revision=chunk_revision,
-                    )[0]
+                    )
                     for text in chunk_texts
                 ]
 
@@ -2589,11 +2619,11 @@ def evaluate_question(
             contextual_before_dispatch = None
             if chunk_revision is not None:
                 chunk_texts = [
-                    protect_embedding_text(
+                    _protected(
                         text,
                         config,
                         expected_revision=chunk_revision,
-                    )[0]
+                    )
                     for text in chunk_texts
                 ]
 
@@ -2653,11 +2683,11 @@ def evaluate_question(
             summary_before_dispatch = None
             if summary_revision is not None:
                 summary_texts = [
-                    protect_embedding_text(
+                    _protected(
                         text,
                         config,
                         expected_revision=summary_revision,
-                    )[0]
+                    )
                     for text in summary_texts
                 ]
 
@@ -2685,11 +2715,11 @@ def evaluate_question(
         relevant_turns = evidence_turns(question)
         summary_query = str(question.question)
         if summary_revision is not None:
-            summary_query = protect_embedding_text(
+            summary_query = _protected(
                 summary_query,
                 config,
                 expected_revision=summary_revision,
-            )[0]
+            )
             validate_embedding_privacy_dispatch(
                 [summary_query],
                 config,
@@ -2762,11 +2792,11 @@ def evaluate_question(
             else:
                 chunk_query = str(question.question)
                 if chunk_revision is not None:
-                    chunk_query = protect_embedding_text(
+                    chunk_query = _protected(
                         chunk_query,
                         config,
                         expected_revision=chunk_revision,
-                    )[0]
+                    )
                     validate_embedding_privacy_dispatch(
                         [chunk_query],
                         config,
@@ -2864,6 +2894,33 @@ def evaluate_question(
                     recall_rerank_scores
                 )
             scored["_candidate_rankings"] = candidate_rankings
+        store_connection = store.connection
+        dag_connection = dag.connection
+        messages_count = int(
+            store_connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        ) if store_connection is not None else 0
+        summary_nodes_count = int(
+            dag_connection.execute("SELECT COUNT(*) FROM summary_nodes").fetchone()[0]
+        ) if dag_connection is not None else 0
+        chunks_count = 0
+        vector_connection = vector_store.connection
+        if vector_connection is not None:
+            try:
+                chunks_count = int(
+                    vector_connection.execute(
+                        "SELECT COUNT(*) FROM lcm_chunk_meta"
+                    ).fetchone()[0]
+                )
+            except sqlite3.OperationalError:
+                # Chunk tables are lazy and absent when the chunk arm is disabled
+                # or no chunk rows were emitted for this question.
+                chunks_count = 0
+        scored["privacy"] = dict(_PRIVACY_QUESTION)
+        scored["corpus_counts"] = {
+            "messages": messages_count,
+            "summary_nodes": summary_nodes_count,
+            "chunks": chunks_count,
+        }
         return scored
     finally:
         vector_store.close()
@@ -3322,11 +3379,19 @@ def _question_checkpoint_record(
             "abstention": True,
             "rerank_mode": None,
             "ingest_ms": 0.0,
+            "privacy": {"documents": 0, "changed": 0, "blocked": 0},
+            "corpus_counts": {"messages": 0, "summary_nodes": 0, "chunks": 0},
             "arms": {},
         }
     checkpoint_scored = copy.deepcopy(scored)
     checkpoint_scored.pop("_candidate_rankings", None)
     ingest_ms = checkpoint_scored.pop("ingest_ms", 0.0)
+    privacy = checkpoint_scored.pop(
+        "privacy", {"documents": 0, "changed": 0, "blocked": 0}
+    )
+    corpus_counts = checkpoint_scored.pop(
+        "corpus_counts", {"messages": 0, "summary_nodes": 0, "chunks": 0}
+    )
     rerank_mode = checkpoint_scored["hybrid_rerank"].pop(
         "rerank_mode", RERANK_MODE_PLACEHOLDER
     )
@@ -3336,6 +3401,8 @@ def _question_checkpoint_record(
         "abstention": False,
         "rerank_mode": rerank_mode,
         "ingest_ms": ingest_ms,
+        "privacy": privacy,
+        "corpus_counts": corpus_counts,
         "arms": checkpoint_scored,
     }
 
@@ -3431,6 +3498,7 @@ def run_harness(
     accounting: ProviderAccounting | None = None,
 ) -> dict[str, Any]:
     """Run every arm over every question and return an aggregate-only report."""
+    _reset_privacy_counts()
     dataset_report: dict[str, Any] = dataset_coordinates(dataset_label)
     if source_sha256 is not None:
         if not _SHA256_RE.fullmatch(source_sha256):
@@ -3735,6 +3803,7 @@ def run_harness(
         "batched_embeddings": embeddings_enabled,
         "reuse_db_template": reuse_db_template,
         "per_question_ms": percentiles(ingest_samples),
+        "privacy": dict(_PRIVACY_COUNTS),
     }
     if dataset_label == "m" or manifest_sha256 is not None:
         ingest_report["embedding_batch_size"] = effective_embedding_batch_size
