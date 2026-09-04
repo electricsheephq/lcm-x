@@ -2691,7 +2691,9 @@ def evaluate_question(
     summary_specs: list[tuple[str, int, str]] = []  # (session_id, node_id, summary_text)
     chunk_items: list[Any] = []
     flat_chunk_batch: list[Any] = []
-    chunk_embedding_mode = _resolved_chunk_embedding_mode(chunk_provider)
+    chunk_embedding_mode = (
+        _resolved_chunk_embedding_mode(chunk_provider) if embeddings_enabled else "none"
+    )
     supports_grouping = embeddings_enabled and chunk_embedding_mode == "contextual"
     flat_chunk_batch_size = max(1, int(embedding_batch_size or 1))
     try:
@@ -3949,8 +3951,10 @@ def run_harness(
                 summary_binding=summary_binding,
                 chunk_binding=_configured_chunk_binding(*summary_binding),
             )
-        resolved_chunk_embedding_mode = _resolved_chunk_embedding_mode(
-            provider_set.chunk
+        resolved_chunk_embedding_mode = (
+            _resolved_chunk_embedding_mode(provider_set.chunk)
+            if embeddings_enabled
+            else "none"
         )
         if resume:
             for record in checkpoint_records:
@@ -4138,7 +4142,7 @@ def run_harness(
         recorded_modes = {
             record.get("chunk_embedding_mode")
             for record in checkpoint_records
-            if record.get("chunk_embedding_mode") in {"flat", "contextual"}
+            if record.get("chunk_embedding_mode") in {"flat", "contextual", "none"}
         }
         if len(recorded_modes) == 1:
             resolved_chunk_embedding_mode = recorded_modes.pop()
@@ -4149,11 +4153,14 @@ def run_harness(
         ):
             resolved_chunk_embedding_mode = "unknown"
         else:
-            legacy_provider_set = resolve_harness_providers(
-                provider_name, model, accounting=accounting
-            )
-            resolved_chunk_embedding_mode = _resolved_chunk_embedding_mode(
-                legacy_provider_set.chunk
+            values = {
+                record.get("chunk_embedding_mode")
+                for record in checkpoint_records
+                if "chunk_embedding_mode" in record
+            }
+            raise ValueError(
+                "checkpoint rows carry unrecognized chunk_embedding_mode values: "
+                f"{sorted(values)!r}"
             )
 
     ingest_report: dict[str, Any] = {

@@ -1487,6 +1487,71 @@ def test_contextual_mode_requires_grouping_capability(tmp_path, monkeypatch):
         )
 
 
+def test_lexical_only_cache_run_records_none_without_resolving_chunk_mode(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as lme
+
+    cache_path = tmp_path / "lexical-only.sqlite3"
+    provider = _ContextualIdentityEmbedder("voyage-4-large")
+    cached = lme.ContentHashEmbeddingCache(
+        provider,
+        cache_path,
+        provider_id="voyage",
+        model_id="voyage-4-large",
+    )
+    monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(cache_path))
+    monkeypatch.delenv(lme.CHUNK_EMBEDDING_MODE_ENV, raising=False)
+    monkeypatch.setattr(
+        lme,
+        "resolve_harness_provider",
+        lambda *_args, **_kwargs: cached,
+    )
+
+    def forbidden_chunk_mode(*_args, **_kwargs):
+        raise AssertionError("must not be called")
+
+    monkeypatch.setattr(lme, "_resolved_chunk_embedding_mode", forbidden_chunk_mode)
+    question = _chunk_mode_question("q-lexical-cache")
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    report = run_harness(
+        [question],
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path / "tmp",
+        embeddings_enabled=False,
+        checkpoint_path=checkpoint,
+        reuse_db_template=False,
+    )
+
+    assert report["ingest"]["chunk_embedding_mode"] == "none"
+    rows = [json.loads(line) for line in checkpoint.read_text().splitlines()[1:]]
+    assert rows and all(row["chunk_embedding_mode"] == "none" for row in rows)
+
+
+def test_lexical_only_contextual_request_with_flat_provider_records_none(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, "contextual")
+    monkeypatch.setattr(
+        lme,
+        "resolve_harness_provider",
+        lambda *_args, **_kwargs: _IdentityEmbedder("voyage-4-large"),
+    )
+    report = run_harness(
+        [_chunk_mode_question("q-lexical-contextual")],
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path,
+        embeddings_enabled=False,
+        reuse_db_template=False,
+    )
+
+    assert report["ingest"]["chunk_embedding_mode"] == "none"
+
+
 def test_bad_chunk_embedding_mode_fails_loud(monkeypatch):
     import benchmarking.longmemeval as lme
 
@@ -2874,6 +2939,84 @@ def test_completed_resume_of_legacy_rows_records_unknown_without_provider_resolu
         reuse_db_template=False,
     )
     assert report["ingest"]["chunk_embedding_mode"] == "unknown"
+
+
+def test_completed_resume_of_lexical_rows_records_none_without_provider_resolution(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as lme
+
+    question = _chunk_mode_question("q-completed-lexical-mode")
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "initial",
+        embeddings_enabled=False,
+        checkpoint_path=checkpoint,
+        reuse_db_template=False,
+    )
+
+    def forbidden_resolution(*_args, **_kwargs):
+        raise AssertionError("must not be called")
+
+    monkeypatch.setattr(lme, "resolve_harness_providers", forbidden_resolution)
+    report = run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "resume",
+        embeddings_enabled=False,
+        checkpoint_path=checkpoint,
+        resume=True,
+        selected_question_ids=[question.question_id],
+        reuse_db_template=False,
+    )
+
+    assert report["ingest"]["chunk_embedding_mode"] == "none"
+
+
+def test_completed_resume_rejects_unrecognized_chunk_embedding_mode(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as lme
+
+    question = _chunk_mode_question("q-completed-unrecognized-mode")
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "initial",
+        embeddings_enabled=False,
+        checkpoint_path=checkpoint,
+        reuse_db_template=False,
+    )
+    lines = checkpoint.read_text(encoding="utf-8").splitlines()
+    row = json.loads(lines[1])
+    row["chunk_embedding_mode"] = "sideways"
+    checkpoint.write_text(
+        lines[0] + "\n" + json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    def forbidden_resolution(*_args, **_kwargs):
+        raise AssertionError("must not be called")
+
+    monkeypatch.setattr(lme, "resolve_harness_providers", forbidden_resolution)
+    with pytest.raises(ValueError, match="unrecognized chunk_embedding_mode.*sideways"):
+        run_harness(
+            [question],
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / "resume",
+            embeddings_enabled=False,
+            checkpoint_path=checkpoint,
+            resume=True,
+            selected_question_ids=[question.question_id],
+            reuse_db_template=False,
+        )
 
 
 def test_completed_resume_and_binding_mismatch_do_not_resolve_provider(
