@@ -1681,7 +1681,6 @@ def test_cloud_query_is_protected_before_provider_dispatch(tmp_path, monkeypatch
 
 
 def test_query_dispatch_validator_block_increments_query_counter(tmp_path, monkeypatch):
-    import benchmarking.longmemeval as lme
     from hermes_lcm import ingest_protection
     from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
 

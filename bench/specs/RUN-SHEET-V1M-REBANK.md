@@ -110,7 +110,8 @@ F53's full 500-question run took **43 minutes** wall across 6 shards on the warm
 post-transform text, so cost is driven entirely by the transform-change count: 0 ⇒ query embeddings only
 (single-digit dollars); a full re-embed worst case is estimated $15–40 (scaling AMENDMENT-2's $5–15 per ~190
 questions). **Cost cap: $40 Voyage.** Order of operations enforces it: the 20-sample determinism probe (sample-scoped
-transform count; runs without the cache and reports no hit rate) and then `prewarm-cache --dry-run` (cache lookups + privacy validation only — no embedding call, no spend) run
+transform count; runs without the cache and reports no hit rate) and then `prewarm-cache --dry-run` (cache lookups + privacy validation only — no embedding call, no spend; for cloud
+providers the CLI also skips provider warmup, so the dry run makes no provider call of any kind) run
 FIRST and report the transform-change count and `would_populate`, the exact number of request units the real
 prewarm would embed; projected spend = `would_populate` × **$40 / 505,695 ≈ $0.0000791 per request unit** (the cap divided
 by the full-corpus worst case — conservative: it prices a full re-embed at exactly the cap). If it exceeds the cap the
