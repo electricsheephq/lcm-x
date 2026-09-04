@@ -78,16 +78,20 @@ Keychain at runtime, never in configs or logs; embed-cache path + size + mtime b
      live-but-inert for retrieval on this corpus; the successor row records "post-#352 · reproduced; transform
      live, retrieval-inert" and the finding publishes the changed-document manifest (question id + raw/protected unit
      digests per changed unit, written by `prewarm-cache --changed-manifest` during the dry run) so the inertness is checkable.
-   - **MOVED-EXPLAINED** — transform-change count >0, at least one per-question delta, and every delta is on a question
-     whose own checkpoint row shows a live transform (`privacy.changed > 0` — a corpus document changed — or
-     `privacy.queries_changed > 0` — its provider-bound query text changed; query transforms never touch the embed
-     cache pair but can move retrieval, so they are an explanation, not drift), cross-checked against the dry-run's
-     changed-document manifest (`prewarm-cache --changed-manifest`) — successor row banked; F53 annotated
-     "pre-#332, superseded" (#380).
+   - **MOVED-EXPLAINED** — at least one per-question delta, and every delta is on a question whose own checkpoint
+     row shows a live transform (`privacy.changed > 0` — a corpus document changed — or `privacy.queries_changed > 0`
+     — its provider-bound query text changed; query transforms never touch the embed cache pair but can move
+     retrieval, so they are an explanation, not drift). The document transform-change count (bar 2) may be 0 here:
+     a query-only transform that moves retrieval is MOVED-EXPLAINED, not undefined. Document deltas are
+     cross-checked against the dry-run's changed-document manifest (`prewarm-cache --changed-manifest`) —
+     successor row banked; F53 annotated "pre-#332, superseded" (#380).
    - **MOVED-UNEXPLAINED** — any delta on a question whose own row shows NO live transform of either kind
      (`privacy.changed == 0` AND `privacy.queries_changed == 0`) — instrument drift: STOP, do not bank, root-cause
      first (compare candidates via `--dump-candidates`). The two MOVED outcomes partition the delta set by that
-     per-row test; a run with deltas of both kinds is MOVED-UNEXPLAINED.
+     per-row test; a run with deltas of both kinds is MOVED-UNEXPLAINED. Together the four outcomes cover every run
+     and no run matches two: results identical to F53 → REPRODUCED or REPRODUCED-TRANSFORM-INERT (split by the
+     document transform-change count); results differ → MOVED-EXPLAINED or MOVED-UNEXPLAINED (split by the per-row
+     test alone — the document count does not enter).
 4. Corpus identity vs F53 (#203/#177 rows). F53 recorded NO per-question message/node/chunk counts (its checkpoint
    records carry only abstention/arms/category/ingest_ms/question_id/rerank_mode, and each question database was
    deleted after scoring), so per-question count parity CANNOT be executed against F53. The executable identity
