@@ -78,6 +78,8 @@ def _run_workflow_scenario(
         "s8b": {"dispatch": False, "prs": [1, 2, 3]},
         "s9": {"dispatch": True, "prs": [1, 2, 3], "target": 1},
         "s10": {"dispatch": True, "prs": [1, 2], "target": 1},
+        "s11": {"dispatch": True, "prs": [1, 2], "target": 1},
+        "s12": {"dispatch": True, "prs": [1, 2], "target": 1},
     }
     config = {"name": name, **scenarios[name]}
     script = _extract_reconcile_script(workflow_path or _workflow_under_test())
@@ -91,6 +93,12 @@ def _run_workflow_scenario(
     driver = f"""
 const cfg = {json.dumps(config)};
 const emissions = [], failures = [], checks = [];
+if (cfg.name === 's12')
+  // A trusted exact success check whose packet consumed 'dispatch-fresh' but
+  // whose live-state fingerprint no longer validates (preserve: false below).
+  checks.push({{id: 0, name: 'AI review exact-head', external_id: 'ai-review-gate:1:base-1:head-1',
+    head_sha: 'head-1', status: 'completed', conclusion: 'success', app: {{id: 15368}},
+    output: {{summary: JSON.stringify({{dispatch_id: 'dispatch-fresh'}})}}}});
 const pullCalls = new Map();
 let branchCalls = 0;
 let nextCheckId = 1;
@@ -125,6 +133,8 @@ const pullsApi = {{
     if (cfg.name === 's9' && pull_number === cfg.target && count === 3)
       throw Error('synthetic target re-snapshot failure');
     const data = original(pull_number);
+    if (cfg.name === 's11' && pull_number === cfg.target && count === 3)
+      data.head.sha = `head-${{pull_number}}-live`;
     if ((cfg.name === 's5' || cfg.name === 's7') && pull_number === cfg.target && count >= 4)
       data.head.sha = `head-${{pull_number}}-live`;
     return {{data}};
@@ -180,6 +190,18 @@ async function fakeRunValidator(input) {{
   if (cfg.name === 's8b' && !input.target && input.peers.length === cfg.prs.length)
     return {{run: {{status: 1}}, result: {{decision: 'PASS',
       peers: input.peers.map(peer => peerResult(peer, true))}}}};
+  if (cfg.name === 's11' && input.target)
+    return {{run: {{status: 1}}, result: {{decision: 'FAIL',
+      peers: input.peers.map(peer => peerResult(peer, true))}}}};
+  if (cfg.name === 's12' && !input.target && input.peers.length === 1 &&
+      input.peers[0].pr_number === cfg.target)
+    return {{run: {{status: 0}}, result: {{decision: 'PASS', peers: [peerResult(input.peers[0], false)]}}}};
+  if (cfg.name === 's12' && input.target)
+    return (input.prior_dispatch_ids || []).includes('dispatch-fresh')
+      ? {{run: {{status: 1}}, result: {{decision: 'FAIL',
+          peers: input.peers.map(peer => peerResult(peer, true))}}}}
+      : {{run: {{status: 0}}, result: {{decision: 'PASS', packet: {{scenario: cfg.name}},
+          peers: input.peers.map(peer => peerResult(peer, true))}}}};
   if (input.target)
     return {{run: {{status: 0}}, result: {{decision: 'PASS', packet: {{scenario: cfg.name}},
       peers: input.peers.map(peer => peerResult(peer, true))}}}};
@@ -294,6 +316,27 @@ def test_behavioral_s10_success_write_failure_fails_the_job():
     assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
     assert len(result["failures"]) == 1
     assert "failure writes: synthetic success write failure" in result["failures"][0]
+
+
+def test_behavioral_s11_resnapshot_drifted_tuple_is_failed_on_rejection():
+    # The re-snapshot returns a force-pushed head; the validator rejects the
+    # old-tuple receipts before the live follow-up read runs. The discovered
+    # drifted tuple must fail closed alongside the dispatch tuple.
+    result = _run_workflow_scenario("s11")
+    assert _failure_tuples(result) == {
+        (1, "base-1", "head-1"),
+        (1, "base-1", "head-1-live"),
+    }
+    assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
+
+
+def test_behavioral_s12_state_invalidated_prior_packet_still_blocks_replay():
+    # A trusted exact success check whose packet is no longer preservable
+    # (state fingerprint drift) still yields its consumed dispatch_id, so the
+    # replayed dispatch is rejected as a clean FAIL (target-only reset).
+    result = _run_workflow_scenario("s12")
+    assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
+    assert _failure_tuples(result) == {(1, "base-1", "head-1")}
 
 
 def receipt(lane: str, *, risk: str = "routine", reviewer: str | None = None):
@@ -778,7 +821,7 @@ def test_workflow_invalid_prior_target_does_not_abort_fresh_renewal():
         "mode: 'peer_only', peers: [priorTarget]}, protectedSha);"
     )
     optional_history = workflow.index(
-        "if (priorValidated.run.status === 0 && priorValidated.result.decision === 'PASS'",
+        "const priorPreserved = priorValidated.run.status === 0 && priorValidated.result.decision === 'PASS'",
         prior_validation,
     )
     target_reset = workflow.index(
@@ -1090,4 +1133,4 @@ def test_workflow_identifies_dispatch_target_before_peer_enumeration():
     # number and tuple are captured before reconciliation can abort.
     assert target_number < target_tuple < enumeration
     assert "if (prNumber && base && head) {" in workflow
-    assert "if (prNumber && liveTuple &&" in workflow
+    assert "for (const tuple of [resnapshotTuple, liveTuple])" in workflow

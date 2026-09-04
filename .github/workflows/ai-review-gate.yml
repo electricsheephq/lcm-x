@@ -216,7 +216,7 @@ jobs:
             const protectedSha = branch.data.commit.sha;
             const dispatchEvent = context.eventName === 'repository_dispatch';
             let prNumber = null, base = null, head = null, result = null;
-            let liveTuple = null;
+            let liveTuple = null, resnapshotTuple = null;
             let conclusion = 'failure', summary = 'Validation failed closed.';
             try {
               if (dispatchEvent) {
@@ -271,18 +271,23 @@ jobs:
                 const priorDispatchIds = [];
                 if (priorExactChecks.length === 1) {
                   const priorValidated = await runValidator({schema_version: '2', mode: 'peer_only', peers: [priorTarget]}, protectedSha);
-                  if (priorValidated.run.status === 0 && priorValidated.result.decision === 'PASS' &&
-                      priorValidated.result.peers?.length === 1 && priorValidated.result.peers[0].preserve) {
-                    const check = priorExactChecks[0];
-                    const stored = check.output_summary || check.output?.summary;
+                  const priorPreserved = priorValidated.run.status === 0 && priorValidated.result.decision === 'PASS' &&
+                    priorValidated.result.peers?.length === 1 && priorValidated.result.peers[0].preserve;
+                  // The nonce of a trusted exact packet is consumed history whether or
+                  // not its live-state fingerprint still validates: a packet invalidated
+                  // by draft/ready, close/reopen, or a force-push away and back must still
+                  // block a replay of the same dispatch. Only a PRESERVED packet that
+                  // cannot yield its nonce aborts; an unreadable invalidated packet just
+                  // contributes no history, so a fresh renewal proceeds.
+                  const check = priorExactChecks[0];
+                  const stored = check.output_summary || check.output?.summary;
+                  try {
                     if (typeof stored !== 'string') throw Error('prior target packet missing');
-                    try {
-                      const packet = JSON.parse(stored);
-                      if (typeof packet.dispatch_id !== 'string') throw Error('prior target dispatch ID invalid');
-                      priorDispatchIds.push(packet.dispatch_id);
-                    } catch (error) {
-                      throw Error(`prior target packet invalid: ${error.message}`);
-                    }
+                    const packet = JSON.parse(stored);
+                    if (typeof packet.dispatch_id !== 'string') throw Error('prior target dispatch ID invalid');
+                    priorDispatchIds.push(packet.dispatch_id);
+                  } catch (error) {
+                    if (priorPreserved) throw Error(`prior target packet invalid: ${error.message}`);
                   }
                 }
                 let target = null;
@@ -296,6 +301,7 @@ jobs:
                   // own verdicts and only the dispatch target fails (below).
                   await emit(prNumber, base, head, 'failure', 'Protected base changed or stored packet invalid; validation started and fails closed until complete.');
                   target = await snapshot(prNumber, defaultBranch);
+                  resnapshotTuple = [target.base_sha, target.head_sha];
                   const input = {schema_version: '2', target, peers: snapshots.filter(item => item.pr_number !== prNumber),
                     receipts: dispatch.receipts, producer: {login: sender.login, id: Number(sender.id), type: sender.type},
                     run: {id: process.env.GITHUB_RUN_ID, attempt: run_attempt},
@@ -364,10 +370,19 @@ jobs:
                 writeFailures.push(error.message);
               }
             }
-            if (prNumber && liveTuple &&
-                (liveTuple[0] !== base || liveTuple[1] !== head)) {
+            // Every tuple this run discovered for the target that differs from the
+            // dispatch tuple — the re-snapshot's and the live follow-up read's —
+            // fails closed too: a force-push between reads must not leave an
+            // earlier success on the drifted head merge-eligible until the next
+            // synchronize event reconciles it.
+            const driftedTuples = new Map();
+            for (const tuple of [resnapshotTuple, liveTuple]) {
+              if (prNumber && tuple && (tuple[0] !== base || tuple[1] !== head))
+                driftedTuples.set(`${tuple[0]}:${tuple[1]}`, tuple);
+            }
+            for (const tuple of driftedTuples.values()) {
               try {
-                await emit(prNumber, liveTuple[0], liveTuple[1], 'failure', summary);
+                await emit(prNumber, tuple[0], tuple[1], 'failure', summary);
               } catch (error) {
                 writeFailures.push(error.message);
               }
