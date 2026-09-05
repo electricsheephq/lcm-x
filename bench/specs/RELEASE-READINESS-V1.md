@@ -19,8 +19,10 @@ needs a live soak. Docs/bench-only releases may skip to GA with a note in the re
    rc's receipt ONLY when the rcN→rcN+1 diff touches nothing outside bench/, docs/, tests/, and
    .github/release-notes/ — AND nothing under bench/instruments/release_gauntlet/ (a changed
    gauntlet invalidates its own receipts) — the carried receipt is referenced WITH the diff-scope proof
-   (`git diff rcN..rcN+1 --name-only`) recorded beside it. Any product-code delta re-runs all
-   affected phases (ingest/recall/privacy deltas re-run everything).
+   (`git diff rcN..rcN+1 --name-only`) recorded beside it. A respin whose rcN→rcN+1 delta is
+   confined to those same paths re-runs Phase B over that delta only and composes the result with
+   the carried Phase B receipt (the composed receipt records both). Any product-code delta re-runs
+   all affected phases (ingest/recall/privacy deltas re-run everything).
 5. **GA tag `vX.Y.Z`** only when A+B+C receipts are green for the passing rc tree. Because
    release.yml reads curated notes from the tagged tree, the GA commit may differ from the rc
    tree by EXACTLY the release-notes addition and nothing else — verified mechanically:
@@ -70,12 +72,20 @@ Findings: P0/P1 verified ⇒ respin. P2 ⇒ tracked issue with disposition befor
 
 A scripted multi-turn session battery over `hermes acp` (the measured headless single-session
 transport) against the clone: ingest-heavy turns, recall probes, compaction crossing at least
-one threshold, doctor at close. Green = zero unexpected errors in engine logs, zero
+one threshold, doctor at close. Green = zero unexpected errors in engine logs, zero NEW
 publication-invariant conflicts (#247-class), recall probes hit, doctor clean. Minimum 30 turns.
+**Differential rule for #247-class conflicts** (applied since the v0.23.2 train; codified
+2026-09-05, #427): a non-zero conflict count passes ONLY when the same soak, on the same host
+build, against the previous GA tree reproduces the conflicts identically in kind and count — the
+receipt records both counts, the host pin and the differential run. A conflict that does not
+reproduce on the previous GA is NEW and fails the phase. While #247 is open the count is expected
+to be non-zero, so the differential run is mandatory whenever it is.
 
 ## Receipts
 
 Each phase writes `PHASE-{A,B,C}-RECEIPT.md`: rc tag + tree sha, exact commands, matrix results
 (per-row pass/fail), findings + dispositions, and the claim class per the gate-closeout
 discipline (a phase receipt claims what it measured, never "customer ready"). The GA release
-notes link all three.
+notes link all three. Receipts are published verbatim (local paths redacted) as comments on the
+release train tracker issue; that comment URL is the durable link of record and is what the GA
+notes link (codified 2026-09-05, #427).
