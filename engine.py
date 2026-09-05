@@ -2240,7 +2240,8 @@ class LCMEngine(
     def _note_fresh_tail_pressure_relieved(self) -> None:
         """Reset the sustained-pressure evidence.
 
-        Called when an entry point observes the session under threshold or a
+        Called when an entry point observes the session under threshold by the
+        host's most recent observation as well as its own estimate, or a
         pass makes real progress (leaf compaction, sanitation-only cleanup,
         overflow recovery): either way the deadlock the yield exists for is
         not happening, so the streak starts over. Also settles the invocation
@@ -2282,6 +2283,14 @@ class LCMEngine(
         knob to 1. The armed bound itself stays invocation-scoped (see
         ``_fresh_tail_pressure_yield_invocation``); only the blocked-streak
         evidence persists across invocations.
+
+        Preflight carries the host-observed token count (the larger of its own
+        estimate and the host's last prompt tokens) into the candidate check, so
+        host pressure that the estimate alone cannot see still counts a blocked
+        observation exactly as an over-threshold estimate would. The streak is
+        relieved only when both the estimate and the host-observed count fall
+        under threshold; a preflight that returns before the candidate check
+        records the invocation as blocked so scope exit preserves the evidence.
 
         ``eligible_tokens`` is the caller's already-filtered view of the raw
         backlog outside the tail (ignored messages and persisted placeholders
