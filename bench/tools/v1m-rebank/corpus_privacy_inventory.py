@@ -6,16 +6,24 @@ applies the production transform (protect_embedding_text) and the outbound valid
 (validate_embedding_privacy_dispatch) exactly as prewarm_embedding_cache does, and records — WITHOUT raw text —
 every changed unit (digests + lengths) and every blocked unit (stage, pattern names from the error, redacted shape
 stats of the raw text). Also runs the 500 question texts through the same pair (the harness protects queries at run time).
-Usage: corpus_privacy_inventory.py <repo> <prepared-dir> <shards-manifest> <out.json>
+Usage: corpus_privacy_inventory.py <repo> <prepared-dir> <shards-manifest> <out.json> [expected-repo-sha]
+The checkout identity of <repo> is recorded (`repo_head`, `repo_dirty_files`); with [expected-repo-sha] the run refuses a mismatch
+(PR #416 review: the artifact must carry evidence of the commit whose transform + validator it replayed).
 """
 import json
 import re
+import subprocess
 import sys
 import time
 import hashlib
 from pathlib import Path
 
 repo, prepared_dir, shards, out_path = sys.argv[1:5]
+expected_sha = sys.argv[5] if len(sys.argv) > 5 else None
+repo_head = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+repo_dirty_files = len(subprocess.run(["git", "-C", repo, "status", "--porcelain"], capture_output=True, text=True, check=True).stdout.splitlines())
+if expected_sha and not repo_head.startswith(expected_sha):
+    sys.exit(f"repo checkout {repo_head} does not match the expected registration sha {expected_sha}")
 sys.path.insert(0, repo)
 import benchmarking.longmemeval as lme  # noqa: E402
 lme._ensure_hermes_lcm_package()
@@ -49,7 +57,7 @@ config, revision = lme._embedding_privacy_context("voyage", "voyage-context-3")
 prepared = lme.load_prepared_dataset(Path(prepared_dir), dataset_label="m")
 ids = lme.load_shard_question_ids(Path(shards))
 t0 = time.time()
-inv = {"repo_head": None, "revision": revision, "prepared_questions": len(prepared.questions), "selected": len(ids),
+inv = {"repo_head": repo_head, "repo_dirty_files": repo_dirty_files, "revision": revision, "prepared_questions": len(prepared.questions), "selected": len(ids),
        "documents": 0, "unique_units": 0, "changed_units": 0, "blocked_units": 0,
        "queries": 0, "queries_changed": 0, "queries_blocked": 0,
        "per_question": {}, "blocked": [], "changed": [], "queries_blocked_detail": [], "queries_changed_detail": []}

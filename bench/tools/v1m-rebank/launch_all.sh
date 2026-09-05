@@ -6,6 +6,10 @@
 set -euo pipefail
 : "${REBANK_REPO:?}"; : "${REBANK_PY:?}"
 R=/Users/m1/Codex/session-notes/2026-09-05/v1m-rebank
+# The gate is enforced, not just documented (review of PR #416): prewarm_gate.sh writes gate-passed-at.txt ONLY on PASS.
+GATE="$R/artifacts/prewarm-gate/gate-passed-at.txt"
+[ -f "$GATE" ] || { echo "refusing to launch: prewarm_gate.sh has not passed (missing $GATE) — run the gate first (sheet §5 / §8 step 4)"; exit 3; }
+echo "gate passed at $(cat "$GATE")"
 for K in 0 1 2 3 4 5; do
   nohup "$R/run_shard.sh" "$K" > "$R/artifacts/shard-$K.log" 2>&1 &
   echo "shard-$K pid $!"

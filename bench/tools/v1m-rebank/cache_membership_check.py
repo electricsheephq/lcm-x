@@ -31,10 +31,18 @@ def open_readonly(path: str) -> sqlite3.Connection:
         return sqlite3.connect(f"file:{path}?immutable=1", uri=True)
 
 
+# The run's cache identity (run_shard.sh / prewarm_gate.sh: provider voyage, model voyage-context-3). Selected explicitly —
+# never "the largest group" — so a cache holding another model's rows cannot report membership for the wrong identity (PR #416 review).
+PROVIDER = "voyage"
+MODEL = "voyage-context-3"
+
 t0 = time.time()
 con = open_readonly(cache_path)
 groups = con.execute("select provider, model, count(*) from embedding_cache group by 1, 2").fetchall()
-provider, model, cache_rows = max(groups, key=lambda g: g[2])
+matching = [g for g in groups if g[0] == PROVIDER and g[1] == MODEL]
+if len(matching) != 1:
+    sys.exit(f"cache has no ({PROVIDER}, {MODEL}) group; groups present: {groups}")
+provider, model, cache_rows = matching[0]
 cache_digests = {row[0] for row in con.execute(
     "select content_sha256 from embedding_cache where provider = ? and model = ?", (provider, model))}
 con.close()

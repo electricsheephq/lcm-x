@@ -310,9 +310,15 @@ record what the first execution of this sheet produced.
    The root-cause probes it used are committed beside the kit: `corpus_privacy_inventory.py` (whole-corpus replay of the transform +
    validator, catch-and-continue, redacted shape statistics only), `changed_units_classes.py`, `blocked_units_attribution.py`,
    `refused_line_model.py` (per-segment line-model record of the refused units) and `cache_membership_check.py` (the §4.4 unit-identity
-   check performed directly against the cache keys, since the dry run stopped before reporting `already_cached`). The three probe scripts and the inventory were lint-normalized for the repository's ruff rules when
-   committed (statement splits and one loop-variable rename only; as-run and committed sha256s both recorded in the kit manifests;
-   `prewarm_gate.sh` and the shell kit are byte-identical to the as-run copies).
+   check performed directly against the cache keys, since the dry run stopped before reporting `already_cached`). `corpus_privacy_inventory.py`,
+   `changed_units_classes.py` and `blocked_units_attribution.py` were lint-normalized for the repository's ruff rules when committed
+   (statement splits and one loop-variable rename only); the review of the park-record PR (#416) then fixed seven committed copies
+   (listed per file in `bench/tools/v1m-rebank/README.md`: gate enforcement in `launch_all.sh`, zero-misses parity in
+   `cache_pair_check.py`, missing-A′ and exit-2 handling in `identity_all.sh`, structural + redacted env inventory in `record_pins.sh`,
+   explicit cache identity in `cache_membership_check.py`, checkout identity in `corpus_privacy_inventory.py`, exact-manifest match in
+   `changed_units_classes.py`). As-run and committed sha256s are both recorded in the kit manifests; `prewarm_gate.sh`, `run_shard.sh`,
+   `run_aprime.sh`, `result_identity.py`, `blocked_units_attribution.py` and `refused_line_model.py` are byte-identical to the as-run copies;
+   the three probes whose logic changed were re-run with the committed copies and reproduced their as-run artifacts.
 8. **§7 precision from the first execution.** "One block is a park" is decided by the dry run's first block; the dry run does not enumerate
    further blocks. The size of the refused set and the transform-change count therefore come from the whole-corpus replay
    (`corpus_privacy_inventory.py`), which applies the identical `protect_embedding_text` + `validate_embedding_privacy_dispatch` pair per

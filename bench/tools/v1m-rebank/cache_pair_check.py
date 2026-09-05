@@ -60,7 +60,7 @@ def main() -> int:
 
     ok = True
     table = []
-    total_new = total_f53 = 0
+    total_new = total_f53 = total_misses = 0
     for k in range(args.shards):
         rb = Path(f"{args.rebank_root}{k}")
         f53 = Path(f"{args.f53_root}{k}")
@@ -74,22 +74,26 @@ def main() -> int:
             continue
         agg_ok = int(agg.get("hits", -1)) == hits and int(agg.get("misses", -1)) == misses
         ref_ok = int(ref["hits"]) == hits and int(ref["misses"]) == misses
-        ok = ok and agg_ok and ref_ok
+        # §4.4(b): misses must be ZERO on both sides — equal non-zero miss counts are not parity (PR #416 review): a miss is a
+        # provider request the pre-spend gate never accounted for.
+        miss_ok = misses == 0 and int(ref["misses"]) == 0
+        ok = ok and agg_ok and ref_ok and miss_ok
         total_new += hits
         total_f53 += int(ref["hits"])
+        total_misses += misses + int(ref["misses"])
         (out / f"forward-baseline-shard-{k}.json").write_text(json.dumps(baseline, indent=1, sort_keys=True))
         table.append(
             (
                 k,
-                "PASS" if (agg_ok and ref_ok) else "FAIL",
+                "PASS" if (agg_ok and ref_ok and miss_ok) else "FAIL",
                 f"rows={rows} row_sum={hits}/{misses} aggregate={agg.get('hits')}/{agg.get('misses')} "
-                f"F53={ref['hits']}/{ref['misses']} aggregate==rows:{agg_ok} ==F53:{ref_ok}",
+                f"F53={ref['hits']}/{ref['misses']} aggregate==rows:{agg_ok} ==F53:{ref_ok} zero-misses:{miss_ok}",
             )
         )
 
     for k, status, detail in table:
         print(f"shard-{k} {status} {detail}")
-    print(f"TOTAL hits new={total_new} F53={total_f53} (F53 registered total 2,361,553; misses must be 0 everywhere)")
+    print(f"TOTAL hits new={total_new} F53={total_f53} misses(new+F53)={total_misses} (F53 registered total 2,361,553; misses must be 0 everywhere)")
     verdict = "PASS" if ok else "FAIL"
     print(f"CACHE-PAIR PARITY: {verdict}")
     (out / "verdict.txt").write_text(verdict + "\n")

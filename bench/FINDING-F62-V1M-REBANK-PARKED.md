@@ -12,8 +12,8 @@ Evidence: `session-notes/2026-09-05/v1m-rebank/artifacts/` (`gate-run.log`, `pre
 **PARKED at the gate under §7 (one block is a park), 2026-09-05T02:48Z — no shard launched, no §4.3 outcome named, F53 stays the
 row of record, and the #366/#374/#384–#391 ledger boundary is measured LIVE on this corpus (not inert).** The dry run stopped at
 document 227,951 with `status: blocked` — "cloud embedding privacy residual detector blocked pattern names: private_key" — after 61
-transformed units. The whole-corpus replay (§3) shows the shipped posture re-shapes 90 unique units (599 occurrences, 258 of 500
-questions) and refuses 3 unique units (18 occurrences, 18 questions), every refusal a false positive of one marker-independent
+transformed units. The whole-corpus replay (§3) shows the shipped posture re-shapes 90 unique units (599 occurrences, 248 of 500
+questions) and refuses 3 unique units (18 occurrences, 17 questions — one question carries two refused units), every refusal a false positive of one marker-independent
 backstop on text with no PEM marker (§8a). The run cannot be completed under posture (a) without a posture or product change; the
 options are the owner's (§10).
 
@@ -35,12 +35,15 @@ Not produced. No shard ran; the gate parks before the first spend-bearing step. 
 | step | documents walked | transformed | refused | scope |
 |---|---|---|---|---|
 | determinism probe (`--sample-size 20 --seed 0`) | 20 of 20 | 0 | 0 | `sample` (probe.json) |
-| `prewarm-cache --dry-run` | 227,951 (stopped at the first block) | 61 (`changed-manifest.jsonl`: 61 rows / 25 questions) | 1 | `corpus` — `question_coverage` 500/500 (dry-run.json) |
-| whole-corpus local replay (`corpus_privacy_inventory.py`, 796 s, no provider calls) | **2,513,035 occurrences = 505,695 unique units** | **599 occurrences = 90 unique units, in 258 of 500 questions** | **18 occurrences = 3 unique units, in 18 of 500 questions** | all 500 questions (corpus-privacy-inventory.json) |
+| `prewarm-cache --dry-run` | 227,951 (stopped at the first block) | 61 (`changed-manifest.jsonl`: 61 rows / 25 questions) | 1 | not recorded — the blocked report carries only `status`, `privacy`, `error`; the gate parks on the block before its coverage check (§8) |
+| whole-corpus local replay (`corpus_privacy_inventory.py`, 796 s, no provider calls; selected 500 = prepared 500, i.e. the shard union is the corpus) | **2,513,035 occurrences = 505,695 unique units** | **599 occurrences = 90 unique units, in 248 of 500 questions** | **18 occurrences = 3 unique units, in 17 of 500 questions** | all 500 questions (corpus-privacy-inventory.json) |
 | the 500 query texts (same transform + validator) | 500 | 0 | 0 | — |
 
 Placeholder occurrences among the 61 manifest units (`changed_units_classes.py`): `password_assignment` 44, `api_key` 38, `private_key` 2 —
-synthetic chat credentials, the transform doing what it ships to do. Interpretation under §4.2: the count is > 0, so the boundary is
+synthetic chat credentials, the transform doing what it ships to do. Question-level footprint: 248 questions carry a re-shaped unit, 17 carry a
+refused unit, 7 carry both, 258 carry either (the per-question map in the inventory). The dry run's stderr progress counter
+(`prewarm processed=178900` at the stop) counts prewarm request units, not `privacy.documents`, so the two figures are not comparable.
+Interpretation under §4.2: the count is > 0, so the boundary is
 **live for this corpus**; whether any metric delta would be attributable to it was never reached (§4.3 needs a completed run).
 
 Exact spend the real prewarm would have needed had nothing blocked (`cache_membership_check.py`): the 90 unique transformed units map to
@@ -97,7 +100,7 @@ class probes seconds, membership check 122 s — all offline. Sheet cap ($40, pr
   line, and returns True at a run of 2 (:1820). For these lines the width is the **whole line, prefix plus tail**, so two consecutive
   prose lines of 6–7 words whose last word is 16–17 characters long satisfy it. The docstring premise (:1805, "ordinary prose/config
   never produces them") is refuted by `eefcadc7…`. Rate on this corpus: 3 units per 505,695 (0.0006%); through shared haystack
-  sessions 18 of 500 questions (3.6%); the harness fails a question loud on a single block, so the run cannot complete.
+  sessions 17 of 500 questions (3.4%); the harness fails a question loud on a single block, so the run cannot complete.
 - **Production behaviour (flagged, not built):** `command.py`'s cloud backfill `break`s with `stop_reason = "privacy_refused"` on the
   first such document — one benign chat halts cloud embedding for the store until the operator opts out. Recorded on #394 (owner-
   reclassified redaction backlog; changes to the scanner are owner-gated since 2026-08-27).
@@ -116,9 +119,12 @@ class probes seconds, membership check 122 s — all offline. Sheet cap ($40, pr
 - Correction of record: the #380 park comment (03:09Z) stated "= the F53 cache exactly → corpus identity holds" on the strength of
   count equality (505,695 = 505,695). Membership was verified afterwards (§4) and the statement is true; at the time it was posted it
   was a count, not an identity. The follow-up comment on #380 says so.
-- Kit: the shell scripts and `cache_membership_check.py`, `refused_line_model.py`, `cache_pair_check.py`, `result_identity.py` are
-  byte-identical to the as-run copies; `corpus_privacy_inventory.py`, `changed_units_classes.py`, `blocked_units_attribution.py` were lint-normalized for the
-  repository's ruff rules (statement splits, one loop-variable rename); both sha256 manifests are committed beside them.
+- Kit: `prewarm_gate.sh`, `run_shard.sh`, `run_aprime.sh`, `result_identity.py`, `blocked_units_attribution.py` and
+  `refused_line_model.py` are byte-identical to the as-run copies; `corpus_privacy_inventory.py`, `changed_units_classes.py` and
+  `blocked_units_attribution.py` were lint-normalized (statement splits, one loop-variable rename); the review of PR #416 then fixed
+  seven committed copies (per-file list in the kit README — none alters a number in this record: the three probes whose logic changed
+  were re-run with the committed copies and reproduced the as-run artifacts; the other tools never ran in the parked execution). Both
+  sha256 manifests are committed beside the kit.
 - What this finding does NOT prove: nothing about F53's numbers under the raw path (no raw-path re-run exists at this head); nothing
   about retrieval quality under the shipped posture (no shard ran); the false-positive rate is for this corpus only.
 

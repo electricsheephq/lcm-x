@@ -28,14 +28,36 @@ OUT="$OUTDIR/pins-rebank-$PHASE-$(date -u +%Y%m%dT%H%M%SZ).txt"
   for t in $(sqlite3 "$D/embed-cache.sqlite" ".tables" 2>/dev/null); do echo "rows[$t]=$(sqlite3 "$D/embed-cache.sqlite" "select count(*) from $t" 2>/dev/null)"; done
   echo "## provider"
   echo "voyage_key_in_keychain=$(security find-generic-password -s VOYAGE_API_KEY -w >/dev/null 2>&1 && echo yes || echo NO)"
-  echo "python=$(${REBANK_PY:-python3} --version 2>&1)  ($REBANK_PY)"
+  echo "python=$(${REBANK_PY:-python3} --version 2>&1)  (${REBANK_PY:-python3})"
   echo "## _EnvFieldSpec inventory (config.py) — name=env_var=value-in-this-shell ((unset) = product default applies)"
-  grep -o '_EnvFieldSpec("[a-z_0-9]*", "[A-Z0-9_]*"' "$REBANK_REPO/config.py" | sed 's/_EnvFieldSpec("\([^"]*\)", "\([^"]*\)"/\1 \2/' | while read -r name var; do
-    printf '%s=%s=%s\n' "$name" "$var" "${(P)var:-(unset)}"
-  done
-  echo "inventory_count=$(grep -c '_EnvFieldSpec(' "$REBANK_REPO/config.py")"
-  echo "## LCM_/HERMES_ env in this shell"
-  env | grep -E '^(LCM_|HERMES_|REBANK_)' | grep -v -i "key" | sort
+  # Structural inventory (PR #416 review): import ENV_FIELD_SPECS instead of regexing config.py (the single-line regex dropped
+  # multi-line declarations), assert emitted == declared, and REDACT the value of every credential-shaped variable
+  # (KEY|TOKEN|SECRET|PASS|COOKIE|AUTH|CREDENTIAL) — this file is retained and shared as evidence.
+  "${REBANK_PY:-python3}" - "$REBANK_REPO" <<'PYEOF'
+import os, re, sys
+repo = sys.argv[1]
+sys.path.insert(0, repo)
+import benchmarking.longmemeval as lme  # noqa: E402
+lme._ensure_hermes_lcm_package()
+from hermes_lcm import config as cfg  # noqa: E402
+SECRET = re.compile(r"KEY|TOKEN|SECRET|PASS|COOKIE|AUTH|CREDENTIAL", re.I)
+def shown(var):
+    if var not in os.environ:
+        return "(unset)"
+    return "(set, redacted)" if SECRET.search(var) else os.environ[var]
+emitted = 0
+for spec in cfg.ENV_FIELD_SPECS:
+    print(f"{spec.name}={spec.env_key}={shown(spec.env_key)}")
+    emitted += 1
+declared = len(cfg.ENV_FIELD_SPECS)
+print(f"inventory_count={declared} emitted={emitted}")
+if emitted != declared:
+    sys.exit(f"env inventory incomplete: emitted {emitted} of {declared}")
+print("## LCM_/HERMES_/REBANK_ env in this shell (credential-shaped values redacted)")
+for var in sorted(os.environ):
+    if var.startswith(("LCM_", "HERMES_", "REBANK_")):
+        print(f"{var}={shown(var)}")
+PYEOF
   if [ "$PHASE" = "postrun" ]; then
     echo "## checkpoint headers (provider identity / privacy revision) per shard"
     for k in 0 1 2 3 4 5; do f=/Users/m1/hermes-work/lme-runs/m-rebank-shard-$k/per_question_checkpoint.jsonl; [ -f "$f" ] && echo "shard-$k $(head -1 "$f" | cut -c1-600)" || echo "shard-$k MISSING"; done

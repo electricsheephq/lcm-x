@@ -2,7 +2,7 @@
 
 Every number ships with its full run config, variance, fail-close accounting, and known dataset defects — rows that cannot meet the standard do not render.
 
-Generated from `results.jsonl` (sha256: `781787ed3cd7a4a74be246c3dd7959489f613f9efed86c477612c7285cb190ce`, rows: 11)
+Generated from `results.jsonl` (sha256: `e26ffe1f8e689f4827ec36111fad4f5fd64335e9396b396d6df3883c30ddff8f`, rows: 11)
 
 ## Summary
 
@@ -325,7 +325,7 @@ A/A' 100q fixed-seed subset (seed 20260802): 95/95 scored questions per-question
 - Delivery (r@10 95.6%) clears the 90% line; top-slot ranking (r@1 50%) is the declared next lever
 - FTS arm dark (prose flag unset) — disclosed; V1-M FTS-ON variant decided after LoCoMo C1
 - FROZEN vs current main (caveat appended 2026-08-26 per PR #368 review): row measured pre-v0.23.1 privacy trio (#332/#333/#338); the production lcm_recall arm may not be compared against post-v0.23.1 production-path rows until the registered re-bank (BASELINE-LEDGER privacy-trio boundary; FINDING-F53 reproducibility note). Reproducibility on current main is UNVERIFIED, not proven broken.
-- Re-bank status (caveat appended 2026-09-05 per FINDING-F62): the registered re-bank on the shipped posture (RUN-SHEET-V1M-REBANK, 22c12b21) PARKED at the pre-spend gate — the production provider-copy transform re-shapes 599 unit occurrences (258/500 questions) of this corpus and the residual validator refuses 3 distinct units (18 questions), so the production lcm_recall arm is NOT EXECUTABLE over LongMemEval-M at 22c12b21; the raw path this row was measured on has not been re-run; the freeze above stands; next step is an owner decision (#380).
+- Re-bank status (caveat appended 2026-09-05 per FINDING-F62): the registered re-bank on the shipped posture (RUN-SHEET-V1M-REBANK, 22c12b21) PARKED at the pre-spend gate — the production provider-copy transform re-shapes 599 unit occurrences (248/500 questions) of this corpus and the residual validator refuses 3 distinct units (17 questions), so the production lcm_recall arm is NOT EXECUTABLE over LongMemEval-M at 22c12b21; the raw path this row was measured on has not been re-run; the freeze above stands; next step is an owner decision (#380).
 
 ### <a id="longmemeval-v1-s500-accuracy-2026-07-29"></a>longmemeval-v1-s500-accuracy-2026-07-29
 

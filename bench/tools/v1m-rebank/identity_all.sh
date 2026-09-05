@@ -63,7 +63,12 @@ EOF
   RC_AA=${PIPESTATUS[0]}
   set -e
 else
-  echo "re-bank A′ dir not present yet ($REBANK_APRIME_DIR) — shard pairs only" | tee "$OUT/identity-aprime-$STAMP.txt"
+  # A′ is a mandatory input for naming any outcome (sheet §4.3/§8 step 6): its absence is a missing-input status, never a pass
+  # (PR #416 review) — RC 2 so the final test below exits 2, not 0.
+  echo "re-bank A′ dir not present ($REBANK_APRIME_DIR) — MISSING MANDATORY INPUT; shard pairs computed, no outcome may be named" | tee "$OUT/identity-aprime-$STAMP.txt"
+  RC_APRIME=2; RC_AA=2
 fi
 echo "RC shards=$RC_SHARDS aprime=$RC_APRIME aa=$RC_AA" | tee "$OUT/identity-rc-$STAMP.txt"
+# exit 2 = invalid input (result_identity.py's own code) must not collapse into 1 (= a confirmed identity delta) — review of PR #416
+if [ "$RC_SHARDS" = 2 ] || [ "$RC_APRIME" = 2 ] || [ "$RC_AA" = 2 ]; then echo "INVALID INPUT in at least one pair — no delta verdict"; exit 2; fi
 [ "$RC_SHARDS" = 0 ] && [ "$RC_APRIME" = 0 ] && [ "$RC_AA" = 0 ]

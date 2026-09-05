@@ -21,10 +21,13 @@ for r in rows:
     wanted[r["question_id"]].add(r["unit_index"])
 ph_re = ip._EMBEDDING_PRIVACY_PLACEHOLDER_RE
 out = {"revision": revision, "units": [], "pattern_totals": collections.Counter(), "unit_kind_totals": collections.Counter()}
+expected_pairs = {(qid, unit_index) for qid, indexes in wanted.items() for unit_index in indexes}
+processed_pairs = set()
 for question in prepared.iter_question_ids(sorted(wanted)):
     for unit_index, text in enumerate(lme.iter_ingest_embedding_request_units(question)):
         if unit_index not in wanted[question.question_id]:
             continue
+        processed_pairs.add((question.question_id, unit_index))
         protected, _rev, changed = ip.protect_embedding_text(text, config, expected_revision=revision)
         names = collections.Counter(m.group(1) if m.groups() else m.group(0) for m in ph_re.finditer(protected))
         for n, c in names.items():
@@ -39,6 +42,15 @@ for question in prepared.iter_question_ids(sorted(wanted)):
                       "has_begin": "-----BEGIN" in text, "mentions_password": bool(re.search(r"passw(or)?d|passphrase", text, re.I))}})
 out["pattern_totals"] = dict(out["pattern_totals"])
 out["unit_kind_totals"] = dict(out["unit_kind_totals"])
+# Fail loud on a stale manifest (PR #416 review): every listed unit must exist in the prepared dataset AND still transform.
+missing_pairs = sorted(expected_pairs - processed_pairs)
+if missing_pairs:
+    sys.exit(f"manifest units absent from the prepared dataset: {len(missing_pairs)} (first: {missing_pairs[:5]})")
+unchanged = [(u["question_id"], u["unit_index"]) for u in out["units"] if not u["changed"]]
+if unchanged:
+    sys.exit(f"manifest units that no longer transform under this revision: {len(unchanged)} (first: {unchanged[:5]})")
+out["units_expected"] = len(expected_pairs)
+out["units_processed"] = len(processed_pairs)
 Path(out_path).write_text(json.dumps(out, indent=2, sort_keys=True))
 print("units replayed:", len(out["units"]), "pattern totals:", out["pattern_totals"])
 for u in out["units"][:61]:
