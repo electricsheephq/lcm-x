@@ -566,10 +566,14 @@ class ReconcileMixin:
         return f"{prefix}:{getattr(self, '_session_id', '')}"
 
     def _load_replay_snapshot_digests(self, prefix: str) -> list[str]:
-        """Load a bounded, versioned digest list from a replay-proof namespace.
+        """Load bounded whole-snapshot proof, including legacy version 2.
 
         Any missing/corrupt/unreadable metadata resolves to an empty list, so a
         caller can never mistake a load failure for durable replay proof.
+
+        Version 2 briefly persisted unused per-message digests. Read only its
+        whole-snapshot digests so the next write can compact it back to the
+        bounded version-1 representation without losing restart replay proof.
         """
         if not getattr(self, "_session_id", ""):
             return []
@@ -581,15 +585,28 @@ class ReconcileMixin:
         except Exception:
             logger.debug("LCM replay snapshot metadata load failed", exc_info=True)
             return []
-        if not isinstance(data, dict) or data.get("version") != 1:
+        if not isinstance(data, dict):
             return []
-        raw_digests = data.get("digests")
+        if data.get("version") == 1:
+            raw_digests = data.get("digests")
+        elif data.get("version") == 2:
+            snapshots = data.get("snapshots")
+            if not isinstance(snapshots, list):
+                return []
+            raw_digests = [
+                snapshot.get("digest")
+                for snapshot in snapshots
+                if isinstance(snapshot, dict)
+            ]
+        else:
+            return []
         if not isinstance(raw_digests, list):
             return []
         ordered: list[str] = []
         for digest in raw_digests:
             normalized = str(digest)
-            if re.fullmatch(r"[0-9a-f]{64}", normalized) and normalized not in ordered:
+            if re.fullmatch(r"[0-9a-f]{64}", normalized):
+                ordered = [item for item in ordered if item != normalized]
                 ordered.append(normalized)
         return ordered[-16:]
 
@@ -630,10 +647,100 @@ class ReconcileMixin:
         self,
         messages: List[Dict[str, Any]],
     ) -> None:
+        digest = self._compacted_active_replay_snapshot_digest(messages)
         self._remember_replay_snapshot(
             _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX,
-            self._compacted_active_replay_snapshot_digest(messages),
+            digest,
         )
+        # Content equality is not occurrence provenance.  The only generic
+        # mixed-order proof available inside the ContextEngine contract is the
+        # exact object occurrence returned by this engine's own compress()
+        # call.  Keep that proof process-local and bounded.  Copies, restarts,
+        # aliases, and mutated messages deliberately fall back to ambiguity
+        # and are persisted duplicate-over-loss.
+        occurrence_ids = [id(message) for message in messages]
+        if not digest or len(set(occurrence_ids)) != len(occurrence_ids):
+            return
+        key = self._active_replay_snapshot_metadata_key()
+        records_by_key = dict(
+            getattr(self, "_compacted_active_replay_occurrence_records", {})
+        )
+        # Keep strong references, not bare ids: Python may reuse an id after
+        # collection, which would turn an unrelated equal message into false
+        # replay proof.  Only the latest snapshot per recent session is needed
+        # for the immediate post-compress race.
+        records_by_key.pop(key, None)
+        records_by_key[key] = [
+            {
+                "digest": digest,
+                "occurrences": [
+                    (message, self._replay_identity_sha256(message))
+                    for message in messages
+                ],
+            }
+        ]
+        while len(records_by_key) > 4:
+            records_by_key.pop(next(iter(records_by_key)))
+        self._compacted_active_replay_occurrence_records = records_by_key
+
+    def _registered_compacted_snapshot_replay_indexes(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> set[int]:
+        """Map exact process-local compress occurrences through a mixed batch.
+
+        Per-message content digests are validation only.  Object identity is
+        the occurrence proof: a copied or reconstructed identity-equal message
+        is ambiguous and must be persisted.  Every registered object must
+        occur exactly once and in its original order; otherwise no row is
+        suppressed.
+        """
+        if not messages:
+            return set()
+        positions_by_object_id: dict[int, list[int]] = {}
+        for index, message in enumerate(messages):
+            positions_by_object_id.setdefault(id(message), []).append(index)
+        key = self._active_replay_snapshot_metadata_key()
+        records = getattr(
+            self,
+            "_compacted_active_replay_occurrence_records",
+            {},
+        ).get(key, [])
+        for record in reversed(records):
+            occurrences = record.get("occurrences") or []
+            if not occurrences or len(occurrences) > len(messages):
+                continue
+            selected_indexes: list[int] = []
+            lower_bound = 0
+            for occurrence_message, occurrence_digest in occurrences:
+                possible_indexes = [
+                    index
+                    for index in positions_by_object_id.get(
+                        id(occurrence_message), []
+                    )
+                    if messages[index] is occurrence_message
+                    and self._replay_identity_sha256(messages[index])
+                    == occurrence_digest
+                ]
+                if len(possible_indexes) != 1:
+                    selected_indexes = []
+                    break
+                selected_index = possible_indexes[0]
+                if selected_index < lower_bound:
+                    selected_indexes = []
+                    break
+                selected_indexes.append(selected_index)
+                lower_bound = selected_index + 1
+            if not selected_indexes:
+                continue
+            selected = [messages[index] for index in selected_indexes]
+            if (
+                self._compacted_active_replay_snapshot_digest(selected)
+                != record["digest"]
+            ):
+                continue
+            return set(selected_indexes)
+        return set()
 
     # -- Session-end full-history proof (consumed ONLY by current-session
     #    full-history session-end ingest) --
