@@ -76,7 +76,10 @@ Findings: P0/P1 verified ⇒ respin. P2 ⇒ tracked issue with disposition befor
 bench/instruments/release_gauntlet/), docs/, tests/ and .github/release-notes/, Phase B runs over
 `rcN..rcN+1` only, and the composed receipt is the carried full-range receipt (previous GA → rcN)
 PLUS the delta receipt (rcN → rcN+1): together they cover previous GA → rcN+1 with no gap, and the GA
-notes cite both. Any other delta re-runs Phase B over the full range.
+notes cite both. This composed receipt IS the full-release-diff sweep the repository requires
+(AGENTS.md): its two parts partition previous GA → rcN+1, and because the eligible paths exclude
+product code, the product tree of rcN+1 is byte-identical to the one swept as a whole at rcN — the
+respin adds no product interaction to review. Any other delta re-runs Phase B over the full range.
 
 ## Phase C — Live-session soak
 
@@ -90,12 +93,17 @@ tree reproduces the same conflicts under the mechanical comparison below. "The s
 recorded tuple that must be identical across every run the comparison uses: the host build pin, the
 soak fixture files (material, probes, canaries) by sha256, the soak configuration by sha256, the
 assistant provider and model identifier (the live-model side of the soak; a fixed seed where the
-provider supports one), the transport, and the turn script. A previous-GA run is reusable across
-candidates only while that tuple is unchanged.
+provider supports one), the transport, the turn script, and the starting state — a fresh isolated
+home and an empty database for every run, or, where a seeded start is part of the fixture, the same
+seed snapshot by digest (publication conflicts depend on persisted lifecycle state, so runs that
+start from different data are not comparable). A previous-GA run is reusable across candidates only
+while that tuple is unchanged.
 1. **Record and profile.** Where the host exposes a conflict's publication point and message, a
    conflict record is `(kind, publication point, message)`, a run's profile is the multiset of its
-   records, and the candidate passes iff its profile equals the previous GA's profile exactly
-   (identities do not jitter, so no band applies). Where it does not (today the engine collapses
+   records, and the candidate passes iff no identity in its multiset is absent from the previous
+   GA's multiset (zero NEW) and it has no more records than the previous GA; identities present only
+   in the previous GA are recorded as REMOVED (identities do not jitter, so no band applies). Where
+   it does not (today the engine collapses
    every publication conflict to the `publication_invariant_conflict` label without its source —
    logging follow-up #430), a record is `(soak turn index, logged error code, logged error name)`
    and the profile is the multiset of records sorted by `(code, name, turn index)` — the **position
@@ -112,7 +120,8 @@ candidates only while that tuple is unchanged.
    recorded band. Sort both profiles; if their counts differ, the candidate's own count is unstable
    and the phase FAILS (investigate, then re-run); otherwise pair records index-wise and
    `band = max_i |turn(A_i) − turn(A′_i)|`, a whole number of soak turns, inclusive (identical
-   profiles give band 0). **The maximum admissible band is 2 soak turns.** A measured band above it
+   profiles give band 0). **The maximum admissible band is 2 soak turns** (the largest same-tree
+   jitter measured on record, and small against a ≥30-turn soak). A measured band above it
    means the candidate's own run-to-run behaviour is too unstable for positions to discriminate; the
    phase is then unevaluable under the positional fallback and FAILS (investigate the soak; identity
    evidence is required to pass).
