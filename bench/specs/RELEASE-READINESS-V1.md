@@ -17,9 +17,12 @@ needs a live soak. Docs/bench-only releases may skip to GA with a note in the re
    Carry-forward rule (every receipt binds an exact tree, so carrying needs proof): **Phase B
    re-runs on every respin** (it is diff-scoped by definition). Phases A and C may carry a prior
    rc's receipt ONLY when the rcN→rcN+1 diff touches nothing outside bench/, docs/, tests/, and
-   .github/release-notes/ — AND nothing under bench/instruments/release_gauntlet/ (a changed
-   gauntlet invalidates its own receipts) — the carried receipt is referenced WITH the diff-scope proof
-   (`git diff rcN..rcN+1 --name-only`) recorded beside it. A respin whose rcN→rcN+1 delta is
+   .github/release-notes/ — AND nothing under bench/instruments/release_gauntlet/ or
+   bench/instruments/compaction_probe/ (a changed gauntlet or soak driver invalidates its own
+   receipts) — AND, for Phase C, its same-soak tuple (§Phase C) is unchanged between the receipt and
+   the candidate; otherwise the phase re-runs. The carried receipt is referenced WITH the diff-scope
+   proof recorded beside it: `git diff --no-renames --name-status rcN..rcN+1`, every listed path —
+   rename detection off, so both sides of any move appear — inside the eligible set. A respin whose rcN→rcN+1 delta is
    confined to those same paths re-runs Phase B over that delta only and composes the result with
    the carried Phase B receipt (the composed receipt records both). **This specification is never
    carry-safe:** when the delta changes an acceptance criterion in this file, every carried receipt
@@ -73,7 +76,8 @@ placeholders, revisions) under the rc tree and exercise re-embed/migration paths
 rule applies: finders and verifiers must not all share the author's model family.
 Findings: P0/P1 verified ⇒ respin. P2 ⇒ tracked issue with disposition before GA.
 **Limited respin (step 4):** when an rcN→rcN+1 delta is confined to bench/ (outside
-bench/instruments/release_gauntlet/), docs/, tests/ and .github/release-notes/, Phase B runs over
+bench/instruments/release_gauntlet/ and bench/instruments/compaction_probe/), docs/, tests/ and
+.github/release-notes/, Phase B runs over
 `rcN..rcN+1` only, and the composed receipt is the carried full-range receipt (previous GA → rcN)
 PLUS the delta receipt (rcN → rcN+1): together they cover previous GA → rcN+1 with no gap, and the GA
 notes cite both. This composed receipt IS the full-release-diff sweep the repository requires
@@ -100,15 +104,16 @@ start from different data are not comparable). A previous-GA run is reusable acr
 while that tuple is unchanged.
 1. **Record and profile.** Where the host exposes a conflict's publication point and message, a
    conflict record is `(kind, publication point, message)`, a run's profile is the multiset of its
-   records, and the candidate passes iff no identity in its multiset is absent from the previous
-   GA's multiset (zero NEW) and it has no more records than the previous GA; identities present only
-   in the previous GA are recorded as REMOVED (identities do not jitter, so no band applies). Where
-   it does not (today the engine collapses
+   records, and the candidate passes iff its multiset is contained in the previous GA's multiset —
+   for every identity the candidate's multiplicity is at most the previous GA's, and any excess
+   occurrence is NEW — which also bounds its count; occurrences present only in the previous GA are
+   recorded as REMOVED (identities do not jitter, so no band applies). Where it does not (today the engine collapses
    every publication conflict to the `publication_invariant_conflict` label without its source —
    logging follow-up #430), a record is `(soak turn index, logged error code, logged error name)`
    and the profile is the multiset of records sorted by `(code, name, turn index)` — the **position
    profile**. The soak turn index is the driver's turn ordinal whose window contains the conflict's
-   log timestamp: windows are half-open, turn i spans [start_i, start_i+1), and the final turn spans
+   log timestamp: windows are half-open, turn i spans [start_i, start_{i+1}) — from its own recorded
+   start to the next turn's recorded start — and the final turn spans
    [start_n, terminal cutoff], where the terminal cutoff is the driver's recorded end of the final
    turn (its start plus its wall time); a conflict logged after the cutoff belongs to no turn. Every
    conflict line maps to exactly one turn; an unmapped or doubly mapped conflict makes the profile
@@ -129,21 +134,26 @@ while that tuple is unchanged.
    differ by at most the band. Pair the candidate profile against the previous-GA profile greedily
    in sorted order: for each candidate record, take the first unused previous-GA record that
    matches it; a candidate record with no match is NEW. Run the pairing for both A and A′.
-4. **Verdict.** The phase passes iff both A and A′ pair every record (zero NEW) AND neither has more
-   records than the previous GA. Equal counts therefore hold in every match; a candidate with more
-   records than the previous GA fails regardless of positions, and one with fewer passes the
-   differential only when every one of its records pairs, the receipt listing the unpaired
-   previous-GA records as REMOVED with the delta commit believed responsible. Kind and aggregate
-   count alone never suffice.
+4. **Differential verdict.** The differential passes iff both A and A′ pair every record (zero
+   NEW) AND neither has more records than the previous GA. It is one conjunct of Green, not Green
+   itself: A, A′ and the previous-GA run must each also pass every non-conflict Phase C assertion
+   (zero unexpected engine errors, recall probes hit, doctor clean) — a run failing any of them
+   establishes no profile and no band, and the phase fails. A candidate with more records than the
+   previous GA fails regardless of positions; one with fewer passes the differential only when every
+   one of its records pairs, the receipt listing the unpaired previous-GA records as REMOVED with the
+   delta commit believed responsible. Kind and aggregate count alone never suffice.
 5. **Known residual of the positional fallback.** A NEW conflict that fires within the band of a
    REMOVED one, with the same code and name, is indistinguishable from it without a publication
    point: the fallback bounds the blind spot to same-band, same-kind substitution and cannot close
    it. It is accepted only while the host exposes no identity (#430); the receipt states the
    residual whenever the fallback is used, and a train whose host exposes publication point and
    message must use the identity rule in step 1 — the fallback is not available to it.
-The receipt records the tuple (pin, fixture and configuration hashes, assistant identifier), the
-sorted profiles of A, A′ and the previous GA, the band, every pairing with its deviation, every
-unpaired record, which identity fields the host surface exposed, and the verdict. While #247 is
+The receipt records every field of the tuple (host pin, fixture and configuration hashes, assistant
+identifier, transport identifier, the sha256 of the driver and turn-script files, the starting-state
+statement or seed digest), the previous GA's exact tag with its resolved commit and tree SHA beside
+its profile, the candidate rc tag and tree SHA, the sorted profiles of A, A′ and the previous GA, the
+band, every pairing with its deviation, every unpaired record, which identity fields the host exposed,
+and the verdict. While #247 is
 open the count is expected to be non-zero, so the differential run is mandatory whenever it is.
 
 ## Receipts
