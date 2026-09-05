@@ -90,7 +90,10 @@ respin adds no product interaction to review. Any other delta re-runs Phase B ov
 A scripted multi-turn session battery over `hermes acp` (the measured headless single-session
 transport) against the clone: ingest-heavy turns, recall probes, compaction crossing at least
 one threshold, doctor at close. Green = zero unexpected errors in engine logs, zero NEW
-publication-invariant conflicts (#247-class), recall probes hit, doctor clean. Minimum 30 turns.
+publication-invariant conflicts (#247-class), recall probes hit, doctor clean, and — whenever a
+previous-GA soak under the same tuple exists — publication-attempt parity with it (item 4 below)
+regardless of the candidate's conflict count: a candidate that reports zero conflicts because it
+attempted fewer publications is not Green. Minimum 30 turns.
 **Differential rule for #247-class conflicts** (applied since the v0.23.2 train; codified
 2026-09-05, #427): a non-zero conflict count passes ONLY when the same soak against the previous GA
 tree reproduces the same conflicts under the mechanical comparison below. "The same soak" is a
@@ -180,8 +183,10 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    tuple — never on the unchanged head. Every run attempted under the tuple is recorded in the
    receipt, aborted soaks included, each with its cause, and a conflict record observed in ANY
    attempted candidate run — completed or aborted, under this tuple or a superseded one — must be
-   paired against the baseline within the band or explicitly dispositioned in the receipt with its
-   cause and evidence before the phase can pass; a tuple change or an abort never discards an
+   paired against the baseline within the band or — only for a record from an aborted run or a
+   superseded tuple — explicitly dispositioned in the receipt with its cause and evidence before the
+   phase can pass (a record from a completed run under the tuple can only pair; an unpaired one is
+   NEW); a tuple change or an abort never discards an
    observed conflict. **The maximum admissible band is 2 soak turns** (the largest same-tree
    jitter measured on record, and small against a ≥30-turn soak). A measured band above it
    means the candidate's own run-to-run behaviour is too unstable for positions to discriminate; the
@@ -196,8 +201,9 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    completely against at least one baseline run (an unchanged candidate must lie within the measured
    jitter of at least one baseline sample), and its NEW records are those left unpaired against the
    baseline run it came closest to.
-4. **Differential verdict.** The differential passes iff both A and A′ pair every record (zero
-   NEW) AND neither has more records than the previous GA. It is one conjunct of Green, not Green
+4. **Differential verdict.** The differential passes only when both A and A′ pair every record
+   (zero NEW) AND neither has more records than the previous GA AND the further conditions of this
+   item hold. It is one conjunct of Green, not Green
    itself: A and A′ must each also pass every non-conflict Phase C assertion (zero unexpected
    engine errors, recall probes hit, doctor clean) — a candidate run failing any of them establishes
    no profile and no band, and the phase fails. B and B′ must complete every turn with an intact log
@@ -231,7 +237,9 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
 The receipt records every field of the tuple (host pin, fixture and configuration hashes, assistant
 identifier, transport identifier, the sha256 of the driver, turn-script and prompt-bearing files, the starting-state
 statement or seed digest, the effective `LCM_*` and behaviour-affecting `HERMES_*` set with its
-canonical digest and its capture source), the previous GA's exact tag with its resolved commit and tree SHA beside
+canonical digest and its capture source, the credential identities or attestations, the driver's
+normalized invocation, the execution-runtime inventories of host and driver with their digests, and
+the publication-attempt counts per run), the previous GA's exact tag with its resolved commit and tree SHA beside
 its profile, the candidate rc tag and tree SHA, the sorted profiles of A, A′, B and B′, both pair
 bands and the band used, every pairing with its deviation, every unpaired record, which identity
 fields the host exposed, the verdict, and — so the derived profiles can be re-derived — the sha256 and
