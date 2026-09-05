@@ -253,7 +253,9 @@ stagger. 6. A/A′ on `prepared-m-aprime100`, same flags including `--dump-candi
 outputs to the session-notes artifacts dir before anything else runs.** 8. Recompute every metric from
 `per_question_checkpoint.jsonl` — never the run's own aggregate (the aggregates `ingest.privacy` and
 `ingest.embed_cache` are restored across `--resume` from the rows, but the checkpoint rows are the record).
-9. Per-shard cache-pair parity = the sum of per-question `embed_cache` rows vs `lme-runs/m-full2-shard-*/`
+9. Per-shard cache-pair parity = the sum of per-question `embed_cache` rows (every row also records `embed_cache_enabled`; a partial
+   `--resume` is refused before any provider resolves unless every restored row matches the live cache posture, so a shard can never
+   mix cached and uncached rows) vs `lme-runs/m-full2-shard-*/`
 `longmemeval_metrics.json` `ingest.embed_cache`; record `corpus_counts` as the forward baseline. 10. FINDING-F62 + F53 annotation — plus the scoreboard row and the §6 ledger rows ONLY on a REPRODUCED outcome (a MOVED outcome
 banks nothing: the finding carries the diagnosis and F53 keeps its row, §4.3) — one PR
 through the gate with an independent audit; #380/#367 close on merge (on a MOVED outcome they stay open with the diagnosis

@@ -3677,6 +3677,7 @@ def _question_checkpoint_record(
     scored: dict[str, Any] | None,
     *,
     chunk_embedding_mode: str | None = None,
+    embed_cache_enabled: bool | None = None,
 ) -> dict[str, Any]:
     zero_privacy = {key: 0 for key in _PRIVACY_KEYS}
     if scored is None:
@@ -3693,6 +3694,8 @@ def _question_checkpoint_record(
         }
         if chunk_embedding_mode is not None:
             record["chunk_embedding_mode"] = chunk_embedding_mode
+        if embed_cache_enabled is not None:
+            record["embed_cache_enabled"] = embed_cache_enabled
         return record
     checkpoint_scored = copy.deepcopy(scored)
     checkpoint_scored.pop("_candidate_rankings", None)
@@ -3725,7 +3728,67 @@ def _question_checkpoint_record(
     }
     if scored_chunk_embedding_mode is not None:
         record["chunk_embedding_mode"] = scored_chunk_embedding_mode
+    if embed_cache_enabled is not None:
+        record["embed_cache_enabled"] = embed_cache_enabled
     return record
+
+
+def _reconcile_embed_cache_posture(
+    records: Iterable[dict[str, Any]],
+    *,
+    live_embed_cache_enabled: bool,
+    fully_completed_resume: bool,
+    restored_embed_cache: dict[str, int],
+) -> bool:
+    """Bind a resume to the cache posture its rows were written under.
+
+    Every current-format row carries ``embed_cache_enabled``. A partial resume must
+    match the live posture row by row -- refused here, before any provider resolves,
+    so no spend occurs and a shard can never mix cached and uncached rows (a cached
+    checkpoint holding only zero-traffic rows is indistinguishable from an uncached
+    one by its counters alone). A completed resume reports the aggregate
+    ``ingest.embed_cache`` whenever the rows say a cache was in play, even at zero
+    traffic. Marker-less legacy rows fall back to the traffic heuristic (non-zero
+    restored traffic proves a cache); they can never partially resume because the
+    chunk-mode check refuses them.
+
+    Returns whether the restored rows were produced under an embed cache.
+    """
+    markers: set[bool | None] = set()
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        question_id = record.get("question_id", "?")
+        marker = record.get("embed_cache_enabled")
+        if marker is not None and not isinstance(marker, bool):
+            raise ValueError(
+                f"checkpoint row {question_id}: malformed embed_cache_enabled={marker!r}"
+            )
+        if not fully_completed_resume:
+            if marker is None:
+                raise ValueError(
+                    f"checkpoint row {question_id}: missing embed_cache_enabled; rows "
+                    "written before this instrument cannot be partially resumed -- "
+                    "start a fresh output root"
+                )
+            if marker != live_embed_cache_enabled:
+                raise ValueError(
+                    f"checkpoint row {question_id}: embed_cache_enabled={marker!r} but "
+                    f"the resumed run has {EMBED_CACHE_ENV} "
+                    f"{'set' if live_embed_cache_enabled else 'unset'}; resume under "
+                    "the same cache posture or start a fresh --output"
+                )
+        markers.add(marker)
+    if len(markers) > 1:
+        raise ValueError(
+            "checkpoint rows mix embed-cache postures: embed_cache_enabled values "
+            f"{sorted(markers, key=repr)!r}"
+        )
+    if markers == {True}:
+        return True
+    if markers == {False}:
+        return False
+    return restored_embed_cache["hits"] > 0 or restored_embed_cache["misses"] > 0
 
 
 def _restore_privacy_counts(records: Iterable[dict[str, Any]]) -> None:
@@ -3970,12 +4033,6 @@ def run_harness(
             )
             _restore_privacy_counts(checkpoint_records)
             restored_embed_cache = _restore_embed_cache_counts(checkpoint_records)
-            # Rows always carry the embed_cache field (zeros when no cache was
-            # configured), so field presence is not the signal; non-zero traffic
-            # proves the restored rows were produced under an embed cache.
-            restored_embed_cache_active = (
-                restored_embed_cache["hits"] > 0 or restored_embed_cache["misses"] > 0
-            )
 
     by_category: dict[str, dict[str, ArmSamples]] = {}
     overall = _new_arm_samples()
@@ -4009,18 +4066,16 @@ def run_harness(
     embed_cache_path = os.environ.get(EMBED_CACHE_ENV)
     if embed_cache_path is not None and not embed_cache_path.strip():
         raise ValueError(f"{EMBED_CACHE_ENV} must be a non-empty SQLite path")
-    if (
-        embed_cache_path is None
-        and restored_embed_cache_active
-        and not fully_completed_resume
-    ):
-        # Refuse to sum a cached half with an uncached half: the restored rows were
-        # produced under an embed cache the live process does not have. Raised
-        # before any provider resolves, so no spend occurs.
-        raise ValueError(
-            "restored checkpoint rows carry embed_cache traffic but "
-            f"{EMBED_CACHE_ENV} is not set for this resume; export the same cache "
-            "or start a fresh --output"
+    live_embed_cache_enabled = embed_cache_path is not None
+    if resume:
+        # Before any provider resolves: a partial resume must match the posture its
+        # rows were written under; a completed one learns from the rows whether the
+        # aggregate cache totals belong in the report.
+        restored_embed_cache_active = _reconcile_embed_cache_posture(
+            checkpoint_records,
+            live_embed_cache_enabled=live_embed_cache_enabled,
+            fully_completed_resume=fully_completed_resume,
+            restored_embed_cache=restored_embed_cache,
         )
 
     provider_set: HarnessProviderSet | None = None
@@ -4186,6 +4241,7 @@ def run_harness(
                     question,
                     scored,
                     chunk_embedding_mode=resolved_chunk_embedding_mode,
+                    embed_cache_enabled=live_embed_cache_enabled,
                 )
                 scored_delta, abstention_delta = _accumulate_question_checkpoint(
                     record,
@@ -4286,11 +4342,11 @@ def run_harness(
     if dataset_label == "m" or manifest_sha256 is not None:
         ingest_report["embedding_batch_size"] = effective_embedding_batch_size
     if embed_cache_path is not None or restored_embed_cache_active:
-        # Restored cache traffic is reported even when the live process has no
-        # cache configured (a fully completed resume constructs no provider); the
-        # partial-resume mix without a live cache was refused above. Zero restored
-        # traffic is indistinguishable from an uncached run here and keeps the
-        # env-gated behaviour; the per-row embed_cache fields stay authoritative.
+        # Restored cache totals are reported whenever the rows say a cache was in
+        # play (their embed_cache_enabled marker; traffic heuristic for legacy rows),
+        # even when the re-reporting process has no cache configured -- a fully
+        # completed resume constructs no provider. A partial resume under a different
+        # posture was refused above, so the sum never mixes cached and uncached rows.
         live_cache_hits, live_cache_misses = _embed_cache_totals(
             ()
             if provider_set is None or embed_cache_path is None

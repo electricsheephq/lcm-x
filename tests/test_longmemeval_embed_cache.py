@@ -360,12 +360,15 @@ def test_resume_aggregate_adds_restored_and_live_embed_cache_counts(tmp_path, mo
     assert resumed["ingest"]["embed_cache"] == {"hits": 12, "misses": 21}
 
 
-def _cached_two_question_run(tmp_path, monkeypatch):
-    """First run under an embed cache: two checkpoint rows, each carrying
-    ``embed_cache == {"hits": 2, "misses": 1}``."""
+def _cached_two_question_run(tmp_path, monkeypatch, *, traffic=(2, 1), cached=True):
+    """First run: two checkpoint rows, each carrying ``embed_cache == traffic``, written
+    under an embed cache when ``cached`` (rows then carry ``embed_cache_enabled=True``)."""
     questions = [_question("q-cache-a"), _question("q-cache-b")]
     checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
-    monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "cache.sqlite3"))
+    if cached:
+        monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "cache.sqlite3"))
+    else:
+        monkeypatch.delenv(lme.EMBED_CACHE_ENV, raising=False)
     metric = {
         "recall@1": 1.0,
         "recall@5": 1.0,
@@ -393,15 +396,15 @@ def _cached_two_question_run(tmp_path, monkeypatch):
         )
 
     def _evaluate(_question, provider, **_kwargs):
-        provider.hits += 2
-        provider.misses += 1
+        provider.hits += traffic[0]
+        provider.misses += traffic[1]
         return {
             **{arm: dict(metric) for arm in lme.ARMS},
             "hybrid_rerank": {**metric, "rerank_mode": lme.RERANK_MODE_PLACEHOLDER},
             "ingest_ms": 1.0,
             "privacy": {key: 0 for key in lme._PRIVACY_KEYS},
             "corpus_counts": {"messages": 1, "summary_nodes": 1, "chunks": 0},
-            "embed_cache": {"hits": 2, "misses": 1},
+            "embed_cache": {"hits": traffic[0], "misses": traffic[1]},
         }
 
     monkeypatch.setattr(lme, "resolve_harness_providers", _resolve)
@@ -418,7 +421,9 @@ def _cached_two_question_run(tmp_path, monkeypatch):
         json.loads(line)
         for line in checkpoint.read_text(encoding="utf-8").splitlines()[1:]
     ]
-    assert [row["embed_cache"] for row in rows] == [{"hits": 2, "misses": 1}] * 2
+    expected_traffic = {"hits": traffic[0], "misses": traffic[1]}
+    assert [row["embed_cache"] for row in rows] == [expected_traffic] * 2
+    assert [row["embed_cache_enabled"] for row in rows] == [cached, cached]
     return questions, checkpoint
 
 
@@ -447,33 +452,98 @@ def test_completed_resume_reports_restored_embed_cache_without_cache_env(
     assert resumed["ingest"]["embed_cache"] == {"hits": 4, "misses": 2}
 
 
-def test_partial_resume_without_cache_env_refuses_rows_carrying_embed_cache(
-    tmp_path, monkeypatch
-):
-    """A cached half must not be summed with an uncached half; refused before any
-    provider resolves."""
-    questions, checkpoint = _cached_two_question_run(tmp_path, monkeypatch)
+def _partial_resume(tmp_path, monkeypatch, questions, checkpoint):
+    """Truncate the checkpoint to its first row, forbid provider resolution, resume."""
     lines = checkpoint.read_text(encoding="utf-8").splitlines()
     checkpoint.write_text(lines[0] + "\n" + lines[1] + "\n", encoding="utf-8")
-    monkeypatch.delenv(lme.EMBED_CACHE_ENV)
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("the mix must be refused before any provider resolves")
 
     monkeypatch.setattr(lme, "resolve_harness_providers", forbidden)
+    return lme.run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "resume",
+        reuse_db_template=False,
+        checkpoint_path=checkpoint,
+        resume=True,
+        selected_question_ids=[question.question_id for question in questions],
+    )
+
+
+@pytest.mark.parametrize("traffic", [(2, 1), (0, 0)], ids=["traffic", "zero-traffic"])
+def test_partial_resume_without_cache_env_refuses_rows_written_under_a_cache(
+    tmp_path, monkeypatch, traffic
+):
+    """A cached half must not be summed with an uncached half; refused before any
+    provider resolves. The zero-traffic case is the bypass a traffic heuristic left
+    open (a cached checkpoint holding only abstention-like rows)."""
+    questions, checkpoint = _cached_two_question_run(tmp_path, monkeypatch, traffic=traffic)
+    monkeypatch.delenv(lme.EMBED_CACHE_ENV)
     with pytest.raises(
-        ValueError, match=f"embed_cache traffic but {lme.EMBED_CACHE_ENV} is not set"
+        ValueError,
+        match=f"embed_cache_enabled=True but the resumed run has {lme.EMBED_CACHE_ENV} unset",
     ):
-        lme.run_harness(
-            questions,
-            provider_name="stub",
-            model="",
-            tmp_dir=tmp_path / "resume",
-            reuse_db_template=False,
-            checkpoint_path=checkpoint,
-            resume=True,
-            selected_question_ids=[question.question_id for question in questions],
-        )
+        _partial_resume(tmp_path, monkeypatch, questions, checkpoint)
+
+
+def test_partial_resume_with_cache_env_refuses_uncached_rows(tmp_path, monkeypatch):
+    """The inverse mix: rows written without a cache must not be completed under one."""
+    questions, checkpoint = _cached_two_question_run(tmp_path, monkeypatch, cached=False)
+    monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "late-cache.sqlite3"))
+    with pytest.raises(
+        ValueError,
+        match=f"embed_cache_enabled=False but the resumed run has {lme.EMBED_CACHE_ENV} set",
+    ):
+        _partial_resume(tmp_path, monkeypatch, questions, checkpoint)
+
+
+def test_completed_resume_of_zero_traffic_cached_rows_reports_embed_cache_without_env(
+    tmp_path, monkeypatch
+):
+    """The marker, not the traffic, decides whether the aggregate belongs in the report."""
+    questions, checkpoint = _cached_two_question_run(tmp_path, monkeypatch, traffic=(0, 0))
+    monkeypatch.delenv(lme.EMBED_CACHE_ENV)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("a fully completed resume must not resolve a provider")
+
+    monkeypatch.setattr(lme, "resolve_harness_providers", forbidden)
+    resumed = lme.run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "resume",
+        reuse_db_template=False,
+        checkpoint_path=checkpoint,
+        resume=True,
+        selected_question_ids=[question.question_id for question in questions],
+    )
+    assert resumed["ingest"]["embed_cache"] == {"hits": 0, "misses": 0}
+
+
+def test_abstention_row_carries_the_embed_cache_marker(tmp_path, monkeypatch):
+    """Abstention rows skip evaluation and carry zero traffic; the marker must still
+    record the posture they were written under."""
+    monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "cache.sqlite3"))
+    question = _question("q-cache_abs")
+    assert question.is_abstention
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    lme.run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "initial",
+        embeddings_enabled=False,
+        reuse_db_template=False,
+        checkpoint_path=checkpoint,
+    )
+    row = json.loads(checkpoint.read_text(encoding="utf-8").splitlines()[1])
+    assert row["abstention"] is True
+    assert row["embed_cache"] == {"hits": 0, "misses": 0}
+    assert row["embed_cache_enabled"] is True
 
 
 def test_prewarm_rejects_split_summary_chunk_identity_before_embedding(tmp_path):
