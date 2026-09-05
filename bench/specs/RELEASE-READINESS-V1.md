@@ -104,7 +104,9 @@ option and value that can change session continuity or turn completion (turn tim
 quiet period, restart-before-probes, probes-only), as the driver manifest records them — the execution
 runtime of the host and of the driver (interpreter version, SQLite library version, platform, and the
 installed-distribution inventory of each virtualenv the runs use, as a sorted name+version list by
-sha256; two runs on different runtimes are not the same soak), the starting state — a fresh isolated home
+sha256 — EXCLUDING the distribution under test itself (the LCM-X package, and the host package where
+the host is what changes), which necessarily differs between the previous-GA and candidate runs and is
+recorded separately by tree sha; two runs on different runtimes are not the same soak), the starting state — a fresh isolated home
 and an empty database for every run, or, where a seeded start is part of the fixture, the same seed
 snapshot by digest (publication conflicts depend on persisted lifecycle state, so runs that start
 from different data are not comparable) — and the effective engine environment: the driver inherits
