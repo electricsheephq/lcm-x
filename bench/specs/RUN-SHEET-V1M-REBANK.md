@@ -72,8 +72,10 @@ Keychain at runtime, never in configs or logs; embed-cache path + size + mtime b
    transforms are tracked in separate `queries*` counters, reported alongside but never part of this bar.
 3. Reproducibility verdict vs the banked F53 row, four pre-declared outcomes. **"Per-question results identical"** is
    the following projection, not raw-row identity (raw rows carry timing fields and instrument fields F53 never wrote):
-   the question-id sets of F53's `per_question_checkpoint.jsonl` rows and the re-bank's must be equal (an id present on
-   one side only is a delta), and for every `question_id` the tuple (`category`, `abstention`, and for each of the seven
+   each file's rows must carry unique `question_id`s — a duplicated row is a malformed checkpoint, refused before any
+   comparison (the harness loader refuses it on `--resume`; the identity script exits 2) — the question-id sets of F53's
+   `per_question_checkpoint.jsonl` rows and the re-bank's must then be equal (an id present on one side only is a delta;
+   with unique ids, equal sets mean equal row counts), and for every `question_id` the tuple (`category`, `abstention`, and for each of the seven
    arms `fts`, `summary_vectors`, `hybrid_rrf`, `hybrid_rerank`, `chunk_vectors`, `hybrid_rrf3`, `lcm_recall`: `recall@1`,
    `recall@5`, `recall@10`, `ndcg@10`, `turn.recall@1`, `turn.recall@5`, `turn.recall@10`, `turn.ndcg@10`,
    `turn.session_granularity`; an arm absent from the row — the abstention rows carry `arms == {}` — projects as absent)
@@ -240,7 +242,10 @@ but malformed (not exactly the three non-negative integer counters) fails the re
 counted as unavailable in the forward baseline, never as zeros. A privacy block is counted wherever it
 occurs, including the determinism probe's uncounted de-duplication scan (`count=False` suppresses only the
 documents/changed totals, never `blocked`), and the CLI's blocked report falls back to the live module
-counters when the raising validator carried none — a blocked report is never all-zero. `prewarm-cache
+counters when the raising validator carried none — a block raised by a validator is never all-zero. The one all-zero
+receipt is an initialization refusal (policy resolution, provider or template setup — before any document or query text
+is evaluated): it carries `question_id: null`, `resumable: false` (§7) and zero counters because nothing was evaluated,
+and its `error` names the policy failure; it is a park like any other block. `prewarm-cache
 --dry-run` performs the cache lookups and privacy validation without embedding and reports `would_populate`. **Cache-parity proxy for this row:** the
 cache key is the sha256 of the post-transform text and the F53 cache (505,695 entries) is fully warm, so the
 `prewarm-cache --dry-run` report must show `would_populate == 0` and `already_cached == unique_request_units`
