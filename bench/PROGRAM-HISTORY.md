@@ -5,7 +5,9 @@ convention `bench/PROGRAM-PLAN-v5.md` states: the human-readable plan lives outs
 documents are authoritative for gates). When a plan era is superseded, its verbatim text is archived
 privately and this file receives one curated entry: what happened, what was decided, which pull
 requests, issues, tags and findings carry the evidence, and which rules the era produced. Entries are
-append-only. Every number here is a pointer into GitHub or `bench/`; the linked artifact is the record.
+append-only. Issue and pull-request numbers refer to `electricsheephq/lcm-x`; `F<n>` refers to
+`bench/FINDING-F<n>-*.md`; tags are this repository's git tags. The referenced artifact is the record; this
+file only points at it.
 
 ---
 
@@ -17,6 +19,7 @@ successor plan (v97, 2026-09-05) restarted the weekly release cadence and opened
 benchmark lanes described in #323.
 
 ### 2026-08-19/20 — consolidation (plan v21)
+
 - Roles fixed: an architect + release-manager orchestrator with a standing autonomous grant; owner gates
   = public naming/publication content, net-new spend categories, release cuts, live customer changes.
 - Verdict channel for lane dossiers: #252 (architect verdict batch 1: #172 LAND, #173 LAND-AFTER-REBASELINE
@@ -26,6 +29,7 @@ benchmark lanes described in #323.
   §5 correction, #287).
 
 ### 2026-08-20/21 — compaction pilot, host migration, LoCoMo arms
+
 - N9 compaction pilot → FINDING-F59: seven arms; headless `codex exec` never compacts (paginated long
   context, 0 compactions at 553,914 in-context tokens); LCM single-session retention 100% at roughly one
   third of the tokens; the restart-bridge and compressor controls 86.7%. Amendments 9–14 (#302, #310,
@@ -40,12 +44,14 @@ benchmark lanes described in #323.
   productization epic became #379 with #317 → #324 as the dependency order.
 
 ### 2026-08-21 → 25 — the interim lane
+
 - While the orchestrator was away, a second lane shipped v0.23.0 (08-22) and v0.23.1 (08-23, privacy
   release: #332 / #333 / #338), changed the V1-M instrument (#352, receipt "land after re-baseline"),
   installed the exact-head AI-review gate as a required check (#349, #358), opened the quality roadmap
   #323 with #317–#321 and #324, and froze the retrieval lane on an owner gate (#353, PR #354).
 
 ### 2026-08-26 — reconciliation and the merge gate
+
 - Durable-state audit of every open issue, PR, milestone and document; milestones for v0.23.2 and the
   B3-A flagship; architecture issues #375 (Phase-B runner), #376 (Phase-C runner), #377 (v0.23.2
   tracker), #378 (F61 registration), #379 (B3-A epic), #380 (F53 re-bank); #346 amended on record.
@@ -68,19 +74,23 @@ benchmark lanes described in #323.
   required dispatch id). Gate right-sizing follow-ups: #369, #392.
 
 ### 2026-08-26/27 — the v0.23.2 train
+
 - rc1 (Phase A caught #383, a truncated-PEM leak → #384, seven review rounds) → rc2 (Phase A caught
   #389, the over-block regression of that fix → #391) → rc3 (#388 release identity, #393 notes
-  hygiene). A five-auditor read-only audit of the train found 25 confirmed findings (3 P0) before
-  the rc3 merge; all fixed or dispositioned on record.
+  hygiene). A five-auditor read-only audit of the train ran before the rc3 merge (#391 records the
+  audit; the count of 25 confirmed findings, 3 of them P0, comes from the maintainers' session record); all
+  fixed or dispositioned on record.
 - rc3 gauntlet: Phase A PASS (30/30 matrix rows, planted-secret battery); Phase B zero release-blocking
   findings after the owner's severity reclassification (severity = impact × exposure; the residual
   redaction precision class became the long-term backlog issue #394); Phase C PASS with a
   pre-existing finding (#247, proven pre-existing by an identical soak against v0.23.1).
 - GA v0.23.2 on 2026-08-27 (#395 notes, #396 contributor credits + CHANGELOG coverage). The GA tree is
   byte-identical to rc3 plus the notes file.
-- The owner then held the release for a one-week soak; no field reports arrived.
+- The owner then held the release for a one-week soak; no field reports arrived (maintainers' support
+  record; the hold itself is public on #411).
 
 ### 2026-09-04/05 — hold lift, co-maintainer queue, the parked re-bank
+
 - Co-maintainer Tosko4 opened #397–#410 on 2026-08-31. Verdicts posted 09-04; #404 (cached FastEmbed
   warmup), #407 (telemetry test deflake) and #408 (linear Teams backfill) merged; the rest await
   revision under the posted findings. #155 (session-end prefix matching extracted to a mixin) merged.
@@ -93,13 +103,15 @@ benchmark lanes described in #323.
   questions and refuses 3 corpus texts (17 questions) → FINDING-F62 (#416; five confirm rounds failed
   before r9 passed; instrument follow-ups K1–K11 on #415). #380 became an owner fork (leave / precision
   fix / opt-out variant); the owner ruled on 2026-09-05 (cloud-copy privacy transform opt-in by default
-  → the raw-path re-bank becomes the re-bank of record, registered against the post-flip main).
+  → the raw-path re-bank becomes the re-bank of record, registered against the post-flip main; the ruling
+  is recorded in the maintainers' plan of record and lands on #380 with the v0.24.0 train).
 - 2026-09-05: plan of record v97 — weekly rc-first cadence with GA on Wednesdays, take-over of the
   co-maintainer queue, the privacy-default change as a versioned train, the Teams enterprise lane
   (evaOS-first, shared-store architecture) and the benchmark lane (raw-path re-bank, the V1-S reader
   row truth correction, the V1-M reader row). Tracked from #323.
 
 ### Rules this era produced (each with the incident that taught it)
+
 1. **Recompute at claim boundaries** — a labelled tuple carried a scramble that thirty seconds of
    recomputation caught (F46/F48 category labels; F62 §4.2 occurrences vs units vs questions).
 2. **Append-only corrections** — findings, ledgers and run sheets are never rewritten; a dated line
@@ -125,8 +137,11 @@ benchmark lanes described in #323.
     while a wrapper's attribute forwarding sent cached runs down an uncached path (#413 r4).
 
 ### Archive pointer
+
 The verbatim orchestrator plan-of-record history for this era (2,628 lines, 266,983 bytes, sha256
 `7e1630ce968f9d940956b35cacdb3f5bf7c293422775e557d9d976f5d2412ac8`) is archived privately by the
-maintainers on 2026-09-05 (maintainer gist + owner session notes). It contains operational detail and
-local paths and is not published; this entry is the public record. Anyone holding the archive can
-verify it against the hash above.
+maintainers on 2026-09-05. Locator: file `PLAN-OF-RECORD-HISTORY-2026-08-19..2026-09-05.md` with its
+`manifest.json` (both hash-anchored) in the maintainers' private session-notes store; a mirror gist, when
+created, is recorded in the maintainers' plan of record. It contains operational detail and local paths
+and is not published — request it from a maintainer; this entry is the public record. Anyone holding the
+archive can verify it against the hash above.
