@@ -2284,13 +2284,13 @@ class LCMEngine(
         ``_fresh_tail_pressure_yield_invocation``); only the blocked-streak
         evidence persists across invocations.
 
-        A preflight that observes host pressure (the host's last prompt tokens
-        over threshold) but cannot judge blockage from its own estimate is
-        recorded as blocked without incrementing the streak, preserving rather
-        than resetting existing evidence until a compaction attempt can count
-        the blocked observation.
-        The subsequent compaction invocation can then increment the streak once
-        it confirms that the fresh tail is the blocker.
+        Preflight carries the host-observed token count (the larger of its own
+        estimate and the host's last prompt tokens) into the candidate check, so
+        host pressure that the estimate alone cannot see still counts a blocked
+        observation exactly as an over-threshold estimate would. The streak is
+        relieved only when both the estimate and the host-observed count fall
+        under threshold; a preflight that returns before the candidate check
+        records the invocation as blocked so scope exit preserves the evidence.
 
         ``eligible_tokens`` is the caller's already-filtered view of the raw
         backlog outside the tail (ignored messages and persisted placeholders
