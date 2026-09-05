@@ -203,5 +203,7 @@ Each phase writes `PHASE-{A,B,C}-RECEIPT.md`: rc tag + tree sha, exact commands,
 discipline (a phase receipt claims what it measured, never "customer ready"). The GA release
 notes link all three. Receipts are published verbatim (local paths redacted) as comments on the
 release train tracker issue; that comment URL is the link of record and is what the GA notes link,
-and the GA notes (or the carry record they link) print the sha256 of each published receipt body
-so an edited or deleted comment is detectable (codified 2026-09-05, #427).
+and the GA notes file itself — an immutable object in the GA tree — prints the sha256 of every
+published receipt body it relies on, carried receipts, addenda and the carry record included, so an
+edited or deleted comment is detectable from the tree alone; a digest that lives only in another
+comment proves nothing (codified 2026-09-05, #427).
