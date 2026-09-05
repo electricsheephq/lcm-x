@@ -136,10 +136,13 @@ class probes seconds, membership check 122 s — all offline. Sheet cap ($40, pr
   the name by construction — so it is unpinned for this execution and the §3 pin inventory stands at 95 of 96 (no harness `LCMConfig`
   is built from the environment, so no field drives the run; the gap is one of record completeness). The committed copy enumerates all
   96 structurally, redacts credential-shaped values instead of dropping the line, and refuses on a count mismatch. Both sha256 manifests
-  are committed beside the kit. Four further kit findings from the review's third pass (gate-marker binding
-  in `launch_all.sh`, failure propagation in the `record_pins.sh` pin block, credential redaction of the captured run environment and a
-  product-sha resume guard in `run_shard.sh` / `run_aprime.sh`) touch no artifact of this execution and are tracked on #415 as
-  prerequisites for the next execution of the sheet.
+  are committed beside the kit. Seven further kit findings from the review's third and fourth passes (gate-marker binding in
+  `launch_all.sh` and its exit status after the last shard; failure propagation in the `record_pins.sh` pin block — the script ran at
+  launch and its pins are complete; credential redaction of the captured run environment and a product-sha resume guard in
+  `run_shard.sh` / `run_aprime.sh`; binding of the inventory's protected digests to the checkout in `cache_membership_check.py`; a
+  validate-stage double-count path in `corpus_privacy_inventory.py` that no unit of this corpus reaches — all 18 raises are
+  transform-stage) touch no artifact of this execution and are tracked on #415 (K1–K7) as prerequisites for the next execution of the
+  sheet.
 - What this finding does NOT prove: nothing about F53's numbers under the raw path (no raw-path re-run exists at this head); nothing
   about retrieval quality under the shipped posture (no shard ran); the false-positive rate is for this corpus only.
 

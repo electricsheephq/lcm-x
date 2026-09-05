@@ -32,6 +32,9 @@ the post-A′ branch of `identity_all.sh`, `record_pins.sh postrun`) carry their
 
 What the first execution produced and why it parked: `bench/FINDING-F62-V1M-REBANK-PARKED.md`.
 
-Four further review findings (third pass of PR #416) on tools that did not run in the parked execution — gate-marker binding in
-`launch_all.sh`, failure propagation in the `record_pins.sh` pin block, credential redaction of the captured run environment and a
-product-sha resume guard in `run_shard.sh` / `run_aprime.sh` — are tracked on #415 and must be fixed before the next execution of the sheet.
+Seven further review findings (third and fourth passes of PR #416) on code paths that produced no artifact of the parked execution —
+gate-marker binding in `launch_all.sh` and its exit status after the last shard, failure propagation in the `record_pins.sh` pin block
+(the script ran at launch; its pins are complete), credential redaction of the captured run environment and a product-sha resume guard in
+`run_shard.sh` / `run_aprime.sh`, binding of the inventory's protected digests to the checkout in `cache_membership_check.py`, and a
+validate-stage double-count path in `corpus_privacy_inventory.py` that no unit of this corpus reaches — are tracked on #415 (K1–K7) and
+must be fixed before the next execution of the sheet.
