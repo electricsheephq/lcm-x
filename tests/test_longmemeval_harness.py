@@ -3207,6 +3207,71 @@ def test_completed_resume_rejects_unrecognized_chunk_embedding_mode(
         )
 
 
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ("drop", "mix legacy rows without chunk_embedding_mode.*'none'"),
+        ("bogus", "unrecognized chunk_embedding_mode.*bogus"),
+    ],
+)
+def test_completed_resume_reconciles_chunk_mode_over_every_row(
+    tmp_path, monkeypatch, mutation, expected
+):
+    """A single valid row must not label a checkpoint whose other rows lack the
+    key or carry an invalid value; every row participates in the reconciliation."""
+    import benchmarking.longmemeval as lme
+
+    questions = [
+        _chunk_mode_question("q-mode-reconcile-a"),
+        _chunk_mode_question("q-mode-reconcile-b"),
+    ]
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "initial",
+        embeddings_enabled=False,
+        checkpoint_path=checkpoint,
+        reuse_db_template=False,
+    )
+    lines = checkpoint.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 3
+    first = json.loads(lines[1])
+    assert first["chunk_embedding_mode"] == "none"
+    second = json.loads(lines[2])
+    if mutation == "drop":
+        del second["chunk_embedding_mode"]
+    else:
+        second["chunk_embedding_mode"] = "bogus"
+    checkpoint.write_text(
+        lines[0]
+        + "\n"
+        + lines[1]
+        + "\n"
+        + json.dumps(second, sort_keys=True, separators=(",", ":"))
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def forbidden_resolution(*_args, **_kwargs):
+        raise AssertionError("must not be called")
+
+    monkeypatch.setattr(lme, "resolve_harness_providers", forbidden_resolution)
+    with pytest.raises(ValueError, match=expected):
+        run_harness(
+            questions,
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / "resume",
+            embeddings_enabled=False,
+            checkpoint_path=checkpoint,
+            resume=True,
+            selected_question_ids=[q.question_id for q in questions],
+            reuse_db_template=False,
+        )
+
+
 def test_completed_resume_and_binding_mismatch_do_not_resolve_provider(
     tmp_path, monkeypatch
 ):

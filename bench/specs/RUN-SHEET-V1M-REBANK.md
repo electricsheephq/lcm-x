@@ -70,7 +70,19 @@ Keychain at runtime, never in configs or logs; embed-cache path + size + mtime b
    discharge measurement for the #366 / #374 / #384-#391 rows: **0 ⇒ inert for this corpus**; >0 ⇒ the
    boundary is live and any metric delta is attributed to it. Only prepared-corpus DOCUMENTS count: query-text
    transforms are tracked in separate `queries*` counters, reported alongside but never part of this bar.
-3. Reproducibility verdict vs the banked F53 row, four pre-declared outcomes:
+3. Reproducibility verdict vs the banked F53 row, four pre-declared outcomes. **"Per-question results identical"** is
+   the following projection, not raw-row identity (raw rows carry timing fields and instrument fields F53 never wrote):
+   the question-id sets of F53's `per_question_checkpoint.jsonl` rows and the re-bank's must be equal (an id present on
+   one side only is a delta), and for every `question_id` the tuple (`category`, `abstention`, and for each of the seven
+   arms `fts`, `summary_vectors`, `hybrid_rrf`, `hybrid_rerank`, `chunk_vectors`, `hybrid_rrf3`, `lcm_recall`: `recall@1`,
+   `recall@5`, `recall@10`, `ndcg@10`, `turn.recall@1`, `turn.recall@5`, `turn.recall@10`, `turn.ndcg@10`,
+   `turn.session_granularity`; an arm absent from the row — the abstention rows carry `arms == {}` — projects as absent)
+   must be equal under exact equality after a JSON round-trip. EXCLUDED as instrumentation: `ingest_ms`, every
+   `latency_ms`, `rerank_mode` and `recall_rerank_status` (configuration echoes, pinned once as a sanity check), and the
+   fields F53 lacks (`privacy`, `corpus_counts`, `embed_cache`, `chunk_embedding_mode`). "A per-question delta" = a
+   `question_id` whose projection differs; "the arm moved" = that arm's nine-field tuple differs. The executable form is
+   the kit's `result_identity.py` (F53 shard file vs re-bank shard file, pairwise; committed with the kit under
+   `bench/tools/v1m-rebank/` in the F62 banking PR), run over all six shard pairs and A/A′ before any outcome is named.
    - **REPRODUCED** — transform-change count 0 AND per-question results identical to F53's on-disk outputs
      (`lme-runs/m-full2-shard-*`) — then the F53 row is confirmed on the current instrument and the successor
      row records "post-#352 · reproduced".

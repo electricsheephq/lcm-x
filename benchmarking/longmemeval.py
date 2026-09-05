@@ -4222,28 +4222,38 @@ def run_harness(
         )
 
     if resolved_chunk_embedding_mode is None:
+        # Every restored row takes part in the reconciliation (a row without the key
+        # reads as None): exactly one recognized value labels the report with that
+        # mode; rows that all lack the key are a legacy checkpoint ("unknown"); any
+        # other shape -- a legacy/current mix, mixed modes, or an unrecognized value
+        # -- is refused here, before any provider is resolved.
+        recognized_modes = {"flat", "contextual", "none"}
         recorded_modes = {
-            record.get("chunk_embedding_mode")
-            for record in checkpoint_records
-            if record.get("chunk_embedding_mode") in {"flat", "contextual", "none"}
+            record.get("chunk_embedding_mode") for record in checkpoint_records
         }
-        if len(recorded_modes) == 1:
+        if len(recorded_modes) == 1 and recorded_modes <= recognized_modes:
             resolved_chunk_embedding_mode = recorded_modes.pop()
-        elif len(recorded_modes) > 1:
-            raise ValueError("checkpoint rows contain mixed chunk embedding modes")
-        elif fully_completed_resume and not any(
-            "chunk_embedding_mode" in record for record in checkpoint_records
-        ):
+        elif recorded_modes == {None}:
+            if not fully_completed_resume:
+                raise ValueError(
+                    "checkpoint rows carry no chunk_embedding_mode and the resume "
+                    "is not fully completed"
+                )
             resolved_chunk_embedding_mode = "unknown"
+        elif None in recorded_modes:
+            present = sorted(
+                mode for mode in recorded_modes if mode is not None
+            )
+            raise ValueError(
+                "checkpoint rows mix legacy rows without chunk_embedding_mode and "
+                f"rows carrying chunk_embedding_mode values {present!r}"
+            )
+        elif recorded_modes <= recognized_modes:
+            raise ValueError("checkpoint rows contain mixed chunk embedding modes")
         else:
-            values = {
-                record.get("chunk_embedding_mode")
-                for record in checkpoint_records
-                if "chunk_embedding_mode" in record
-            }
             raise ValueError(
                 "checkpoint rows carry unrecognized chunk_embedding_mode values: "
-                f"{sorted(values)!r}"
+                f"{sorted(recorded_modes - recognized_modes, key=repr)!r}"
             )
 
     ingest_report: dict[str, Any] = {
