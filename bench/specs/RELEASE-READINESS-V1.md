@@ -139,11 +139,12 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    the same tree, and a very stable candidate pair must not turn ordinary baseline jitter into a
    false NEW. The band is therefore measured from TWO same-tree pairs — the candidate pair A/A′ and
    the previous-GA pair B/B′, all four runs under the same tuple — BEFORE any cross comparison is
-   computed, and no later run widens a recorded band. Within each pair, sort both profiles; if a
-   pair's counts differ, that tree's own count is unstable and the phase FAILS (investigate, then
-   re-run); otherwise pair records index-wise and take `max_i |turn(X_i) − turn(X′_i)|`; the band is
-   the larger of the two pairs' values, a whole number of soak turns, inclusive (identical profiles
-   give 0). Every run attempted under the tuple is recorded in the receipt — unstable pairs, failed
+   computed, and no later run widens a recorded band. Within each pair, sort both profiles; if the
+   pair's `(code, name)` multisets differ — in count or in identity — that tree's own conflict set is
+   unstable and the phase FAILS (investigate, then re-run); otherwise, within each `(code, name)`
+   group, pair records index-wise and take `max_i |turn(X_i) − turn(X′_i)|` over all groups; the band
+   is the larger of the two pairs' values, a whole number of soak turns, inclusive (identical
+   profiles give 0). Every run attempted under the tuple is recorded in the receipt — unstable pairs, failed
    runs and aborted soaks included, each with its cause — and the pairs used are the first two
    stable runs of each tree in attempt order; a later run never replaces an earlier stable one. **The maximum admissible band is 2 soak turns** (the largest same-tree
    jitter measured on record, and small against a ≥30-turn soak). A measured band above it
@@ -153,8 +154,12 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
 3. **Match.** Two records match iff their codes and names are identical and their turn indices
    differ by at most the band. Pair the candidate profile against the previous-GA profile greedily
    in sorted order: for each candidate record, take the first unused previous-GA record that
-   matches it; a candidate record with no match is NEW. Run the pairing for both A and A′ against B
-   (the previous-GA run whose profile is the reference; B′ establishes the baseline band).
+   matches it; a candidate record with no match is NEW. Run the pairing for each candidate run
+   against each baseline run separately — A against B, then A against B′, and likewise A′ — with the
+   count condition of step 4 applied against that baseline run; a candidate run passes when it pairs
+   completely against at least one baseline run (an unchanged candidate must lie within the measured
+   jitter of at least one baseline sample), and its NEW records are those left unpaired against the
+   baseline run it came closest to.
 4. **Differential verdict.** The differential passes iff both A and A′ pair every record (zero
    NEW) AND neither has more records than the previous GA. It is one conjunct of Green, not Green
    itself: A, A′, B and B′ must each also pass every non-conflict Phase C assertion
