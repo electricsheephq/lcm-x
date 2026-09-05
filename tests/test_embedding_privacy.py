@@ -91,7 +91,7 @@ def _engine_with_summary(tmp_path, text: str):
 
 def test_cloud_privacy_is_independent_of_durable_redaction_and_validates_catalog(tmp_path):
     revision = embedding_privacy_revision(_config(tmp_path, enabled=False))
-    assert revision.startswith("privacy:v3:")
+    assert revision.startswith("privacy:v4:")
     with pytest.raises(EmbeddingPrivacyPolicyError, match="nonempty"):
         embedding_privacy_revision(_config(tmp_path, enabled=False, patterns=[]))
     with pytest.raises(EmbeddingPrivacyPolicyError, match="unknown"):
@@ -114,7 +114,7 @@ def test_default_cloud_posture_keeps_durable_text_raw_and_protects_provider_copy
     protected, revision, changed = protect_embedding_text(raw, config)
     assert changed is True
     assert secret not in protected
-    assert revision.startswith("privacy:v3:")
+    assert revision.startswith("privacy:v4:")
     validate_embedding_privacy_dispatch([protected], config, expected_revision=revision)
     status = ingest_protection_mod.sensitive_pattern_status(config)
     assert status["sensitive_patterns_enabled"] is False
@@ -175,8 +175,8 @@ def test_provider_transform_removes_secret_metadata_and_canonicalizes_placeholde
     protected, revision, changed = protect_embedding_text(raw, config)
 
     assert changed is True
-    assert revision.startswith("privacy:v3:")
-    assert not revision.startswith("privacy:v2:")
+    assert revision.startswith("privacy:v4:")
+    assert not revision.startswith("privacy:v3:")
     assert "abcdefghijklmnop" not in protected
     assert "correct-horse-battery" not in protected
     assert "deadbeefdeadbeef" not in protected
@@ -223,7 +223,7 @@ def test_truncated_private_key_is_redacted_before_semantic_cloud_call(tmp_path):
     assert key_body not in provider.queries[0]
 
 
-def test_privacy_v3_revision_makes_prior_vectors_pending(tmp_path):
+def test_privacy_v4_revision_makes_prior_vectors_pending(tmp_path):
     config = _config(tmp_path)
     dag = SummaryDAG(config.database_path)
     try:
@@ -240,7 +240,7 @@ def test_privacy_v3_revision_makes_prior_vectors_pending(tmp_path):
         dag.close()
 
     current_revision = embedding_privacy_revision(config)
-    old_revision = current_revision.replace("privacy:v3:", "privacy:v2:", 1)
+    old_revision = current_revision.replace("privacy:v4:", "privacy:v3:", 1)
     store = VectorStore(config.database_path, config=config)
     try:
         old_identity_hash = store.register_profile(
@@ -640,6 +640,189 @@ def test_embedding_privacy_redacts_pem_after_password_assignment(tmp_path, prefi
     validate_embedding_privacy_dispatch([protected], cfg, expected_revision=revision)
 
 
+@pytest.mark.parametrize(
+    "template",
+    [
+        'password="prefixSECRET%suffixSECRET"',
+        "password=prefixSECRET%suffixSECRET",
+    ],
+    ids=["quoted", "unquoted"],
+)
+def test_assignment_redaction_consumes_fragments_around_private_key_placeholder(
+    tmp_path,
+    template,
+):
+    cfg = _config(tmp_path)
+    private_key = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        f"{_KEY_BODY}\n"
+        "-----END PRIVATE KEY-----"
+    )
+    text = template % private_key
+
+    durable = redact_sensitive_text(text, cfg)
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+
+    for output in (durable, protected):
+        assert "prefixSECRET" not in output
+        assert "suffixSECRET" not in output
+        assert _KEY_BODY not in output
+        assert "name=password_assignment" in output
+    validate_embedding_privacy_dispatch(
+        [protected],
+        cfg,
+        expected_revision=revision,
+    )
+
+
+@pytest.mark.parametrize("quoted", [False, True], ids=["unquoted", "quoted"])
+@pytest.mark.parametrize(
+    "prefix,suffix",
+    [
+        ("", ""),
+        ("Q", ""),
+        ("Q", "Z"),
+        ("QZ", "Q"),
+        ("QZ", "ZQ"),
+    ],
+    ids=["zero-chars", "one-char", "two-chars", "three-chars", "four-chars"],
+)
+def test_private_key_placeholder_satisfies_password_assignment_minimum(
+    tmp_path,
+    quoted,
+    prefix,
+    suffix,
+):
+    cfg = _config(tmp_path)
+    private_key = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        f"{_KEY_BODY}\n"
+        "-----END PRIVATE KEY-----"
+    )
+    value = f"{prefix}{private_key}{suffix}"
+    text = f'password="{value}"' if quoted else f"password={value}"
+
+    durable = redact_sensitive_text(text, cfg)
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+
+    for output in (durable, protected):
+        assert _KEY_BODY not in output
+        assert "name=private_key" not in output
+        assert "name=password_assignment" in output
+        if prefix:
+            assert prefix not in output
+        if suffix:
+            assert suffix not in output
+    validate_embedding_privacy_dispatch(
+        [protected],
+        cfg,
+        expected_revision=revision,
+    )
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "prefix]brace}",
+        'prefix\\"quoted]brace}',
+    ],
+    ids=["delimiters", "escaped-quote-and-delimiters"],
+)
+def test_quoted_password_scans_delimiters_through_closing_quote(
+    tmp_path,
+    prefix,
+):
+    cfg = _config(tmp_path)
+    private_key = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        f"{_KEY_BODY}\n"
+        "-----END PRIVATE KEY-----"
+    )
+    suffix = "]tail}suffixSECRET"
+    text = f'password="{prefix}{private_key}{suffix}" trailing prose'
+
+    durable = redact_sensitive_text(text, cfg)
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+
+    for output in (durable, protected):
+        assert prefix not in output
+        assert suffix not in output
+        assert _KEY_BODY not in output
+        assert "name=password_assignment" in output
+        assert output.endswith('" trailing prose')
+    validate_embedding_privacy_dispatch(
+        [protected],
+        cfg,
+        expected_revision=revision,
+    )
+
+
+def test_quoted_password_detects_placeholder_after_escaped_start(tmp_path):
+    """An odd backslash before a PEM placeholder must not hide short fragments."""
+    cfg = _config(tmp_path)
+    private_key = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        f"{_KEY_BODY}\n"
+        "-----END PRIVATE KEY-----"
+    )
+    text = f'password="Q\\{private_key}Z"'
+
+    durable = redact_sensitive_text(text, cfg)
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+
+    for output in (durable, protected):
+        assert _KEY_BODY not in output
+        assert "name=private_key" not in output
+        assert "name=password_assignment" in output
+        assert "Q\\" not in output
+        assert "Z\"" not in output
+    validate_embedding_privacy_dispatch(
+        [protected],
+        cfg,
+        expected_revision=revision,
+    )
+
+
+def test_noncanonical_private_key_marker_cannot_cross_newline(tmp_path):
+    cfg = _config(tmp_path)
+    trailing = "ordinary user text must remain"
+    text = (
+        "password=x[LCM embedding privacy: name=private_key\n"
+        f"{trailing}]"
+    )
+
+    durable = redact_sensitive_text(text, cfg)
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+
+    assert trailing in durable
+    assert trailing in protected
+    validate_embedding_privacy_dispatch(
+        [protected],
+        cfg,
+        expected_revision=revision,
+    )
+
+
+def test_unterminated_placeholder_prefixes_stay_linear(tmp_path):
+    cfg = _config(tmp_path)
+    repeated = "[LCM embedding privacy: name=private_key" * 10_000
+    text = f'password="{repeated}" trailing prose'
+
+    started = time.perf_counter()
+    durable = redact_sensitive_text(text, cfg)
+    protected, revision, _changed = protect_embedding_text(text, cfg)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 3.0
+    assert durable.endswith('" trailing prose')
+    assert protected.endswith('" trailing prose')
+    validate_embedding_privacy_dispatch(
+        [protected],
+        cfg,
+        expected_revision=revision,
+    )
+
+
 def test_embedding_privacy_residual_flags_orphaned_end_marker(tmp_path):
     """Transform-independent residual check: a surviving PEM END marker fails closed."""
     cfg = _config(tmp_path)
@@ -665,7 +848,8 @@ def test_durable_redaction_pem_after_password_survives_ordering(tmp_path):
     text = "password: -----BEGIN PRIVATE KEY-----\n%s\n-----END PRIVATE KEY-----" % _KEY_BODY
     out = redact_sensitive_text(text, cfg)
     assert _KEY_BODY not in out
-    assert "private_key" in out
+    assert "name=private_key" not in out
+    assert "name=password_assignment" in out
 
 
 def test_durable_redacts_truncated_pem_after_password(tmp_path):
