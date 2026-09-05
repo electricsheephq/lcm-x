@@ -17,14 +17,23 @@ needs a live soak. Docs/bench-only releases may skip to GA with a note in the re
    Carry-forward rule (every receipt binds an exact tree, so carrying needs proof): **Phase B
    re-runs on every respin** (it is diff-scoped by definition). Phases A and C may carry a prior
    rc's receipt ONLY when the rcN→rcN+1 diff touches nothing outside bench/, docs/, tests/, and
-   .github/release-notes/ — AND nothing under bench/instruments/release_gauntlet/ (a changed
-   gauntlet invalidates its own receipts) — the carried receipt is referenced WITH the diff-scope proof
-   (`git diff rcN..rcN+1 --name-only`) recorded beside it. Any product-code delta re-runs all
-   affected phases (ingest/recall/privacy deltas re-run everything).
+   .github/release-notes/ — AND nothing under bench/instruments/release_gauntlet/ or
+   bench/instruments/compaction_probe/ (a changed gauntlet or soak driver invalidates its own
+   receipts) — AND, for Phase C, its same-soak tuple (§Phase C) is unchanged between the receipt and
+   the candidate; otherwise the phase re-runs. The carried receipt is referenced WITH the diff-scope
+   proof recorded beside it: `git diff --no-renames --name-status rcN..rcN+1`, every listed path —
+   rename detection off, so both sides of any move appear — inside the eligible set. A respin whose rcN→rcN+1 delta is
+   confined to those same paths re-runs Phase B over that delta only and composes the result with
+   the carried Phase B receipt (the composed receipt records both). **This specification is never
+   carry-safe:** when the delta changes an acceptance criterion in this file, every carried receipt
+   for the affected phase is re-evaluated against the new criterion from the evidence it recorded,
+   and the carry record states that re-evaluation; if the recorded evidence cannot be evaluated under
+   the new criterion, the phase re-runs. Any product-code delta re-runs all affected phases
+   (ingest/recall/privacy deltas re-run everything).
 5. **GA tag `vX.Y.Z`** only when A+B+C receipts are green for the passing rc tree. Because
    release.yml reads curated notes from the tagged tree, the GA commit may differ from the rc
    tree by EXACTLY the release-notes addition and nothing else — verified mechanically:
-   `git diff --name-status rcN..GA` must show ONLY `A` (added) entries under `.github/release-notes/` — modifying or deleting existing notes is not the exception. GA notes =
+   `git diff --no-renames --name-status rcN..GA` must show EXACTLY ONE entry, `A .github/release-notes/vX.Y.Z.md` — the notes file for the GA tag and nothing else; a second added file, or modifying or deleting existing notes, is not the exception. GA notes =
    rc notes + gauntlet summary + receipt links.
 
 ## Phase A — Live all-tools matrix (the "clone" test)
@@ -58,24 +67,242 @@ and assembly never breaks; its negative control proves the shipped default recal
 
 ## Phase B — P0/P1 adversarial sweep (ultracode)
 
-Multi-agent workflow over the FULL release diff (previous GA tag → rc tag), not per-PR deltas:
+Multi-agent workflow over the FULL release diff (previous GA tag → rc tag), not per-PR deltas
+(the limited-respin composition below is the only exception):
 dimensions ≥ {correctness, security/privacy, performance/DoS, API contract, upgrade/migration,
 concurrency} → independent finders → 2-vote adversarial verification → verdicts. The
 upgrade/migration dimension is mandatory: open a previous-GA-created DB (old vectors,
 placeholders, revisions) under the rc tree and exercise re-embed/migration paths. Cross-model
 rule applies: finders and verifiers must not all share the author's model family.
 Findings: P0/P1 verified ⇒ respin. P2 ⇒ tracked issue with disposition before GA.
+**Limited respin (step 4):** when an rcN→rcN+1 delta is confined to bench/ (outside
+bench/instruments/release_gauntlet/ and bench/instruments/compaction_probe/), docs/, tests/ and
+.github/release-notes/, Phase B runs over
+`rcN..rcN+1` only, and the composed receipt is the carried full-range receipt (previous GA → rcN)
+PLUS the delta receipt (rcN → rcN+1): together they cover previous GA → rcN+1 with no gap, and the GA
+notes cite both. This composed receipt IS the full-release-diff sweep the repository requires
+(AGENTS.md): its two parts partition previous GA → rcN+1, and because the eligible paths exclude
+product code, the product tree of rcN+1 is byte-identical to the one swept as a whole at rcN — the
+respin adds no product interaction to review. Any other delta re-runs Phase B over the full range.
 
 ## Phase C — Live-session soak
 
 A scripted multi-turn session battery over `hermes acp` (the measured headless single-session
 transport) against the clone: ingest-heavy turns, recall probes, compaction crossing at least
-one threshold, doctor at close. Green = zero unexpected errors in engine logs, zero
-publication-invariant conflicts (#247-class), recall probes hit, doctor clean. Minimum 30 turns.
+one threshold, doctor at close. Green = zero unexpected errors in engine logs, zero NEW
+publication-invariant conflicts (#247-class), recall probes hit, doctor clean, and — whenever a
+previous-GA soak under the same tuple exists — publication-attempt parity with it (item 4 below)
+regardless of the candidate's conflict count: a candidate that reports zero conflicts because it
+attempted fewer publications is not Green. Minimum 30 turns.
+**Differential rule for #247-class conflicts** (applied since the v0.23.2 train; codified
+2026-09-05, #427): while #247 is open the differential run against the previous GA under the same
+tuple is MANDATORY for every candidate regardless of its conflict count — a zero count is an anomaly
+to explain (an under-exposed soak reports zero), never Green by itself — and a non-zero count passes
+ONLY when that soak reproduces the same conflicts under the mechanical comparison below. "The same soak" is a
+recorded tuple that must be identical across every run the comparison uses: the host build pin, the
+soak fixture files (material, probes, canaries) by sha256, the soak configuration by sha256, the
+host's system prompt and every other prompt-bearing file the fresh home starts with (`SOUL.md` and
+its kin) by sha256 or an explicit absence marker, the
+assistant provider and model identifier (the live-model side of the soak; a fixed seed where the
+provider supports one), the transport, the driver and turn-script files by sha256, the driver's normalized invocation — every
+option and value that can change session continuity or turn completion (turn timeout, boot timeout,
+quiet period, restart-before-probes, probes-only), as the driver manifest records them — the execution
+runtime of the host and of the driver (interpreter version, SQLite library version, platform, and the
+installed-distribution inventory of each virtualenv the runs use, as a sorted name+version list by
+sha256 — EXCLUDING the distribution under test itself (the LCM-X package, and the host package where
+the host is what changes), which necessarily differs between the previous-GA and candidate runs and is
+recorded separately by tree sha; two runs on different runtimes are not the same soak), the starting state — a fresh isolated home
+and an empty database for every run, or, where a seeded start is part of the fixture, the same seed
+snapshot by digest (publication conflicts depend on persisted lifecycle state, so runs that start
+from different data are not comparable) — and the effective engine environment: the driver inherits
+the launching process's environment and the host then loads its own files (the fresh home's `.env`),
+so the environment is captured AFTER every loader has run — every `LCM_*` variable and every
+behaviour-affecting `HERMES_*` variable (model, generation length, thresholds) present in the
+session's effective environment is recorded — name and value, or, where the value is a secret
+(a credential, token or key), the name, a fixed presence marker and the credential's NON-SECRET
+identity: the account, project, organisation or key identifier the provider exposes, or the
+secret-manager reference and version the value was injected from; where the provider exposes none,
+the evaluator compares the values of the runs under comparison privately, in memory, and publishes
+only the attestation `identical` or `differs`. The same applies to any credential the assistant or
+host reads from its own store rather than the environment (an auth file in the fresh home): the
+store's non-secret account identity is a tuple field. Never any digest of a secret value, salted,
+keyed or not — a published hash of a secret is a cross-release correlation and offline-guessing
+oracle — and never the presence marker alone: two runs under different credentials can run under
+different accounts, tenants, entitlements or provider rollouts, so a tuple that does not bind the
+credential identity does not bind the soak. The canonical digest is the sha256 of the sorted
+`name=value` list with each secret value replaced by its non-secret identity (or by the attestation
+token), and the sets, identities and attestations must be identical across the runs compared. The
+identity is the proof of record whenever the provider or store exposes one; the attestation is the
+proof only where none is exposed — alternatives, never both required. A `differs`, or the absence of
+whichever proof applies, makes the runs non-comparable and the differential unevaluable (FAIL); thresholds such as
+`LCM_CONTEXT_THRESHOLD` change when compaction runs and therefore the conflict profile. The capture
+has a named mechanical source stated in the receipt — a dump of the session process's environment
+after launch, or, until the driver records one, the launching shell's `LCM_*`/`HERMES_*` listing
+plus proof that the fresh home contributes none (its `.env` absent or its variable names listed);
+the driver manifest's `env_names` list names only the variables the driver itself sets and is NOT
+the effective environment. Launch the soak from a scrubbed environment that carries only the
+recorded variables. Provider-side defaults cannot be pinned, so the
+previous-GA runs must be contemporaneous with the candidate pair — run within the same 24 hours on
+the same provider model identifier; an older previous-GA run is re-run, not reused.
+1. **Record and profile.** Where the host exposes a conflict's publication point and message, a
+   conflict record is `(kind, publication point, message)`, a run's profile is the multiset of its
+   records, and the candidate passes iff its multiset is contained in the previous GA's multiset —
+   for every identity the candidate's multiplicity is at most the previous GA's, and any excess
+   occurrence is NEW — which also bounds its count; occurrences present only in the previous GA are
+   recorded as REMOVED (identities do not jitter, so no band applies). Under this rule the two
+   previous-GA runs must have identical identity multisets — otherwise the baseline's conflict set is
+   unstable and the phase FAILS — and containment is tested against that shared multiset; the two
+   candidate runs must likewise agree with each other. Where it does not (today the engine collapses
+   every publication conflict to the `publication_invariant_conflict` label without its source —
+   logging follow-up #430), a record is `(soak turn index, logged error code, logged error name)`
+   and the profile is the multiset of records sorted by `(code, name, turn index)` — the **position
+   profile**. The soak turn index is the driver's turn ordinal whose window contains the conflict's
+   log timestamp. The driver records, per turn, the timestamp `ts` at which the turn ENDED and the
+   turn's elapsed `wall_ms`; the start is derived, not read: `start_i = ts_i − wall_ms_i` (the two
+   clocks differ by sub-second drift at most, and the derivation is a fixed computation over the
+   results file). The driver's turn timestamps and the host log's conflict timestamps must come from
+   the same clock — driver and host on one machine, stated in the receipt; where they do not, the
+   measured offset bound is recorded and a conflict within that bound of a window boundary makes the
+   run unevaluable (FAIL). Windows are half-open, turn i spans [start_i, start_{i+1}) — from its derived start
+   to the next turn's derived start — and the final turn spans [start_n, ts_n], its recorded end; a
+   conflict logged after ts_n belongs to no turn. Every conflict line maps to exactly one turn; an
+   unmapped or doubly mapped conflict makes the profile unevaluable and the phase FAILS. The
+   derivation rule is part of the receipt, so two operators derive the same profile from the same
+   log and results file.
+2. **Band.** Because the assistant side is a live model, position profiles jitter between runs of
+   the same tree, and a very stable candidate pair must not turn ordinary baseline jitter into a
+   false NEW. The band is therefore measured from TWO same-tree pairs — the candidate pair A/A′ and
+   the previous-GA pair B/B′, all four runs under the same tuple — BEFORE any cross comparison is
+   computed, and no later run widens a recorded band. Within each pair, sort both profiles; if the
+   pair's `(code, name)` multisets differ — in count or in identity — that tree's own conflict set is
+   unstable and the phase FAILS (investigate, then re-run); otherwise, within each `(code, name)`
+   group, pair records index-wise and take `max_i |turn(X_i) − turn(X′_i)|` over all groups; the band
+   is the larger of the two pairs' values, a whole number of soak turns, inclusive (identical
+   profiles give 0; a pair whose two profiles are both empty — a candidate that repaired every
+   baseline conflict — is identical with band 0, so the band is then the baseline pair's value). The first two completed runs of each tree under the tuple are BINDING: they are
+   the pair, an unstable pair fails the phase for that candidate, and a record observed in any
+   completed run that pairs with no baseline record is NEW even if a later run does not show it. A
+   further run is admissible only after a recorded causal change — a new candidate tree or a new
+   tuple — never on the unchanged head. Every run attempted under the tuple is recorded in the
+   receipt, aborted soaks included, each with its cause, and a conflict record observed in ANY
+   attempted candidate run — completed or aborted, under this tuple or a superseded one — must be
+   accounted for in the receipt, by kind and by position separately. KIND is tuple-independent
+   evidence: a record whose `(code, name)` appears in no baseline run under any tuple is NEW
+   regardless of the tuple it was observed under and fails the phase. POSITION is comparable only
+   within one tuple: a record of a baseline-known kind from an aborted run under the current tuple
+   pairs against the current baseline within the band or is NEW; a record of a baseline-known kind
+   from a run under a SUPERSEDED tuple pairs only against a baseline run under that same tuple, within
+   that tuple's own band (never the current band) — where no baseline run exists under that tuple the
+   record is UNCOMPARED: the receipt lists it with its position and the tuple-field discrepancy that
+   superseded the tuple, no positional claim is made for it, it never pairs with anything, and the
+   positional verdict rests on the binding pairs alone. A tuple may be superseded only on the evidence
+   of a tuple-field discrepancy — a recorded field whose value differed from the tuple's (a different
+   credential identity, a runtime inventory that changed during the run, a different prompt-file
+   hash) — never on the conflicts a run showed; a run whose recorded fields show no discrepancy is a
+   run under the current tuple and its records pair or are NEW. "Dispositioned" means only that the
+   receipt states, for such a record, which same-tuple baseline record it pairs with, that it is
+   UNCOMPARED (with the discrepancy), or that it is NEW — a disposition never discharges a record, and
+   a NEW record from any attempted candidate run fails the phase exactly as one from a binding run
+   does; a tuple change or an abort never discards an observed conflict. **The maximum admissible band is 2 soak turns** (the largest same-tree
+   jitter measured on record, and small against a ≥30-turn soak). A measured band above it
+   means the run-to-run behaviour of whichever tree's pair exceeds it — candidate or previous GA —
+   is too unstable for positions to discriminate (an over-band previous-GA pair leaves the baseline
+   unestablished: unevaluable, FAIL); the
+   phase is then unevaluable under the positional fallback and FAILS (investigate the soak; identity
+   evidence is required to pass).
+3. **Match.** Two records match iff their codes and names are identical and their turn indices
+   differ by at most the band. Pair the candidate profile against the previous-GA profile greedily
+   in sorted order: for each candidate record, take the first unused previous-GA record that
+   matches it; a candidate record with no match is NEW. Run the pairing for each candidate run
+   against each baseline run separately — A against B, then A against B′, and likewise A′ — with the
+   count condition of step 4 applied against that baseline run; a candidate run passes when it pairs
+   completely against at least one baseline run (an unchanged candidate must lie within the measured
+   jitter of at least one baseline sample), and its NEW records are those left unpaired against the
+   baseline run it came closest to.
+4. **Differential verdict.** The differential passes only when both A and A′ pair every record
+   (zero NEW) AND neither has more records than the previous GA AND the further conditions of this
+   item hold. It is one conjunct of Green, not Green
+   itself: A and A′ must each also pass every non-conflict Phase C assertion (zero unexpected
+   engine errors, recall probes hit, doctor clean) — a candidate run failing any of them establishes
+   no profile and no band, and the phase fails. B and B′ must complete every turn with an intact log
+   and results file so their conflict profiles can be extracted, and must pass the non-conflict
+   assertions that can change publication behaviour — zero unexpected engine errors and a clean
+   doctor — because an unhealthy baseline can carry spurious conflicts that absorb candidate records
+   which would otherwise be NEW; a recall-probe miss by a baseline run is recorded beside its profile
+   and does not block the candidate (a release that repairs a previous-GA recall failure must remain
+   releasable). If a baseline run fails one of the health assertions, the differential is unevaluable
+   and the phase FAILS closed; releasing a candidate that repairs that very failure is an owner
+   decision recorded in the receipt (ESCALATED/OWNER GATE), with the candidate's own two clean runs
+   and the disclosed baseline failure as the evidence — the gate never turns green on its own in that
+   case. A candidate with more records than the
+   previous GA fails regardless of positions. Publication-attempt parity is a condition of EVERY
+   comparison, not only of fewer-record candidates: each candidate run's publication attempts —
+   the leaf publications persisted in the run's store during the run — `summary_nodes` rows with
+   `depth = 0` and `source_type = 'messages'` that are absent from the run's recorded starting state
+   (every such row when the start is an empty database; rows with `node_id` above the seed snapshot's
+   maximum when the fixture seeds the store), the nodes that pass the lifecycle publication point
+   where a #247-class conflict can arise — PLUS its conflict records — must be at least each baseline
+   run's; both counts are receipt fields, listed separately, beside the count of any other persisted
+   node and the starting-state row count. Condensation and rollup parents (`depth ≥ 1`, `source_type = 'nodes'`) are
+   inserted without lifecycle staging, cannot raise the conflict, and are never counted as attempts —
+   an aggregate node count would let extra condensation stand in for skipped leaf publications.
+   Successes are counted per PERSISTED LEAF PUBLICATION, never per compaction invocation or per
+   invocation-level telemetry (`total_compactions`, `compression_count`): one invocation can publish
+   several leaves in one sweep, and an invocation that conflicts after publishing some of them returns
+   through the fail-open path before its invocation counter advances, so an invocation count under-
+   counts successes and can equate a baseline that published two nodes and then conflicted with a
+   candidate that published one node and stopped. Counts alone do not show WHERE the attempts
+   happened, so parity is also positional: each run's **publication-point profile** is the sorted
+   multiset of soak turn indices at which a publication was attempted — the turn of every counted
+   leaf publication (its `created_at` mapped by the item 1 windows; same clock domain) and the turn
+   of every conflict record — and every baseline publication point must pair with a candidate
+   publication point within the band (item 3 pairing over turn indices alone, outcome ignored, each
+   point used once), with no baseline point left unpaired. A candidate that made the same number of
+   attempts at earlier points, or that covered less history with smaller leaves and never reached a
+   later baseline point, fails here even though its counts match. The receipt lists each run's
+   publication-point profile and, for disclosure, its covered frontier — the latest soak turn whose
+   messages a counted leaf publication consumed (from the leaf's `latest_at`). A candidate that attempted fewer
+   publications exercised fewer publication points, so a zero-NEW conclusion over it is incomplete
+   and the phase fails. A candidate with fewer records passes the differential only when every one
+   of its records pairs, attempt parity holds and every baseline publication point is paired — a
+   repaired conflict becomes a persisted leaf publication at the same point, so the counts and the
+   points stay; a skipped attempt leaves a baseline point unpaired and fails — the receipt listing the
+   unpaired previous-GA records as REMOVED with the delta commit believed responsible. Kind and
+   aggregate count alone never suffice.
+5. **Known residual of the positional fallback.** A NEW conflict that fires within the band of a
+   REMOVED one, with the same code and name, is indistinguishable from it without a publication
+   point: the fallback bounds the blind spot to same-band, same-kind substitution and cannot close
+   it. It is accepted only while the host exposes no identity (#430); the receipt states the
+   residual whenever the fallback is used, and a train whose host exposes publication point and
+   message must use the identity rule in step 1 — the fallback is not available to it. A second
+   residual is stated whenever a run under a superseded tuple left UNCOMPARED records: a same-kind
+   conflict at a position the binding runs did not reproduce was observed once under a tuple whose
+   positions cannot be compared — it is recorded, not measured.
+The receipt records every field of the tuple (host pin, fixture and configuration hashes, assistant
+identifier, transport identifier, the sha256 of the driver, turn-script and prompt-bearing files, the starting-state
+statement or seed digest, the effective `LCM_*` and behaviour-affecting `HERMES_*` set with its
+canonical digest and its capture source, the credential identities or attestations, the driver's
+normalized invocation, the execution-runtime inventories of host and driver with their digests, and
+the publication-attempt counts per run — persisted leaf publications, other persisted nodes, and conflict records, separately; each run's publication-point profile and covered frontier; every UNCOMPARED record with its discrepancy), the previous GA's exact tag with its resolved commit and tree SHA beside
+its profile, the candidate rc tag and tree SHA, the sorted profiles of A, A′, B and B′, both pair
+bands and the band used, every pairing with its deviation, every unpaired record, which identity
+fields the host exposed, the verdict, and — so the derived profiles can be re-derived — the sha256 and
+a retained reference (path or URL) of every run's raw engine/host log, driver results file and
+manifest. While #247 is
+open the count is expected to be non-zero and the differential run is mandatory for every candidate,
+zero count included (see the rule's opening sentence).
 
 ## Receipts
 
 Each phase writes `PHASE-{A,B,C}-RECEIPT.md`: rc tag + tree sha, exact commands, matrix results
 (per-row pass/fail), findings + dispositions, and the claim class per the gate-closeout
 discipline (a phase receipt claims what it measured, never "customer ready"). The GA release
-notes link all three.
+notes link all three. Receipts are published verbatim (local paths redacted; operational identifiers — account, project or
+key identifiers, secret-manager references, environment values that name infrastructure — may appear
+in an abbreviated or hashed form provided the receipt states the form and equality across runs stays
+readable from it, the full values living in the retained reference) as comments on the
+release train tracker issue; that comment URL is the link of record and is what the GA notes link,
+and the GA notes file itself — an immutable object in the GA tree — prints the sha256 of every
+published receipt body it relies on, carried receipts, addenda and the carry record included, so an
+edited or deleted comment is detectable from the tree alone; a digest that lives only in another
+comment proves nothing (codified 2026-09-05, #427).
