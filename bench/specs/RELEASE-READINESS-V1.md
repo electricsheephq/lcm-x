@@ -80,14 +80,17 @@ one threshold, doctor at close. Green = zero unexpected errors in engine logs, z
 publication-invariant conflicts (#247-class), recall probes hit, doctor clean. Minimum 30 turns.
 **Differential rule for #247-class conflicts** (applied since the v0.23.2 train; codified
 2026-09-05, #427): a non-zero conflict count passes ONLY when the same soak, on the same host
-build, against the previous GA tree reproduces the same conflicts — matched by identity (kind,
-publication point and message where the host exposes them), not by aggregate count alone; the
-receipt records both counts, the identities it could observe, the host pin and the differential
-run, and states explicitly when the host surface only exposes kind and count (the engine currently
-collapses every publication conflict to the `publication_invariant_conflict` label without its
-source — tracked as a logging follow-up). A conflict that does not reproduce on the previous GA
-is NEW and fails the phase. While #247 is open the count is expected to be non-zero, so the
-differential run is mandatory whenever it is.
+build, against the previous GA tree reproduces the same conflicts — matched by identity, never by
+aggregate count alone. A conflict's identity is its kind, its publication point and message where
+the host exposes them, and — always available, because the soak is scripted and deterministic in
+its turn structure — its position: the soak turn index and compaction round at which it fired,
+plus the error code/name the engine logs. Two runs match only when the multiset of identities is
+equal; the receipt records both identity lists, the host pin and the differential run, and states
+which identity fields the host surface exposed (the engine currently collapses every publication
+conflict to the `publication_invariant_conflict` label without its source — tracked as a logging
+follow-up, so today identity = kind + position + code/name). A conflict that does not reproduce on
+the previous GA — by identity — is NEW and fails the phase. While #247 is open the count is
+expected to be non-zero, so the differential run is mandatory whenever it is.
 
 ## Receipts
 
