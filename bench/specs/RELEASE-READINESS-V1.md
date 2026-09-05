@@ -64,13 +64,19 @@ and assembly never breaks; its negative control proves the shipped default recal
 
 ## Phase B — P0/P1 adversarial sweep (ultracode)
 
-Multi-agent workflow over the FULL release diff (previous GA tag → rc tag), not per-PR deltas:
+Multi-agent workflow over the FULL release diff (previous GA tag → rc tag), not per-PR deltas
+(the limited-respin composition below is the only exception):
 dimensions ≥ {correctness, security/privacy, performance/DoS, API contract, upgrade/migration,
 concurrency} → independent finders → 2-vote adversarial verification → verdicts. The
 upgrade/migration dimension is mandatory: open a previous-GA-created DB (old vectors,
 placeholders, revisions) under the rc tree and exercise re-embed/migration paths. Cross-model
 rule applies: finders and verifiers must not all share the author's model family.
 Findings: P0/P1 verified ⇒ respin. P2 ⇒ tracked issue with disposition before GA.
+**Limited respin (step 4):** when an rcN→rcN+1 delta is confined to bench/ (outside
+bench/instruments/release_gauntlet/), docs/, tests/ and .github/release-notes/, Phase B runs over
+`rcN..rcN+1` only, and the composed receipt is the carried full-range receipt (previous GA → rcN)
+PLUS the delta receipt (rcN → rcN+1): together they cover previous GA → rcN+1 with no gap, and the GA
+notes cite both. Any other delta re-runs Phase B over the full range.
 
 ## Phase C — Live-session soak
 
@@ -79,22 +85,42 @@ transport) against the clone: ingest-heavy turns, recall probes, compaction cros
 one threshold, doctor at close. Green = zero unexpected errors in engine logs, zero NEW
 publication-invariant conflicts (#247-class), recall probes hit, doctor clean. Minimum 30 turns.
 **Differential rule for #247-class conflicts** (applied since the v0.23.2 train; codified
-2026-09-05, #427): a non-zero conflict count passes ONLY when the same soak, on the same host
-build, against the previous GA tree reproduces the same conflicts, matched as follows. **Where the
-host exposes a conflict's publication point and message, identity is kind + publication point +
-message and the two runs must have equal multisets of identities.** Where it does not (the engine
-currently collapses every publication conflict to the `publication_invariant_conflict` label
-without its source — tracked as a logging follow-up), the comparison is the **position profile**:
-the soak turn index and compaction round at which each conflict fired, plus the logged error
-code/name. Because the assistant side of the soak is a live model, profiles jitter between runs of
-the same tree; the receipt therefore establishes the jitter band with an A/A′ pair (two runs of the
-candidate on the same host) and the candidate-vs-previous-GA deviation must lie inside that band
-— a deviation outside it is NEW and fails the phase. Equal conflict counts are a necessary conjunct of
-every match (a profile with more conflicts than the previous GA fails regardless of positions); kind
-and aggregate count alone never suffice.
-The receipt records both profiles, the A/A′ pair, the host pin, the differential run, and which
-identity fields the host surface exposed. While #247 is open the count is expected to be non-zero,
-so the differential run is mandatory whenever it is.
+2026-09-05, #427): a non-zero conflict count passes ONLY when the same soak against the previous GA
+tree reproduces the same conflicts under the mechanical comparison below. "The same soak" is a
+recorded tuple that must be identical across every run the comparison uses: the host build pin, the
+soak fixture files (material, probes, canaries) by sha256, the soak configuration by sha256, the
+assistant provider and model identifier (the live-model side of the soak; a fixed seed where the
+provider supports one), the transport, and the turn script. A previous-GA run is reusable across
+candidates only while that tuple is unchanged.
+1. **Record and profile.** Where the host exposes a conflict's publication point and message, a
+   conflict record is `(kind, publication point, message)`, a run's profile is the multiset of its
+   records, and the candidate passes iff its profile equals the previous GA's profile exactly
+   (identities do not jitter, so no band applies). Where it does not (today the engine collapses
+   every publication conflict to the `publication_invariant_conflict` label without its source —
+   logging follow-up #430), a record is `(soak turn index, logged error code, logged error name)`
+   and the profile is the multiset of records sorted by `(code, name, turn index)` — the **position
+   profile**.
+2. **Band.** Because the assistant side is a live model, position profiles jitter between runs of
+   the same tree. The band is measured from an A/A′ pair — two runs of the candidate tree under the
+   same tuple — BEFORE any comparison with the previous GA is computed, and no later run widens a
+   recorded band. Sort both profiles; if their counts differ, the candidate's own count is unstable
+   and the phase FAILS (investigate, then re-run); otherwise pair records index-wise and
+   `band = max_i |turn(A_i) − turn(A′_i)|`, a whole number of soak turns, inclusive (identical
+   profiles give band 0).
+3. **Match.** Two records match iff their codes and names are identical and their turn indices
+   differ by at most the band. Pair the candidate profile against the previous-GA profile greedily
+   in sorted order: for each candidate record, take the first unused previous-GA record that
+   matches it; a candidate record with no match is NEW. Run the pairing for both A and A′.
+4. **Verdict.** The phase passes iff both A and A′ pair every record (zero NEW) AND neither has more
+   records than the previous GA. Equal counts therefore hold in every match; a candidate with more
+   records than the previous GA fails regardless of positions, and one with fewer passes the
+   differential only when every one of its records pairs, the receipt listing the unpaired
+   previous-GA records as REMOVED with the delta commit believed responsible. Kind and aggregate
+   count alone never suffice.
+The receipt records the tuple (pin, fixture and configuration hashes, assistant identifier), the
+sorted profiles of A, A′ and the previous GA, the band, every pairing with its deviation, every
+unpaired record, which identity fields the host surface exposed, and the verdict. While #247 is
+open the count is expected to be non-zero, so the differential run is mandatory whenever it is.
 
 ## Receipts
 
