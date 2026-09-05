@@ -97,11 +97,16 @@ tree reproduces the same conflicts under the mechanical comparison below. "The s
 recorded tuple that must be identical across every run the comparison uses: the host build pin, the
 soak fixture files (material, probes, canaries) by sha256, the soak configuration by sha256, the
 assistant provider and model identifier (the live-model side of the soak; a fixed seed where the
-provider supports one), the transport, the turn script, and the starting state — a fresh isolated
-home and an empty database for every run, or, where a seeded start is part of the fixture, the same
-seed snapshot by digest (publication conflicts depend on persisted lifecycle state, so runs that
-start from different data are not comparable). A previous-GA run is reusable across candidates only
-while that tuple is unchanged.
+provider supports one), the transport, the turn script, the starting state — a fresh isolated home
+and an empty database for every run, or, where a seeded start is part of the fixture, the same seed
+snapshot by digest (publication conflicts depend on persisted lifecycle state, so runs that start
+from different data are not comparable) — and the effective engine environment: the driver inherits
+the launching process's environment, so every `LCM_*` variable present at launch is recorded — name
+and value, or name plus the sha256 of the value where the value is a secret — together with the
+sha256 of the sorted `name=value` list as the canonical digest, and the sets must be identical across
+the runs compared; thresholds such as `LCM_CONTEXT_THRESHOLD` change when compaction runs and therefore
+the conflict profile. Launch the soak from a scrubbed environment that carries only the recorded
+variables. A previous-GA run is reusable across candidates only while that tuple is unchanged.
 1. **Record and profile.** Where the host exposes a conflict's publication point and message, a
    conflict record is `(kind, publication point, message)`, a run's profile is the multiset of its
    records, and the candidate passes iff its multiset is contained in the previous GA's multiset —
@@ -150,7 +155,7 @@ while that tuple is unchanged.
    message must use the identity rule in step 1 — the fallback is not available to it.
 The receipt records every field of the tuple (host pin, fixture and configuration hashes, assistant
 identifier, transport identifier, the sha256 of the driver and turn-script files, the starting-state
-statement or seed digest), the previous GA's exact tag with its resolved commit and tree SHA beside
+statement or seed digest, the recorded `LCM_*` environment), the previous GA's exact tag with its resolved commit and tree SHA beside
 its profile, the candidate rc tag and tree SHA, the sorted profiles of A, A′ and the previous GA, the
 band, every pairing with its deviation, every unpaired record, which identity fields the host exposed,
 and the verdict. While #247 is
