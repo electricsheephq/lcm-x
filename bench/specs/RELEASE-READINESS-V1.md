@@ -99,7 +99,9 @@ candidates only while that tuple is unchanged.
    every publication conflict to the `publication_invariant_conflict` label without its source —
    logging follow-up #430), a record is `(soak turn index, logged error code, logged error name)`
    and the profile is the multiset of records sorted by `(code, name, turn index)` — the **position
-   profile**.
+   profile**. The soak turn index is the driver's turn ordinal whose window (turn start to the next
+   turn start) contains the conflict's log timestamp, so two operators derive the same profile from
+   the same log and results file.
 2. **Band.** Because the assistant side is a live model, position profiles jitter between runs of
    the same tree. The band is measured from an A/A′ pair — two runs of the candidate tree under the
    same tuple — BEFORE any comparison with the previous GA is computed, and no later run widens a
@@ -117,6 +119,12 @@ candidates only while that tuple is unchanged.
    differential only when every one of its records pairs, the receipt listing the unpaired
    previous-GA records as REMOVED with the delta commit believed responsible. Kind and aggregate
    count alone never suffice.
+5. **Known residual of the positional fallback.** A NEW conflict that fires within the band of a
+   REMOVED one, with the same code and name, is indistinguishable from it without a publication
+   point: the fallback bounds the blind spot to same-band, same-kind substitution and cannot close
+   it. It is accepted only while the host exposes no identity (#430); the receipt states the
+   residual whenever the fallback is used, and a train whose host exposes publication point and
+   message must use the identity rule in step 1 — the fallback is not available to it.
 The receipt records the tuple (pin, fixture and configuration hashes, assistant identifier), the
 sorted profiles of A, A′ and the previous GA, the band, every pairing with its deviation, every
 unpaired record, which identity fields the host surface exposed, and the verdict. While #247 is
