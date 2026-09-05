@@ -106,9 +106,13 @@ from different data are not comparable) — and the effective engine environment
 the launching process's environment and the host then loads its own files (the fresh home's `.env`),
 so the environment is captured AFTER every loader has run — every `LCM_*` variable and every
 behaviour-affecting `HERMES_*` variable (model, generation length, thresholds) present in the
-session's effective environment is recorded — name and value, or name plus the sha256 of the value
-where the value is a secret — together with the sha256 of the sorted `name=value` list as the
-canonical digest, and the sets must be identical across the runs compared; thresholds such as
+session's effective environment is recorded — name and value, or, where the value is a secret
+(a credential, token or key), the name and a fixed presence marker only, never any digest of the
+value, salted or not: a published hash of a secret is a cross-release correlation and offline-guessing
+oracle, and the behaviour a credential selects is already captured by the provider and model
+identifiers and the non-secret variables — together with the sha256 of the sorted `name=value` list,
+secret values replaced by the marker, as the canonical digest, and the sets must be identical across
+the runs compared; thresholds such as
 `LCM_CONTEXT_THRESHOLD` change when compaction runs and therefore the conflict profile. The capture
 has a named mechanical source stated in the receipt — a dump of the session process's environment
 after launch, or, until the driver records one, the launching shell's `LCM_*`/`HERMES_*` listing
