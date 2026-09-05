@@ -269,3 +269,61 @@ outputs to the session-notes artifacts dir before anything else runs.** 8. Recom
 banks nothing: the finding carries the diagnosis and F53 keeps its row, §4.3) — one PR
 through the gate with an independent audit; #380/#367 close on merge (on a MOVED outcome they stay open with the diagnosis
 linked); #252 verdict record.
+
+## Amendment 1 (2026-09-05, append-only; rides the F62 park-record PR)
+
+Source: the NON_BLOCKING observations of the independent confirms of PR #413 (r15+r16 `review-413-r16-opus-deep-reasoner.md`
+PASS 96/0; r22 PASS 96/0; r23 PASS 97/0). None changes a bar, a pin, or an outcome; each is a text or executability fix. Items 7–8
+record what the first execution of this sheet produced.
+
+1. **§8 step 3 — probe shorthand is executable.** `scripts/lcm_longmemeval.py determinism-probe --prepared-dir <prepared-m>
+   --shards-manifest <prepared-m-shards> --dataset-label m --model voyage-context-3 --sample-size 20 --seed 0` (the parser requires
+   the manifest flags; the registered shorthand dies with "the following arguments are required" — loud, zero spend). Same flags as step 4.
+2. **§8 step 4 / §5 — the gate script is named and version-controlled.** "exactly as the gate script does" refers to `prewarm_gate.sh`,
+   committed as `bench/tools/v1m-rebank/prewarm_gate.sh` byte-identical to the copy the 2026-09-05 execution used (sha256 in
+   `bench/tools/v1m-rebank/KIT-MANIFEST-AS-RUN.sha256`), together with `run_shard.sh`, `run_aprime.sh`, `launch_all.sh`, `record_pins.sh`,
+   `identity_all.sh`, `cache_pair_check.py` and `result_identity.py` (the §4.3 identity projection registered in r17 of #413; smoke: F53
+   shard-0 vs itself = 84/84 identical, exit 0; shard-0 vs shard-1 = 168 one-side deltas, exit 1; self-test over F53's own outputs =
+   500/500, 100/100, and 0 discordant A/A′ rows). Kit correction recorded here: the shard scripts derive `--resume` from the presence of a
+   checkpoint on disk — the harness refuses `--resume` on a fresh output root and refuses a bare run over an existing checkpoint (the F53
+   kit passed neither flag; an unconditional `--resume` would have failed every shard at launch).
+3. **§6 wording.** The header's "appended only when a REPRODUCED outcome banks the successor row" applies to the banking rows (#352
+   RECORDED · trio posture · #199 · #245). The #203/#177 rows (cache-pair identity + forward `corpus_counts` baseline) are produced by §4.4
+   regardless of the reproducibility verdict and are appended on ANY completed run — they discharge an instrument gap, not a
+   reproducibility claim. Conservative direction preserved: a MOVED outcome still banks no row; a PARKED execution appends nothing.
+4. **§7 receipt keys.** The structured run receipt carries six keys: `status`, `question_id`, `privacy`, `checkpoint`, `resumable`, `error`
+   (the five listed plus `error`, which is a constant or pattern names only — never text; verified against every raise site in
+   `ingest_protection.py` and `tools.py`).
+5. **Instrument follow-ups carried from the #413 confirms (NON_BLOCKING; tracked in #415).** (a) a zero-question `--resume` over a
+   header-only checkpoint raises the "mixed chunk embedding modes" text (CLI-unreachable — `--limit` must be positive; message only);
+   (b) the probe's `chunk_identity` record should be copied into the postrun pins (`record_pins.sh postrun` does not read `probe.json`
+   today); (c) symlinked-cache sidecar aliases; (d) cache-database identity on resume; (e) `--dump-candidates` header chunk mode.
+6. **§8 all-zero receipt on `--resume` (r22 confirm precision).** §8's description of the all-zero blocked receipt is written for a fresh
+   run. On a `--resume`, the same initialization refusal reports `resumable: true` — the checkpoint header already exists on disk — and its
+   `privacy` counters are the RESTORED totals of the completed rows (zero only if no prior row transformed or blocked). The classification
+   holds in both cases (a validator-raised block always carries `blocked ≥ 1`, so an all-zero receipt is an initialization refusal); the
+   sentence reads: "fresh run: `resumable: false`, `checkpoint: null`, zero counters; `--resume`: `resumable: true` with the restored
+   counters; `question_id: null` in both". Unreachable under the registered procedure (every harness `LCMConfig` is built directly, never
+   `from_env`, so `LCM_SENSITIVE_PATTERNS` cannot empty the policy — measured by the r22 confirm).
+7. **First execution (2026-09-05T02:48Z) PARKED at §8 step 4 under §7.** The dry run blocked at document 227,951 (`private_key` residual,
+   61 transformed units before the block). §7 required PARK + root-cause + row-level disclosure; the record is `FINDING-F62-V1M-REBANK-PARKED.md`.
+   The root-cause probes it used are committed beside the kit: `corpus_privacy_inventory.py` (whole-corpus replay of the transform +
+   validator, catch-and-continue, redacted shape statistics only), `changed_units_classes.py`, `blocked_units_attribution.py`,
+   `refused_line_model.py` (per-segment line-model record of the refused units) and `cache_membership_check.py` (the §4.4 unit-identity
+   check performed directly against the cache keys, since the dry run stopped before reporting `already_cached`). `corpus_privacy_inventory.py`,
+   `changed_units_classes.py` and `blocked_units_attribution.py` were lint-normalized for the repository's ruff rules when committed
+   (statement splits and one loop-variable rename only); the review of the park-record PR (#416) then fixed seven committed copies
+   (listed per file in `bench/tools/v1m-rebank/README.md`: gate enforcement in `launch_all.sh`, zero-misses parity in
+   `cache_pair_check.py`, missing-A′ and exit-2 handling in `identity_all.sh`, structural + redacted env inventory in `record_pins.sh`,
+   explicit cache identity in `cache_membership_check.py`, checkout identity in `corpus_privacy_inventory.py`, exact-manifest match in
+   `changed_units_classes.py`). As-run and committed sha256s are both recorded in the kit manifests; `prewarm_gate.sh`, `run_shard.sh`,
+   `run_aprime.sh`, `result_identity.py` and `refused_line_model.py` are byte-identical to the as-run copies; the three probes whose logic
+   changed were re-run with the committed copies and reproduced their as-run artifacts; `record_pins.sh` ran at launch with its as-run
+   copy, whose regex inventory listed 89 of the 96 declared fields — six of the seven dropped fields were unset at launch per the pins
+   file's environment listing; the seventh, `LCM_EMBEDDING_API_KEY_ENV`, was filtered out of that listing by construction and is unpinned
+   for this execution, so the §3 inventory stands at 95 of 96 (disclosed with the field names in FINDING-F62 §8).
+8. **§7 precision from the first execution.** "One block is a park" is decided by the dry run's first block; the dry run does not enumerate
+   further blocks. The size of the refused set and the transform-change count therefore come from the whole-corpus replay
+   (`corpus_privacy_inventory.py`), which applies the identical `protect_embedding_text` + `validate_embedding_privacy_dispatch` pair per
+   unit and never records raw text. A re-registration that changes the posture (an opt-out variant) or follows a product change to the
+   validator is a NEW row registration, never an amendment of this sheet's bars.
