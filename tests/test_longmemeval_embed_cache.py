@@ -239,7 +239,84 @@ def test_prewarm_refuses_changed_manifest_that_aliases_the_cache(tmp_path, monke
             [_question("q-alias-seed")], cached, dry_run=True, changed_manifest=hard_link
         )
     assert cache_path.read_bytes() == before
+
+    # The cache's SQLite sidecars are live state too: a truncating open of the
+    # -wal corrupts the journal and of a mapped -shm kills the process.
+    sidecars = {
+        suffix: cache_path.with_name(cache_path.name + suffix)
+        for suffix in ("-wal", "-shm", "-journal")
+    }
+
+    def _sidecar_state():
+        return {
+            suffix: (path.read_bytes() if path.exists() else None)
+            for suffix, path in sidecars.items()
+        }
+
+    sidecar_state = _sidecar_state()
+    for sidecar in sidecars.values():
+        with pytest.raises(ValueError, match="SQLite sidecars"):
+            lme.prewarm_embedding_cache(
+                [_question("q-alias-seed")], cached, dry_run=True, changed_manifest=sidecar
+            )
+    sidecar_link = tmp_path / "manifest-shm-link.jsonl"
+    sidecar_link.symlink_to(sidecars["-shm"])
+    with pytest.raises(ValueError, match="SQLite sidecars"):
+        lme.prewarm_embedding_cache(
+            [_question("q-alias-seed")], cached, dry_run=True, changed_manifest=sidecar_link
+        )
+    if sidecars["-wal"].exists():
+        # A hard link to a live sidecar resolves elsewhere but names the same inode.
+        wal_hard_link = tmp_path / "manifest-wal-hardlink.jsonl"
+        os.link(sidecars["-wal"], wal_hard_link)
+        with pytest.raises(ValueError, match="SQLite sidecars"):
+            lme.prewarm_embedding_cache(
+                [_question("q-alias-seed")], cached, dry_run=True, changed_manifest=wal_hard_link
+            )
+    # Refused before any open: neither the cache nor a sidecar changed, nothing was created.
+    assert _sidecar_state() == sidecar_state
+    assert cache_path.read_bytes() == before
     assert raw.calls == calls_after_seed
+
+
+def test_prewarm_report_labels_shard_coverage(tmp_path, monkeypatch):
+    """`privacy_scope` is `corpus` only when the selection covers every prepared question."""
+    monkeypatch.setattr(
+        lme,
+        "iter_ingest_embedding_request_units",
+        lambda _question: iter(["ordinary document"]),
+    )
+    cached = lme.ContentHashEmbeddingCache(
+        _CountingProvider("voyage-context-4"), tmp_path / "coverage-cache.sqlite3"
+    )
+    questions = [_question("q-cover")]
+
+    default = lme.prewarm_embedding_cache(questions, cached, dry_run=True)
+    assert default["privacy_scope"] == "corpus"
+    assert "question_coverage" not in default
+
+    full = lme.prewarm_embedding_cache(
+        questions, cached, dry_run=True, question_coverage={"selected": 3, "prepared": 3}
+    )
+    assert full["privacy_scope"] == "corpus"
+    assert full["question_coverage"] == {"selected": 3, "prepared": 3}
+
+    partial = lme.prewarm_embedding_cache(
+        questions, cached, dry_run=True, question_coverage={"selected": 2, "prepared": 3}
+    )
+    assert partial["privacy_scope"] == "partial"
+    assert partial["question_coverage"] == {"selected": 2, "prepared": 3}
+
+    for bad in (
+        {"selected": 4, "prepared": 3},
+        {"selected": -1, "prepared": 3},
+        {"selected": 1},
+        {"selected": "x", "prepared": 3},
+    ):
+        with pytest.raises(ValueError, match="question_coverage"):
+            lme.prewarm_embedding_cache(
+                questions, cached, dry_run=True, question_coverage=bad
+            )
 
 
 def test_evaluate_question_reports_exact_embed_cache_delta(tmp_path):
@@ -805,3 +882,58 @@ def test_fastembed_prewarm_resolves_with_run_path_warmup(tmp_path, monkeypatch):
     assert prewarm_calls[0][1]["changed_manifest"] == str(
         tmp_path / "changed.jsonl"
     )
+    # A bare iterable carries no coverage: the report keeps its library-use label.
+    assert prewarm_calls[0][1]["question_coverage"] is None
+
+
+def test_prewarm_cli_passes_shard_coverage_to_the_report(tmp_path, monkeypatch):
+    """The shard selection counts how much of the prepared corpus it covers, and the
+    prewarm command hands those counts to the report so a shard union that misses
+    a manifest or a question is labelled `partial`, never `corpus`."""
+    cli = _load_cli()
+    monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "cache.db"))
+
+    class _Prepared:
+        questions = [
+            {"question_id": "q1", "file": "q1.json"},
+            {"question_id": "q2", "file": "q2.json"},
+        ]
+
+        def iter_question_ids(self, question_ids):
+            for question_id in question_ids:
+                yield f"question:{question_id}"
+
+    monkeypatch.setattr(cli, "load_prepared_dataset", lambda *_a, **_k: _Prepared())
+    monkeypatch.setattr(cli, "load_shard_question_ids", lambda _path: ("q1",))
+    selection = cli._prepared_shard_questions(
+        SimpleNamespace(prepared_dir="prepared", shards_manifest="shards", dataset_label="m")
+    )
+    assert selection.coverage == {"selected": 1, "prepared": 2}
+    assert list(selection) == ["question:q1"]
+
+    monkeypatch.setattr(cli, "resolve_harness_provider", lambda *_a, **_k: object())
+    captured: dict = {}
+
+    def _prewarm(questions, _provider, **kwargs):
+        captured["coverage"] = kwargs["question_coverage"]
+        captured["questions"] = list(questions)
+        return {"privacy_scope": "partial"}
+
+    monkeypatch.setattr(cli, "prewarm_embedding_cache", _prewarm)
+    args = cli._parse_args(
+        [
+            "prewarm-cache",
+            "--prepared-dir",
+            "prepared",
+            "--shards-manifest",
+            "shards",
+            "--model",
+            "voyage-context-3",
+            "--dry-run",
+        ]
+    )
+    assert cli._cmd_prewarm_cache(args) == 0
+    assert captured == {
+        "coverage": {"selected": 1, "prepared": 2},
+        "questions": ["question:q1"],
+    }

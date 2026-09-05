@@ -81,6 +81,8 @@ PREPARED_MANIFEST_SCHEMA_VERSION = 1
 PER_QUESTION_CHECKPOINT_FILENAME = "per_question_checkpoint.jsonl"
 _CHECKPOINT_HEADER_KEY = "__checkpoint_header__"
 _DUMP_HEADER_KEY = "__dump_header__"
+# SQLite sidecars of the embed cache: live state a stray write must never truncate.
+_SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 _CANDIDATE_DUMP_TOP_K = 10
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _IJSON_MIN_VERSION = (3, 2)
@@ -1722,13 +1724,36 @@ def prewarm_embedding_cache(
     progress: Callable[[int], None] | None = None,
     dry_run: bool = False,
     changed_manifest: str | os.PathLike | None = None,
+    question_coverage: dict[str, int] | None = None,
 ) -> dict[str, Any]:
-    """Populate all unique ingest document units, skipping already-cached keys."""
+    """Populate all unique ingest document units, skipping already-cached keys.
+
+    ``question_coverage`` (``{"selected": n, "prepared": m}``) says how much of the
+    prepared corpus the caller's question selection covers; the report labels its
+    privacy counters ``privacy_scope: "corpus"`` only when the selection covers every
+    prepared question and ``"partial"`` otherwise. Callers that pass no coverage
+    (library use over an explicit corpus) keep the ``"corpus"`` label.
+    """
     _reset_privacy_counts()
     if not isinstance(provider, ContentHashEmbeddingCache):
         raise ValueError(f"{EMBED_CACHE_ENV} must be set for prewarm-cache")
     if progress_every <= 0:
         raise ValueError("progress_every must be positive")
+    covers_corpus = True
+    if question_coverage is not None:
+        try:
+            selected_count = int(question_coverage["selected"])
+            prepared_count = int(question_coverage["prepared"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "question_coverage must carry integer 'selected' and 'prepared' counts"
+            ) from exc
+        if selected_count < 0 or prepared_count < 0 or selected_count > prepared_count:
+            raise ValueError(
+                "question_coverage must satisfy 0 <= selected <= prepared "
+                f"(got selected={selected_count}, prepared={prepared_count})"
+            )
+        covers_corpus = selected_count == prepared_count
     chunk_embedding_mode = _resolved_chunk_embedding_mode(
         provider, enforce_cache_guard=False
     )
@@ -1766,16 +1791,24 @@ def prewarm_embedding_cache(
     changed_manifest_file = None
     if changed_manifest_path is not None:
         cache_file = provider.cache_path
-        aliases_cache = changed_manifest_path.resolve() == cache_file.resolve() or (
-            changed_manifest_path.exists()
-            and cache_file.exists()
-            and os.path.samefile(changed_manifest_path, cache_file)
-        )
-        if aliases_cache:
-            raise ValueError(
-                "--changed-manifest must not be the embedding cache file: opening "
-                f"{changed_manifest_path} for writing would truncate the cache"
+        # The cache's SQLite sidecars are live state too: truncating an open -wal
+        # corrupts the journal and truncating a mapped -shm kills the process.
+        guarded_cache_paths = [cache_file] + [
+            Path(f"{cache_file}{suffix}") for suffix in _SQLITE_SIDECAR_SUFFIXES
+        ]
+        for guarded in guarded_cache_paths:
+            aliases_cache = changed_manifest_path.resolve() == guarded.resolve() or (
+                changed_manifest_path.exists()
+                and guarded.exists()
+                and os.path.samefile(changed_manifest_path, guarded)
             )
+            if aliases_cache:
+                raise ValueError(
+                    "--changed-manifest must not be the embedding cache file or one of "
+                    f"its SQLite sidecars ({', '.join(_SQLITE_SIDECAR_SUFFIXES)}): "
+                    f"opening {changed_manifest_path} for writing would truncate live "
+                    "cache state"
+                )
         changed_manifest_path.parent.mkdir(parents=True, exist_ok=True)
         changed_manifest_file = changed_manifest_path.open("w", encoding="utf-8")
 
@@ -1844,7 +1877,7 @@ def prewarm_embedding_cache(
     finally:
         if changed_manifest_file is not None:
             changed_manifest_file.close()
-    return {
+    report: dict[str, Any] = {
         "provider": provider.provider_id,
         "model": provider.model_id,
         "cache_path": str(provider.cache_path),
@@ -1859,8 +1892,14 @@ def prewarm_embedding_cache(
         ),
         "changed_units": changed_units,
         "privacy": dict(_PRIVACY_COUNTS),
-        "privacy_scope": "corpus",
+        "privacy_scope": "corpus" if covers_corpus else "partial",
     }
+    if question_coverage is not None:
+        report["question_coverage"] = {
+            "selected": selected_count,
+            "prepared": prepared_count,
+        }
+    return report
 
 
 def embedding_determinism_report(

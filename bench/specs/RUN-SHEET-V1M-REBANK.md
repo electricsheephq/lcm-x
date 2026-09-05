@@ -68,7 +68,8 @@ Keychain at runtime, never in configs or logs; embed-cache path + size + mtime b
    when the §5 gate lets it run, repeats the count) over
    `prepared-m` under the declared posture (input-hash parity with the F53-era cache). This is the ledger
    discharge measurement for the #366 / #374 / #384-#391 rows: **0 ⇒ inert for this corpus**; >0 ⇒ the
-   boundary is live and any metric delta is attributed to it. Only prepared-corpus DOCUMENTS count: query-text
+   boundary is live for this corpus — whether a metric delta is attributable to it is decided per row by §4.3
+   (a delta without the §4.3 unit-link is MOVED-UNEXPLAINED, never attributed). Only prepared-corpus DOCUMENTS count: query-text
    transforms are tracked in separate `queries*` counters, reported alongside but never part of this bar.
 3. Reproducibility verdict vs the banked F53 row, four pre-declared outcomes. **"Per-question results identical"** is
    the following projection, not raw-row identity (raw rows carry timing fields and instrument fields F53 never wrote):
@@ -223,7 +224,10 @@ voyage-context-3 --dry-run --changed-manifest <evidence path>` (the §2/§3 pinn
 cache and `LCM_LONGMEMEVAL_CHUNK_EMBEDDING_MODE=flat` is exported, exactly as the gate script does) over `prepared-m` FIRST (cache
 lookups + privacy validation, no
 embedding call, no spend — §5 ordering) → `would_populate`, projected prewarm spend vs the cap (≥ $40 → PARK, §5/§7), the
-changed-document manifest, and the CORPUS transform-change count (`privacy_scope: corpus`); only after that gate clears, the real
+changed-document manifest, and the CORPUS transform-change count (`privacy_scope: corpus` — the report carries
+`question_coverage {selected, prepared}` and labels itself `corpus` only when the shard union equals the prepared manifest's
+question set, `partial` otherwise; the gate script parks on anything but `corpus`, so a missing shard manifest or an omitted
+question can never clear the spend gate or discharge a ledger row); only after that gate clears, the real
 `prewarm-cache` with the same `--prepared-dir` / `--shards-manifest` / `--model` flags minus `--dry-run` over the same corpus
 (expected `populated == 0`). Both are reported by the instrument-only
 `privacy` counters this registration PR adds to the harness (baseline at the merge-base 0301405b, BEFORE this PR: every

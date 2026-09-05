@@ -458,12 +458,34 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def _prepared_shard_questions(args: argparse.Namespace):
+class _ShardSelection:
+    """Manifest-selected questions plus how much of the prepared corpus they cover.
+
+    ``coverage`` lets ``prewarm-cache`` label its privacy counters truthfully: a
+    shard union that misses a manifest or a question is a partial scan, and its
+    report must say so instead of claiming ``privacy_scope: corpus``. Extra ids are
+    refused by the prepared dataset and duplicates by the shard loader, so equal
+    counts mean an exact partition.
+    """
+
+    def __init__(self, prepared, question_ids: tuple[str, ...]) -> None:
+        self._prepared = prepared
+        self._question_ids = question_ids
+        self.coverage = {
+            "selected": len(set(question_ids)),
+            "prepared": len(prepared.questions),
+        }
+
+    def __iter__(self):
+        return self._prepared.iter_question_ids(self._question_ids)
+
+
+def _prepared_shard_questions(args: argparse.Namespace) -> _ShardSelection:
     prepared = load_prepared_dataset(
         Path(args.prepared_dir), dataset_label=args.dataset_label
     )
     question_ids = load_shard_question_ids(Path(args.shards_manifest))
-    return prepared.iter_question_ids(question_ids)
+    return _ShardSelection(prepared, tuple(question_ids))
 
 
 def _refuse_changed_manifest_input_alias(
@@ -547,6 +569,9 @@ def _cmd_prewarm_cache(args: argparse.Namespace) -> int:
             ),
             dry_run=args.dry_run,
             changed_manifest=args.changed_manifest,
+            # None when a caller hands in a bare iterable; the shard selection
+            # carries the counts that decide "corpus" vs "partial".
+            question_coverage=getattr(questions, "coverage", None),
         )
     except EmbeddingPrivacyPolicyError as exc:
         privacy = getattr(exc, "privacy_counts", None)
