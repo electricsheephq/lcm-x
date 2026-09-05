@@ -17,6 +17,10 @@ from hermes_lcm.dag import SummaryNode
 from hermes_lcm.db_bootstrap import check_external_content_fts_integrity
 from hermes_lcm.diagnostics import doctor_guidance_for_check
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.scope_storage import (
+    clear_never_enabled_cache,
+    resolve_startup_teams_state,
+)
 from hermes_lcm.store import build_message_fts_spec
 
 
@@ -533,7 +537,29 @@ def test_lcm_doctor_reports_health_checks(engine):
     assert "plugin_version: 0.23.3" in result
     assert f"plugin_path: {repo_root}" in result
     assert "plugin_git_commit:" in result
+    assert "teams_scope_storage: pass" in result
     assert "triage_guidance:\n- none" in result
+
+
+def test_lcm_doctor_reports_stamped_without_marker_and_repair(engine):
+    engine._store.append(
+        "imported-session",
+        {"role": "user", "content": "hello"},
+    )
+    clear_never_enabled_cache(engine._store.connection)
+    engine._store.connection.execute(
+        "UPDATE messages SET access_scope = 'principal-a'"
+    )
+    engine._store.connection.commit()
+    before = resolve_startup_teams_state(engine._store.connection)
+
+    result = handle_lcm_command("doctor", engine)
+
+    assert resolve_startup_teams_state(engine._store.connection) == before
+    assert "status: issues-found" in result
+    assert "teams_scope_storage: fail" in result
+    assert "setup_teams_scope" in result
+    assert "persist_teams_enabled(conn, True)" in result
 
 
 def test_lcm_doctor_reports_heartbeat_noise_rows_without_mutating_or_leaking_content(engine):

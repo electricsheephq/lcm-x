@@ -211,6 +211,23 @@ class SummaryDAG:
                 value TEXT
             );
         """)
+        # summary_nodes is created HERE, not by the core bootstrap, so the core
+        # scope pass can already have recorded its marker on the store's
+        # connection while this table did not yet exist -- and that marker makes
+        # every later sweep a no-op. Repair the one column with the module's
+        # targeted probe so the additive nullable column really is present on
+        # every database; the rollup invalidation triggers resolve
+        # ``new.access_scope`` at CREATE TRIGGER time and cannot install without
+        # it.
+        #
+        # BEFORE the FTS index is built, deliberately. ``nodes_fts`` is an
+        # external-content fts5 table over summary_nodes, and altering the
+        # content table after this connection has prepared statements against
+        # the vtable makes the first write fail to re-prepare
+        # (SQLITE_SCHEMA / "vtable constructor failed: nodes_fts").
+        from .scope_storage import ensure_scope_columns
+
+        ensure_scope_columns(self._conn, tables=("summary_nodes",))
         ensure_external_content_fts(
             self._conn,
             build_nodes_fts_spec(),
@@ -632,7 +649,7 @@ class SummaryDAG:
                 logger.warning("FTS node search failed, falling back to LIKE: %s", exc)
                 return self._search_like(query, session_id=session_id, limit=limit, sort=sort, source=source)
 
-            raw_nodes = [self._row_to_node(r) for r in rows]
+            raw_nodes = [self._row_to_node(r, with_search_rank=True) for r in rows]
             for node in raw_nodes:
                 if source and not self._node_matches_source(node.node_id, source, cache=source_match_cache):
                     continue
@@ -884,7 +901,18 @@ class SummaryDAG:
 
     # -- Helpers ------------------------------------------------------------
 
-    def _row_to_node(self, row) -> SummaryNode:
+    def _row_to_node(self, row, *, with_search_rank: bool = False) -> SummaryNode:
+        """Map one ``summary_nodes`` row, optionally carrying an FTS rank.
+
+        The rank is the LAST column of the FTS query's projection, not a fixed
+        position: this table is additive, and reading it as "column 12 when the
+        row is longer than twelve" silently returned the first NEW table column
+        instead the moment one landed. The additive ``access_scope`` column did
+        exactly that -- every FTS search returned rank ``None``, which is not an
+        error anywhere: relevance and hybrid ordering just quietly degrade to
+        recency. Callers that do not project a rank say so by omission.
+        """
+
         return SummaryNode(
             node_id=row[0],
             session_id=row[1],
@@ -898,7 +926,7 @@ class SummaryDAG:
             earliest_at=row[9],
             latest_at=row[10],
             expand_hint=row[11] or "",
-            search_rank=row[12] if len(row) > 12 else None,
+            search_rank=row[-1] if with_search_rank else None,
         )
 
     def close(self) -> None:

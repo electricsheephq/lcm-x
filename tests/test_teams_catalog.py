@@ -1,9 +1,9 @@
-"""The Teams catalog: created only on an explicit enable, and recognised.
+"""The Teams catalog: created only on explicit enable and fail-closed to old code.
 
 Two properties carry this phase. A store that never enables Teams must end up
 with no Teams tables at all -- that is what keeps a single-user install
-untouched by any of this. And a store that DOES enable must still be repairable,
-which it is not unless the family prefix is on db_bootstrap's allowlist.
+untouched by any of this. A newer store that does carry Teams tables must remain
+unmodified when an older build cannot verify that family exactly.
 """
 
 from __future__ import annotations
@@ -14,14 +14,6 @@ import pytest
 
 from hermes_lcm import db_bootstrap
 from hermes_lcm.teams import catalog
-
-
-# db_bootstrap's family allowlist and its repairable-store classification are
-# call-site surfaces: the catalog creates its own tables here, and db_bootstrap
-# learns the `lcm_teams` prefix in the slice that wires it in.
-_NEEDS_DB_BOOTSTRAP = pytest.mark.skip(
-    reason="call-site slice: db_bootstrap does not know the lcm_teams family yet"
-)
 
 
 @pytest.fixture()
@@ -84,20 +76,18 @@ def test_a_missing_table_is_reported_as_a_defect(store: sqlite3.Connection) -> N
     ]
 
 
-def test_every_table_carries_the_allowlisted_family_prefix() -> None:
-    """Repair tooling recognises families by prefix, not by table name.
+def test_every_table_carries_the_teams_family_prefix() -> None:
+    """The catalog stays inside its one reserved table-name family.
 
-    Split from the allowlist-membership check below. The prefix invariant is a
-    property of THIS module and needs no database bootstrap, so gating it on
-    the call-site slice left the whole thing uncovered for no reason.
+    The prefix invariant is a property of this module and does not imply that
+    older bootstrap code may repair or downgrade an unknown catalog shape.
     """
     assert all(name.startswith("lcm_teams") for name in catalog.TEAMS_TABLES)
 
 
-@_NEEDS_DB_BOOTSTRAP
-def test_the_family_prefix_is_in_the_repair_allowlist() -> None:
-    """The half that genuinely needs db_bootstrap."""
-    assert "lcm_teams" in db_bootstrap._KNOWN_FEATURE_TABLE_PREFIXES
+def test_the_family_prefix_is_not_in_the_interim_repair_allowlist() -> None:
+    """Old code must not downgrade a Teams schema it cannot verify exactly."""
+    assert "lcm_teams" not in db_bootstrap._KNOWN_FEATURE_TABLE_PREFIXES
 
 
 def test_an_unknown_tenant_reads_as_zero_rather_than_raising(
@@ -146,26 +136,34 @@ def test_an_unknown_revision_field_is_refused(store: sqlite3.Connection) -> None
         catalog.bump_revision(store, "tenant-1", "revocation_epoch = 0 --")
 
 
-@_NEEDS_DB_BOOTSTRAP
-def test_a_teams_store_is_still_classified_as_repairable(
-    store: sqlite3.Connection,
-) -> None:
-    """Without the prefix allowlist entry, repair refuses a Teams store.
+def test_unknown_teams_table_refuses_interim_stamp_remediation(tmp_path) -> None:
+    from hermes_lcm.dag import SummaryDAG
+    from hermes_lcm.store import MessageStore
 
-    classify_version_mismatch reads extra tables by family prefix; an
-    unrecognised family means "a newer build owns this database", which is the
-    one answer that stops the repair path running.
-    """
-    db_bootstrap.ensure_metadata_table(store)
-    catalog.ensure_teams_catalog(store)
+    db_path = tmp_path / "future-teams.db"
+    message_store = MessageStore(db_path)
+    dag = SummaryDAG(db_path)
+    dag.close()
+    message_store.close()
 
-    extras = [
-        row[0]
-        for row in store.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        if str(row[0]).startswith("lcm_teams")
-    ]
-    assert extras, "the catalog should have created tables to classify"
-    assert all(
-        any(name.startswith(prefix) for prefix in db_bootstrap._KNOWN_FEATURE_TABLE_PREFIXES)
-        for name in extras
-    )
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("CREATE TABLE lcm_teams_requests_future (request_id TEXT)")
+        future_version = db_bootstrap.SCHEMA_VERSION + 1
+        db_bootstrap.set_schema_version(conn, future_version)
+        conn.commit()
+
+        assert (
+            db_bootstrap.classify_version_mismatch(conn)
+            == db_bootstrap.VERSION_MISMATCH_GENUINELY_NEWER
+        )
+        result = db_bootstrap.remediate_interim_schema_stamp(conn, apply=True)
+        assert result["status"] == "refused"
+        assert result["applied"] is False
+        assert db_bootstrap.read_existing_schema_version(conn) == future_version
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='lcm_teams_requests_future'"
+        ).fetchone() is not None
+    finally:
+        conn.close()

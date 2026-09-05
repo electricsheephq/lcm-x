@@ -146,6 +146,7 @@ from .sqlite_util import (
     _is_sqlite_locked_error,
     _temporary_sqlite_busy_timeout,
 )
+from .scope_storage import _set_teams_enabled, bind_startup_teams_state
 from .store import MessageStore
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 from . import tools as lcm_tools
@@ -793,6 +794,8 @@ class LCMEngine(
                     model=self._assertion_extraction_model(),
                     timeout_seconds=self._assertion_extraction_timeout(),
                 )
+            enabled, _ = bind_startup_teams_state(self._store.connection)
+            _set_teams_enabled(self, enabled)
         except Exception:
             self._close_storage()
             raise
