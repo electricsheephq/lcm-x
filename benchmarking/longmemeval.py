@@ -81,6 +81,8 @@ PREPARED_MANIFEST_SCHEMA_VERSION = 1
 PER_QUESTION_CHECKPOINT_FILENAME = "per_question_checkpoint.jsonl"
 _CHECKPOINT_HEADER_KEY = "__checkpoint_header__"
 _DUMP_HEADER_KEY = "__dump_header__"
+# SQLite sidecars of the embed cache: live state a stray write must never truncate.
+_SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 _CANDIDATE_DUMP_TOP_K = 10
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _IJSON_MIN_VERSION = (3, 2)
@@ -140,6 +142,17 @@ _WHITESPACE_RE = re.compile(r"\s+")
 _STUB_MODEL = "stub-hash-64"
 _STUB_DIM = 64
 EMBED_CACHE_ENV = "LCM_LONGMEMEVAL_EMBED_CACHE"
+CHUNK_EMBEDDING_MODE_ENV = "LCM_LONGMEMEVAL_CHUNK_EMBEDDING_MODE"
+
+
+def _chunk_embedding_mode() -> str:
+    """Return the configured chunk-embedding mode, failing on unknown values."""
+    mode = os.environ.get(CHUNK_EMBEDDING_MODE_ENV, "auto").strip().lower()
+    if mode not in {"auto", "flat", "contextual"}:
+        raise ValueError(
+            f"{CHUNK_EMBEDDING_MODE_ENV} must be one of: auto, flat, contextual"
+        )
+    return mode
 
 
 @dataclass
@@ -475,6 +488,98 @@ def _configured_chunk_binding(provider: str, model: str) -> tuple[str, str]:
     return normalized_provider, default_chunk_model(normalized_provider, model)
 
 
+_PRIVACY_KEYS = (
+    "documents",
+    "changed",
+    "blocked",
+    "queries",
+    "queries_changed",
+    "queries_blocked",
+)
+_PRIVACY_COUNTS = {key: 0 for key in _PRIVACY_KEYS}
+_PRIVACY_QUESTION = {key: 0 for key in _PRIVACY_KEYS}
+
+
+def _reset_privacy_counts() -> None:
+    _PRIVACY_COUNTS.update({key: 0 for key in _PRIVACY_KEYS})
+    _PRIVACY_QUESTION.update({key: 0 for key in _PRIVACY_KEYS})
+
+
+def _attach_privacy_counts(exc: BaseException) -> BaseException:
+    """Attach the current aggregate privacy counts to a policy exception."""
+    if not hasattr(exc, "privacy_counts"):
+        exc.privacy_counts = dict(_PRIVACY_COUNTS)
+    return exc
+
+
+def _record_validator_block(
+    exc: BaseException, *, kind: str, count: int
+) -> BaseException:
+    """Count a dispatch-validator refusal, then attach aggregate counters."""
+    if kind == "document":
+        blocked_key = "blocked"
+    elif kind == "query":
+        blocked_key = "queries_blocked"
+    else:
+        raise ValueError(f"unsupported privacy protection kind: {kind!r}")
+    for counters in (_PRIVACY_COUNTS, _PRIVACY_QUESTION):
+        counters[blocked_key] += count
+    return _attach_privacy_counts(exc)
+
+
+def _protected(
+    text: str,
+    config,
+    *,
+    expected_revision: str | None = None,
+    kind: str = "document",
+    count: bool = True,
+) -> str:
+    """Protect one provider-bound value and record transform outcomes.
+
+    ``count=False`` suppresses total/changed counters only; a policy block is
+    always counted so refusals remain visible even during de-duplication scans.
+    ``blocked`` means documents refused dispatch by either the transform or the
+    dispatch validator (and ``queries_blocked`` is the query equivalent).
+    """
+    if kind not in {"document", "query"}:
+        raise ValueError(f"unsupported privacy protection kind: {kind!r}")
+    _ensure_hermes_lcm_package()
+    from hermes_lcm.ingest_protection import (
+        EmbeddingPrivacyPolicyError,
+        protect_embedding_text,
+    )
+
+    if kind == "document":
+        total_key, changed_key, blocked_key = (
+            "documents",
+            "changed",
+            "blocked",
+        )
+    else:
+        total_key, changed_key, blocked_key = (
+            "queries",
+            "queries_changed",
+            "queries_blocked",
+        )
+    if count:
+        _PRIVACY_COUNTS[total_key] += 1
+        _PRIVACY_QUESTION[total_key] += 1
+    try:
+        protected, _revision, changed = protect_embedding_text(
+            text, config, expected_revision=expected_revision
+        )
+    except EmbeddingPrivacyPolicyError as exc:
+        _PRIVACY_COUNTS[blocked_key] += 1
+        _PRIVACY_QUESTION[blocked_key] += 1
+        _attach_privacy_counts(exc)
+        raise
+    if count and changed:
+        _PRIVACY_COUNTS[changed_key] += 1
+        _PRIVACY_QUESTION[changed_key] += 1
+    return protected
+
+
 def _embedding_privacy_context(
     provider: str, model: str, *, embeddings_enabled: bool = True
 ) -> tuple[Any | None, str | None]:
@@ -563,6 +668,7 @@ class ContentHashEmbeddingCache:
     """
 
     provider_id: str
+    supports_contextualized_grouping = False
 
     def __init__(
         self,
@@ -794,6 +900,52 @@ class ContentHashEmbeddingCache:
 
     def __getattr__(self, name: str):
         return getattr(self._provider, name)
+
+
+def _resolved_chunk_embedding_mode(
+    chunk_provider: Any, *, enforce_cache_guard: bool = True
+) -> str:
+    """Resolve flat/contextual semantics against the unwrapped chunk provider."""
+    requested = _chunk_embedding_mode()
+    underlying = (
+        getattr(chunk_provider, "_provider", chunk_provider)
+        if isinstance(chunk_provider, ContentHashEmbeddingCache)
+        else chunk_provider
+    )
+    supports_contextual = bool(
+        getattr(underlying, "supports_contextualized_grouping", False)
+    ) and callable(getattr(underlying, "embed_chunk_group_batches", None))
+    if requested == "flat":
+        resolved = "flat"
+    elif requested == "contextual":
+        if not supports_contextual:
+            raise ValueError(
+                "contextual chunk embedding requested but the chunk provider does not "
+                "support contextualized grouping"
+            )
+        resolved = "contextual"
+    else:
+        resolved = "contextual" if supports_contextual else "flat"
+    if (
+        resolved == "contextual"
+        and enforce_cache_guard
+        and isinstance(chunk_provider, ContentHashEmbeddingCache)
+    ):
+        raise ValueError(
+            "contextual chunk grouping is not cache-backed: set "
+            "LCM_LONGMEMEVAL_CHUNK_EMBEDDING_MODE=flat or unset "
+            "LCM_LONGMEMEVAL_EMBED_CACHE"
+        )
+    return resolved
+
+
+def _embed_cache_totals(providers: Iterable[Any]) -> tuple[int, int]:
+    """Return process-local cache hit/miss totals, de-duplicated by provider id."""
+    unique = {id(provider): provider for provider in providers}
+    return (
+        sum(int(getattr(provider, "hits", 0)) for provider in unique.values()),
+        sum(int(getattr(provider, "misses", 0)) for provider in unique.values()),
+    )
 
 
 def _maybe_cache_harness_provider(provider, *, provider_name: str):
@@ -1570,12 +1722,45 @@ def prewarm_embedding_cache(
     *,
     progress_every: int = 100,
     progress: Callable[[int], None] | None = None,
+    dry_run: bool = False,
+    changed_manifest: str | os.PathLike | None = None,
+    question_coverage: dict[str, int] | None = None,
 ) -> dict[str, Any]:
-    """Populate all unique ingest document units, skipping already-cached keys."""
+    """Populate all unique ingest document units, skipping already-cached keys.
+
+    ``question_coverage`` (``{"selected": n, "prepared": m}``) says how much of the
+    prepared corpus the caller's question selection covers; the report labels its
+    privacy counters ``privacy_scope: "corpus"`` only when the selection covers every
+    prepared question and ``"partial"`` otherwise. Callers that pass no coverage
+    (library use over an explicit corpus) keep the ``"corpus"`` label.
+    """
+    _reset_privacy_counts()
     if not isinstance(provider, ContentHashEmbeddingCache):
         raise ValueError(f"{EMBED_CACHE_ENV} must be set for prewarm-cache")
     if progress_every <= 0:
         raise ValueError("progress_every must be positive")
+    covers_corpus = True
+    if question_coverage is not None:
+        try:
+            selected_count = int(question_coverage["selected"])
+            prepared_count = int(question_coverage["prepared"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "question_coverage must carry integer 'selected' and 'prepared' counts"
+            ) from exc
+        if selected_count < 0 or prepared_count < 0 or selected_count > prepared_count:
+            raise ValueError(
+                "question_coverage must satisfy 0 <= selected <= prepared "
+                f"(got selected={selected_count}, prepared={prepared_count})"
+            )
+        covers_corpus = selected_count == prepared_count
+    chunk_embedding_mode = _resolved_chunk_embedding_mode(
+        provider, enforce_cache_guard=False
+    )
+    if chunk_embedding_mode == "contextual":
+        raise ValueError(
+            "prewarm-cache populates flat chunk units; contextual mode is not cache-backed"
+        )
     configured_chunk = _configured_chunk_binding(
         provider.provider_id, provider.model_id
     )
@@ -1590,7 +1775,7 @@ def prewarm_embedding_cache(
     )
     if privacy_revision is not None:
         from hermes_lcm.ingest_protection import (
-            protect_embedding_text,
+            EmbeddingPrivacyPolicyError,
             validate_embedding_privacy_dispatch,
         )
 
@@ -1598,48 +1783,123 @@ def prewarm_embedding_cache(
     batch: list[str] = []
     already_cached = 0
     processed = 0
+    would_populate = 0
+    changed_units = 0
+    changed_manifest_path = (
+        Path(changed_manifest) if changed_manifest is not None else None
+    )
+    changed_manifest_file = None
+    if changed_manifest_path is not None:
+        cache_file = provider.cache_path
+        # The cache's SQLite sidecars are live state too: truncating an open -wal
+        # corrupts the journal and truncating a mapped -shm kills the process.
+        guarded_cache_paths = [cache_file] + [
+            Path(f"{cache_file}{suffix}") for suffix in _SQLITE_SIDECAR_SUFFIXES
+        ]
+        for guarded in guarded_cache_paths:
+            aliases_cache = changed_manifest_path.resolve() == guarded.resolve() or (
+                changed_manifest_path.exists()
+                and guarded.exists()
+                and os.path.samefile(changed_manifest_path, guarded)
+            )
+            if aliases_cache:
+                raise ValueError(
+                    "--changed-manifest must not be the embedding cache file or one of "
+                    f"its SQLite sidecars ({', '.join(_SQLITE_SIDECAR_SUFFIXES)}): "
+                    f"opening {changed_manifest_path} for writing would truncate live "
+                    "cache state"
+                )
+        changed_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        changed_manifest_file = changed_manifest_path.open("w", encoding="utf-8")
 
     def flush_batch() -> None:
-        nonlocal already_cached, processed
+        nonlocal already_cached, processed, would_populate
         if not batch:
             return
-        already_cached += provider.cached_count(batch)
+        cached = provider.cached_count(batch)
+        already_cached += cached
         if privacy_revision is not None:
-            validate_embedding_privacy_dispatch(
-                batch,
-                privacy_config,
-                expected_revision=privacy_revision,
-            )
-        provider.embed_documents(batch)
+            try:
+                validate_embedding_privacy_dispatch(
+                    batch,
+                    privacy_config,
+                    expected_revision=privacy_revision,
+                )
+            except EmbeddingPrivacyPolicyError as exc:
+                raise _record_validator_block(
+                    exc, kind="document", count=len(batch)
+                )
+        if dry_run:
+            would_populate += len(batch) - cached
+        else:
+            provider.embed_documents(batch)
         processed += len(batch)
         if progress is not None:
             progress(processed)
         batch.clear()
 
-    for question in questions:
-        for text in iter_ingest_embedding_request_units(question):
-            if privacy_revision is not None:
-                text = protect_embedding_text(
-                    text,
-                    privacy_config,
-                    expected_revision=privacy_revision,
-                )[0]
-            digest = provider.content_sha256(text)
-            if digest in seen:
-                continue
-            seen.add(digest)
-            batch.append(text)
-            if len(batch) == progress_every:
-                flush_batch()
-    flush_batch()
-    return {
+    try:
+        for question in questions:
+            for unit_index, raw_text in enumerate(
+                iter_ingest_embedding_request_units(question)
+            ):
+                text = raw_text
+                if privacy_revision is not None:
+                    text = _protected(
+                        raw_text,
+                        privacy_config,
+                        expected_revision=privacy_revision,
+                    )
+                if text != raw_text:
+                    changed_units += 1
+                    if changed_manifest_file is not None:
+                        changed_manifest_file.write(
+                            json.dumps(
+                                {
+                                    "question_id": question.question_id,
+                                    "unit_index": unit_index,
+                                    "raw_sha256": provider.content_sha256(raw_text),
+                                    "protected_sha256": provider.content_sha256(text),
+                                },
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            )
+                            + "\n"
+                        )
+                digest = provider.content_sha256(text)
+                if digest in seen:
+                    continue
+                seen.add(digest)
+                batch.append(text)
+                if len(batch) == progress_every:
+                    flush_batch()
+        flush_batch()
+    finally:
+        if changed_manifest_file is not None:
+            changed_manifest_file.close()
+    report: dict[str, Any] = {
         "provider": provider.provider_id,
         "model": provider.model_id,
         "cache_path": str(provider.cache_path),
         "unique_request_units": len(seen),
         "already_cached": already_cached,
-        "populated": len(seen) - already_cached,
+        "populated": 0 if dry_run else len(seen) - already_cached,
+        "dry_run": dry_run,
+        "would_populate": would_populate,
+        "chunk_embedding_mode": chunk_embedding_mode,
+        "changed_manifest": (
+            str(changed_manifest_path) if changed_manifest_path is not None else None
+        ),
+        "changed_units": changed_units,
+        "privacy": dict(_PRIVACY_COUNTS),
+        "privacy_scope": "corpus" if covers_corpus else "partial",
     }
+    if question_coverage is not None:
+        report["question_coverage"] = {
+            "selected": selected_count,
+            "prepared": prepared_count,
+        }
+    return report
 
 
 def embedding_determinism_report(
@@ -1650,45 +1910,83 @@ def embedding_determinism_report(
     seed: int = 0,
 ) -> dict[str, Any]:
     """Embed random unique session summaries twice and compare float bits."""
+    _reset_privacy_counts()
     if sample_size <= 0:
         raise ValueError("sample_size must be positive")
-    privacy_config, privacy_revision = _embedding_privacy_context(
+    # The probe embeds through the summary identity only. Its chunk_embedding_mode
+    # may only describe the provider the run will actually use for chunks, so it is
+    # resolved on this provider solely when the production chunk identity IS the
+    # summary identity (the registered row: voyage-context-3 maps to itself);
+    # otherwise the field is null and the split is recorded, never guessed.
+    probe_identity = (
         str(getattr(provider, "provider_id", "")),
         str(getattr(provider, "model_id", "")),
+    )
+    configured_chunk = _configured_chunk_binding(*probe_identity)
+    chunk_identity_matches_summary = configured_chunk == probe_identity
+    chunk_embedding_mode = (
+        _resolved_chunk_embedding_mode(provider)
+        if chunk_identity_matches_summary
+        else None
+    )
+    privacy_config, privacy_revision = _embedding_privacy_context(
+        *probe_identity
     )
     before_dispatch = None
     if privacy_revision is not None:
         from hermes_lcm.ingest_protection import (
-            protect_embedding_text,
+            EmbeddingPrivacyPolicyError,
             validate_embedding_privacy_dispatch,
         )
 
         def before_dispatch(texts: Sequence[str]) -> None:
-            validate_embedding_privacy_dispatch(
-                texts,
-                privacy_config,
-                expected_revision=privacy_revision,
-            )
-
-    unique: dict[str, str] = {}
-    for question in questions:
-        for session in question.haystack_sessions:
-            text = deterministic_session_summary(session)
-            if privacy_revision is not None:
-                text = protect_embedding_text(
-                    text,
+            try:
+                validate_embedding_privacy_dispatch(
+                    texts,
                     privacy_config,
                     expected_revision=privacy_revision,
-                )[0]
+                )
+            except EmbeddingPrivacyPolicyError as exc:
+                raise _record_validator_block(
+                    exc, kind="document", count=len(texts)
+                )
+
+    unique: dict[str, str] = {}
+    unique_raw: dict[str, str] = {}
+    for question in questions:
+        for session in question.haystack_sessions:
+            raw = deterministic_session_summary(session)
+            text = raw
+            if privacy_revision is not None:
+                text = _protected(
+                    raw,
+                    privacy_config,
+                    expected_revision=privacy_revision,
+                    count=False,
+                )
             digest = ContentHashEmbeddingCache.content_sha256(text)
             unique.setdefault(digest, text)
+            unique_raw.setdefault(digest, raw)
     if len(unique) < sample_size:
         raise ValueError(
             f"determinism probe needs {sample_size} unique sessions; found {len(unique)}"
         )
 
     sampled_digests = random.Random(seed).sample(list(unique), sample_size)
-    sampled_texts = [unique[digest] for digest in sampled_digests]
+    sampled_texts: list[str] = []
+    for digest in sampled_digests:
+        if privacy_revision is None:
+            sampled_texts.append(unique[digest])
+            continue
+        protected = _protected(
+            unique_raw[digest],
+            privacy_config,
+            expected_revision=privacy_revision,
+            count=True,
+        )
+        if protected != unique[digest]:
+            raise ValueError("determinism probe privacy protection is not deterministic")
+        sampled_texts.append(protected)
     first = _embed_in_batches(
         provider, sampled_texts, before_dispatch=before_dispatch
     )
@@ -1721,6 +2019,14 @@ def embedding_determinism_report(
         "bitwise_identical_count": identical,
         "non_identical_count": sample_size - identical,
         "max_abs_diff": max_abs_diff,
+        "chunk_embedding_mode": chunk_embedding_mode,
+        "chunk_identity": {
+            "summary": list(probe_identity),
+            "chunk": list(configured_chunk),
+            "matches_summary": chunk_identity_matches_summary,
+        },
+        "privacy": dict(_PRIVACY_COUNTS),
+        "privacy_scope": "sample",
     }
 
 
@@ -2246,16 +2552,19 @@ def rerank_sessions_voyage(
         # Production protects rerank payloads under the embedding-privacy
         # resolution (#371); the harness mirrors it — only the provider-bound
         # copies are transformed, ordering still applies to the originals.
-        _ensure_hermes_lcm_package()
-        from hermes_lcm.ingest_protection import protect_embedding_text
-
-        query = protect_embedding_text(
-            query, privacy_config, expected_revision=privacy_revision
-        )[0]
+        query = _protected(
+            query,
+            privacy_config,
+            expected_revision=privacy_revision,
+            kind="query",
+        )
         documents = [
-            protect_embedding_text(
-                doc, privacy_config, expected_revision=privacy_revision
-            )[0]
+            _protected(
+                doc,
+                privacy_config,
+                expected_revision=privacy_revision,
+                kind="document",
+            )
             for doc in documents
         ]
     try:
@@ -2344,6 +2653,7 @@ def evaluate_question(
     ``session_granularity`` flag. ``ingest_ms`` (per-question ingest wall time) and,
     for ``hybrid_rerank``, ``rerank_mode`` ride alongside for aggregation.
     """
+    _PRIVACY_QUESTION.update({key: 0 for key in _PRIVACY_KEYS})
     _ensure_hermes_lcm_package()
     from hermes_lcm.chunking import group_by_store_id, iter_message_chunks
     from hermes_lcm.config import LCMConfig
@@ -2361,6 +2671,9 @@ def evaluate_question(
         )
     summary_provider = provider_embedder
     chunk_provider = chunk_provider or summary_provider
+    cache_start_hits, cache_start_misses = _embed_cache_totals(
+        (summary_provider, chunk_provider)
+    )
     summary_name, model = _provider_binding(summary_provider, provider_name, "")
     chunk_name, chunk_model = _provider_binding(
         chunk_provider, summary_name, default_chunk_model(summary_name, model)
@@ -2402,9 +2715,9 @@ def evaluate_question(
         else chunk_provider
     )
     from hermes_lcm.ingest_protection import (
+        EmbeddingPrivacyPolicyError,
         embedding_privacy_revision,
         embedding_provider_requires_privacy,
-        protect_embedding_text,
         validate_embedding_privacy_dispatch,
     )
 
@@ -2447,11 +2760,10 @@ def evaluate_question(
     summary_specs: list[tuple[str, int, str]] = []  # (session_id, node_id, summary_text)
     chunk_items: list[Any] = []
     flat_chunk_batch: list[Any] = []
-    grouping_target = chunk_provider
-    supports_grouping = bool(
-        embeddings_enabled
-        and getattr(grouping_target, "supports_contextualized_grouping", False)
-    ) and callable(getattr(grouping_target, "embed_chunk_group_batches", None))
+    chunk_embedding_mode = (
+        _resolved_chunk_embedding_mode(chunk_provider) if embeddings_enabled else "none"
+    )
+    supports_grouping = embeddings_enabled and chunk_embedding_mode == "contextual"
     flat_chunk_batch_size = max(1, int(embedding_batch_size or 1))
     try:
         if embeddings_enabled:
@@ -2495,20 +2807,25 @@ def evaluate_question(
             before_dispatch = None
             if chunk_revision is not None:
                 chunk_texts = [
-                    protect_embedding_text(
+                    _protected(
                         text,
                         config,
                         expected_revision=chunk_revision,
-                    )[0]
+                    )
                     for text in chunk_texts
                 ]
 
                 def before_dispatch(texts: Sequence[str]) -> None:
-                    validate_embedding_privacy_dispatch(
-                        texts,
-                        config,
-                        expected_revision=chunk_revision,
-                    )
+                    try:
+                        validate_embedding_privacy_dispatch(
+                            texts,
+                            config,
+                            expected_revision=chunk_revision,
+                        )
+                    except EmbeddingPrivacyPolicyError as exc:
+                        raise _record_validator_block(
+                            exc, kind="document", count=len(texts)
+                        )
 
             vectors = _embed_in_batches(
                 chunk_documents_provider,
@@ -2589,20 +2906,25 @@ def evaluate_question(
             contextual_before_dispatch = None
             if chunk_revision is not None:
                 chunk_texts = [
-                    protect_embedding_text(
+                    _protected(
                         text,
                         config,
                         expected_revision=chunk_revision,
-                    )[0]
+                    )
                     for text in chunk_texts
                 ]
 
                 def contextual_before_dispatch(indexes: Sequence[int]) -> None:
-                    validate_embedding_privacy_dispatch(
-                        [chunk_texts[int(index)] for index in indexes],
-                        config,
-                        expected_revision=chunk_revision,
-                    )
+                    try:
+                        validate_embedding_privacy_dispatch(
+                            [chunk_texts[int(index)] for index in indexes],
+                            config,
+                            expected_revision=chunk_revision,
+                        )
+                    except EmbeddingPrivacyPolicyError as exc:
+                        raise _record_validator_block(
+                            exc, kind="document", count=len(indexes)
+                        )
 
             groups = [
                 [(index, chunk_texts[index]) for index in group]
@@ -2653,20 +2975,25 @@ def evaluate_question(
             summary_before_dispatch = None
             if summary_revision is not None:
                 summary_texts = [
-                    protect_embedding_text(
+                    _protected(
                         text,
                         config,
                         expected_revision=summary_revision,
-                    )[0]
+                    )
                     for text in summary_texts
                 ]
 
                 def summary_before_dispatch(texts: Sequence[str]) -> None:
-                    validate_embedding_privacy_dispatch(
-                        texts,
-                        config,
-                        expected_revision=summary_revision,
-                    )
+                    try:
+                        validate_embedding_privacy_dispatch(
+                            texts,
+                            config,
+                            expected_revision=summary_revision,
+                        )
+                    except EmbeddingPrivacyPolicyError as exc:
+                        raise _record_validator_block(
+                            exc, kind="document", count=len(texts)
+                        )
 
             summary_vectors = _embed_in_batches(
                 summary_documents_provider,
@@ -2685,16 +3012,20 @@ def evaluate_question(
         relevant_turns = evidence_turns(question)
         summary_query = str(question.question)
         if summary_revision is not None:
-            summary_query = protect_embedding_text(
+            summary_query = _protected(
                 summary_query,
                 config,
                 expected_revision=summary_revision,
-            )[0]
-            validate_embedding_privacy_dispatch(
-                [summary_query],
-                config,
-                expected_revision=summary_revision,
+                kind="query",
             )
+            try:
+                validate_embedding_privacy_dispatch(
+                    [summary_query],
+                    config,
+                    expected_revision=summary_revision,
+                )
+            except EmbeddingPrivacyPolicyError as exc:
+                raise _record_validator_block(exc, kind="query", count=1)
         query_vec = (
             harness_query_provider.embed_query(summary_query)
             if embeddings_enabled
@@ -2762,16 +3093,20 @@ def evaluate_question(
             else:
                 chunk_query = str(question.question)
                 if chunk_revision is not None:
-                    chunk_query = protect_embedding_text(
+                    chunk_query = _protected(
                         chunk_query,
                         config,
                         expected_revision=chunk_revision,
-                    )[0]
-                    validate_embedding_privacy_dispatch(
-                        [chunk_query],
-                        config,
-                        expected_revision=chunk_revision,
+                        kind="query",
                     )
+                    try:
+                        validate_embedding_privacy_dispatch(
+                            [chunk_query],
+                            config,
+                            expected_revision=chunk_revision,
+                        )
+                    except EmbeddingPrivacyPolicyError as exc:
+                        raise _record_validator_block(exc, kind="query", count=1)
                 chunk_query_vec = harness_chunk_query_provider.embed_query(chunk_query)
             chunk_raw, chunk_ms = _timed(
                 lambda: chunk_hits(
@@ -2864,6 +3199,43 @@ def evaluate_question(
                     recall_rerank_scores
                 )
             scored["_candidate_rankings"] = candidate_rankings
+        store_connection = store.connection
+        dag_connection = dag.connection
+        messages_count = int(
+            store_connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        ) if store_connection is not None else 0
+        summary_nodes_count = int(
+            dag_connection.execute("SELECT COUNT(*) FROM summary_nodes").fetchone()[0]
+        ) if dag_connection is not None else 0
+        chunks_count = 0
+        vector_connection = vector_store.connection
+        if vector_connection is not None:
+            try:
+                chunks_count = int(
+                    vector_connection.execute(
+                        "SELECT COUNT(*) FROM lcm_chunk_meta"
+                    ).fetchone()[0]
+                )
+            except sqlite3.OperationalError as exc:
+                # Chunk tables are lazy and absent when the chunk arm is disabled
+                # or no chunk rows were emitted for this question.
+                if "no such table" not in str(exc).lower():
+                    raise
+                chunks_count = 0
+        scored["chunk_embedding_mode"] = chunk_embedding_mode
+        scored["privacy"] = dict(_PRIVACY_QUESTION)
+        scored["corpus_counts"] = {
+            "messages": messages_count,
+            "summary_nodes": summary_nodes_count,
+            "chunks": chunks_count,
+        }
+        cache_end_hits, cache_end_misses = _embed_cache_totals(
+            (summary_provider, chunk_provider)
+        )
+        scored["embed_cache"] = {
+            "hits": cache_end_hits - cache_start_hits,
+            "misses": cache_end_misses - cache_start_misses,
+        }
         return scored
     finally:
         vector_store.close()
@@ -3215,6 +3587,7 @@ def _load_question_checkpoint(
         _validate_restored_checkpoint_metrics(
             record, line_number=index + 1, path=path, recall_rerank=recall_rerank
         )
+        _validate_restored_corpus_counts(record, line_number=index + 1, path=path)
         seen.add(question_id)
         records.append(record)
         offset += len(raw_line)
@@ -3312,32 +3685,233 @@ def _validate_restored_checkpoint_metrics(
             )
 
 
+_CORPUS_COUNT_KEYS = ("messages", "summary_nodes", "chunks")
+
+
+def _validate_restored_corpus_counts(
+    record: dict[str, Any], *, line_number: int, path: Path
+) -> None:
+    """Validate a restored per-question ``corpus_counts`` (the forward baseline).
+
+    A row without the field, or with an explicit null, is a legacy row: it
+    restores unchanged and the recompute reports its counts as unavailable,
+    never as zeros. A present value must be exactly the three non-negative
+    integer counters — a malformed value would otherwise re-enter the record
+    silently, and these rows ARE the record for the forward baseline.
+    """
+    if "corpus_counts" not in record or record["corpus_counts"] is None:
+        return
+    counts = record["corpus_counts"]
+    if not isinstance(counts, dict) or set(counts) != set(_CORPUS_COUNT_KEYS):
+        raise ValueError(
+            f"checkpoint line {line_number} field corpus_counts must be an object with "
+            f"exactly the keys {list(_CORPUS_COUNT_KEYS)}: {path}"
+        )
+    for key in _CORPUS_COUNT_KEYS:
+        value = counts[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(
+                f"checkpoint line {line_number} field corpus_counts.{key} must be a "
+                f"non-negative integer: {path}"
+            )
+
+
+def _annotate_privacy_block(exc: BaseException, question: Question) -> None:
+    """Bind a run-time privacy refusal to its question for the CLI's receipt."""
+    try:
+        from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
+    except ImportError:
+        return
+    if not isinstance(exc, EmbeddingPrivacyPolicyError):
+        return
+    if not hasattr(exc, "question_id"):
+        exc.question_id = question.question_id
+    if not hasattr(exc, "question_privacy"):
+        exc.question_privacy = dict(_PRIVACY_QUESTION)
+
+
 def _question_checkpoint_record(
-    question: Question, scored: dict[str, Any] | None
+    question: Question,
+    scored: dict[str, Any] | None,
+    *,
+    chunk_embedding_mode: str | None = None,
+    embed_cache_enabled: bool | None = None,
 ) -> dict[str, Any]:
+    zero_privacy = {key: 0 for key in _PRIVACY_KEYS}
     if scored is None:
-        return {
+        record = {
             "question_id": question.question_id,
             "category": question.category,
             "abstention": True,
             "rerank_mode": None,
             "ingest_ms": 0.0,
+            "privacy": zero_privacy,
+            "corpus_counts": {"messages": 0, "summary_nodes": 0, "chunks": 0},
+            "embed_cache": {"hits": 0, "misses": 0},
             "arms": {},
         }
+        if chunk_embedding_mode is not None:
+            record["chunk_embedding_mode"] = chunk_embedding_mode
+        if embed_cache_enabled is not None:
+            record["embed_cache_enabled"] = embed_cache_enabled
+        return record
     checkpoint_scored = copy.deepcopy(scored)
     checkpoint_scored.pop("_candidate_rankings", None)
+    scored_chunk_embedding_mode = checkpoint_scored.pop(
+        "chunk_embedding_mode", chunk_embedding_mode
+    )
     ingest_ms = checkpoint_scored.pop("ingest_ms", 0.0)
+    privacy = checkpoint_scored.pop(
+        "privacy", zero_privacy
+    )
+    corpus_counts = checkpoint_scored.pop(
+        "corpus_counts", {"messages": 0, "summary_nodes": 0, "chunks": 0}
+    )
+    embed_cache = checkpoint_scored.pop(
+        "embed_cache", {"hits": 0, "misses": 0}
+    )
     rerank_mode = checkpoint_scored["hybrid_rerank"].pop(
         "rerank_mode", RERANK_MODE_PLACEHOLDER
     )
-    return {
+    record = {
         "question_id": question.question_id,
         "category": question.category,
         "abstention": False,
         "rerank_mode": rerank_mode,
         "ingest_ms": ingest_ms,
+        "privacy": privacy,
+        "corpus_counts": corpus_counts,
+        "embed_cache": embed_cache,
         "arms": checkpoint_scored,
     }
+    if scored_chunk_embedding_mode is not None:
+        record["chunk_embedding_mode"] = scored_chunk_embedding_mode
+    if embed_cache_enabled is not None:
+        record["embed_cache_enabled"] = embed_cache_enabled
+    return record
+
+
+def _reconcile_embed_cache_posture(
+    records: Iterable[dict[str, Any]],
+    *,
+    live_embed_cache_enabled: bool,
+    fully_completed_resume: bool,
+    restored_embed_cache: dict[str, int],
+) -> bool:
+    """Bind a resume to the cache posture its rows were written under.
+
+    Every current-format row carries ``embed_cache_enabled``. A partial resume must
+    match the live posture row by row -- refused here, before any provider resolves,
+    so no spend occurs and a shard can never mix cached and uncached rows (a cached
+    checkpoint holding only zero-traffic rows is indistinguishable from an uncached
+    one by its counters alone). A completed resume reports the aggregate
+    ``ingest.embed_cache`` whenever the rows say a cache was in play, even at zero
+    traffic. Marker-less legacy rows fall back to the traffic heuristic (non-zero
+    restored traffic proves a cache); they can never partially resume because the
+    chunk-mode check refuses them.
+
+    Returns whether the restored rows were produced under an embed cache.
+    """
+    markers: set[bool | None] = set()
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        question_id = record.get("question_id", "?")
+        marker = record.get("embed_cache_enabled")
+        if marker is not None and not isinstance(marker, bool):
+            raise ValueError(
+                f"checkpoint row {question_id}: malformed embed_cache_enabled={marker!r}"
+            )
+        if not fully_completed_resume:
+            if marker is None:
+                raise ValueError(
+                    f"checkpoint row {question_id}: missing embed_cache_enabled; rows "
+                    "written before this instrument cannot be partially resumed -- "
+                    "start a fresh output root"
+                )
+            if marker != live_embed_cache_enabled:
+                raise ValueError(
+                    f"checkpoint row {question_id}: embed_cache_enabled={marker!r} but "
+                    f"the resumed run has {EMBED_CACHE_ENV} "
+                    f"{'set' if live_embed_cache_enabled else 'unset'}; resume under "
+                    "the same cache posture or start a fresh --output"
+                )
+        markers.add(marker)
+    if len(markers) > 1:
+        raise ValueError(
+            "checkpoint rows mix embed-cache postures: embed_cache_enabled values "
+            f"{sorted(markers, key=repr)!r}"
+        )
+    if markers == {True}:
+        return True
+    if markers == {False}:
+        return False
+    return restored_embed_cache["hits"] > 0 or restored_embed_cache["misses"] > 0
+
+
+def _restore_privacy_counts(records: Iterable[dict[str, Any]]) -> None:
+    """Restore additive privacy totals from old or new checkpoint rows."""
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        question_id = record.get("question_id", "?")
+        if "privacy" not in record or record["privacy"] is None:
+            continue
+        privacy = record["privacy"]
+        if not isinstance(privacy, dict):
+            raise ValueError(
+                f"checkpoint row {question_id}: malformed privacy={privacy!r}"
+            )
+        for key in _PRIVACY_KEYS:
+            value = privacy.get(key, 0)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(
+                    f"checkpoint row {question_id}: malformed privacy.{key}={value!r}"
+                )
+        # A present object is either a pre-r2 row (exactly the three document
+        # counters, restored with zero query counters) or a current row (all six).
+        # Anything else is a partial object whose missing keys would silently
+        # restore as zeros -- these totals are row-level evidence, so fail closed.
+        keys = set(privacy)
+        if keys != set(_PRIVACY_KEYS) and keys != set(_PRIVACY_KEYS[:3]):
+            raise ValueError(
+                f"checkpoint row {question_id}: privacy must carry exactly the legacy "
+                f"three document counters or all six counters, got {sorted(keys)!r}"
+            )
+        for key in _PRIVACY_KEYS:
+            _PRIVACY_COUNTS[key] += privacy.get(key, 0)
+
+
+def _restore_embed_cache_counts(records: Iterable[dict[str, Any]]) -> dict[str, int]:
+    """Restore additive per-question cache totals from old or new checkpoint rows."""
+    totals = {"hits": 0, "misses": 0}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        question_id = record.get("question_id", "?")
+        if "embed_cache" not in record or record["embed_cache"] is None:
+            continue
+        embed_cache = record["embed_cache"]
+        if not isinstance(embed_cache, dict):
+            raise ValueError(
+                f"checkpoint row {question_id}: malformed embed_cache={embed_cache!r}"
+            )
+        for key in totals:
+            value = embed_cache.get(key, 0)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(
+                    f"checkpoint row {question_id}: malformed embed_cache.{key}={value!r}"
+                )
+        # The per-shard cache pair is the sum of these rows: a partial object
+        # would restore a silent zero into the parity evidence.
+        if set(embed_cache) != set(totals):
+            raise ValueError(
+                f"checkpoint row {question_id}: embed_cache must carry exactly the keys "
+                f"{sorted(totals)!r}, got {sorted(embed_cache)!r}"
+            )
+        for key in totals:
+            totals[key] += embed_cache[key]
+    return totals
 
 
 def _accumulate_question_checkpoint(
@@ -3431,6 +4005,7 @@ def run_harness(
     accounting: ProviderAccounting | None = None,
 ) -> dict[str, Any]:
     """Run every arm over every question and return an aggregate-only report."""
+    _reset_privacy_counts()
     dataset_report: dict[str, Any] = dataset_coordinates(dataset_label)
     if source_sha256 is not None:
         if not _SHA256_RE.fullmatch(source_sha256):
@@ -3491,6 +4066,8 @@ def run_harness(
     if resume and checkpoint_path is None:
         raise ValueError("resume=True requires a checkpoint_path")
     checkpoint_records: list[dict[str, Any]] = []
+    restored_embed_cache = {"hits": 0, "misses": 0}
+    restored_embed_cache_active = False
     if checkpoint_path is not None:
         checkpoint_path = Path(checkpoint_path)
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3512,6 +4089,8 @@ def run_harness(
                 selected_question_ids=selected_ids,
                 expected_header=expected_checkpoint_header,
             )
+            _restore_privacy_counts(checkpoint_records)
+            restored_embed_cache = _restore_embed_cache_counts(checkpoint_records)
 
     by_category: dict[str, dict[str, ArmSamples]] = {}
     overall = _new_arm_samples()
@@ -3545,9 +4124,21 @@ def run_harness(
     embed_cache_path = os.environ.get(EMBED_CACHE_ENV)
     if embed_cache_path is not None and not embed_cache_path.strip():
         raise ValueError(f"{EMBED_CACHE_ENV} must be a non-empty SQLite path")
+    live_embed_cache_enabled = embed_cache_path is not None
+    if resume:
+        # Before any provider resolves: a partial resume must match the posture its
+        # rows were written under; a completed one learns from the rows whether the
+        # aggregate cache totals belong in the report.
+        restored_embed_cache_active = _reconcile_embed_cache_posture(
+            checkpoint_records,
+            live_embed_cache_enabled=live_embed_cache_enabled,
+            fully_completed_resume=fully_completed_resume,
+            restored_embed_cache=restored_embed_cache,
+        )
 
     provider_set: HarnessProviderSet | None = None
     db_template: Path | None = None
+    resolved_chunk_embedding_mode: str | None = None
     if not fully_completed_resume:
         if embeddings_enabled:
             provider_set = resolve_harness_providers(
@@ -3569,6 +4160,27 @@ def run_harness(
                 summary_binding=summary_binding,
                 chunk_binding=_configured_chunk_binding(*summary_binding),
             )
+        resolved_chunk_embedding_mode = (
+            _resolved_chunk_embedding_mode(provider_set.chunk)
+            if embeddings_enabled
+            else "none"
+        )
+        if resume:
+            for record in checkpoint_records:
+                question_id = record["question_id"]
+                if "chunk_embedding_mode" not in record:
+                    raise ValueError(
+                        f"checkpoint row {question_id}: missing chunk_embedding_mode; "
+                        "rows written before this instrument cannot be partially "
+                        "resumed — start a fresh output root"
+                    )
+                recorded_mode = record["chunk_embedding_mode"]
+                if recorded_mode != resolved_chunk_embedding_mode:
+                    raise ValueError(
+                        f"checkpoint row {question_id}: "
+                        f"chunk_embedding_mode={recorded_mode!r} but the resumed run "
+                        f"resolves {resolved_chunk_embedding_mode!r}"
+                    )
         if reuse_db_template:
             _ensure_hermes_lcm_package()
             from hermes_lcm.config import LCMConfig
@@ -3683,7 +4295,12 @@ def run_harness(
                         raise RuntimeError(
                             "candidate dump rankings were not returned for a scored question"
                         )
-                record = _question_checkpoint_record(question, scored)
+                record = _question_checkpoint_record(
+                    question,
+                    scored,
+                    chunk_embedding_mode=resolved_chunk_embedding_mode,
+                    embed_cache_enabled=live_embed_cache_enabled,
+                )
                 scored_delta, abstention_delta = _accumulate_question_checkpoint(
                     record,
                     by_category=by_category,
@@ -3711,6 +4328,13 @@ def run_harness(
                     )
                 if checkpoint_file is not None:
                     _write_checkpoint_record(checkpoint_file, record)
+            except Exception as exc:
+                # A run-time privacy refusal (query texts are protected only
+                # here, never by the prewarm dry run) leaves this question
+                # without a row; bind it to the question so the CLI can emit a
+                # structured receipt instead of a bare traceback.
+                _annotate_privacy_block(exc, question)
+                raise
             finally:
                 _cleanup_question_db(tmp_dir, question.question_id)
     finally:
@@ -3731,22 +4355,70 @@ def run_harness(
             f"question count mismatch: expected {question_count}, consumed {consumed_count}"
         )
 
+    if resolved_chunk_embedding_mode is None:
+        # Every restored row takes part in the reconciliation (a row without the key
+        # reads as None): exactly one recognized value labels the report with that
+        # mode; rows that all lack the key are a legacy checkpoint ("unknown"); any
+        # other shape -- a legacy/current mix, mixed modes, or an unrecognized value
+        # -- is refused here, before any provider is resolved.
+        recognized_modes = {"flat", "contextual", "none"}
+        recorded_modes = {
+            record.get("chunk_embedding_mode") for record in checkpoint_records
+        }
+        if len(recorded_modes) == 1 and recorded_modes <= recognized_modes:
+            resolved_chunk_embedding_mode = recorded_modes.pop()
+        elif recorded_modes == {None}:
+            if not fully_completed_resume:
+                raise ValueError(
+                    "checkpoint rows carry no chunk_embedding_mode and the resume "
+                    "is not fully completed"
+                )
+            resolved_chunk_embedding_mode = "unknown"
+        elif None in recorded_modes:
+            present = sorted(
+                mode for mode in recorded_modes if mode is not None
+            )
+            raise ValueError(
+                "checkpoint rows mix legacy rows without chunk_embedding_mode and "
+                f"rows carrying chunk_embedding_mode values {present!r}"
+            )
+        elif recorded_modes <= recognized_modes:
+            raise ValueError("checkpoint rows contain mixed chunk embedding modes")
+        else:
+            raise ValueError(
+                "checkpoint rows carry unrecognized chunk_embedding_mode values: "
+                f"{sorted(recorded_modes - recognized_modes, key=repr)!r}"
+            )
+
     ingest_report: dict[str, Any] = {
         "batched_embeddings": embeddings_enabled,
+        "chunk_embedding_mode": resolved_chunk_embedding_mode,
         "reuse_db_template": reuse_db_template,
         "per_question_ms": percentiles(ingest_samples),
+        "privacy": dict(_PRIVACY_COUNTS),
     }
     if dataset_label == "m" or manifest_sha256 is not None:
         ingest_report["embedding_batch_size"] = effective_embedding_batch_size
-    if embed_cache_path is not None:
-        resolved_providers = (
+    # A fully completed resume constructs no provider, so its report follows the
+    # rows' posture EXCLUSIVELY (their embed_cache_enabled marker; traffic heuristic
+    # for legacy rows) -- the live env is neither required nor trusted for it, in
+    # either direction. Otherwise the live posture decides; a partial resume under a
+    # different posture was refused above, so the sum never mixes cached and
+    # uncached rows.
+    report_embed_cache = (
+        restored_embed_cache_active
+        if fully_completed_resume
+        else embed_cache_path is not None
+    )
+    if report_embed_cache:
+        live_cache_hits, live_cache_misses = _embed_cache_totals(
             ()
-            if provider_set is None
-            else tuple({id(item): item for item in (provider_set.summary, provider_set.chunk)}.values())
+            if provider_set is None or embed_cache_path is None
+            else (provider_set.summary, provider_set.chunk)
         )
         ingest_report["embed_cache"] = {
-            "hits": sum(int(getattr(item, "hits", 0)) for item in resolved_providers),
-            "misses": sum(int(getattr(item, "misses", 0)) for item in resolved_providers),
+            "hits": restored_embed_cache["hits"] + live_cache_hits,
+            "misses": restored_embed_cache["misses"] + live_cache_misses,
         }
 
     report = {

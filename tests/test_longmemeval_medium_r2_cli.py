@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import benchmarking.longmemeval as lme
+from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
 from tests.conftest import load_cli as _load_cli
 
 
@@ -180,3 +181,221 @@ def test_direct_dataset_digest_change_fails_closed_on_resume(tmp_path):
 
     with pytest.raises(SystemExit, match=r"configuration mismatch.*source_sha256"):
         cli.main([*base_args, "--resume"])
+
+
+def test_prewarm_privacy_block_is_a_durable_cli_report(tmp_path, monkeypatch, capsys):
+    cli = _load_cli()
+    monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "cache.sqlite3"))
+    monkeypatch.setattr(cli, "_prepared_shard_questions", lambda _args: iter(()))
+    monkeypatch.setattr(cli, "resolve_harness_provider", lambda *_args, **_kwargs: object())
+
+    def _blocked(*_args, **_kwargs):
+        error = EmbeddingPrivacyPolicyError("privacy policy blocked dispatch")
+        error.privacy_counts = {
+            "documents": 1,
+            "changed": 0,
+            "blocked": 1,
+            "queries": 0,
+            "queries_changed": 0,
+            "queries_blocked": 0,
+        }
+        raise error
+
+    monkeypatch.setattr(cli, "prewarm_embedding_cache", _blocked)
+    result = cli.main(
+        [
+            "prewarm-cache",
+            "--prepared-dir",
+            str(tmp_path / "prepared"),
+            "--shards-manifest",
+            str(tmp_path / "shards"),
+            "--model",
+            "voyage-context-4",
+        ]
+    )
+
+    assert result == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "blocked"
+    assert payload["privacy"]["blocked"] == 1
+
+
+def test_prewarm_progress_goes_to_stderr_and_stdout_is_one_json_object(
+    tmp_path, monkeypatch, capsys
+):
+    cli = _load_cli()
+    monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "cache.sqlite3"))
+    monkeypatch.setattr(cli, "_prepared_shard_questions", lambda _args: iter(()))
+    monkeypatch.setattr(cli, "resolve_harness_provider", lambda *_args, **_kwargs: object())
+
+    def _prewarm(*_args, progress=None, **_kwargs):
+        progress(100)
+        progress(200)
+        return {"populated": 0, "already_cached": 200, "unique_request_units": 200}
+
+    monkeypatch.setattr(cli, "prewarm_embedding_cache", _prewarm)
+    result = cli.main(
+        [
+            "prewarm-cache",
+            "--prepared-dir",
+            str(tmp_path / "prepared"),
+            "--shards-manifest",
+            str(tmp_path / "shards"),
+            "--model",
+            "voyage-context-4",
+        ]
+    )
+
+    assert result == 0
+    captured = capsys.readouterr()
+    # The whole stdout stream is ONE JSON object a gate can json.loads().
+    payload = json.loads(captured.out)
+    assert payload["populated"] == 0
+    assert "prewarm processed=100" in captured.err
+    assert "prewarm processed=" not in captured.out
+
+
+def test_run_privacy_block_report_carries_question_id_and_row_counters(tmp_path):
+    cli = _load_cli()
+    error = EmbeddingPrivacyPolicyError("privacy policy blocked query dispatch")
+    error.question_id = "q-blocked"
+    error.question_privacy = {
+        "documents": 3,
+        "changed": 0,
+        "blocked": 0,
+        "queries": 1,
+        "queries_changed": 0,
+        "queries_blocked": 1,
+    }
+    checkpoint = tmp_path / "per_question_checkpoint.jsonl"
+    # The header exists: the harness wrote it before the blocked question ran.
+    checkpoint.write_text(
+        json.dumps({"__checkpoint_header__": {"bindings": {}}}) + "\n", encoding="utf-8"
+    )
+    report = cli._run_privacy_block_report(error, checkpoint_path=checkpoint)
+    assert report["status"] == "blocked"
+    assert report["question_id"] == "q-blocked"
+    assert report["privacy"]["queries_blocked"] == 1
+    assert report["checkpoint"] == str(checkpoint)
+    assert report["resumable"] is True
+    assert "blocked query dispatch" in report["error"]
+    # Only privacy refusals become receipts; everything else keeps its path.
+    assert cli._run_privacy_block_report(ValueError("not privacy"), checkpoint_path=checkpoint) is None
+
+
+def test_run_privacy_block_report_is_not_resumable_before_the_header_exists(tmp_path):
+    """A refusal raised before the checkpoint header is written (policy resolution,
+    provider/template initialization) must not advertise a --resume that fails."""
+    cli = _load_cli()
+    error = EmbeddingPrivacyPolicyError("privacy policy blocked dispatch")
+    missing = tmp_path / "missing" / "per_question_checkpoint.jsonl"
+    report = cli._run_privacy_block_report(error, checkpoint_path=missing)
+    assert report["status"] == "blocked"
+    assert report["resumable"] is False
+    assert report["checkpoint"] is None
+    assert set(report) == {"status", "question_id", "privacy", "checkpoint", "resumable", "error"}
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    assert cli._run_privacy_block_report(error, checkpoint_path=empty)["resumable"] is False
+    rowless = tmp_path / "no-header.jsonl"
+    rowless.write_text(json.dumps({"question_id": "q1"}) + "\n", encoding="utf-8")
+    assert cli._run_privacy_block_report(error, checkpoint_path=rowless)["resumable"] is False
+    with_header = tmp_path / "with-header.jsonl"
+    with_header.write_text(json.dumps({"__checkpoint_header__": {}}) + "\n", encoding="utf-8")
+    resumable = cli._run_privacy_block_report(error, checkpoint_path=with_header)
+    assert resumable["resumable"] is True
+    assert resumable["checkpoint"] == str(with_header)
+
+
+def test_dispatch_validator_block_report_contains_all_privacy_keys(tmp_path, monkeypatch, capsys):
+    cli = _load_cli()
+    monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "cache.sqlite3"))
+    question = lme.Question(
+        question_id="q-dispatch-block",
+        question_type="single-session-user",
+        question="what was said?",
+        haystack_session_ids=["s0"],
+        haystack_sessions=[[{"role": "user", "content": "ordinary text"}]],
+        answer_session_ids=["s0"],
+    )
+    monkeypatch.setattr(cli, "_prepared_shard_questions", lambda _args: iter([question]))
+    monkeypatch.setattr(
+        lme,
+        "iter_ingest_embedding_request_units",
+        lambda _question: iter(["first", "second", "third"]),
+    )
+    monkeypatch.setattr(
+        cli,
+        "resolve_harness_provider",
+        lambda *_args, **_kwargs: lme.ContentHashEmbeddingCache(
+            lme.StubEmbedder(),
+            tmp_path / "cache.sqlite3",
+            provider_id="voyage",
+            model_id="voyage-context-4",
+        ),
+    )
+    cli._longmemeval._ensure_hermes_lcm_package()
+    from hermes_lcm import ingest_protection
+
+    def _blocked(*_args, **_kwargs):
+        raise EmbeddingPrivacyPolicyError("privacy policy blocked dispatch")
+
+    monkeypatch.setattr(ingest_protection, "validate_embedding_privacy_dispatch", _blocked)
+
+    result = cli.main(
+        [
+            "prewarm-cache",
+            "--prepared-dir",
+            str(tmp_path / "prepared"),
+            "--shards-manifest",
+            str(tmp_path / "shards"),
+            "--model",
+            "voyage-context-4",
+        ]
+    )
+
+    assert result == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "blocked"
+    assert set(payload["privacy"]) == set(lme._PRIVACY_KEYS)
+    assert payload["privacy"]["blocked"] == 3
+
+
+def test_determinism_privacy_block_is_a_durable_cli_report(tmp_path, monkeypatch, capsys):
+    cli = _load_cli()
+    monkeypatch.setattr(cli, "_prepared_shard_questions", lambda _args: iter(()))
+    monkeypatch.setattr(cli, "resolve_harness_provider", lambda *_args, **_kwargs: object())
+
+    def _blocked(*_args, **_kwargs):
+        error = EmbeddingPrivacyPolicyError("privacy policy blocked dispatch")
+        error.privacy_counts = {
+            "documents": 0,
+            "changed": 0,
+            # The probe protects documents only, so `blocked` is the reachable counter.
+            "blocked": 1,
+            "queries": 0,
+            "queries_changed": 0,
+            "queries_blocked": 0,
+        }
+        raise error
+
+    monkeypatch.setattr(cli, "embedding_determinism_report", _blocked)
+    result = cli.main(
+        [
+            "determinism-probe",
+            "--prepared-dir",
+            str(tmp_path / "prepared"),
+            "--shards-manifest",
+            str(tmp_path / "shards"),
+            "--model",
+            "voyage-4-large",
+            "--sample-size",
+            "1",
+        ]
+    )
+
+    assert result == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "blocked"
+    assert payload["privacy"]["blocked"] == 1
+    assert payload["privacy"]["queries_blocked"] == 0
