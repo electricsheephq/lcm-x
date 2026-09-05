@@ -104,7 +104,8 @@ benchmark lanes described in #323.
   before r9 passed; instrument follow-ups K1–K11 on #415). #380 became an owner fork (leave / precision
   fix / opt-out variant); the owner ruled on 2026-09-05 (cloud-copy privacy transform opt-in by default
   → the raw-path re-bank becomes the re-bank of record, registered against the post-flip main; the ruling
-  is recorded in the maintainers' plan of record and lands on #380 with the v0.24.0 train).
+  is recorded in the maintainers' plan of record and lands on #380 with the privacy-flip train, the next
+  minor release).
 - 2026-09-05: plan of record v97 — weekly rc-first cadence with GA on Wednesdays, take-over of the
   co-maintainer queue, the privacy-default change as a versioned train, the Teams enterprise lane
   (evaOS-first, shared-store architecture) and the benchmark lane (raw-path re-bank, the V1-S reader
