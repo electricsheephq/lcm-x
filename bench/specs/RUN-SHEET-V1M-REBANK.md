@@ -308,9 +308,9 @@ record what the first execution of this sheet produced.
 7. **First execution (2026-09-05T02:48Z) PARKED at §8 step 4 under §7.** The dry run blocked at document 227,951 (`private_key` residual,
    61 transformed units before the block). §7 required PARK + root-cause + row-level disclosure; the record is `FINDING-F62-V1M-REBANK-PARKED.md`.
    The root-cause probes it used are committed beside the kit: `corpus_privacy_inventory.py` (whole-corpus replay of the transform +
-   validator, catch-and-continue, redacted shape statistics only), `changed_units_classes.py`, `blocked_units_attribution.py` and
-   `cache_membership_check.py` (the §4.4 unit-identity check performed directly against the cache keys, since the dry run stopped before
-   reporting `already_cached`). The three probe scripts and the inventory were lint-normalized for the repository's ruff rules when
+   validator, catch-and-continue, redacted shape statistics only), `changed_units_classes.py`, `blocked_units_attribution.py`,
+   `refused_line_model.py` (per-segment line-model record of the refused units) and `cache_membership_check.py` (the §4.4 unit-identity
+   check performed directly against the cache keys, since the dry run stopped before reporting `already_cached`). The three probe scripts and the inventory were lint-normalized for the repository's ruff rules when
    committed (statement splits and one loop-variable rename only; as-run and committed sha256s both recorded in the kit manifests;
    `prewarm_gate.sh` and the shell kit are byte-identical to the as-run copies).
 8. **§7 precision from the first execution.** "One block is a park" is decided by the dry run's first block; the dry run does not enumerate

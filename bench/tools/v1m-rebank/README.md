@@ -15,6 +15,7 @@ re-running them elsewhere means re-parametrising those paths. Nothing here is im
 | `corpus_privacy_inventory.py` | whole-corpus local replay of `protect_embedding_text` + `validate_embedding_privacy_dispatch` per unit (no provider calls); records digests, lengths and redacted shape statistics only — never raw text | lint-normalized |
 | `changed_units_classes.py`, `blocked_units_attribution.py` | placeholder classes of the changed units; per-sub-detector attribution of the refused units with redacted line shapes | lint-normalized |
 | `cache_membership_check.py` | §4.4 unit identity against the F53 cache keys (`sha256` of the exact unit text under provider/model), plus the exact `would_populate` the dry run would have reported had no unit blocked | byte-identical |
+| `refused_line_model.py` | per-segment line-model record of the refused units (kind, physical line, width, token count, longest token, counted-by-backstop) — the F62 §8a evidence; no raw text | byte-identical |
 
 `KIT-MANIFEST-AS-RUN.sha256` holds the sha256 of every file as it ran (from the session-notes kit directory);
 `KIT-MANIFEST-COMMITTED.sha256` holds the sha256 of the committed copies. The four rows marked lint-normalized differ only by

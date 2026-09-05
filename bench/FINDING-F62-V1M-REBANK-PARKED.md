@@ -78,18 +78,26 @@ class probes seconds, membership check 122 s — all offline. Sheet cap ($40, pr
 - **Every refused unit fires exactly one sub-detector**, `_has_orphan_full_width_base64_run` (the #384 round-6 marker-independent
   backstop) (`blocked_units_attribution.py` → `blocked-units-attribution.json`; per-detector isolation over the transform's residual
   checks). None of the three texts carries a `-----BEGIN`/`-----END` marker or the words "private key"; none mentions a password or a
-  key word. Redacted shapes (raw text is never written):
-  - text `021513ef…` (9 occurrences / 9 questions): 14 lines; lines 9–10 are `PREFIXED_B64` segments of 42 and 81 characters, two
-    tokens each, longest tokens 39 and 78 — a numbered list of ever-longer strings.
-  - text `eefcadc7…` (5 / 5): 58 lines of prose, longest token 20; lines 4–5 are `PREFIXED_B64` segments of 60 and 42 characters with
-    6–7 ordinary words each, ending in a 16- and a 17-character word — plain prose classified as PEM body lines.
-  - text `401a2dc6…` (4 / 4): lines 20–36 are 17 contiguous `N. <60–61-character token>` list lines — a numbered list of long strings.
-- **Mechanism.** `_pem_line_model` classifies a line as `PREFIXED_B64` when up to a few leading tokens are followed by a base64-charset
-  tail of ≥ 16 characters; the orphan-run backstop then counts the line as a "full PEM width" body line when the **whole segment,
-  prefix plus tail, is ≥ 40 characters**, and refuses on ≥ 2 contiguous such lines. So two consecutive prose lines of 6–7 words whose
-  last word is 16–17 characters long satisfy it. The detector's docstring premise — "ordinary prose/config never produces them" — is
-  refuted by `eefcadc7…`. Rate on this corpus: 3 units per 505,695 (0.0006%); through shared haystack sessions 18 of 500 questions
-  (3.6%); the harness fails a question loud on a single block, so the run cannot complete.
+  key word (shape flags in `corpus-privacy-inventory.json`). Line-model record (`refused_line_model.py` → `refused-line-model.json`:
+  per model segment its kind, 1-based physical line, width = `content_end − redact_start`, token count, longest token, and whether the
+  backstop counts it; raw text is never written):
+  - text `021513ef…` (9 occurrences / 9 questions): 14 lines, a numbered list of ever-longer strings (lines 3–11, two tokens each);
+    the backstop counts **lines 10 and 11** — `PREFIXED_B64`, widths 42 and 81, longest tokens 39 and 78 (line 9, width 23, is the
+    same class under the width floor). Run of 2 → refused.
+  - text `eefcadc7…` (5 / 5): 58 lines of prose, longest token anywhere 20; the backstop counts **lines 5 and 6** — `PREFIXED_B64`,
+    widths 60 and 42, 7 and 6 ordinary words ending in a 17- and a 16-character word (lines 7, 8 and 13 are the same class under the
+    floor). Plain prose classified as PEM body lines; run of 2 → refused.
+  - text `401a2dc6…` (4 / 4): 30 lines; the backstop counts **lines 11–27** — 17 contiguous `PREFIXED_B64` segments of width 62–63,
+    two tokens each (`N. <60–61-character token>`), a numbered list of long strings.
+  Every counted segment has `prefix_chars` 0: `redact_start` sits at the line start, so the width compared with 40 is the whole line,
+  leading tokens included.
+- **Mechanism** (`ingest_protection.py` at 22c12b21): `_pem_line_model` (:586) classifies a line as `PREFIXED_B64` (kind 9) when a few
+  leading tokens are followed by a base64-charset tail; `_has_orphan_full_width_base64_run` (:1797–1824) counts a segment when its kind
+  is `STRICT_B64` or `PREFIXED_B64` and `content_end − redact_start >= 40` (:1811–1814), resets the run on a placeholder or any other
+  line, and returns True at a run of 2 (:1820). For these lines the width is the **whole line, prefix plus tail**, so two consecutive
+  prose lines of 6–7 words whose last word is 16–17 characters long satisfy it. The docstring premise (:1805, "ordinary prose/config
+  never produces them") is refuted by `eefcadc7…`. Rate on this corpus: 3 units per 505,695 (0.0006%); through shared haystack
+  sessions 18 of 500 questions (3.6%); the harness fails a question loud on a single block, so the run cannot complete.
 - **Production behaviour (flagged, not built):** `command.py`'s cloud backfill `break`s with `stop_reason = "privacy_refused"` on the
   first such document — one benign chat halts cloud embedding for the store until the operator opts out. Recorded on #394 (owner-
   reclassified redaction backlog; changes to the scanner are owner-gated since 2026-08-27).
@@ -108,8 +116,8 @@ class probes seconds, membership check 122 s — all offline. Sheet cap ($40, pr
 - Correction of record: the #380 park comment (03:09Z) stated "= the F53 cache exactly → corpus identity holds" on the strength of
   count equality (505,695 = 505,695). Membership was verified afterwards (§4) and the statement is true; at the time it was posted it
   was a count, not an identity. The follow-up comment on #380 says so.
-- Kit: the shell scripts and `cache_membership_check.py`, `cache_pair_check.py`, `result_identity.py` are byte-identical to the as-run
-  copies; `corpus_privacy_inventory.py`, `changed_units_classes.py`, `blocked_units_attribution.py` were lint-normalized for the
+- Kit: the shell scripts and `cache_membership_check.py`, `refused_line_model.py`, `cache_pair_check.py`, `result_identity.py` are
+  byte-identical to the as-run copies; `corpus_privacy_inventory.py`, `changed_units_classes.py`, `blocked_units_attribution.py` were lint-normalized for the
   repository's ruff rules (statement splits, one loop-variable rename); both sha256 manifests are committed beside them.
 - What this finding does NOT prove: nothing about F53's numbers under the raw path (no raw-path re-run exists at this head); nothing
   about retrieval quality under the shipped posture (no shard ran); the false-positive rate is for this corpus only.
