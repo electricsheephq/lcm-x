@@ -130,9 +130,13 @@ class probes seconds, membership check 122 s — all offline. Sheet cap ($40, pr
   ran once at launch (`pins-rebank-launch-20260905T024456Z.txt`) and its as-run regex inventory listed 89 of the 96 declared
   `_EnvFieldSpec` fields under a printed `inventory_count=96`. The seven it dropped (`LCM_ADAPTIVE_RETRIEVAL_ENABLED`,
   `LCM_ASSERTION_EXTRACTION_ENABLED`, `LCM_ASSERTION_EXTRACTION_MAX_SOURCES_PER_PASS`, `LCM_ASSERTION_EXTRACTION_TIMEOUT_SECONDS`,
-  `LCM_EMBEDDING_API_KEY_ENV`, `LCM_EMBEDDING_BASE_URL`, `LCM_FRESH_TAIL_PRESSURE_YIELD_MIN_OBSERVATIONS`) were all unset at launch per
-  the same file's independent `LCM_/HERMES_/REBANK_` environment listing, which completes the §3 pin inventory for this execution; the
-  committed copy enumerates all 96 structurally and refuses on a count mismatch. Both sha256 manifests are committed beside the kit. Four further kit findings from the review's third pass (gate-marker binding
+  `LCM_EMBEDDING_API_KEY_ENV`, `LCM_EMBEDDING_BASE_URL`, `LCM_FRESH_TAIL_PRESSURE_YIELD_MIN_OBSERVATIONS`): six of them were unset at
+  launch per the same file's `## LCM_/HERMES_ env in this shell` listing (four variables set, none of them a declared field); the
+  seventh, `LCM_EMBEDDING_API_KEY_ENV`, cannot be read from that listing — the as-run copy built it with `grep -v -i "key"`, which drops
+  the name by construction — so it is unpinned for this execution and the §3 pin inventory stands at 95 of 96 (no harness `LCMConfig`
+  is built from the environment, so no field drives the run; the gap is one of record completeness). The committed copy enumerates all
+  96 structurally, redacts credential-shaped values instead of dropping the line, and refuses on a count mismatch. Both sha256 manifests
+  are committed beside the kit. Four further kit findings from the review's third pass (gate-marker binding
   in `launch_all.sh`, failure propagation in the `record_pins.sh` pin block, credential redaction of the captured run environment and a
   product-sha resume guard in `run_shard.sh` / `run_aprime.sh`) touch no artifact of this execution and are tracked on #415 as
   prerequisites for the next execution of the sheet.
