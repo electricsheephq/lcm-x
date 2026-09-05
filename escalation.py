@@ -383,6 +383,22 @@ _HISTORICAL_HEADING_MARKERS = (
     "## Historical Remaining Work",
 )
 
+_TASK_STATE_PRECEDENCE_GUIDANCE = (
+    "Task-state precedence:\n"
+    "Recent task-state changes have highest authority for the task identity or topic they describe. "
+    "Explicit cancellation, rejection, completion, "
+    "supersession, or waiting for the user overrides any older active-task, latest-directive, "
+    "continuation, blocker, or handoff label only for the same task identity or topic.\n"
+    "Do not use the terminal state of one task to demote unrelated active work. When that is the newest "
+    "state for a task, demote that task's older state; say 'no active task / waiting for user' only after "
+    "evaluating every identified task independently and finding no remaining active work.\n"
+    "Keep a blocker or pending handoff active only when the latest turns for that same task show it is "
+    "still unresolved and actionable. If recent turns concern a different task, preserve unrelated "
+    "active blockers and handoffs.\n"
+    "During hierarchical condensation, reconcile inherited active-task labels against newer child "
+    "summaries and recent turns for the same identity or topic before treating them as current.\n"
+)
+
 
 def _build_l1_focus_brief(focus_topic: str) -> str:
     """Build L1 focus guidance with explicit demote instructions for stale topics.
@@ -407,8 +423,7 @@ def _build_l1_focus_brief(focus_topic: str) -> str:
         f"mark them under one of these historical headings: {markers}.\n"
         "Frame them as STALE context — the agent must NOT resume that work unless the latest user message\n"
         "explicitly asks for it. If fully resolved, reduce to a one-line bullet or omit.\n"
-        "Exception: active blockers or handoff state should NOT be demoted even if they are absent from the\n"
-        "latest turns. Keep blockers and pending handoffs outside historical headings so the agent can still act on them.\n"
+        f"{_TASK_STATE_PRECEDENCE_GUIDANCE}"
     )
 
 
@@ -432,8 +447,7 @@ def _build_l2_focus_brief(focus_topic: str) -> str:
         f"Place non-current work under: {markers}.\n"
         "These sections are STALE — the agent must not act on them unless the latest user message explicitly\n"
         "requests it. Reduce resolved topics to one-liners or drop.\n"
-        "Exception: active blockers and pending handoff state should NOT be demoted even when absent from recent\n"
-        "turns. Keep them outside historical headings so the agent retains awareness of unresolved constraints.\n"
+        f"{_TASK_STATE_PRECEDENCE_GUIDANCE}"
     )
 
 
