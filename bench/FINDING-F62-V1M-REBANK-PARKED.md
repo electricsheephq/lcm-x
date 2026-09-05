@@ -80,6 +80,10 @@ class probes seconds, membership check 122 s — all offline. Sheet cap ($40, pr
 
 ## 8a. Root cause, attribution, production behaviour
 
+- **The corpus is not PEM-free; the refusals are precision on marker-free text.** At least one of the 90 re-shaped units carries a real
+  `-----BEGIN … PRIVATE KEY-----` block that the transform redacted (one unit, 5 of the 599 occurrences, in 5 questions; the two
+  `private_key` rows of the 61-unit pre-halt manifest are that same unit, and the manifest classes only 43 of the 90 units, so this is a
+  lower bound). Replayed at 22c12b21 with a marker regex on the unit text, flags and lengths only — `pem-marker-check-private-key-units.json`.
 - **Every refused unit fires exactly one sub-detector**, `_has_orphan_full_width_base64_run` (the #384 round-6 marker-independent
   backstop) (`blocked_units_attribution.py` → `blocked-units-attribution.json`; per-detector isolation over the transform's residual
   checks). None of the three texts carries a `-----BEGIN`/`-----END` marker or the words "private key"; none mentions a password or a
