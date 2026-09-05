@@ -89,7 +89,9 @@ the soak turn index and compaction round at which each conflict fired, plus the 
 code/name. Because the assistant side of the soak is a live model, profiles jitter between runs of
 the same tree; the receipt therefore establishes the jitter band with an A/A′ pair (two runs of the
 candidate on the same host) and the candidate-vs-previous-GA deviation must lie inside that band
-— a deviation outside it is NEW and fails the phase. Kind and aggregate count alone never suffice.
+— a deviation outside it is NEW and fails the phase. Equal conflict counts are a necessary conjunct of
+every match (a profile with more conflicts than the previous GA fails regardless of positions); kind
+and aggregate count alone never suffice.
 The receipt records both profiles, the A/A′ pair, the host pin, the differential run, and which
 identity fields the host surface exposed. While #247 is open the count is expected to be non-zero,
 so the differential run is mandatory whenever it is.
