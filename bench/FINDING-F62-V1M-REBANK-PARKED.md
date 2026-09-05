@@ -119,12 +119,18 @@ class probes seconds, membership check 122 s — all offline. Sheet cap ($40, pr
 - Correction of record: the #380 park comment (03:09Z) stated "= the F53 cache exactly → corpus identity holds" on the strength of
   count equality (505,695 = 505,695). Membership was verified afterwards (§4) and the statement is true; at the time it was posted it
   was a count, not an identity. The follow-up comment on #380 says so.
-- Kit: `prewarm_gate.sh`, `run_shard.sh`, `run_aprime.sh`, `result_identity.py`, `blocked_units_attribution.py` and
-  `refused_line_model.py` are byte-identical to the as-run copies; `corpus_privacy_inventory.py`, `changed_units_classes.py` and
-  `blocked_units_attribution.py` were lint-normalized (statement splits, one loop-variable rename); the review of PR #416 then fixed
-  seven committed copies (per-file list in the kit README — none alters a number in this record: the three probes whose logic changed
-  were re-run with the committed copies and reproduced the as-run artifacts; the other tools never ran in the parked execution). Both
-  sha256 manifests are committed beside the kit.
+- Kit: `prewarm_gate.sh`, `run_shard.sh`, `run_aprime.sh`, `result_identity.py` and `refused_line_model.py` are byte-identical to
+  the as-run copies; `corpus_privacy_inventory.py`, `changed_units_classes.py` and `blocked_units_attribution.py` were lint-normalized
+  (statement splits, one loop-variable rename); the review of PR #416 then fixed seven committed copies (per-file list in the kit
+  README). None alters a number in this record: the three probes whose logic changed (`corpus_privacy_inventory.py`,
+  `changed_units_classes.py`, `cache_membership_check.py`) were re-run with the committed copies and reproduced the as-run artifacts;
+  three (`cache_pair_check.py`, `identity_all.sh`, `launch_all.sh`) never ran in the parked execution; the seventh, `record_pins.sh`,
+  ran once at launch (`pins-rebank-launch-20260905T024456Z.txt`) and its as-run regex inventory listed 89 of the 96 declared
+  `_EnvFieldSpec` fields under a printed `inventory_count=96`. The seven it dropped (`LCM_ADAPTIVE_RETRIEVAL_ENABLED`,
+  `LCM_ASSERTION_EXTRACTION_ENABLED`, `LCM_ASSERTION_EXTRACTION_MAX_SOURCES_PER_PASS`, `LCM_ASSERTION_EXTRACTION_TIMEOUT_SECONDS`,
+  `LCM_EMBEDDING_API_KEY_ENV`, `LCM_EMBEDDING_BASE_URL`, `LCM_FRESH_TAIL_PRESSURE_YIELD_MIN_OBSERVATIONS`) were all unset at launch per
+  the same file's independent `LCM_/HERMES_/REBANK_` environment listing, which completes the §3 pin inventory for this execution; the
+  committed copy enumerates all 96 structurally and refuses on a count mismatch. Both sha256 manifests are committed beside the kit.
 - What this finding does NOT prove: nothing about F53's numbers under the raw path (no raw-path re-run exists at this head); nothing
   about retrieval quality under the shipped posture (no shard ran); the false-positive rate is for this corpus only.
 

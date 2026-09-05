@@ -317,8 +317,10 @@ record what the first execution of this sheet produced.
    `cache_pair_check.py`, missing-A′ and exit-2 handling in `identity_all.sh`, structural + redacted env inventory in `record_pins.sh`,
    explicit cache identity in `cache_membership_check.py`, checkout identity in `corpus_privacy_inventory.py`, exact-manifest match in
    `changed_units_classes.py`). As-run and committed sha256s are both recorded in the kit manifests; `prewarm_gate.sh`, `run_shard.sh`,
-   `run_aprime.sh`, `result_identity.py`, `blocked_units_attribution.py` and `refused_line_model.py` are byte-identical to the as-run copies;
-   the three probes whose logic changed were re-run with the committed copies and reproduced their as-run artifacts.
+   `run_aprime.sh`, `result_identity.py` and `refused_line_model.py` are byte-identical to the as-run copies; the three probes whose logic
+   changed were re-run with the committed copies and reproduced their as-run artifacts; `record_pins.sh` ran at launch with its as-run
+   copy, whose regex inventory listed 89 of the 96 declared fields — the seven dropped fields were unset at launch per the pins file's
+   independent environment listing (disclosed with the field names in FINDING-F62 §8).
 8. **§7 precision from the first execution.** "One block is a park" is decided by the dry run's first block; the dry run does not enumerate
    further blocks. The size of the refused set and the transform-change count therefore come from the whole-corpus replay
    (`corpus_privacy_inventory.py`), which applies the identical `protect_embedding_text` + `validate_embedding_privacy_dispatch` pair per
