@@ -144,9 +144,12 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    unstable and the phase FAILS (investigate, then re-run); otherwise, within each `(code, name)`
    group, pair records index-wise and take `max_i |turn(X_i) − turn(X′_i)|` over all groups; the band
    is the larger of the two pairs' values, a whole number of soak turns, inclusive (identical
-   profiles give 0). Every run attempted under the tuple is recorded in the receipt — unstable pairs, failed
-   runs and aborted soaks included, each with its cause — and the pairs used are the first two
-   stable runs of each tree in attempt order; a later run never replaces an earlier stable one. **The maximum admissible band is 2 soak turns** (the largest same-tree
+   profiles give 0). The first two completed runs of each tree under the tuple are BINDING: they are
+   the pair, an unstable pair fails the phase for that candidate, and a record observed in any
+   completed run that pairs with no baseline record is NEW even if a later run does not show it. A
+   further run is admissible only after a recorded causal change — a new candidate tree or a new
+   tuple — never on the unchanged head. Every run attempted under the tuple is recorded in the
+   receipt, aborted soaks included, each with its cause. **The maximum admissible band is 2 soak turns** (the largest same-tree
    jitter measured on record, and small against a ≥30-turn soak). A measured band above it
    means the candidate's own run-to-run behaviour is too unstable for positions to discriminate; the
    phase is then unevaluable under the positional fallback and FAILS (investigate the soak; identity
@@ -176,7 +179,8 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    message must use the identity rule in step 1 — the fallback is not available to it.
 The receipt records every field of the tuple (host pin, fixture and configuration hashes, assistant
 identifier, transport identifier, the sha256 of the driver and turn-script files, the starting-state
-statement or seed digest, the recorded `LCM_*` environment), the previous GA's exact tag with its resolved commit and tree SHA beside
+statement or seed digest, the effective `LCM_*` and behaviour-affecting `HERMES_*` set with its
+canonical digest and its capture source), the previous GA's exact tag with its resolved commit and tree SHA beside
 its profile, the candidate rc tag and tree SHA, the sorted profiles of A, A′, B and B′, both pair
 bands and the band used, every pairing with its deviation, every unpaired record, which identity
 fields the host exposed, the verdict, and — so the derived profiles can be re-derived — the sha256 and
