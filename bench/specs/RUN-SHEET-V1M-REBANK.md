@@ -106,18 +106,24 @@ Keychain at runtime, never in configs or logs; embed-cache path + size + mtime b
      > 0 for every MOVED-EXPLAINED run (a unit-link needs a changed unit); a query-only transform that moves retrieval is
      MOVED-UNEXPLAINED (defined, and not banked). Disclosed limitation: F53
      dumped no candidates (its rows carry per-arm metrics only), so the link is established on the re-bank side and
-     the finding says so. Outcome: successor row banked; F53 annotated "pre-#332, superseded" (#380).
+     the finding says so. Outcome: a DIAGNOSIS, not a banking verdict — membership of a transformed unit in a retrieved or gold
+     session is delta-level evidence, never a causal proof (an unrelated instrument change can move the arm while the unit's
+     transformed embedding had no effect), so the successor row is NOT banked and F53 stays the row of record; the finding
+     publishes the per-row link evidence and the F53 row is annotated "not reproduced on the shipped posture — diagnosis in
+     F62" (#380). Banking a moved row requires a registered counterfactual instrument (a transform-off replay or a per-unit
+     embedding/ranking counterfactual), which does not exist at this head.
    - **MOVED-UNEXPLAINED** — any delta on a question whose own row shows NO live transform of either kind
      (`privacy.changed == 0` AND `privacy.queries_changed == 0`), OR whose live transform has no delta-level link
      under test (ii) — instrument drift, or a transform whose effect on this row is unproven: STOP, do not bank,
      root-cause first. The natural diagnostic (a transform-off replay of the delta questions into a scratch root, diffing the
      two candidate dumps) does NOT exist in the harness at this head and would be registered as its own instrument change
-     before use; until then a MOVED-UNEXPLAINED run is simply not banked. The two MOVED outcomes partition the
+     before use; until then NO MOVED run is banked — MOVED-EXPLAINED publishes its per-row link evidence as the diagnosis,
+     MOVED-UNEXPLAINED stops for root-cause. The two MOVED outcomes partition the
      delta set by that per-row test (live transform AND delta-level link); a run with rows of both kinds is
      MOVED-UNEXPLAINED. Together the four outcomes cover every run
      and no run matches two: results identical to F53 → REPRODUCED or REPRODUCED-TRANSFORM-INERT (split by the
      document transform-change count); results differ → MOVED-EXPLAINED or MOVED-UNEXPLAINED (split by the per-row
-     test alone — the document count does not enter). `--dump-candidates` is therefore ON for every shard and for A/A′
+     test alone — the document count does not enter; neither banks a successor row — only the two REPRODUCED outcomes do). `--dump-candidates` is therefore ON for every shard and for A/A′
      (§8 steps 5–6); a shard without its candidate dump, or whose dump is missing rows (a `--resume` after a run that lacked the flag does
      not re-dump completed questions), cannot be classified and is re-run from a fresh output root.
 4. Corpus identity vs F53 (#203/#177 rows). F53 recorded NO per-question message/node/chunk counts (its checkpoint
@@ -199,7 +205,12 @@ changed-document manifest, and the CORPUS transform-change count (`privacy_scope
 `privacy` counters this registration PR adds to the harness (baseline at the merge-base 0301405b, BEFORE this PR: every
 `protect_embedding_text` call site discarded `changed`, and `EmbeddingPrivacyPolicyError` was never referenced in the
 harness or driver — a block would have aborted a shard uncounted; this PR replaces that state): `changed` / `blocked` counts in the prewarm and determinism reports and in
-`ingest_report["privacy"]` (NOT the checkpoint header — a new header key breaks resume), plus per-question
+`ingest_report["privacy"]` (NOT the checkpoint header — a new header key breaks resume; the `queries` / `queries_changed` /
+`queries_blocked` counters are HARNESS-SIDE by definition — the summary and chunk query dispatches — and do not count the production
+`lcm_recall` arm, which protects and embeds the same question text through the product path (`tools.py`, `protect_embedding_text` in
+the recall query path; that second embed per question is the one §5 discloses); the transform is a deterministic function of text and
+posture under the run's single bound privacy revision, so the row-level boolean "query transformed" is identical for both paths and no
+verdict uses the magnitude), plus per-question
 `corpus_counts` (messages / summary nodes / chunks ingested) and per-question `embed_cache` {hits, misses}
 deltas in each per-question record so future rows have per-question parity fields (the forward baseline —
 F53 has none, §4.4) and the cache pair can be recomputed from rows. On `--resume`, a restored row whose `corpus_counts` is present
