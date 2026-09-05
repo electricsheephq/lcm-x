@@ -2308,6 +2308,52 @@ def test_resume_validates_restored_corpus_counts(tmp_path):
     assert _resume("resume-null")["question_count"] == 1
 
 
+def test_run_time_privacy_block_is_bound_to_its_question_and_leaves_no_row(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as harness
+    from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
+
+    question = parse_question(
+        _make_raw(
+            "q-runtime-block",
+            "single-session-user",
+            sessions={
+                "s-block": [
+                    {"role": "user", "content": "first toy message"},
+                    {"role": "assistant", "content": "second toy message", "has_answer": True},
+                ]
+            },
+            answer_session_ids=["s-block"],
+            question="what was in the toy message",
+        )
+    )
+
+    def _blocked(*_args, **_kwargs):
+        # Query texts are protected only at run time; emulate a query refusal
+        # after the per-question counters observed the dispatch.
+        harness._PRIVACY_QUESTION.update({"queries": 1, "queries_blocked": 1})
+        raise EmbeddingPrivacyPolicyError("privacy policy blocked query dispatch")
+
+    monkeypatch.setattr(harness, "evaluate_question", _blocked)
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    with pytest.raises(EmbeddingPrivacyPolicyError) as raised:
+        run_harness(
+            [question],
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / "initial",
+            checkpoint_path=checkpoint,
+        )
+
+    assert raised.value.question_id == "q-runtime-block"
+    assert raised.value.question_privacy["queries_blocked"] == 1
+    # No row for the blocked question: --resume re-runs it (fail-closed, resumable).
+    lines = checkpoint.read_text(encoding="utf-8").splitlines() if checkpoint.exists() else []
+    assert len(lines) <= 1
+    assert all("q-runtime-block" not in line for line in lines[1:])
+
+
 def test_embeddings_disabled_preserves_raw_corpus_text_in_fts(tmp_path):
     provider = _IdentityEmbedder("voyage-4-large")
     question = _privacy_question("q-private-fts-off")

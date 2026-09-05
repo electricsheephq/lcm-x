@@ -220,6 +220,65 @@ def test_prewarm_privacy_block_is_a_durable_cli_report(tmp_path, monkeypatch, ca
     assert payload["privacy"]["blocked"] == 1
 
 
+def test_prewarm_progress_goes_to_stderr_and_stdout_is_one_json_object(
+    tmp_path, monkeypatch, capsys
+):
+    cli = _load_cli()
+    monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "cache.sqlite3"))
+    monkeypatch.setattr(cli, "_prepared_shard_questions", lambda _args: iter(()))
+    monkeypatch.setattr(cli, "resolve_harness_provider", lambda *_args, **_kwargs: object())
+
+    def _prewarm(*_args, progress=None, **_kwargs):
+        progress(100)
+        progress(200)
+        return {"populated": 0, "already_cached": 200, "unique_request_units": 200}
+
+    monkeypatch.setattr(cli, "prewarm_embedding_cache", _prewarm)
+    result = cli.main(
+        [
+            "prewarm-cache",
+            "--prepared-dir",
+            str(tmp_path / "prepared"),
+            "--shards-manifest",
+            str(tmp_path / "shards"),
+            "--model",
+            "voyage-context-4",
+        ]
+    )
+
+    assert result == 0
+    captured = capsys.readouterr()
+    # The whole stdout stream is ONE JSON object a gate can json.loads().
+    payload = json.loads(captured.out)
+    assert payload["populated"] == 0
+    assert "prewarm processed=100" in captured.err
+    assert "prewarm processed=" not in captured.out
+
+
+def test_run_privacy_block_report_carries_question_id_and_row_counters(tmp_path):
+    cli = _load_cli()
+    error = EmbeddingPrivacyPolicyError("privacy policy blocked query dispatch")
+    error.question_id = "q-blocked"
+    error.question_privacy = {
+        "documents": 3,
+        "changed": 0,
+        "blocked": 0,
+        "queries": 1,
+        "queries_changed": 0,
+        "queries_blocked": 1,
+    }
+    checkpoint = tmp_path / "per_question_checkpoint.jsonl"
+    report = cli._run_privacy_block_report(error, checkpoint_path=checkpoint)
+    assert report["status"] == "blocked"
+    assert report["question_id"] == "q-blocked"
+    assert report["privacy"]["queries_blocked"] == 1
+    assert report["checkpoint"] == str(checkpoint)
+    assert report["resumable"] is True
+    assert "blocked query dispatch" in report["error"]
+    # Only privacy refusals become receipts; everything else keeps its path.
+    assert cli._run_privacy_block_report(ValueError("not privacy"), checkpoint_path=checkpoint) is None
+
+
 def test_dispatch_validator_block_report_contains_all_privacy_keys(tmp_path, monkeypatch, capsys):
     cli = _load_cli()
     monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "cache.sqlite3"))

@@ -278,6 +278,38 @@ def _validated_dump_candidates_path(
     return dump_path
 
 
+def _run_privacy_block_report(
+    exc: BaseException, *, checkpoint_path: Path
+) -> dict | None:
+    """Structured, redacted receipt for a privacy refusal raised inside a run.
+
+    Documents are validated by the prewarm dry run before any spend, but question
+    texts are protected only at run time, so a query-only refusal surfaces here.
+    The blocked question has no checkpoint row (``--resume`` re-runs it); the
+    receipt carries its id and the per-question counters the harness attached.
+    Returns None for any other exception.
+    """
+    try:
+        from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
+    except ImportError:
+        return None
+    if not isinstance(exc, EmbeddingPrivacyPolicyError):
+        return None
+    privacy = getattr(exc, "question_privacy", None)
+    if privacy is None:
+        privacy = getattr(exc, "privacy_counts", None)
+    if privacy is None:
+        privacy = dict(_longmemeval._PRIVACY_COUNTS)
+    return {
+        "status": "blocked",
+        "question_id": getattr(exc, "question_id", None),
+        "privacy": privacy,
+        "checkpoint": str(checkpoint_path),
+        "resumable": True,
+        "error": str(exc),
+    }
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     if args.provider != "stub" and not args.model:
         raise SystemExit(f"--model is required for --provider {args.provider}")
@@ -379,8 +411,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 resume=args.resume,
                 selected_question_ids=selected_question_ids,
             )
-    except (OSError, ValueError) as exc:
-        raise SystemExit(str(exc)) from exc
+    except Exception as exc:
+        blocked = _run_privacy_block_report(
+            exc, checkpoint_path=output_dir / PER_QUESTION_CHECKPOINT_FILENAME
+        )
+        if blocked is not None:
+            print(json.dumps(blocked, indent=2, sort_keys=True))
+            return 2
+        if isinstance(exc, (OSError, ValueError)):
+            raise SystemExit(str(exc)) from exc
+        raise
 
     metrics_path = output_dir / "longmemeval_metrics.json"
     metrics_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
@@ -426,10 +466,30 @@ def _refuse_changed_manifest_input_alias(
             )
     if not changed_manifest.exists():
         return
-    inputs = [shards, Path(args.prepared_dir) / "manifest.json"]
+    prepared_dir = Path(args.prepared_dir)
+    manifests = [shards, prepared_dir / "manifest.json"]
     if shards.is_dir():
-        inputs.extend(sorted(shards.glob("shard-*/manifest.json")))
+        manifests.extend(sorted(shards.glob("shard-*/manifest.json")))
+    inputs: list[Path] = list(manifests)
+    # Every question file a manifest references is an input too: a hard link to
+    # one resolves outside the guarded directories yet names the same inode.
+    for manifest in manifests:
+        if not manifest.is_file():
+            continue
+        try:
+            entries = json.loads(manifest.read_text(encoding="utf-8")).get("questions", [])
+        except (OSError, ValueError, AttributeError):
+            entries = []
+        for entry in entries if isinstance(entries, list) else []:
+            name = entry.get("file") if isinstance(entry, dict) else None
+            if isinstance(name, str) and name:
+                inputs.append(manifest.parent / name)
+                inputs.append(prepared_dir / name)
+    seen: set[Path] = set()
     for candidate in inputs:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
         if candidate.exists() and os.path.samefile(changed_manifest, candidate):
             raise SystemExit(
                 f"Refusing --changed-manifest that is the same file as an input: {candidate}"
@@ -457,8 +517,10 @@ def _cmd_prewarm_cache(args: argparse.Namespace) -> int:
         report = prewarm_embedding_cache(
             questions,
             provider,
+            # Progress is operator chatter; stdout stays one JSON object so
+            # consumers can json.loads() the success, dry-run and blocked reports.
             progress=lambda processed: print(
-                f"prewarm processed={processed}", flush=True
+                f"prewarm processed={processed}", file=sys.stderr, flush=True
             ),
             dry_run=args.dry_run,
             changed_manifest=args.changed_manifest,

@@ -463,12 +463,23 @@ def test_prewarm_cli_refuses_changed_manifest_that_aliases_an_input(tmp_path, mo
     prepared_dir = tmp_path / "prepared"
     prepared_dir.mkdir()
     prepared_manifest = prepared_dir / "manifest.json"
-    prepared_manifest.write_text("{}", encoding="utf-8")
+    prepared_question = prepared_dir / "q1.json"
+    prepared_question.write_text('{"question_id": "q1"}', encoding="utf-8")
+    prepared_manifest.write_text(
+        '{"questions": [{"file": "q1.json", "question_id": "q1"}]}', encoding="utf-8"
+    )
     shards_dir = tmp_path / "shards"
     (shards_dir / "shard-0").mkdir(parents=True)
     shard_manifest = shards_dir / "shard-0" / "manifest.json"
-    shard_manifest.write_text('{"question_ids": []}', encoding="utf-8")
-    before = {path: path.read_bytes() for path in (prepared_manifest, shard_manifest)}
+    shard_question = shards_dir / "shard-0" / "q2.json"
+    shard_question.write_text('{"question_id": "q2"}', encoding="utf-8")
+    shard_manifest.write_text(
+        '{"questions": [{"file": "q2.json", "question_id": "q2"}]}', encoding="utf-8"
+    )
+    before = {
+        path: path.read_bytes()
+        for path in (prepared_manifest, shard_manifest, prepared_question, shard_question)
+    }
     monkeypatch.setattr(
         cli, "_prepared_shard_questions", lambda _args: pytest.fail("inputs must not be read")
     )
@@ -477,6 +488,12 @@ def test_prewarm_cli_refuses_changed_manifest_that_aliases_an_input(tmp_path, mo
     )
     hard_link = tmp_path / "hardlink.jsonl"
     os.link(shard_manifest, hard_link)
+    # Hard links to the per-question files themselves resolve outside every
+    # guarded directory yet name the same inode as a corpus input.
+    question_hard_link = tmp_path / "question-hardlink.jsonl"
+    os.link(prepared_question, question_hard_link)
+    shard_question_hard_link = tmp_path / "shard-question-hardlink.jsonl"
+    os.link(shard_question, shard_question_hard_link)
 
     def _args(changed_manifest):
         return SimpleNamespace(
@@ -496,6 +513,8 @@ def test_prewarm_cli_refuses_changed_manifest_that_aliases_an_input(tmp_path, mo
         shards_dir / "shard-0" / "changed.jsonl",
         prepared_dir / "changed.jsonl",
         hard_link,
+        question_hard_link,
+        shard_question_hard_link,
     ):
         with pytest.raises(SystemExit, match="Refusing --changed-manifest"):
             cli._cmd_prewarm_cache(_args(alias))

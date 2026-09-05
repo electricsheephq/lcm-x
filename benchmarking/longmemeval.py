@@ -3658,6 +3658,20 @@ def _validate_restored_corpus_counts(
             )
 
 
+def _annotate_privacy_block(exc: BaseException, question: Question) -> None:
+    """Bind a run-time privacy refusal to its question for the CLI's receipt."""
+    try:
+        from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
+    except ImportError:
+        return
+    if not isinstance(exc, EmbeddingPrivacyPolicyError):
+        return
+    if not hasattr(exc, "question_id"):
+        exc.question_id = question.question_id
+    if not hasattr(exc, "question_privacy"):
+        exc.question_privacy = dict(_PRIVACY_QUESTION)
+
+
 def _question_checkpoint_record(
     question: Question,
     scored: dict[str, Any] | None,
@@ -4161,6 +4175,13 @@ def run_harness(
                     )
                 if checkpoint_file is not None:
                     _write_checkpoint_record(checkpoint_file, record)
+            except Exception as exc:
+                # A run-time privacy refusal (query texts are protected only
+                # here, never by the prewarm dry run) leaves this question
+                # without a row; bind it to the question so the CLI can emit a
+                # structured receipt instead of a bare traceback.
+                _annotate_privacy_block(exc, question)
+                raise
             finally:
                 _cleanup_question_db(tmp_dir, question.question_id)
     finally:
