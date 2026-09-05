@@ -107,12 +107,21 @@ the launching process's environment and the host then loads its own files (the f
 so the environment is captured AFTER every loader has run — every `LCM_*` variable and every
 behaviour-affecting `HERMES_*` variable (model, generation length, thresholds) present in the
 session's effective environment is recorded — name and value, or, where the value is a secret
-(a credential, token or key), the name and a fixed presence marker only, never any digest of the
-value, salted or not: a published hash of a secret is a cross-release correlation and offline-guessing
-oracle, and the behaviour a credential selects is already captured by the provider and model
-identifiers and the non-secret variables — together with the sha256 of the sorted `name=value` list,
-secret values replaced by the marker, as the canonical digest, and the sets must be identical across
-the runs compared; thresholds such as
+(a credential, token or key), the name, a fixed presence marker and the credential's NON-SECRET
+identity: the account, project, organisation or key identifier the provider exposes, or the
+secret-manager reference and version the value was injected from; where the provider exposes none,
+the evaluator compares the values of the runs under comparison privately, in memory, and publishes
+only the attestation `identical` or `differs`. The same applies to any credential the assistant or
+host reads from its own store rather than the environment (an auth file in the fresh home): the
+store's non-secret account identity is a tuple field. Never any digest of a secret value, salted,
+keyed or not — a published hash of a secret is a cross-release correlation and offline-guessing
+oracle — and never the presence marker alone: two runs under different credentials can run under
+different accounts, tenants, entitlements or provider rollouts, so a tuple that does not bind the
+credential identity does not bind the soak. The canonical digest is the sha256 of the sorted
+`name=value` list with each secret value replaced by its non-secret identity (or by the attestation
+token), and the sets, identities and attestations must be identical across the runs compared; a
+`differs`, an absent identity or an absent attestation makes the runs non-comparable and the
+differential unevaluable (FAIL); thresholds such as
 `LCM_CONTEXT_THRESHOLD` change when compaction runs and therefore the conflict profile. The capture
 has a named mechanical source stated in the receipt — a dump of the session process's environment
 after launch, or, until the driver records one, the launching shell's `LCM_*`/`HERMES_*` listing
