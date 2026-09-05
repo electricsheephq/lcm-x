@@ -99,16 +99,23 @@ candidates only while that tuple is unchanged.
    every publication conflict to the `publication_invariant_conflict` label without its source —
    logging follow-up #430), a record is `(soak turn index, logged error code, logged error name)`
    and the profile is the multiset of records sorted by `(code, name, turn index)` — the **position
-   profile**. The soak turn index is the driver's turn ordinal whose window (turn start to the next
-   turn start) contains the conflict's log timestamp, so two operators derive the same profile from
-   the same log and results file.
+   profile**. The soak turn index is the driver's turn ordinal whose window contains the conflict's
+   log timestamp: windows are half-open, turn i spans [start_i, start_i+1), and the final turn spans
+   [start_n, terminal cutoff], where the terminal cutoff is the driver's recorded end of the final
+   turn (its start plus its wall time); a conflict logged after the cutoff belongs to no turn. Every
+   conflict line maps to exactly one turn; an unmapped or doubly mapped conflict makes the profile
+   unevaluable and the phase FAILS. Two operators therefore derive the same profile from the same
+   log and results file.
 2. **Band.** Because the assistant side is a live model, position profiles jitter between runs of
    the same tree. The band is measured from an A/A′ pair — two runs of the candidate tree under the
    same tuple — BEFORE any comparison with the previous GA is computed, and no later run widens a
    recorded band. Sort both profiles; if their counts differ, the candidate's own count is unstable
    and the phase FAILS (investigate, then re-run); otherwise pair records index-wise and
    `band = max_i |turn(A_i) − turn(A′_i)|`, a whole number of soak turns, inclusive (identical
-   profiles give band 0).
+   profiles give band 0). **The maximum admissible band is 2 soak turns.** A measured band above it
+   means the candidate's own run-to-run behaviour is too unstable for positions to discriminate; the
+   phase is then unevaluable under the positional fallback and FAILS (investigate the soak; identity
+   evidence is required to pass).
 3. **Match.** Two records match iff their codes and names are identical and their turn indices
    differ by at most the band. Pair the candidate profile against the previous-GA profile greedily
    in sorted order: for each candidate record, take the first unused previous-GA record that
