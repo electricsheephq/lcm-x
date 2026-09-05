@@ -114,23 +114,23 @@ copy-paste setups per agent type.
 ## Project status
 
 The latest stable release is
-`v0.23.1@81d8d41197dddc4c09b57097f4955ebae32366a9`. It adds the
-fail-closed provider-input privacy boundary used by cloud summary/query
-embeddings while preserving the 15-tool surface, schema-5 core store, and
+`v0.23.2@676bb48dde29f06899ff829a7cb8b1d9d2e262f6`. It ships the lossless
+default (durable sensitive-pattern redaction is opt-in; cloud-embedding privacy
+is an independent flag that transforms only the provider-bound copy — see
+"Sensitive-pattern redaction" below), the PEM private-key redaction hardening,
+loud privacy-policy failures on the recall path, and the rc-first release
+gauntlet, while preserving the 15-tool surface, schema-5 core store, and
 default-off experimental features.
-(v0.23.1 coupled that boundary to durable redaction; main has since made the two
-independent — see "Sensitive-pattern redaction" below.)
 
 Stable release identity and the continuing `main` development line are
 separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
 The reconciled `main` line now identifies itself as
-`hermes-lcm v0.23.2 (15 tools)` — aligned forward from the `v0.23.1` stable
-tag, which identifies itself as `hermes-lcm v0.23.1 (15 tools)`. This resolves
-the earlier drift where `main` declared an older release candidate than the
-shipped stable tag (#385); it is a forward bump, never a restamp of any past
-commit's own recorded identity.
+`hermes-lcm v0.23.3 (15 tools)` — aligned forward from the `v0.23.2` stable
+tag, which identifies itself as `hermes-lcm v0.23.2 (15 tools)`. This is the
+forward bump for the next point release (rc-first), never a restamp of any past
+commit's own recorded identity (#385 fixed the earlier drift).
 
 Eva has accepted exact stable v0.23.1 with hosted `voyage-4-large`,
 1024-dimensional float32 summary vectors under one privacy-bound identity.
@@ -247,14 +247,14 @@ After checking out the exact stable tag, typical output is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm v0.23.1 (15 tools)
+  ✓ hermes-lcm v0.23.2 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm
 ```
 
 An untagged checkout of the reconciled `main` baseline instead reports
-`hermes-lcm v0.23.2 (15 tools)`; verify the loaded commit before treating
+`hermes-lcm v0.23.3 (15 tools)`; verify the loaded commit before treating
 either string as release proof.
 
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
@@ -912,7 +912,7 @@ exposes retrieval tools that can drill back into exact stored sources.
 - [Operator guide](docs/operator-guide.md) — install, activation, full
   configuration reference, diagnostics
 - [Retrieval tools reference](docs/retrieval-tools.md) — exact tool contracts
-- [Current project state](docs/project-status.md) — v0.23.1 stable baseline,
+- [Current project state](docs/project-status.md) — v0.23.2 stable baseline,
   separate main-development identity, active work, and proof boundaries
 - [Benchmark methodology and results](benchmarks/METHODOLOGY.md) — retrieval
   and judged-QA evaluation contracts, reproduction, and landed result index
@@ -964,7 +964,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
 [tags page](https://github.com/electricsheephq/lcm-x/tags), and
-[CHANGELOG](CHANGELOG.md) for version history. `v0.23.1` is the latest stable
+[CHANGELOG](CHANGELOG.md) for version history. `v0.23.2` is the latest stable
 GitHub Release; verify its exact SHA before installation.
 
 ## License
