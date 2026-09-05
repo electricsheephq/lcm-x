@@ -97,16 +97,25 @@ tree reproduces the same conflicts under the mechanical comparison below. "The s
 recorded tuple that must be identical across every run the comparison uses: the host build pin, the
 soak fixture files (material, probes, canaries) by sha256, the soak configuration by sha256, the
 assistant provider and model identifier (the live-model side of the soak; a fixed seed where the
-provider supports one), the transport, the turn script, the starting state — a fresh isolated home
+provider supports one), the transport, the driver and turn-script files by sha256, the starting state — a fresh isolated home
 and an empty database for every run, or, where a seeded start is part of the fixture, the same seed
 snapshot by digest (publication conflicts depend on persisted lifecycle state, so runs that start
 from different data are not comparable) — and the effective engine environment: the driver inherits
-the launching process's environment, so every `LCM_*` variable present at launch is recorded — name
-and value, or name plus the sha256 of the value where the value is a secret — together with the
-sha256 of the sorted `name=value` list as the canonical digest, and the sets must be identical across
-the runs compared; thresholds such as `LCM_CONTEXT_THRESHOLD` change when compaction runs and therefore
-the conflict profile. Launch the soak from a scrubbed environment that carries only the recorded
-variables. A previous-GA run is reusable across candidates only while that tuple is unchanged.
+the launching process's environment and the host then loads its own files (the fresh home's `.env`),
+so the environment is captured AFTER every loader has run — every `LCM_*` variable and every
+behaviour-affecting `HERMES_*` variable (model, generation length, thresholds) present in the
+session's effective environment is recorded — name and value, or name plus the sha256 of the value
+where the value is a secret — together with the sha256 of the sorted `name=value` list as the
+canonical digest, and the sets must be identical across the runs compared; thresholds such as
+`LCM_CONTEXT_THRESHOLD` change when compaction runs and therefore the conflict profile. The capture
+has a named mechanical source stated in the receipt — a dump of the session process's environment
+after launch, or, until the driver records one, the launching shell's `LCM_*`/`HERMES_*` listing
+plus proof that the fresh home contributes none (its `.env` absent or its variable names listed);
+the driver manifest's `env_names` list names only the variables the driver itself sets and is NOT
+the effective environment. Launch the soak from a scrubbed environment that carries only the
+recorded variables. Provider-side defaults cannot be pinned, so the
+previous-GA runs must be contemporaneous with the candidate pair — run within the same 24 hours on
+the same provider model identifier; an older previous-GA run is re-run, not reused.
 1. **Record and profile.** Where the host exposes a conflict's publication point and message, a
    conflict record is `(kind, publication point, message)`, a run's profile is the multiset of its
    records, and the candidate passes iff its multiset is contained in the previous GA's multiset —
@@ -117,20 +126,26 @@ variables. A previous-GA run is reusable across candidates only while that tuple
    logging follow-up #430), a record is `(soak turn index, logged error code, logged error name)`
    and the profile is the multiset of records sorted by `(code, name, turn index)` — the **position
    profile**. The soak turn index is the driver's turn ordinal whose window contains the conflict's
-   log timestamp: windows are half-open, turn i spans [start_i, start_{i+1}) — from its own recorded
-   start to the next turn's recorded start — and the final turn spans
-   [start_n, terminal cutoff], where the terminal cutoff is the driver's recorded end of the final
-   turn (its start plus its wall time); a conflict logged after the cutoff belongs to no turn. Every
-   conflict line maps to exactly one turn; an unmapped or doubly mapped conflict makes the profile
-   unevaluable and the phase FAILS. Two operators therefore derive the same profile from the same
+   log timestamp. The driver records, per turn, the timestamp `ts` at which the turn ENDED and the
+   turn's elapsed `wall_ms`; the start is derived, not read: `start_i = ts_i − wall_ms_i` (the two
+   clocks differ by sub-second drift at most, and the derivation is a fixed computation over the
+   results file). Windows are half-open, turn i spans [start_i, start_{i+1}) — from its derived start
+   to the next turn's derived start — and the final turn spans [start_n, ts_n], its recorded end; a
+   conflict logged after ts_n belongs to no turn. Every conflict line maps to exactly one turn; an
+   unmapped or doubly mapped conflict makes the profile unevaluable and the phase FAILS. The
+   derivation rule is part of the receipt, so two operators derive the same profile from the same
    log and results file.
 2. **Band.** Because the assistant side is a live model, position profiles jitter between runs of
-   the same tree. The band is measured from an A/A′ pair — two runs of the candidate tree under the
-   same tuple — BEFORE any comparison with the previous GA is computed, and no later run widens a
-   recorded band. Sort both profiles; if their counts differ, the candidate's own count is unstable
-   and the phase FAILS (investigate, then re-run); otherwise pair records index-wise and
-   `band = max_i |turn(A_i) − turn(A′_i)|`, a whole number of soak turns, inclusive (identical
-   profiles give band 0). **The maximum admissible band is 2 soak turns** (the largest same-tree
+   the same tree, and a very stable candidate pair must not turn ordinary baseline jitter into a
+   false NEW. The band is therefore measured from TWO same-tree pairs — the candidate pair A/A′ and
+   the previous-GA pair B/B′, all four runs under the same tuple — BEFORE any cross comparison is
+   computed, and no later run widens a recorded band. Within each pair, sort both profiles; if a
+   pair's counts differ, that tree's own count is unstable and the phase FAILS (investigate, then
+   re-run); otherwise pair records index-wise and take `max_i |turn(X_i) − turn(X′_i)|`; the band is
+   the larger of the two pairs' values, a whole number of soak turns, inclusive (identical profiles
+   give 0). Every run attempted under the tuple is recorded in the receipt — unstable pairs, failed
+   runs and aborted soaks included, each with its cause — and the pairs used are the first two
+   stable runs of each tree in attempt order; a later run never replaces an earlier stable one. **The maximum admissible band is 2 soak turns** (the largest same-tree
    jitter measured on record, and small against a ≥30-turn soak). A measured band above it
    means the candidate's own run-to-run behaviour is too unstable for positions to discriminate; the
    phase is then unevaluable under the positional fallback and FAILS (investigate the soak; identity
@@ -138,10 +153,11 @@ variables. A previous-GA run is reusable across candidates only while that tuple
 3. **Match.** Two records match iff their codes and names are identical and their turn indices
    differ by at most the band. Pair the candidate profile against the previous-GA profile greedily
    in sorted order: for each candidate record, take the first unused previous-GA record that
-   matches it; a candidate record with no match is NEW. Run the pairing for both A and A′.
+   matches it; a candidate record with no match is NEW. Run the pairing for both A and A′ against B
+   (the previous-GA run whose profile is the reference; B′ establishes the baseline band).
 4. **Differential verdict.** The differential passes iff both A and A′ pair every record (zero
    NEW) AND neither has more records than the previous GA. It is one conjunct of Green, not Green
-   itself: A, A′ and the previous-GA run must each also pass every non-conflict Phase C assertion
+   itself: A, A′, B and B′ must each also pass every non-conflict Phase C assertion
    (zero unexpected engine errors, recall probes hit, doctor clean) — a run failing any of them
    establishes no profile and no band, and the phase fails. A candidate with more records than the
    previous GA fails regardless of positions; one with fewer passes the differential only when every
@@ -156,9 +172,11 @@ variables. A previous-GA run is reusable across candidates only while that tuple
 The receipt records every field of the tuple (host pin, fixture and configuration hashes, assistant
 identifier, transport identifier, the sha256 of the driver and turn-script files, the starting-state
 statement or seed digest, the recorded `LCM_*` environment), the previous GA's exact tag with its resolved commit and tree SHA beside
-its profile, the candidate rc tag and tree SHA, the sorted profiles of A, A′ and the previous GA, the
-band, every pairing with its deviation, every unpaired record, which identity fields the host exposed,
-and the verdict. While #247 is
+its profile, the candidate rc tag and tree SHA, the sorted profiles of A, A′, B and B′, both pair
+bands and the band used, every pairing with its deviation, every unpaired record, which identity
+fields the host exposed, the verdict, and — so the derived profiles can be re-derived — the sha256 and
+a retained reference (path or URL) of every run's raw engine/host log, driver results file and
+manifest. While #247 is
 open the count is expected to be non-zero, so the differential run is mandatory whenever it is.
 
 ## Receipts
