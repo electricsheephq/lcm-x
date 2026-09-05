@@ -124,9 +124,10 @@ oracle — and never the presence marker alone: two runs under different credent
 different accounts, tenants, entitlements or provider rollouts, so a tuple that does not bind the
 credential identity does not bind the soak. The canonical digest is the sha256 of the sorted
 `name=value` list with each secret value replaced by its non-secret identity (or by the attestation
-token), and the sets, identities and attestations must be identical across the runs compared; a
-`differs`, an absent identity or an absent attestation makes the runs non-comparable and the
-differential unevaluable (FAIL); thresholds such as
+token), and the sets, identities and attestations must be identical across the runs compared. The
+identity is the proof of record whenever the provider or store exposes one; the attestation is the
+proof only where none is exposed — alternatives, never both required. A `differs`, or the absence of
+whichever proof applies, makes the runs non-comparable and the differential unevaluable (FAIL); thresholds such as
 `LCM_CONTEXT_THRESHOLD` change when compaction runs and therefore the conflict profile. The capture
 has a named mechanical source stated in the receipt — a dump of the session process's environment
 after launch, or, until the driver records one, the launching shell's `LCM_*`/`HERMES_*` listing
