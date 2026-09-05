@@ -186,12 +186,24 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    tuple — never on the unchanged head. Every run attempted under the tuple is recorded in the
    receipt, aborted soaks included, each with its cause, and a conflict record observed in ANY
    attempted candidate run — completed or aborted, under this tuple or a superseded one — must be
-   paired against the baseline within the band or recorded as NEW for the candidate; "dispositioned"
-   means only that the receipt states, for a record from an aborted run or a superseded tuple, which
-   baseline record it pairs with (any baseline run of any tuple recorded for this candidate, within
-   the band) or that it is NEW — a disposition never discharges a record, and a NEW record from any
-   attempted candidate run fails the phase exactly as one from a binding run does; a tuple change or
-   an abort never discards an observed conflict. **The maximum admissible band is 2 soak turns** (the largest same-tree
+   accounted for in the receipt, by kind and by position separately. KIND is tuple-independent
+   evidence: a record whose `(code, name)` appears in no baseline run under any tuple is NEW
+   regardless of the tuple it was observed under and fails the phase. POSITION is comparable only
+   within one tuple: a record of a baseline-known kind from an aborted run under the current tuple
+   pairs against the current baseline within the band or is NEW; a record of a baseline-known kind
+   from a run under a SUPERSEDED tuple pairs only against a baseline run under that same tuple, within
+   that tuple's own band (never the current band) — where no baseline run exists under that tuple the
+   record is UNCOMPARED: the receipt lists it with its position and the tuple-field discrepancy that
+   superseded the tuple, no positional claim is made for it, it never pairs with anything, and the
+   positional verdict rests on the binding pairs alone. A tuple may be superseded only on the evidence
+   of a tuple-field discrepancy — a recorded field whose value differed from the tuple's (a different
+   credential identity, a runtime inventory that changed during the run, a different prompt-file
+   hash) — never on the conflicts a run showed; a run whose recorded fields show no discrepancy is a
+   run under the current tuple and its records pair or are NEW. "Dispositioned" means only that the
+   receipt states, for such a record, which same-tuple baseline record it pairs with, that it is
+   UNCOMPARED (with the discrepancy), or that it is NEW — a disposition never discharges a record, and
+   a NEW record from any attempted candidate run fails the phase exactly as one from a binding run
+   does; a tuple change or an abort never discards an observed conflict. **The maximum admissible band is 2 soak turns** (the largest same-tree
    jitter measured on record, and small against a ≥30-turn soak). A measured band above it
    means the run-to-run behaviour of whichever tree's pair exceeds it — candidate or previous GA —
    is too unstable for positions to discriminate (an over-band previous-GA pair leaves the baseline
@@ -225,10 +237,15 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    case. A candidate with more records than the
    previous GA fails regardless of positions. Publication-attempt parity is a condition of EVERY
    comparison, not only of fewer-record candidates: each candidate run's publication attempts —
-   the summary nodes persisted in the run's store at run end (`summary_nodes` rows: the store starts
-   empty under the tuple, so every row is a publication that committed during the run) PLUS its
-   conflict records — must be at least each baseline run's; both counts are receipt fields, listed
-   separately. Successes are counted per PUBLISHED NODE, never per compaction invocation or per
+   the leaf publications persisted in the run's store at run end — `summary_nodes` rows with
+   `depth = 0` and `source_type = 'messages'`, the nodes that pass the lifecycle publication point
+   where a #247-class conflict can arise (the store starts empty under the tuple, so every such row is
+   a leaf publication that committed during the run) — PLUS its conflict records — must be at least
+   each baseline run's; both counts are receipt fields, listed separately, beside the count of any
+   other persisted node. Condensation and rollup parents (`depth ≥ 1`, `source_type = 'nodes'`) are
+   inserted without lifecycle staging, cannot raise the conflict, and are never counted as attempts —
+   an aggregate node count would let extra condensation stand in for skipped leaf publications.
+   Successes are counted per PERSISTED LEAF PUBLICATION, never per compaction invocation or per
    invocation-level telemetry (`total_compactions`, `compression_count`): one invocation can publish
    several leaves in one sweep, and an invocation that conflicts after publishing some of them returns
    through the fail-open path before its invocation counter advances, so an invocation count under-
@@ -236,8 +253,8 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    candidate that published one node and stopped. A candidate that attempted fewer
    publications exercised fewer publication points, so a zero-NEW conclusion over it is incomplete
    and the phase fails. A candidate with fewer records passes the differential only when every one
-   of its records pairs and attempt parity holds — a repaired conflict becomes a published
-   node, so the attempts stay equal; a skipped attempt does not — the receipt listing the
+   of its records pairs and attempt parity holds — a repaired conflict becomes a persisted
+   leaf publication, so the attempts stay equal; a skipped attempt does not — the receipt listing the
    unpaired previous-GA records as REMOVED with the delta commit believed responsible. Kind and
    aggregate count alone never suffice.
 5. **Known residual of the positional fallback.** A NEW conflict that fires within the band of a
@@ -245,13 +262,16 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    point: the fallback bounds the blind spot to same-band, same-kind substitution and cannot close
    it. It is accepted only while the host exposes no identity (#430); the receipt states the
    residual whenever the fallback is used, and a train whose host exposes publication point and
-   message must use the identity rule in step 1 — the fallback is not available to it.
+   message must use the identity rule in step 1 — the fallback is not available to it. A second
+   residual is stated whenever a run under a superseded tuple left UNCOMPARED records: a same-kind
+   conflict at a position the binding runs did not reproduce was observed once under a tuple whose
+   positions cannot be compared — it is recorded, not measured.
 The receipt records every field of the tuple (host pin, fixture and configuration hashes, assistant
 identifier, transport identifier, the sha256 of the driver, turn-script and prompt-bearing files, the starting-state
 statement or seed digest, the effective `LCM_*` and behaviour-affecting `HERMES_*` set with its
 canonical digest and its capture source, the credential identities or attestations, the driver's
 normalized invocation, the execution-runtime inventories of host and driver with their digests, and
-the publication-attempt counts per run — persisted summary nodes and conflict records, separately), the previous GA's exact tag with its resolved commit and tree SHA beside
+the publication-attempt counts per run — persisted leaf publications, other persisted nodes, and conflict records, separately; every UNCOMPARED record with its discrepancy), the previous GA's exact tag with its resolved commit and tree SHA beside
 its profile, the candidate rc tag and tree SHA, the sorted profiles of A, A′, B and B′, both pair
 bands and the band used, every pairing with its deviation, every unpaired record, which identity
 fields the host exposed, the verdict, and — so the derived profiles can be re-derived — the sha256 and
