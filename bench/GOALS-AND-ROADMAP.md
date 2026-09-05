@@ -47,6 +47,8 @@ public scoreboard (owner naming pending — the only external gate) + upstream #
 ## G5 — Ops invariants (already in force)
 RUN-LOG.md append-only per run · pins/pinverify per lane · A/A′ per new instrument-config ·
 paired gates for delivery changes · author≠judge on load-bearing verdicts · same-day corrections.
+Superseded plan-of-record eras are recorded in `PROGRAM-HISTORY.md` (append-only; one curated entry
+per era, verbatim archive hash-anchored).
 
 ## Sequencing (next ~72h, machine-bound critical path)
 1. #436 settle: sanity slice verdict on fa00ec9 (RUNNING) → batch-4 re-pass → maintainer merge window.
