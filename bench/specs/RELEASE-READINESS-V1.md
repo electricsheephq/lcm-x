@@ -178,7 +178,8 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    unstable and the phase FAILS (investigate, then re-run); otherwise, within each `(code, name)`
    group, pair records index-wise and take `max_i |turn(X_i) − turn(X′_i)|` over all groups; the band
    is the larger of the two pairs' values, a whole number of soak turns, inclusive (identical
-   profiles give 0). The first two completed runs of each tree under the tuple are BINDING: they are
+   profiles give 0; a pair whose two profiles are both empty — a candidate that repaired every
+   baseline conflict — is identical with band 0, so the band is then the baseline pair's value). The first two completed runs of each tree under the tuple are BINDING: they are
    the pair, an unstable pair fails the phase for that candidate, and a record observed in any
    completed run that pairs with no baseline record is NEW even if a later run does not show it. A
    further run is admissible only after a recorded causal change — a new candidate tree or a new
@@ -224,13 +225,19 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    case. A candidate with more records than the
    previous GA fails regardless of positions. Publication-attempt parity is a condition of EVERY
    comparison, not only of fewer-record candidates: each candidate run's publication attempts —
-   successful compactions per host telemetry (`total_compactions`, which counts successes only: a
-   conflicted attempt returns before the telemetry is written) PLUS its conflict records — must be
-   at least each baseline run's; both counts are receipt fields. A candidate that attempted fewer
+   the summary nodes persisted in the run's store at run end (`summary_nodes` rows: the store starts
+   empty under the tuple, so every row is a publication that committed during the run) PLUS its
+   conflict records — must be at least each baseline run's; both counts are receipt fields, listed
+   separately. Successes are counted per PUBLISHED NODE, never per compaction invocation or per
+   invocation-level telemetry (`total_compactions`, `compression_count`): one invocation can publish
+   several leaves in one sweep, and an invocation that conflicts after publishing some of them returns
+   through the fail-open path before its invocation counter advances, so an invocation count under-
+   counts successes and can equate a baseline that published two nodes and then conflicted with a
+   candidate that published one node and stopped. A candidate that attempted fewer
    publications exercised fewer publication points, so a zero-NEW conclusion over it is incomplete
    and the phase fails. A candidate with fewer records passes the differential only when every one
-   of its records pairs and attempt parity holds — a repaired conflict becomes a successful
-   compaction, so the attempts stay equal; a skipped attempt does not — the receipt listing the
+   of its records pairs and attempt parity holds — a repaired conflict becomes a published
+   node, so the attempts stay equal; a skipped attempt does not — the receipt listing the
    unpaired previous-GA records as REMOVED with the delta commit believed responsible. Kind and
    aggregate count alone never suffice.
 5. **Known residual of the positional fallback.** A NEW conflict that fires within the band of a
@@ -244,7 +251,7 @@ identifier, transport identifier, the sha256 of the driver, turn-script and prom
 statement or seed digest, the effective `LCM_*` and behaviour-affecting `HERMES_*` set with its
 canonical digest and its capture source, the credential identities or attestations, the driver's
 normalized invocation, the execution-runtime inventories of host and driver with their digests, and
-the publication-attempt counts per run), the previous GA's exact tag with its resolved commit and tree SHA beside
+the publication-attempt counts per run — persisted summary nodes and conflict records, separately), the previous GA's exact tag with its resolved commit and tree SHA beside
 its profile, the candidate rc tag and tree SHA, the sorted profiles of A, A′, B and B′, both pair
 bands and the band used, every pairing with its deviation, every unpaired record, which identity
 fields the host exposed, the verdict, and — so the derived profiles can be re-derived — the sha256 and
