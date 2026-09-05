@@ -201,10 +201,14 @@ the finding publishes the diagnosis instead; never edited)
 1. Merge this sheet (gate: acceptance + independent factual audit). 2. New worktree at `origin/main`;
 record pins (§3). 3. `scripts/lcm_longmemeval.py determinism-probe --sample-size 20` → determinism verdict + SAMPLE-scoped privacy
 counts (`privacy_scope: sample`; the probe runs with the embed cache disabled and reports no cache statistics).
-4. `prewarm-cache --dry-run --changed-manifest <evidence path>` over `prepared-m` FIRST (cache lookups + privacy validation, no
+4. `prewarm-cache --prepared-dir <prepared-m> --shards-manifest <prepared-m-shards> --dataset-label m --provider voyage --model
+voyage-context-3 --dry-run --changed-manifest <evidence path>` (the §2/§3 pinned inputs; `LCM_LONGMEMEVAL_EMBED_CACHE` names the F53
+cache and `LCM_LONGMEMEVAL_CHUNK_EMBEDDING_MODE=flat` is exported, exactly as the gate script does) over `prepared-m` FIRST (cache
+lookups + privacy validation, no
 embedding call, no spend — §5 ordering) → `would_populate`, projected prewarm spend vs the cap (≥ $40 → PARK, §5/§7), the
 changed-document manifest, and the CORPUS transform-change count (`privacy_scope: corpus`); only after that gate clears, the real
-`prewarm-cache` over the same corpus (expected `populated == 0`). Both are reported by the instrument-only
+`prewarm-cache` with the same `--prepared-dir` / `--shards-manifest` / `--model` flags minus `--dry-run` over the same corpus
+(expected `populated == 0`). Both are reported by the instrument-only
 `privacy` counters this registration PR adds to the harness (baseline at the merge-base 0301405b, BEFORE this PR: every
 `protect_embedding_text` call site discarded `changed`, and `EmbeddingPrivacyPolicyError` was never referenced in the
 harness or driver — a block would have aborted a shard uncounted; this PR replaces that state): `changed` / `blocked` counts in the prewarm and determinism reports and in

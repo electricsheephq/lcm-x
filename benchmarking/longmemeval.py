@@ -3747,7 +3747,18 @@ def _restore_privacy_counts(records: Iterable[dict[str, Any]]) -> None:
                 raise ValueError(
                     f"checkpoint row {question_id}: malformed privacy.{key}={value!r}"
                 )
-            _PRIVACY_COUNTS[key] += value
+        # A present object is either a pre-r2 row (exactly the three document
+        # counters, restored with zero query counters) or a current row (all six).
+        # Anything else is a partial object whose missing keys would silently
+        # restore as zeros -- these totals are row-level evidence, so fail closed.
+        keys = set(privacy)
+        if keys != set(_PRIVACY_KEYS) and keys != set(_PRIVACY_KEYS[:3]):
+            raise ValueError(
+                f"checkpoint row {question_id}: privacy must carry exactly the legacy "
+                f"three document counters or all six counters, got {sorted(keys)!r}"
+            )
+        for key in _PRIVACY_KEYS:
+            _PRIVACY_COUNTS[key] += privacy.get(key, 0)
 
 
 def _restore_embed_cache_counts(records: Iterable[dict[str, Any]]) -> dict[str, int]:
@@ -3770,7 +3781,15 @@ def _restore_embed_cache_counts(records: Iterable[dict[str, Any]]) -> dict[str, 
                 raise ValueError(
                     f"checkpoint row {question_id}: malformed embed_cache.{key}={value!r}"
                 )
-            totals[key] += value
+        # The per-shard cache pair is the sum of these rows: a partial object
+        # would restore a silent zero into the parity evidence.
+        if set(embed_cache) != set(totals):
+            raise ValueError(
+                f"checkpoint row {question_id}: embed_cache must carry exactly the keys "
+                f"{sorted(totals)!r}, got {sorted(embed_cache)!r}"
+            )
+        for key in totals:
+            totals[key] += embed_cache[key]
     return totals
 
 

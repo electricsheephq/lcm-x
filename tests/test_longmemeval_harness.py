@@ -2308,6 +2308,74 @@ def test_resume_validates_restored_corpus_counts(tmp_path):
     assert _resume("resume-null")["question_count"] == 1
 
 
+def test_resume_rejects_partial_privacy_or_embed_cache_objects(tmp_path):
+    question = parse_question(
+        _make_raw(
+            "q-partial-counters",
+            "single-session-user",
+            sessions={
+                "s-partial": [
+                    {"role": "user", "content": "first toy message"},
+                    {"role": "assistant", "content": "second toy message", "has_answer": True},
+                ]
+            },
+            answer_session_ids=["s-partial"],
+            question="what was in the toy message",
+        )
+    )
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "initial",
+        checkpoint_path=checkpoint,
+    )
+    header, row_line = checkpoint.read_text(encoding="utf-8").splitlines()[:2]
+
+    def _write(row):
+        checkpoint.write_text(
+            header + "\n" + json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+
+    def _resume(label):
+        return run_harness(
+            [question],
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / label,
+            checkpoint_path=checkpoint,
+            resume=True,
+            selected_question_ids=[question.question_id],
+        )
+
+    # A present object must carry its exact key set: a missing key would
+    # otherwise restore as a silent zero inside the cache-pair / privacy evidence.
+    partial = {
+        "embed-cache-missing-misses": ("embed_cache", {"hits": 12}),
+        "embed-cache-extra-key": ("embed_cache", {"hits": 12, "misses": 0, "evictions": 1}),
+        "privacy-five-keys": (
+            "privacy",
+            {"documents": 1, "changed": 0, "blocked": 0, "queries": 1, "queries_changed": 0},
+        ),
+        "privacy-mixed-sets": (
+            "privacy",
+            {"documents": 1, "changed": 0, "blocked": 0, "queries_blocked": 0},
+        ),
+        "privacy-partial-legacy": ("privacy", {"documents": 1, "changed": 0}),
+    }
+    for label, (field, value) in partial.items():
+        row = json.loads(row_line)
+        row[field] = value
+        _write(row)
+        with pytest.raises(ValueError, match=field):
+            _resume(f"resume-{label}")
+    # The untouched row (all six privacy keys, both cache keys) still resumes.
+    _write(json.loads(row_line))
+    assert _resume("resume-intact")["question_count"] == 1
+
+
 def test_run_time_privacy_block_is_bound_to_its_question_and_leaves_no_row(
     tmp_path, monkeypatch
 ):
