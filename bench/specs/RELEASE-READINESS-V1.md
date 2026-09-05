@@ -95,8 +95,10 @@ previous-GA soak under the same tuple exists — publication-attempt parity with
 regardless of the candidate's conflict count: a candidate that reports zero conflicts because it
 attempted fewer publications is not Green. Minimum 30 turns.
 **Differential rule for #247-class conflicts** (applied since the v0.23.2 train; codified
-2026-09-05, #427): a non-zero conflict count passes ONLY when the same soak against the previous GA
-tree reproduces the same conflicts under the mechanical comparison below. "The same soak" is a
+2026-09-05, #427): while #247 is open the differential run against the previous GA under the same
+tuple is MANDATORY for every candidate regardless of its conflict count — a zero count is an anomaly
+to explain (an under-exposed soak reports zero), never Green by itself — and a non-zero count passes
+ONLY when that soak reproduces the same conflicts under the mechanical comparison below. "The same soak" is a
 recorded tuple that must be identical across every run the comparison uses: the host build pin, the
 soak fixture files (material, probes, canaries) by sha256, the soak configuration by sha256, the
 host's system prompt and every other prompt-bearing file the fresh home starts with (`SOUL.md` and
@@ -183,13 +185,16 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    tuple — never on the unchanged head. Every run attempted under the tuple is recorded in the
    receipt, aborted soaks included, each with its cause, and a conflict record observed in ANY
    attempted candidate run — completed or aborted, under this tuple or a superseded one — must be
-   paired against the baseline within the band or — only for a record from an aborted run or a
-   superseded tuple — explicitly dispositioned in the receipt with its cause and evidence before the
-   phase can pass (a record from a completed run under the tuple can only pair; an unpaired one is
-   NEW); a tuple change or an abort never discards an
-   observed conflict. **The maximum admissible band is 2 soak turns** (the largest same-tree
+   paired against the baseline within the band or recorded as NEW for the candidate; "dispositioned"
+   means only that the receipt states, for a record from an aborted run or a superseded tuple, which
+   baseline record it pairs with (any baseline run of any tuple recorded for this candidate, within
+   the band) or that it is NEW — a disposition never discharges a record, and a NEW record from any
+   attempted candidate run fails the phase exactly as one from a binding run does; a tuple change or
+   an abort never discards an observed conflict. **The maximum admissible band is 2 soak turns** (the largest same-tree
    jitter measured on record, and small against a ≥30-turn soak). A measured band above it
-   means the candidate's own run-to-run behaviour is too unstable for positions to discriminate; the
+   means the run-to-run behaviour of whichever tree's pair exceeds it — candidate or previous GA —
+   is too unstable for positions to discriminate (an over-band previous-GA pair leaves the baseline
+   unestablished: unevaluable, FAIL); the
    phase is then unevaluable under the positional fallback and FAILS (investigate the soak; identity
    evidence is required to pass).
 3. **Match.** Two records match iff their codes and names are identical and their turn indices
@@ -245,7 +250,8 @@ bands and the band used, every pairing with its deviation, every unpaired record
 fields the host exposed, the verdict, and — so the derived profiles can be re-derived — the sha256 and
 a retained reference (path or URL) of every run's raw engine/host log, driver results file and
 manifest. While #247 is
-open the count is expected to be non-zero, so the differential run is mandatory whenever it is.
+open the count is expected to be non-zero and the differential run is mandatory for every candidate,
+zero count included (see the rule's opening sentence).
 
 ## Receipts
 
