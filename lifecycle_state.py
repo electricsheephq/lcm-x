@@ -977,25 +977,33 @@ class LifecycleStateStore:
         )
         snapshot_rows = conn.execute(
             """
-            SELECT m.store_id, m.conversation_id, m.content
+            SELECT m.store_id, m.session_id, m.conversation_id, m.content
             FROM json_each(?) AS source
             CROSS JOIN messages AS m
-            WHERE m.store_id = source.value AND m.session_id = ?
+            WHERE m.store_id = source.value
             ORDER BY m.store_id
             """,
-            (str(snapshot_ids), session_id),
+            (str(snapshot_ids),),
         ).fetchall()
         if [int(row[0]) for row in snapshot_rows] != snapshot_ids:
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )
-        if any(str(row[1] or "").strip() not in {"", conversation_id} for row in snapshot_rows):
+
+        def belongs_to_conversation(row: sqlite3.Row | tuple[Any, ...]) -> bool:
+            row_session_id = str(row[1] or "")
+            row_conversation_id = str(row[2] or "").strip()
+            return row_conversation_id == conversation_id or (
+                not row_conversation_id and row_session_id == session_id
+            )
+
+        if any(not belongs_to_conversation(row) for row in snapshot_rows):
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )
         snapshot_by_id = {int(row[0]): row for row in snapshot_rows}
         if any(
-            snapshot_by_id[store_id][2] != proof
+            snapshot_by_id[store_id][3] != proof
             for store_id, proof in exclusion_proofs.items()
         ):
             raise LifecyclePublicationConflictError(
@@ -1003,14 +1011,22 @@ class LifecycleStateStore:
             )
         rows = conn.execute(
             """
-            SELECT store_id, conversation_id, content
+            SELECT store_id, session_id, conversation_id, content
             FROM messages
-            WHERE session_id = ? AND store_id > ? AND store_id <= ?
+            WHERE store_id > ? AND store_id <= ?
+              AND (conversation_id = ? OR session_id = ?)
             ORDER BY store_id
             """,
-            (session_id, expected_frontier, covered_end),
+            (
+                expected_frontier,
+                covered_end,
+                conversation_id,
+                session_id,
+            ),
         ).fetchall()
-        authoritative_ids = [int(row[0]) for row in rows]
+        authoritative_ids = [
+            int(row[0]) for row in rows if belongs_to_conversation(row)
+        ]
         proven_ids = sorted(covered_ids + excluded_ids)
         if authoritative_ids != proven_ids:
             raise LifecyclePublicationConflictError(
@@ -1019,16 +1035,20 @@ class LifecycleStateStore:
                 f"authoritative={authoritative_ids}, covered={covered_ids}, "
                 f"excluded={excluded_ids})"
             )
+        # Message store_ids are globally unique. A compression rollover can
+        # move summary nodes to a new session without moving their raw source
+        # rows, so lineage ownership must be checked across every node rather
+        # than only nodes carrying the currently bound session id.
         if conn.execute(
             """
             SELECT 1
             FROM summary_nodes AS node, json_each(node.source_ids) AS source
-            WHERE node.session_id = ? AND node.source_type = 'messages'
+            WHERE node.source_type = 'messages'
               AND node.node_id != ?
               AND source.value IN (SELECT value FROM json_each(?))
             LIMIT 1
             """,
-            (session_id, publication_node_id, str(all_covered_ids)),
+            (publication_node_id, str(all_covered_ids)),
         ).fetchone():
             raise LifecyclePublicationConflictError(
                 "Compaction publication source lineage is already claimed"
