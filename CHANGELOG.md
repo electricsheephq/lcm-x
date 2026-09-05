@@ -1,7 +1,8 @@
 # Changelog
 
-This file is the repository-root version history. Every tag from v0.21.0-rc1 onward has curated
-notes under `.github/release-notes/`; GitHub Releases are published from tags (rc tags as prereleases).
+This file is the repository-root version history. Curated notes under `.github/release-notes/` exist for
+every `v0.x` tag from v0.21.0-rc2 onward (plus a `v0.21.0-rc1` file with no matching tag today); older tags,
+including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are published from tags (rc tags as prereleases).
 
 ## Unreleased
 
