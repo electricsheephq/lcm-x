@@ -64,8 +64,8 @@ Keychain at runtime, never in configs or logs; embed-cache path + size + mtime b
    0-delivered rows and instrument failures disclosed per question, never dropped; abstention-excluded count
    reported as in F53 (470 scored + 30 excluded).
 2. **Transform-change count** = the number of prepared-corpus documents for which
-   `protect_embedding_text` returned `changed=True` or raised, measured by the dry-run full pass (`prewarm-cache --dry-run`: every unit validated, nothing embedded; the real prewarm
-   repeats the count) over
+   `protect_embedding_text` returned `changed=True` or raised, measured by the dry-run full pass (`prewarm-cache --dry-run`: every unit validated, nothing embedded; the real prewarm,
+   when the §5 gate lets it run, repeats the count) over
    `prepared-m` under the declared posture (input-hash parity with the F53-era cache). This is the ledger
    discharge measurement for the #366 / #374 / #384-#391 rows: **0 ⇒ inert for this corpus**; >0 ⇒ the
    boundary is live and any metric delta is attributed to it. Only prepared-corpus DOCUMENTS count: query-text
@@ -85,7 +85,8 @@ Keychain at runtime, never in configs or logs; embed-cache path + size + mtime b
      touch the embed cache pair), AND (ii) the transform is LINKED to the moved retrieval at the
      delta level — question-scope correlation is not causation (a transformed-but-irrelevant unit can coexist with
      unrelated drift on the same row). The link holds ONLY through a changed unit — a changed query has no delta-level
-     observable in the registered artifacts: the candidate dump records the protected-query rankings only, the harness has
+     observable in the registered artifacts: the candidate dump records the as-run rankings only (protected-query for the
+     embedding arms, raw-query for `fts`), the harness has
      no transform-off replay at this head (it resolves the production privacy posture at every provider-set construction),
      and the `fts` arm never sees the transform at all (it searches the lossless durable store with the RAW question,
      `fts_hits(store, question.question, …)`; only the summary/chunk/rerank queries are protected). The link holds when at
@@ -94,8 +95,14 @@ Keychain at runtime, never in configs or logs; embed-cache path + size + mtime b
      its session by replaying the same walk over the prepared question's `haystack_sessions` that
      `iter_ingest_embedding_request_units` performs, counting units per session — no embedding call)
      belongs to a session or turn that appears in the re-bank run's `--dump-candidates` row for that question, either in
-     the top-10 of an arm whose metric moved or among the row's gold sessions/turns (a transformed gold unit that
-     dropped out of the top-10 explains a loss the same way). The document transform-change count (bar 2) is therefore
+     the top-10 of an EMBEDDING-DRIVEN arm whose metric moved, or among the row's gold sessions/turns when an embedding-driven
+     arm moved (a transformed gold unit that dropped out of the top-10 explains a loss the same way). Embedding-driven = any
+     arm but `fts`: the durable store the lexical arm searches is written RAW (`store.append_batch` receives the haystack turns;
+     the protected copies are used only for embedding dispatch — the registered test
+     `test_cloud_embeddings_keep_lossless_raw_corpus_in_fts` pins it) and it is queried with the RAW question, so no transform
+     of either kind can move `fts`; a row whose only moved arm is `fts` has no possible link and is MOVED-UNEXPLAINED, and an
+     `fts` move on a mixed row is never explained by the link that explains its other arms. The document transform-change
+     count (bar 2) is therefore
      > 0 for every MOVED-EXPLAINED run (a unit-link needs a changed unit); a query-only transform that moves retrieval is
      MOVED-UNEXPLAINED (defined, and not banked). Disclosed limitation: F53
      dumped no candidates (its rows carry per-arm metrics only), so the link is established on the re-bank side and
