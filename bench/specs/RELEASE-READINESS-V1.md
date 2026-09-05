@@ -80,17 +80,19 @@ one threshold, doctor at close. Green = zero unexpected errors in engine logs, z
 publication-invariant conflicts (#247-class), recall probes hit, doctor clean. Minimum 30 turns.
 **Differential rule for #247-class conflicts** (applied since the v0.23.2 train; codified
 2026-09-05, #427): a non-zero conflict count passes ONLY when the same soak, on the same host
-build, against the previous GA tree reproduces the same conflicts — matched by identity, never by
-aggregate count alone. A conflict's identity is its kind, its publication point and message where
-the host exposes them, and — always available, because the soak is scripted and deterministic in
-its turn structure — its position: the soak turn index and compaction round at which it fired,
-plus the error code/name the engine logs. Two runs match only when the multiset of identities is
-equal; the receipt records both identity lists, the host pin and the differential run, and states
-which identity fields the host surface exposed (the engine currently collapses every publication
-conflict to the `publication_invariant_conflict` label without its source — tracked as a logging
-follow-up, so today identity = kind + position + code/name). A conflict that does not reproduce on
-the previous GA — by identity — is NEW and fails the phase. While #247 is open the count is
-expected to be non-zero, so the differential run is mandatory whenever it is.
+build, against the previous GA tree reproduces the same conflicts, matched as follows. **Where the
+host exposes a conflict's publication point and message, identity is kind + publication point +
+message and the two runs must have equal multisets of identities.** Where it does not (the engine
+currently collapses every publication conflict to the `publication_invariant_conflict` label
+without its source — tracked as a logging follow-up), the comparison is the **position profile**:
+the soak turn index and compaction round at which each conflict fired, plus the logged error
+code/name. Because the assistant side of the soak is a live model, profiles jitter between runs of
+the same tree; the receipt therefore establishes the jitter band with an A/A′ pair (two runs of the
+candidate on the same host) and the candidate-vs-previous-GA deviation must lie inside that band
+— a deviation outside it is NEW and fails the phase. Kind and aggregate count alone never suffice.
+The receipt records both profiles, the A/A′ pair, the host pin, the differential run, and which
+identity fields the host surface exposed. While #247 is open the count is expected to be non-zero,
+so the differential run is mandatory whenever it is.
 
 ## Receipts
 
