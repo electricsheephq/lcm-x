@@ -13,7 +13,8 @@ Evidence: `session-notes/2026-09-05/v1m-rebank/artifacts/` (`gate-run.log`, `pre
 row of record, and the #366/#374/#384–#391 ledger boundary is measured LIVE on this corpus (not inert).** The dry run stopped at
 document 227,951 with `status: blocked` — "cloud embedding privacy residual detector blocked pattern names: private_key" — after 61
 transformed units. The whole-corpus replay (§3) shows the shipped posture re-shapes 90 unique units (599 occurrences, 248 of 500
-questions) and refuses 3 unique units (18 occurrences, 17 questions — one question carries two refused units), every refusal a false positive of one marker-independent
+questions) and refuses 3 unique units (18 occurrences, 17 questions — one question carries two refused units); the §4.2 transform-change count (documents for which the transform returned `changed=True` OR raised) is
+therefore 617 occurrences = 93 unique units in 258 of 500 questions. Every refusal is a false positive of one marker-independent
 backstop on text with no PEM marker (§8a). The run cannot be completed under posture (a) without a posture or product change; the
 options are the owner's (§10).
 
@@ -43,7 +44,8 @@ Placeholder occurrences among the 61 manifest units (`changed_units_classes.py`)
 synthetic chat credentials, the transform doing what it ships to do. Question-level footprint: 248 questions carry a re-shaped unit, 17 carry a
 refused unit, 7 carry both, 258 carry either (the per-question map in the inventory). The dry run's stderr progress counter
 (`prewarm processed=178900` at the stop) counts prewarm request units, not `privacy.documents`, so the two figures are not comparable.
-Interpretation under §4.2: the count is > 0, so the boundary is
+Interpretation under §4.2: the transform-change count (returned `changed=True` OR raised) is 617 occurrences = 93 unique units in 258 of
+500 questions — 599 / 90 / 248 re-shaped + 18 / 3 / 17 refused, 7 questions in both — the count is > 0, so the boundary is
 **live for this corpus**; whether any metric delta would be attributable to it was never reached (§4.3 needs a completed run).
 
 Exact spend the real prewarm would have needed had nothing blocked (`cache_membership_check.py`): the 90 unique transformed units map to
@@ -130,14 +132,17 @@ class probes seconds, membership check 122 s — all offline. Sheet cap ($40, pr
   `LCM_ASSERTION_EXTRACTION_ENABLED`, `LCM_ASSERTION_EXTRACTION_MAX_SOURCES_PER_PASS`, `LCM_ASSERTION_EXTRACTION_TIMEOUT_SECONDS`,
   `LCM_EMBEDDING_API_KEY_ENV`, `LCM_EMBEDDING_BASE_URL`, `LCM_FRESH_TAIL_PRESSURE_YIELD_MIN_OBSERVATIONS`) were all unset at launch per
   the same file's independent `LCM_/HERMES_/REBANK_` environment listing, which completes the §3 pin inventory for this execution; the
-  committed copy enumerates all 96 structurally and refuses on a count mismatch. Both sha256 manifests are committed beside the kit.
+  committed copy enumerates all 96 structurally and refuses on a count mismatch. Both sha256 manifests are committed beside the kit. Four further kit findings from the review's third pass (gate-marker binding
+  in `launch_all.sh`, failure propagation in the `record_pins.sh` pin block, credential redaction of the captured run environment and a
+  product-sha resume guard in `run_shard.sh` / `run_aprime.sh`) touch no artifact of this execution and are tracked on #415 as
+  prerequisites for the next execution of the sheet.
 - What this finding does NOT prove: nothing about F53's numbers under the raw path (no raw-path re-run exists at this head); nothing
   about retrieval quality under the shipped posture (no shard ran); the false-positive rate is for this corpus only.
 
 ## 9. Ledger
 
 Nothing discharges. `bench/BASELINE-LEDGER.md` rows #366, #374 and #384+#391 have their status cells updated in place to the measured
-result (599 transformed occurrences / 90 unique units; 3 refused units) — rows never edited, per the ledger rule. The #203/#177 rows
+result (§4.2 transform-change count 617 occurrences = 93 unique units: 599 / 90 re-shaped + 18 / 3 refused) — rows never edited, per the ledger rule. The #203/#177 rows
 (cache-pair identity + forward baseline) are untouched: §4.4(b) needs a completed run. #380 and #367 stay open. The F53 finding and the
 F53 scoreboard row carry a dated append-only line pointing here (the freeze stands; no number changes).
 

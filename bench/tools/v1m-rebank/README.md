@@ -31,3 +31,7 @@ beside the originals in the evidence directory). The tools that never ran in the
 the post-A′ branch of `identity_all.sh`, `record_pins.sh postrun`) carry their fixes for the next execution.
 
 What the first execution produced and why it parked: `bench/FINDING-F62-V1M-REBANK-PARKED.md`.
+
+Four further review findings (third pass of PR #416) on tools that did not run in the parked execution — gate-marker binding in
+`launch_all.sh`, failure propagation in the `record_pins.sh` pin block, credential redaction of the captured run environment and a
+product-sha resume guard in `run_shard.sh` / `run_aprime.sh` — are tracked on #415 and must be fixed before the next execution of the sheet.
