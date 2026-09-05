@@ -163,7 +163,8 @@ by the production `lcm_recall` arm, never cache-served — ≈ 1,000 query embed
 harness does not record these dispatches (provider accounting is transient and unwired in the CLI); the bound is the count
 itself: ≈ 1,050 request units ≈ $0.08 at the cap-basis price above. Public V1-M data only. OpenRouter: not used.
 
-## 6. Ledger discharges (appended at banking, never edited)
+## 6. Ledger discharges (appended only when a REPRODUCED outcome banks the successor row — a MOVED outcome appends nothing here and
+the finding publishes the diagnosis instead; never edited)
 - `#352` → RECORDED (finding records "post-#352 instrument").
 - `#332/#333/#338` trio row → posture recorded (durable lossless + provider-copy transform on) and F53
   reproducibility settled per §4.3.
@@ -178,8 +179,10 @@ itself: ≈ 1,050 request units ≈ $0.08 at the cap-basis price above. Public V
 - Voyage 429 sustained >30 min → halve the shard count, document, continue (operational).
 - Any `EmbeddingPrivacyPolicyError` is fail-loud by design: the pre-launch `prewarm-cache` / `determinism-probe`
   commands print a `{"status": "blocked", "privacy": …}` report and exit non-zero (park before launch, root-cause);
-  a block inside a shard aborts that shard uncaught, and a `--resume` re-hits the same question → park, root-cause,
-  disclose row-level. There is no percentage threshold: one block is a park.
+  a block inside a shard (a query-only refusal — documents were validated by the dry run) makes `run` print the same structured
+  `{"status": "blocked", "question_id": …, "privacy": <per-question counters>, "checkpoint": …, "resumable": true}` receipt
+  and exit 2 with NO checkpoint row for that question, so a `--resume` re-hits the same question → park, root-cause,
+  disclose row-level (the receipt is the row-level evidence). There is no percentage threshold: one block is a park.
 - Projected prewarm spend ≥ $40 → park before launch (§5; the same threshold as §5 — one observable outcome).
 - Host reboot / kill → resume with `--resume` per shard (checkpoint verified); no partial results carry
   over across a re-registration.
@@ -232,5 +235,7 @@ outputs to the session-notes artifacts dir before anything else runs.** 8. Recom
 `per_question_checkpoint.jsonl` — never the run's own aggregate (the aggregates `ingest.privacy` and
 `ingest.embed_cache` are restored across `--resume` from the rows, but the checkpoint rows are the record).
 9. Per-shard cache-pair parity = the sum of per-question `embed_cache` rows vs `lme-runs/m-full2-shard-*/`
-`longmemeval_metrics.json` `ingest.embed_cache`; record `corpus_counts` as the forward baseline. 10. FINDING-F62 + scoreboard row + §6 ledger rows + F53 annotation, one PR
-through the gate with an independent audit; #380/#367 close on merge; #252 verdict record.
+`longmemeval_metrics.json` `ingest.embed_cache`; record `corpus_counts` as the forward baseline. 10. FINDING-F62 + F53 annotation — plus the scoreboard row and the §6 ledger rows ONLY on a REPRODUCED outcome (a MOVED outcome
+banks nothing: the finding carries the diagnosis and F53 keeps its row, §4.3) — one PR
+through the gate with an independent audit; #380/#367 close on merge (on a MOVED outcome they stay open with the diagnosis
+linked); #252 verdict record.
