@@ -2234,6 +2234,80 @@ def test_resume_restores_legacy_three_key_privacy_rows(tmp_path):
     }
 
 
+def test_resume_validates_restored_corpus_counts(tmp_path):
+    question = parse_question(
+        _make_raw(
+            "q-corpus-counts-row",
+            "single-session-user",
+            sessions={
+                "s-counts": [
+                    {"role": "user", "content": "first toy message"},
+                    {"role": "assistant", "content": "second toy message", "has_answer": True},
+                ]
+            },
+            answer_session_ids=["s-counts"],
+            question="what was in the toy message",
+        )
+    )
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "initial",
+        checkpoint_path=checkpoint,
+    )
+    header, row_line = checkpoint.read_text(encoding="utf-8").splitlines()[:2]
+    assert json.loads(row_line)["corpus_counts"] == {
+        "messages": 2,
+        "summary_nodes": 1,
+        "chunks": 0,
+    }
+
+    def _write(row):
+        checkpoint.write_text(
+            header + "\n" + json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+
+    def _resume(label):
+        return run_harness(
+            [question],
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / label,
+            checkpoint_path=checkpoint,
+            resume=True,
+            selected_question_ids=[question.question_id],
+        )
+
+    # A present value must be exactly the three non-negative integer counters.
+    malformed = {
+        "non-object": [2, 1, 0],
+        "missing-key": {"messages": 2, "summary_nodes": 1},
+        "extra-key": {"messages": 2, "summary_nodes": 1, "chunks": 0, "turns": 2},
+        "negative": {"messages": -1, "summary_nodes": 1, "chunks": 0},
+        "bool": {"messages": True, "summary_nodes": 1, "chunks": 0},
+        "float": {"messages": 2.0, "summary_nodes": 1, "chunks": 0},
+    }
+    for label, value in malformed.items():
+        row = json.loads(row_line)
+        row["corpus_counts"] = value
+        _write(row)
+        with pytest.raises(ValueError, match="corpus_counts"):
+            _resume(f"resume-{label}")
+    # A legacy row without the field (or with an explicit null) still resumes;
+    # the recompute reports its counts as unavailable, never as zeros.
+    row = json.loads(row_line)
+    del row["corpus_counts"]
+    _write(row)
+    assert _resume("resume-legacy")["question_count"] == 1
+    row = json.loads(row_line)
+    row["corpus_counts"] = None
+    _write(row)
+    assert _resume("resume-null")["question_count"] == 1
+
+
 def test_embeddings_disabled_preserves_raw_corpus_text_in_fts(tmp_path):
     provider = _IdentityEmbedder("voyage-4-large")
     question = _privacy_question("q-private-fts-off")

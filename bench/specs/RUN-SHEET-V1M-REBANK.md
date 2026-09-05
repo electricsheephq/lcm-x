@@ -80,29 +80,32 @@ Keychain at runtime, never in configs or logs; embed-cache path + size + mtime b
      live, retrieval-inert" and the finding publishes the changed-document manifest (question id + raw/protected unit
      digests per changed unit, written by `prewarm-cache --changed-manifest` during the dry run) so the inertness is checkable.
    - **MOVED-EXPLAINED** — at least one per-question delta, and every delta row passes BOTH tests: (i) its own checkpoint
-     row shows a live transform (`privacy.changed > 0` — a corpus document changed — or `privacy.queries_changed > 0`
-     — its provider-bound query text changed; query transforms never touch the embed cache pair but can move
-     retrieval, so they are an explanation, not drift), AND (ii) the transform is LINKED to the moved retrieval at the
+     row shows a live document transform (`privacy.changed > 0` — a corpus document changed; `privacy.queries_changed > 0`
+     records a changed provider-bound query text but is NOT an explanation by itself — see (ii); query transforms never
+     touch the embed cache pair), AND (ii) the transform is LINKED to the moved retrieval at the
      delta level — question-scope correlation is not causation (a transformed-but-irrelevant unit can coexist with
-     unrelated drift on the same row). The link holds when the row's query text changed (`queries_changed > 0`) AND every
-     arm that moved on that row is embedding-driven — any arm but `fts`: the lexical arm searches the lossless durable
-     store with the RAW question (`fts_hits(store, question.question, …)`; only the summary/chunk/rerank queries are
-     protected), so a query transform cannot reach it and an `fts`-only move is never explained by a changed query (the
-     hybrid arms fuse a vector component and can be); or when at least one changed unit of that question (a
+     unrelated drift on the same row). The link holds ONLY through a changed unit — a changed query has no delta-level
+     observable in the registered artifacts: the candidate dump records the protected-query rankings only, the harness has
+     no transform-off replay at this head (it resolves the production privacy posture at every provider-set construction),
+     and the `fts` arm never sees the transform at all (it searches the lossless durable store with the RAW question,
+     `fts_hits(store, question.question, …)`; only the summary/chunk/rerank queries are protected). The link holds when at
+     least one changed unit of that question (a
      `--changed-manifest` record: `question_id` + `unit_index` in the harness's deterministic unit order, mapped back to
      its session by replaying the same walk over the prepared question's `haystack_sessions` that
      `iter_ingest_embedding_request_units` performs, counting units per session — no embedding call)
      belongs to a session or turn that appears in the re-bank run's `--dump-candidates` row for that question, either in
      the top-10 of an arm whose metric moved or among the row's gold sessions/turns (a transformed gold unit that
-     dropped out of the top-10 explains a loss the same way). The document transform-change count (bar 2) may be 0
-     here: a query-only transform that moves retrieval is MOVED-EXPLAINED, not undefined. Disclosed limitation: F53
+     dropped out of the top-10 explains a loss the same way). The document transform-change count (bar 2) is therefore
+     > 0 for every MOVED-EXPLAINED run (a unit-link needs a changed unit); a query-only transform that moves retrieval is
+     MOVED-UNEXPLAINED (defined, and not banked). Disclosed limitation: F53
      dumped no candidates (its rows carry per-arm metrics only), so the link is established on the re-bank side and
      the finding says so. Outcome: successor row banked; F53 annotated "pre-#332, superseded" (#380).
    - **MOVED-UNEXPLAINED** — any delta on a question whose own row shows NO live transform of either kind
      (`privacy.changed == 0` AND `privacy.queries_changed == 0`), OR whose live transform has no delta-level link
      under test (ii) — instrument drift, or a transform whose effect on this row is unproven: STOP, do not bank,
-     root-cause first (root-cause procedure: re-run the delta questions once with the transform disabled into a scratch
-     root and diff the two `--dump-candidates` rows — a diagnostic, never banked). The two MOVED outcomes partition the
+     root-cause first. The natural diagnostic (a transform-off replay of the delta questions into a scratch root, diffing the
+     two candidate dumps) does NOT exist in the harness at this head and would be registered as its own instrument change
+     before use; until then a MOVED-UNEXPLAINED run is simply not banked. The two MOVED outcomes partition the
      delta set by that per-row test (live transform AND delta-level link); a run with rows of both kinds is
      MOVED-UNEXPLAINED. Together the four outcomes cover every run
      and no run matches two: results identical to F53 → REPRODUCED or REPRODUCED-TRANSFORM-INERT (split by the
@@ -192,7 +195,9 @@ harness or driver — a block would have aborted a shard uncounted; this PR repl
 `ingest_report["privacy"]` (NOT the checkpoint header — a new header key breaks resume), plus per-question
 `corpus_counts` (messages / summary nodes / chunks ingested) and per-question `embed_cache` {hits, misses}
 deltas in each per-question record so future rows have per-question parity fields (the forward baseline —
-F53 has none, §4.4) and the cache pair can be recomputed from rows. A privacy block is counted wherever it
+F53 has none, §4.4) and the cache pair can be recomputed from rows. On `--resume`, a restored row whose `corpus_counts` is present
+but malformed (not exactly the three non-negative integer counters) fails the resume loudly; a row without one (legacy) is
+counted as unavailable in the forward baseline, never as zeros. A privacy block is counted wherever it
 occurs, including the determinism probe's uncounted de-duplication scan (`count=False` suppresses only the
 documents/changed totals, never `blocked`), and the CLI's blocked report falls back to the live module
 counters when the raising validator carried none — a blocked report is never all-zero. `prewarm-cache

@@ -3529,6 +3529,7 @@ def _load_question_checkpoint(
         _validate_restored_checkpoint_metrics(
             record, line_number=index + 1, path=path, recall_rerank=recall_rerank
         )
+        _validate_restored_corpus_counts(record, line_number=index + 1, path=path)
         seen.add(question_id)
         records.append(record)
         offset += len(raw_line)
@@ -3623,6 +3624,37 @@ def _validate_restored_checkpoint_metrics(
             raise ValueError(
                 f"checkpoint line {line_number} field arms.lcm_recall.recall_rerank_status "
                 f"must be a non-empty string: {path}"
+            )
+
+
+_CORPUS_COUNT_KEYS = ("messages", "summary_nodes", "chunks")
+
+
+def _validate_restored_corpus_counts(
+    record: dict[str, Any], *, line_number: int, path: Path
+) -> None:
+    """Validate a restored per-question ``corpus_counts`` (the forward baseline).
+
+    A row without the field, or with an explicit null, is a legacy row: it
+    restores unchanged and the recompute reports its counts as unavailable,
+    never as zeros. A present value must be exactly the three non-negative
+    integer counters — a malformed value would otherwise re-enter the record
+    silently, and these rows ARE the record for the forward baseline.
+    """
+    if "corpus_counts" not in record or record["corpus_counts"] is None:
+        return
+    counts = record["corpus_counts"]
+    if not isinstance(counts, dict) or set(counts) != set(_CORPUS_COUNT_KEYS):
+        raise ValueError(
+            f"checkpoint line {line_number} field corpus_counts must be an object with "
+            f"exactly the keys {list(_CORPUS_COUNT_KEYS)}: {path}"
+        )
+    for key in _CORPUS_COUNT_KEYS:
+        value = counts[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(
+                f"checkpoint line {line_number} field corpus_counts.{key} must be a "
+                f"non-negative integer: {path}"
             )
 
 
