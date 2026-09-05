@@ -866,6 +866,27 @@ manifest-based rollback. See the [operator guide](docs/operator-guide.md#histori
 
 ## Troubleshooting
 
+### WebUI breaks after `hermes update`
+
+Hermes frontends can run in separate long-lived processes. After an agent
+update, a still-running WebUI process may keep old Python modules in memory
+while later imports read the new files from disk. Import errors, unexpected
+constructor arguments, or an `lcm` fallback in only that frontend can therefore
+be process version skew rather than an LCM database failure.
+
+Restart every Hermes process that imports agent code after an update, including
+the gateway and any separately managed WebUI. For the standalone Hermex WebUI,
+the usual command is:
+
+```bash
+~/hermes-webui/ctl.sh restart
+```
+
+Then restart the gateway with the service command used by that installation and
+verify `hermes plugins` from the affected runtime. Clearing browser caches,
+reinstalling LCM-X, or changing the database does not refresh Python modules in
+another process.
+
 ### `hermes plugins` shows `lcm (not found)` but LCM tools exist
 
 If `plugins.enabled` contains `hermes-lcm`, `context.engine: lcm` is set, and
