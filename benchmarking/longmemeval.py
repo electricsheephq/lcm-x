@@ -4360,12 +4360,18 @@ def run_harness(
     }
     if dataset_label == "m" or manifest_sha256 is not None:
         ingest_report["embedding_batch_size"] = effective_embedding_batch_size
-    if embed_cache_path is not None or restored_embed_cache_active:
-        # Restored cache totals are reported whenever the rows say a cache was in
-        # play (their embed_cache_enabled marker; traffic heuristic for legacy rows),
-        # even when the re-reporting process has no cache configured -- a fully
-        # completed resume constructs no provider. A partial resume under a different
-        # posture was refused above, so the sum never mixes cached and uncached rows.
+    # A fully completed resume constructs no provider, so its report follows the
+    # rows' posture EXCLUSIVELY (their embed_cache_enabled marker; traffic heuristic
+    # for legacy rows) -- the live env is neither required nor trusted for it, in
+    # either direction. Otherwise the live posture decides; a partial resume under a
+    # different posture was refused above, so the sum never mixes cached and
+    # uncached rows.
+    report_embed_cache = (
+        restored_embed_cache_active
+        if fully_completed_resume
+        else embed_cache_path is not None
+    )
+    if report_embed_cache:
         live_cache_hits, live_cache_misses = _embed_cache_totals(
             ()
             if provider_set is None or embed_cache_path is None

@@ -524,6 +524,39 @@ def test_completed_resume_of_zero_traffic_cached_rows_reports_embed_cache_withou
     assert resumed["ingest"]["embed_cache"] == {"hits": 0, "misses": 0}
 
 
+@pytest.mark.parametrize("cached", [True, False], ids=["cached-rows", "uncached-rows"])
+@pytest.mark.parametrize("live_env", [True, False], ids=["env-set", "env-unset"])
+def test_completed_resume_report_follows_the_rows_posture_not_the_live_env(
+    tmp_path, monkeypatch, cached, live_env
+):
+    """A completed resume constructs no provider; its aggregate embed_cache must
+    follow the rows' recorded posture in both directions of live-env disagreement."""
+    questions, checkpoint = _cached_two_question_run(tmp_path, monkeypatch, cached=cached)
+    if live_env:
+        monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "live-cache.sqlite3"))
+    else:
+        monkeypatch.delenv(lme.EMBED_CACHE_ENV, raising=False)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("a fully completed resume must not resolve a provider")
+
+    monkeypatch.setattr(lme, "resolve_harness_providers", forbidden)
+    resumed = lme.run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "resume",
+        reuse_db_template=False,
+        checkpoint_path=checkpoint,
+        resume=True,
+        selected_question_ids=[question.question_id for question in questions],
+    )
+    if cached:
+        assert resumed["ingest"]["embed_cache"] == {"hits": 4, "misses": 2}
+    else:
+        assert "embed_cache" not in resumed["ingest"]
+
+
 def test_abstention_row_carries_the_embed_cache_marker(tmp_path, monkeypatch):
     """Abstention rows skip evaluation and carry zero traffic; the marker must still
     record the posture they were written under."""
