@@ -64,7 +64,8 @@ Keychain at runtime, never in configs or logs; embed-cache path + size + mtime b
    0-delivered rows and instrument failures disclosed per question, never dropped; abstention-excluded count
    reported as in F53 (470 scored + 30 excluded).
 2. **Transform-change count** = the number of prepared-corpus documents for which
-   `protect_embedding_text` returned `changed=True` or raised, measured by a full prewarm pass over
+   `protect_embedding_text` returned `changed=True` or raised, measured by the dry-run full pass (`prewarm-cache --dry-run`: every unit validated, nothing embedded; the real prewarm
+   repeats the count) over
    `prepared-m` under the declared posture (input-hash parity with the F53-era cache). This is the ledger
    discharge measurement for the #366 / #374 / #384-#391 rows: **0 ⇒ inert for this corpus**; >0 ⇒ the
    boundary is live and any metric delta is attributed to it. Only prepared-corpus DOCUMENTS count: query-text
@@ -83,8 +84,11 @@ Keychain at runtime, never in configs or logs; embed-cache path + size + mtime b
      — its provider-bound query text changed; query transforms never touch the embed cache pair but can move
      retrieval, so they are an explanation, not drift), AND (ii) the transform is LINKED to the moved retrieval at the
      delta level — question-scope correlation is not causation (a transformed-but-irrelevant unit can coexist with
-     unrelated drift on the same row). The link holds when the row's query text changed (`queries_changed > 0` re-ranks
-     the whole candidate list by construction), or when at least one changed unit of that question (a
+     unrelated drift on the same row). The link holds when the row's query text changed (`queries_changed > 0`) AND every
+     arm that moved on that row is embedding-driven — any arm but `fts`: the lexical arm searches the lossless durable
+     store with the RAW question (`fts_hits(store, question.question, …)`; only the summary/chunk/rerank queries are
+     protected), so a query transform cannot reach it and an `fts`-only move is never explained by a changed query (the
+     hybrid arms fuse a vector component and can be); or when at least one changed unit of that question (a
      `--changed-manifest` record: `question_id` + `unit_index` in the harness's deterministic unit order, mapped back to
      its session by replaying the same walk over the prepared question's `haystack_sessions` that
      `iter_ingest_embedding_request_units` performs, counting units per session — no embedding call)
@@ -104,7 +108,8 @@ Keychain at runtime, never in configs or logs; embed-cache path + size + mtime b
      and no run matches two: results identical to F53 → REPRODUCED or REPRODUCED-TRANSFORM-INERT (split by the
      document transform-change count); results differ → MOVED-EXPLAINED or MOVED-UNEXPLAINED (split by the per-row
      test alone — the document count does not enter). `--dump-candidates` is therefore ON for every shard and for A/A′
-     (§8 steps 5–6); a shard without its candidate dump cannot be classified and is re-run.
+     (§8 steps 5–6); a shard without its candidate dump, or whose dump is missing rows (a `--resume` after a run that lacked the flag does
+     not re-dump completed questions), cannot be classified and is re-run from a fresh output root.
 4. Corpus identity vs F53 (#203/#177 rows). F53 recorded NO per-question message/node/chunk counts (its checkpoint
    records carry only abstention/arms/category/ingest_ms/question_id/rerank_mode, and each question database was
    deleted after scoring), so per-question count parity CANNOT be executed against F53. The executable identity
