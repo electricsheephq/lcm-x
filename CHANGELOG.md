@@ -1,9 +1,29 @@
 # Changelog
 
-This file is the repository-root version history. LCM-X currently publishes
-version tags but does not have a destination GitHub Release object for RC2.
+This file is the repository-root version history. Every tag has curated notes under
+`.github/release-notes/`; GitHub Releases are published from tags (rc tags as prereleases).
 
 ## Unreleased
+
+## v0.23.3 - maintenance point release
+
+- Session-end prefix matching extracted from `engine.py` into `prefix_matching.py` as a mixin;
+  no behaviour change (verified AST-identical at review). (#155)
+- FastEmbed warmup prefers the locally cached model before enabling downloads; explicit warmup
+  stays the only path that may download a missing model. (#404, addresses #235 — contributed by
+  @Tosko4)
+- Teams scope backfill is linear (ascending rowid cursor through session, derived and rollup
+  backfills). (#408, closes #386 — contributed by @Tosko4)
+- Test: the atomic compaction-telemetry contention regression no longer depends on runner
+  scheduling; production's 100 ms best-effort policy is unchanged. (#407, closes #328 —
+  contributed by @Tosko4)
+- Governance: the exact-head receipt gate preserves valid peer receipts when one pull request's
+  gate fails cleanly, fails closed on a transient error during its final read, and requires a
+  `dispatch_id` in receipt dispatches. (#362)
+- Records: BASELINE-LEDGER rows for the v0.23.2 security/privacy train (#412); the F53 V1-M
+  re-bank registration (#413) and its park record FINDING-F62 (#416); contributor credits and
+  full v0.23.2 PR coverage (#396). Documentation names v0.23.2 as the latest stable release and
+  carries the forward identity `hermes-lcm v0.23.3 (15 tools)`.
 
 ## v0.23.2 - security + lossless point release
 
