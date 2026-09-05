@@ -192,8 +192,11 @@ the finding publishes the diagnosis instead; never edited)
 - Any `EmbeddingPrivacyPolicyError` is fail-loud by design: the pre-launch `prewarm-cache` / `determinism-probe`
   commands print a `{"status": "blocked", "privacy": …}` report and exit non-zero (park before launch, root-cause);
   a block inside a shard (a query-only refusal — documents were validated by the dry run) makes `run` print the same structured
-  `{"status": "blocked", "question_id": …, "privacy": <per-question counters>, "checkpoint": …, "resumable": true}` receipt
-  and exit 2 with NO checkpoint row for that question, so a `--resume` re-hits the same question → park, root-cause,
+  `{"status": "blocked", "question_id": …, "privacy": <per-question counters>, "checkpoint": …, "resumable": <bool>}` receipt
+  and exit 2 with NO checkpoint row for that question. `resumable` reflects the durable state: true only when the checkpoint
+  header already exists on disk (then a `--resume` re-hits the same question); a refusal raised before the header is written
+  (policy resolution, provider/template initialization) reports `"resumable": false` with `"checkpoint": null` and is re-launched
+  fresh, never resumed. Either way → park, root-cause,
   disclose row-level (the receipt is the row-level evidence). There is no percentage threshold: one block is a park.
 - Projected prewarm spend ≥ $40 → park before launch (§5; the same threshold as §5 — one observable outcome).
 - Host reboot / kill → resume with `--resume` per shard (checkpoint verified); no partial results carry

@@ -278,6 +278,26 @@ def _validated_dump_candidates_path(
     return dump_path
 
 
+def _checkpoint_has_header(checkpoint_path: Path) -> bool:
+    """True only when ``--resume`` could actually continue: the checkpoint's first
+    non-empty line is the harness header object. A refusal raised before the header
+    is written (policy resolution, provider/template initialization) leaves no such
+    file, and the honest recovery is a fresh run, not a resume."""
+    try:
+        with checkpoint_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                return (
+                    isinstance(record, dict)
+                    and _longmemeval._CHECKPOINT_HEADER_KEY in record
+                )
+    except (OSError, ValueError):
+        return False
+    return False
+
+
 def _run_privacy_block_report(
     exc: BaseException, *, checkpoint_path: Path
 ) -> dict | None:
@@ -287,7 +307,9 @@ def _run_privacy_block_report(
     texts are protected only at run time, so a query-only refusal surfaces here.
     The blocked question has no checkpoint row (``--resume`` re-runs it); the
     receipt carries its id and the per-question counters the harness attached.
-    Returns None for any other exception.
+    ``resumable`` reflects the durable state: true only when the checkpoint header
+    already exists on disk; otherwise ``checkpoint`` is null and the run is
+    re-launched fresh. Returns None for any other exception.
     """
     try:
         from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
@@ -300,12 +322,13 @@ def _run_privacy_block_report(
         privacy = getattr(exc, "privacy_counts", None)
     if privacy is None:
         privacy = dict(_longmemeval._PRIVACY_COUNTS)
+    resumable = _checkpoint_has_header(checkpoint_path)
     return {
         "status": "blocked",
         "question_id": getattr(exc, "question_id", None),
         "privacy": privacy,
-        "checkpoint": str(checkpoint_path),
-        "resumable": True,
+        "checkpoint": str(checkpoint_path) if resumable else None,
+        "resumable": resumable,
         "error": str(exc),
     }
 

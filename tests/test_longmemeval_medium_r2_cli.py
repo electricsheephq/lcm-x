@@ -268,6 +268,10 @@ def test_run_privacy_block_report_carries_question_id_and_row_counters(tmp_path)
         "queries_blocked": 1,
     }
     checkpoint = tmp_path / "per_question_checkpoint.jsonl"
+    # The header exists: the harness wrote it before the blocked question ran.
+    checkpoint.write_text(
+        json.dumps({"__checkpoint_header__": {"bindings": {}}}) + "\n", encoding="utf-8"
+    )
     report = cli._run_privacy_block_report(error, checkpoint_path=checkpoint)
     assert report["status"] == "blocked"
     assert report["question_id"] == "q-blocked"
@@ -277,6 +281,30 @@ def test_run_privacy_block_report_carries_question_id_and_row_counters(tmp_path)
     assert "blocked query dispatch" in report["error"]
     # Only privacy refusals become receipts; everything else keeps its path.
     assert cli._run_privacy_block_report(ValueError("not privacy"), checkpoint_path=checkpoint) is None
+
+
+def test_run_privacy_block_report_is_not_resumable_before_the_header_exists(tmp_path):
+    """A refusal raised before the checkpoint header is written (policy resolution,
+    provider/template initialization) must not advertise a --resume that fails."""
+    cli = _load_cli()
+    error = EmbeddingPrivacyPolicyError("privacy policy blocked dispatch")
+    missing = tmp_path / "missing" / "per_question_checkpoint.jsonl"
+    report = cli._run_privacy_block_report(error, checkpoint_path=missing)
+    assert report["status"] == "blocked"
+    assert report["resumable"] is False
+    assert report["checkpoint"] is None
+    assert set(report) == {"status", "question_id", "privacy", "checkpoint", "resumable", "error"}
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    assert cli._run_privacy_block_report(error, checkpoint_path=empty)["resumable"] is False
+    rowless = tmp_path / "no-header.jsonl"
+    rowless.write_text(json.dumps({"question_id": "q1"}) + "\n", encoding="utf-8")
+    assert cli._run_privacy_block_report(error, checkpoint_path=rowless)["resumable"] is False
+    with_header = tmp_path / "with-header.jsonl"
+    with_header.write_text(json.dumps({"__checkpoint_header__": {}}) + "\n", encoding="utf-8")
+    resumable = cli._run_privacy_block_report(error, checkpoint_path=with_header)
+    assert resumable["resumable"] is True
+    assert resumable["checkpoint"] == str(with_header)
 
 
 def test_dispatch_validator_block_report_contains_all_privacy_keys(tmp_path, monkeypatch, capsys):

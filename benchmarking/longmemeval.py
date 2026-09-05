@@ -3946,6 +3946,7 @@ def run_harness(
         raise ValueError("resume=True requires a checkpoint_path")
     checkpoint_records: list[dict[str, Any]] = []
     restored_embed_cache = {"hits": 0, "misses": 0}
+    restored_embed_cache_active = False
     if checkpoint_path is not None:
         checkpoint_path = Path(checkpoint_path)
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3969,6 +3970,12 @@ def run_harness(
             )
             _restore_privacy_counts(checkpoint_records)
             restored_embed_cache = _restore_embed_cache_counts(checkpoint_records)
+            # Rows always carry the embed_cache field (zeros when no cache was
+            # configured), so field presence is not the signal; non-zero traffic
+            # proves the restored rows were produced under an embed cache.
+            restored_embed_cache_active = (
+                restored_embed_cache["hits"] > 0 or restored_embed_cache["misses"] > 0
+            )
 
     by_category: dict[str, dict[str, ArmSamples]] = {}
     overall = _new_arm_samples()
@@ -4002,6 +4009,19 @@ def run_harness(
     embed_cache_path = os.environ.get(EMBED_CACHE_ENV)
     if embed_cache_path is not None and not embed_cache_path.strip():
         raise ValueError(f"{EMBED_CACHE_ENV} must be a non-empty SQLite path")
+    if (
+        embed_cache_path is None
+        and restored_embed_cache_active
+        and not fully_completed_resume
+    ):
+        # Refuse to sum a cached half with an uncached half: the restored rows were
+        # produced under an embed cache the live process does not have. Raised
+        # before any provider resolves, so no spend occurs.
+        raise ValueError(
+            "restored checkpoint rows carry embed_cache traffic but "
+            f"{EMBED_CACHE_ENV} is not set for this resume; export the same cache "
+            "or start a fresh --output"
+        )
 
     provider_set: HarnessProviderSet | None = None
     db_template: Path | None = None
@@ -4265,10 +4285,15 @@ def run_harness(
     }
     if dataset_label == "m" or manifest_sha256 is not None:
         ingest_report["embedding_batch_size"] = effective_embedding_batch_size
-    if embed_cache_path is not None:
+    if embed_cache_path is not None or restored_embed_cache_active:
+        # Restored cache traffic is reported even when the live process has no
+        # cache configured (a fully completed resume constructs no provider); the
+        # partial-resume mix without a live cache was refused above. Zero restored
+        # traffic is indistinguishable from an uncached run here and keeps the
+        # env-gated behaviour; the per-row embed_cache fields stay authoritative.
         live_cache_hits, live_cache_misses = _embed_cache_totals(
             ()
-            if provider_set is None
+            if provider_set is None or embed_cache_path is None
             else (provider_set.summary, provider_set.chunk)
         )
         ingest_report["embed_cache"] = {

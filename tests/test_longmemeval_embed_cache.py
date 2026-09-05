@@ -360,6 +360,122 @@ def test_resume_aggregate_adds_restored_and_live_embed_cache_counts(tmp_path, mo
     assert resumed["ingest"]["embed_cache"] == {"hits": 12, "misses": 21}
 
 
+def _cached_two_question_run(tmp_path, monkeypatch):
+    """First run under an embed cache: two checkpoint rows, each carrying
+    ``embed_cache == {"hits": 2, "misses": 1}``."""
+    questions = [_question("q-cache-a"), _question("q-cache-b")]
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(tmp_path / "cache.sqlite3"))
+    metric = {
+        "recall@1": 1.0,
+        "recall@5": 1.0,
+        "recall@10": 1.0,
+        "ndcg@10": 1.0,
+        "latency_ms": 1.0,
+        "turn": {
+            "recall@1": 1.0,
+            "recall@5": 1.0,
+            "recall@10": 1.0,
+            "ndcg@10": 1.0,
+            "session_granularity": False,
+        },
+    }
+
+    def _resolve(*_args, **_kwargs):
+        provider = SimpleNamespace(
+            provider_id="stub", model_id="stub-hash-64", hits=0, misses=0
+        )
+        return lme.HarnessProviderSet(
+            summary=provider,
+            chunk=provider,
+            summary_binding=("stub", "stub-hash-64"),
+            chunk_binding=("stub", "stub-hash-64"),
+        )
+
+    def _evaluate(_question, provider, **_kwargs):
+        provider.hits += 2
+        provider.misses += 1
+        return {
+            **{arm: dict(metric) for arm in lme.ARMS},
+            "hybrid_rerank": {**metric, "rerank_mode": lme.RERANK_MODE_PLACEHOLDER},
+            "ingest_ms": 1.0,
+            "privacy": {key: 0 for key in lme._PRIVACY_KEYS},
+            "corpus_counts": {"messages": 1, "summary_nodes": 1, "chunks": 0},
+            "embed_cache": {"hits": 2, "misses": 1},
+        }
+
+    monkeypatch.setattr(lme, "resolve_harness_providers", _resolve)
+    monkeypatch.setattr(lme, "evaluate_question", _evaluate)
+    lme.run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "initial",
+        reuse_db_template=False,
+        checkpoint_path=checkpoint,
+    )
+    rows = [
+        json.loads(line)
+        for line in checkpoint.read_text(encoding="utf-8").splitlines()[1:]
+    ]
+    assert [row["embed_cache"] for row in rows] == [{"hits": 2, "misses": 1}] * 2
+    return questions, checkpoint
+
+
+def test_completed_resume_reports_restored_embed_cache_without_cache_env(
+    tmp_path, monkeypatch
+):
+    """Re-reporting a completed cached shard without the cache env must keep the
+    aggregate cache-pair evidence the rows carry (and construct no provider)."""
+    questions, checkpoint = _cached_two_question_run(tmp_path, monkeypatch)
+    monkeypatch.delenv(lme.EMBED_CACHE_ENV)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("a fully completed resume must not resolve a provider")
+
+    monkeypatch.setattr(lme, "resolve_harness_providers", forbidden)
+    resumed = lme.run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "resume",
+        reuse_db_template=False,
+        checkpoint_path=checkpoint,
+        resume=True,
+        selected_question_ids=[question.question_id for question in questions],
+    )
+    assert resumed["ingest"]["embed_cache"] == {"hits": 4, "misses": 2}
+
+
+def test_partial_resume_without_cache_env_refuses_rows_carrying_embed_cache(
+    tmp_path, monkeypatch
+):
+    """A cached half must not be summed with an uncached half; refused before any
+    provider resolves."""
+    questions, checkpoint = _cached_two_question_run(tmp_path, monkeypatch)
+    lines = checkpoint.read_text(encoding="utf-8").splitlines()
+    checkpoint.write_text(lines[0] + "\n" + lines[1] + "\n", encoding="utf-8")
+    monkeypatch.delenv(lme.EMBED_CACHE_ENV)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("the mix must be refused before any provider resolves")
+
+    monkeypatch.setattr(lme, "resolve_harness_providers", forbidden)
+    with pytest.raises(
+        ValueError, match=f"embed_cache traffic but {lme.EMBED_CACHE_ENV} is not set"
+    ):
+        lme.run_harness(
+            questions,
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / "resume",
+            reuse_db_template=False,
+            checkpoint_path=checkpoint,
+            resume=True,
+            selected_question_ids=[question.question_id for question in questions],
+        )
+
+
 def test_prewarm_rejects_split_summary_chunk_identity_before_embedding(tmp_path):
     raw = _CountingProvider("voyage-4-large")
     cached = lme.ContentHashEmbeddingCache(raw, tmp_path / "embeddings.db")
