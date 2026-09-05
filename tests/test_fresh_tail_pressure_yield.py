@@ -271,6 +271,46 @@ def test_pressure_relief_resets_blocked_streak(tmp_path, monkeypatch):
         engine.shutdown()
 
 
+def test_preflight_under_estimate_does_not_reset_host_pressure_streak(
+    tmp_path, monkeypatch
+):
+    engine = _make_engine(tmp_path, monkeypatch, fresh_tail_count=128)
+    try:
+        min_observations = engine._config.fresh_tail_pressure_yield_min_observations
+        messages = [_tiny_user(i) for i in range(30)]
+        assert count_messages_tokens(messages) < engine.threshold_tokens
+        engine.last_prompt_tokens = 9_000
+
+        streaks = []
+        statuses = []
+        for _turn in range(min_observations):
+            assert engine.should_compress_preflight(list(messages)) is False
+            compressed = engine.compress(list(messages), current_tokens=9_000)
+            streaks.append(engine._pressure_yield_blocked_streak)
+            statuses.append(engine._last_compression_status)
+
+        assert streaks[:-1] == list(range(1, min_observations))
+        assert statuses[-1] == "compacted"
+        assert len(compressed) < len(messages)
+    finally:
+        engine.shutdown()
+
+
+def test_preflight_relieves_when_host_and_estimate_are_under_threshold(
+    tmp_path, monkeypatch
+):
+    engine = _make_engine(tmp_path, monkeypatch, fresh_tail_count=128)
+    try:
+        messages = [_tiny_user(i) for i in range(30)]
+        engine._pressure_yield_blocked_streak = 1
+        engine.last_prompt_tokens = 1_000
+
+        assert engine.should_compress_preflight(list(messages)) is False
+        assert engine._pressure_yield_blocked_streak == 0
+    finally:
+        engine.shutdown()
+
+
 # ── Invocation scoping and cleanup of the armed bound ────────────────────────
 
 

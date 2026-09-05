@@ -90,8 +90,11 @@ class CompactionMixin:
                 return True
             return self.threshold_tokens > 0 and rough >= self.threshold_tokens
         rough = count_messages_tokens(messages)
-        if self.threshold_tokens > 0 and rough < self.threshold_tokens:
+        host_observed = max(rough, int(getattr(self, "last_prompt_tokens", 0) or 0))
+        if self.threshold_tokens > 0 and host_observed < self.threshold_tokens:
             self._note_fresh_tail_pressure_relieved()
+        elif self.threshold_tokens > 0 and rough < self.threshold_tokens:
+            self._pressure_yield_invocation_verdict = "blocked"
         pre_ingest_placeholder_ambiguous_noop = False
         pre_ingest_noop_reason = ""
         pre_ingest_placeholder_cleanup_requested = False

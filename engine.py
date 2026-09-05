@@ -2240,7 +2240,8 @@ class LCMEngine(
     def _note_fresh_tail_pressure_relieved(self) -> None:
         """Reset the sustained-pressure evidence.
 
-        Called when an entry point observes the session under threshold or a
+        Called when an entry point observes the session under threshold by the
+        host's most recent observation as well as its own estimate, or a
         pass makes real progress (leaf compaction, sanitation-only cleanup,
         overflow recovery): either way the deadlock the yield exists for is
         not happening, so the streak starts over. Also settles the invocation
