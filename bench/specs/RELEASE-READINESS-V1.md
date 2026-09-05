@@ -99,7 +99,12 @@ soak fixture files (material, probes, canaries) by sha256, the soak configuratio
 host's system prompt and every other prompt-bearing file the fresh home starts with (`SOUL.md` and
 its kin) by sha256 or an explicit absence marker, the
 assistant provider and model identifier (the live-model side of the soak; a fixed seed where the
-provider supports one), the transport, the driver and turn-script files by sha256, the starting state — a fresh isolated home
+provider supports one), the transport, the driver and turn-script files by sha256, the driver's normalized invocation — every
+option and value that can change session continuity or turn completion (turn timeout, boot timeout,
+quiet period, restart-before-probes, probes-only), as the driver manifest records them — the execution
+runtime of the host and of the driver (interpreter version, SQLite library version, platform, and the
+installed-distribution inventory of each virtualenv the runs use, as a sorted name+version list by
+sha256; two runs on different runtimes are not the same soak), the starting state — a fresh isolated home
 and an empty database for every run, or, where a seeded start is part of the fixture, the same seed
 snapshot by digest (publication conflicts depend on persisted lifecycle state, so runs that start
 from different data are not comparable) — and the effective engine environment: the driver inherits
@@ -186,11 +191,17 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    itself: A and A′ must each also pass every non-conflict Phase C assertion (zero unexpected
    engine errors, recall probes hit, doctor clean) — a candidate run failing any of them establishes
    no profile and no band, and the phase fails. B and B′ must complete every turn with an intact log
-   and results file so their conflict profiles can be extracted; a non-conflict assertion a baseline
-   run fails is recorded beside its profile and does not block the candidate (a release that repairs
-   a previous-GA failure must remain releasable). A candidate with more records than the
+   and results file so their conflict profiles can be extracted, and must pass the non-conflict
+   assertions that can change publication behaviour — zero unexpected engine errors and a clean
+   doctor — because an unhealthy baseline can carry spurious conflicts that absorb candidate records
+   which would otherwise be NEW; a recall-probe miss by a baseline run is recorded beside its profile
+   and does not block the candidate (a release that repairs a previous-GA recall failure must remain
+   releasable). A candidate with more records than the
    previous GA fails regardless of positions; one with fewer passes the differential only when every
-   one of its records pairs, the receipt listing the unpaired previous-GA records as REMOVED with the
+   one of its records pairs AND each candidate run reached at least as many compactions as each
+   baseline run (host compaction telemetry, a receipt field) — a candidate that compacts less
+   exercised fewer publication points, so its missing conflicts are unevaluable, not removed, and
+   the phase fails — the receipt listing the unpaired previous-GA records as REMOVED with the
    delta commit believed responsible. Kind and aggregate count alone never suffice.
 5. **Known residual of the positional fallback.** A NEW conflict that fires within the band of a
    REMOVED one, with the same code and name, is indistinguishable from it without a publication
@@ -214,7 +225,10 @@ open the count is expected to be non-zero, so the differential run is mandatory 
 Each phase writes `PHASE-{A,B,C}-RECEIPT.md`: rc tag + tree sha, exact commands, matrix results
 (per-row pass/fail), findings + dispositions, and the claim class per the gate-closeout
 discipline (a phase receipt claims what it measured, never "customer ready"). The GA release
-notes link all three. Receipts are published verbatim (local paths redacted) as comments on the
+notes link all three. Receipts are published verbatim (local paths redacted; operational identifiers — account, project or
+key identifiers, secret-manager references, environment values that name infrastructure — may appear
+in an abbreviated or hashed form provided the receipt states the form and equality across runs stays
+readable from it, the full values living in the retained reference) as comments on the
 release train tracker issue; that comment URL is the link of record and is what the GA notes link,
 and the GA notes file itself — an immutable object in the GA tree — prints the sha256 of every
 published receipt body it relies on, carried receipts, addenda and the carry record included, so an
