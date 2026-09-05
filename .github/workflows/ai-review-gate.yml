@@ -61,76 +61,363 @@ jobs:
             const listFiles = (prNumber) => github.paginate(github.rest.pulls.listFiles,
               {owner, repo, pull_number: prNumber, per_page: 100})
               .then(files => files.map(file => file.filename));
+            const listTimeline = (prNumber) => github.paginate(
+              github.rest.issues.listEventsForTimeline,
+              {owner, repo, issue_number: prNumber, per_page: 100})
+              .then(events => events
+                .filter(event => ['base_ref_changed', 'head_ref_force_pushed', 'closed',
+                  'reopened', 'convert_to_draft', 'ready_for_review'].includes(event.event))
+                .map(event => ({event: event.event, id: event.id, created_at: event.created_at})));
+            const listTrustedChecks = (head) => github.paginate(github.rest.checks.listForRef,
+              {owner, repo, ref: head, check_name: 'AI review exact-head', filter: 'all', per_page: 100})
+              .then(runs => runs.filter(run => run.name === 'AI review exact-head')
+                .map(run => ({name: run.name, app_id: run.app?.id, external_id: run.external_id,
+                  head_sha: run.head_sha, status: run.status, conclusion: run.conclusion,
+                  output: run.output, output_summary: run.output?.summary})));
+            const runValidator = async (input, protectedSha) => {
+              const source = await github.rest.repos.getContent({owner, repo,
+                path: 'scripts/ai_review_gate.py', ref: protectedSha});
+              if (Array.isArray(source.data) || source.data.encoding !== 'base64') throw Error('validator unavailable');
+              fs.writeFileSync('/tmp/gate.py', Buffer.from(source.data.content, 'base64'));
+              const run = cp.spawnSync('python', ['/tmp/gate.py'], {input: JSON.stringify(input), encoding: 'utf8'});
+              if (run.error) throw run.error;
+              return {run, result: JSON.parse(run.stdout || '{}')};
+            };
+            const snapshot = async (prNumber, defaultBranch) => {
+              const live = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
+              const pr = live.data;
+              try {
+                const files = await listFiles(prNumber);
+                const unresolved = await unresolvedThreads(prNumber);
+                const timeline = await listTimeline(prNumber);
+                const checks = await listTrustedChecks(pr.head.sha);
+                return {repository: `${owner}/${repo}`, pr_number: pr.number,
+                  base_ref: pr.base.ref, base_sha: pr.base.sha, head_sha: pr.head.sha,
+                  changed_paths: files, timeline_events: timeline,
+                  unresolved_threads: unresolved, check_runs: checks,
+                  api_complete: true, pagination_complete: true,
+                  draft: pr.draft, state: pr.state, default_branch: defaultBranch};
+              } catch (error) {
+                // The live tuple was already read: carry it so a partial failure
+                // fails the head that is actually live, not only the listed one.
+                // A non-object throw is wrapped so the tuple and a message survive.
+                const carrier = (error && typeof error === 'object') ? error : new Error(String(error));
+                carrier.liveTuple = {base_ref: pr.base.ref, base_sha: pr.base.sha,
+                  head_sha: pr.head.sha, state: pr.state, draft: pr.draft};
+                throw carrier;
+              }
+            };
             const reconcileOpenPullRequests = async (defaultBranch) => {
               const open = await github.paginate(github.rest.pulls.list,
                 {owner, repo, state: 'open', base: defaultBranch, per_page: 100});
-              const failures = [];
+              const snapshots = [], failures = [], listedTuples = [];
               for (const candidate of open) {
-                try {
-                  const live = await github.rest.pulls.get({owner, repo, pull_number: candidate.number});
-                  if (live.data.state !== 'open' || live.data.base.ref !== defaultBranch)
-                    throw Error('PR is no longer an open default-base change');
-                  await emit(live.data.number, live.data.base.sha, live.data.head.sha, 'failure',
-                    'Protected base changed; fresh exact-base/head review receipts are required.');
-                } catch (error) {
-                  failures.push(`${candidate.number}:${error.message}`);
+                try { snapshots.push(await snapshot(candidate.number, defaultBranch)); }
+                catch (error) {
+                  failures.push(`${candidate.number}:${error?.message ?? String(error)}`);
+                  // Prefer the tuple pulls.get observed over the (possibly stale)
+                  // list entry; when they differ, the listed tuple is failed too.
+                  const live = error?.liveTuple;
+                  snapshots.push({repository: `${owner}/${repo}`, pr_number: candidate.number,
+                    base_ref: live?.base_ref ?? candidate.base?.ref, base_sha: live?.base_sha ?? candidate.base?.sha,
+                    head_sha: live?.head_sha ?? candidate.head?.sha, state: live?.state ?? candidate.state,
+                    draft: live?.draft ?? candidate.draft, default_branch: defaultBranch,
+                    api_complete: false, pagination_complete: false, api_error: true,
+                    changed_paths: [], timeline_events: [], check_runs: []});
+                  if (live && candidate.base?.sha && candidate.head?.sha &&
+                      (live.base_sha !== candidate.base.sha || live.head_sha !== candidate.head.sha))
+                    listedTuples.push({pr_number: candidate.number, base_sha: candidate.base.sha, head_sha: candidate.head.sha});
                 }
               }
               if (failures.length) core.setFailed(`Failed to reset PRs: ${failures.join(',')}`);
-              return failures;
+              return {snapshots, failures, listedTuples};
+            };
+            const failKnownSnapshots = async (snapshots, reason) => {
+              const writeFailures = [];
+              for (const candidate of snapshots) {
+                if (!candidate?.pr_number || !candidate?.base_sha || !candidate?.head_sha)
+                  continue;
+                try {
+                  await emit(candidate.pr_number, candidate.base_sha, candidate.head_sha, 'failure', reason);
+                } catch (error) {
+                  writeFailures.push(`${candidate.pr_number}:${error.message}`);
+                }
+              }
+              return writeFailures;
+            };
+            const finalReadInvalidPeers = async (peerResults, snapshots, defaultBranch, protectedSha) => {
+              for (const peer of peerResults) {
+                if (peer.preserve) continue;
+                const original = snapshots.find(item => item.pr_number === peer.pr_number);
+                let currentTuple = null, currentPeer = null;
+                try {
+                  if (!original?.base_sha || !original?.head_sha)
+                    throw Error('invalid peer original tuple unavailable');
+                  const current = await snapshot(peer.pr_number, defaultBranch);
+                  currentTuple = current;
+                  const currentValidated = await runValidator({schema_version: '2', mode: 'peer_only', peers: [current]}, protectedSha);
+                  if (currentValidated.run.status !== 0 || currentValidated.result.decision !== 'PASS' ||
+                      currentValidated.result.peers?.length !== 1)
+                    throw Error('invalid peer final validation failed');
+                  currentPeer = currentValidated.result.peers[0];
+                } catch (error) {
+                  // snapshot() carries the tuple it observed before a later read failed;
+                  // that live head fails below exactly as a completed re-snapshot's would.
+                  if (!currentTuple && error?.liveTuple)
+                    currentTuple = {pr_number: peer.pr_number, base_sha: error.liveTuple.base_sha,
+                      head_sha: error.liveTuple.head_sha};
+                  const writeFailures = [];
+                  if (original?.base_sha && original?.head_sha) {
+                    try {
+                      await emit(original.pr_number, original.base_sha, original.head_sha, 'failure',
+                        `Invalid peer final read failed closed: ${error.message}`);
+                    } catch (writeError) { writeFailures.push(writeError.message); }
+                  }
+                  if (currentTuple?.base_sha && currentTuple?.head_sha &&
+                      (currentTuple.base_sha !== original?.base_sha || currentTuple.head_sha !== original?.head_sha)) {
+                    try {
+                      await emit(currentTuple.pr_number, currentTuple.base_sha, currentTuple.head_sha, 'failure',
+                        `Invalid peer final read failed closed: ${error.message}`);
+                    } catch (writeError) { writeFailures.push(writeError.message); }
+                  }
+                  const suffix = writeFailures.length ? `; failure writes: ${writeFailures.join(',')}` : '';
+                  throw Error(`invalid peer final read failed: ${error.message}${suffix}`);
+                }
+                if (currentPeer.preserve) continue;
+                const writeFailures = [];
+                try {
+                  await emit(original.pr_number, original.base_sha, original.head_sha, 'failure',
+                    JSON.stringify(currentPeer));
+                } catch (writeError) { writeFailures.push(writeError.message); }
+                if (currentTuple.base_sha !== original.base_sha || currentTuple.head_sha !== original.head_sha) {
+                  try {
+                    await emit(currentTuple.pr_number, currentTuple.base_sha, currentTuple.head_sha, 'failure',
+                      JSON.stringify(currentPeer));
+                  } catch (writeError) { writeFailures.push(writeError.message); }
+                }
+                if (writeFailures.length)
+                  throw Error(`invalid peer failure writes failed: ${writeFailures.join(',')}`);
+              }
+            };
+            const finalReadPreservedPeers = async (peerResults, snapshots, defaultBranch, protectedSha) => {
+              for (const peer of peerResults) {
+                if (!peer.preserve) continue;
+                const original = snapshots.find(item => item.pr_number === peer.pr_number);
+                let currentTuple = null;
+                try {
+                  if (!original?.base_sha || !original?.head_sha)
+                    throw Error('preserved peer original tuple unavailable');
+                  const current = await snapshot(peer.pr_number, defaultBranch);
+                  currentTuple = current;
+                  const finalValidated = await runValidator({schema_version: '2', mode: 'peer_only', peers: [current]}, protectedSha);
+                  if (finalValidated.run.status !== 0 || finalValidated.result.decision !== 'PASS' ||
+                      finalValidated.result.peers?.length !== 1 || !finalValidated.result.peers[0].preserve)
+                    throw Error('preserved peer final validation failed');
+                } catch (error) {
+                  // snapshot() carries the tuple it observed before a later read failed;
+                  // that live head fails below exactly as a completed re-snapshot's would.
+                  if (!currentTuple && error?.liveTuple)
+                    currentTuple = {pr_number: peer.pr_number, base_sha: error.liveTuple.base_sha,
+                      head_sha: error.liveTuple.head_sha};
+                  const writeFailures = [];
+                  try {
+                    await emit(original.pr_number, original.base_sha, original.head_sha, 'failure',
+                      `Preserved peer final read failed closed: ${error.message}`);
+                  } catch (writeError) { writeFailures.push(writeError.message); }
+                  if (currentTuple?.base_sha && currentTuple?.head_sha &&
+                      (currentTuple.base_sha !== original?.base_sha || currentTuple.head_sha !== original?.head_sha)) {
+                    try {
+                      await emit(currentTuple.pr_number, currentTuple.base_sha, currentTuple.head_sha, 'failure',
+                        `Preserved peer final read failed closed: ${error.message}`);
+                    } catch (writeError) { writeFailures.push(writeError.message); }
+                  }
+                  const suffix = writeFailures.length ? `; failure writes: ${writeFailures.join(',')}` : '';
+                  throw Error(`preserved peer final read failed: ${error.message}${suffix}`);
+                }
+              }
             };
             const repository = await github.rest.repos.get({owner, repo});
             const defaultBranch = repository.data.default_branch;
             const branch = await github.rest.repos.getBranch({owner, repo, branch: defaultBranch});
             const protectedSha = branch.data.commit.sha;
-            const failures = await reconcileOpenPullRequests(defaultBranch);
-            if (failures.length) return;
-            if (context.eventName !== 'repository_dispatch') return;
-            let prNumber = null, base = null, head = null;
+            const dispatchEvent = context.eventName === 'repository_dispatch';
+            let prNumber = null, base = null, head = null, result = null;
+            let liveTuple = null, resnapshotTuple = null;
             let conclusion = 'failure', summary = 'Validation failed closed.';
             try {
-              const dispatch = context.payload.client_payload;
-              if (!dispatch || typeof dispatch !== 'object' || Array.isArray(dispatch) ||
-                  !Array.isArray(dispatch.receipts)) throw Error('dispatch payload invalid');
-              prNumber = Number(dispatch.pr_number);
-              if (!Number.isInteger(prNumber) || prNumber <= 0)
-                throw Error('dispatch PR number invalid');
-              if (context.ref !== `refs/heads/${defaultBranch}` || context.sha !== protectedSha)
-                throw Error('dispatch must execute from current protected default branch');
-              let pr = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
-              base = pr.data.base.sha;
-              head = pr.data.head.sha;
-              await emit(prNumber, base, head, 'failure', 'Validation started; fail closed until complete.');
-              if (pr.data.base.ref !== defaultBranch || pr.data.state !== 'open' || pr.data.draft)
-                throw Error('pull request is not an open, ready default-branch change');
-              const files = await listFiles(prNumber);
-              const unresolved = await unresolvedThreads(prNumber);
-              const source = await github.rest.repos.getContent({owner, repo,
-                path: 'scripts/ai_review_gate.py', ref: protectedSha});
-              if (Array.isArray(source.data) || source.data.encoding !== 'base64') throw Error('validator unavailable');
-              fs.writeFileSync('/tmp/gate.py', Buffer.from(source.data.content, 'base64'));
-              const input = {repository: `${owner}/${repo}`, pr_number: prNumber,
-                base_sha: base, head_sha: head, changed_paths: files,
-                receipts: dispatch.receipts, unresolved_threads: unresolved,
-                api_complete: true, pagination_complete: true};
-              const run = cp.spawnSync('python', ['/tmp/gate.py'], {input: JSON.stringify(input), encoding: 'utf8'});
-              if (run.error) throw run.error;
-              const result = JSON.parse(run.stdout || '{}');
-              const live = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
-              const liveBranch = await github.rest.repos.getBranch({owner, repo, branch: defaultBranch});
-              const liveFiles = await listFiles(prNumber);
-              const liveUnresolved = await unresolvedThreads(prNumber);
-              if (live.data.head.sha !== head || live.data.base.sha !== base ||
-                  live.data.base.ref !== defaultBranch || live.data.state !== 'open' || live.data.draft ||
-                  liveBranch.data.commit.sha !== protectedSha ||
-                  context.ref !== `refs/heads/${defaultBranch}` || context.sha !== protectedSha ||
-                  JSON.stringify(liveFiles) !== JSON.stringify(files) || unresolved !== 0 ||
-                  liveUnresolved !== 0) throw Error('PR, protected-base, files, or threads drift');
-              if (run.status !== 0 || result.decision !== 'PASS') throw Error('receipt validation failed');
-              conclusion = 'success';
-              summary = JSON.stringify(result);
+              if (dispatchEvent) {
+                // Identify the dispatch target before any broader API work: an
+                // identifiable target must reach the fail-closed emit even when
+                // open-PR enumeration itself rejects.
+                const dispatch = context.payload.client_payload;
+                if (!dispatch || typeof dispatch !== 'object' || Array.isArray(dispatch))
+                  throw Error('dispatch payload invalid');
+                if (typeof dispatch.pr_number !== 'number' || !Number.isInteger(dispatch.pr_number) || dispatch.pr_number <= 0) throw Error('dispatch PR number invalid');
+                prNumber = dispatch.pr_number;
+                const tuple = (await github.rest.pulls.get({owner, repo, pull_number: prNumber})).data;
+                base = tuple.base.sha; head = tuple.head.sha;
+              }
+              const reconciled = await reconcileOpenPullRequests(defaultBranch);
+              const snapshots = reconciled.snapshots;
+              if (dispatchEvent) {
+                const dispatch = context.payload.client_payload;
+                const sender = context.payload.sender;
+                const run_attempt = Number(process.env.GITHUB_RUN_ATTEMPT || '1');
+                if (sender?.login !== '100yenadmin' || Number(sender?.id) !== 239388517 ||
+                    sender?.type !== 'User' || context.actor !== '100yenadmin' || Number(process.env.GITHUB_ACTOR_ID) !== 239388517)
+                  throw Error('dispatch producer unauthenticated');
+                if (!Number.isInteger(run_attempt) || run_attempt !== 1)
+                  throw Error('repository dispatch reruns cannot promote');
+                if (!Array.isArray(dispatch.receipts) || typeof dispatch.dispatch_id !== 'string')
+                  throw Error('dispatch packet invalid');
+                if (context.ref !== `refs/heads/${defaultBranch}` || context.sha !== protectedSha)
+                  throw Error('dispatch must execute from current protected default branch');
+                const envelopeValidated = await runValidator({schema_version: '2', mode: 'dispatch_envelope',
+                  target: {repository: `${owner}/${repo}`, pr_number: prNumber, base_sha: base, head_sha: head},
+                  receipts: dispatch.receipts, dispatch_id: dispatch.dispatch_id}, protectedSha);
+                if (envelopeValidated.run.status !== 0 || envelopeValidated.result.decision !== 'PASS')
+                  throw Error('dispatch packet invalid');
+                if (reconciled.failures.length) {
+                  const writeFailures = await failKnownSnapshots(snapshots.concat(reconciled.listedTuples),
+                    'Open PR reconciliation failed closed.');
+                  const suffix = writeFailures.length ? `; failure writes: ${writeFailures.join(',')}` : '';
+                  throw Error(`open PR reconciliation incomplete${suffix}`);
+                }
+                const priorTarget = snapshots.find(item => item.pr_number === prNumber);
+                if (!priorTarget || priorTarget.api_complete !== true ||
+                    priorTarget.pagination_complete !== true || priorTarget.repository !== `${owner}/${repo}` ||
+                    priorTarget.base_ref !== defaultBranch || priorTarget.base_sha !== base || priorTarget.head_sha !== head ||
+                    priorTarget.state !== 'open' || priorTarget.draft)
+                  throw Error('dispatch target missing or drifted from reconciliation');
+                const expectedExternalId = `ai-review-gate:${prNumber}:${base}:${head}`;
+                const priorExactChecks = (priorTarget?.check_runs || []).filter(check =>
+                  check.app_id === 15368 && check.external_id === expectedExternalId &&
+                  check.head_sha === head && check.status === 'completed' && check.conclusion === 'success');
+                if (priorExactChecks.length > 1) throw Error('DUPLICATE_TRUSTED_CHECK');
+                const priorDispatchIds = [];
+                if (priorExactChecks.length === 1) {
+                  const priorValidated = await runValidator({schema_version: '2', mode: 'peer_only', peers: [priorTarget]}, protectedSha);
+                  const priorPreserved = priorValidated.run.status === 0 && priorValidated.result.decision === 'PASS' &&
+                    priorValidated.result.peers?.length === 1 && priorValidated.result.peers[0].preserve;
+                  // The nonce of a trusted exact packet is consumed history whether or
+                  // not its live-state fingerprint still validates: a packet invalidated
+                  // by draft/ready, close/reopen, or a force-push away and back must still
+                  // block a replay of the same dispatch. Only a PRESERVED packet that
+                  // cannot yield its nonce aborts; an unreadable invalidated packet just
+                  // contributes no history, so a fresh renewal proceeds.
+                  const check = priorExactChecks[0];
+                  const stored = check.output_summary || check.output?.summary;
+                  try {
+                    if (typeof stored !== 'string') throw Error('prior target packet missing');
+                    const packet = JSON.parse(stored);
+                    if (typeof packet.dispatch_id !== 'string') throw Error('prior target dispatch ID invalid');
+                    priorDispatchIds.push(packet.dispatch_id);
+                  } catch (error) {
+                    if (priorPreserved) throw Error(`prior target packet invalid: ${error.message}`);
+                  }
+                }
+                let target = null;
+                try {
+                  // Infra failures only: a validator crash, malformed output, an
+                  // incomplete peer-result set, or an API rejection of the
+                  // pre-validation reset / target re-snapshot leaves peer state
+                  // UNKNOWN (the validator never reconciled the peers), so every
+                  // known snapshot resets. A clean FAIL decision is NOT in this
+                  // class — the validator evaluated every peer, so peers keep their
+                  // own verdicts and only the dispatch target fails (below).
+                  await emit(prNumber, base, head, 'failure', 'Protected base changed or stored packet invalid; validation started and fails closed until complete.');
+                  target = await snapshot(prNumber, defaultBranch);
+                  resnapshotTuple = [target.base_sha, target.head_sha];
+                  const input = {schema_version: '2', target, peers: snapshots.filter(item => item.pr_number !== prNumber),
+                    receipts: dispatch.receipts, producer: {login: sender.login, id: Number(sender.id), type: sender.type},
+                    run: {id: process.env.GITHUB_RUN_ID, attempt: run_attempt},
+                    dispatch_id: dispatch.dispatch_id, prior_dispatch_ids: priorDispatchIds};
+                  const validated = await runValidator(input, protectedSha);
+                  result = validated.result;
+                  if (!result?.decision || !Array.isArray(result.peers) ||
+                      result.peers.length !== input.peers.length)
+                    throw Error('peer reconciliation validation incomplete');
+                  if (result.decision === 'PASS' && validated.run?.status !== 0)
+                    throw Error('validator exited non-zero with a PASS payload');
+                  await finalReadInvalidPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
+                  await finalReadPreservedPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
+                } catch (error) {
+                  // A re-snapshot that observed a drifted target head before a later
+                  // read failed still carries that tuple; it fails with the dispatch
+                  // tuple below instead of keeping whatever check it already holds.
+                  if (error?.liveTuple && !resnapshotTuple)
+                    resnapshotTuple = [error.liveTuple.base_sha, error.liveTuple.head_sha];
+                  const writeFailures = await failKnownSnapshots(snapshots.concat(reconciled.listedTuples),
+                    `Peer reconciliation validation failed closed: ${error.message}`);
+                  const suffix = writeFailures.length ? `; failure writes: ${writeFailures.join(',')}` : '';
+                  throw Error(`peer reconciliation validation failed: ${error.message}${suffix}`);
+                }
+                if (result.decision !== 'PASS') throw Error('receipt validation failed');
+                const live = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
+                liveTuple = [live.data.base.sha, live.data.head.sha];
+                const liveBranch = await github.rest.repos.getBranch({owner, repo, branch: defaultBranch});
+                const liveFiles = await listFiles(prNumber);
+                const liveTimeline = await listTimeline(prNumber);
+                const liveUnresolved = await unresolvedThreads(prNumber);
+                if (target.head_sha !== head || target.base_sha !== base ||
+                    live.data.head.sha !== head || live.data.base.sha !== base ||
+                    live.data.base.ref !== defaultBranch || live.data.state !== 'open' || live.data.draft ||
+                    liveBranch.data.commit.sha !== protectedSha || context.ref !== `refs/heads/${defaultBranch}` ||
+                    context.sha !== protectedSha || JSON.stringify(liveFiles) !== JSON.stringify(target.changed_paths) ||
+                    JSON.stringify(liveTimeline) !== JSON.stringify(target.timeline_events) ||
+                    liveUnresolved !== 0 || target.unresolved_threads !== 0) {
+                  throw Error('PR, protected-base, files, or threads drift');
+                }
+                conclusion = 'success'; summary = JSON.stringify(result.packet);
+              } else {
+                let validated;
+                try {
+                  validated = await runValidator({schema_version: '2', mode: 'peer_only', peers: snapshots}, protectedSha);
+                  if (!validated.result?.decision || !Array.isArray(validated.result.peers) ||
+                      validated.result.peers.length !== snapshots.length)
+                    throw Error('peer reconciliation validation incomplete');
+                  if (validated.result.decision === 'PASS' && validated.run?.status !== 0)
+                    throw Error('validator exited non-zero with a PASS payload');
+                  result = validated.result;
+                  await finalReadInvalidPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
+                  await finalReadPreservedPeers(result.peers || [], snapshots, defaultBranch, protectedSha);
+                } catch (error) {
+                  const writeFailures = await failKnownSnapshots(snapshots.concat(reconciled.listedTuples),
+                    `Peer reconciliation validation failed closed: ${error.message}`);
+                  const suffix = writeFailures.length ? `; failure writes: ${writeFailures.join(',')}` : '';
+                  throw Error(`peer reconciliation validation failed: ${error.message}${suffix}`);
+                }
+                if (result.decision !== 'PASS') throw Error('peer reconciliation found invalid peers');
+                return;
+              }
             } catch (error) {
               summary = `Validation failed closed: ${error.message}`;
             }
-            if (prNumber && base && head) await emit(prNumber, base, head, conclusion, summary);
-            if (conclusion !== 'success') core.setFailed(summary);
+            const writeFailures = [];
+            if (prNumber && base && head) {
+              try {
+                await emit(prNumber, base, head, conclusion, summary);
+              } catch (error) {
+                writeFailures.push(error.message);
+              }
+            }
+            // Every tuple this run discovered for the target that differs from the
+            // dispatch tuple — the re-snapshot's and the live follow-up read's —
+            // fails closed too: a force-push between reads must not leave an
+            // earlier success on the drifted head merge-eligible until the next
+            // synchronize event reconciles it.
+            const driftedTuples = new Map();
+            for (const tuple of [resnapshotTuple, liveTuple]) {
+              if (prNumber && tuple && (tuple[0] !== base || tuple[1] !== head))
+                driftedTuples.set(`${tuple[0]}:${tuple[1]}`, tuple);
+            }
+            for (const tuple of driftedTuples.values()) {
+              try {
+                await emit(prNumber, tuple[0], tuple[1], 'failure', summary);
+              } catch (error) {
+                writeFailures.push(error.message);
+              }
+            }
+            if (writeFailures.length)
+              summary = `${summary}; failure writes: ${writeFailures.join(',')}`;
+            if (conclusion !== 'success' || writeFailures.length) core.setFailed(summary);
