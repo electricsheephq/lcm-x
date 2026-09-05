@@ -1027,7 +1027,10 @@ def test_rerank_privacy_opt_out_keeps_raw_payload(recall_engine, monkeypatch):
     assert provider.payload == (query, [snippet])
 
 
-def test_rerank_privacy_policy_error_propagates(recall_engine, monkeypatch):
+def test_rerank_privacy_policy_error_returns_tool_contract_json(
+    recall_engine,
+    monkeypatch,
+):
     recall_engine._config.rerank_enabled = True
     node = _add_summary(
         recall_engine, "kanban policy", session_id="session-a", created_at=5.0
@@ -1060,17 +1063,50 @@ def test_rerank_privacy_policy_error_propagates(recall_engine, monkeypatch):
         fail_at_rerank_dispatch,
     )
 
-    with pytest.raises(
-        EmbeddingPrivacyPolicyError, match="policy changed before rerank dispatch"
-    ):
-        _recall(
-            recall_engine,
-            monkeypatch,
-            provider=RerankProvider(),
-            include="summaries",
-            scope_bias=0.0,
-            limit=5,
-        )
+    payload = _recall(
+        recall_engine,
+        monkeypatch,
+        provider=RerankProvider(),
+        include="summaries",
+        scope_bias=0.0,
+        limit=5,
+    )
+
+    assert payload["error_code"] == "embedding_privacy_policy"
+    assert "policy changed before rerank dispatch" in payload["error"]
+    assert "/lcm embed warmup" in payload["remediation"]
+
+
+@pytest.mark.parametrize("mode", ["semantic", "hybrid"])
+def test_grep_privacy_policy_error_does_not_degrade_to_fts(
+    recall_engine,
+    monkeypatch,
+    mode,
+):
+    recall_engine._store.append(
+        CURRENT,
+        {"role": "user", "content": "kanban privacy upgrade"},
+    )
+    provider = MockProvider()
+    monkeypatch.setattr(
+        lcm_tools,
+        "_lcm_grep_resolve_provider",
+        lambda _engine, *, deadline: provider,
+    )
+
+    def fail_privacy(*_args, **_kwargs):
+        raise EmbeddingPrivacyPolicyError("registered privacy revision is stale")
+
+    monkeypatch.setattr(lcm_tools, "_lcm_grep_embed_query", fail_privacy)
+
+    payload = json.loads(lcm_tools.lcm_grep(
+        {"query": "kanban", "mode": mode},
+        engine=recall_engine,
+    ))
+
+    assert payload["error_code"] == "embedding_privacy_policy"
+    assert payload.get("degraded_to_fts") is not True
+    assert "/lcm embed warmup" in payload["remediation"]
 
 
 def test_rerank_margin_holds_incumbent_and_reports_scores(recall_engine, monkeypatch):
