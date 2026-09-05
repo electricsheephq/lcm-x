@@ -556,6 +556,27 @@ def test_prewarm_rejects_split_summary_chunk_identity_before_embedding(tmp_path)
     assert raw.calls == 0
 
 
+def test_determinism_probe_reports_chunk_mode_only_for_the_run_chunk_identity():
+    """The probe embeds the summary identity only; its chunk_embedding_mode may only
+    describe the provider the run uses for chunks. voyage-4-large maps to
+    voyage-context-4, so the field is null and the split is recorded; a model that
+    maps to itself reports its mode."""
+    split = _CountingProvider("voyage-4-large")
+    report = lme.embedding_determinism_report([_question()], split, sample_size=1)
+    assert report["chunk_embedding_mode"] is None
+    assert report["chunk_identity"] == {
+        "summary": ["voyage", "voyage-4-large"],
+        "chunk": ["voyage", "voyage-context-4"],
+        "matches_summary": False,
+    }
+    assert split.calls > 0  # the summary-determinism measurement still ran
+
+    same = _CountingProvider("voyage-context-3")
+    report = lme.embedding_determinism_report([_question()], same, sample_size=1)
+    assert report["chunk_embedding_mode"] in {"flat", "contextual"}
+    assert report["chunk_identity"]["matches_summary"] is True
+
+
 def test_cache_cli_subcommands_parse_without_execution():
     cli = _load_cli()
 

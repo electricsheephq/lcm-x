@@ -1874,10 +1874,24 @@ def embedding_determinism_report(
     _reset_privacy_counts()
     if sample_size <= 0:
         raise ValueError("sample_size must be positive")
-    chunk_embedding_mode = _resolved_chunk_embedding_mode(provider)
-    privacy_config, privacy_revision = _embedding_privacy_context(
+    # The probe embeds through the summary identity only. Its chunk_embedding_mode
+    # may only describe the provider the run will actually use for chunks, so it is
+    # resolved on this provider solely when the production chunk identity IS the
+    # summary identity (the registered row: voyage-context-3 maps to itself);
+    # otherwise the field is null and the split is recorded, never guessed.
+    probe_identity = (
         str(getattr(provider, "provider_id", "")),
         str(getattr(provider, "model_id", "")),
+    )
+    configured_chunk = _configured_chunk_binding(*probe_identity)
+    chunk_identity_matches_summary = configured_chunk == probe_identity
+    chunk_embedding_mode = (
+        _resolved_chunk_embedding_mode(provider)
+        if chunk_identity_matches_summary
+        else None
+    )
+    privacy_config, privacy_revision = _embedding_privacy_context(
+        *probe_identity
     )
     before_dispatch = None
     if privacy_revision is not None:
@@ -1967,6 +1981,11 @@ def embedding_determinism_report(
         "non_identical_count": sample_size - identical,
         "max_abs_diff": max_abs_diff,
         "chunk_embedding_mode": chunk_embedding_mode,
+        "chunk_identity": {
+            "summary": list(probe_identity),
+            "chunk": list(configured_chunk),
+            "matches_summary": chunk_identity_matches_summary,
+        },
         "privacy": dict(_PRIVACY_COUNTS),
         "privacy_scope": "sample",
     }
