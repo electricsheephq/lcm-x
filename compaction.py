@@ -117,7 +117,7 @@ class CompactionMixin:
             eligible, reason = self._leaf_compaction_candidate_status(
                 messages,
                 allow_partial_leaf=self._config.threshold_full_sweep_enabled,
-                observed_tokens=rough,
+                observed_tokens=host_observed,
             )
             pre_ingest_placeholder_cleanup_requested = bool(
                 not eligible and self._pressure_yield_tail_token_limit > 0
@@ -186,7 +186,7 @@ class CompactionMixin:
                     and self.threshold_tokens > 0
                     and replay_rough >= self.threshold_tokens
                 ),
-                observed_tokens=replay_rough,
+                observed_tokens=max(replay_rough, host_observed),
             )
             if eligible:
                 if self.threshold_tokens > 0 and replay_rough >= self.threshold_tokens:
@@ -244,7 +244,7 @@ class CompactionMixin:
             eligible, reason = self._leaf_compaction_candidate_status(
                 messages,
                 allow_partial_leaf=self._config.threshold_full_sweep_enabled,
-                observed_tokens=rough,
+                observed_tokens=host_observed,
             )
             if eligible:
                 return self._mark_preflight_compression_requested(

@@ -296,6 +296,52 @@ def test_preflight_under_estimate_does_not_reset_host_pressure_streak(
         engine.shutdown()
 
 
+def test_preflight_replay_diff_preserves_host_pressure_streak(tmp_path, monkeypatch):
+    """Replay-diff preflight must preserve host-pressure evidence until compaction."""
+    engine = _make_engine(tmp_path, monkeypatch, fresh_tail_count=128)
+    try:
+        min_observations = engine._config.fresh_tail_pressure_yield_min_observations
+        messages = [_tiny_user(i) for i in range(30)]
+        assert count_messages_tokens(messages) < engine.threshold_tokens
+        engine.last_prompt_tokens = 9_000
+
+        real_ingest = engine._ingest_messages
+        state = {"preflight": False}
+
+        def replay_diff_ingest(messages, *args, **kwargs):
+            replay = real_ingest(messages, *args, **kwargs)
+            if state["preflight"] and replay:
+                replay = list(replay)
+                replay[-1] = {
+                    **replay[-1],
+                    "content": replay[-1]["content"] + " (replay-normalised)",
+                }
+            return replay
+
+        monkeypatch.setattr(engine, "_ingest_messages", replay_diff_ingest)
+        preflight_streaks = []
+        statuses = []
+        compacted = None
+        for _turn in range(min_observations):
+            state["preflight"] = True
+            engine.should_compress_preflight(list(messages))
+            preflight_streaks.append(engine._pressure_yield_blocked_streak)
+            state["preflight"] = False
+            compressed = engine.compress(list(messages), current_tokens=9_000)
+            statuses.append(engine._last_compression_status)
+            if engine._last_compression_status == "compacted":
+                compacted = compressed
+
+        # The preflight replay-diff path must advance past observation 1; a
+        # successful compaction may reset the streak before later rounds.
+        assert max(preflight_streaks) >= min_observations
+        assert "compacted" in statuses
+        assert compacted is not None
+        assert len(compacted) < len(messages)
+    finally:
+        engine.shutdown()
+
+
 def test_preflight_relieves_when_host_and_estimate_are_under_threshold(
     tmp_path, monkeypatch
 ):
