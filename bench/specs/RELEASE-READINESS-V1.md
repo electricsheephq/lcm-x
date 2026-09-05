@@ -21,8 +21,12 @@ needs a live soak. Docs/bench-only releases may skip to GA with a note in the re
    gauntlet invalidates its own receipts) — the carried receipt is referenced WITH the diff-scope proof
    (`git diff rcN..rcN+1 --name-only`) recorded beside it. A respin whose rcN→rcN+1 delta is
    confined to those same paths re-runs Phase B over that delta only and composes the result with
-   the carried Phase B receipt (the composed receipt records both). Any product-code delta re-runs
-   all affected phases (ingest/recall/privacy deltas re-run everything).
+   the carried Phase B receipt (the composed receipt records both). **This specification is never
+   carry-safe:** when the delta changes an acceptance criterion in this file, every carried receipt
+   for the affected phase is re-evaluated against the new criterion from the evidence it recorded,
+   and the carry record states that re-evaluation; if the recorded evidence cannot be evaluated under
+   the new criterion, the phase re-runs. Any product-code delta re-runs all affected phases
+   (ingest/recall/privacy deltas re-run everything).
 5. **GA tag `vX.Y.Z`** only when A+B+C receipts are green for the passing rc tree. Because
    release.yml reads curated notes from the tagged tree, the GA commit may differ from the rc
    tree by EXACTLY the release-notes addition and nothing else — verified mechanically:
@@ -76,10 +80,14 @@ one threshold, doctor at close. Green = zero unexpected errors in engine logs, z
 publication-invariant conflicts (#247-class), recall probes hit, doctor clean. Minimum 30 turns.
 **Differential rule for #247-class conflicts** (applied since the v0.23.2 train; codified
 2026-09-05, #427): a non-zero conflict count passes ONLY when the same soak, on the same host
-build, against the previous GA tree reproduces the conflicts identically in kind and count — the
-receipt records both counts, the host pin and the differential run. A conflict that does not
-reproduce on the previous GA is NEW and fails the phase. While #247 is open the count is expected
-to be non-zero, so the differential run is mandatory whenever it is.
+build, against the previous GA tree reproduces the same conflicts — matched by identity (kind,
+publication point and message where the host exposes them), not by aggregate count alone; the
+receipt records both counts, the identities it could observe, the host pin and the differential
+run, and states explicitly when the host surface only exposes kind and count (the engine currently
+collapses every publication conflict to the `publication_invariant_conflict` label without its
+source — tracked as a logging follow-up). A conflict that does not reproduce on the previous GA
+is NEW and fails the phase. While #247 is open the count is expected to be non-zero, so the
+differential run is mandatory whenever it is.
 
 ## Receipts
 
@@ -87,5 +95,6 @@ Each phase writes `PHASE-{A,B,C}-RECEIPT.md`: rc tag + tree sha, exact commands,
 (per-row pass/fail), findings + dispositions, and the claim class per the gate-closeout
 discipline (a phase receipt claims what it measured, never "customer ready"). The GA release
 notes link all three. Receipts are published verbatim (local paths redacted) as comments on the
-release train tracker issue; that comment URL is the durable link of record and is what the GA
-notes link (codified 2026-09-05, #427).
+release train tracker issue; that comment URL is the link of record and is what the GA notes link,
+and the GA notes (or the carry record they link) print the sha256 of each published receipt body
+so an edited or deleted comment is detectable (codified 2026-09-05, #427).
