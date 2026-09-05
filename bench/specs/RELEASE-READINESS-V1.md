@@ -96,6 +96,8 @@ publication-invariant conflicts (#247-class), recall probes hit, doctor clean. M
 tree reproduces the same conflicts under the mechanical comparison below. "The same soak" is a
 recorded tuple that must be identical across every run the comparison uses: the host build pin, the
 soak fixture files (material, probes, canaries) by sha256, the soak configuration by sha256, the
+host's system prompt and every other prompt-bearing file the fresh home starts with (`SOUL.md` and
+its kin) by sha256 or an explicit absence marker, the
 assistant provider and model identifier (the live-model side of the soak; a fixed seed where the
 provider supports one), the transport, the driver and turn-script files by sha256, the starting state — a fresh isolated home
 and an empty database for every run, or, where a seeded start is part of the fixture, the same seed
@@ -121,7 +123,10 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    records, and the candidate passes iff its multiset is contained in the previous GA's multiset —
    for every identity the candidate's multiplicity is at most the previous GA's, and any excess
    occurrence is NEW — which also bounds its count; occurrences present only in the previous GA are
-   recorded as REMOVED (identities do not jitter, so no band applies). Where it does not (today the engine collapses
+   recorded as REMOVED (identities do not jitter, so no band applies). Under this rule the two
+   previous-GA runs must have identical identity multisets — otherwise the baseline's conflict set is
+   unstable and the phase FAILS — and containment is tested against that shared multiset; the two
+   candidate runs must likewise agree with each other. Where it does not (today the engine collapses
    every publication conflict to the `publication_invariant_conflict` label without its source —
    logging follow-up #430), a record is `(soak turn index, logged error code, logged error name)`
    and the profile is the multiset of records sorted by `(code, name, turn index)` — the **position
@@ -165,9 +170,12 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    baseline run it came closest to.
 4. **Differential verdict.** The differential passes iff both A and A′ pair every record (zero
    NEW) AND neither has more records than the previous GA. It is one conjunct of Green, not Green
-   itself: A, A′, B and B′ must each also pass every non-conflict Phase C assertion
-   (zero unexpected engine errors, recall probes hit, doctor clean) — a run failing any of them
-   establishes no profile and no band, and the phase fails. A candidate with more records than the
+   itself: A and A′ must each also pass every non-conflict Phase C assertion (zero unexpected
+   engine errors, recall probes hit, doctor clean) — a candidate run failing any of them establishes
+   no profile and no band, and the phase fails. B and B′ must complete every turn with an intact log
+   and results file so their conflict profiles can be extracted; a non-conflict assertion a baseline
+   run fails is recorded beside its profile and does not block the candidate (a release that repairs
+   a previous-GA failure must remain releasable). A candidate with more records than the
    previous GA fails regardless of positions; one with fewer passes the differential only when every
    one of its records pairs, the receipt listing the unpaired previous-GA records as REMOVED with the
    delta commit believed responsible. Kind and aggregate count alone never suffice.
@@ -178,7 +186,7 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    residual whenever the fallback is used, and a train whose host exposes publication point and
    message must use the identity rule in step 1 — the fallback is not available to it.
 The receipt records every field of the tuple (host pin, fixture and configuration hashes, assistant
-identifier, transport identifier, the sha256 of the driver and turn-script files, the starting-state
+identifier, transport identifier, the sha256 of the driver, turn-script and prompt-bearing files, the starting-state
 statement or seed digest, the effective `LCM_*` and behaviour-affecting `HERMES_*` set with its
 canonical digest and its capture source), the previous GA's exact tag with its resolved commit and tree SHA beside
 its profile, the candidate rc tag and tree SHA, the sorted profiles of A, A′, B and B′, both pair
