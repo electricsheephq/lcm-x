@@ -33,7 +33,7 @@ needs a live soak. Docs/bench-only releases may skip to GA with a note in the re
 5. **GA tag `vX.Y.Z`** only when A+B+C receipts are green for the passing rc tree. Because
    release.yml reads curated notes from the tagged tree, the GA commit may differ from the rc
    tree by EXACTLY the release-notes addition and nothing else — verified mechanically:
-   `git diff --name-status rcN..GA` must show ONLY `A` (added) entries under `.github/release-notes/` — modifying or deleting existing notes is not the exception. GA notes =
+   `git diff --no-renames --name-status rcN..GA` must show EXACTLY ONE entry, `A .github/release-notes/vX.Y.Z.md` — the notes file for the GA tag and nothing else; a second added file, or modifying or deleting existing notes, is not the exception. GA notes =
    rc notes + gauntlet summary + receipt links.
 
 ## Phase A — Live all-tools matrix (the "clone" test)
@@ -153,7 +153,10 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    log timestamp. The driver records, per turn, the timestamp `ts` at which the turn ENDED and the
    turn's elapsed `wall_ms`; the start is derived, not read: `start_i = ts_i − wall_ms_i` (the two
    clocks differ by sub-second drift at most, and the derivation is a fixed computation over the
-   results file). Windows are half-open, turn i spans [start_i, start_{i+1}) — from its derived start
+   results file). The driver's turn timestamps and the host log's conflict timestamps must come from
+   the same clock — driver and host on one machine, stated in the receipt; where they do not, the
+   measured offset bound is recorded and a conflict within that bound of a window boundary makes the
+   run unevaluable (FAIL). Windows are half-open, turn i spans [start_i, start_{i+1}) — from its derived start
    to the next turn's derived start — and the final turn spans [start_n, ts_n], its recorded end; a
    conflict logged after ts_n belongs to no turn. Every conflict line maps to exactly one turn; an
    unmapped or doubly mapped conflict makes the profile unevaluable and the phase FAILS. The
@@ -173,7 +176,11 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    completed run that pairs with no baseline record is NEW even if a later run does not show it. A
    further run is admissible only after a recorded causal change — a new candidate tree or a new
    tuple — never on the unchanged head. Every run attempted under the tuple is recorded in the
-   receipt, aborted soaks included, each with its cause. **The maximum admissible band is 2 soak turns** (the largest same-tree
+   receipt, aborted soaks included, each with its cause, and a conflict record observed in ANY
+   attempted candidate run — completed or aborted, under this tuple or a superseded one — must be
+   paired against the baseline within the band or explicitly dispositioned in the receipt with its
+   cause and evidence before the phase can pass; a tuple change or an abort never discards an
+   observed conflict. **The maximum admissible band is 2 soak turns** (the largest same-tree
    jitter measured on record, and small against a ≥30-turn soak). A measured band above it
    means the candidate's own run-to-run behaviour is too unstable for positions to discriminate; the
    phase is then unevaluable under the positional fallback and FAILS (investigate the soak; identity
@@ -197,13 +204,22 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    doctor — because an unhealthy baseline can carry spurious conflicts that absorb candidate records
    which would otherwise be NEW; a recall-probe miss by a baseline run is recorded beside its profile
    and does not block the candidate (a release that repairs a previous-GA recall failure must remain
-   releasable). A candidate with more records than the
-   previous GA fails regardless of positions; one with fewer passes the differential only when every
-   one of its records pairs AND each candidate run reached at least as many compactions as each
-   baseline run (host compaction telemetry, a receipt field) — a candidate that compacts less
-   exercised fewer publication points, so its missing conflicts are unevaluable, not removed, and
-   the phase fails — the receipt listing the unpaired previous-GA records as REMOVED with the
-   delta commit believed responsible. Kind and aggregate count alone never suffice.
+   releasable). If a baseline run fails one of the health assertions, the differential is unevaluable
+   and the phase FAILS closed; releasing a candidate that repairs that very failure is an owner
+   decision recorded in the receipt (ESCALATED/OWNER GATE), with the candidate's own two clean runs
+   and the disclosed baseline failure as the evidence — the gate never turns green on its own in that
+   case. A candidate with more records than the
+   previous GA fails regardless of positions. Publication-attempt parity is a condition of EVERY
+   comparison, not only of fewer-record candidates: each candidate run's publication attempts —
+   successful compactions per host telemetry (`total_compactions`, which counts successes only: a
+   conflicted attempt returns before the telemetry is written) PLUS its conflict records — must be
+   at least each baseline run's; both counts are receipt fields. A candidate that attempted fewer
+   publications exercised fewer publication points, so a zero-NEW conclusion over it is incomplete
+   and the phase fails. A candidate with fewer records passes the differential only when every one
+   of its records pairs and attempt parity holds — a repaired conflict becomes a successful
+   compaction, so the attempts stay equal; a skipped attempt does not — the receipt listing the
+   unpaired previous-GA records as REMOVED with the delta commit believed responsible. Kind and
+   aggregate count alone never suffice.
 5. **Known residual of the positional fallback.** A NEW conflict that fires within the band of a
    REMOVED one, with the same code and name, is indistinguishable from it without a publication
    point: the fallback bounds the blind spot to same-band, same-kind substitution and cannot close
