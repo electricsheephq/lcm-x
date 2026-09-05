@@ -237,12 +237,13 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    case. A candidate with more records than the
    previous GA fails regardless of positions. Publication-attempt parity is a condition of EVERY
    comparison, not only of fewer-record candidates: each candidate run's publication attempts —
-   the leaf publications persisted in the run's store at run end — `summary_nodes` rows with
-   `depth = 0` and `source_type = 'messages'`, the nodes that pass the lifecycle publication point
-   where a #247-class conflict can arise (the store starts empty under the tuple, so every such row is
-   a leaf publication that committed during the run) — PLUS its conflict records — must be at least
-   each baseline run's; both counts are receipt fields, listed separately, beside the count of any
-   other persisted node. Condensation and rollup parents (`depth ≥ 1`, `source_type = 'nodes'`) are
+   the leaf publications persisted in the run's store during the run — `summary_nodes` rows with
+   `depth = 0` and `source_type = 'messages'` that are absent from the run's recorded starting state
+   (every such row when the start is an empty database; rows with `node_id` above the seed snapshot's
+   maximum when the fixture seeds the store), the nodes that pass the lifecycle publication point
+   where a #247-class conflict can arise — PLUS its conflict records — must be at least each baseline
+   run's; both counts are receipt fields, listed separately, beside the count of any other persisted
+   node and the starting-state row count. Condensation and rollup parents (`depth ≥ 1`, `source_type = 'nodes'`) are
    inserted without lifecycle staging, cannot raise the conflict, and are never counted as attempts —
    an aggregate node count would let extra condensation stand in for skipped leaf publications.
    Successes are counted per PERSISTED LEAF PUBLICATION, never per compaction invocation or per
@@ -250,11 +251,22 @@ the same provider model identifier; an older previous-GA run is re-run, not reus
    several leaves in one sweep, and an invocation that conflicts after publishing some of them returns
    through the fail-open path before its invocation counter advances, so an invocation count under-
    counts successes and can equate a baseline that published two nodes and then conflicted with a
-   candidate that published one node and stopped. A candidate that attempted fewer
+   candidate that published one node and stopped. Counts alone do not show WHERE the attempts
+   happened, so parity is also positional: each run's **publication-point profile** is the sorted
+   multiset of soak turn indices at which a publication was attempted — the turn of every counted
+   leaf publication (its `created_at` mapped by the item 1 windows; same clock domain) and the turn
+   of every conflict record — and every baseline publication point must pair with a candidate
+   publication point within the band (item 3 pairing over turn indices alone, outcome ignored, each
+   point used once), with no baseline point left unpaired. A candidate that made the same number of
+   attempts at earlier points, or that covered less history with smaller leaves and never reached a
+   later baseline point, fails here even though its counts match. The receipt lists each run's
+   publication-point profile and, for disclosure, its covered frontier — the latest soak turn whose
+   messages a counted leaf publication consumed (from the leaf's `latest_at`). A candidate that attempted fewer
    publications exercised fewer publication points, so a zero-NEW conclusion over it is incomplete
    and the phase fails. A candidate with fewer records passes the differential only when every one
-   of its records pairs and attempt parity holds — a repaired conflict becomes a persisted
-   leaf publication, so the attempts stay equal; a skipped attempt does not — the receipt listing the
+   of its records pairs, attempt parity holds and every baseline publication point is paired — a
+   repaired conflict becomes a persisted leaf publication at the same point, so the counts and the
+   points stay; a skipped attempt leaves a baseline point unpaired and fails — the receipt listing the
    unpaired previous-GA records as REMOVED with the delta commit believed responsible. Kind and
    aggregate count alone never suffice.
 5. **Known residual of the positional fallback.** A NEW conflict that fires within the band of a
@@ -271,7 +283,7 @@ identifier, transport identifier, the sha256 of the driver, turn-script and prom
 statement or seed digest, the effective `LCM_*` and behaviour-affecting `HERMES_*` set with its
 canonical digest and its capture source, the credential identities or attestations, the driver's
 normalized invocation, the execution-runtime inventories of host and driver with their digests, and
-the publication-attempt counts per run — persisted leaf publications, other persisted nodes, and conflict records, separately; every UNCOMPARED record with its discrepancy), the previous GA's exact tag with its resolved commit and tree SHA beside
+the publication-attempt counts per run — persisted leaf publications, other persisted nodes, and conflict records, separately; each run's publication-point profile and covered frontier; every UNCOMPARED record with its discrepancy), the previous GA's exact tag with its resolved commit and tree SHA beside
 its profile, the candidate rc tag and tree SHA, the sorted profiles of A, A′, B and B′, both pair
 bands and the band used, every pairing with its deviation, every unpaired record, which identity
 fields the host exposed, the verdict, and — so the derived profiles can be re-derived — the sha256 and
