@@ -12235,12 +12235,20 @@ class TestEngineCompress:
             {"role": "user", "content": "fresh"},
             {"role": "assistant", "content": "answer"},
         ]
-        monotonic_calls = 0
+        clock_now = 0.0
 
         def fake_monotonic():
-            nonlocal monotonic_calls
-            monotonic_calls += 1
-            return 0.0 if monotonic_calls <= 2 else 121.0
+            return clock_now
+
+        original_add_node = instance._dag.add_node
+
+        def add_node_then_exhaust_budget(*args, **kwargs):
+            nonlocal clock_now
+            result = original_add_node(*args, **kwargs)
+            # The first leaf commits within the invocation deadline. Time
+            # expires before the next leaf, independently of clock read count.
+            clock_now = 601.0
+            return result
 
         def fake_leaf(chunk, focus_topic=None, deadline=None):
             del focus_topic, deadline
@@ -12249,6 +12257,7 @@ class TestEngineCompress:
         import hermes_lcm.compaction as compaction_module
 
         monkeypatch.setattr(compaction_module.time, "monotonic", fake_monotonic)
+        monkeypatch.setattr(instance._dag, "add_node", add_node_then_exhaust_budget)
         monkeypatch.setattr(instance, "_summarize_leaf_chunk_with_rescue", fake_leaf)
         try:
             instance.compress(messages, current_tokens=count_messages_tokens(messages))

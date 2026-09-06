@@ -256,8 +256,12 @@ def test_threshold_sweep_uses_shared_ceiling_and_honors_lower_host_deadline(
 def test_invocation_snapshot_survives_newer_host_generation(engine):
     first_fence = _SyntheticFence(time.monotonic() + 600)
     second_fence = _SyntheticFence(time.monotonic() + 900)
-    first_check = lambda: False
-    second_check = lambda: True
+    def first_check():
+        return False
+
+    def second_check():
+        return True
+
     engine._compression_publication_fence = first_fence
     engine._compression_cancelled_check = first_check
 
