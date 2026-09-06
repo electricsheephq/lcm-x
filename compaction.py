@@ -22,8 +22,6 @@ import math
 import time
 from typing import Any, Dict, List, Optional
 
-from agent.auxiliary_client import AuxiliaryExplicitCancellation
-
 from .dag import SummaryNode
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
 from .message_content import text_content_for_pattern_matching
@@ -38,6 +36,15 @@ logger = logging.getLogger(__name__)
 _THRESHOLD_FULL_SWEEP_MAX_PASSES = 12
 _THRESHOLD_FULL_SWEEP_MAX_SECONDS = 120.0
 _LCM_INVOCATION_TOTAL_CEILING_SECONDS = 600.0
+
+
+class _StandaloneAuxiliaryExplicitCancellation(BaseException):
+    """Standalone fallback when the minimal CI host has no auxiliary module."""
+
+    cause = "explicit_host_cancel"
+
+    def __init__(self) -> None:
+        super().__init__("auxiliary request explicitly cancelled by host")
 
 
 class _CompressionInvocationGuard:
@@ -116,6 +123,7 @@ _COMPRESSION_INVOCATION: contextvars.ContextVar[_CompressionInvocationGuard | No
 
 def _read_invocation_deadline(publication_fence: Any) -> float:
     """Capture one absolute deadline from the current host invocation."""
+    capture_started = time.monotonic()
     deadline = None
     if publication_fence is not None:
         try:
@@ -130,8 +138,11 @@ def _read_invocation_deadline(publication_fence: Any) -> float:
         except Exception:
             deadline = None
     if not isinstance(deadline, (int, float)) or not math.isfinite(float(deadline)):
-        deadline = time.monotonic() + _LCM_INVOCATION_TOTAL_CEILING_SECONDS
-    return float(deadline)
+        deadline = capture_started + _LCM_INVOCATION_TOTAL_CEILING_SECONDS
+    return min(
+        float(deadline),
+        capture_started + _LCM_INVOCATION_TOTAL_CEILING_SECONDS,
+    )
 
 
 class CompactionMixin:
@@ -151,6 +162,14 @@ class CompactionMixin:
         invocation = self._compression_invocation_guard()
         return invocation.deadline_monotonic if invocation is not None else None
 
+    @staticmethod
+    def _raise_compression_cancelled() -> None:
+        try:
+            from agent.auxiliary_client import AuxiliaryExplicitCancellation
+        except ImportError:
+            raise _StandaloneAuxiliaryExplicitCancellation()
+        raise AuxiliaryExplicitCancellation()
+
     @contextlib.contextmanager
     def _compression_publication_admission(self):
         """Fence one short DAG publication; provider work stays unfenced."""
@@ -159,7 +178,7 @@ class CompactionMixin:
             yield
             return
         if not invocation.begin_publication():
-            raise AuxiliaryExplicitCancellation()
+            self._raise_compression_cancelled()
         try:
             yield
         finally:
@@ -903,10 +922,17 @@ class CompactionMixin:
             and self.threshold_tokens > 0
             and estimated_active_tokens >= self.threshold_tokens
         )
-        sweep_deadline = time.monotonic() + _THRESHOLD_FULL_SWEEP_MAX_SECONDS
         invocation_deadline = self._compression_invocation_deadline()
-        if invocation_deadline is not None:
-            sweep_deadline = min(sweep_deadline, invocation_deadline)
+        if self._compression_invocation_guard() is None:
+            sweep_deadline = time.monotonic() + _THRESHOLD_FULL_SWEEP_MAX_SECONDS
+        else:
+            # A qualified invocation owns one shared total ceiling.  The
+            # captured host deadline may be earlier, but this sweep must not
+            # renew or reapply the legacy 120-second per-sweep cap.
+            sweep_deadline = min(
+                invocation_deadline,
+                time.monotonic() + _LCM_INVOCATION_TOTAL_CEILING_SECONDS,
+            )
         configured_sweep_target = int(self._config.summary_prefix_target_tokens)
         sweep_target_tokens = max(
             1,

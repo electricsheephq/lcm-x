@@ -9,7 +9,13 @@ import pytest
 
 import hermes_lcm.compaction as lcm_compaction
 import hermes_lcm.engine as lcm_engine
-from agent.auxiliary_client import AuxiliaryExplicitCancellation
+
+try:
+    from agent.auxiliary_client import AuxiliaryExplicitCancellation
+except ImportError:
+    AuxiliaryExplicitCancellation = (
+        lcm_compaction._StandaloneAuxiliaryExplicitCancellation
+    )
 
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
@@ -221,6 +227,30 @@ def test_one_captured_deadline_reaches_leaf_rescues_and_condensation(
     assert condensation_deadlines == [deadline]
     assert fence.begin_calls == 1
     assert fence.finish_calls == 1
+
+
+@pytest.mark.parametrize("host_budget, maximum", [(1000.0, 600.0), (90.0, 90.0)])
+def test_threshold_sweep_uses_shared_ceiling_and_honors_lower_host_deadline(
+    engine, monkeypatch, host_budget, maximum
+):
+    engine._config.threshold_full_sweep_enabled = True
+    engine.threshold_tokens = 1
+    started = time.monotonic()
+    fence = _SyntheticFence(started + host_budget)
+    _install_fence(engine, fence)
+    deadlines = []
+    monkeypatch.setattr(
+        lcm_engine,
+        "summarize_with_escalation",
+        lambda **kwargs: (deadlines.append(kwargs["deadline"]) or "synthetic summary", 1),
+    )
+
+    engine.compress(_messages())
+
+    assert deadlines
+    assert deadlines[0] - started <= maximum + 0.1
+    if maximum == 600.0:
+        assert deadlines[0] - started > 120.0
 
 
 def test_invocation_snapshot_survives_newer_host_generation(engine):
