@@ -1744,6 +1744,12 @@ class ReconcileMixin:
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
     def _folded_tail_lineage_metadata_key(self) -> str:
+        conversation_id = str(getattr(self, "_conversation_id", "") or "")
+        if conversation_id:
+            # This proof follows the logical conversation across host-session
+            # rollover. Session-scoping it would discard the retained-tail
+            # range exactly when the next session must publish it.
+            return f"folded_tail_lineage:{conversation_id}"
         return self._replay_snapshot_metadata_key("folded_tail_lineage")
 
     def _exact_session_store_row(
@@ -1761,38 +1767,89 @@ class ReconcileMixin:
             return None
         return rows[0]
 
+    def _folded_tail_source_rows(
+        self,
+        source_store_ids: list[int],
+    ) -> Optional[list[Dict[str, Any]]]:
+        """Resolve and validate the ordered rows represented by one active fold.
+
+        A folded active message can span a retained tail produced by an older
+        session.  Resolve by the durable store primary key, then apply the same
+        logical-conversation ownership predicate used by publication: explicit
+        conversation rows are authoritative, while blank legacy rows require a
+        lifecycle-proven producing session.  Ambiguous or missing rows fail
+        closed so lineage metadata can never widen source ownership.
+        """
+        normalized_ids = [int(store_id) for store_id in source_store_ids if int(store_id) > 0]
+        if not normalized_ids or len(normalized_ids) != len(set(normalized_ids)):
+            return None
+        if normalized_ids != sorted(normalized_ids):
+            return None
+        rows_by_id = self._store.get_batch(normalized_ids)
+        if set(rows_by_id) != set(normalized_ids):
+            return None
+
+        conversation_id = str(getattr(self, "_conversation_id", "") or "").strip()
+        proven_sessions = {str(self._session_id or "")}
+        if conversation_id:
+            lifecycle = self._lifecycle.get_by_conversation(conversation_id)
+            if lifecycle is not None:
+                proven_sessions.update(
+                    str(session_id)
+                    for session_id in (
+                        lifecycle.current_session_id,
+                        lifecycle.last_finalized_session_id,
+                    )
+                    if session_id
+                )
+        proven_sessions.discard("")
+        rows = [rows_by_id[store_id] for store_id in normalized_ids]
+        for row in rows:
+            row_conversation_id = str(row.get("conversation_id") or "").strip()
+            row_session_id = str(row.get("session_id") or "")
+            if conversation_id:
+                owned = row_conversation_id == conversation_id or (
+                    not row_conversation_id and row_session_id in proven_sessions
+                )
+            else:
+                owned = row_session_id in proven_sessions
+            if not owned:
+                return None
+        return rows
+
     def _write_folded_tail_lineage(
         self,
         folded_message: Dict[str, Any],
-        source_store_id: int,
+        source_store_ids: int | list[int],
     ) -> bool:
-        """Persist exact occurrence proof for one generated-context fold."""
+        """Persist exact ordered occurrence proof for one generated-context fold."""
         if not self._session_id:
             return False
         try:
-            source_row = self._exact_session_store_row(int(source_store_id))
-            if source_row is None:
+            if isinstance(source_store_ids, int):
+                normalized_ids = [int(source_store_ids)]
+            else:
+                normalized_ids = [int(store_id) for store_id in source_store_ids]
+            source_rows = self._folded_tail_source_rows(normalized_ids)
+            if not source_rows:
                 return False
             folded_identity = self._message_replay_identity(folded_message)
-            source_identity = self._message_replay_identity(
-                source_row,
-                stored_row=True,
-            )
-            if (
-                folded_identity[0] != source_identity[0]
-                or folded_identity[2:] != source_identity[2:]
+            if any(
+                self._message_replay_identity(row, stored_row=True)[0]
+                != folded_identity[0]
+                for row in source_rows
             ):
                 return False
             payload = {
-                "version": 1,
+                "version": 2,
                 "folded_identity_sha256": self._replay_identity_sha256(
                     folded_message
                 ),
-                "source_store_id": int(source_store_id),
-                "source_identity_sha256": self._replay_identity_sha256(
-                    source_row,
-                    stored_row=True,
-                ),
+                "source_store_ids": normalized_ids,
+                "source_identity_sha256": [
+                    self._replay_identity_sha256(row, stored_row=True)
+                    for row in source_rows
+                ],
             }
             self._store.write_metadata_json(
                 [self._folded_tail_lineage_metadata_key()],
@@ -1821,26 +1878,41 @@ class ReconcileMixin:
     def _load_folded_tail_lineage(
         self,
         messages: List[Dict[str, Any]],
-    ) -> Optional[tuple[Dict[str, Any], Dict[str, Any]]]:
-        """Resolve one exact folded active occurrence to its durable source row."""
+    ) -> Optional[tuple[Dict[str, Any], list[Dict[str, Any]]]]:
+        """Resolve one exact folded active occurrence to durable source rows."""
         if not self._session_id:
             return None
         try:
             payload = self._store.read_metadata_json(
                 self._folded_tail_lineage_metadata_key()
             )
-            if not isinstance(payload, dict) or payload.get("version") != 1:
+            if not isinstance(payload, dict):
                 return None
-            source_store_id = int(payload.get("source_store_id") or 0)
+            version = int(payload.get("version") or 0)
+            if version == 1:
+                source_store_ids = [int(payload.get("source_store_id") or 0)]
+                source_digests = [str(payload.get("source_identity_sha256") or "")]
+            elif version == 2:
+                raw_ids = payload.get("source_store_ids")
+                raw_digests = payload.get("source_identity_sha256")
+                if not isinstance(raw_ids, list) or not isinstance(raw_digests, list):
+                    return None
+                source_store_ids = [int(store_id) for store_id in raw_ids]
+                source_digests = [str(digest or "") for digest in raw_digests]
+            else:
+                return None
             folded_digest = str(payload.get("folded_identity_sha256") or "")
-            source_digest = str(payload.get("source_identity_sha256") or "")
-            if source_store_id <= 0 or not folded_digest or not source_digest:
-                return None
-            source_row = self._exact_session_store_row(source_store_id)
             if (
-                source_row is None
-                or self._replay_identity_sha256(source_row, stored_row=True)
-                != source_digest
+                not source_store_ids
+                or len(source_store_ids) != len(source_digests)
+                or not folded_digest
+                or any(not digest for digest in source_digests)
+            ):
+                return None
+            source_rows = self._folded_tail_source_rows(source_store_ids)
+            if source_rows is None or any(
+                self._replay_identity_sha256(row, stored_row=True) != digest
+                for row, digest in zip(source_rows, source_digests)
             ):
                 return None
             matches = [
@@ -1851,16 +1923,13 @@ class ReconcileMixin:
             if len(matches) != 1:
                 return None
             folded_identity = self._message_replay_identity(matches[0])
-            source_identity = self._message_replay_identity(
-                source_row,
-                stored_row=True,
-            )
-            if (
-                folded_identity[0] != source_identity[0]
-                or folded_identity[2:] != source_identity[2:]
+            if any(
+                self._message_replay_identity(row, stored_row=True)[0]
+                != folded_identity[0]
+                for row in source_rows
             ):
                 return None
-            return matches[0], source_row
+            return matches[0], source_rows
         except Exception:
             logger.debug("LCM folded-tail lineage metadata load failed", exc_info=True)
             return None
@@ -1873,7 +1942,8 @@ class ReconcileMixin:
         folded_lineage = self._load_folded_tail_lineage(messages)
         if folded_lineage is None:
             return {}
-        folded_message, source_row = folded_lineage
+        folded_message, source_rows = folded_lineage
+        source_row = source_rows[0]
         return {
             id(folded_message): self._message_replay_identity(
                 source_row,
@@ -1910,11 +1980,14 @@ class ReconcileMixin:
         )
         folded_lineage = self._load_folded_tail_lineage(messages)
         if folded_lineage is not None:
-            _folded_message, source_row = folded_lineage
-            if int(source_row.get("store_id") or 0) <= int(
-                self._last_compacted_store_id or 0
-            ):
-                candidates.append(source_row)
+            _folded_message, source_rows = folded_lineage
+            candidates.extend(
+                row
+                for row in source_rows
+                if int(row.get("store_id") or 0) <= int(
+                    self._last_compacted_store_id or 0
+                )
+            )
         retained_anchor_loader = getattr(
             self,
             "_load_retained_user_anchor_row",

@@ -11,6 +11,19 @@ are admitted only when their producing session is one of those proven
 bindings. Ambiguous or foreign rows fail closed before a summary node or
 frontier advance is committed.
 
+When active-context assembly folds a retained assistant run into one provider
+message, LCM records the complete ordered `store_id` range behind that fold.
+The range is resolved by primary key and checked against the same conversation
+ownership predicate before publication, so chronology and producing session
+ownership survive rollover without rewriting raw rows. A missing, duplicate, or
+ambiguous lineage row rejects the publication rather than advancing the
+frontier.
+
+Rollover finalization, retained-node reassignment, and lifecycle rebinding are
+staged on one existing `lcm.db` SQLite transaction. A fault rolls the whole
+state back; retrying a committed rollover is idempotent and does not duplicate
+or reclaim source rows.
+
 Do not promise that `/new` deletes historical LCM data. Earlier rows remain in `lcm.db` unless an explicitly authorized cleanup removes them, and they remain available through bounded cross-session recall.
 
 ## `/lcm rotate`

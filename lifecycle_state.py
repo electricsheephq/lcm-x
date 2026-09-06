@@ -379,6 +379,77 @@ class LifecycleStateStore:
         assert updated is not None
         return updated
 
+    @_synchronized
+    def stage_rollover(
+        self,
+        conn: sqlite3.Connection,
+        conversation_id: str,
+        *,
+        old_session_id: str,
+        new_session_id: str,
+        finalized_frontier_store_id: int = 0,
+    ) -> None:
+        """Stage finalization and rebinding on a caller-owned SQLite transaction.
+
+        The DAG connection owns the transaction when rollover also reassigns
+        retained nodes.  This method deliberately performs no commit, allowing
+        lifecycle state and node ownership to roll back together on any fault.
+        """
+        row = conn.execute(
+            """
+            SELECT current_session_id, last_finalized_session_id,
+                   last_finalized_frontier_store_id
+            FROM lcm_lifecycle_state
+            WHERE conversation_id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()
+        if row is not None and str(row[0] or "") == new_session_id and str(row[1] or "") == old_session_id:
+            return
+
+        last_finalized_frontier = max(
+            int(finalized_frontier_store_id or 0),
+            int(row[2] or 0) if row is not None else 0,
+        )
+        now = time.time()
+        conn.execute(
+            """
+            INSERT INTO lcm_lifecycle_state(
+                conversation_id,
+                current_session_id,
+                last_finalized_session_id,
+                current_frontier_store_id,
+                last_finalized_frontier_store_id,
+                current_bound_at,
+                last_finalized_at,
+                last_rollover_at,
+                last_reset_at,
+                updated_at
+            ) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(conversation_id) DO UPDATE SET
+                current_session_id = excluded.current_session_id,
+                last_finalized_session_id = excluded.last_finalized_session_id,
+                current_frontier_store_id = 0,
+                last_finalized_frontier_store_id = excluded.last_finalized_frontier_store_id,
+                current_bound_at = excluded.current_bound_at,
+                last_finalized_at = excluded.last_finalized_at,
+                last_rollover_at = excluded.last_rollover_at,
+                last_reset_at = excluded.last_reset_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                conversation_id,
+                new_session_id,
+                old_session_id,
+                last_finalized_frontier,
+                now,
+                now,
+                now,
+                now,
+                now,
+            ),
+        )
+
     def get_fragmentation_stats(self, state_db_path: str | Path | None = None) -> dict[str, Any]:
         """Return read-only lifecycle/session fragmentation diagnostics.
 

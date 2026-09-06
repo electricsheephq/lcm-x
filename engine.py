@@ -1821,11 +1821,14 @@ class LCMEngine(
                     circuit_breaker=self._summary_circuit_breaker,
                     spend_guard=self._summary_spend_guard,
                     timeout=timeout_seconds,
+                    deadline=deadline,
                     l2_budget_ratio=self._config.l2_budget_ratio,
                     l3_truncate_tokens=self._config.l3_truncate_tokens,
                     focus_topic=focus_topic or "",
                     custom_instructions=self._config.custom_instructions,
                 )
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("threshold full sweep time budget exhausted")
                 return attempt_chunk, source_tokens, summary_text, level, attempt_number
             except Exception as exc:
                 if attempt_number >= max_attempts or not self._is_retry_worthy_leaf_summary_error(exc):
@@ -3122,11 +3125,6 @@ class LCMEngine(
             )
 
         if can_reassign:
-            self._lifecycle.finalize_session(
-                conversation_id,
-                source_session_id,
-                frontier_store_id=frontier,
-            )
             self._copy_generated_ignore_hashes_to_session(
                 source_session_id,
                 session_id,
@@ -3152,7 +3150,12 @@ class LCMEngine(
             # raw rows here makes session-scoped transcript recovery report the
             # old/child session as missing even though its payload was only
             # reassigned to the next compression segment.
-            moved_nodes = self._dag.reassign_session_nodes(source_session_id, session_id)
+            moved_nodes = self._atomic_rollover_lcm_state(
+                conversation_id,
+                source_session_id,
+                session_id,
+                frontier_store_id=frontier,
+            )
             logger.debug(
                 "LCM compression boundary continued %s -> %s: carried %d DAG nodes; preserved raw message ownership",
                 source_session_id,
@@ -3984,7 +3987,53 @@ class LCMEngine(
                 new_session_id,
             )
             return 0
-        return self._dag.reassign_session_nodes(old_session_id, new_session_id)
+        conversation_id = str(self._conversation_id or old_session_id or new_session_id)
+        state = self._lifecycle.get_by_conversation(conversation_id)
+        frontier = max(
+            int(self._last_compacted_store_id or 0),
+            int(state.last_finalized_frontier_store_id if state else 0),
+        )
+        return self._atomic_rollover_lcm_state(
+            conversation_id,
+            old_session_id,
+            new_session_id,
+            frontier_store_id=frontier,
+        )
+
+    def _atomic_rollover_lcm_state(
+        self,
+        conversation_id: str,
+        old_session_id: str,
+        new_session_id: str,
+        *,
+        frontier_store_id: int = 0,
+    ) -> int:
+        """Commit lifecycle rollover and retained-node reassignment together."""
+        if not old_session_id or not new_session_id or old_session_id == new_session_id:
+            return 0
+        conn = self._dag.connection
+        if conn is None:
+            raise RuntimeError("SummaryDAG connection is closed")
+        with self._dag._db_lock:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._lifecycle.stage_rollover(
+                    conn,
+                    conversation_id,
+                    old_session_id=old_session_id,
+                    new_session_id=new_session_id,
+                    finalized_frontier_store_id=frontier_store_id,
+                )
+                moved = SummaryDAG.stage_reassign_session_nodes(
+                    conn,
+                    old_session_id,
+                    new_session_id,
+                )
+                conn.commit()
+                return moved
+            except Exception:
+                conn.rollback()
+                raise
 
     def rollover_session(
         self,
@@ -5295,7 +5344,26 @@ class LCMEngine(
 
     def _get_store_ids_for_messages(self, messages: List[Dict[str, Any]]) -> List[int]:
         ids_by_message_id = self._get_store_id_map_for_messages(messages)
-        return [ids_by_message_id[id(msg)] for msg in messages if id(msg) in ids_by_message_id]
+        folded_lineage = self._load_folded_tail_lineage(messages)
+        folded_message_id = None
+        folded_source_ids: list[int] = []
+        if folded_lineage is not None:
+            folded_message, source_rows = folded_lineage
+            folded_message_id = id(folded_message)
+            folded_source_ids = [
+                int(row["store_id"])
+                for row in source_rows
+                if int(row.get("store_id") or 0) > 0
+            ]
+        store_ids: list[int] = []
+        for msg in messages:
+            if folded_message_id is not None and id(msg) == folded_message_id:
+                store_ids.extend(folded_source_ids)
+                continue
+            mapped_store_id = ids_by_message_id.get(id(msg))
+            if mapped_store_id is not None:
+                store_ids.append(int(mapped_store_id))
+        return store_ids
 
     # -- Internal: summarization -------------------------------------------
 
@@ -6068,11 +6136,14 @@ class LCMEngine(
             circuit_breaker=self._summary_circuit_breaker,
             spend_guard=self._summary_spend_guard,
             timeout=timeout_seconds,
+            deadline=deadline,
             l2_budget_ratio=self._config.l2_budget_ratio,
             l3_truncate_tokens=self._config.l3_truncate_tokens,
             focus_topic=focus_topic or "",
             custom_instructions=self._config.custom_instructions,
         )
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("threshold full sweep time budget exhausted")
         earliest_at, latest_at = self._dag.get_source_time_window(
             [node.node_id for node in nodes]
         )
@@ -6635,7 +6706,7 @@ class LCMEngine(
                 result.append(proactive_msg)
 
         folded_source_store_id = 0
-        folded_result_index: Optional[int] = None
+        folded_source_store_ids: list[int] = []
         folded_original_tail: Optional[Dict[str, Any]] = None
         if retained_generated_context_parts:
             generated_context = "\n\n---\n\n".join(
@@ -6650,8 +6721,29 @@ class LCMEngine(
                     source_ids.get(id(tail_selected[0])) or 0
                 )
                 if folded_source_store_id > 0:
+                    if summary_role == "assistant":
+                        # Final active-context cleanup merges adjacent plain
+                        # assistant turns. Capture that complete leading run
+                        # before cleanup so publication can retain every raw
+                        # occurrence represented by the one merged message.
+                        for candidate in tail_selected:
+                            if (
+                                candidate.get("role") != "assistant"
+                                or not isinstance(candidate.get("content"), str)
+                                or candidate.get("codex_reasoning_items")
+                                or candidate.get("codex_message_items")
+                                or candidate.get("finish_reason") == "incomplete"
+                            ):
+                                break
+                            candidate_store_id = int(
+                                source_ids.get(id(candidate)) or 0
+                            )
+                            if candidate_store_id <= 0:
+                                break
+                            folded_source_store_ids.append(candidate_store_id)
+                    if not folded_source_store_ids:
+                        folded_source_store_ids = [folded_source_store_id]
                     folded_original_tail = tail_selected[0]
-                    folded_result_index = len(result)
                     tail_selected = [
                         self._prepend_generated_context_to_message(
                             folded_original_tail,
@@ -6671,6 +6763,64 @@ class LCMEngine(
 
         # Fresh tail
         result.extend(tail_selected)
+
+        # Preserve the complete durable range for any leading assistant run
+        # that active-context cleanup will merge. The merged provider message
+        # has no one-to-one replay identity, so its lineage must be recorded
+        # before cleanup creates the new dict object.
+        folded_lineage_candidates: list[tuple[str, list[int]]] = []
+        candidate_index = 0
+        while candidate_index < len(result):
+            candidate = result[candidate_index]
+            if (
+                candidate.get("role") != "assistant"
+                or not isinstance(candidate.get("content"), str)
+                or candidate.get("codex_reasoning_items")
+                or candidate.get("codex_message_items")
+                or candidate.get("finish_reason") == "incomplete"
+            ):
+                candidate_index += 1
+                continue
+            run = [candidate]
+            run_index = candidate_index + 1
+            while run_index < len(result):
+                next_message = result[run_index]
+                if (
+                    next_message.get("role") != "assistant"
+                    or not isinstance(next_message.get("content"), str)
+                    or next_message.get("codex_reasoning_items")
+                    or next_message.get("codex_message_items")
+                    or next_message.get("finish_reason") == "incomplete"
+                ):
+                    break
+                run.append(next_message)
+                run_index += 1
+            if len(run) > 1:
+                source_ids: list[int] = []
+                hinted_tail_message_ids: set[int] = set()
+                if (
+                    folded_original_tail is not None
+                    and run[0] is tail_selected[0]
+                    and folded_source_store_ids
+                ):
+                    source_ids.extend(folded_source_store_ids)
+                    hinted_tail_message_ids = {
+                        id(message)
+                        for message in tail_selected[: len(folded_source_store_ids)]
+                    }
+                for run_message in run:
+                    if id(run_message) in hinted_tail_message_ids:
+                        continue
+                    mapped_ids = self._get_store_ids_for_messages([run_message])
+                    if not mapped_ids:
+                        source_ids = []
+                        break
+                    source_ids.extend(mapped_ids)
+                if source_ids and len(source_ids) == len(set(source_ids)):
+                    folded_lineage_candidates.append(
+                        ("\n".join(message["content"].strip() for message in run), source_ids)
+                    )
+            candidate_index = max(run_index, candidate_index + 1)
 
         # ── Active-context cleanup / tool-pair guardrail ──
         # Drop assistant turns that carry only blank/internal structured content,
@@ -6701,19 +6851,23 @@ class LCMEngine(
             result = self._sanitize_active_context_messages(trimmed_result)
 
         existing_folded_lineage = self._load_folded_tail_lineage(result)
-        if (
-            folded_result_index is not None
-            and folded_original_tail is not None
-            and folded_result_index < len(result)
-        ):
-            if not self._write_folded_tail_lineage(
-                result[folded_result_index],
-                folded_source_store_id,
-            ):
-                result[folded_result_index] = folded_original_tail
-                result = self._sanitize_active_context_messages(result)
-                self._clear_folded_tail_lineage()
-        elif existing_folded_lineage is None:
+        lineage_written = False
+        if len(folded_lineage_candidates) == 1:
+            expected_content, source_ids = folded_lineage_candidates[0]
+            matches = [
+                message
+                for message in result
+                if (
+                    message.get("role") == "assistant"
+                    and message.get("content") == expected_content
+                )
+            ]
+            if len(matches) == 1:
+                lineage_written = self._write_folded_tail_lineage(
+                    matches[0],
+                    source_ids,
+                )
+        if not lineage_written and existing_folded_lineage is None:
             self._clear_folded_tail_lineage()
 
         # Persist proof only for the exact provider-visible compacted snapshot

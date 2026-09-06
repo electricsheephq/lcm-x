@@ -430,6 +430,19 @@ class SummaryDAG:
             self._conn.commit()
         return moved
 
+    @staticmethod
+    def stage_reassign_session_nodes(
+        conn: sqlite3.Connection,
+        old_session_id: str,
+        new_session_id: str,
+    ) -> int:
+        """Stage a session-node reassignment in a caller-owned transaction."""
+        cur = conn.execute(
+            "UPDATE summary_nodes SET session_id = ? WHERE session_id = ?",
+            (new_session_id, old_session_id),
+        )
+        return int(cur.rowcount or 0)
+
     # -- Read ---------------------------------------------------------------
 
     def get_node(self, node_id: int) -> Optional[SummaryNode]:
