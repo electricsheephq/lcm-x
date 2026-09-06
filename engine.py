@@ -3070,15 +3070,17 @@ class LCMEngine(
             return "", None, "lifecycle row has no source session"
 
         # Resolve exactly one durable source before copying metadata, rebinding
-        # lifecycle state, or moving DAG nodes.  The conversation-id row is
+        # lifecycle state, or moving DAG nodes.  The conversation-id alias is
         # checked first because legacy hosts may use the old session id as the
-        # logical conversation key; the requested logical row then covers a
-        # finalized source no longer returned by get_by_session(old).
+        # logical conversation key.  The old-session lookup comes next so a
+        # process-local auxiliary conversation cannot veto the host callback's
+        # source.  The requested logical row remains a fallback for a finalized
+        # source no longer returned by get_by_session(old).
         selected_source_session_id = ""
         selected_source_state = None
         selection_reason = "no lifecycle source"
         seen_state_keys: set[tuple[Any, ...]] = set()
-        for candidate_state in (conversation_state, current_state, session_state):
+        for candidate_state in (conversation_state, session_state, current_state):
             if candidate_state is None:
                 continue
             state_key = (

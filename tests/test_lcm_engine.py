@@ -7609,7 +7609,7 @@ class TestMessageFiltering:
             "new-session",
             platform="telegram",
             context_length=1000,
-            conversation_id="conv-cleared-count-literal",
+            conversation_id="user-123",
             boundary_reason="compression",
             old_session_id="user-123",
         )
@@ -13643,6 +13643,31 @@ class TestSessionRollover:
         ))
         engine._last_compacted_store_id = store_id
         old_conversation_id = engine._conversation_id
+
+        state_db = Path(engine._store.db_path).parent / "state.db"
+        host = sqlite3.connect(state_db)
+        host.executescript(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                parent_session_id TEXT,
+                end_reason TEXT,
+                ended_at REAL,
+                model_config TEXT,
+                source TEXT,
+                started_at REAL
+            );
+            """
+        )
+        host.executemany(
+            "INSERT INTO sessions(id, parent_session_id, end_reason, ended_at, model_config, source, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("compress-rollover-old", None, "compression", 1.0, "{}", "telegram", 1.0),
+                ("compress-rollover-new", "compress-rollover-old", None, None, "{}", "telegram", 2.0),
+            ],
+        )
+        host.commit()
+        host.close()
 
         moved = engine.rollover_session(
             "compress-rollover-old",
