@@ -46,9 +46,18 @@ may become one provider message. Their lineage is recorded after tool cleanup
 from the exact durable assistant occurrences, excluding the dropped tool row;
 an unmapped assistant occurrence prevents lineage publication.
 
-Summary escalation carries one absolute sweep deadline through every model
-level and rescue attempt. A late result is discarded and the pending source and
-maintenance debt remain available for a later bounded retry.
+Each compression invocation captures one absolute deadline, shared by normal
+leaf work, model escalation, rescue attempts and condensation. The ceiling is
+600 seconds, or the lower deadline supplied by Hermes. A late result is
+discarded; sources and pending maintenance debt remain available for a later
+bounded retry.
+
+On Hermes hosts that supply an invocation-owned publication fence, LCM captures
+that fence once and holds it only around each short DAG transaction. Provider
+calls run outside the fence. Cancellation either prevents publication or waits
+for an already admitted transaction to finish; a later attempt cannot replace
+the captured fence. Older hosts retain their cancellation callback check but
+do not provide this atomic publication guarantee.
 
 Do not promise that `/new` deletes historical LCM data. Earlier rows remain in `lcm.db` unless an explicitly authorized cleanup removes them, and they remain available through bounded cross-session recall.
 

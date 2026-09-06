@@ -618,7 +618,8 @@ oldest raw chunks outside the protected fresh tail even after pressure falls
 below the trigger. It then condenses the provider-visible summary frontier only
 when that frontier exceeds `LCM_SUMMARY_PREFIX_TARGET_TOKENS` (or one leaf
 budget when the target is `0`). One invocation is bounded to 12 total leaf plus
-condensation calls and 120 seconds between calls, persists each completed DAG
+condensation calls and one shared 600-second deadline (or the lower host
+deadline), persists each completed DAG
 pass, and publishes one newly assembled active context at the end. It is
 synchronous and independent of deferred/background maintenance.
 
