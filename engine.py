@@ -4606,6 +4606,17 @@ class LCMEngine(
             return
         try:
             self._ingest_cursor_needs_reconcile = self._store.get_session_count(self._session_id) > 0
+            if not self._ingest_cursor_needs_reconcile and self._conversation_id:
+                # A newly bound successor can be empty while its active
+                # context replays the finalized conversation's fresh tail.
+                # Mark it for reconciliation so _ingest_messages can prove
+                # that prefix from the logical conversation before appending
+                # genuinely new rows.
+                lifecycle = self._lifecycle.get_by_conversation(self._conversation_id)
+                self._ingest_cursor_needs_reconcile = bool(
+                    lifecycle is not None
+                    and lifecycle.last_finalized_frontier_store_id > 0
+                )
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
             self._ingest_cursor_needs_reconcile = False

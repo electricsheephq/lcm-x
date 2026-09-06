@@ -192,17 +192,14 @@ class LifecycleStateStore:
             # already owns the persisted finalized checkpoint, so restoring
             # it is safe and monotonic.  A different session must start at
             # zero until a proven rollover edge advances it.
-            same_finalized_session = (
-                existing.current_session_id is None
-                and existing.last_finalized_session_id == session_id
-            )
-            current_frontier = (
-                max(
-                    existing.current_frontier_store_id,
-                    existing.last_finalized_frontier_store_id,
-                )
-                if same_finalized_session
-                else 0
+            # A logical conversation never rewinds its committed frontier when
+            # it is rebound to a new session.  The finalized marker proves the
+            # older range even for an ordinary (non-compression) rollover, so
+            # the next publication can admit the retained fresh tail without
+            # replaying already-covered rows.
+            current_frontier = max(
+                existing.current_frontier_store_id,
+                existing.last_finalized_frontier_store_id,
             )
             current_bound_at = (
                 existing.current_bound_at if existing.current_session_id == session_id else now

@@ -1487,6 +1487,49 @@ class ReconcileMixin:
             logger.debug("LCM ingest cursor reconciliation count failed: %s", exc)
             return 0
         if session_count <= 0:
+            # An ordinary host rollover starts an empty successor session but
+            # can replay the retained fresh tail from the finalized session.
+            # Session-local reconciliation cannot see that prefix, so prove it
+            # from the logical conversation's finalized frontier before
+            # treating the incoming suffix as new.  Only synthetic scaffolds
+            # and exact rows already present in the finalized conversation may
+            # be consumed. The retained fresh tail is intentionally beyond
+            # the committed frontier, so it is valid replay even though it
+            # has not been summarized yet; the first unmapped row remains a
+            # durable delta.
+            conversation_id = str(self._conversation_id or "")
+            if conversation_id:
+                lifecycle = self._lifecycle.get_by_conversation(conversation_id)
+                finalized_frontier = int(
+                    lifecycle.last_finalized_frontier_store_id
+                    if lifecycle is not None
+                    else 0
+                )
+                if finalized_frontier > 0:
+                    mapped_ids = self._get_store_id_map_for_messages(messages)
+                    cursor = 0
+                    mapped_prefix = 0
+                    for index, message in enumerate(messages):
+                        if self._is_replayed_context_scaffold_message(message):
+                            cursor = index + 1
+                            continue
+                        mapped_id = int(mapped_ids.get(id(message)) or 0)
+                        if mapped_id > 0:
+                            mapped_prefix += 1
+                            cursor = index + 1
+                            continue
+                        break
+                    if mapped_prefix > 0:
+                        self._record_ingest_reconciliation(
+                            action="advanced cursor",
+                            reason="replayed finalized conversation prefix after ordinary rollover",
+                            cursor=cursor,
+                            incoming=len(messages),
+                            session_count=session_count,
+                            stored_tail_count=0,
+                            effective_incoming=mapped_prefix,
+                        )
+                        return cursor
             placeholder_budget = self._load_generated_ignored_placeholder_hash_counts()
             placeholder_ordinals = self._load_generated_ignored_placeholder_hash_ordinals()
             if placeholder_budget and placeholder_ordinals:

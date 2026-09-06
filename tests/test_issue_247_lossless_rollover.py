@@ -114,6 +114,59 @@ def test_source_mapping_spans_current_and_last_finalized_sessions(tmp_path):
     assert [mapped[id(row)] for row in old_rows] == source_ids
 
 
+def test_ordinary_rollover_preserves_committed_frontier_for_fresh_tail(tmp_path, monkeypatch):
+    conversation_id = "issue-247-ordinary-frontier"
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "ordinary-frontier.db"),
+            fresh_tail_count=1,
+            leaf_chunk_tokens=1,
+            incremental_max_depth=0,
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _summary)
+    engine.on_session_start(
+        "s1",
+        platform="cli",
+        conversation_id=conversation_id,
+        context_length=200_000,
+    )
+    first_context = [
+        {"role": "assistant", "content": f"old-{index}"}
+        for index in range(4)
+    ] + [{"role": "user", "content": "old-tail"}]
+    try:
+        engine.ingest(first_context)
+        first_context = engine.compress(first_context, force=True)
+        first_frontier = engine._last_compacted_store_id
+        assert first_frontier > 0
+
+        engine.rollover_session(
+            "s1",
+            "s2",
+            previous_messages=first_context,
+            platform="cli",
+            context_length=200_000,
+        )
+        assert engine._last_compacted_store_id == first_frontier
+
+        second_context = first_context + [
+            {"role": "assistant", "content": "new-one"},
+            {"role": "assistant", "content": "new-two"},
+            {"role": "user", "content": "new-tail"},
+        ]
+        engine.ingest(second_context)
+        engine.compress(second_context, force=True)
+    finally:
+        status = engine.last_compression_status
+        final_frontier = engine._last_compacted_store_id
+        engine.shutdown()
+
+    assert status == "compacted"
+    assert final_frontier > first_frontier
+
+
 def test_replayed_scaffold_and_later_duplicate_keep_distinct_source_ownership(tmp_path):
     conversation_id = "issue-247-scaffold-ownership"
     engine = LCMEngine(
