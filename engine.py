@@ -3022,12 +3022,6 @@ class LCMEngine(
             and host_successor_proven
         ):
             return
-        if conversation_state is None and current_state is not None:
-            # ``get_by_session(old_session_id)`` no longer finds a source after
-            # a later session was finalized.  The requested logical
-            # conversation row still carries that finalized source and may be
-            # used only after the same host-chain proof below.
-            conversation_state = current_state
 
         def _state_conversation_matches(state: Any) -> bool:
             return bool(
@@ -3038,175 +3032,98 @@ class LCMEngine(
                 )
             )
 
-        def _host_source_from_conversation_state(state: Any) -> tuple[str, Any]:
-            if not _state_conversation_matches(state):
-                return "", None
-            if state.current_session_id == old_session_id:
-                return old_session_id, state
-            if (
-                state.conversation_id == old_session_id
-                and state.current_session_id
-            ):
-                # Some legacy hosts used the old session id as the lifecycle
-                # conversation id.  That alias does not prove that its live
-                # current session is the source for this callback: a stale
-                # s4 must not be reassigned to s3 merely because s1 -> s3 is
-                # a valid host edge.  Select the current row only when it is
-                # itself on the exact durable s1 -> s4 -> s3 chain.
-                current_session_id = str(state.current_session_id)
-                if (
-                    self._host_proves_compression_successor(
-                        old_session_id,
-                        current_session_id,
-                        kwargs,
-                    )
-                    and self._host_proves_compression_successor(
-                        current_session_id,
-                        session_id,
-                        kwargs,
-                    )
-                ):
-                    return current_session_id, state
-                return "", None
-            if (
-                state.current_session_id is None
-                and state.last_finalized_session_id
-            ):
-                finalized_session_id = str(state.last_finalized_session_id)
-                if finalized_session_id == old_session_id:
-                    return (
-                        (finalized_session_id, state)
-                        if host_successor_proven
-                        else ("", None)
-                    )
-                if (
-                    self._host_proves_compression_successor(
-                        old_session_id,
-                        finalized_session_id,
-                        kwargs,
-                    )
-                    and self._host_proves_compression_successor(
-                        finalized_session_id,
-                        session_id,
-                        kwargs,
-                    )
-                ):
-                    return finalized_session_id, state
-                return "", None
-            return "", None
-
-        def _host_source_from_session_state(state: Any) -> tuple[str, Any]:
-            if not _state_conversation_matches(state):
-                return "", None
-            if state.current_session_id == old_session_id:
-                return old_session_id, state
-            if (
-                state.current_session_id is None
-                and state.last_finalized_session_id == old_session_id
-            ):
-                return (
-                    (old_session_id, state)
-                    if host_successor_proven
-                    else ("", None)
-                )
-            if state.current_session_id is None and state.last_finalized_session_id:
-                finalized_session_id = str(state.last_finalized_session_id)
-                if (
-                    self._host_proves_compression_successor(
-                        old_session_id,
-                        finalized_session_id,
-                        kwargs,
-                    )
-                    and self._host_proves_compression_successor(
-                        finalized_session_id,
-                        session_id,
-                        kwargs,
-                    )
-                ):
-                    return finalized_session_id, state
-            return "", None
-
-        host_source_session_id, host_source_state = _host_source_from_conversation_state(
-            conversation_state
-        )
-        if not host_source_session_id:
-            host_source_session_id, host_source_state = _host_source_from_session_state(
-                session_state
-            )
-        if (
-            not host_source_session_id
-            and conversation_state is not None
-            and _state_conversation_matches(conversation_state)
-            and conversation_state.conversation_id == old_session_id
-            and conversation_state.current_session_id
-            and conversation_state.current_session_id != old_session_id
-        ):
-            logger.warning(
-                "LCM refused compression rebind %s -> %s: legacy conversation alias current session %s is outside the proven host chain",
-                old_session_id,
-                session_id,
-                conversation_state.current_session_id,
-            )
-            return
-        if (
-            not host_source_session_id
-            and host_successor_proven
-            and current_state is not None
-            and current_state.current_session_id
-            and current_state.current_session_id != session_id
-        ):
-            current_session_on_host_chain = (
+        def _host_chain_proves(source_session_id: str) -> bool:
+            return (
                 self._host_proves_compression_successor(
                     old_session_id,
-                    current_state.current_session_id,
+                    source_session_id,
                     kwargs,
                 )
                 and self._host_proves_compression_successor(
-                    current_state.current_session_id,
+                    source_session_id,
                     session_id,
                     kwargs,
                 )
             )
-            if current_session_on_host_chain:
-                # The host callback may carry an older parent while LCM has
-                # already committed an intermediate current session. Rebind
-                # only from an LCM source that is itself on the exact durable
-                # host chain; a merely newer local session must be preserved.
-                host_source_session_id = current_state.current_session_id
-                host_source_state = current_state
-            else:
-                logger.warning(
-                    "LCM refused stale compression rebind %s -> %s: current session %s is outside the proven host chain",
-                    old_session_id,
-                    session_id,
-                    current_state.current_session_id,
-                )
 
-        source_session_id = host_source_session_id or old_session_id
-        source_state = host_source_state or session_state
+        def _classify_state(state: Any) -> tuple[str, Any, str]:
+            if not _state_conversation_matches(state):
+                return "", None, "conversation mismatch"
+            current_session_id = str(state.current_session_id or "")
+            finalized_session_id = str(state.last_finalized_session_id or "")
+            if current_session_id == old_session_id:
+                return old_session_id, state, "current session matches callback source"
+            if current_session_id:
+                if _host_chain_proves(current_session_id):
+                    return current_session_id, state, "current session is on host chain"
+                return "", None, "current session is outside host chain"
+            if finalized_session_id:
+                if finalized_session_id == old_session_id:
+                    if host_successor_proven:
+                        return old_session_id, state, "finalized session matches callback source"
+                    return "", None, "finalized source lacks host proof"
+                if _host_chain_proves(finalized_session_id):
+                    return finalized_session_id, state, "finalized session is on host chain"
+                return "", None, "finalized session is outside host chain"
+            return "", None, "lifecycle row has no source session"
+
+        # Resolve exactly one durable source before copying metadata, rebinding
+        # lifecycle state, or moving DAG nodes.  The conversation-id row is
+        # checked first because legacy hosts may use the old session id as the
+        # logical conversation key; the requested logical row then covers a
+        # finalized source no longer returned by get_by_session(old).
+        selected_source_session_id = ""
+        selected_source_state = None
+        selection_reason = "no lifecycle source"
+        seen_state_keys: set[tuple[Any, ...]] = set()
+        for candidate_state in (conversation_state, current_state, session_state):
+            if candidate_state is None:
+                continue
+            state_key = (
+                candidate_state.conversation_id,
+                candidate_state.current_session_id,
+                candidate_state.last_finalized_session_id,
+                candidate_state.updated_at,
+            )
+            if state_key in seen_state_keys:
+                continue
+            seen_state_keys.add(state_key)
+            source_candidate, state_candidate, reason = _classify_state(candidate_state)
+            if reason == "conversation mismatch":
+                continue
+            if source_candidate:
+                selected_source_session_id = source_candidate
+                selected_source_state = state_candidate
+                selection_reason = reason
+                break
+            if reason != "lifecycle row has no source session":
+                selection_reason = reason
+                break
+
+        if not selected_source_session_id:
+            logger.warning(
+                "LCM refused compression rebind %s -> %s before mutation: %s",
+                old_session_id,
+                session_id,
+                selection_reason,
+            )
+            return
+
+        source_session_id = selected_source_session_id
+        source_state = selected_source_state
 
         if previous_session_id and previous_session_id != old_session_id:
-            # Hermes passes the session that actually crossed the compression
-            # boundary as old_session_id. A different bound session can be a
-            # short-lived subagent/cron/WebUI side channel that ran after the
-            # foreground compaction. Prefer the host-authoritative source when
-            # the durable lifecycle proves it belongs to LCM. When the host
-            # old_session_id is the durable conversation id, use that row's
-            # current/finalized LCM source instead of unrelated auxiliary rows
-            # where the id appears only as last_finalized_session_id. Without
-            # that proof, leave the committed state untouched.
-            if host_source_session_id:
-                logger.warning(
-                    "LCM compression boundary using host old_session_id %s as carry-over source=%s despite bound session drift=%s",
-                    old_session_id,
-                    host_source_session_id,
-                    previous_session_id,
-                )
-            else:
-                # A stale host boundary without a durable successor is not a
-                # supported rebind.  The committed frontier and source rows
-                # remain untouched so a later proven callback can resume.
-                return
+            # Hermes may report the host boundary after a short-lived
+            # subagent/cron/WebUI side channel became the process binding. The
+            # selected source is already proven above; keep that identity while
+            # carrying the boundary forward.
+            logger.warning(
+                "LCM compression boundary using selected source=%s for host old_session_id=%s despite bound session drift=%s (%s)",
+                source_session_id,
+                old_session_id,
+                previous_session_id,
+                selection_reason,
+            )
 
         conversation_id = (
             (source_state.conversation_id if source_state else None)
