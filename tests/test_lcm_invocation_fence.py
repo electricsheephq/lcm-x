@@ -235,8 +235,8 @@ def test_threshold_sweep_uses_shared_ceiling_and_honors_lower_host_deadline(
 ):
     engine._config.threshold_full_sweep_enabled = True
     engine.threshold_tokens = 1
-    started = time.monotonic()
-    fence = _SyntheticFence(started + host_budget)
+    fence_started = time.monotonic()
+    fence = _SyntheticFence(fence_started + host_budget)
     _install_fence(engine, fence)
     deadlines = []
     monkeypatch.setattr(
@@ -245,6 +245,7 @@ def test_threshold_sweep_uses_shared_ceiling_and_honors_lower_host_deadline(
         lambda **kwargs: (deadlines.append(kwargs["deadline"]) or "synthetic summary", 1),
     )
 
+    started = time.monotonic()
     engine.compress(_messages())
 
     assert deadlines

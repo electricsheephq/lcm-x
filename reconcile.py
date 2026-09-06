@@ -1780,8 +1780,10 @@ class ReconcileMixin:
         lifecycle-proven producing session.  Ambiguous or missing rows fail
         closed so lineage metadata can never widen source ownership.
         """
-        normalized_ids = [int(store_id) for store_id in source_store_ids if int(store_id) > 0]
-        if not normalized_ids or len(normalized_ids) != len(set(normalized_ids)):
+        normalized_ids = [int(store_id) for store_id in source_store_ids]
+        if not normalized_ids or any(store_id <= 0 for store_id in normalized_ids):
+            return None
+        if len(normalized_ids) != len(set(normalized_ids)):
             return None
         if normalized_ids != sorted(normalized_ids):
             return None

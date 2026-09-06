@@ -1016,14 +1016,20 @@ def test_sweep_deadline_rejects_a_late_summary_result(tmp_path, monkeypatch):
         hermes_home=str(tmp_path / "home"),
     )
     calls = {}
-    clock = iter((10.0, 111.0))
+    clock = 10.0
 
     def late_summary(**kwargs):
         calls.update(kwargs)
         return "late summary", 1
 
     monkeypatch.setattr(lcm_engine, "summarize_with_escalation", late_summary)
-    monkeypatch.setattr(lcm_engine.time, "monotonic", lambda: next(clock))
+    def monotonic():
+        nonlocal clock
+        current = clock
+        clock += 101.0
+        return current
+
+    monkeypatch.setattr(lcm_engine.time, "monotonic", monotonic)
     try:
         with pytest.raises(TimeoutError, match="time budget exhausted"):
             engine._summarize_leaf_chunk_with_rescue(
@@ -1038,14 +1044,20 @@ def test_sweep_deadline_rejects_a_late_summary_result(tmp_path, monkeypatch):
 
 def test_escalation_deadline_is_not_renewed_for_level_two(monkeypatch):
     calls = []
-    clock = iter((10.0, 111.0))
+    clock = 10.0
 
     def fake_summary(*_args, **kwargs):
         calls.append(kwargs.get("timeout"))
         return None
 
     monkeypatch.setattr(lcm_escalation, "_invoke_summary_llm", fake_summary)
-    monkeypatch.setattr(lcm_escalation.time, "monotonic", lambda: next(clock))
+    def monotonic():
+        nonlocal clock
+        current = clock
+        clock += 101.0
+        return current
+
+    monkeypatch.setattr(lcm_escalation.time, "monotonic", monotonic)
     summary, level = lcm_escalation.summarize_with_escalation(
         "synthetic deadline source",
         source_tokens=4,

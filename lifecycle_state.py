@@ -393,7 +393,6 @@ class LifecycleStateStore:
         assert updated is not None
         return updated
 
-    @_synchronized
     def stage_rollover(
         self,
         conn: sqlite3.Connection,
@@ -1230,6 +1229,7 @@ class LifecycleStateStore:
                     for row in legacy_rows
                     if str(row[0] or "").strip()
                     and str(row[0] or "").strip() not in proven_sessions
+                    and str(row[0] or "").strip() not in explicit_sessions
                 }
             )
         ambiguous_sessions = sorted(

@@ -1922,25 +1922,34 @@ class LCMEngine(
             timeout=timeout,
         )
 
+    def _validate_conversation_admission(
+        self,
+        session_id: str,
+        conversation_id: str | None,
+    ) -> None:
+        requested_conversation_id = str(conversation_id or "").strip()
+        if not requested_conversation_id or self._session_ignored or self._session_stateless:
+            return
+        dag_conn = self._dag.connection
+        if dag_conn is None:
+            return
+        ownership = self._lifecycle.audit_conversation_ownership(
+            dag_conn,
+            requested_conversation_id,
+            str(session_id or ""),
+        )
+        if not ownership.get("ok"):
+            raise LifecyclePublicationConflictError(
+                "LCM conversation ownership audit failed before session admission"
+            )
+
     def _bind_lifecycle_state(
         self,
         session_id: str,
         *,
         conversation_id: str | None = None,
     ) -> None:
-        requested_conversation_id = str(conversation_id or "").strip()
-        if requested_conversation_id and not self._session_ignored and not self._session_stateless:
-            dag_conn = self._dag.connection
-            if dag_conn is not None:
-                ownership = self._lifecycle.audit_conversation_ownership(
-                    dag_conn,
-                    requested_conversation_id,
-                    str(session_id or ""),
-                )
-                if not ownership.get("ok"):
-                    raise LifecyclePublicationConflictError(
-                        "LCM conversation ownership audit failed before session admission"
-                    )
+        self._validate_conversation_admission(session_id, conversation_id)
         state = self._lifecycle.bind_session(session_id, conversation_id=conversation_id)
         self._conversation_id = state.conversation_id
         self._lcm_session_last_conversation_id[session_id] = state.conversation_id
@@ -3014,9 +3023,14 @@ class LCMEngine(
         if (
             current_state is not None
             and current_state.current_session_id == session_id
-            and current_state.last_finalized_session_id == old_session_id
             and not host_successor_proven
         ):
+            if current_state.last_finalized_session_id != old_session_id:
+                logger.warning(
+                    "LCM refused stale compression rebind %s -> %s: current binding is not the callback edge",
+                    old_session_id,
+                    session_id,
+                )
             return
         if (
             current_state is not None
@@ -3100,9 +3114,11 @@ class LCMEngine(
                 selected_source_state = state_candidate
                 selection_reason = reason
                 break
-            if reason != "lifecycle row has no source session":
+            if (
+                reason != "lifecycle row has no source session"
+                and selection_reason == "no lifecycle source"
+            ):
                 selection_reason = reason
-                break
 
         if not selected_source_session_id:
             logger.warning(
@@ -3137,6 +3153,7 @@ class LCMEngine(
             or old_session_id
             or session_id
         )
+        self._validate_conversation_admission(session_id, conversation_id)
         process_local_frontier = (
             int(self._last_compacted_store_id or 0)
             if source_session_id and previous_session_id == source_session_id
@@ -3283,6 +3300,11 @@ class LCMEngine(
         previous_session_id = self._session_id
         previous_conversation_id = self._conversation_id
         requested_conversation_id = str(kwargs.get("conversation_id") or session_id)
+        if not (boundary_reason == "compression" and old_session_id and old_session_id != session_id):
+            self._validate_conversation_admission(
+                session_id,
+                kwargs.get("conversation_id"),
+            )
         self._lcm_current_start_allows_bypass_lineage = False
         requested_platform = str(kwargs.get("platform") or self._session_platform or "")
         pre_reset_preserve_ambiguous_no_frame_old_session = False
@@ -4100,8 +4122,15 @@ class LCMEngine(
                 )
                 conn.commit()
                 return moved
-            except Exception:
-                conn.rollback()
+            except BaseException:
+                try:
+                    conn.rollback()
+                except Exception:
+                    logger.warning(
+                        "LCM rollover rollback failed for conversation=%s",
+                        conversation_id,
+                        exc_info=True,
+                    )
                 raise
 
     def rollover_session(
