@@ -27,6 +27,9 @@ or reclaim source rows.
 At session admission, LCM runs a read-only ownership audit for the requested
 logical conversation. It rejects a session that would make blank legacy rows
 ambiguous or orphaned; unrelated conversation rows do not widen that audit.
+Zero-frontier, debt-free lifecycle rows with no messages or DAG nodes for their
+own current binding are recorded as non-owning aliases; a source-bearing row
+that shares a producing session remains ambiguous.
 Publication then checks only the indexed current/last-finalized owner-session
 scope, so unrelated DAG nodes do not enter the hot transaction.
 

@@ -523,6 +523,23 @@ def test_ownership_audit_rejects_ambiguous_and_orphan_legacy_bindings(tmp_path):
     engine._store.append("s1", {"role": "assistant", "content": "legacy"})
     engine._store.append("orphan", {"role": "assistant", "content": "legacy orphan"})
     engine._lifecycle.record_rollover(
+        "empty-alias",
+        old_session_id="s1",
+        new_session_id="alias-session",
+    )
+    alias_audit = engine._lifecycle.audit_conversation_ownership(
+        engine._dag.connection,
+        conversation_id,
+        "s1",
+    )
+    assert alias_audit["ok"] is True
+    assert alias_audit["non_owning_aliases"] == ["empty-alias"]
+    engine._store.append(
+        "other-session",
+        {"role": "assistant", "content": "other source"},
+        conversation_id="other-conversation",
+    )
+    engine._lifecycle.record_rollover(
         "other-conversation",
         old_session_id="s1",
         new_session_id="other-session",
@@ -535,6 +552,11 @@ def test_ownership_audit_rejects_ambiguous_and_orphan_legacy_bindings(tmp_path):
         )
         assert audit["ok"] is False
         assert audit["ambiguous_sessions"] == ["s1"]
+        with pytest.raises(LifecyclePublicationConflictError):
+            engine._bind_lifecycle_state(
+                "ambiguous-session",
+                conversation_id=conversation_id,
+            )
         orphan_audit = engine._lifecycle.audit_conversation_ownership(
             engine._dag.connection,
             conversation_id,

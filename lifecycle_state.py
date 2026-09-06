@@ -1061,35 +1061,16 @@ class LifecycleStateStore:
         if not conversation_id:
             return {"ok": bool(session_id), "reason": "missing conversation id"}
 
-        lifecycle_rows = conn.execute(
+        target_state = conn.execute(
             """
-            SELECT conversation_id, current_session_id, last_finalized_session_id
+            SELECT conversation_id, current_session_id, last_finalized_session_id,
+                   current_frontier_store_id, last_finalized_frontier_store_id,
+                   debt_kind, debt_size_estimate
             FROM lcm_lifecycle_state
             WHERE conversation_id = ?
-               OR current_session_id = ?
-               OR last_finalized_session_id = ?
             """,
-            (conversation_id, session_id, session_id),
-        ).fetchall()
-        by_session: dict[str, set[str]] = {}
-        for row in lifecycle_rows:
-            row_conversation = str(row[0] or "").strip()
-            for value in (row[1], row[2]):
-                value = str(value or "").strip()
-                if value:
-                    by_session.setdefault(value, set()).add(row_conversation)
-
-        state = next(
-            (row for row in lifecycle_rows if str(row[0] or "").strip() == conversation_id),
-            None,
-        )
-        proven_sessions: set[str] = set()
-        if state is not None:
-            proven_sessions = {
-                str(value or "").strip()
-                for value in (state[1], state[2])
-                if str(value or "").strip()
-            }
+            (conversation_id,),
+        ).fetchone()
         explicit_rows = conn.execute(
             """
             SELECT DISTINCT session_id
@@ -1101,6 +1082,98 @@ class LifecycleStateStore:
         explicit_sessions = {
             str(row[0] or "").strip() for row in explicit_rows if str(row[0] or "").strip()
         }
+        referenced_sessions = set(explicit_sessions)
+        if target_state is not None:
+            referenced_sessions.update(
+                str(value or "").strip()
+                for value in (target_state[1], target_state[2])
+                if str(value or "").strip()
+            )
+        if session_id:
+            referenced_sessions.add(session_id)
+        if referenced_sessions:
+            placeholders = ",".join("?" for _ in referenced_sessions)
+            lifecycle_rows = conn.execute(
+                f"""
+                SELECT conversation_id, current_session_id, last_finalized_session_id,
+                       current_frontier_store_id, last_finalized_frontier_store_id,
+                       debt_kind, debt_size_estimate
+                FROM lcm_lifecycle_state
+                WHERE conversation_id = ?
+                   OR current_session_id IN ({placeholders})
+                   OR last_finalized_session_id IN ({placeholders})
+                """,
+                (
+                    conversation_id,
+                    *sorted(referenced_sessions),
+                    *sorted(referenced_sessions),
+                ),
+            ).fetchall()
+        else:
+            lifecycle_rows = conn.execute(
+                """
+                SELECT conversation_id, current_session_id, last_finalized_session_id,
+                       current_frontier_store_id, last_finalized_frontier_store_id,
+                       debt_kind, debt_size_estimate
+                FROM lcm_lifecycle_state
+                WHERE conversation_id = ?
+                """,
+                (conversation_id,),
+            ).fetchall()
+
+        def has_ownership_evidence(row: sqlite3.Row | tuple[Any, ...]) -> bool:
+            row_conversation = str(row[0] or "").strip()
+            if row_conversation == conversation_id:
+                return True
+            if (
+                int(row[3] or 0) > 0
+                or int(row[4] or 0) > 0
+                or str(row[5] or "").strip()
+                or int(row[6] or 0) > 0
+            ):
+                return True
+            if conn.execute(
+                "SELECT 1 FROM messages WHERE conversation_id = ? LIMIT 1",
+                (row_conversation,),
+            ).fetchone():
+                return True
+            current_session = str(row[1] or "").strip()
+            if not current_session:
+                # A row with no current binding cannot prove that its shared
+                # last-finalized reference is an empty alias.
+                return True
+            if conn.execute(
+                "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1",
+                (current_session,),
+            ).fetchone():
+                return True
+            if conn.execute(
+                "SELECT 1 FROM summary_nodes WHERE session_id = ? LIMIT 1",
+                (current_session,),
+            ).fetchone():
+                return True
+            return False
+
+        by_session: dict[str, set[str]] = {}
+        non_owning_aliases: list[str] = []
+        for row in lifecycle_rows:
+            if not has_ownership_evidence(row):
+                non_owning_aliases.append(str(row[0] or "").strip())
+                continue
+            row_conversation = str(row[0] or "").strip()
+            for value in (row[1], row[2]):
+                value = str(value or "").strip()
+                if value:
+                    by_session.setdefault(value, set()).add(row_conversation)
+
+        state = target_state
+        proven_sessions: set[str] = set()
+        if state is not None:
+            proven_sessions = {
+                str(value or "").strip()
+                for value in (state[1], state[2])
+                if str(value or "").strip()
+            }
         candidate_sessions = set(proven_sessions) | explicit_sessions
         if session_id:
             candidate_sessions.add(session_id)
@@ -1136,6 +1209,7 @@ class LifecycleStateStore:
             "explicit_sessions": sorted(explicit_sessions),
             "ambiguous_sessions": ambiguous_sessions,
             "orphan_legacy_sessions": orphan_legacy_sessions,
+            "non_owning_aliases": sorted(non_owning_aliases),
             "reason": "" if ok else "ambiguous or orphan legacy message ownership",
         }
 

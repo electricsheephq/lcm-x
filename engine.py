@@ -136,7 +136,7 @@ from .compaction import CompactionMixin
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
 from .prefix_matching import PrefixMatchingMixin
-from .lifecycle_state import LifecycleStateStore
+from .lifecycle_state import LifecyclePublicationConflictError, LifecycleStateStore
 from .message_content import (
     normalize_content_value,
     stored_text_content_for_pattern_matching,
