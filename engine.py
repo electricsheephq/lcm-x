@@ -136,7 +136,7 @@ from .compaction import CompactionMixin
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
 from .prefix_matching import PrefixMatchingMixin
-from .lifecycle_state import LifecycleStateStore
+from .lifecycle_state import LifecyclePublicationConflictError, LifecycleStateStore
 from .message_content import (
     normalize_content_value,
     stored_text_content_for_pattern_matching,
@@ -1792,6 +1792,8 @@ class LCMEngine(
         focus_topic: Optional[str] = None,
         deadline: Optional[float] = None,
     ) -> tuple[List[Dict[str, Any]], int, str, int, int]:
+        if deadline is None:
+            deadline = self._compression_invocation_deadline()
         attempt_chunk = list(initial_chunk)
         max_attempts = 3
         attempt_number = 0
@@ -1821,11 +1823,14 @@ class LCMEngine(
                     circuit_breaker=self._summary_circuit_breaker,
                     spend_guard=self._summary_spend_guard,
                     timeout=timeout_seconds,
+                    deadline=deadline,
                     l2_budget_ratio=self._config.l2_budget_ratio,
                     l3_truncate_tokens=self._config.l3_truncate_tokens,
                     focus_topic=focus_topic or "",
                     custom_instructions=self._config.custom_instructions,
                 )
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("threshold full sweep time budget exhausted")
                 return attempt_chunk, source_tokens, summary_text, level, attempt_number
             except Exception as exc:
                 if attempt_number >= max_attempts or not self._is_retry_worthy_leaf_summary_error(exc):
@@ -1917,13 +1922,40 @@ class LCMEngine(
             timeout=timeout,
         )
 
+    def _validate_conversation_admission(
+        self,
+        session_id: str,
+        conversation_id: str | None,
+    ) -> None:
+        requested_conversation_id = str(conversation_id or "").strip()
+        if not requested_conversation_id or self._session_ignored or self._session_stateless:
+            return
+        dag_conn = self._dag.connection
+        if dag_conn is None:
+            return
+        ownership = self._lifecycle.audit_conversation_ownership(
+            dag_conn,
+            requested_conversation_id,
+            str(session_id or ""),
+        )
+        if not ownership.get("ok"):
+            raise LifecyclePublicationConflictError(
+                "LCM conversation ownership audit failed before session admission"
+            )
+
     def _bind_lifecycle_state(
         self,
         session_id: str,
         *,
         conversation_id: str | None = None,
+        preserve_frontier: bool = False,
     ) -> None:
-        state = self._lifecycle.bind_session(session_id, conversation_id=conversation_id)
+        self._validate_conversation_admission(session_id, conversation_id)
+        state = self._lifecycle.bind_session(
+            session_id,
+            conversation_id=conversation_id,
+            preserve_frontier=preserve_frontier,
+        )
         self._conversation_id = state.conversation_id
         self._lcm_session_last_conversation_id[session_id] = state.conversation_id
         self._last_compacted_store_id = state.current_frontier_store_id
@@ -2101,6 +2133,67 @@ class LCMEngine(
             db_path.parent / "state.db",
             description=f"state database fallback from LCM database {db_path}",
         )
+
+    def _host_proves_compression_successor(
+        self,
+        old_session_id: str,
+        new_session_id: str,
+        kwargs: Dict[str, Any] | None = None,
+    ) -> bool:
+        """Return true only for one unambiguous durable host chain.
+
+        LCM has no authority to invent a successor when a boundary callback is
+        stale.  Hermes' ``state.db`` is read-only here; a direct compression
+        child is accepted only when the parent is durably compression-ended and
+        every step to the requested child has exactly one canonical successor.
+        A missing, malformed, or branching host record fails closed.
+        """
+        old_session_id = str(old_session_id or "").strip()
+        new_session_id = str(new_session_id or "").strip()
+        if not old_session_id or not new_session_id or old_session_id == new_session_id:
+            return False
+        path = self._state_db_path(kwargs)
+        if not path.exists():
+            return False
+        try:
+            uri = path.resolve().as_uri() + "?mode=ro"
+            conn = sqlite3.connect(uri, uri=True)
+            try:
+                current = old_session_id
+                visited: set[str] = set()
+                for _ in range(100):
+                    if current == new_session_id:
+                        return True
+                    if not current or current in visited:
+                        return False
+                    visited.add(current)
+                    parent = conn.execute(
+                        "SELECT end_reason FROM sessions WHERE id = ? LIMIT 1",
+                        (current,),
+                    ).fetchone()
+                    if parent is None or str(parent[0] or "") != "compression":
+                        return False
+                    children = conn.execute(
+                        """
+                        SELECT child.id
+                        FROM sessions AS child
+                        WHERE child.parent_session_id = ?
+                          AND json_extract(COALESCE(child.model_config, '{}'), '$._branched_from') IS NULL
+                          AND json_extract(COALESCE(child.model_config, '{}'), '$._delegate_from') IS NULL
+                          AND COALESCE(child.source, '') != 'tool'
+                        ORDER BY child.started_at DESC, child.id DESC
+                        """,
+                        (current,),
+                    ).fetchall()
+                    if len(children) != 1:
+                        return False
+                    current = str(children[0][0] or "")
+            finally:
+                conn.close()
+        except (OSError, sqlite3.Error, ValueError):
+            logger.debug("LCM host compression successor probe failed", exc_info=True)
+            return False
+        return False
 
     def _clear_pending_reset_boundary(self) -> None:
         self._pending_reset_session_id = ""
@@ -2919,6 +3012,56 @@ class LCMEngine(
         requested_conversation_id = kwargs.get("conversation_id")
         session_state = self._lifecycle.get_by_session(old_session_id)
         conversation_state = self._lifecycle.get_by_conversation(old_session_id)
+        host_successor_proven = self._host_proves_compression_successor(
+            old_session_id,
+            session_id,
+            kwargs,
+        )
+        host_state_available = False
+        host_state_path = self._state_db_path(kwargs)
+        if host_state_path.exists():
+            try:
+                uri = host_state_path.resolve().as_uri() + "?mode=ro"
+                conn = sqlite3.connect(uri, uri=True)
+                try:
+                    columns = {
+                        str(row[1] or "")
+                        for row in conn.execute("PRAGMA table_info(sessions)")
+                    }
+                finally:
+                    conn.close()
+                # Older/minimal host fixtures do not expose the durable
+                # compression marker. They cannot contradict the LCM-only
+                # callback path, so leave legacy behavior intact there.
+                host_state_available = {"id", "parent_session_id", "end_reason"}.issubset(columns)
+            except (OSError, sqlite3.Error, ValueError):
+                host_state_available = False
+
+        # A duplicate callback after the new LCM state is committed is safe
+        # only when the committed lifecycle edge or the host's durable chain
+        # proves that this exact child is the successor.  Never rebind a live
+        # newer state from a stale host callback.
+        current_state = self._lifecycle.get_by_conversation(
+            str(requested_conversation_id or self._conversation_id or "")
+        )
+        if (
+            current_state is not None
+            and current_state.current_session_id == session_id
+            and not host_successor_proven
+        ):
+            if current_state.last_finalized_session_id != old_session_id:
+                logger.warning(
+                    "LCM refused stale compression rebind %s -> %s: current binding is not the callback edge",
+                    old_session_id,
+                    session_id,
+                )
+            return
+        if (
+            current_state is not None
+            and current_state.current_session_id == session_id
+            and host_successor_proven
+        ):
+            return
 
         def _state_conversation_matches(state: Any) -> bool:
             return bool(
@@ -2929,133 +3072,104 @@ class LCMEngine(
                 )
             )
 
-        def _has_summary_nodes(candidate_session_id: str | None) -> bool:
-            return bool(candidate_session_id and self._dag.get_session_nodes(candidate_session_id))
-
-        def _host_source_from_conversation_state(state: Any) -> tuple[str, Any]:
-            if not _state_conversation_matches(state):
-                return "", None
-            if state.current_session_id == old_session_id and _has_summary_nodes(old_session_id):
-                return old_session_id, state
-            if (
-                state.conversation_id == old_session_id
-                and state.current_session_id
-                and _has_summary_nodes(state.current_session_id)
-            ):
-                return state.current_session_id, state
-            if (
-                state.current_session_id is None
-                and state.last_finalized_session_id
-                and _has_summary_nodes(state.last_finalized_session_id)
-            ):
-                return state.last_finalized_session_id, state
-            return "", None
-
-        def _host_source_from_session_state(state: Any) -> tuple[str, Any]:
-            if not _state_conversation_matches(state):
-                return "", None
-            if state.current_session_id == old_session_id and _has_summary_nodes(old_session_id):
-                return old_session_id, state
-            if (
-                state.current_session_id is None
-                and state.last_finalized_session_id == old_session_id
-                and _has_summary_nodes(old_session_id)
-            ):
-                return old_session_id, state
-            return "", None
-
-        host_source_session_id, host_source_state = _host_source_from_conversation_state(
-            conversation_state
-        )
-        if not host_source_session_id:
-            host_source_session_id, host_source_state = _host_source_from_session_state(
-                session_state
+        def _host_chain_proves(source_session_id: str) -> bool:
+            return (
+                self._host_proves_compression_successor(
+                    old_session_id,
+                    source_session_id,
+                    kwargs,
+                )
+                and self._host_proves_compression_successor(
+                    source_session_id,
+                    session_id,
+                    kwargs,
+                )
             )
 
-        source_session_id = host_source_session_id or old_session_id
-        source_state = host_source_state or session_state
+        def _classify_state(state: Any) -> tuple[str, Any, str]:
+            if not _state_conversation_matches(state):
+                return "", None, "conversation mismatch"
+            current_session_id = str(state.current_session_id or "")
+            finalized_session_id = str(state.last_finalized_session_id or "")
+            if current_session_id == old_session_id:
+                if host_successor_proven or not host_state_available:
+                    return old_session_id, state, "current session matches proven callback source"
+                return "", None, "current source lacks host successor proof"
+            if current_session_id:
+                if _host_chain_proves(current_session_id):
+                    return current_session_id, state, "current session is on host chain"
+                return "", None, "current session is outside host chain"
+            if finalized_session_id:
+                if finalized_session_id == old_session_id:
+                    if host_successor_proven:
+                        return old_session_id, state, "finalized session matches callback source"
+                    return "", None, "finalized source lacks host proof"
+                if _host_chain_proves(finalized_session_id):
+                    return finalized_session_id, state, "finalized session is on host chain"
+                return "", None, "finalized session is outside host chain"
+            return "", None, "lifecycle row has no source session"
+
+        # Resolve exactly one durable source before copying metadata, rebinding
+        # lifecycle state, or moving DAG nodes.  The conversation-id alias is
+        # checked first because legacy hosts may use the old session id as the
+        # logical conversation key.  The old-session lookup comes next so a
+        # process-local auxiliary conversation cannot veto the host callback's
+        # source.  The requested logical row remains a fallback for a finalized
+        # source no longer returned by get_by_session(old).
+        selected_source_session_id = ""
+        selected_source_state = None
+        selection_reason = "no lifecycle source"
+        seen_state_keys: set[tuple[Any, ...]] = set()
+        for candidate_state in (conversation_state, session_state, current_state):
+            if candidate_state is None:
+                continue
+            state_key = (
+                candidate_state.conversation_id,
+                candidate_state.current_session_id,
+                candidate_state.last_finalized_session_id,
+                candidate_state.updated_at,
+            )
+            if state_key in seen_state_keys:
+                continue
+            seen_state_keys.add(state_key)
+            source_candidate, state_candidate, reason = _classify_state(candidate_state)
+            if reason == "conversation mismatch":
+                continue
+            if source_candidate:
+                selected_source_session_id = source_candidate
+                selected_source_state = state_candidate
+                selection_reason = reason
+                break
+            if (
+                reason != "lifecycle row has no source session"
+                and selection_reason == "no lifecycle source"
+            ):
+                selection_reason = reason
+
+        if not selected_source_session_id:
+            logger.warning(
+                "LCM refused compression rebind %s -> %s before mutation: %s",
+                old_session_id,
+                session_id,
+                selection_reason,
+            )
+            return
+
+        source_session_id = selected_source_session_id
+        source_state = selected_source_state
 
         if previous_session_id and previous_session_id != old_session_id:
-            # Hermes passes the session that actually crossed the compression
-            # boundary as old_session_id. A different bound session can be a
-            # short-lived subagent/cron/WebUI side channel that ran after the
-            # foreground compaction. Prefer the host-authoritative source when
-            # durable lifecycle + DAG evidence proves it belongs to LCM, then
-            # fall back to the older bound-session recovery path. When the host
-            # old_session_id is the durable conversation id, use that row's
-            # current/finalized LCM source instead of unrelated auxiliary rows
-            # where the id appears only as last_finalized_session_id.
-            if host_source_session_id:
-                logger.warning(
-                    "LCM compression boundary using host old_session_id %s as carry-over source=%s despite bound session drift=%s",
-                    old_session_id,
-                    host_source_session_id,
-                    previous_session_id,
-                )
-            else:
-                bound_state = self._lifecycle.get_by_session(previous_session_id)
-                bound_conversation_matches = bool(
-                    bound_state
-                    and (not self._conversation_id or bound_state.conversation_id == self._conversation_id)
-                    and (
-                        not requested_conversation_id
-                        or bound_state.conversation_id == requested_conversation_id
-                    )
-                )
-                bound_is_active_source = bool(
-                    bound_state and bound_state.current_session_id == previous_session_id
-                )
-                bound_is_finalized_source = bool(
-                    bound_state
-                    and bound_state.current_session_id is None
-                    and bound_state.last_finalized_session_id == previous_session_id
-                )
-                bound_has_summary_nodes = bool(self._dag.get_session_nodes(previous_session_id))
-                if (
-                    bound_conversation_matches
-                    and (bound_is_active_source or bound_is_finalized_source)
-                    and bound_has_summary_nodes
-                ):
-                    source_session_id = previous_session_id
-                    source_state = bound_state
-                    logger.warning(
-                        "LCM compression boundary using bound session %s as carry-over source; host old_session_id=%s does not match",
-                        previous_session_id,
-                        old_session_id,
-                    )
-                else:
-                    # Fallback: sibling chain with zero-DAG parent.
-                    # When stale old_session_id has no DAG nodes AND the
-                    # bound session belongs to a different conversation_id
-                    # but shares the same last_finalized_session_id
-                    # (parent) — prefer the bound session despite the
-                    # conversation_id mismatch. This handles the lifecycle
-                    # fork case where two sessions on the same channel
-                    # received different conversation_ids.
-                    bound_shares_parent_with_host = bool(
-                        bound_state
-                        and bound_state.last_finalized_session_id == old_session_id
-                    )
-                    host_has_no_dag = not bool(
-                        self._dag.get_session_nodes(old_session_id)
-                    )
-                    if (
-                        bound_shares_parent_with_host
-                        and host_has_no_dag
-                        and (bound_is_active_source or bound_is_finalized_source)
-                        and bound_has_summary_nodes
-                    ):
-                        source_session_id = previous_session_id
-                        source_state = bound_state
-                        logger.warning(
-                            "LCM compression boundary using bound session %s on sibling chain as carry-over source; host old_session_id=%s has zero DAG, parent=%s matches",
-                            previous_session_id,
-                            old_session_id,
-                            bound_state.last_finalized_session_id,
-                        )
-                    else:
-                        source_session_id = ""
-                        source_state = None
+            # Hermes may report the host boundary after a short-lived
+            # subagent/cron/WebUI side channel became the process binding. The
+            # selected source is already proven above; keep that identity while
+            # carrying the boundary forward.
+            logger.warning(
+                "LCM compression boundary using selected source=%s for host old_session_id=%s despite bound session drift=%s (%s)",
+                source_session_id,
+                old_session_id,
+                previous_session_id,
+                selection_reason,
+            )
 
         conversation_id = (
             (source_state.conversation_id if source_state else None)
@@ -3065,6 +3179,7 @@ class LCMEngine(
             or old_session_id
             or session_id
         )
+        self._validate_conversation_admission(session_id, conversation_id)
         process_local_frontier = (
             int(self._last_compacted_store_id or 0)
             if source_session_id and previous_session_id == source_session_id
@@ -3122,11 +3237,6 @@ class LCMEngine(
             )
 
         if can_reassign:
-            self._lifecycle.finalize_session(
-                conversation_id,
-                source_session_id,
-                frontier_store_id=frontier,
-            )
             self._copy_generated_ignore_hashes_to_session(
                 source_session_id,
                 session_id,
@@ -3152,7 +3262,13 @@ class LCMEngine(
             # raw rows here makes session-scoped transcript recovery report the
             # old/child session as missing even though its payload was only
             # reassigned to the next compression segment.
-            moved_nodes = self._dag.reassign_session_nodes(source_session_id, session_id)
+            moved_nodes = self._atomic_rollover_lcm_state(
+                conversation_id,
+                source_session_id,
+                session_id,
+                frontier_store_id=frontier,
+                record_reset=True,
+            )
             logger.debug(
                 "LCM compression boundary continued %s -> %s: carried %d DAG nodes; preserved raw message ownership",
                 source_session_id,
@@ -3172,6 +3288,7 @@ class LCMEngine(
             self._bind_lifecycle_state(
                 session_id,
                 conversation_id=kwargs.get("conversation_id"),
+                preserve_frontier=True,
             )
             self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
             self._schedule_ingest_cursor_reconciliation()
@@ -3211,6 +3328,7 @@ class LCMEngine(
         previous_session_id = self._session_id
         previous_conversation_id = self._conversation_id
         requested_conversation_id = str(kwargs.get("conversation_id") or session_id)
+        preserve_frontier = bool(kwargs.pop("_lcm_preserve_frontier", False))
         self._lcm_current_start_allows_bypass_lineage = False
         requested_platform = str(kwargs.get("platform") or self._session_platform or "")
         pre_reset_preserve_ambiguous_no_frame_old_session = False
@@ -3409,6 +3527,7 @@ class LCMEngine(
                 self._bind_lifecycle_state(
                     session_id,
                     conversation_id=kwargs.get("conversation_id"),
+                    preserve_frontier=preserve_frontier,
                 )
                 self._schedule_ingest_cursor_reconciliation()
                 self._log_session_filter_diagnostics()
@@ -3475,6 +3594,7 @@ class LCMEngine(
         self._bind_lifecycle_state(
             session_id,
             conversation_id=kwargs.get("conversation_id"),
+            preserve_frontier=preserve_frontier,
         )
         self._schedule_ingest_cursor_reconciliation()
         self._log_session_filter_diagnostics()
@@ -3984,7 +4104,62 @@ class LCMEngine(
                 new_session_id,
             )
             return 0
-        return self._dag.reassign_session_nodes(old_session_id, new_session_id)
+        conversation_id = str(self._conversation_id or old_session_id or new_session_id)
+        state = self._lifecycle.get_by_conversation(conversation_id)
+        frontier = max(
+            int(self._last_compacted_store_id or 0),
+            int(state.last_finalized_frontier_store_id if state else 0),
+        )
+        return self._atomic_rollover_lcm_state(
+            conversation_id,
+            old_session_id,
+            new_session_id,
+            frontier_store_id=frontier,
+        )
+
+    def _atomic_rollover_lcm_state(
+        self,
+        conversation_id: str,
+        old_session_id: str,
+        new_session_id: str,
+        *,
+        frontier_store_id: int = 0,
+        record_reset: bool = False,
+    ) -> int:
+        """Commit lifecycle rollover and retained-node reassignment together."""
+        if not old_session_id or not new_session_id or old_session_id == new_session_id:
+            return 0
+        conn = self._dag.connection
+        if conn is None:
+            raise RuntimeError("SummaryDAG connection is closed")
+        with self._dag._db_lock:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._lifecycle.stage_rollover(
+                    conn,
+                    conversation_id,
+                    old_session_id=old_session_id,
+                    new_session_id=new_session_id,
+                    finalized_frontier_store_id=frontier_store_id,
+                    record_reset=record_reset,
+                )
+                moved = SummaryDAG.stage_reassign_session_nodes(
+                    conn,
+                    old_session_id,
+                    new_session_id,
+                )
+                conn.commit()
+                return moved
+            except BaseException:
+                try:
+                    conn.rollback()
+                except Exception:
+                    logger.warning(
+                        "LCM rollover rollback failed for conversation=%s",
+                        conversation_id,
+                        exc_info=True,
+                    )
+                raise
 
     def rollover_session(
         self,
@@ -4045,7 +4220,10 @@ class LCMEngine(
                 bound_session_id,
             )
 
-        self.on_session_start(new_session_id, conversation_id=conversation_id, **kwargs)
+        start_kwargs = dict(kwargs)
+        if boundary_reason != "compression" and previous_messages:
+            start_kwargs["_lcm_preserve_frontier"] = True
+        self.on_session_start(new_session_id, conversation_id=conversation_id, **start_kwargs)
 
         if not carry_over_context:
             return 0
@@ -4459,6 +4637,17 @@ class LCMEngine(
             return
         try:
             self._ingest_cursor_needs_reconcile = self._store.get_session_count(self._session_id) > 0
+            if not self._ingest_cursor_needs_reconcile and self._conversation_id:
+                # A newly bound successor can be empty while its active
+                # context replays the finalized conversation's fresh tail.
+                # Mark it for reconciliation so _ingest_messages can prove
+                # that prefix from the logical conversation before appending
+                # genuinely new rows.
+                lifecycle = self._lifecycle.get_by_conversation(self._conversation_id)
+                self._ingest_cursor_needs_reconcile = bool(
+                    lifecycle is not None
+                    and lifecycle.last_finalized_frontier_store_id > 0
+                )
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
             self._ingest_cursor_needs_reconcile = False
@@ -5293,9 +5482,45 @@ class LCMEngine(
             "[Externalized payload: kind=raw_payload;"
         )
 
-    def _get_store_ids_for_messages(self, messages: List[Dict[str, Any]]) -> List[int]:
-        ids_by_message_id = self._get_store_id_map_for_messages(messages)
-        return [ids_by_message_id[id(msg)] for msg in messages if id(msg) in ids_by_message_id]
+    def _get_store_ids_for_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        mapped_ids_by_message_id: Optional[dict[int, int]] = None,
+    ) -> List[int]:
+        """Return durable ids without remapping a subset of one active pass.
+
+        Compaction may inspect a replayed scaffold and the remaining source
+        prefix separately.  Re-running the monotonic mapper for each subset
+        lets both occurrences claim the same durable row.  Callers that have
+        already mapped the complete active pass provide that map here; the
+        default keeps the existing standalone behavior.
+        """
+        ids_by_message_id = (
+            mapped_ids_by_message_id
+            if mapped_ids_by_message_id is not None
+            else self._get_store_id_map_for_messages(messages)
+        )
+        folded_lineage = self._load_folded_tail_lineage(messages)
+        folded_message_id = None
+        folded_source_ids: list[int] = []
+        if folded_lineage is not None:
+            folded_message, source_rows = folded_lineage
+            folded_message_id = id(folded_message)
+            folded_source_ids = [
+                int(row["store_id"])
+                for row in source_rows
+                if int(row.get("store_id") or 0) > 0
+            ]
+        store_ids: list[int] = []
+        for msg in messages:
+            if folded_message_id is not None and id(msg) == folded_message_id:
+                store_ids.extend(folded_source_ids)
+                continue
+            mapped_store_id = ids_by_message_id.get(id(msg))
+            if mapped_store_id is not None:
+                store_ids.append(int(mapped_store_id))
+        return store_ids
 
     # -- Internal: summarization -------------------------------------------
 
@@ -6043,6 +6268,8 @@ class LCMEngine(
         deadline: Optional[float] = None,
     ) -> tuple[int, int, int]:
         """Persist one same-depth condensation and return source/output tokens and level."""
+        if deadline is None:
+            deadline = self._compression_invocation_deadline()
         if not nodes:
             raise ValueError("condensation requires at least one summary node")
         depth = nodes[0].depth
@@ -6068,11 +6295,14 @@ class LCMEngine(
             circuit_breaker=self._summary_circuit_breaker,
             spend_guard=self._summary_spend_guard,
             timeout=timeout_seconds,
+            deadline=deadline,
             l2_budget_ratio=self._config.l2_budget_ratio,
             l3_truncate_tokens=self._config.l3_truncate_tokens,
             focus_topic=focus_topic or "",
             custom_instructions=self._config.custom_instructions,
         )
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("threshold full sweep time budget exhausted")
         earliest_at, latest_at = self._dag.get_source_time_window(
             [node.node_id for node in nodes]
         )
@@ -6090,7 +6320,8 @@ class LCMEngine(
             latest_at=latest_at,
             expand_hint=self._extract_expand_hint(summary_text),
         )
-        self._dag.add_node(condensed_node)
+        with self._compression_publication_admission():
+            self._dag.add_node(condensed_node)
         self._invalidate_rollups_for_published_node(condensed_node)
         return source_tokens, summary_tokens, level
 
@@ -6635,8 +6866,9 @@ class LCMEngine(
                 result.append(proactive_msg)
 
         folded_source_store_id = 0
-        folded_result_index: Optional[int] = None
+        folded_source_store_ids: list[int] = []
         folded_original_tail: Optional[Dict[str, Any]] = None
+        folded_active_tail: Optional[Dict[str, Any]] = None
         if retained_generated_context_parts:
             generated_context = "\n\n---\n\n".join(
                 retained_generated_context_parts
@@ -6645,20 +6877,51 @@ class LCMEngine(
                 tail_selected
                 and tail_selected[0].get("role") == summary_role
             ):
-                source_ids = self._get_store_id_map_for_messages(tail_selected)
-                folded_source_store_id = int(
-                    source_ids.get(id(tail_selected[0])) or 0
-                )
-                if folded_source_store_id > 0:
-                    folded_original_tail = tail_selected[0]
-                    folded_result_index = len(result)
-                    tail_selected = [
-                        self._prepend_generated_context_to_message(
-                            folded_original_tail,
-                            generated_context,
-                        ),
-                        *tail_selected[1:],
+                prior_folded_lineage = self._load_folded_tail_lineage(tail_selected)
+                if prior_folded_lineage is not None:
+                    _prior_folded_message, prior_source_rows = prior_folded_lineage
+                    folded_source_store_ids = [
+                        int(row.get("store_id") or 0)
+                        for row in prior_source_rows
                     ]
+                    folded_source_store_id = int(folded_source_store_ids[0] or 0)
+                    source_ids = {
+                        id(tail_selected[0]): folded_source_store_id,
+                    }
+                else:
+                    source_ids = self._get_store_id_map_for_messages(tail_selected)
+                    folded_source_store_id = int(
+                        source_ids.get(id(tail_selected[0])) or 0
+                    )
+                if folded_source_store_id > 0:
+                    if summary_role == "assistant" and prior_folded_lineage is None:
+                        # Final active-context cleanup merges adjacent plain
+                        # assistant turns. Capture that complete leading run
+                        # before cleanup so publication can retain every raw
+                        # occurrence represented by the one merged message.
+                        for candidate in tail_selected:
+                            if (
+                                candidate.get("role") != "assistant"
+                                or not isinstance(candidate.get("content"), str)
+                                or candidate.get("codex_reasoning_items")
+                                or candidate.get("codex_message_items")
+                                or candidate.get("finish_reason") == "incomplete"
+                            ):
+                                break
+                            candidate_store_id = int(
+                                source_ids.get(id(candidate)) or 0
+                            )
+                            if candidate_store_id <= 0:
+                                break
+                            folded_source_store_ids.append(candidate_store_id)
+                    if not folded_source_store_ids:
+                        folded_source_store_ids = [folded_source_store_id]
+                    folded_original_tail = tail_selected[0]
+                    folded_active_tail = self._prepend_generated_context_to_message(
+                        folded_original_tail,
+                        generated_context,
+                    )
+                    tail_selected = [folded_active_tail, *tail_selected[1:]]
                 else:
                     logger.warning(
                         "LCM omitted generated context because the same-role "
@@ -6672,10 +6935,163 @@ class LCMEngine(
         # Fresh tail
         result.extend(tail_selected)
 
+        # Preserve the complete durable range for any leading assistant run
+        # that active-context cleanup will merge. The merged provider message
+        # has no one-to-one replay identity, so its lineage must be recorded
+        # before cleanup creates the new dict object.
+        folded_lineage_candidates: list[tuple[str, list[int]]] = []
+        candidate_index = 0
+        while candidate_index < len(result):
+            candidate = result[candidate_index]
+            if (
+                candidate.get("role") != "assistant"
+                or not isinstance(candidate.get("content"), str)
+                or candidate.get("codex_reasoning_items")
+                or candidate.get("codex_message_items")
+                or candidate.get("finish_reason") == "incomplete"
+            ):
+                candidate_index += 1
+                continue
+            run = [candidate]
+            run_index = candidate_index + 1
+            while run_index < len(result):
+                next_message = result[run_index]
+                if (
+                    next_message.get("role") != "assistant"
+                    or not isinstance(next_message.get("content"), str)
+                    or next_message.get("codex_reasoning_items")
+                    or next_message.get("codex_message_items")
+                    or next_message.get("finish_reason") == "incomplete"
+                ):
+                    break
+                run.append(next_message)
+                run_index += 1
+            if len(run) > 1:
+                source_ids: list[int] = []
+                hinted_tail_message_ids: set[int] = set()
+                if (
+                    folded_original_tail is not None
+                    and run[0] is tail_selected[0]
+                    and folded_source_store_ids
+                ):
+                    source_ids.extend(folded_source_store_ids)
+                    hinted_tail_message_ids = {
+                        id(message)
+                        for message in tail_selected[: len(folded_source_store_ids)]
+                    }
+                for run_message in run:
+                    if id(run_message) in hinted_tail_message_ids:
+                        continue
+                    mapped_ids = self._get_store_ids_for_messages([run_message])
+                    if not mapped_ids:
+                        source_ids = []
+                        break
+                    source_ids.extend(mapped_ids)
+                if source_ids and len(source_ids) == len(set(source_ids)):
+                    folded_lineage_candidates.append(
+                        ("\n".join(message["content"].strip() for message in run), source_ids)
+                    )
+            candidate_index = max(run_index, candidate_index + 1)
+
         # ── Active-context cleanup / tool-pair guardrail ──
         # Drop assistant turns that carry only blank/internal structured content,
-        # then ensure provider-valid tool-call/result sequencing.
-        result = self._sanitize_active_context_messages(result)
+        # then ensure provider-valid tool-call/result sequencing. Capture the
+        # post-tool-cleanup assistant runs before the final merge: an orphan or
+        # late tool row is intentionally excluded, but the assistant rows on
+        # either side still need their exact durable source ids.
+        cleanup_ready = self._sanitize_active_context_messages(
+            result,
+            merge_adjacent_assistants=False,
+        )
+        cleanup_source_ids = self._get_store_id_map_for_messages(cleanup_ready)
+        folded_restore_messages: list[Dict[str, Any]] = []
+        if folded_active_tail is not None and folded_source_store_ids:
+            # The generated fold has no raw replay identity, so the cleanup
+            # mapper cannot find it after an orphan tool row is removed.  The
+            # fold's source row was proven before adding generated context;
+            # carry that exact occurrence into the post-cleanup run.  This
+            # keeps the later assistant occurrence distinct and lets the
+            # final merged message receive complete lineage.
+            folded_cleanup = self._sanitize_active_preserved_objective_message(
+                folded_active_tail
+            )
+            if folded_cleanup is not None:
+                folded_cleanup = _clean_active_assistant_message(folded_cleanup)
+            if folded_cleanup is not None:
+                folded_cleanup_identity = self._message_replay_identity(folded_cleanup)
+                folded_cleanup_matches = [
+                    message
+                    for message in cleanup_ready
+                    if self._message_replay_identity(message) == folded_cleanup_identity
+                ]
+                if len(folded_cleanup_matches) == 1:
+                    cleanup_source_ids[id(folded_cleanup_matches[0])] = int(
+                        folded_source_store_ids[0]
+                    )
+                    folded_index = cleanup_ready.index(folded_cleanup_matches[0])
+                    folded_run = [folded_cleanup_matches[0]]
+                    folded_run_index = folded_index + 1
+                    while folded_run_index < len(cleanup_ready):
+                        next_message = cleanup_ready[folded_run_index]
+                        if (
+                            next_message.get("role") != "assistant"
+                            or not isinstance(next_message.get("content"), str)
+                            or next_message.get("codex_reasoning_items")
+                            or next_message.get("codex_message_items")
+                            or next_message.get("finish_reason") == "incomplete"
+                        ):
+                            break
+                        folded_run.append(next_message)
+                        folded_run_index += 1
+                    # If lineage persistence fails after this run is merged,
+                    # restore the original provider-visible occurrences so
+                    # later compaction can still map every durable source row.
+                    folded_restore_messages = [
+                        folded_original_tail,
+                        *folded_run[1:],
+                    ]
+        post_cleanup_lineage_candidates: list[tuple[str, list[int]]] = []
+        cleanup_index = 0
+        while cleanup_index < len(cleanup_ready):
+            candidate = cleanup_ready[cleanup_index]
+            if (
+                candidate.get("role") != "assistant"
+                or not isinstance(candidate.get("content"), str)
+                or candidate.get("codex_reasoning_items")
+                or candidate.get("codex_message_items")
+                or candidate.get("finish_reason") == "incomplete"
+            ):
+                cleanup_index += 1
+                continue
+            run = [candidate]
+            run_index = cleanup_index + 1
+            while run_index < len(cleanup_ready):
+                next_message = cleanup_ready[run_index]
+                if (
+                    next_message.get("role") != "assistant"
+                    or not isinstance(next_message.get("content"), str)
+                    or next_message.get("codex_reasoning_items")
+                    or next_message.get("codex_message_items")
+                    or next_message.get("finish_reason") == "incomplete"
+                ):
+                    break
+                run.append(next_message)
+                run_index += 1
+            if len(run) > 1:
+                source_ids = [
+                    int(cleanup_source_ids.get(id(message)) or 0)
+                    for message in run
+                ]
+                if any(source_id <= 0 for source_id in source_ids):
+                    logger.warning(
+                        "LCM omitted folded lineage for a cleaned assistant run with unmapped source rows"
+                    )
+                elif len(source_ids) == len(set(source_ids)):
+                    post_cleanup_lineage_candidates.append(
+                        ("\n".join(message["content"].strip() for message in run), source_ids)
+                    )
+            cleanup_index = max(run_index, cleanup_index + 1)
+        result = _merge_adjacent_assistant_messages(cleanup_ready)
         if leading_msg is None:
             while result and result[0].get("role") in {"assistant", "tool"}:
                 result = result[1:]
@@ -6701,19 +7117,70 @@ class LCMEngine(
             result = self._sanitize_active_context_messages(trimmed_result)
 
         existing_folded_lineage = self._load_folded_tail_lineage(result)
+        lineage_written = False
+        folded_lineage_message: Optional[Dict[str, Any]] = None
+        # The first fresh-tail message may carry tool calls, so it cannot be
+        # represented by the adjacent plain-assistant-run candidate below.
+        # Preserve its exact durable occurrence directly after cleanup.  If
+        # cleanup merged or otherwise changed the message, the post-cleanup
+        # candidate path remains responsible for the resulting run.
+        if folded_active_tail is not None and folded_source_store_ids:
+            folded_identity = self._message_replay_identity(folded_active_tail)
+            direct_matches = [
+                message
+                for message in result
+                if self._message_replay_identity(message) == folded_identity
+            ]
+            if len(direct_matches) == 1:
+                folded_lineage_message = direct_matches[0]
+                lineage_written = self._write_folded_tail_lineage(
+                    direct_matches[0],
+                    folded_source_store_ids,
+                )
+        lineage_candidates = []
+        for candidate in (*folded_lineage_candidates, *post_cleanup_lineage_candidates):
+            if candidate not in lineage_candidates:
+                lineage_candidates.append(candidate)
+        if not lineage_written:
+            matching_lineage_candidates = []
+            for expected_content, source_ids in lineage_candidates:
+                matches = [
+                    message
+                    for message in result
+                    if (
+                        message.get("role") == "assistant"
+                        and message.get("content") == expected_content
+                    )
+                ]
+                if len(matches) == 1:
+                    matching_lineage_candidates.append((source_ids, matches[0]))
+            if len(matching_lineage_candidates) == 1:
+                source_ids, folded_message = matching_lineage_candidates[0]
+                lineage_written = self._write_folded_tail_lineage(
+                    folded_message,
+                    source_ids,
+                )
+                folded_lineage_message = folded_message
         if (
-            folded_result_index is not None
+            not lineage_written
+            and existing_folded_lineage is None
+            and folded_lineage_message is not None
             and folded_original_tail is not None
-            and folded_result_index < len(result)
         ):
-            if not self._write_folded_tail_lineage(
-                result[folded_result_index],
-                folded_source_store_id,
-            ):
-                result[folded_result_index] = folded_original_tail
-                result = self._sanitize_active_context_messages(result)
-                self._clear_folded_tail_lineage()
-        elif existing_folded_lineage is None:
+            # Generated context is usable only when its exact source mapping
+            # was durably recorded.  Restore the original provider-visible
+            # tail on a write failure so an unproven summary cannot survive
+            # as active context.
+            restored_result: list[Dict[str, Any]] = []
+            for message in result:
+                if message is not folded_lineage_message:
+                    restored_result.append(message)
+                    continue
+                restored_result.extend(
+                    folded_restore_messages or [folded_original_tail]
+                )
+            result = restored_result
+        if not lineage_written and existing_folded_lineage is None:
             self._clear_folded_tail_lineage()
 
         # Persist proof only for the exact provider-visible compacted snapshot

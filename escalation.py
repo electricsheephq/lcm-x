@@ -455,6 +455,7 @@ def _invoke_summary_llm_chain(
     model: str = "",
     fallback_models: list[str] | tuple[str, ...] | None = None,
     timeout: float | None = None,
+    deadline: float | None = None,
     reasoning_effort: str = "",
     circuit_breaker: SummaryCircuitBreaker | None = None,
     spend_guard: "SummarySpendGuard | None" = None,
@@ -463,6 +464,16 @@ def _invoke_summary_llm_chain(
     chain = _summary_model_chain(model, fallback_models)
     skipped = 0
     for candidate_model in chain:
+        route_timeout = timeout
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            route_timeout = (
+                min(timeout, remaining)
+                if timeout is not None
+                else remaining
+            )
         if circuit_breaker is not None and not circuit_breaker.allows(candidate_model):
             skipped += 1
             logger.warning(
@@ -483,7 +494,7 @@ def _invoke_summary_llm_chain(
                 prompt,
                 max_tokens,
                 model=candidate_model,
-                timeout=timeout,
+                timeout=route_timeout,
                 reasoning_effort=reasoning_effort,
             )
         except Exception as exc:
@@ -651,6 +662,7 @@ def summarize_with_escalation(
     depth: int = 0,
     model: str = "",
     timeout: float | None = None,
+    deadline: float | None = None,
     reasoning_effort: str = "",
     l2_budget_ratio: float = 0.50,
     l3_truncate_tokens: int = 512,
@@ -675,6 +687,7 @@ def summarize_with_escalation(
         model=model,
         fallback_models=fallback_models,
         timeout=timeout,
+        deadline=deadline,
         reasoning_effort=reasoning_effort,
         circuit_breaker=circuit_breaker,
         spend_guard=spend_guard,
@@ -696,6 +709,7 @@ def summarize_with_escalation(
         model=model,
         fallback_models=fallback_models,
         timeout=timeout,
+        deadline=deadline,
         reasoning_effort=reasoning_effort,
         circuit_breaker=circuit_breaker,
         spend_guard=spend_guard,

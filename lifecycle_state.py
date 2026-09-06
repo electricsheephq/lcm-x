@@ -11,6 +11,7 @@ This is the smallest viable substrate for cross-turn/session lifecycle state:
 from __future__ import annotations
 
 import functools
+import json
 import sqlite3
 import threading
 import time
@@ -167,6 +168,7 @@ class LifecycleStateStore:
         session_id: str,
         *,
         conversation_id: str | None = None,
+        preserve_frontier: bool = True,
     ) -> LifecycleState:
         existing = self.get_by_conversation(conversation_id) if conversation_id else self.get_by_session(session_id)
         conversation_id = conversation_id or (existing.conversation_id if existing else session_id)
@@ -186,8 +188,27 @@ class LifecycleStateStore:
         if existing is not None:
             if existing.current_session_id == session_id:
                 return existing
+            # A gateway restart can re-admit the exact session that was last
+            # finalized after the active binding was cleared.  That session
+            # already owns the persisted finalized checkpoint, so restoring
+            # it is safe and monotonic.  A different session must start at
+            # zero until a proven rollover edge advances it.
+            # A logical conversation never rewinds its committed frontier when
+            # it is rebound to a new session.  The finalized marker proves the
+            # older range even for an ordinary (non-compression) rollover, so
+            # the next publication can admit the retained fresh tail without
+            # replaying already-covered rows.
+            same_finalized_session = (
+                existing.current_session_id is None
+                and existing.last_finalized_session_id == session_id
+            )
             current_frontier = (
-                existing.current_frontier_store_id if existing.current_session_id == session_id else 0
+                max(
+                    existing.current_frontier_store_id,
+                    existing.last_finalized_frontier_store_id,
+                )
+                if preserve_frontier or same_finalized_session
+                else 0
             )
             current_bound_at = (
                 existing.current_bound_at if existing.current_session_id == session_id else now
@@ -358,7 +379,7 @@ class LifecycleStateStore:
                 current_bound_at = excluded.current_bound_at,
                 last_finalized_at = excluded.last_finalized_at,
                 last_rollover_at = excluded.last_rollover_at,
-                last_reset_at = excluded.last_reset_at,
+                last_reset_at = lcm_lifecycle_state.last_reset_at,
                 updated_at = excluded.updated_at
             """,
             (
@@ -377,6 +398,99 @@ class LifecycleStateStore:
         updated = self.get_by_conversation(conversation_id)
         assert updated is not None
         return updated
+
+    def stage_rollover(
+        self,
+        conn: sqlite3.Connection,
+        conversation_id: str,
+        *,
+        old_session_id: str,
+        new_session_id: str,
+        finalized_frontier_store_id: int = 0,
+        record_reset: bool = False,
+    ) -> None:
+        """Stage finalization and rebinding on a caller-owned SQLite transaction.
+
+        The DAG connection owns the transaction when rollover also reassigns
+        retained nodes.  This method deliberately performs no commit, allowing
+        lifecycle state and node ownership to roll back together on any fault.
+        """
+        row = conn.execute(
+            """
+            SELECT current_session_id, last_finalized_session_id,
+                   last_finalized_frontier_store_id, last_reset_at
+            FROM lcm_lifecycle_state
+            WHERE conversation_id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()
+        if row is not None and str(row[0] or "") == new_session_id and str(row[1] or "") == old_session_id:
+            return
+
+        if row is not None:
+            current_session_id = str(row[0] or "")
+            last_finalized_session_id = str(row[1] or "")
+            # A rollover callback may be replayed after a gateway restart, but
+            # it must never replace a newer active binding.  The only safe
+            # states are the expected old session or its already-finalized
+            # form; an absent row remains insertable below.
+            if not (
+                current_session_id == old_session_id
+                or (
+                    not current_session_id
+                    and last_finalized_session_id == old_session_id
+                )
+            ):
+                raise LifecyclePublicationConflictError(
+                    "Lifecycle rollover binding changed before staging "
+                    f"(expected current={old_session_id!r}, "
+                    f"actual current={current_session_id!r}, "
+                    f"finalized={last_finalized_session_id!r})"
+                )
+
+        last_finalized_frontier = max(
+            int(finalized_frontier_store_id or 0),
+            int(row[2] or 0) if row is not None else 0,
+        )
+        now = time.time()
+        last_reset_at = now if record_reset else (row[3] if row is not None else None)
+        conn.execute(
+            """
+            INSERT INTO lcm_lifecycle_state(
+                conversation_id,
+                current_session_id,
+                last_finalized_session_id,
+                current_frontier_store_id,
+                last_finalized_frontier_store_id,
+                current_bound_at,
+                last_finalized_at,
+                last_rollover_at,
+                last_reset_at,
+                updated_at
+            ) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(conversation_id) DO UPDATE SET
+                current_session_id = excluded.current_session_id,
+                last_finalized_session_id = excluded.last_finalized_session_id,
+                current_frontier_store_id = 0,
+                last_finalized_frontier_store_id = excluded.last_finalized_frontier_store_id,
+                current_bound_at = excluded.current_bound_at,
+                last_finalized_at = excluded.last_finalized_at,
+                last_rollover_at = excluded.last_rollover_at,
+                last_reset_at = excluded.last_reset_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                conversation_id,
+                new_session_id,
+                old_session_id,
+                last_finalized_frontier,
+                now,
+                now,
+                now,
+                last_reset_at,
+                now,
+            ),
+        )
 
     def get_fragmentation_stats(self, state_db_path: str | Path | None = None) -> dict[str, Any]:
         """Return read-only lifecycle/session fragmentation diagnostics.
@@ -930,6 +1044,218 @@ class LifecycleStateStore:
             "Lifecycle session binding changed during summary publication"
         )
 
+    @staticmethod
+    def _conversation_owner_session_ids(
+        conn: sqlite3.Connection,
+        conversation_id: str,
+        session_id: str,
+    ) -> set[str]:
+        """Resolve proven producing sessions for one logical conversation.
+
+        The lifecycle binding contributes the current and last-finalized
+        sessions. Explicit conversation ids on durable message rows extend
+        that set for older producing sessions; blank legacy conversation ids
+        are admitted only for the already-proven lifecycle sessions.
+        """
+        owner_sessions = {str(session_id or "")}
+        state = conn.execute(
+            """
+            SELECT current_session_id, last_finalized_session_id
+            FROM lcm_lifecycle_state
+            WHERE conversation_id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()
+        if state is not None:
+            owner_sessions.update(
+                str(value or "")
+                for value in (state[0], state[1])
+                if value
+            )
+        rows = conn.execute(
+            """
+            SELECT DISTINCT session_id
+            FROM messages
+            WHERE conversation_id = ? AND session_id IS NOT NULL AND session_id != ''
+            """,
+            (conversation_id,),
+        ).fetchall()
+        owner_sessions.update(str(row[0]) for row in rows if row[0])
+        owner_sessions.discard("")
+        return owner_sessions
+
+    @staticmethod
+    def audit_conversation_ownership(
+        conn: sqlite3.Connection,
+        conversation_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Audit message ownership before a conversation is admitted.
+
+        Durable rows with an explicit conversation id are authoritative.  A
+        blank legacy id is admissible only when its producing session is the
+        current or last-finalized lifecycle binding for this conversation.
+        This read-only audit deliberately does not inspect ``summary_nodes``;
+        publication validates only the bounded owner-session scope below.
+        """
+        conversation_id = str(conversation_id or "").strip()
+        session_id = str(session_id or "").strip()
+        if not conversation_id:
+            return {"ok": bool(session_id), "reason": "missing conversation id"}
+
+        target_state = conn.execute(
+            """
+            SELECT conversation_id, current_session_id, last_finalized_session_id,
+                   current_frontier_store_id, last_finalized_frontier_store_id,
+                   debt_kind, debt_size_estimate
+            FROM lcm_lifecycle_state
+            WHERE conversation_id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()
+        explicit_rows = conn.execute(
+            """
+            SELECT DISTINCT session_id
+            FROM messages
+            WHERE conversation_id = ?
+            """,
+            (conversation_id,),
+        ).fetchall()
+        explicit_sessions = {
+            str(row[0] or "").strip() for row in explicit_rows if str(row[0] or "").strip()
+        }
+        referenced_sessions = set(explicit_sessions)
+        if target_state is not None:
+            referenced_sessions.update(
+                str(value or "").strip()
+                for value in (target_state[1], target_state[2])
+                if str(value or "").strip()
+            )
+        if session_id:
+            referenced_sessions.add(session_id)
+        if referenced_sessions:
+            placeholders = ",".join("?" for _ in referenced_sessions)
+            lifecycle_rows = conn.execute(
+                f"""
+                SELECT conversation_id, current_session_id, last_finalized_session_id,
+                       current_frontier_store_id, last_finalized_frontier_store_id,
+                       debt_kind, debt_size_estimate
+                FROM lcm_lifecycle_state
+                WHERE conversation_id = ?
+                   OR current_session_id IN ({placeholders})
+                   OR last_finalized_session_id IN ({placeholders})
+                """,
+                (
+                    conversation_id,
+                    *sorted(referenced_sessions),
+                    *sorted(referenced_sessions),
+                ),
+            ).fetchall()
+        else:
+            lifecycle_rows = conn.execute(
+                """
+                SELECT conversation_id, current_session_id, last_finalized_session_id,
+                       current_frontier_store_id, last_finalized_frontier_store_id,
+                       debt_kind, debt_size_estimate
+                FROM lcm_lifecycle_state
+                WHERE conversation_id = ?
+                """,
+                (conversation_id,),
+            ).fetchall()
+
+        def has_ownership_evidence(row: sqlite3.Row | tuple[Any, ...]) -> bool:
+            row_conversation = str(row[0] or "").strip()
+            if row_conversation == conversation_id:
+                return True
+            if (
+                int(row[3] or 0) > 0
+                or int(row[4] or 0) > 0
+                or str(row[5] or "").strip()
+                or int(row[6] or 0) > 0
+            ):
+                return True
+            if conn.execute(
+                "SELECT 1 FROM messages WHERE conversation_id = ? LIMIT 1",
+                (row_conversation,),
+            ).fetchone():
+                return True
+            current_session = str(row[1] or "").strip()
+            if not current_session:
+                # A row with no current binding cannot prove that its shared
+                # last-finalized reference is an empty alias.
+                return True
+            if conn.execute(
+                "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1",
+                (current_session,),
+            ).fetchone():
+                return True
+            if conn.execute(
+                "SELECT 1 FROM summary_nodes WHERE session_id = ? LIMIT 1",
+                (current_session,),
+            ).fetchone():
+                return True
+            return False
+
+        by_session: dict[str, set[str]] = {}
+        non_owning_aliases: list[str] = []
+        for row in lifecycle_rows:
+            if not has_ownership_evidence(row):
+                non_owning_aliases.append(str(row[0] or "").strip())
+                continue
+            row_conversation = str(row[0] or "").strip()
+            for value in (row[1], row[2]):
+                value = str(value or "").strip()
+                if value:
+                    by_session.setdefault(value, set()).add(row_conversation)
+
+        state = target_state
+        proven_sessions: set[str] = set()
+        if state is not None:
+            proven_sessions = {
+                str(value or "").strip()
+                for value in (state[1], state[2])
+                if str(value or "").strip()
+            }
+        candidate_sessions = set(proven_sessions) | explicit_sessions
+        if session_id:
+            candidate_sessions.add(session_id)
+        orphan_legacy_sessions: list[str] = []
+        if candidate_sessions:
+            placeholders = ",".join("?" for _ in candidate_sessions)
+            legacy_rows = conn.execute(
+                f"""
+                SELECT DISTINCT session_id
+                FROM messages
+                WHERE (conversation_id IS NULL OR conversation_id = '')
+                  AND session_id IN ({placeholders})
+                """,
+                tuple(sorted(candidate_sessions)),
+            ).fetchall()
+            orphan_legacy_sessions = sorted(
+                {
+                    str(row[0] or "").strip()
+                    for row in legacy_rows
+                    if str(row[0] or "").strip()
+                    and str(row[0] or "").strip() not in proven_sessions
+                    and str(row[0] or "").strip() not in explicit_sessions
+                }
+            )
+        ambiguous_sessions = sorted(
+            session for session, conversations in by_session.items() if len(conversations) > 1
+        )
+        ok = not ambiguous_sessions and not orphan_legacy_sessions
+        return {
+            "ok": ok,
+            "conversation_id": conversation_id,
+            "session_id": session_id,
+            "proven_sessions": sorted(proven_sessions),
+            "explicit_sessions": sorted(explicit_sessions),
+            "ambiguous_sessions": ambiguous_sessions,
+            "orphan_legacy_sessions": orphan_legacy_sessions,
+            "non_owning_aliases": sorted(non_owning_aliases),
+            "reason": "" if ok else "ambiguous or orphan legacy message ownership",
+        }
+
     def stage_compaction_publication(
         self,
         conn: sqlite3.Connection,
@@ -946,6 +1272,15 @@ class LifecycleStateStore:
         The caller owns the node/frontier transaction. The expected frontier is
         its optimistic publication generation.
         """
+        ownership = self.audit_conversation_ownership(
+            conn,
+            conversation_id,
+            session_id,
+        )
+        if not ownership.get("ok"):
+            raise LifecyclePublicationConflictError(
+                "Compaction publication source ownership is ambiguous"
+            )
         expected_frontier = max(0, int(expected_frontier_store_id or 0))
         all_covered_ids = sorted(
             {int(store_id) for store_id in covered_store_ids if int(store_id) > 0}
@@ -972,30 +1307,43 @@ class LifecycleStateStore:
                 "Compaction publication coverage overlaps an explicit exclusion"
             )
         exclusion_proofs = filter_exclusion_proofs or {}
+        owner_session_ids = self._conversation_owner_session_ids(
+            conn,
+            conversation_id,
+            session_id,
+        )
         snapshot_ids = sorted(
             set(all_covered_ids + excluded_ids + list(exclusion_proofs))
         )
         snapshot_rows = conn.execute(
             """
-            SELECT m.store_id, m.conversation_id, m.content
+            SELECT m.store_id, m.session_id, m.conversation_id, m.content
             FROM json_each(?) AS source
             CROSS JOIN messages AS m
-            WHERE m.store_id = source.value AND m.session_id = ?
+            WHERE m.store_id = source.value
             ORDER BY m.store_id
             """,
-            (str(snapshot_ids), session_id),
+            (str(snapshot_ids),),
         ).fetchall()
         if [int(row[0]) for row in snapshot_rows] != snapshot_ids:
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )
-        if any(str(row[1] or "").strip() not in {"", conversation_id} for row in snapshot_rows):
+
+        def belongs_to_conversation(row: sqlite3.Row | tuple[Any, ...]) -> bool:
+            row_session_id = str(row[1] or "")
+            row_conversation_id = str(row[2] or "").strip()
+            return row_conversation_id == conversation_id or (
+                not row_conversation_id and row_session_id in owner_session_ids
+            )
+
+        if any(not belongs_to_conversation(row) for row in snapshot_rows):
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )
         snapshot_by_id = {int(row[0]): row for row in snapshot_rows}
         if any(
-            snapshot_by_id[store_id][2] != proof
+            snapshot_by_id[store_id][3] != proof
             for store_id, proof in exclusion_proofs.items()
         ):
             raise LifecyclePublicationConflictError(
@@ -1003,14 +1351,27 @@ class LifecycleStateStore:
             )
         rows = conn.execute(
             """
-            SELECT store_id, conversation_id, content
+            SELECT store_id, session_id, conversation_id, content
             FROM messages
-            WHERE session_id = ? AND store_id > ? AND store_id <= ?
+            WHERE store_id > ? AND store_id <= ?
             ORDER BY store_id
             """,
-            (session_id, expected_frontier, covered_end),
+            (
+                expected_frontier,
+                covered_end,
+            ),
         ).fetchall()
-        authoritative_ids = [int(row[0]) for row in rows]
+        if any(
+            str(row[1] or "") in owner_session_ids
+            and str(row[2] or "").strip() not in {"", conversation_id}
+            for row in rows
+        ):
+            raise LifecyclePublicationConflictError(
+                "Compaction publication source ownership changed"
+            )
+        authoritative_ids = [
+            int(row[0]) for row in rows if belongs_to_conversation(row)
+        ]
         proven_ids = sorted(covered_ids + excluded_ids)
         if authoritative_ids != proven_ids:
             raise LifecyclePublicationConflictError(
@@ -1019,20 +1380,23 @@ class LifecycleStateStore:
                 f"authoritative={authoritative_ids}, covered={covered_ids}, "
                 f"excluded={excluded_ids})"
             )
-        if conn.execute(
-            """
-            SELECT 1
-            FROM summary_nodes AS node, json_each(node.source_ids) AS source
-            WHERE node.session_id = ? AND node.source_type = 'messages'
-              AND node.node_id != ?
-              AND source.value IN (SELECT value FROM json_each(?))
-            LIMIT 1
-            """,
-            (session_id, publication_node_id, str(all_covered_ids)),
-        ).fetchone():
-            raise LifecyclePublicationConflictError(
-                "Compaction publication source lineage is already claimed"
-            )
+        if owner_session_ids:
+            owner_placeholders = ",".join("?" for _ in owner_session_ids)
+            if conn.execute(
+                f"""
+                SELECT 1
+                FROM summary_nodes AS node, json_each(node.source_ids) AS source
+                WHERE node.session_id IN ({owner_placeholders})
+                  AND node.source_type = 'messages'
+                  AND node.node_id != ?
+                  AND source.value IN (SELECT value FROM json_each(?))
+                LIMIT 1
+                """,
+                (*sorted(owner_session_ids), publication_node_id, json.dumps(all_covered_ids)),
+            ).fetchone():
+                raise LifecyclePublicationConflictError(
+                    "Compaction publication source lineage is already claimed"
+                )
         row = conn.execute(
             """
             SELECT current_session_id, current_frontier_store_id

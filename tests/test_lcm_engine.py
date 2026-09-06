@@ -26,6 +26,7 @@ from hermes_lcm.engine_registry import (
     use_active_lcm_engine,
 )
 from hermes_lcm.externalize import externalize_ingest_payload
+from hermes_lcm.lifecycle_state import LifecyclePublicationConflictError
 from hermes_lcm.tokens import count_message_tokens, count_messages_tokens, count_tokens
 
 
@@ -7608,7 +7609,7 @@ class TestMessageFiltering:
             "new-session",
             platform="telegram",
             context_length=1000,
-            conversation_id="conv-cleared-count-literal",
+            conversation_id="user-123",
             boundary_reason="compression",
             old_session_id="user-123",
         )
@@ -12234,12 +12235,20 @@ class TestEngineCompress:
             {"role": "user", "content": "fresh"},
             {"role": "assistant", "content": "answer"},
         ]
-        monotonic_calls = 0
+        clock_now = 0.0
 
         def fake_monotonic():
-            nonlocal monotonic_calls
-            monotonic_calls += 1
-            return 0.0 if monotonic_calls <= 2 else 121.0
+            return clock_now
+
+        original_add_node = instance._dag.add_node
+
+        def add_node_then_exhaust_budget(*args, **kwargs):
+            nonlocal clock_now
+            result = original_add_node(*args, **kwargs)
+            # The first leaf commits within the invocation deadline. Time
+            # expires before the next leaf, independently of clock read count.
+            clock_now = 601.0
+            return result
 
         def fake_leaf(chunk, focus_topic=None, deadline=None):
             del focus_topic, deadline
@@ -12248,6 +12257,7 @@ class TestEngineCompress:
         import hermes_lcm.compaction as compaction_module
 
         monkeypatch.setattr(compaction_module.time, "monotonic", fake_monotonic)
+        monkeypatch.setattr(instance._dag, "add_node", add_node_then_exhaust_budget)
         monkeypatch.setattr(instance, "_summarize_leaf_chunk_with_rescue", fake_leaf)
         try:
             instance.compress(messages, current_tokens=count_messages_tokens(messages))
@@ -13643,6 +13653,31 @@ class TestSessionRollover:
         engine._last_compacted_store_id = store_id
         old_conversation_id = engine._conversation_id
 
+        state_db = Path(engine._store.db_path).parent / "state.db"
+        host = sqlite3.connect(state_db)
+        host.executescript(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                parent_session_id TEXT,
+                end_reason TEXT,
+                ended_at REAL,
+                model_config TEXT,
+                source TEXT,
+                started_at REAL
+            );
+            """
+        )
+        host.executemany(
+            "INSERT INTO sessions(id, parent_session_id, end_reason, ended_at, model_config, source, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("compress-rollover-old", None, "compression", 1.0, "{}", "telegram", 1.0),
+                ("compress-rollover-new", "compress-rollover-old", None, None, "{}", "telegram", 2.0),
+            ],
+        )
+        host.commit()
+        host.close()
+
         moved = engine.rollover_session(
             "compress-rollover-old",
             "compress-rollover-new",
@@ -13736,13 +13771,8 @@ class TestSessionRollover:
         assert engine._dag.get_session_nodes("attacker-new") == []
         assert engine._session_id == "attacker-new"
 
-    def test_compression_boundary_skip_uses_new_session_cursor_for_fresh_messages(self, engine):
-        """Unproven boundary skips must not trust stale cursor/frontier state.
-
-        If the bound session cannot be proven to be the carry-over source, the
-        new session must persist its own fresh messages rather than inheriting a
-        cursor that makes them look already ingested.
-        """
+    def test_compression_boundary_without_host_proof_preserves_committed_state(self, engine):
+        """An unproven host boundary must leave the committed source untouched."""
         engine.on_session_start("session-a", platform="telegram", context_length=200000)
         engine._last_compacted_store_id = 42
         engine._ingest_cursor = 3
@@ -13755,24 +13785,13 @@ class TestSessionRollover:
             context_length=200000,
         )
 
-        fresh_messages = [
-            {"role": "user", "content": "fresh session-b question"},
-            {"role": "assistant", "content": "fresh session-b answer"},
-        ]
-        replay = engine._ingest_messages(fresh_messages)
+        assert engine._session_id == "session-a"
+        assert engine._last_compacted_store_id == 42
+        assert engine._ingest_cursor == 3
+        assert engine._store.get_session_count("session-b") == 0
 
-        assert replay == fresh_messages
-        assert engine._session_id == "session-b"
-        assert engine._last_compacted_store_id == 0
-        assert engine._ingest_cursor == len(fresh_messages)
-        assert engine._store.get_session_count("session-b") == len(fresh_messages)
-        assert [row["content"] for row in engine._store.get_session_messages("session-b")] == [
-            "fresh session-b question",
-            "fresh session-b answer",
-        ]
-
-    def test_compression_boundary_skip_preflight_cooldown_is_lossless(self, engine):
-        """Preflight should ingest fresh messages but not request compression during cooldown."""
+    def test_compression_boundary_without_host_proof_skips_preflight_mutation(self, engine):
+        """An unproven host boundary must not admit a fresh preflight session."""
         engine.on_session_start("session-a", platform="telegram", context_length=200000)
         engine._last_compacted_store_id = 42
         engine._ingest_cursor = 3
@@ -13783,19 +13802,11 @@ class TestSessionRollover:
             platform="telegram",
             context_length=200000,
         )
-        engine.threshold_tokens = 1
-        engine._config.leaf_chunk_tokens = 1
-        engine._config.dynamic_leaf_chunk_enabled = False
-        engine._config.fresh_tail_count = 1
 
-        fresh_messages = [
-            {"role": "user", "content": f"fresh preflight payload {idx}"}
-            for idx in range(6)
-        ]
-
-        assert engine.should_compress_preflight(fresh_messages) is False
-        assert engine._store.get_session_count("session-b") == len(fresh_messages)
-        assert engine._ingest_cursor == len(fresh_messages)
+        assert engine._session_id == "session-a"
+        assert engine._last_compacted_store_id == 42
+        assert engine._ingest_cursor == 3
+        assert engine._store.get_session_count("session-b") == 0
 
     def test_compression_boundary_skip_preflight_cooldown_blocks_replay_diff(self, engine, monkeypatch):
         engine.on_session_start("session-a", platform="telegram", context_length=200000)
@@ -16402,7 +16413,7 @@ class TestSessionRollover:
         finally:
             engine.shutdown()
 
-    def test_reused_normal_session_id_scopes_off_current_dedupe_to_current_conversation(self, tmp_path):
+    def test_reused_normal_session_id_rejects_ambiguous_cross_conversation_binding(self, tmp_path):
         config = LCMConfig(
             database_path=str(tmp_path / "lcm_reused_normal_id_current_conversation.db"),
             stateless_session_patterns=["stateless"],
@@ -16430,49 +16441,28 @@ class TestSessionRollover:
             engine.ingest(old_messages)
             engine.on_session_end("shared-session", old_messages)
 
-            engine.on_session_start(
-                "shared-session",
-                platform="cli",
-                conversation_id="current-normal-conversation",
-                context_length=200000,
-            )
-            current_prefix = [
-                {"role": "user", "content": "current conversation prefix"},
-            ]
-            engine.ingest(current_prefix)
-
-            engine.on_session_start(
-                "foreground-session",
-                platform="cli",
-                conversation_id="foreground-conversation",
-                context_length=200000,
-            )
-            current_end = current_prefix + [
-                {"role": "assistant", "content": "current conversation final"},
-            ]
-
-            engine.on_session_end("shared-session", current_end)
+            with pytest.raises(LifecyclePublicationConflictError):
+                engine.on_session_start(
+                    "shared-session",
+                    platform="cli",
+                    conversation_id="current-normal-conversation",
+                    context_length=200000,
+                )
 
             rows = engine._store.get_session_messages("shared-session")
             old_rows = [row for row in rows if row["conversation_id"] == "old-normal-conversation"]
-            current_rows = [row for row in rows if row["conversation_id"] == "current-normal-conversation"]
             bypass_rows = [row for row in rows if row["conversation_id"] == "bypass-conversation"]
 
             assert [row["content"] for row in old_rows] == [
                 "old conversation prefix",
                 "old conversation answer",
             ]
-            assert [row["content"] for row in current_rows] == [
-                "current conversation prefix",
-                "current conversation final",
-            ]
+            assert engine._conversation_id == "old-normal-conversation"
             assert bypass_rows == []
-            current_state = engine._lifecycle.get_by_conversation("current-normal-conversation")
             old_state = engine._lifecycle.get_by_conversation("old-normal-conversation")
-            assert current_state is not None
             assert old_state is not None
-            assert current_state.last_finalized_session_id == "shared-session"
             assert old_state.last_finalized_session_id == "shared-session"
+            assert engine._lifecycle.get_by_conversation("current-normal-conversation") is None
         finally:
             engine.shutdown()
 
@@ -19951,9 +19941,9 @@ class TestSessionRollover:
         assert status["lifecycle"]["current_frontier_store_id"] == store_id
         assert status["lifecycle"]["last_finalized_frontier_store_id"] == store_id
         assert status["lifecycle"]["last_rollover_at"] is not None
-        assert status["lifecycle"]["last_reset_at"] is None
+        assert status["lifecycle"]["last_reset_at"] is not None
 
-    def test_compression_boundary_uses_bound_lcm_source_when_host_old_session_differs(self, engine):
+    def test_compression_boundary_refuses_unproven_host_source_when_lcm_source_differs(self, engine):
         engine.on_session_start("lcm-source", platform="telegram", context_length=200000)
         source_store_id = engine._store.append(
             "lcm-source",
@@ -20003,7 +19993,9 @@ class TestSessionRollover:
             context_length=200000,
         )
 
-        assert engine._session_id == "new-hermes-session"
+        # The LCM source and frontier remain committed until the host supplies
+        # a durable compression successor proof.
+        assert engine._session_id == "lcm-source"
         assert engine._conversation_id == old_conversation_id
         assert engine.compression_count == 2
         assert engine.last_prompt_tokens == 1000
@@ -20014,23 +20006,17 @@ class TestSessionRollover:
         assert engine._store.get_session_count("lcm-source") == 1
         assert engine._store.get_session_count("new-hermes-session") == 0
         assert engine._store.get_session_count("old-hermes-session") == 1
-        assert engine._dag.get_session_nodes("lcm-source") == []
-        new_nodes = engine._dag.get_session_nodes("new-hermes-session")
-        assert len(new_nodes) == 1
-        assert new_nodes[0].node_id == source_node_id
-        assert new_nodes[0].summary == "LCM-bound summary"
+        source_nodes = engine._dag.get_session_nodes("lcm-source")
+        assert [node.node_id for node in source_nodes] == [source_node_id]
+        assert source_nodes[0].summary == "LCM-bound summary"
         stale_host_node = engine._dag.get_node(stale_host_node_id)
         assert stale_host_node is not None
         assert stale_host_node.session_id == "old-hermes-session"
 
-        status = engine.get_status()
-        assert status["store_messages"] == 0
-        assert status["dag_nodes"] == 1
-        assert status["compression_count"] == 2
         expanded = json.loads(engine.handle_tool_call("lcm_expand", {"node_id": source_node_id}))
         assert expanded["expanded"][0]["content"] == "important LCM-bound context"
 
-    def test_compression_boundary_prefers_active_bound_source_over_stale_finalized_host(self, engine):
+    def test_compression_boundary_requires_host_proof_for_active_bound_source(self, engine):
         engine.on_session_start(
             "lcm-source",
             platform="telegram",
@@ -20099,22 +20085,20 @@ class TestSessionRollover:
             context_length=200000,
         )
 
-        assert engine._session_id == "new-hermes-session"
+        assert engine._session_id == "lcm-source"
         assert engine._conversation_id == "shared-conversation"
         assert engine._store.get_session_count("lcm-source") == 1
         assert engine._store.get_session_count("new-hermes-session") == 0
         assert engine._store.get_session_count("old-hermes-session") == 1
-        assert engine._dag.get_session_nodes("lcm-source") == []
-        new_nodes = engine._dag.get_session_nodes("new-hermes-session")
-        assert len(new_nodes) == 1
-        assert new_nodes[0].node_id == source_node_id
+        source_nodes = engine._dag.get_session_nodes("lcm-source")
+        assert [node.node_id for node in source_nodes] == [source_node_id]
         stale_host_node = engine._dag.get_node(stale_host_node_id)
         assert stale_host_node is not None
         assert stale_host_node.session_id == "old-hermes-session"
         expanded = json.loads(engine.handle_tool_call("lcm_expand", {"node_id": source_node_id}))
         assert expanded["expanded"][0]["content"] == "active bound context must move"
 
-    def test_compression_boundary_uses_finalized_bound_lcm_source_when_host_old_session_differs(self, engine):
+    def test_compression_boundary_requires_host_proof_for_finalized_lcm_source(self, engine):
         engine.on_session_start("lcm-source", platform="telegram", context_length=200000)
         source_store_id = engine._store.append(
             "lcm-source",
@@ -20176,34 +20160,32 @@ class TestSessionRollover:
             context_length=200000,
         )
 
-        assert engine._session_id == "new-hermes-session"
+        assert engine._session_id == "lcm-source"
         assert engine._conversation_id == old_conversation_id
         assert engine.compression_count == 2
         assert engine.last_prompt_tokens == 1000
         assert engine.last_completion_tokens == 50
         assert engine.last_total_tokens == 1050
-        assert engine._last_compacted_store_id == source_store_id
+        assert engine._last_compacted_store_id == 0
         assert engine._ingest_cursor == 2
         assert engine._store.get_session_count("lcm-source") == 1
         assert engine._store.get_session_count("new-hermes-session") == 0
         assert engine._store.get_session_count("old-hermes-session") == 1
-        assert engine._dag.get_session_nodes("lcm-source") == []
-        new_nodes = engine._dag.get_session_nodes("new-hermes-session")
-        assert len(new_nodes) == 1
-        assert new_nodes[0].node_id == source_node_id
+        source_nodes = engine._dag.get_session_nodes("lcm-source")
+        assert [node.node_id for node in source_nodes] == [source_node_id]
         stale_host_node = engine._dag.get_node(stale_host_node_id)
         assert stale_host_node is not None
         assert stale_host_node.session_id == "old-hermes-session"
         lifecycle = engine._lifecycle.get_by_conversation(old_conversation_id)
         assert lifecycle is not None
-        assert lifecycle.current_session_id == "new-hermes-session"
+        assert lifecycle.current_session_id is None
         assert lifecycle.last_finalized_session_id == "lcm-source"
-        assert lifecycle.current_frontier_store_id == source_store_id
+        assert lifecycle.current_frontier_store_id == 0
         assert lifecycle.last_finalized_frontier_store_id == source_store_id
         expanded = json.loads(engine.handle_tool_call("lcm_expand", {"node_id": source_node_id}))
         assert expanded["expanded"][0]["content"] == "finalized LCM-bound context"
 
-    def test_compression_boundary_rejects_bound_source_for_explicit_conversation_mismatch(self, engine):
+    def test_compression_boundary_preserves_source_for_explicit_conversation_mismatch(self, engine):
         engine.on_session_start(
             "lcm-source",
             platform="telegram",
@@ -20260,11 +20242,11 @@ class TestSessionRollover:
             context_length=200000,
         )
 
-        assert engine._session_id == "new-hermes-session"
-        assert engine._conversation_id == "conversation-b"
-        assert engine.compression_count == 0
-        assert engine._last_compacted_store_id == 0
-        assert engine._ingest_cursor == 0
+        assert engine._session_id == "lcm-source"
+        assert engine._conversation_id == "conversation-a"
+        assert engine.compression_count == 2
+        assert engine._last_compacted_store_id == source_store_id
+        assert engine._ingest_cursor == 2
         assert engine._store.get_session_count("lcm-source") == 1
         assert engine._store.get_session_count("new-hermes-session") == 0
         assert engine._store.get_session_count("old-hermes-session") == 1
@@ -20279,15 +20261,14 @@ class TestSessionRollover:
         assert conversation_a.current_session_id is None
         assert conversation_a.last_finalized_session_id == "lcm-source"
         conversation_b = engine._lifecycle.get_by_conversation("conversation-b")
-        assert conversation_b is not None
-        assert conversation_b.current_session_id == "new-hermes-session"
+        assert conversation_b is None
 
     # ── Sibling-chain fallback tests (PR #242, zero-DAG host) ──
 
-    def test_compression_boundary_sibling_chain_zero_dag_host_positive(
+    def test_compression_boundary_sibling_chain_without_host_proof_refuses_rebind(
         self, engine,
     ):
-        """Active bound sibling with zero-DAG host — fallback activates."""
+        """An LCM binding alone cannot prove a host compression successor."""
         engine.on_session_start(
             "lcm-source",
             platform="telegram",
@@ -20349,31 +20330,28 @@ class TestSessionRollover:
             context_length=200000,
         )
 
-        # Fallback activated — nodes transferred
-        assert engine._session_id == "new-hermes-session"
-        assert engine._conversation_id == "conversation-a"  # source wins
+        # No host state.db chain was supplied, so the committed source remains
+        # current and the callback is safe to retry after proof arrives.
+        assert engine._session_id == "lcm-source"
+        assert engine._conversation_id == "conversation-a"
         assert engine.compression_count == 3
         assert engine._last_compacted_store_id == source_store_id
         assert engine._ingest_cursor == 2
         assert engine._store.get_session_count("lcm-source") == 1
         assert engine._store.get_session_count("new-hermes-session") == 0
         assert engine._store.get_session_count("old-hermes-session") == 1
-        assert engine._dag.get_session_nodes("lcm-source") == []
-        new_nodes = engine._dag.get_session_nodes("new-hermes-session")
-        assert len(new_nodes) == 1
-        assert new_nodes[0].node_id == source_node_id
+        source_nodes = engine._dag.get_session_nodes("lcm-source")
+        assert [node.node_id for node in source_nodes] == [source_node_id]
         # Stale host message stays put (zero DAG means no node to check)
         assert engine._store.get_session_count("old-hermes-session") == 1
         # Content verifiable
-        expanded = json.loads(
-            engine.handle_tool_call("lcm_expand", {"node_id": source_node_id}),
-        )
+        expanded = json.loads(engine.handle_tool_call("lcm_expand", {"node_id": source_node_id}))
         assert expanded["expanded"][0]["content"] == "sibling chain context must move"
 
-    def test_compression_boundary_sibling_chain_bound_no_dag_negative(
+    def test_compression_boundary_sibling_chain_bound_no_dag_preserves_state(
         self, engine,
     ):
-        """Bound source has no DAG — fallback deactivated."""
+        """A missing host successor proof preserves the bound source state."""
         engine.on_session_start(
             "lcm-source",
             platform="telegram",
@@ -20405,16 +20383,16 @@ class TestSessionRollover:
             context_length=200000,
         )
 
-        # Fallback rejected — bound_has_summary_nodes guard failed
-        assert engine.compression_count == 0  # reset
-        assert engine._last_compacted_store_id == 0
+        assert engine._session_id == "lcm-source"
+        assert engine.compression_count == 3
+        assert engine._last_compacted_store_id == source_store_id
         assert engine._store.get_session_count("lcm-source") == 1
         assert engine._store.get_session_count("new-hermes-session") == 0
 
-    def test_compression_boundary_sibling_chain_parent_mismatch_negative(
+    def test_compression_boundary_sibling_chain_parent_mismatch_preserves_state(
         self, engine,
     ):
-        """Bound session has different parent — fallback deactivated."""
+        """A mismatched parent must not trigger an unproven rebind."""
         engine.on_session_start(
             "lcm-source",
             platform="telegram",
@@ -20460,9 +20438,9 @@ class TestSessionRollover:
             context_length=200000,
         )
 
-        # Fallback rejected — bound_shares_parent_with_host guard failed
-        assert engine.compression_count == 0
-        assert engine._last_compacted_store_id == 0
+        assert engine._session_id == "lcm-source"
+        assert engine.compression_count == 3
+        assert engine._last_compacted_store_id == source_store_id
         assert engine._store.get_session_count("lcm-source") == 1
 
     def test_compression_boundary_sibling_chain_host_has_dag_negative(
@@ -20533,11 +20511,10 @@ class TestSessionRollover:
         # Bound session NOT transferred
         assert engine._store.get_session_count("lcm-source") == 1
 
-    def test_compression_boundary_sibling_chain_active_source_different_conv_id(
+    def test_compression_boundary_sibling_chain_different_conversation_preserves_state(
         self, engine,
     ):
-        """Active bound sibling with explicit conversation_id mismatch —
-        fallback activates despite mismatched conversations."""
+        """A conversation mismatch cannot be repaired without host proof."""
         engine.on_session_start(
             "lcm-source",
             platform="telegram",
@@ -20588,20 +20565,18 @@ class TestSessionRollover:
             context_length=200000,
         )
 
-        # Fallback activated — nodes transferred, source conv wins
+        assert engine._session_id == "lcm-source"
         assert engine._conversation_id == "conversation-x"
         assert engine.compression_count == 3
         assert engine._store.get_session_count("lcm-source") == 1
         assert engine._store.get_session_count("new-hermes-session") == 0
-        assert engine._dag.get_session_nodes("lcm-source") == []
-        new_nodes = engine._dag.get_session_nodes("new-hermes-session")
-        assert len(new_nodes) == 1
-        assert new_nodes[0].node_id == source_node_id
+        source_nodes = engine._dag.get_session_nodes("lcm-source")
+        assert [node.node_id for node in source_nodes] == [source_node_id]
 
     def test_compression_boundary_sibling_chain_source_none_kwargs_fallback(
         self, engine,
     ):
-        """source_state is None — conversation_id falls to kwargs."""
+        """Without an LCM binding, an unproven callback leaves state untouched."""
         engine.on_session_start(
             "new-hermes-session",
             boundary_reason="compression",
@@ -20611,15 +20586,13 @@ class TestSessionRollover:
             context_length=200000,
         )
 
-        # All guards fail — source_state is None
-        # conversation_id falls through: kwargs → self._conversation_id
-        assert engine._conversation_id == "conversation-c"
+        assert engine._session_id == "test-session"
+        assert engine._conversation_id == ""
 
     def test_compression_boundary_sibling_chain_conversation_id_regression(
         self, engine,
     ):
-        """Sibling-chain fallback → conversation_id from bound session,
-        NOT kwargs. Regression test for the bug stephenschoettler found."""
+        """A local sibling edge is insufficient without a durable host chain."""
         engine.on_session_start(
             "lcm-source",
             platform="telegram",
@@ -20666,23 +20639,17 @@ class TestSessionRollover:
             context_length=200000,
         )
 
-        # KEY ASSERTION: conversation_id = "conversation-a" (source wins)
-        # NOT "conversation-b" (which kwargs would produce pre-fix)
+        # The callback is retained for replay once the host proves the edge;
+        # kwargs must not make an unsupported conversation binding look valid.
         assert engine._conversation_id == "conversation-a"
-        assert engine._session_id == "new-hermes-session"
+        assert engine._session_id == "lcm-source"
         assert engine.compression_count == 3
-        # Verify the lifecycle under conversation-a is aware of the new session
         conv_a = engine._lifecycle.get_by_conversation("conversation-a")
         assert conv_a is not None
-        assert conv_a.current_session_id == "new-hermes-session"
-        # conversation-b not created — session bound to conversation-a
+        assert conv_a.current_session_id == "lcm-source"
         conv_b = engine._lifecycle.get_by_conversation("conversation-b")
         assert conv_b is None
-        # Nodes moved correctly
-        assert engine._dag.get_session_nodes("lcm-source") == []
-        new_nodes = engine._dag.get_session_nodes("new-hermes-session")
-        assert len(new_nodes) == 1
-        assert new_nodes[0].node_id == source_node_id
+        assert [node.node_id for node in engine._dag.get_session_nodes("lcm-source")] == [source_node_id]
 
     def test_compression_boundary_prefers_host_old_session_when_bound_session_drifted(self, engine):
         engine.on_session_start(
@@ -20886,6 +20853,34 @@ class TestSessionRollover:
         assert wrong_state is not None
         assert wrong_state.conversation_id == "auxiliary-conversation"
 
+        # The legacy conversation-id alias is accepted only when the active
+        # LCM source and requested child lie on the same durable host chain.
+        state_db = Path(engine._store.db_path).parent / "state.db"
+        host = sqlite3.connect(state_db)
+        host.executescript(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                parent_session_id TEXT,
+                end_reason TEXT,
+                ended_at REAL,
+                model_config TEXT,
+                source TEXT,
+                started_at REAL
+            );
+            """
+        )
+        host.executemany(
+            "INSERT INTO sessions(id, parent_session_id, end_reason, ended_at, model_config, source, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("host-conversation", None, "compression", 1.0, "{}", "cli", 1.0),
+                ("foreground-active", "host-conversation", "compression", 2.0, "{}", "telegram", 2.0),
+                ("foreground-new", "foreground-active", None, None, "{}", "telegram", 3.0),
+            ],
+        )
+        host.commit()
+        host.close()
+
         engine.on_session_start(
             "foreground-new",
             boundary_reason="compression",
@@ -20910,7 +20905,7 @@ class TestSessionRollover:
         assert aux_state.current_session_id == "drifted-auxiliary"
         assert aux_state.last_finalized_session_id == "host-conversation"
 
-    def test_compression_boundary_mismatch_resets_session_scoped_state(self, engine):
+    def test_compression_boundary_mismatch_preserves_session_scoped_state(self, engine):
         engine.on_session_start("bound-session", platform="telegram", context_length=200000)
         engine.compression_count = 3
         engine.last_prompt_tokens = 900
@@ -20928,14 +20923,14 @@ class TestSessionRollover:
             context_length=200000,
         )
 
-        assert engine._session_id == "new-session"
-        assert engine._conversation_id != old_conversation_id
-        assert engine.compression_count == 0
-        assert engine.last_prompt_tokens == 0
-        assert engine.last_completion_tokens == 0
-        assert engine.last_total_tokens == 0
-        assert engine._last_compacted_store_id == 0
-        assert engine._ingest_cursor == 0
+        assert engine._session_id == "bound-session"
+        assert engine._conversation_id == old_conversation_id
+        assert engine.compression_count == 3
+        assert engine.last_prompt_tokens == 900
+        assert engine.last_completion_tokens == 12
+        assert engine.last_total_tokens == 912
+        assert engine._last_compacted_store_id == 42
+        assert engine._ingest_cursor == 7
 
     def test_compression_boundary_preserves_externalized_payload_session_metadata(self, tmp_path):
         config = LCMConfig(
@@ -21146,7 +21141,7 @@ class TestSessionRollover:
         assert status["lifecycle"]["last_finalized_session_id"] == "compress-old"
         assert status["lifecycle"]["last_finalized_frontier_store_id"] == store_id
 
-    def test_reset_before_compression_boundary_mismatch_finalizes_pending_old_session(self, engine):
+    def test_reset_before_compression_boundary_mismatch_preserves_pending_reset(self, engine):
         engine.on_session_start("bound-after-reset", platform="telegram", context_length=200000)
         store_id = engine._store.append(
             "bound-after-reset",
@@ -21180,10 +21175,13 @@ class TestSessionRollover:
 
         old_state = engine._lifecycle.get_by_conversation(old_conversation_id)
         assert old_state is not None
-        assert old_state.current_session_id is None
-        assert old_state.last_finalized_session_id == "bound-after-reset"
-        assert old_state.last_finalized_frontier_store_id == store_id
-        assert engine._pending_reset_session_id == ""
+        assert engine._session_id == "bound-after-reset"
+        assert old_state.current_session_id == "bound-after-reset"
+        assert old_state.last_finalized_session_id is None
+        assert old_state.current_frontier_store_id == 0
+        assert old_state.last_reset_at is not None
+        assert engine._pending_reset_session_id == "bound-after-reset"
+        assert engine._pending_reset_frontier_store_id == store_id
 
     def test_on_session_start_recovers_durable_lifecycle_state_after_restart(self, engine, monkeypatch):
         engine.on_session_start("active-session", platform="cli", context_length=200000)

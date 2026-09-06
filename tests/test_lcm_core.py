@@ -24,7 +24,7 @@ from hermes_lcm.escalation import (
     _build_l2_focus_brief,
     _deterministic_truncate,
 )
-from hermes_lcm.lifecycle_state import LifecycleStateStore
+from hermes_lcm.lifecycle_state import LifecyclePublicationConflictError, LifecycleStateStore
 from hermes_lcm.db_bootstrap import (
     ExternalContentFtsSpec,
     SCHEMA_VERSION,
@@ -3546,6 +3546,60 @@ class TestLifecycleStateStore:
         assert after_reset.debt_size_estimate == 0
         assert after_reset.last_reset_at is not None
 
+        state.close()
+
+    def test_stage_rollover_rejects_stale_callback_and_preserves_newer_binding(self, tmp_path):
+        state = LifecycleStateStore(tmp_path / "lifecycle-stale-rollover.db")
+        state.bind_session("old-session", conversation_id="conversation")
+        state.record_rollover(
+            "conversation",
+            old_session_id="old-session",
+            new_session_id="new-session",
+        )
+
+        conn = state.connection
+        assert conn is not None
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            with pytest.raises(LifecyclePublicationConflictError):
+                state.stage_rollover(
+                    conn,
+                    "conversation",
+                    old_session_id="old-session",
+                    new_session_id="stale-session",
+                )
+        finally:
+            conn.rollback()
+
+        current = state.get_by_conversation("conversation")
+        assert current is not None
+        assert current.current_session_id == "new-session"
+        assert current.last_finalized_session_id == "old-session"
+        state.close()
+
+    def test_stage_rollover_preserves_last_reset_at_on_conflict(self, tmp_path):
+        state = LifecycleStateStore(tmp_path / "lifecycle-rollover-reset.db")
+        state.bind_session("old-session", conversation_id="conversation")
+        reset = state.record_reset("conversation")
+        assert reset is not None
+        reset_at = reset.last_reset_at
+        assert reset_at is not None
+
+        conn = state.connection
+        assert conn is not None
+        conn.execute("BEGIN IMMEDIATE")
+        state.stage_rollover(
+            conn,
+            "conversation",
+            old_session_id="old-session",
+            new_session_id="new-session",
+        )
+        conn.commit()
+
+        rolled = state.get_by_conversation("conversation")
+        assert rolled is not None
+        assert rolled.current_session_id == "new-session"
+        assert rolled.last_reset_at == reset_at
         state.close()
 
     def test_prune_empty_sessions_deletes_row_with_zero_data(self, tmp_path):

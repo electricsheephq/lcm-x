@@ -15,7 +15,10 @@ lifecycle) through normal attribute lookup. ``LCMEngine`` mixes this in ahead of
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
+import math
 import time
 from typing import Any, Dict, List, Optional
 
@@ -32,9 +35,155 @@ logger = logging.getLogger(__name__)
 
 _THRESHOLD_FULL_SWEEP_MAX_PASSES = 12
 _THRESHOLD_FULL_SWEEP_MAX_SECONDS = 120.0
+_LCM_INVOCATION_TOTAL_CEILING_SECONDS = 600.0
+
+
+class _StandaloneAuxiliaryExplicitCancellation(BaseException):
+    """Standalone fallback when the minimal CI host has no auxiliary module."""
+
+    cause = "explicit_host_cancel"
+
+    def __init__(self) -> None:
+        super().__init__("auxiliary request explicitly cancelled by host")
+
+
+class _CompressionInvocationGuard:
+    """Immutable host-cancellation snapshot for one LCM invocation."""
+
+    __slots__ = ("cancel_check", "publication_fence", "deadline_monotonic")
+
+    def __init__(
+        self,
+        *,
+        cancel_check: Any,
+        publication_fence: Any,
+        deadline_monotonic: float,
+    ) -> None:
+        self.cancel_check = cancel_check
+        self.publication_fence = publication_fence
+        self.deadline_monotonic = deadline_monotonic
+
+    @property
+    def has_atomic_fence(self) -> bool:
+        fence = self.publication_fence
+        return bool(
+            fence is not None
+            and callable(getattr(fence, "begin_lock_setup", None))
+            and callable(getattr(fence, "finish_lock_setup", None))
+        )
+
+    def is_cancelled(self) -> bool:
+        deadline = self.deadline_monotonic
+        if deadline is not None and time.monotonic() >= deadline:
+            return True
+        fence = self.publication_fence
+        if fence is not None:
+            try:
+                if bool(getattr(fence, "is_cancelled", False)):
+                    return True
+            except BaseException:
+                return True
+        check = self.cancel_check
+        if callable(check):
+            try:
+                return bool(check())
+            except BaseException:
+                return True
+        return False
+
+    def begin_publication(self) -> bool:
+        """Admit one short DAG transaction, retaining the host fence lock."""
+        if self.has_atomic_fence:
+            fence = self.publication_fence
+            try:
+                if not bool(fence.begin_lock_setup()):
+                    return False
+            except BaseException:
+                return False
+            # Re-check while the fence lock is held, then retain it through
+            # SummaryDAG's transaction.
+            if self.is_cancelled():
+                try:
+                    fence.finish_lock_setup()
+                finally:
+                    return False
+            return True
+        # Old hosts retain callback-based behavior without an atomic claim.
+        return not self.is_cancelled()
+
+    def finish_publication(self) -> None:
+        if self.has_atomic_fence:
+            self.publication_fence.finish_lock_setup()
+
+
+_COMPRESSION_INVOCATION: contextvars.ContextVar[_CompressionInvocationGuard | None] = (
+    contextvars.ContextVar("hermes_lcm_compression_invocation", default=None)
+)
+
+
+def _read_invocation_deadline(publication_fence: Any) -> float:
+    """Capture one absolute deadline from the current host invocation."""
+    capture_started = time.monotonic()
+    deadline = None
+    if publication_fence is not None:
+        try:
+            deadline = getattr(publication_fence, "deadline_monotonic", None)
+        except BaseException:
+            deadline = None
+    if not isinstance(deadline, (int, float)) or not math.isfinite(float(deadline)):
+        try:
+            from agent.auxiliary_client import _current_aux_stream_deadline
+
+            deadline = _current_aux_stream_deadline()
+        except Exception:
+            deadline = None
+    if not isinstance(deadline, (int, float)) or not math.isfinite(float(deadline)):
+        deadline = capture_started + _LCM_INVOCATION_TOTAL_CEILING_SECONDS
+    return min(
+        float(deadline),
+        capture_started + _LCM_INVOCATION_TOTAL_CEILING_SECONDS,
+    )
 
 
 class CompactionMixin:
+    def _capture_compression_invocation(self) -> _CompressionInvocationGuard:
+        """Snapshot host guards once before provider or DAG work."""
+        publication_fence = getattr(self, "_compression_publication_fence", None)
+        return _CompressionInvocationGuard(
+            cancel_check=getattr(self, "_compression_cancelled_check", None),
+            publication_fence=publication_fence,
+            deadline_monotonic=_read_invocation_deadline(publication_fence),
+        )
+
+    def _compression_invocation_guard(self) -> _CompressionInvocationGuard | None:
+        return _COMPRESSION_INVOCATION.get()
+
+    def _compression_invocation_deadline(self) -> float | None:
+        invocation = self._compression_invocation_guard()
+        return invocation.deadline_monotonic if invocation is not None else None
+
+    @staticmethod
+    def _raise_compression_cancelled() -> None:
+        try:
+            from agent.auxiliary_client import AuxiliaryExplicitCancellation
+        except ImportError:
+            raise _StandaloneAuxiliaryExplicitCancellation()
+        raise AuxiliaryExplicitCancellation()
+
+    @contextlib.contextmanager
+    def _compression_publication_admission(self):
+        """Fence one short DAG publication; provider work stays unfenced."""
+        invocation = self._compression_invocation_guard()
+        if invocation is None:
+            yield
+            return
+        if not invocation.begin_publication():
+            self._raise_compression_cancelled()
+        try:
+            yield
+        finally:
+            invocation.finish_publication()
+
     def _maybe_reclassify_late_auxiliary_before_compaction_write(self) -> None:
         maybe_reclassify = getattr(
             self,
@@ -495,6 +644,8 @@ class CompactionMixin:
                  focus_topic: Optional[str] = None,
                  force: bool = False) -> List[Dict[str, Any]]:
         """Run compaction and leave a terminal public status on every failure."""
+        invocation = self._capture_compression_invocation()
+        invocation_token = _COMPRESSION_INVOCATION.set(invocation)
         try:
             with self._fresh_tail_pressure_yield_invocation():
                 return self._compress_impl(
@@ -507,6 +658,8 @@ class CompactionMixin:
             self._last_compression_status = "error"
             self._last_compression_noop_reason = ""
             raise
+        finally:
+            _COMPRESSION_INVOCATION.reset(invocation_token)
 
     def _fail_open_after_publication_failure(
         self,
@@ -615,9 +768,22 @@ class CompactionMixin:
         proven = {int(store_id) for store_id in already_proven_store_ids}
         proofs = dict(initial_proofs)
         after_store_id = expected_frontier
+        owner_session_ids = {str(self._session_id or "")}
+        lifecycle = self._lifecycle.get_by_conversation(self._conversation_id)
+        if lifecycle is not None:
+            owner_session_ids.update(
+                str(session_id)
+                for session_id in (
+                    lifecycle.current_session_id,
+                    lifecycle.last_finalized_session_id,
+                )
+                if session_id
+            )
+        owner_session_ids.discard("")
         while after_store_id < covered_end:
-            rows = self._store.get_session_messages_after(
-                self._session_id,
+            rows = self._store.get_conversation_messages_after(
+                self._conversation_id,
+                session_ids=owner_session_ids,
                 after_store_id=after_store_id,
             )
             if not rows:
@@ -756,7 +922,17 @@ class CompactionMixin:
             and self.threshold_tokens > 0
             and estimated_active_tokens >= self.threshold_tokens
         )
-        sweep_deadline = time.monotonic() + _THRESHOLD_FULL_SWEEP_MAX_SECONDS
+        invocation_deadline = self._compression_invocation_deadline()
+        if self._compression_invocation_guard() is None:
+            sweep_deadline = time.monotonic() + _THRESHOLD_FULL_SWEEP_MAX_SECONDS
+        else:
+            # A qualified invocation owns one shared total ceiling.  The
+            # captured host deadline may be earlier, but this sweep must not
+            # renew or reapply the legacy 120-second per-sweep cap.
+            sweep_deadline = min(
+                invocation_deadline,
+                time.monotonic() + _LCM_INVOCATION_TOTAL_CEILING_SECONDS,
+            )
         configured_sweep_target = int(self._config.summary_prefix_target_tokens)
         sweep_target_tokens = max(
             1,
@@ -822,8 +998,30 @@ class CompactionMixin:
             # turn; that must remain eligible for compaction instead of being
             # replayed forever as fresh-looking intent.
             leading_anchor_count = self._leading_anchor_count(working_messages)
+            # Map the permanent system scaffold separately, then map every
+            # occurrence after it once.  An anchored system row that was just
+            # ingested must not consume the suffix's monotonic cursor: it would
+            # shift the compactable suffix onto duplicate post-rotate rows.
+            # Reserve the scaffold's exact row while mapping the suffix, and
+            # keep a proven retained user anchor in that suffix map so all
+            # publication exclusions remain disjoint from source coverage.
+            anchor_store_id_map = (
+                self._get_store_id_map_for_messages([working_messages[0]])
+                if leading_anchor_count
+                else {}
+            )
+            pass_messages = (
+                working_messages[1:] if leading_anchor_count else working_messages
+            )
+            pass_store_id_map = self._get_store_id_map_for_messages(
+                pass_messages,
+                excluded_store_ids=set(anchor_store_id_map.values()),
+            )
+            pass_store_id_map.update(anchor_store_id_map)
+            self._current_compress_store_ids_by_message_id = pass_store_id_map
             publication_excluded_store_ids = self._get_store_ids_for_messages(
-                working_messages[:leading_anchor_count]
+                working_messages[:leading_anchor_count],
+                mapped_ids_by_message_id=pass_store_id_map,
             )
             filter_exclusion_proofs: Dict[int, Any] = {}
             if fresh_tail_start <= leading_anchor_count:
@@ -852,7 +1050,8 @@ class CompactionMixin:
             if candidate_start > leading_anchor_count:
                 publication_excluded_store_ids.extend(
                     self._get_store_ids_for_messages(
-                        working_messages[leading_anchor_count:candidate_start]
+                        working_messages[leading_anchor_count:candidate_start],
+                        mapped_ids_by_message_id=pass_store_id_map,
                     )
                 )
                 dropped_replayed_scaffold_messages = True
@@ -865,9 +1064,6 @@ class CompactionMixin:
                     break
 
             if candidate_start < fresh_tail_start:
-                self._current_compress_store_ids_by_message_id = self._get_store_id_map_for_messages(
-                    working_messages[leading_anchor_count:]
-                )
                 compactable_pairs = list(
                     zip(
                         working_messages[candidate_start:fresh_tail_start],
@@ -1135,9 +1331,15 @@ class CompactionMixin:
             source_lineage_chunk = [
                 message for message in source_lookup_chunk if id(message) not in dependent_reply_message_ids
             ]
-            source_store_ids = self._get_store_ids_for_messages(source_lineage_chunk)
+            source_store_ids = self._get_store_ids_for_messages(
+                source_lineage_chunk,
+                mapped_ids_by_message_id=pass_store_id_map,
+            )
             source_store_ids = sorted(dict.fromkeys(source_store_ids))
-            consumed_store_ids = self._get_store_ids_for_messages(source_lookup_chunk)
+            consumed_store_ids = self._get_store_ids_for_messages(
+                source_lookup_chunk,
+                mapped_ids_by_message_id=pass_store_id_map,
+            )
             consumed_store_ids = sorted(dict.fromkeys(consumed_store_ids))
             earliest_at, latest_at = self._store.get_time_bounds(source_store_ids)
             summary_tokens = count_tokens(summary_text)
@@ -1191,7 +1393,8 @@ class CompactionMixin:
                             filter_exclusion_proofs,
                         )
                     before_commit = stage_frontier
-                self._dag.add_node(node, before_commit=before_commit)
+                with self._compression_publication_admission():
+                    self._dag.add_node(node, before_commit=before_commit)
             except Exception as exc:
                 if (
                     not _is_sqlite_locked_error(exc)

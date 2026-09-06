@@ -608,7 +608,8 @@ What the main knobs do:
   pressure falls below the trigger. It always uses the configured working leaf
   size, then condenses a too-large summary frontier toward
   `LCM_SUMMARY_PREFIX_TARGET_TOKENS` (`0` means one leaf budget). The whole
-  invocation is bounded to 12 summary calls and 120 seconds between calls,
+  invocation is bounded to 12 summary calls and one shared 600-second deadline
+  (or the lower host deadline),
   persists each completed DAG pass, and publishes one active context at the end.
   It remains synchronous and does not enable deferred/background maintenance.
 - `LCM_EXPANSION_CONTEXT_TOKENS` controls how much recovered material
