@@ -609,6 +609,70 @@ def test_generated_fold_after_orphan_tool_keeps_post_cleanup_lineage(tmp_path):
         engine.shutdown()
 
 
+def test_generated_fold_lineage_failure_restores_merged_tail(tmp_path, monkeypatch):
+    conversation_id = "issue-247-generated-fold-lineage-failure"
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "generated-fold-lineage-failure.db"),
+            fresh_tail_count=24,
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    engine.on_session_start(
+        "s1",
+        platform="cli",
+        conversation_id=conversation_id,
+        context_length=200_000,
+    )
+    first_source_id = engine._store.append(
+        "s1",
+        {"role": "assistant", "content": "assistant-one"},
+        conversation_id=conversation_id,
+    )
+    engine._store.append(
+        "s1",
+        {
+            "role": "tool",
+            "tool_call_id": "orphan-call",
+            "content": "late orphan result",
+        },
+        conversation_id=conversation_id,
+    )
+    second_source_id = engine._store.append(
+        "s1",
+        {"role": "assistant", "content": "assistant-two"},
+        conversation_id=conversation_id,
+    )
+    engine._dag.add_node(
+        SummaryNode(
+            session_id="s1",
+            summary="prior durable summary",
+            token_count=1,
+            source_token_count=1,
+            source_ids=[],
+        )
+    )
+    monkeypatch.setattr(engine, "_write_folded_tail_lineage", lambda *_args: False)
+    try:
+        context = engine._assemble_context(
+            {"role": "system", "content": "system"},
+            engine._store.get_session_messages("s1"),
+            assembly_cap_override=200_000,
+            retained_user_message={"role": "user", "content": "current objective"},
+        )
+        assert [message.get("content") for message in context[-2:]] == [
+            "assistant-one",
+            "assistant-two",
+        ]
+        assert not any("prior durable summary" in str(message.get("content")) for message in context)
+        mapped = engine._get_store_id_map_for_messages(context[1:])
+    finally:
+        engine.shutdown()
+
+    assert mapped[id(context[-2])] == first_source_id
+    assert mapped[id(context[-1])] == second_source_id
+
+
 def test_legacy_conversation_alias_refuses_unproven_current_session(tmp_path):
     conversation_id = "legacy-session-alias"
     hermes_home = tmp_path / "home"

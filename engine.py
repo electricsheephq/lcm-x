@@ -6921,6 +6921,7 @@ class LCMEngine(
             merge_adjacent_assistants=False,
         )
         cleanup_source_ids = self._get_store_id_map_for_messages(cleanup_ready)
+        folded_restore_messages: list[Dict[str, Any]] = []
         if folded_active_tail is not None and folded_source_store_ids:
             # The generated fold has no raw replay identity, so the cleanup
             # mapper cannot find it after an orphan tool row is removed.  The
@@ -6944,6 +6945,28 @@ class LCMEngine(
                     cleanup_source_ids[id(folded_cleanup_matches[0])] = int(
                         folded_source_store_ids[0]
                     )
+                    folded_index = cleanup_ready.index(folded_cleanup_matches[0])
+                    folded_run = [folded_cleanup_matches[0]]
+                    folded_run_index = folded_index + 1
+                    while folded_run_index < len(cleanup_ready):
+                        next_message = cleanup_ready[folded_run_index]
+                        if (
+                            next_message.get("role") != "assistant"
+                            or not isinstance(next_message.get("content"), str)
+                            or next_message.get("codex_reasoning_items")
+                            or next_message.get("codex_message_items")
+                            or next_message.get("finish_reason") == "incomplete"
+                        ):
+                            break
+                        folded_run.append(next_message)
+                        folded_run_index += 1
+                    # If lineage persistence fails after this run is merged,
+                    # restore the original provider-visible occurrences so
+                    # later compaction can still map every durable source row.
+                    folded_restore_messages = [
+                        folded_original_tail,
+                        *folded_run[1:],
+                    ]
         post_cleanup_lineage_candidates: list[tuple[str, list[int]]] = []
         cleanup_index = 0
         while cleanup_index < len(cleanup_ready):
@@ -7054,6 +7077,7 @@ class LCMEngine(
                     folded_message,
                     source_ids,
                 )
+                folded_lineage_message = folded_message
         if (
             not lineage_written
             and existing_folded_lineage is None
@@ -7064,10 +7088,15 @@ class LCMEngine(
             # was durably recorded.  Restore the original provider-visible
             # tail on a write failure so an unproven summary cannot survive
             # as active context.
-            result = [
-                folded_original_tail if message is folded_lineage_message else message
-                for message in result
-            ]
+            restored_result: list[Dict[str, Any]] = []
+            for message in result:
+                if message is not folded_lineage_message:
+                    restored_result.append(message)
+                    continue
+                restored_result.extend(
+                    folded_restore_messages or [folded_original_tail]
+                )
+            result = restored_result
         if not lineage_written and existing_folded_lineage is None:
             self._clear_folded_tail_lineage()
 
