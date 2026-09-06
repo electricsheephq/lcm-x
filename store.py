@@ -847,6 +847,53 @@ class MessageStore:
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
+    def get_conversation_messages_after(
+        self,
+        conversation_id: str | None,
+        *,
+        session_ids: Collection[str] | None = None,
+        after_store_id: int = 0,
+        limit: int = 10000,
+    ) -> List[Dict[str, Any]]:
+        """Get ordered raw rows owned by one logical conversation.
+
+        Rows with an explicit conversation id are authoritative regardless of
+        their producing session. Legacy rows with a blank conversation id are
+        admitted only when their producing session is supplied by the caller's
+        proven lifecycle binding. The query is ordered by the global store id
+        so duplicate and tool-call matching preserve chronology across
+        rollover sessions.
+        """
+        normalized_sessions = tuple(
+            sorted({str(value) for value in (session_ids or ()) if str(value)})
+        )
+        where = ["store_id > ?"]
+        args: list[Any] = [int(after_store_id or 0)]
+        if conversation_id:
+            owner_parts = ["conversation_id = ?"]
+            owner_args: list[Any] = [str(conversation_id)]
+            if normalized_sessions:
+                placeholders = ",".join("?" for _ in normalized_sessions)
+                owner_parts.append(
+                    f"(COALESCE(conversation_id, '') = '' AND session_id IN ({placeholders}))"
+                )
+                owner_args.extend(normalized_sessions)
+            where.append("(" + " OR ".join(owner_parts) + ")")
+            args.extend(owner_args)
+        elif normalized_sessions:
+            placeholders = ",".join("?" for _ in normalized_sessions)
+            where.append(f"session_id IN ({placeholders})")
+            args.extend(normalized_sessions)
+        else:
+            return []
+        rows = self._conn.execute(
+            f"""SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages
+               WHERE {' AND '.join(where)}
+               ORDER BY store_id LIMIT ?""",
+            [*args, max(1, int(limit))],
+        ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
     def get_session_tail(self, session_id: str, limit: int = 1000) -> List[Dict[str, Any]]:
         """Get the latest messages for a session, returned in store order."""
         if limit <= 0:

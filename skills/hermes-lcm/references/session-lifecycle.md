@@ -2,6 +2,15 @@
 
 Hermes `/new` starts a new host session. LCM-X binds that session to its own lifecycle row and may carry eligible higher-depth summaries into the new current-session context. Source eligibility and exact expansion still come from descendant raw messages; carried summaries do not rewrite source ownership.
 
+Compaction source mapping and publication are scoped to the logical
+conversation, not only the currently bound host session. A source row keeps
+its producing `session_id` and global `store_id`; explicit `conversation_id`
+rows may therefore be validated after rollover through the current and
+last-finalized lifecycle bindings. Legacy rows with a blank conversation id
+are admitted only when their producing session is one of those proven
+bindings. Ambiguous or foreign rows fail closed before a summary node or
+frontier advance is committed.
+
 Do not promise that `/new` deletes historical LCM data. Earlier rows remain in `lcm.db` unless an explicitly authorized cleanup removes them, and they remain available through bounded cross-session recall.
 
 ## `/lcm rotate`

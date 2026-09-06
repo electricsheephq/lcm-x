@@ -11,6 +11,7 @@ This is the smallest viable substrate for cross-turn/session lifecycle state:
 from __future__ import annotations
 
 import functools
+import json
 import sqlite3
 import threading
 import time
@@ -930,6 +931,46 @@ class LifecycleStateStore:
             "Lifecycle session binding changed during summary publication"
         )
 
+    @staticmethod
+    def _conversation_owner_session_ids(
+        conn: sqlite3.Connection,
+        conversation_id: str,
+        session_id: str,
+    ) -> set[str]:
+        """Resolve proven producing sessions for one logical conversation.
+
+        The lifecycle binding contributes the current and last-finalized
+        sessions. Explicit conversation ids on durable message rows extend
+        that set for older producing sessions; blank legacy conversation ids
+        are admitted only for the already-proven lifecycle sessions.
+        """
+        owner_sessions = {str(session_id or "")}
+        state = conn.execute(
+            """
+            SELECT current_session_id, last_finalized_session_id
+            FROM lcm_lifecycle_state
+            WHERE conversation_id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()
+        if state is not None:
+            owner_sessions.update(
+                str(value or "")
+                for value in (state[0], state[1])
+                if value
+            )
+        rows = conn.execute(
+            """
+            SELECT DISTINCT session_id
+            FROM messages
+            WHERE conversation_id = ? AND session_id IS NOT NULL AND session_id != ''
+            """,
+            (conversation_id,),
+        ).fetchall()
+        owner_sessions.update(str(row[0]) for row in rows if row[0])
+        owner_sessions.discard("")
+        return owner_sessions
+
     def stage_compaction_publication(
         self,
         conn: sqlite3.Connection,
@@ -972,30 +1013,44 @@ class LifecycleStateStore:
                 "Compaction publication coverage overlaps an explicit exclusion"
             )
         exclusion_proofs = filter_exclusion_proofs or {}
+        owner_session_ids = self._conversation_owner_session_ids(
+            conn,
+            conversation_id,
+            session_id,
+        )
+        owner_session_scope = json.dumps(sorted(owner_session_ids))
         snapshot_ids = sorted(
             set(all_covered_ids + excluded_ids + list(exclusion_proofs))
         )
         snapshot_rows = conn.execute(
             """
-            SELECT m.store_id, m.conversation_id, m.content
+            SELECT m.store_id, m.session_id, m.conversation_id, m.content
             FROM json_each(?) AS source
             CROSS JOIN messages AS m
-            WHERE m.store_id = source.value AND m.session_id = ?
+            WHERE m.store_id = source.value
             ORDER BY m.store_id
             """,
-            (str(snapshot_ids), session_id),
+            (str(snapshot_ids),),
         ).fetchall()
         if [int(row[0]) for row in snapshot_rows] != snapshot_ids:
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )
-        if any(str(row[1] or "").strip() not in {"", conversation_id} for row in snapshot_rows):
+
+        def belongs_to_conversation(row: sqlite3.Row | tuple[Any, ...]) -> bool:
+            row_session_id = str(row[1] or "")
+            row_conversation_id = str(row[2] or "").strip()
+            return row_conversation_id == conversation_id or (
+                not row_conversation_id and row_session_id in owner_session_ids
+            )
+
+        if any(not belongs_to_conversation(row) for row in snapshot_rows):
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )
         snapshot_by_id = {int(row[0]): row for row in snapshot_rows}
         if any(
-            snapshot_by_id[store_id][2] != proof
+            snapshot_by_id[store_id][3] != proof
             for store_id, proof in exclusion_proofs.items()
         ):
             raise LifecyclePublicationConflictError(
@@ -1003,14 +1058,27 @@ class LifecycleStateStore:
             )
         rows = conn.execute(
             """
-            SELECT store_id, conversation_id, content
+            SELECT store_id, session_id, conversation_id, content
             FROM messages
-            WHERE session_id = ? AND store_id > ? AND store_id <= ?
+            WHERE store_id > ? AND store_id <= ?
             ORDER BY store_id
             """,
-            (session_id, expected_frontier, covered_end),
+            (
+                expected_frontier,
+                covered_end,
+            ),
         ).fetchall()
-        authoritative_ids = [int(row[0]) for row in rows]
+        if any(
+            str(row[1] or "") in owner_session_ids
+            and str(row[2] or "").strip() not in {"", conversation_id}
+            for row in rows
+        ):
+            raise LifecyclePublicationConflictError(
+                "Compaction publication source ownership changed"
+            )
+        authoritative_ids = [
+            int(row[0]) for row in rows if belongs_to_conversation(row)
+        ]
         proven_ids = sorted(covered_ids + excluded_ids)
         if authoritative_ids != proven_ids:
             raise LifecyclePublicationConflictError(
@@ -1023,12 +1091,13 @@ class LifecycleStateStore:
             """
             SELECT 1
             FROM summary_nodes AS node, json_each(node.source_ids) AS source
-            WHERE node.session_id = ? AND node.source_type = 'messages'
+            WHERE node.session_id IN (SELECT value FROM json_each(?))
+              AND node.source_type = 'messages'
               AND node.node_id != ?
               AND source.value IN (SELECT value FROM json_each(?))
             LIMIT 1
             """,
-            (session_id, publication_node_id, str(all_covered_ids)),
+            (owner_session_scope, publication_node_id, str(all_covered_ids)),
         ).fetchone():
             raise LifecyclePublicationConflictError(
                 "Compaction publication source lineage is already claimed"

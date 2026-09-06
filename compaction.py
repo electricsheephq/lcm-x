@@ -615,9 +615,22 @@ class CompactionMixin:
         proven = {int(store_id) for store_id in already_proven_store_ids}
         proofs = dict(initial_proofs)
         after_store_id = expected_frontier
+        owner_session_ids = {str(self._session_id or "")}
+        lifecycle = self._lifecycle.get_by_conversation(self._conversation_id)
+        if lifecycle is not None:
+            owner_session_ids.update(
+                str(session_id)
+                for session_id in (
+                    lifecycle.current_session_id,
+                    lifecycle.last_finalized_session_id,
+                )
+                if session_id
+            )
+        owner_session_ids.discard("")
         while after_store_id < covered_end:
-            rows = self._store.get_session_messages_after(
-                self._session_id,
+            rows = self._store.get_conversation_messages_after(
+                self._conversation_id,
+                session_ids=owner_session_ids,
                 after_store_id=after_store_id,
             )
             if not rows:
