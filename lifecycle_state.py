@@ -168,6 +168,7 @@ class LifecycleStateStore:
         session_id: str,
         *,
         conversation_id: str | None = None,
+        preserve_frontier: bool = True,
     ) -> LifecycleState:
         existing = self.get_by_conversation(conversation_id) if conversation_id else self.get_by_session(session_id)
         conversation_id = conversation_id or (existing.conversation_id if existing else session_id)
@@ -197,9 +198,13 @@ class LifecycleStateStore:
             # older range even for an ordinary (non-compression) rollover, so
             # the next publication can admit the retained fresh tail without
             # replaying already-covered rows.
-            current_frontier = max(
-                existing.current_frontier_store_id,
-                existing.last_finalized_frontier_store_id,
+            current_frontier = (
+                max(
+                    existing.current_frontier_store_id,
+                    existing.last_finalized_frontier_store_id,
+                )
+                if preserve_frontier
+                else 0
             )
             current_bound_at = (
                 existing.current_bound_at if existing.current_session_id == session_id else now

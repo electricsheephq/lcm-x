@@ -504,6 +504,32 @@ def test_fresh_tail_merged_assistant_run_preserves_every_source_id(tmp_path, mon
         _folded_message, retained_rows = folded_lineage
         assert len(retained_rows) > 1
 
+        state_db_path = tmp_path / "home" / "state.db"
+        state_db_path.parent.mkdir(parents=True, exist_ok=True)
+        state_db = sqlite3.connect(str(state_db_path))
+        state_db.executescript(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                parent_session_id TEXT,
+                end_reason TEXT,
+                ended_at REAL,
+                model_config TEXT,
+                source TEXT,
+                started_at REAL
+            );
+            """
+        )
+        state_db.executemany(
+            "INSERT INTO sessions(id, parent_session_id, end_reason, ended_at, model_config, source, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("s1", None, "compression", 1.0, "{}", "cli", 1.0),
+                ("s2", "s1", None, None, "{}", "cli", 2.0),
+            ],
+        )
+        state_db.commit()
+        state_db.close()
+
         engine.on_session_start(
             "s2",
             platform="cli",
@@ -660,6 +686,77 @@ def test_generated_fold_after_orphan_tool_keeps_post_cleanup_lineage(tmp_path):
         ]
     finally:
         engine.shutdown()
+
+
+def test_reassembling_existing_fold_preserves_all_source_ids(tmp_path):
+    conversation_id = "issue-247-reassembled-fold"
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "reassembled-fold.db"),
+            fresh_tail_count=24,
+            new_session_retain_depth=-1,
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    engine.on_session_start(
+        "s1",
+        platform="cli",
+        conversation_id=conversation_id,
+        context_length=200_000,
+    )
+    first_source_id = engine._store.append(
+        "s1",
+        {"role": "assistant", "content": "assistant-one"},
+        conversation_id=conversation_id,
+    )
+    second_source_id = engine._store.append(
+        "s1",
+        {"role": "assistant", "content": "assistant-two"},
+        conversation_id=conversation_id,
+    )
+    try:
+        engine._dag.add_node(
+            SummaryNode(
+                session_id="s1",
+                summary="retained summary",
+                token_count=1,
+                source_token_count=2,
+                source_ids=[first_source_id, second_source_id],
+            )
+        )
+        anchor = {"role": "user", "content": "current objective"}
+        first_context = engine._assemble_context(
+            None,
+            [
+                {"role": "assistant", "content": "assistant-one"},
+                {"role": "assistant", "content": "assistant-two"},
+                {"role": "user", "content": "tail"},
+            ],
+            assembly_cap_override=200_000,
+            retained_user_message=anchor,
+        )
+        first_lineage = engine._load_folded_tail_lineage(first_context)
+        assert first_lineage is not None
+        assert [row["store_id"] for row in first_lineage[1]] == [
+            first_source_id,
+            second_source_id,
+        ]
+
+        second_context = engine._assemble_context(
+            None,
+            first_context[1:],
+            assembly_cap_override=200_000,
+            retained_user_message=anchor,
+        )
+        second_lineage = engine._load_folded_tail_lineage(second_context)
+    finally:
+        engine.shutdown()
+
+    assert second_lineage is not None
+    assert [row["store_id"] for row in second_lineage[1]] == [
+        first_source_id,
+        second_source_id,
+    ]
 
 
 def test_generated_fold_lineage_failure_restores_merged_tail(tmp_path, monkeypatch):

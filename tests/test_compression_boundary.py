@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import time
 
 from hermes_lcm.config import LCMConfig
@@ -57,6 +58,31 @@ def test_compression_boundary_carries_summaries_without_moving_raw_messages(tmp_
             ),
             encoding="utf-8",
         )
+        state_db = tmp_path / "home" / "state.db"
+        state_db.parent.mkdir(parents=True, exist_ok=True)
+        host = sqlite3.connect(state_db)
+        host.executescript(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                parent_session_id TEXT,
+                end_reason TEXT,
+                ended_at REAL,
+                model_config TEXT,
+                source TEXT,
+                started_at REAL
+            );
+            """
+        )
+        host.executemany(
+            "INSERT INTO sessions(id, parent_session_id, end_reason, ended_at, model_config, source, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("parent-session", None, "compression", 1.0, "{}", "discord", 1.0),
+                ("child-session", "parent-session", None, None, "{}", "discord", 2.0),
+            ],
+        )
+        host.commit()
+        host.close()
 
         engine.on_session_start(
             "child-session",

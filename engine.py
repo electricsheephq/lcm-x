@@ -1948,9 +1948,14 @@ class LCMEngine(
         session_id: str,
         *,
         conversation_id: str | None = None,
+        preserve_frontier: bool = True,
     ) -> None:
         self._validate_conversation_admission(session_id, conversation_id)
-        state = self._lifecycle.bind_session(session_id, conversation_id=conversation_id)
+        state = self._lifecycle.bind_session(
+            session_id,
+            conversation_id=conversation_id,
+            preserve_frontier=preserve_frontier,
+        )
         self._conversation_id = state.conversation_id
         self._lcm_session_last_conversation_id[session_id] = state.conversation_id
         self._last_compacted_store_id = state.current_frontier_store_id
@@ -3012,6 +3017,25 @@ class LCMEngine(
             session_id,
             kwargs,
         )
+        host_state_available = False
+        host_state_path = self._state_db_path(kwargs)
+        if host_state_path.exists():
+            try:
+                uri = host_state_path.resolve().as_uri() + "?mode=ro"
+                conn = sqlite3.connect(uri, uri=True)
+                try:
+                    columns = {
+                        str(row[1] or "")
+                        for row in conn.execute("PRAGMA table_info(sessions)")
+                    }
+                finally:
+                    conn.close()
+                # Older/minimal host fixtures do not expose the durable
+                # compression marker. They cannot contradict the LCM-only
+                # callback path, so leave legacy behavior intact there.
+                host_state_available = {"id", "parent_session_id", "end_reason"}.issubset(columns)
+            except (OSError, sqlite3.Error, ValueError):
+                host_state_available = False
 
         # A duplicate callback after the new LCM state is committed is safe
         # only when the committed lifecycle edge or the host's durable chain
@@ -3068,7 +3092,9 @@ class LCMEngine(
             current_session_id = str(state.current_session_id or "")
             finalized_session_id = str(state.last_finalized_session_id or "")
             if current_session_id == old_session_id:
-                return old_session_id, state, "current session matches callback source"
+                if host_successor_proven or not host_state_available:
+                    return old_session_id, state, "current session matches proven callback source"
+                return "", None, "current source lacks host successor proof"
             if current_session_id:
                 if _host_chain_proves(current_session_id):
                     return current_session_id, state, "current session is on host chain"
@@ -3211,6 +3237,10 @@ class LCMEngine(
             )
 
         if can_reassign:
+            # A compression boundary is a lifecycle reset even when the host
+            # skips the explicit reset callback. Record it before the atomic
+            # rollover so the staged transaction preserves the timestamp.
+            self._lifecycle.record_reset(conversation_id)
             self._copy_generated_ignore_hashes_to_session(
                 source_session_id,
                 session_id,
@@ -3261,6 +3291,7 @@ class LCMEngine(
             self._bind_lifecycle_state(
                 session_id,
                 conversation_id=kwargs.get("conversation_id"),
+                preserve_frontier=True,
             )
             self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
             self._schedule_ingest_cursor_reconciliation()
@@ -3300,11 +3331,7 @@ class LCMEngine(
         previous_session_id = self._session_id
         previous_conversation_id = self._conversation_id
         requested_conversation_id = str(kwargs.get("conversation_id") or session_id)
-        if not (boundary_reason == "compression" and old_session_id and old_session_id != session_id):
-            self._validate_conversation_admission(
-                session_id,
-                kwargs.get("conversation_id"),
-            )
+        preserve_frontier = not bool(kwargs.pop("_lcm_reset_frontier", False))
         self._lcm_current_start_allows_bypass_lineage = False
         requested_platform = str(kwargs.get("platform") or self._session_platform or "")
         pre_reset_preserve_ambiguous_no_frame_old_session = False
@@ -3503,6 +3530,7 @@ class LCMEngine(
                 self._bind_lifecycle_state(
                     session_id,
                     conversation_id=kwargs.get("conversation_id"),
+                    preserve_frontier=preserve_frontier,
                 )
                 self._schedule_ingest_cursor_reconciliation()
                 self._log_session_filter_diagnostics()
@@ -3569,6 +3597,7 @@ class LCMEngine(
         self._bind_lifecycle_state(
             session_id,
             conversation_id=kwargs.get("conversation_id"),
+            preserve_frontier=preserve_frontier,
         )
         self._schedule_ingest_cursor_reconciliation()
         self._log_session_filter_diagnostics()
@@ -4192,7 +4221,10 @@ class LCMEngine(
                 bound_session_id,
             )
 
-        self.on_session_start(new_session_id, conversation_id=conversation_id, **kwargs)
+        start_kwargs = dict(kwargs)
+        if boundary_reason != "compression" and not previous_messages:
+            start_kwargs["_lcm_reset_frontier"] = True
+        self.on_session_start(new_session_id, conversation_id=conversation_id, **start_kwargs)
 
         if not carry_over_context:
             return 0
@@ -6846,12 +6878,24 @@ class LCMEngine(
                 tail_selected
                 and tail_selected[0].get("role") == summary_role
             ):
-                source_ids = self._get_store_id_map_for_messages(tail_selected)
-                folded_source_store_id = int(
-                    source_ids.get(id(tail_selected[0])) or 0
-                )
+                prior_folded_lineage = self._load_folded_tail_lineage(tail_selected)
+                if prior_folded_lineage is not None:
+                    _prior_folded_message, prior_source_rows = prior_folded_lineage
+                    folded_source_store_ids = [
+                        int(row.get("store_id") or 0)
+                        for row in prior_source_rows
+                    ]
+                    folded_source_store_id = int(folded_source_store_ids[0] or 0)
+                    source_ids = {
+                        id(tail_selected[0]): folded_source_store_id,
+                    }
+                else:
+                    source_ids = self._get_store_id_map_for_messages(tail_selected)
+                    folded_source_store_id = int(
+                        source_ids.get(id(tail_selected[0])) or 0
+                    )
                 if folded_source_store_id > 0:
-                    if summary_role == "assistant":
+                    if summary_role == "assistant" and prior_folded_lineage is None:
                         # Final active-context cleanup merges adjacent plain
                         # assistant turns. Capture that complete leading run
                         # before cleanup so publication can retain every raw
