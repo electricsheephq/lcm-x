@@ -835,11 +835,26 @@ class CompactionMixin:
             # turn; that must remain eligible for compaction instead of being
             # replayed forever as fresh-looking intent.
             leading_anchor_count = self._leading_anchor_count(working_messages)
-            # Map every occurrence in this pass once, before any replayed
-            # scaffold is removed.  Mapping the scaffold and the remaining
-            # suffix independently restarts the monotonic cursor and can
-            # assign both occurrences the same durable source row.
-            pass_store_id_map = self._get_store_id_map_for_messages(working_messages)
+            # Map the permanent system scaffold separately, then map every
+            # occurrence after it once.  An anchored system row that was just
+            # ingested must not consume the suffix's monotonic cursor: it would
+            # shift the compactable suffix onto duplicate post-rotate rows.
+            # Reserve the scaffold's exact row while mapping the suffix, and
+            # keep a proven retained user anchor in that suffix map so all
+            # publication exclusions remain disjoint from source coverage.
+            anchor_store_id_map = (
+                self._get_store_id_map_for_messages([working_messages[0]])
+                if leading_anchor_count
+                else {}
+            )
+            pass_messages = (
+                working_messages[1:] if leading_anchor_count else working_messages
+            )
+            pass_store_id_map = self._get_store_id_map_for_messages(
+                pass_messages,
+                excluded_store_ids=set(anchor_store_id_map.values()),
+            )
+            pass_store_id_map.update(anchor_store_id_map)
             self._current_compress_store_ids_by_message_id = pass_store_id_map
             publication_excluded_store_ids = self._get_store_ids_for_messages(
                 working_messages[:leading_anchor_count],

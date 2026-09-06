@@ -1958,7 +1958,12 @@ class ReconcileMixin:
         """Return whether ``message`` is the unique active durable fold."""
         return bool(self._active_folded_tail_identity_overrides([message]))
 
-    def _get_store_id_map_for_messages(self, messages: List[Dict[str, Any]]) -> dict[int, int]:
+    def _get_store_id_map_for_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        excluded_store_ids: set[int] | None = None,
+    ) -> dict[int, int]:
         """Map current raw message objects back to store_ids in stable order.
 
         Matching starts strictly after ``_last_compacted_store_id`` so repeated
@@ -1968,6 +1973,11 @@ class ReconcileMixin:
         the store has, the surplus earliest active occurrences are treated as
         synthetic/carry-over and left unmapped so they cannot steal later stored
         literal copies with the same content.
+
+        ``excluded_store_ids`` is an internal occurrence reservation used when
+        a permanent scaffold is mapped separately from the compactable suffix.
+        The reserved rows remain available to publication exclusion accounting,
+        but cannot be claimed by the suffix's monotonic matcher.
 
         One explicitly registered retained-user occurrence may sit at or below
         the compaction frontier. It is admitted only when exactly one active
@@ -2052,6 +2062,14 @@ class ReconcileMixin:
                 break
             candidates.extend(page)
             next_candidate_after = page[-1]["store_id"]
+
+        if excluded_store_ids:
+            reserved = {int(store_id) for store_id in excluded_store_ids if int(store_id) > 0}
+            candidates = [
+                candidate
+                for candidate in candidates
+                if int(candidate.get("store_id") or 0) not in reserved
+            ]
 
         def active_lineage_identity(
             message: Dict[str, Any],

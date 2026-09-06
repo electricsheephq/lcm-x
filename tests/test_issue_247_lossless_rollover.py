@@ -546,6 +546,144 @@ def test_tool_cleanup_folded_assistant_run_preserves_exact_source_ids(tmp_path):
         engine.shutdown()
 
 
+def test_generated_fold_after_orphan_tool_keeps_post_cleanup_lineage(tmp_path):
+    conversation_id = "issue-247-generated-fold-cleanup"
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "generated-fold-cleanup.db"),
+            fresh_tail_count=24,
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    engine.on_session_start(
+        "s1",
+        platform="cli",
+        conversation_id=conversation_id,
+        context_length=200_000,
+    )
+    first_source_id = engine._store.append(
+        "s1",
+        {"role": "assistant", "content": "assistant-one"},
+        conversation_id=conversation_id,
+    )
+    engine._store.append(
+        "s1",
+        {
+            "role": "tool",
+            "tool_call_id": "orphan-call",
+            "content": "late orphan result",
+        },
+        conversation_id=conversation_id,
+    )
+    second_source_id = engine._store.append(
+        "s1",
+        {"role": "assistant", "content": "assistant-two"},
+        conversation_id=conversation_id,
+    )
+    engine._dag.add_node(
+        SummaryNode(
+            session_id="s1",
+            summary="prior durable summary",
+            token_count=1,
+            source_token_count=1,
+            source_ids=[],
+        )
+    )
+    try:
+        context = engine._assemble_context(
+            {"role": "system", "content": "system"},
+            engine._store.get_session_messages("s1"),
+            assembly_cap_override=200_000,
+            retained_user_message={"role": "user", "content": "current objective"},
+        )
+        folded_lineage = engine._load_folded_tail_lineage(context)
+        assert folded_lineage is not None
+        folded_message, source_rows = folded_lineage
+        assert "assistant-one" in folded_message["content"]
+        assert "assistant-two" in folded_message["content"]
+        assert [row["store_id"] for row in source_rows] == [
+            first_source_id,
+            second_source_id,
+        ]
+    finally:
+        engine.shutdown()
+
+
+def test_legacy_conversation_alias_refuses_unproven_current_session(tmp_path):
+    conversation_id = "legacy-session-alias"
+    hermes_home = tmp_path / "home"
+    hermes_home.mkdir()
+    state_db = hermes_home / "state.db"
+    host = sqlite3.connect(state_db)
+    host.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            parent_session_id TEXT,
+            end_reason TEXT,
+            ended_at REAL,
+            model_config TEXT,
+            source TEXT,
+            started_at REAL
+        );
+        """
+    )
+    host.executemany(
+        "INSERT INTO sessions(id, parent_session_id, end_reason, ended_at, model_config, source, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("s1", None, "compression", 1.0, "{}", "cli", 1.0),
+            ("s3", "s1", None, None, "{}", "cli", 3.0),
+        ],
+    )
+    host.commit()
+    host.close()
+
+    engine = LCMEngine(
+        config=LCMConfig(database_path=str(tmp_path / "legacy-alias.db")),
+        hermes_home=str(hermes_home),
+    )
+    engine.on_session_start(
+        "s1",
+        platform="cli",
+        conversation_id=conversation_id,
+        context_length=200_000,
+    )
+    source_id = engine._store.append(
+        "s1",
+        {"role": "assistant", "content": "committed source"},
+        conversation_id=conversation_id,
+    )
+    engine._lifecycle.advance_frontier(conversation_id, "s1", source_id)
+    engine.on_session_start(
+        "s4",
+        platform="cli",
+        conversation_id=conversation_id,
+        context_length=200_000,
+    )
+    before = engine._lifecycle.get_by_conversation(conversation_id)
+    assert before is not None
+    assert before.current_session_id == "s4"
+    engine.on_session_start(
+        "s3",
+        platform="cli",
+        conversation_id=conversation_id,
+        boundary_reason="compression",
+        old_session_id="s1",
+        context_length=200_000,
+        hermes_home=str(hermes_home),
+    )
+    after = engine._lifecycle.get_by_conversation(conversation_id)
+    try:
+        assert after is not None
+        assert after.current_session_id == "s4"
+        assert after.current_frontier_store_id == before.current_frontier_store_id
+        assert engine._store.get(source_id)["session_id"] == "s1"
+        assert engine._session_id == "s4"
+        assert engine._store.get_session_count("s3") == 0
+    finally:
+        engine.shutdown()
+
+
 def test_atomic_rollover_rolls_back_lifecycle_and_node_reassignment(tmp_path, monkeypatch):
     conversation_id = "issue-247-atomic"
     engine = LCMEngine(

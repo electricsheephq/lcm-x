@@ -3041,7 +3041,27 @@ class LCMEngine(
                 state.conversation_id == old_session_id
                 and state.current_session_id
             ):
-                return state.current_session_id, state
+                # Some legacy hosts used the old session id as the lifecycle
+                # conversation id.  That alias does not prove that its live
+                # current session is the source for this callback: a stale
+                # s4 must not be reassigned to s3 merely because s1 -> s3 is
+                # a valid host edge.  Select the current row only when it is
+                # itself on the exact durable s1 -> s4 -> s3 chain.
+                current_session_id = str(state.current_session_id)
+                if (
+                    self._host_proves_compression_successor(
+                        old_session_id,
+                        current_session_id,
+                        kwargs,
+                    )
+                    and self._host_proves_compression_successor(
+                        current_session_id,
+                        session_id,
+                        kwargs,
+                    )
+                ):
+                    return current_session_id, state
+                return "", None
             if (
                 state.current_session_id is None
                 and state.last_finalized_session_id
@@ -3068,6 +3088,21 @@ class LCMEngine(
             host_source_session_id, host_source_state = _host_source_from_session_state(
                 session_state
             )
+        if (
+            not host_source_session_id
+            and conversation_state is not None
+            and _state_conversation_matches(conversation_state)
+            and conversation_state.conversation_id == old_session_id
+            and conversation_state.current_session_id
+            and conversation_state.current_session_id != old_session_id
+        ):
+            logger.warning(
+                "LCM refused compression rebind %s -> %s: legacy conversation alias current session %s is outside the proven host chain",
+                old_session_id,
+                session_id,
+                conversation_state.current_session_id,
+            )
+            return
         if (
             not host_source_session_id
             and host_successor_proven
@@ -6917,6 +6952,29 @@ class LCMEngine(
             merge_adjacent_assistants=False,
         )
         cleanup_source_ids = self._get_store_id_map_for_messages(cleanup_ready)
+        if folded_active_tail is not None and folded_source_store_ids:
+            # The generated fold has no raw replay identity, so the cleanup
+            # mapper cannot find it after an orphan tool row is removed.  The
+            # fold's source row was proven before adding generated context;
+            # carry that exact occurrence into the post-cleanup run.  This
+            # keeps the later assistant occurrence distinct and lets the
+            # final merged message receive complete lineage.
+            folded_cleanup = self._sanitize_active_preserved_objective_message(
+                folded_active_tail
+            )
+            if folded_cleanup is not None:
+                folded_cleanup = _clean_active_assistant_message(folded_cleanup)
+            if folded_cleanup is not None:
+                folded_cleanup_identity = self._message_replay_identity(folded_cleanup)
+                folded_cleanup_matches = [
+                    message
+                    for message in cleanup_ready
+                    if self._message_replay_identity(message) == folded_cleanup_identity
+                ]
+                if len(folded_cleanup_matches) == 1:
+                    cleanup_source_ids[id(folded_cleanup_matches[0])] = int(
+                        folded_source_store_ids[0]
+                    )
         post_cleanup_lineage_candidates: list[tuple[str, list[int]]] = []
         cleanup_index = 0
         while cleanup_index < len(cleanup_ready):
