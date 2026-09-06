@@ -15,9 +15,14 @@ lifecycle) through normal attribute lookup. ``LCMEngine`` mixes this in ahead of
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
+import math
 import time
 from typing import Any, Dict, List, Optional
+
+from agent.auxiliary_client import AuxiliaryExplicitCancellation
 
 from .dag import SummaryNode
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
@@ -32,9 +37,134 @@ logger = logging.getLogger(__name__)
 
 _THRESHOLD_FULL_SWEEP_MAX_PASSES = 12
 _THRESHOLD_FULL_SWEEP_MAX_SECONDS = 120.0
+_LCM_INVOCATION_TOTAL_CEILING_SECONDS = 600.0
+
+
+class _CompressionInvocationGuard:
+    """Immutable host-cancellation snapshot for one LCM invocation."""
+
+    __slots__ = ("cancel_check", "publication_fence", "deadline_monotonic")
+
+    def __init__(
+        self,
+        *,
+        cancel_check: Any,
+        publication_fence: Any,
+        deadline_monotonic: float,
+    ) -> None:
+        self.cancel_check = cancel_check
+        self.publication_fence = publication_fence
+        self.deadline_monotonic = deadline_monotonic
+
+    @property
+    def has_atomic_fence(self) -> bool:
+        fence = self.publication_fence
+        return bool(
+            fence is not None
+            and callable(getattr(fence, "begin_lock_setup", None))
+            and callable(getattr(fence, "finish_lock_setup", None))
+        )
+
+    def is_cancelled(self) -> bool:
+        deadline = self.deadline_monotonic
+        if deadline is not None and time.monotonic() >= deadline:
+            return True
+        fence = self.publication_fence
+        if fence is not None:
+            try:
+                if bool(getattr(fence, "is_cancelled", False)):
+                    return True
+            except BaseException:
+                return True
+        check = self.cancel_check
+        if callable(check):
+            try:
+                return bool(check())
+            except BaseException:
+                return True
+        return False
+
+    def begin_publication(self) -> bool:
+        """Admit one short DAG transaction, retaining the host fence lock."""
+        if self.has_atomic_fence:
+            fence = self.publication_fence
+            try:
+                if not bool(fence.begin_lock_setup()):
+                    return False
+            except BaseException:
+                return False
+            # Re-check while the fence lock is held, then retain it through
+            # SummaryDAG's transaction.
+            if self.is_cancelled():
+                try:
+                    fence.finish_lock_setup()
+                finally:
+                    return False
+            return True
+        # Old hosts retain callback-based behavior without an atomic claim.
+        return not self.is_cancelled()
+
+    def finish_publication(self) -> None:
+        if self.has_atomic_fence:
+            self.publication_fence.finish_lock_setup()
+
+
+_COMPRESSION_INVOCATION: contextvars.ContextVar[_CompressionInvocationGuard | None] = (
+    contextvars.ContextVar("hermes_lcm_compression_invocation", default=None)
+)
+
+
+def _read_invocation_deadline(publication_fence: Any) -> float:
+    """Capture one absolute deadline from the current host invocation."""
+    deadline = None
+    if publication_fence is not None:
+        try:
+            deadline = getattr(publication_fence, "deadline_monotonic", None)
+        except BaseException:
+            deadline = None
+    if not isinstance(deadline, (int, float)) or not math.isfinite(float(deadline)):
+        try:
+            from agent.auxiliary_client import _current_aux_stream_deadline
+
+            deadline = _current_aux_stream_deadline()
+        except Exception:
+            deadline = None
+    if not isinstance(deadline, (int, float)) or not math.isfinite(float(deadline)):
+        deadline = time.monotonic() + _LCM_INVOCATION_TOTAL_CEILING_SECONDS
+    return float(deadline)
 
 
 class CompactionMixin:
+    def _capture_compression_invocation(self) -> _CompressionInvocationGuard:
+        """Snapshot host guards once before provider or DAG work."""
+        publication_fence = getattr(self, "_compression_publication_fence", None)
+        return _CompressionInvocationGuard(
+            cancel_check=getattr(self, "_compression_cancelled_check", None),
+            publication_fence=publication_fence,
+            deadline_monotonic=_read_invocation_deadline(publication_fence),
+        )
+
+    def _compression_invocation_guard(self) -> _CompressionInvocationGuard | None:
+        return _COMPRESSION_INVOCATION.get()
+
+    def _compression_invocation_deadline(self) -> float | None:
+        invocation = self._compression_invocation_guard()
+        return invocation.deadline_monotonic if invocation is not None else None
+
+    @contextlib.contextmanager
+    def _compression_publication_admission(self):
+        """Fence one short DAG publication; provider work stays unfenced."""
+        invocation = self._compression_invocation_guard()
+        if invocation is None:
+            yield
+            return
+        if not invocation.begin_publication():
+            raise AuxiliaryExplicitCancellation()
+        try:
+            yield
+        finally:
+            invocation.finish_publication()
+
     def _maybe_reclassify_late_auxiliary_before_compaction_write(self) -> None:
         maybe_reclassify = getattr(
             self,
@@ -495,6 +625,8 @@ class CompactionMixin:
                  focus_topic: Optional[str] = None,
                  force: bool = False) -> List[Dict[str, Any]]:
         """Run compaction and leave a terminal public status on every failure."""
+        invocation = self._capture_compression_invocation()
+        invocation_token = _COMPRESSION_INVOCATION.set(invocation)
         try:
             with self._fresh_tail_pressure_yield_invocation():
                 return self._compress_impl(
@@ -507,6 +639,8 @@ class CompactionMixin:
             self._last_compression_status = "error"
             self._last_compression_noop_reason = ""
             raise
+        finally:
+            _COMPRESSION_INVOCATION.reset(invocation_token)
 
     def _fail_open_after_publication_failure(
         self,
@@ -770,6 +904,9 @@ class CompactionMixin:
             and estimated_active_tokens >= self.threshold_tokens
         )
         sweep_deadline = time.monotonic() + _THRESHOLD_FULL_SWEEP_MAX_SECONDS
+        invocation_deadline = self._compression_invocation_deadline()
+        if invocation_deadline is not None:
+            sweep_deadline = min(sweep_deadline, invocation_deadline)
         configured_sweep_target = int(self._config.summary_prefix_target_tokens)
         sweep_target_tokens = max(
             1,
@@ -1230,7 +1367,8 @@ class CompactionMixin:
                             filter_exclusion_proofs,
                         )
                     before_commit = stage_frontier
-                self._dag.add_node(node, before_commit=before_commit)
+                with self._compression_publication_admission():
+                    self._dag.add_node(node, before_commit=before_commit)
             except Exception as exc:
                 if (
                     not _is_sqlite_locked_error(exc)

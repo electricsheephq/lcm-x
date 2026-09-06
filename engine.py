@@ -1792,6 +1792,8 @@ class LCMEngine(
         focus_topic: Optional[str] = None,
         deadline: Optional[float] = None,
     ) -> tuple[List[Dict[str, Any]], int, str, int, int]:
+        if deadline is None:
+            deadline = self._compression_invocation_deadline()
         attempt_chunk = list(initial_chunk)
         max_attempts = 3
         attempt_number = 0
@@ -6193,6 +6195,8 @@ class LCMEngine(
         deadline: Optional[float] = None,
     ) -> tuple[int, int, int]:
         """Persist one same-depth condensation and return source/output tokens and level."""
+        if deadline is None:
+            deadline = self._compression_invocation_deadline()
         if not nodes:
             raise ValueError("condensation requires at least one summary node")
         depth = nodes[0].depth
@@ -6243,7 +6247,8 @@ class LCMEngine(
             latest_at=latest_at,
             expand_hint=self._extract_expand_hint(summary_text),
         )
-        self._dag.add_node(condensed_node)
+        with self._compression_publication_admission():
+            self._dag.add_node(condensed_node)
         self._invalidate_rollups_for_published_node(condensed_node)
         return source_tokens, summary_tokens, level
 
