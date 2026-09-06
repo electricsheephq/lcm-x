@@ -3075,12 +3075,32 @@ class LCMEngine(
             and current_state.current_session_id
             and current_state.current_session_id != session_id
         ):
-            # The host callback may carry an older parent while LCM has already
-            # committed an intermediate current session. Rebind from that
-            # committed LCM source into the exact host-proven successor; do
-            # not move from the stale host parent or reset the frontier.
-            host_source_session_id = current_state.current_session_id
-            host_source_state = current_state
+            current_session_on_host_chain = (
+                self._host_proves_compression_successor(
+                    old_session_id,
+                    current_state.current_session_id,
+                    kwargs,
+                )
+                and self._host_proves_compression_successor(
+                    current_state.current_session_id,
+                    session_id,
+                    kwargs,
+                )
+            )
+            if current_session_on_host_chain:
+                # The host callback may carry an older parent while LCM has
+                # already committed an intermediate current session. Rebind
+                # only from an LCM source that is itself on the exact durable
+                # host chain; a merely newer local session must be preserved.
+                host_source_session_id = current_state.current_session_id
+                host_source_state = current_state
+            else:
+                logger.warning(
+                    "LCM refused stale compression rebind %s -> %s: current session %s is outside the proven host chain",
+                    old_session_id,
+                    session_id,
+                    current_state.current_session_id,
+                )
 
         source_session_id = host_source_session_id or old_session_id
         source_state = host_source_state or session_state
@@ -6872,8 +6892,57 @@ class LCMEngine(
 
         # ── Active-context cleanup / tool-pair guardrail ──
         # Drop assistant turns that carry only blank/internal structured content,
-        # then ensure provider-valid tool-call/result sequencing.
-        result = self._sanitize_active_context_messages(result)
+        # then ensure provider-valid tool-call/result sequencing. Capture the
+        # post-tool-cleanup assistant runs before the final merge: an orphan or
+        # late tool row is intentionally excluded, but the assistant rows on
+        # either side still need their exact durable source ids.
+        cleanup_ready = self._sanitize_active_context_messages(
+            result,
+            merge_adjacent_assistants=False,
+        )
+        cleanup_source_ids = self._get_store_id_map_for_messages(cleanup_ready)
+        post_cleanup_lineage_candidates: list[tuple[str, list[int]]] = []
+        cleanup_index = 0
+        while cleanup_index < len(cleanup_ready):
+            candidate = cleanup_ready[cleanup_index]
+            if (
+                candidate.get("role") != "assistant"
+                or not isinstance(candidate.get("content"), str)
+                or candidate.get("codex_reasoning_items")
+                or candidate.get("codex_message_items")
+                or candidate.get("finish_reason") == "incomplete"
+            ):
+                cleanup_index += 1
+                continue
+            run = [candidate]
+            run_index = cleanup_index + 1
+            while run_index < len(cleanup_ready):
+                next_message = cleanup_ready[run_index]
+                if (
+                    next_message.get("role") != "assistant"
+                    or not isinstance(next_message.get("content"), str)
+                    or next_message.get("codex_reasoning_items")
+                    or next_message.get("codex_message_items")
+                    or next_message.get("finish_reason") == "incomplete"
+                ):
+                    break
+                run.append(next_message)
+                run_index += 1
+            if len(run) > 1:
+                source_ids = [
+                    int(cleanup_source_ids.get(id(message)) or 0)
+                    for message in run
+                ]
+                if any(source_id <= 0 for source_id in source_ids):
+                    logger.warning(
+                        "LCM omitted folded lineage for a cleaned assistant run with unmapped source rows"
+                    )
+                elif len(source_ids) == len(set(source_ids)):
+                    post_cleanup_lineage_candidates.append(
+                        ("\n".join(message["content"].strip() for message in run), source_ids)
+                    )
+            cleanup_index = max(run_index, cleanup_index + 1)
+        result = _merge_adjacent_assistant_messages(cleanup_ready)
         if leading_msg is None:
             while result and result[0].get("role") in {"assistant", "tool"}:
                 result = result[1:]
@@ -6900,8 +6969,12 @@ class LCMEngine(
 
         existing_folded_lineage = self._load_folded_tail_lineage(result)
         lineage_written = False
-        if len(folded_lineage_candidates) == 1:
-            expected_content, source_ids = folded_lineage_candidates[0]
+        lineage_candidates = []
+        for candidate in (*folded_lineage_candidates, *post_cleanup_lineage_candidates):
+            if candidate not in lineage_candidates:
+                lineage_candidates.append(candidate)
+        matching_lineage_candidates = []
+        for expected_content, source_ids in lineage_candidates:
             matches = [
                 message
                 for message in result
@@ -6911,10 +6984,13 @@ class LCMEngine(
                 )
             ]
             if len(matches) == 1:
-                lineage_written = self._write_folded_tail_lineage(
-                    matches[0],
-                    source_ids,
-                )
+                matching_lineage_candidates.append((source_ids, matches[0]))
+        if len(matching_lineage_candidates) == 1:
+            source_ids, folded_message = matching_lineage_candidates[0]
+            lineage_written = self._write_folded_tail_lineage(
+                folded_message,
+                source_ids,
+            )
         if not lineage_written and existing_folded_lineage is None:
             self._clear_folded_tail_lineage()
 

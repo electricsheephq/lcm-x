@@ -37,7 +37,14 @@ If a compression boundary callback is stale, LCM keeps the committed frontier
 and active binding unless Hermes' read-only `state.db` proves one unambiguous
 compression successor for that exact child. A proven duplicate callback is a
 no-op; an ambiguous or missing host successor fails closed without rebinding
-or moving source rows.
+or moving source rows. If LCM is already on an intermediate session, that
+session must itself be proven on the host chain from the callback's old session
+to the requested child; a newer local session is preserved.
+
+When active cleanup drops an orphan or late tool row, adjacent assistant turns
+may become one provider message. Their lineage is recorded after tool cleanup
+from the exact durable assistant occurrences, excluding the dropped tool row;
+an unmapped assistant occurrence prevents lineage publication.
 
 Summary escalation carries one absolute sweep deadline through every model
 level and rescue attempt. A late result is discarded and the pending source and

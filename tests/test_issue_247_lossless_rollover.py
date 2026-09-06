@@ -378,6 +378,65 @@ def test_fresh_tail_merged_assistant_run_preserves_every_source_id(tmp_path, mon
         engine.shutdown()
 
 
+def test_tool_cleanup_folded_assistant_run_preserves_exact_source_ids(tmp_path):
+    conversation_id = "issue-247-tool-cleanup-lineage"
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "tool-cleanup-lineage.db"),
+            fresh_tail_count=24,
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    engine.on_session_start(
+        "s1",
+        platform="cli",
+        conversation_id=conversation_id,
+        context_length=200_000,
+    )
+    try:
+        engine._store.append(
+            "s1",
+            {"role": "assistant", "content": "assistant-one"},
+            conversation_id=conversation_id,
+        )
+        engine._store.append(
+            "s1",
+            {
+                "role": "tool",
+                "tool_call_id": "orphan-call",
+                "content": "late orphan result",
+            },
+            conversation_id=conversation_id,
+        )
+        engine._store.append(
+            "s1",
+            {"role": "assistant", "content": "assistant-two"},
+            conversation_id=conversation_id,
+        )
+        engine._store.append(
+            "s1",
+            {"role": "user", "content": "continue"},
+            conversation_id=conversation_id,
+        )
+        stored = engine._store.get_session_messages("s1")
+        context = engine._assemble_context(
+            {"role": "system", "content": "system"},
+            stored,
+            assembly_cap_override=200_000,
+        )
+        folded_lineage = engine._load_folded_tail_lineage(context)
+        assert folded_lineage is not None
+        folded_message, source_rows = folded_lineage
+        assert folded_message["content"] == "assistant-one\nassistant-two"
+        assert [row["store_id"] for row in source_rows] == [
+            stored[0]["store_id"],
+            stored[2]["store_id"],
+        ]
+        assert stored[1]["store_id"] not in [row["store_id"] for row in source_rows]
+    finally:
+        engine.shutdown()
+
+
 def test_atomic_rollover_rolls_back_lifecycle_and_node_reassignment(tmp_path, monkeypatch):
     conversation_id = "issue-247-atomic"
     engine = LCMEngine(
@@ -693,6 +752,29 @@ def test_host_successor_replay_is_idempotent_and_stale_binding_preserves_frontie
         assert engine._session_id == "s3"
         assert after.current_session_id == "s3"
         assert after.current_frontier_store_id == before.current_frontier_store_id
+
+        engine.on_session_start(
+            "s4",
+            platform="cli",
+            conversation_id=conversation_id,
+            context_length=200_000,
+        )
+        engine._lifecycle.advance_frontier(conversation_id, "s4", source_id)
+        before = engine._lifecycle.get_by_conversation(conversation_id)
+        engine.on_session_start(
+            "s3",
+            platform="cli",
+            conversation_id=conversation_id,
+            context_length=200_000,
+            boundary_reason="compression",
+            old_session_id="s1",
+            hermes_home=str(hermes_home),
+        )
+        after = engine._lifecycle.get_by_conversation(conversation_id)
+        assert before is not None and after is not None
+        assert engine._session_id == "s4"
+        assert after.current_session_id == "s4"
+        assert after.current_frontier_store_id == before.current_frontier_store_id == source_id
     finally:
         engine.shutdown()
 
