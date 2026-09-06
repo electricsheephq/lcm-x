@@ -373,7 +373,7 @@ class LifecycleStateStore:
                 current_bound_at = excluded.current_bound_at,
                 last_finalized_at = excluded.last_finalized_at,
                 last_rollover_at = excluded.last_rollover_at,
-                last_reset_at = excluded.last_reset_at,
+                last_reset_at = lcm_lifecycle_state.last_reset_at,
                 updated_at = excluded.updated_at
             """,
             (
@@ -421,6 +421,27 @@ class LifecycleStateStore:
         if row is not None and str(row[0] or "") == new_session_id and str(row[1] or "") == old_session_id:
             return
 
+        if row is not None:
+            current_session_id = str(row[0] or "")
+            last_finalized_session_id = str(row[1] or "")
+            # A rollover callback may be replayed after a gateway restart, but
+            # it must never replace a newer active binding.  The only safe
+            # states are the expected old session or its already-finalized
+            # form; an absent row remains insertable below.
+            if not (
+                current_session_id == old_session_id
+                or (
+                    not current_session_id
+                    and last_finalized_session_id == old_session_id
+                )
+            ):
+                raise LifecyclePublicationConflictError(
+                    "Lifecycle rollover binding changed before staging "
+                    f"(expected current={old_session_id!r}, "
+                    f"actual current={current_session_id!r}, "
+                    f"finalized={last_finalized_session_id!r})"
+                )
+
         last_finalized_frontier = max(
             int(finalized_frontier_store_id or 0),
             int(row[2] or 0) if row is not None else 0,
@@ -448,7 +469,7 @@ class LifecycleStateStore:
                 current_bound_at = excluded.current_bound_at,
                 last_finalized_at = excluded.last_finalized_at,
                 last_rollover_at = excluded.last_rollover_at,
-                last_reset_at = excluded.last_reset_at,
+                last_reset_at = lcm_lifecycle_state.last_reset_at,
                 updated_at = excluded.updated_at
             """,
             (
