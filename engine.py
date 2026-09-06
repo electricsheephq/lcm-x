@@ -1926,6 +1926,19 @@ class LCMEngine(
         *,
         conversation_id: str | None = None,
     ) -> None:
+        requested_conversation_id = str(conversation_id or "").strip()
+        if requested_conversation_id and not self._session_ignored and not self._session_stateless:
+            dag_conn = self._dag.connection
+            if dag_conn is not None:
+                ownership = self._lifecycle.audit_conversation_ownership(
+                    dag_conn,
+                    requested_conversation_id,
+                    str(session_id or ""),
+                )
+                if not ownership.get("ok"):
+                    raise LifecyclePublicationConflictError(
+                        "LCM conversation ownership audit failed before session admission"
+                    )
         state = self._lifecycle.bind_session(session_id, conversation_id=conversation_id)
         self._conversation_id = state.conversation_id
         self._lcm_session_last_conversation_id[session_id] = state.conversation_id
@@ -2104,6 +2117,67 @@ class LCMEngine(
             db_path.parent / "state.db",
             description=f"state database fallback from LCM database {db_path}",
         )
+
+    def _host_proves_compression_successor(
+        self,
+        old_session_id: str,
+        new_session_id: str,
+        kwargs: Dict[str, Any] | None = None,
+    ) -> bool:
+        """Return true only for one unambiguous durable host chain.
+
+        LCM has no authority to invent a successor when a boundary callback is
+        stale.  Hermes' ``state.db`` is read-only here; a direct compression
+        child is accepted only when the parent is durably compression-ended and
+        every step to the requested child has exactly one canonical successor.
+        A missing, malformed, or branching host record fails closed.
+        """
+        old_session_id = str(old_session_id or "").strip()
+        new_session_id = str(new_session_id or "").strip()
+        if not old_session_id or not new_session_id or old_session_id == new_session_id:
+            return False
+        path = self._state_db_path(kwargs)
+        if not path.exists():
+            return False
+        try:
+            uri = path.resolve().as_uri() + "?mode=ro"
+            conn = sqlite3.connect(uri, uri=True)
+            try:
+                current = old_session_id
+                visited: set[str] = set()
+                for _ in range(100):
+                    if current == new_session_id:
+                        return True
+                    if not current or current in visited:
+                        return False
+                    visited.add(current)
+                    parent = conn.execute(
+                        "SELECT end_reason FROM sessions WHERE id = ? LIMIT 1",
+                        (current,),
+                    ).fetchone()
+                    if parent is None or str(parent[0] or "") != "compression":
+                        return False
+                    children = conn.execute(
+                        """
+                        SELECT child.id
+                        FROM sessions AS child
+                        WHERE child.parent_session_id = ?
+                          AND json_extract(COALESCE(child.model_config, '{}'), '$._branched_from') IS NULL
+                          AND json_extract(COALESCE(child.model_config, '{}'), '$._delegate_from') IS NULL
+                          AND COALESCE(child.source, '') != 'tool'
+                        ORDER BY child.started_at DESC, child.id DESC
+                        """,
+                        (current,),
+                    ).fetchall()
+                    if len(children) != 1:
+                        return False
+                    current = str(children[0][0] or "")
+            finally:
+                conn.close()
+        except (OSError, sqlite3.Error, ValueError):
+            logger.debug("LCM host compression successor probe failed", exc_info=True)
+            return False
+        return False
 
     def _clear_pending_reset_boundary(self) -> None:
         self._pending_reset_session_id = ""
@@ -2922,6 +2996,32 @@ class LCMEngine(
         requested_conversation_id = kwargs.get("conversation_id")
         session_state = self._lifecycle.get_by_session(old_session_id)
         conversation_state = self._lifecycle.get_by_conversation(old_session_id)
+        host_successor_proven = self._host_proves_compression_successor(
+            old_session_id,
+            session_id,
+            kwargs,
+        )
+
+        # A duplicate callback after the new LCM state is committed is safe
+        # only when the committed lifecycle edge or the host's durable chain
+        # proves that this exact child is the successor.  Never rebind a live
+        # newer state from a stale host callback.
+        current_state = self._lifecycle.get_by_conversation(
+            str(requested_conversation_id or self._conversation_id or "")
+        )
+        if (
+            current_state is not None
+            and current_state.current_session_id == session_id
+            and current_state.last_finalized_session_id == old_session_id
+            and not host_successor_proven
+        ):
+            return
+        if (
+            current_state is not None
+            and current_state.current_session_id == session_id
+            and host_successor_proven
+        ):
+            return
 
         def _state_conversation_matches(state: Any) -> bool:
             return bool(
@@ -2932,24 +3032,19 @@ class LCMEngine(
                 )
             )
 
-        def _has_summary_nodes(candidate_session_id: str | None) -> bool:
-            return bool(candidate_session_id and self._dag.get_session_nodes(candidate_session_id))
-
         def _host_source_from_conversation_state(state: Any) -> tuple[str, Any]:
             if not _state_conversation_matches(state):
                 return "", None
-            if state.current_session_id == old_session_id and _has_summary_nodes(old_session_id):
+            if state.current_session_id == old_session_id:
                 return old_session_id, state
             if (
                 state.conversation_id == old_session_id
                 and state.current_session_id
-                and _has_summary_nodes(state.current_session_id)
             ):
                 return state.current_session_id, state
             if (
                 state.current_session_id is None
                 and state.last_finalized_session_id
-                and _has_summary_nodes(state.last_finalized_session_id)
             ):
                 return state.last_finalized_session_id, state
             return "", None
@@ -2957,12 +3052,11 @@ class LCMEngine(
         def _host_source_from_session_state(state: Any) -> tuple[str, Any]:
             if not _state_conversation_matches(state):
                 return "", None
-            if state.current_session_id == old_session_id and _has_summary_nodes(old_session_id):
+            if state.current_session_id == old_session_id:
                 return old_session_id, state
             if (
                 state.current_session_id is None
                 and state.last_finalized_session_id == old_session_id
-                and _has_summary_nodes(old_session_id)
             ):
                 return old_session_id, state
             return "", None
@@ -2974,6 +3068,19 @@ class LCMEngine(
             host_source_session_id, host_source_state = _host_source_from_session_state(
                 session_state
             )
+        if (
+            not host_source_session_id
+            and host_successor_proven
+            and current_state is not None
+            and current_state.current_session_id
+            and current_state.current_session_id != session_id
+        ):
+            # The host callback may carry an older parent while LCM has already
+            # committed an intermediate current session. Rebind from that
+            # committed LCM source into the exact host-proven successor; do
+            # not move from the stale host parent or reset the frontier.
+            host_source_session_id = current_state.current_session_id
+            host_source_state = current_state
 
         source_session_id = host_source_session_id or old_session_id
         source_state = host_source_state or session_state
@@ -2983,11 +3090,11 @@ class LCMEngine(
             # boundary as old_session_id. A different bound session can be a
             # short-lived subagent/cron/WebUI side channel that ran after the
             # foreground compaction. Prefer the host-authoritative source when
-            # durable lifecycle + DAG evidence proves it belongs to LCM, then
-            # fall back to the older bound-session recovery path. When the host
+            # the durable lifecycle proves it belongs to LCM. When the host
             # old_session_id is the durable conversation id, use that row's
             # current/finalized LCM source instead of unrelated auxiliary rows
-            # where the id appears only as last_finalized_session_id.
+            # where the id appears only as last_finalized_session_id. Without
+            # that proof, leave the committed state untouched.
             if host_source_session_id:
                 logger.warning(
                     "LCM compression boundary using host old_session_id %s as carry-over source=%s despite bound session drift=%s",
@@ -2996,69 +3103,10 @@ class LCMEngine(
                     previous_session_id,
                 )
             else:
-                bound_state = self._lifecycle.get_by_session(previous_session_id)
-                bound_conversation_matches = bool(
-                    bound_state
-                    and (not self._conversation_id or bound_state.conversation_id == self._conversation_id)
-                    and (
-                        not requested_conversation_id
-                        or bound_state.conversation_id == requested_conversation_id
-                    )
-                )
-                bound_is_active_source = bool(
-                    bound_state and bound_state.current_session_id == previous_session_id
-                )
-                bound_is_finalized_source = bool(
-                    bound_state
-                    and bound_state.current_session_id is None
-                    and bound_state.last_finalized_session_id == previous_session_id
-                )
-                bound_has_summary_nodes = bool(self._dag.get_session_nodes(previous_session_id))
-                if (
-                    bound_conversation_matches
-                    and (bound_is_active_source or bound_is_finalized_source)
-                    and bound_has_summary_nodes
-                ):
-                    source_session_id = previous_session_id
-                    source_state = bound_state
-                    logger.warning(
-                        "LCM compression boundary using bound session %s as carry-over source; host old_session_id=%s does not match",
-                        previous_session_id,
-                        old_session_id,
-                    )
-                else:
-                    # Fallback: sibling chain with zero-DAG parent.
-                    # When stale old_session_id has no DAG nodes AND the
-                    # bound session belongs to a different conversation_id
-                    # but shares the same last_finalized_session_id
-                    # (parent) — prefer the bound session despite the
-                    # conversation_id mismatch. This handles the lifecycle
-                    # fork case where two sessions on the same channel
-                    # received different conversation_ids.
-                    bound_shares_parent_with_host = bool(
-                        bound_state
-                        and bound_state.last_finalized_session_id == old_session_id
-                    )
-                    host_has_no_dag = not bool(
-                        self._dag.get_session_nodes(old_session_id)
-                    )
-                    if (
-                        bound_shares_parent_with_host
-                        and host_has_no_dag
-                        and (bound_is_active_source or bound_is_finalized_source)
-                        and bound_has_summary_nodes
-                    ):
-                        source_session_id = previous_session_id
-                        source_state = bound_state
-                        logger.warning(
-                            "LCM compression boundary using bound session %s on sibling chain as carry-over source; host old_session_id=%s has zero DAG, parent=%s matches",
-                            previous_session_id,
-                            old_session_id,
-                            bound_state.last_finalized_session_id,
-                        )
-                    else:
-                        source_session_id = ""
-                        source_state = None
+                # A stale host boundary without a durable successor is not a
+                # supported rebind.  The committed frontier and source rows
+                # remain untouched so a later proven callback can resume.
+                return
 
         conversation_id = (
             (source_state.conversation_id if source_state else None)

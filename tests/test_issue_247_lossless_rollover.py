@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import sqlite3
+import time
+
+import hermes_lcm.escalation as lcm_escalation
 import hermes_lcm.engine as lcm_engine
 import pytest
 
@@ -476,5 +480,263 @@ def test_sweep_deadline_rejects_a_late_summary_result(tmp_path, monkeypatch):
             )
         assert calls["deadline"] == 110.0
         assert engine._dag.get_session_nodes("") == []
+    finally:
+        engine.shutdown()
+
+
+def test_escalation_deadline_is_not_renewed_for_level_two(monkeypatch):
+    calls = []
+    clock = iter((10.0, 111.0))
+
+    def fake_summary(*_args, **kwargs):
+        calls.append(kwargs.get("timeout"))
+        return None
+
+    monkeypatch.setattr(lcm_escalation, "_invoke_summary_llm", fake_summary)
+    monkeypatch.setattr(lcm_escalation.time, "monotonic", lambda: next(clock))
+    summary, level = lcm_escalation.summarize_with_escalation(
+        "synthetic deadline source",
+        source_tokens=4,
+        token_budget=2,
+        timeout=100.0,
+        deadline=110.0,
+        l3_truncate_tokens=2,
+    )
+
+    assert level == 3
+    assert summary
+    assert calls == [100.0]
+
+
+def test_ownership_audit_rejects_ambiguous_and_orphan_legacy_bindings(tmp_path):
+    conversation_id = "issue-247-audit"
+    engine = LCMEngine(
+        config=LCMConfig(database_path=str(tmp_path / "audit.db")),
+        hermes_home=str(tmp_path / "home"),
+    )
+    engine.on_session_start(
+        "s1",
+        platform="cli",
+        conversation_id=conversation_id,
+        context_length=200_000,
+    )
+    engine._store.append("s1", {"role": "assistant", "content": "legacy"})
+    engine._store.append("orphan", {"role": "assistant", "content": "legacy orphan"})
+    engine._lifecycle.record_rollover(
+        "other-conversation",
+        old_session_id="s1",
+        new_session_id="other-session",
+    )
+    try:
+        audit = engine._lifecycle.audit_conversation_ownership(
+            engine._dag.connection,
+            conversation_id,
+            "s1",
+        )
+        assert audit["ok"] is False
+        assert audit["ambiguous_sessions"] == ["s1"]
+        orphan_audit = engine._lifecycle.audit_conversation_ownership(
+            engine._dag.connection,
+            conversation_id,
+            "orphan",
+        )
+        assert orphan_audit["ok"] is False
+        assert orphan_audit["orphan_legacy_sessions"] == ["orphan"]
+    finally:
+        engine.shutdown()
+
+
+def test_host_successor_replay_is_idempotent_and_stale_binding_preserves_frontier(tmp_path):
+    conversation_id = "issue-247-host-replay"
+    hermes_home = tmp_path / "home"
+    hermes_home.mkdir()
+    state_db = hermes_home / "state.db"
+    host = sqlite3.connect(state_db)
+    host.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            parent_session_id TEXT,
+            end_reason TEXT,
+            ended_at REAL,
+            model_config TEXT,
+            source TEXT,
+            started_at REAL
+        );
+        """
+    )
+    host.executemany(
+        "INSERT INTO sessions(id, parent_session_id, end_reason, ended_at, model_config, source, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("s1", None, "compression", 1.0, "{}", "cli", 1.0),
+            ("s2", "s1", None, None, "{}", "cli", 2.0),
+        ],
+    )
+    host.commit()
+    host.close()
+
+    engine = LCMEngine(
+        config=LCMConfig(database_path=str(tmp_path / "host-replay.db")),
+        hermes_home=str(hermes_home),
+    )
+    engine.on_session_start(
+        "s1",
+        platform="cli",
+        conversation_id=conversation_id,
+        context_length=200_000,
+    )
+    source_id = engine._store.append(
+        "s1",
+        {"role": "assistant", "content": "retained source"},
+        conversation_id=conversation_id,
+    )
+    engine._lifecycle.advance_frontier(conversation_id, "s1", source_id)
+    engine._dag.add_node(
+        SummaryNode(
+            session_id="s1",
+            summary="retained summary",
+            token_count=1,
+            source_token_count=1,
+            source_ids=[source_id],
+        )
+    )
+    try:
+        engine.on_session_start(
+            "s2",
+            platform="cli",
+            conversation_id=conversation_id,
+            context_length=200_000,
+            boundary_reason="compression",
+            old_session_id="s1",
+            hermes_home=str(hermes_home),
+        )
+        state = engine._lifecycle.get_by_conversation(conversation_id)
+        assert state is not None
+        assert state.current_session_id == "s2"
+        assert state.last_finalized_session_id == "s1"
+        assert state.last_finalized_frontier_store_id == source_id
+        assert len(engine._dag.get_session_nodes("s2")) == 1
+
+        engine.on_session_start(
+            "s2",
+            platform="cli",
+            conversation_id=conversation_id,
+            context_length=200_000,
+            boundary_reason="compression",
+            old_session_id="s1",
+            hermes_home=str(hermes_home),
+        )
+        assert len(engine._dag.get_session_nodes("s2")) == 1
+        assert engine._lifecycle.get_by_conversation(conversation_id).current_frontier_store_id == source_id
+
+        host = sqlite3.connect(state_db)
+        host.execute(
+            "UPDATE sessions SET end_reason = 'compression', ended_at = 3.0 WHERE id = 's2'"
+        )
+        host.execute(
+            "INSERT INTO sessions(id, parent_session_id, end_reason, ended_at, model_config, source, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("s3", "s2", None, None, "{}", "cli", 3.0),
+        )
+        host.commit()
+        host.close()
+
+        engine.on_session_start(
+            "s3",
+            platform="cli",
+            conversation_id=conversation_id,
+            context_length=200_000,
+            boundary_reason="compression",
+            old_session_id="s1",
+            hermes_home=str(hermes_home),
+        )
+        state = engine._lifecycle.get_by_conversation(conversation_id)
+        assert state is not None
+        assert state.current_session_id == "s3"
+        assert state.last_finalized_session_id == "s2"
+        assert state.current_frontier_store_id == source_id
+        assert len(engine._dag.get_session_nodes("s3")) == 1
+
+        before = engine._lifecycle.get_by_conversation(conversation_id)
+        engine.on_session_start(
+            "stale-child",
+            platform="cli",
+            conversation_id=conversation_id,
+            context_length=200_000,
+            boundary_reason="compression",
+            old_session_id="unknown-old",
+            hermes_home=str(hermes_home),
+        )
+        after = engine._lifecycle.get_by_conversation(conversation_id)
+        assert before is not None and after is not None
+        assert engine._session_id == "s3"
+        assert after.current_session_id == "s3"
+        assert after.current_frontier_store_id == before.current_frontier_store_id
+    finally:
+        engine.shutdown()
+
+
+def test_publication_validation_scales_with_fixed_owner_scope(tmp_path):
+    conversation_id = "issue-247-publication-perf"
+    engine = LCMEngine(
+        config=LCMConfig(database_path=str(tmp_path / "publication-perf.db")),
+        hermes_home=str(tmp_path / "home"),
+    )
+    engine.on_session_start(
+        "legitimate-session",
+        platform="cli",
+        conversation_id=conversation_id,
+        context_length=200_000,
+    )
+    source_ids = [
+        engine._store.append(
+            "legitimate-session",
+            {"role": "assistant", "content": f"source-{index}"},
+            conversation_id=conversation_id,
+        )
+        for index in range(4)
+    ]
+    conn = engine._dag.connection
+    assert conn is not None
+
+    def measure(rounds=30):
+        timings = []
+        conn.execute("BEGIN")
+        try:
+            for _ in range(rounds):
+                conn.execute("SAVEPOINT issue247_perf")
+                started = time.perf_counter()
+                engine._lifecycle.stage_compaction_publication(
+                    conn,
+                    conversation_id,
+                    "legitimate-session",
+                    -1,
+                    0,
+                    source_ids,
+                )
+                timings.append(time.perf_counter() - started)
+                conn.execute("ROLLBACK TO issue247_perf")
+                conn.execute("RELEASE issue247_perf")
+        finally:
+            conn.rollback()
+        return sum(timings) / len(timings)
+
+    try:
+        baseline = measure()
+        conn.execute("BEGIN")
+        conn.executemany(
+            """
+            INSERT INTO summary_nodes(
+                session_id, depth, summary, token_count, source_token_count,
+                source_ids, source_type, created_at
+            ) VALUES (?, 0, 'foreign', 1, 1, '[]', 'messages', ?)
+            """,
+            [
+                (f"foreign-session-{index % 500}", float(index))
+                for index in range(20_000)
+            ],
+        )
+        conn.commit()
+        expanded = measure()
+        assert expanded <= baseline * 2.0
     finally:
         engine.shutdown()

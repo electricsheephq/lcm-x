@@ -24,6 +24,22 @@ staged on one existing `lcm.db` SQLite transaction. A fault rolls the whole
 state back; retrying a committed rollover is idempotent and does not duplicate
 or reclaim source rows.
 
+At session admission, LCM runs a read-only ownership audit for the requested
+logical conversation. It rejects a session that would make blank legacy rows
+ambiguous or orphaned; unrelated conversation rows do not widen that audit.
+Publication then checks only the indexed current/last-finalized owner-session
+scope, so unrelated DAG nodes do not enter the hot transaction.
+
+If a compression boundary callback is stale, LCM keeps the committed frontier
+and active binding unless Hermes' read-only `state.db` proves one unambiguous
+compression successor for that exact child. A proven duplicate callback is a
+no-op; an ambiguous or missing host successor fails closed without rebinding
+or moving source rows.
+
+Summary escalation carries one absolute sweep deadline through every model
+level and rescue attempt. A late result is discarded and the pending source and
+maintenance debt remain available for a later bounded retry.
+
 Do not promise that `/new` deletes historical LCM data. Earlier rows remain in `lcm.db` unless an explicitly authorized cleanup removes them, and they remain available through bounded cross-session recall.
 
 ## `/lcm rotate`

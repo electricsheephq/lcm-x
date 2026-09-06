@@ -1042,6 +1042,103 @@ class LifecycleStateStore:
         owner_sessions.discard("")
         return owner_sessions
 
+    @staticmethod
+    def audit_conversation_ownership(
+        conn: sqlite3.Connection,
+        conversation_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Audit message ownership before a conversation is admitted.
+
+        Durable rows with an explicit conversation id are authoritative.  A
+        blank legacy id is admissible only when its producing session is the
+        current or last-finalized lifecycle binding for this conversation.
+        This read-only audit deliberately does not inspect ``summary_nodes``;
+        publication validates only the bounded owner-session scope below.
+        """
+        conversation_id = str(conversation_id or "").strip()
+        session_id = str(session_id or "").strip()
+        if not conversation_id:
+            return {"ok": bool(session_id), "reason": "missing conversation id"}
+
+        lifecycle_rows = conn.execute(
+            """
+            SELECT conversation_id, current_session_id, last_finalized_session_id
+            FROM lcm_lifecycle_state
+            WHERE conversation_id = ?
+               OR current_session_id = ?
+               OR last_finalized_session_id = ?
+            """,
+            (conversation_id, session_id, session_id),
+        ).fetchall()
+        by_session: dict[str, set[str]] = {}
+        for row in lifecycle_rows:
+            row_conversation = str(row[0] or "").strip()
+            for value in (row[1], row[2]):
+                value = str(value or "").strip()
+                if value:
+                    by_session.setdefault(value, set()).add(row_conversation)
+
+        state = next(
+            (row for row in lifecycle_rows if str(row[0] or "").strip() == conversation_id),
+            None,
+        )
+        proven_sessions: set[str] = set()
+        if state is not None:
+            proven_sessions = {
+                str(value or "").strip()
+                for value in (state[1], state[2])
+                if str(value or "").strip()
+            }
+        explicit_rows = conn.execute(
+            """
+            SELECT DISTINCT session_id
+            FROM messages
+            WHERE conversation_id = ?
+            """,
+            (conversation_id,),
+        ).fetchall()
+        explicit_sessions = {
+            str(row[0] or "").strip() for row in explicit_rows if str(row[0] or "").strip()
+        }
+        candidate_sessions = set(proven_sessions) | explicit_sessions
+        if session_id:
+            candidate_sessions.add(session_id)
+        orphan_legacy_sessions: list[str] = []
+        if candidate_sessions:
+            placeholders = ",".join("?" for _ in candidate_sessions)
+            legacy_rows = conn.execute(
+                f"""
+                SELECT DISTINCT session_id
+                FROM messages
+                WHERE (conversation_id IS NULL OR conversation_id = '')
+                  AND session_id IN ({placeholders})
+                """,
+                tuple(sorted(candidate_sessions)),
+            ).fetchall()
+            orphan_legacy_sessions = sorted(
+                {
+                    str(row[0] or "").strip()
+                    for row in legacy_rows
+                    if str(row[0] or "").strip()
+                    and str(row[0] or "").strip() not in proven_sessions
+                }
+            )
+        ambiguous_sessions = sorted(
+            session for session, conversations in by_session.items() if len(conversations) > 1
+        )
+        ok = not ambiguous_sessions and not orphan_legacy_sessions
+        return {
+            "ok": ok,
+            "conversation_id": conversation_id,
+            "session_id": session_id,
+            "proven_sessions": sorted(proven_sessions),
+            "explicit_sessions": sorted(explicit_sessions),
+            "ambiguous_sessions": ambiguous_sessions,
+            "orphan_legacy_sessions": orphan_legacy_sessions,
+            "reason": "" if ok else "ambiguous or orphan legacy message ownership",
+        }
+
     def stage_compaction_publication(
         self,
         conn: sqlite3.Connection,
@@ -1058,6 +1155,15 @@ class LifecycleStateStore:
         The caller owns the node/frontier transaction. The expected frontier is
         its optimistic publication generation.
         """
+        ownership = self.audit_conversation_ownership(
+            conn,
+            conversation_id,
+            session_id,
+        )
+        if not ownership.get("ok"):
+            raise LifecyclePublicationConflictError(
+                "Compaction publication source ownership is ambiguous"
+            )
         expected_frontier = max(0, int(expected_frontier_store_id or 0))
         all_covered_ids = sorted(
             {int(store_id) for store_id in covered_store_ids if int(store_id) > 0}
@@ -1089,7 +1195,6 @@ class LifecycleStateStore:
             conversation_id,
             session_id,
         )
-        owner_session_scope = json.dumps(sorted(owner_session_ids))
         snapshot_ids = sorted(
             set(all_covered_ids + excluded_ids + list(exclusion_proofs))
         )
@@ -1158,21 +1263,23 @@ class LifecycleStateStore:
                 f"authoritative={authoritative_ids}, covered={covered_ids}, "
                 f"excluded={excluded_ids})"
             )
-        if conn.execute(
-            """
-            SELECT 1
-            FROM summary_nodes AS node, json_each(node.source_ids) AS source
-            WHERE node.session_id IN (SELECT value FROM json_each(?))
-              AND node.source_type = 'messages'
-              AND node.node_id != ?
-              AND source.value IN (SELECT value FROM json_each(?))
-            LIMIT 1
-            """,
-            (owner_session_scope, publication_node_id, str(all_covered_ids)),
-        ).fetchone():
-            raise LifecyclePublicationConflictError(
-                "Compaction publication source lineage is already claimed"
-            )
+        if owner_session_ids:
+            owner_placeholders = ",".join("?" for _ in owner_session_ids)
+            if conn.execute(
+                f"""
+                SELECT 1
+                FROM summary_nodes AS node, json_each(node.source_ids) AS source
+                WHERE node.session_id IN ({owner_placeholders})
+                  AND node.source_type = 'messages'
+                  AND node.node_id != ?
+                  AND source.value IN (SELECT value FROM json_each(?))
+                LIMIT 1
+                """,
+                (*sorted(owner_session_ids), publication_node_id, json.dumps(all_covered_ids)),
+            ).fetchone():
+                raise LifecyclePublicationConflictError(
+                    "Compaction publication source lineage is already claimed"
+                )
         row = conn.execute(
             """
             SELECT current_session_id, current_frontier_store_id
