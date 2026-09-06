@@ -198,12 +198,16 @@ class LifecycleStateStore:
             # older range even for an ordinary (non-compression) rollover, so
             # the next publication can admit the retained fresh tail without
             # replaying already-covered rows.
+            same_finalized_session = (
+                existing.current_session_id is None
+                and existing.last_finalized_session_id == session_id
+            )
             current_frontier = (
                 max(
                     existing.current_frontier_store_id,
                     existing.last_finalized_frontier_store_id,
                 )
-                if preserve_frontier
+                if preserve_frontier or same_finalized_session
                 else 0
             )
             current_bound_at = (
@@ -403,6 +407,7 @@ class LifecycleStateStore:
         old_session_id: str,
         new_session_id: str,
         finalized_frontier_store_id: int = 0,
+        record_reset: bool = False,
     ) -> None:
         """Stage finalization and rebinding on a caller-owned SQLite transaction.
 
@@ -413,7 +418,7 @@ class LifecycleStateStore:
         row = conn.execute(
             """
             SELECT current_session_id, last_finalized_session_id,
-                   last_finalized_frontier_store_id
+                   last_finalized_frontier_store_id, last_reset_at
             FROM lcm_lifecycle_state
             WHERE conversation_id = ?
             """,
@@ -448,6 +453,7 @@ class LifecycleStateStore:
             int(row[2] or 0) if row is not None else 0,
         )
         now = time.time()
+        last_reset_at = now if record_reset else (row[3] if row is not None else None)
         conn.execute(
             """
             INSERT INTO lcm_lifecycle_state(
@@ -470,7 +476,7 @@ class LifecycleStateStore:
                 current_bound_at = excluded.current_bound_at,
                 last_finalized_at = excluded.last_finalized_at,
                 last_rollover_at = excluded.last_rollover_at,
-                last_reset_at = lcm_lifecycle_state.last_reset_at,
+                last_reset_at = excluded.last_reset_at,
                 updated_at = excluded.updated_at
             """,
             (
@@ -481,7 +487,7 @@ class LifecycleStateStore:
                 now,
                 now,
                 now,
-                now,
+                last_reset_at,
                 now,
             ),
         )

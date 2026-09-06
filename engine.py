@@ -1948,7 +1948,7 @@ class LCMEngine(
         session_id: str,
         *,
         conversation_id: str | None = None,
-        preserve_frontier: bool = True,
+        preserve_frontier: bool = False,
     ) -> None:
         self._validate_conversation_admission(session_id, conversation_id)
         state = self._lifecycle.bind_session(
@@ -3237,10 +3237,6 @@ class LCMEngine(
             )
 
         if can_reassign:
-            # A compression boundary is a lifecycle reset even when the host
-            # skips the explicit reset callback. Record it before the atomic
-            # rollover so the staged transaction preserves the timestamp.
-            self._lifecycle.record_reset(conversation_id)
             self._copy_generated_ignore_hashes_to_session(
                 source_session_id,
                 session_id,
@@ -3271,6 +3267,7 @@ class LCMEngine(
                 source_session_id,
                 session_id,
                 frontier_store_id=frontier,
+                record_reset=True,
             )
             logger.debug(
                 "LCM compression boundary continued %s -> %s: carried %d DAG nodes; preserved raw message ownership",
@@ -3331,7 +3328,7 @@ class LCMEngine(
         previous_session_id = self._session_id
         previous_conversation_id = self._conversation_id
         requested_conversation_id = str(kwargs.get("conversation_id") or session_id)
-        preserve_frontier = not bool(kwargs.pop("_lcm_reset_frontier", False))
+        preserve_frontier = bool(kwargs.pop("_lcm_preserve_frontier", False))
         self._lcm_current_start_allows_bypass_lineage = False
         requested_platform = str(kwargs.get("platform") or self._session_platform or "")
         pre_reset_preserve_ambiguous_no_frame_old_session = False
@@ -4127,6 +4124,7 @@ class LCMEngine(
         new_session_id: str,
         *,
         frontier_store_id: int = 0,
+        record_reset: bool = False,
     ) -> int:
         """Commit lifecycle rollover and retained-node reassignment together."""
         if not old_session_id or not new_session_id or old_session_id == new_session_id:
@@ -4143,6 +4141,7 @@ class LCMEngine(
                     old_session_id=old_session_id,
                     new_session_id=new_session_id,
                     finalized_frontier_store_id=frontier_store_id,
+                    record_reset=record_reset,
                 )
                 moved = SummaryDAG.stage_reassign_session_nodes(
                     conn,
@@ -4222,8 +4221,8 @@ class LCMEngine(
             )
 
         start_kwargs = dict(kwargs)
-        if boundary_reason != "compression" and not previous_messages:
-            start_kwargs["_lcm_reset_frontier"] = True
+        if boundary_reason != "compression" and previous_messages:
+            start_kwargs["_lcm_preserve_frontier"] = True
         self.on_session_start(new_session_id, conversation_id=conversation_id, **start_kwargs)
 
         if not carry_over_context:

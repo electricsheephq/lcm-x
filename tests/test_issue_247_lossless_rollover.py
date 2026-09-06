@@ -1120,6 +1120,7 @@ def test_atomic_rollover_rolls_back_lifecycle_and_node_reassignment(tmp_path, mo
                 conversation_id,
                 "s1",
                 "s2",
+                record_reset=True,
             )
         except RuntimeError as exc:
             assert str(exc) == "synthetic rollover fault"
@@ -1130,6 +1131,7 @@ def test_atomic_rollover_rolls_back_lifecycle_and_node_reassignment(tmp_path, mo
         assert state is not None
         assert state.current_session_id == "s1"
         assert state.last_finalized_session_id is None
+        assert state.last_reset_at is None
         assert len(engine._dag.get_session_nodes("s1")) == 1
         assert engine._dag.get_session_nodes("s2") == []
 
@@ -1142,6 +1144,7 @@ def test_atomic_rollover_rolls_back_lifecycle_and_node_reassignment(tmp_path, mo
             conversation_id,
             "s1",
             "s2",
+            record_reset=True,
         )
         assert moved == 1
         duplicate = engine._atomic_rollover_lcm_state(
@@ -1154,6 +1157,7 @@ def test_atomic_rollover_rolls_back_lifecycle_and_node_reassignment(tmp_path, mo
         assert state is not None
         assert state.current_session_id == "s2"
         assert state.last_finalized_session_id == "s1"
+        assert state.last_reset_at is not None
         assert engine._dag.get_session_nodes("s1") == []
         assert len(engine._dag.get_session_nodes("s2")) == 1
     finally:
