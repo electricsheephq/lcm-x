@@ -187,8 +187,22 @@ class LifecycleStateStore:
         if existing is not None:
             if existing.current_session_id == session_id:
                 return existing
+            # A gateway restart can re-admit the exact session that was last
+            # finalized after the active binding was cleared.  That session
+            # already owns the persisted finalized checkpoint, so restoring
+            # it is safe and monotonic.  A different session must start at
+            # zero until a proven rollover edge advances it.
+            same_finalized_session = (
+                existing.current_session_id is None
+                and existing.last_finalized_session_id == session_id
+            )
             current_frontier = (
-                existing.current_frontier_store_id if existing.current_session_id == session_id else 0
+                max(
+                    existing.current_frontier_store_id,
+                    existing.last_finalized_frontier_store_id,
+                )
+                if same_finalized_session
+                else 0
             )
             current_bound_at = (
                 existing.current_bound_at if existing.current_session_id == session_id else now
