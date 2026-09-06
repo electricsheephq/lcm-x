@@ -684,6 +684,128 @@ def test_legacy_conversation_alias_refuses_unproven_current_session(tmp_path):
         engine.shutdown()
 
 
+def test_finalized_alias_refuses_stale_callback_without_host_proof(tmp_path):
+    conversation_id = "finalized-alias-stale"
+    engine = LCMEngine(
+        config=LCMConfig(database_path=str(tmp_path / "finalized-stale.db")),
+        hermes_home=str(tmp_path / "home"),
+    )
+    engine.on_session_start(
+        "s1",
+        platform="cli",
+        conversation_id=conversation_id,
+        context_length=200_000,
+    )
+    source_id = engine._store.append(
+        "s1",
+        {"role": "assistant", "content": "finalized source"},
+        conversation_id=conversation_id,
+    )
+    engine._lifecycle.advance_frontier(conversation_id, "s1", source_id)
+    engine._atomic_rollover_lcm_state(conversation_id, "s1", "s2")
+    engine._lifecycle.finalize_session(
+        conversation_id,
+        "s2",
+        frontier_store_id=source_id,
+    )
+    engine._session_id = "s2"
+    before = engine._lifecycle.get_by_conversation(conversation_id)
+    assert before is not None
+    assert before.current_session_id is None
+    assert before.last_finalized_session_id == "s2"
+    try:
+        engine.on_session_start(
+            "s3",
+            platform="cli",
+            conversation_id=conversation_id,
+            boundary_reason="compression",
+            old_session_id="s1",
+            context_length=200_000,
+        )
+        after = engine._lifecycle.get_by_conversation(conversation_id)
+        assert after == before
+        assert engine._session_id == "s2"
+        assert engine._store.get_session_count("s3") == 0
+        assert engine._store.get(source_id)["session_id"] == "s1"
+    finally:
+        engine.shutdown()
+
+
+def test_finalized_alias_resumes_only_on_proven_host_chain(tmp_path):
+    conversation_id = "finalized-alias-proven"
+    hermes_home = tmp_path / "home"
+    hermes_home.mkdir()
+    state_db = hermes_home / "state.db"
+    host = sqlite3.connect(state_db)
+    host.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            parent_session_id TEXT,
+            end_reason TEXT,
+            ended_at REAL,
+            model_config TEXT,
+            source TEXT,
+            started_at REAL
+        );
+        """
+    )
+    host.executemany(
+        "INSERT INTO sessions(id, parent_session_id, end_reason, ended_at, model_config, source, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("s1", None, "compression", 1.0, "{}", "cli", 1.0),
+            ("s2", "s1", "compression", 2.0, "{}", "cli", 2.0),
+            ("s3", "s2", None, None, "{}", "cli", 3.0),
+        ],
+    )
+    host.commit()
+    host.close()
+
+    engine = LCMEngine(
+        config=LCMConfig(database_path=str(tmp_path / "finalized-proven.db")),
+        hermes_home=str(hermes_home),
+    )
+    engine.on_session_start(
+        "s1",
+        platform="cli",
+        conversation_id=conversation_id,
+        context_length=200_000,
+    )
+    source_id = engine._store.append(
+        "s1",
+        {"role": "assistant", "content": "proven finalized source"},
+        conversation_id=conversation_id,
+    )
+    engine._lifecycle.advance_frontier(conversation_id, "s1", source_id)
+    engine._atomic_rollover_lcm_state(conversation_id, "s1", "s2")
+    engine._lifecycle.finalize_session(
+        conversation_id,
+        "s2",
+        frontier_store_id=source_id,
+    )
+    engine._session_id = "s2"
+    try:
+        engine.on_session_start(
+            "s3",
+            platform="cli",
+            conversation_id=conversation_id,
+            boundary_reason="compression",
+            old_session_id="s1",
+            context_length=200_000,
+            hermes_home=str(hermes_home),
+        )
+        state = engine._lifecycle.get_by_conversation(conversation_id)
+        assert state is not None
+        assert state.current_session_id == "s3"
+        assert state.last_finalized_session_id == "s2"
+        assert state.last_finalized_frontier_store_id == source_id
+        assert state.current_frontier_store_id == source_id
+        assert engine._session_id == "s3"
+        assert engine._store.get_session_count("s3") == 0
+    finally:
+        engine.shutdown()
+
+
 def test_atomic_rollover_rolls_back_lifecycle_and_node_reassignment(tmp_path, monkeypatch):
     conversation_id = "issue-247-atomic"
     engine = LCMEngine(

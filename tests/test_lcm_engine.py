@@ -20819,6 +20819,34 @@ class TestSessionRollover:
         assert wrong_state is not None
         assert wrong_state.conversation_id == "auxiliary-conversation"
 
+        # The legacy conversation-id alias is accepted only when the active
+        # LCM source and requested child lie on the same durable host chain.
+        state_db = Path(engine._store.db_path).parent / "state.db"
+        host = sqlite3.connect(state_db)
+        host.executescript(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                parent_session_id TEXT,
+                end_reason TEXT,
+                ended_at REAL,
+                model_config TEXT,
+                source TEXT,
+                started_at REAL
+            );
+            """
+        )
+        host.executemany(
+            "INSERT INTO sessions(id, parent_session_id, end_reason, ended_at, model_config, source, started_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("host-conversation", None, "compression", 1.0, "{}", "cli", 1.0),
+                ("foreground-active", "host-conversation", "compression", 2.0, "{}", "telegram", 2.0),
+                ("foreground-new", "foreground-active", None, None, "{}", "telegram", 3.0),
+            ],
+        )
+        host.commit()
+        host.close()
+
         engine.on_session_start(
             "foreground-new",
             boundary_reason="compression",

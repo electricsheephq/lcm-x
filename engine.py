@@ -3022,6 +3022,12 @@ class LCMEngine(
             and host_successor_proven
         ):
             return
+        if conversation_state is None and current_state is not None:
+            # ``get_by_session(old_session_id)`` no longer finds a source after
+            # a later session was finalized.  The requested logical
+            # conversation row still carries that finalized source and may be
+            # used only after the same host-chain proof below.
+            conversation_state = current_state
 
         def _state_conversation_matches(state: Any) -> bool:
             return bool(
@@ -3066,7 +3072,27 @@ class LCMEngine(
                 state.current_session_id is None
                 and state.last_finalized_session_id
             ):
-                return state.last_finalized_session_id, state
+                finalized_session_id = str(state.last_finalized_session_id)
+                if finalized_session_id == old_session_id:
+                    return (
+                        (finalized_session_id, state)
+                        if host_successor_proven
+                        else ("", None)
+                    )
+                if (
+                    self._host_proves_compression_successor(
+                        old_session_id,
+                        finalized_session_id,
+                        kwargs,
+                    )
+                    and self._host_proves_compression_successor(
+                        finalized_session_id,
+                        session_id,
+                        kwargs,
+                    )
+                ):
+                    return finalized_session_id, state
+                return "", None
             return "", None
 
         def _host_source_from_session_state(state: Any) -> tuple[str, Any]:
@@ -3078,7 +3104,26 @@ class LCMEngine(
                 state.current_session_id is None
                 and state.last_finalized_session_id == old_session_id
             ):
-                return old_session_id, state
+                return (
+                    (old_session_id, state)
+                    if host_successor_proven
+                    else ("", None)
+                )
+            if state.current_session_id is None and state.last_finalized_session_id:
+                finalized_session_id = str(state.last_finalized_session_id)
+                if (
+                    self._host_proves_compression_successor(
+                        old_session_id,
+                        finalized_session_id,
+                        kwargs,
+                    )
+                    and self._host_proves_compression_successor(
+                        finalized_session_id,
+                        session_id,
+                        kwargs,
+                    )
+                ):
+                    return finalized_session_id, state
             return "", None
 
         host_source_session_id, host_source_state = _host_source_from_conversation_state(
