@@ -731,6 +731,66 @@ def test_finalized_alias_refuses_stale_callback_without_host_proof(tmp_path):
         engine.shutdown()
 
 
+def test_bound_finalized_alias_refuses_stale_callback_without_host_proof(tmp_path):
+    """A process still bound to finalized old state cannot guess a successor."""
+    conversation_id = "finalized-alias-bound-old-stale"
+    engine = LCMEngine(
+        config=LCMConfig(database_path=str(tmp_path / "finalized-bound-stale.db")),
+        hermes_home=str(tmp_path / "home"),
+    )
+    engine.on_session_start(
+        "s1",
+        platform="cli",
+        conversation_id=conversation_id,
+        context_length=200_000,
+    )
+    source_id = engine._store.append(
+        "s1",
+        {"role": "assistant", "content": "bound finalized source"},
+        conversation_id=conversation_id,
+    )
+    engine._dag.add_node(
+        SummaryNode(
+            session_id="s1",
+            summary="bound finalized summary",
+            token_count=1,
+            source_token_count=1,
+            source_ids=[source_id],
+        )
+    )
+    engine._lifecycle.advance_frontier(conversation_id, "s1", source_id)
+    engine._lifecycle.finalize_session(
+        conversation_id,
+        "s1",
+        frontier_store_id=source_id,
+    )
+    before = engine._lifecycle.get_by_conversation(conversation_id)
+    before_nodes = engine._dag.get_session_nodes("s1")
+    assert before is not None
+    assert before.current_session_id is None
+    assert before.last_finalized_session_id == "s1"
+    assert before.last_finalized_frontier_store_id == source_id
+    assert engine._session_id == "s1"
+    try:
+        engine.on_session_start(
+            "s3",
+            platform="cli",
+            conversation_id=conversation_id,
+            boundary_reason="compression",
+            old_session_id="s1",
+            context_length=200_000,
+        )
+        after = engine._lifecycle.get_by_conversation(conversation_id)
+        assert after == before
+        assert engine._session_id == "s1"
+        assert engine._store.get_session_count("s3") == 0
+        assert engine._store.get(source_id)["session_id"] == "s1"
+        assert engine._dag.get_session_nodes("s1") == before_nodes
+        assert engine._dag.get_session_nodes("s3") == []
+    finally:
+        engine.shutdown()
+
+
 def test_finalized_alias_resumes_only_on_proven_host_chain(tmp_path):
     conversation_id = "finalized-alias-proven"
     hermes_home = tmp_path / "home"
