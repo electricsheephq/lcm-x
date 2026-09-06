@@ -5410,8 +5410,25 @@ class LCMEngine(
             "[Externalized payload: kind=raw_payload;"
         )
 
-    def _get_store_ids_for_messages(self, messages: List[Dict[str, Any]]) -> List[int]:
-        ids_by_message_id = self._get_store_id_map_for_messages(messages)
+    def _get_store_ids_for_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        mapped_ids_by_message_id: Optional[dict[int, int]] = None,
+    ) -> List[int]:
+        """Return durable ids without remapping a subset of one active pass.
+
+        Compaction may inspect a replayed scaffold and the remaining source
+        prefix separately.  Re-running the monotonic mapper for each subset
+        lets both occurrences claim the same durable row.  Callers that have
+        already mapped the complete active pass provide that map here; the
+        default keeps the existing standalone behavior.
+        """
+        ids_by_message_id = (
+            mapped_ids_by_message_id
+            if mapped_ids_by_message_id is not None
+            else self._get_store_id_map_for_messages(messages)
+        )
         folded_lineage = self._load_folded_tail_lineage(messages)
         folded_message_id = None
         folded_source_ids: list[int] = []
@@ -6776,6 +6793,7 @@ class LCMEngine(
         folded_source_store_id = 0
         folded_source_store_ids: list[int] = []
         folded_original_tail: Optional[Dict[str, Any]] = None
+        folded_active_tail: Optional[Dict[str, Any]] = None
         if retained_generated_context_parts:
             generated_context = "\n\n---\n\n".join(
                 retained_generated_context_parts
@@ -6812,13 +6830,11 @@ class LCMEngine(
                     if not folded_source_store_ids:
                         folded_source_store_ids = [folded_source_store_id]
                     folded_original_tail = tail_selected[0]
-                    tail_selected = [
-                        self._prepend_generated_context_to_message(
-                            folded_original_tail,
-                            generated_context,
-                        ),
-                        *tail_selected[1:],
-                    ]
+                    folded_active_tail = self._prepend_generated_context_to_message(
+                        folded_original_tail,
+                        generated_context,
+                    )
+                    tail_selected = [folded_active_tail, *tail_selected[1:]]
                 else:
                     logger.warning(
                         "LCM omitted generated context because the same-role "
@@ -6969,28 +6985,62 @@ class LCMEngine(
 
         existing_folded_lineage = self._load_folded_tail_lineage(result)
         lineage_written = False
+        folded_lineage_message: Optional[Dict[str, Any]] = None
+        # The first fresh-tail message may carry tool calls, so it cannot be
+        # represented by the adjacent plain-assistant-run candidate below.
+        # Preserve its exact durable occurrence directly after cleanup.  If
+        # cleanup merged or otherwise changed the message, the post-cleanup
+        # candidate path remains responsible for the resulting run.
+        if folded_active_tail is not None and folded_source_store_ids:
+            folded_identity = self._message_replay_identity(folded_active_tail)
+            direct_matches = [
+                message
+                for message in result
+                if self._message_replay_identity(message) == folded_identity
+            ]
+            if len(direct_matches) == 1:
+                folded_lineage_message = direct_matches[0]
+                lineage_written = self._write_folded_tail_lineage(
+                    direct_matches[0],
+                    folded_source_store_ids,
+                )
         lineage_candidates = []
         for candidate in (*folded_lineage_candidates, *post_cleanup_lineage_candidates):
             if candidate not in lineage_candidates:
                 lineage_candidates.append(candidate)
-        matching_lineage_candidates = []
-        for expected_content, source_ids in lineage_candidates:
-            matches = [
-                message
-                for message in result
-                if (
-                    message.get("role") == "assistant"
-                    and message.get("content") == expected_content
+        if not lineage_written:
+            matching_lineage_candidates = []
+            for expected_content, source_ids in lineage_candidates:
+                matches = [
+                    message
+                    for message in result
+                    if (
+                        message.get("role") == "assistant"
+                        and message.get("content") == expected_content
+                    )
+                ]
+                if len(matches) == 1:
+                    matching_lineage_candidates.append((source_ids, matches[0]))
+            if len(matching_lineage_candidates) == 1:
+                source_ids, folded_message = matching_lineage_candidates[0]
+                lineage_written = self._write_folded_tail_lineage(
+                    folded_message,
+                    source_ids,
                 )
+        if (
+            not lineage_written
+            and existing_folded_lineage is None
+            and folded_lineage_message is not None
+            and folded_original_tail is not None
+        ):
+            # Generated context is usable only when its exact source mapping
+            # was durably recorded.  Restore the original provider-visible
+            # tail on a write failure so an unproven summary cannot survive
+            # as active context.
+            result = [
+                folded_original_tail if message is folded_lineage_message else message
+                for message in result
             ]
-            if len(matches) == 1:
-                matching_lineage_candidates.append((source_ids, matches[0]))
-        if len(matching_lineage_candidates) == 1:
-            source_ids, folded_message = matching_lineage_candidates[0]
-            lineage_written = self._write_folded_tail_lineage(
-                folded_message,
-                source_ids,
-            )
         if not lineage_written and existing_folded_lineage is None:
             self._clear_folded_tail_lineage()
 

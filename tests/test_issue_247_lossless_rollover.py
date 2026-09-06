@@ -114,6 +114,115 @@ def test_source_mapping_spans_current_and_last_finalized_sessions(tmp_path):
     assert [mapped[id(row)] for row in old_rows] == source_ids
 
 
+def test_replayed_scaffold_and_later_duplicate_keep_distinct_source_ownership(tmp_path):
+    conversation_id = "issue-247-scaffold-ownership"
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "scaffold-ownership.db"),
+            fresh_tail_count=1,
+            leaf_chunk_tokens=1,
+            incremental_max_depth=0,
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    engine.on_session_start(
+        "s1",
+        platform="cli",
+        conversation_id=conversation_id,
+        context_length=200_000,
+    )
+    scaffold_content = (
+        "[Current user objective preserved from compacted history]\n"
+        "replayed objective"
+    )
+    source_ids = engine._store.append_batch(
+        "s1",
+        [
+            {"role": "user", "content": scaffold_content},
+            {"role": "user", "content": scaffold_content},
+        ],
+        conversation_id=conversation_id,
+    )
+    scaffold = {"role": "user", "content": scaffold_content}
+    later_duplicate = {"role": "user", "content": scaffold_content}
+    active = [
+        {"role": "system", "content": "system"},
+        scaffold,
+        {"role": "assistant", "content": "durable boundary"},
+        later_duplicate,
+    ]
+
+    try:
+        pass_map = engine._get_store_id_map_for_messages(active)
+        excluded = engine._get_store_ids_for_messages(
+            [scaffold],
+            mapped_ids_by_message_id=pass_map,
+        )
+        covered = engine._get_store_ids_for_messages(
+            [later_duplicate],
+            mapped_ids_by_message_id=pass_map,
+        )
+    finally:
+        engine.shutdown()
+
+    assert pass_map[id(scaffold)] == source_ids[0]
+    assert pass_map[id(later_duplicate)] == source_ids[1]
+    assert excluded == [source_ids[0]]
+    assert covered == [source_ids[1]]
+    assert not set(excluded) & set(covered)
+
+
+def test_scaffold_exclusion_does_not_overlap_compacted_source_lookup(
+    tmp_path,
+    monkeypatch,
+):
+    conversation_id = "issue-247-scaffold-publication"
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "scaffold-publication.db"),
+            fresh_tail_count=1,
+            leaf_chunk_tokens=1,
+            incremental_max_depth=0,
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _summary)
+    engine.on_session_start(
+        "s1",
+        platform="cli",
+        conversation_id=conversation_id,
+        context_length=200_000,
+    )
+    scaffold_content = (
+        "[Current user objective preserved from compacted history]\n"
+        "replayed objective"
+    )
+    duplicate_content = "replayed objective"
+    active = [
+        {"role": "user", "content": scaffold_content},
+        {"role": "user", "content": duplicate_content},
+        {"role": "assistant", "content": "fresh tail"},
+    ]
+    engine.ingest(active)
+    source_ids = [
+        row["store_id"] for row in engine._store.get_session_messages("s1")
+    ]
+
+    try:
+        result = engine.compress(active)
+        state = engine._lifecycle.get_by_conversation(conversation_id)
+        nodes = engine._dag.get_session_nodes("s1")
+    finally:
+        engine.shutdown()
+
+    assert engine.last_compression_status == "compacted"
+    assert state is not None
+    assert state.current_frontier_store_id == source_ids[1]
+    assert len(nodes) == 1
+    assert nodes[0].source_ids == [source_ids[1]]
+    assert result[-1] == active[-1]
+
+
 def test_publication_accepts_cross_session_sources_owned_by_conversation(tmp_path):
     conversation_id = "issue-247-publication"
     engine = LCMEngine(

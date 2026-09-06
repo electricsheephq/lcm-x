@@ -369,7 +369,7 @@ def test_filter_exclusion_content_is_revalidated_in_publication_snapshot(
     assert engine.last_compression_status == "error"
 
 
-def test_filter_exclusion_scan_pages_to_the_covered_end(
+def test_filter_exclusion_scan_preserves_conversation_coverage(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -382,11 +382,28 @@ def test_filter_exclusion_scan_pages_to_the_covered_end(
     last_page = [{"store_id": 10_001, "content": "DROP_ME"}]
     calls = []
 
-    def paged_rows(_session_id, after_store_id=0, limit=10_000):
-        calls.append((after_store_id, limit))
+    def paged_rows(
+        conversation_id,
+        *,
+        session_ids=None,
+        after_store_id=0,
+        limit=10_000,
+    ):
+        calls.append(
+            {
+                "conversation_id": conversation_id,
+                "session_ids": set(session_ids or ()),
+                "after_store_id": after_store_id,
+                "limit": limit,
+            }
+        )
         return first_page if after_store_id == 0 else last_page
 
-    monkeypatch.setattr(engine._store, "get_session_messages_after", paged_rows)
+    monkeypatch.setattr(
+        engine._store,
+        "get_conversation_messages_after",
+        paged_rows,
+    )
     try:
         proofs = engine._stored_publication_filter_exclusions(
             0,
@@ -397,8 +414,11 @@ def test_filter_exclusion_scan_pages_to_the_covered_end(
     finally:
         engine.shutdown()
 
-    assert calls == [(0, 10_000), (10_000, 10_000)]
     assert proofs == {10_001: "DROP_ME"}
+    assert calls
+    assert all(call["conversation_id"] == "issue-5-filter-pages" for call in calls)
+    assert all(call["session_ids"] == {"issue-5-filter-pages"} for call in calls)
+    assert any(call["after_store_id"] == 10_000 for call in calls)
 
 
 def test_below_frontier_source_lineage_is_claimed_once(tmp_path) -> None:

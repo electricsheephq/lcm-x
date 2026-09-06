@@ -835,8 +835,15 @@ class CompactionMixin:
             # turn; that must remain eligible for compaction instead of being
             # replayed forever as fresh-looking intent.
             leading_anchor_count = self._leading_anchor_count(working_messages)
+            # Map every occurrence in this pass once, before any replayed
+            # scaffold is removed.  Mapping the scaffold and the remaining
+            # suffix independently restarts the monotonic cursor and can
+            # assign both occurrences the same durable source row.
+            pass_store_id_map = self._get_store_id_map_for_messages(working_messages)
+            self._current_compress_store_ids_by_message_id = pass_store_id_map
             publication_excluded_store_ids = self._get_store_ids_for_messages(
-                working_messages[:leading_anchor_count]
+                working_messages[:leading_anchor_count],
+                mapped_ids_by_message_id=pass_store_id_map,
             )
             filter_exclusion_proofs: Dict[int, Any] = {}
             if fresh_tail_start <= leading_anchor_count:
@@ -865,7 +872,8 @@ class CompactionMixin:
             if candidate_start > leading_anchor_count:
                 publication_excluded_store_ids.extend(
                     self._get_store_ids_for_messages(
-                        working_messages[leading_anchor_count:candidate_start]
+                        working_messages[leading_anchor_count:candidate_start],
+                        mapped_ids_by_message_id=pass_store_id_map,
                     )
                 )
                 dropped_replayed_scaffold_messages = True
@@ -878,9 +886,6 @@ class CompactionMixin:
                     break
 
             if candidate_start < fresh_tail_start:
-                self._current_compress_store_ids_by_message_id = self._get_store_id_map_for_messages(
-                    working_messages[leading_anchor_count:]
-                )
                 compactable_pairs = list(
                     zip(
                         working_messages[candidate_start:fresh_tail_start],
@@ -1148,9 +1153,15 @@ class CompactionMixin:
             source_lineage_chunk = [
                 message for message in source_lookup_chunk if id(message) not in dependent_reply_message_ids
             ]
-            source_store_ids = self._get_store_ids_for_messages(source_lineage_chunk)
+            source_store_ids = self._get_store_ids_for_messages(
+                source_lineage_chunk,
+                mapped_ids_by_message_id=pass_store_id_map,
+            )
             source_store_ids = sorted(dict.fromkeys(source_store_ids))
-            consumed_store_ids = self._get_store_ids_for_messages(source_lookup_chunk)
+            consumed_store_ids = self._get_store_ids_for_messages(
+                source_lookup_chunk,
+                mapped_ids_by_message_id=pass_store_id_map,
+            )
             consumed_store_ids = sorted(dict.fromkeys(consumed_store_ids))
             earliest_at, latest_at = self._store.get_time_bounds(source_store_ids)
             summary_tokens = count_tokens(summary_text)
