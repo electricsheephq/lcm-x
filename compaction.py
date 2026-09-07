@@ -580,11 +580,9 @@ class CompactionMixin:
             getattr(exc, "sqlite_errorcode", None),
             getattr(exc, "sqlite_errorname", None),
         )
-        if isinstance(exc, LifecyclePublicationConflictError):
-            fallback = self._native_after_publication_conflict(fallback)
         return fallback
 
-    def _native_after_publication_conflict(
+    def _compress_native_recovery(
         self, messages: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
         """Let the host archive a native summary without claiming LCM coverage.
@@ -594,8 +592,14 @@ class CompactionMixin:
         writes no DAG, lifecycle, frontier, or host-session state. In particular
         it must not use the bypass helper's deterministic tail-trimming path.
         """
+        if not self._config.native_recovery:
+            return messages
+        self._last_compress_aborted = True
+        self._last_compression_status = "error"
+        self._last_compression_noop_reason = "native recovery did not produce a usable summary"
+        self._last_summary_error = self._last_compression_noop_reason
         cancelled = getattr(self, "_compression_cancelled_check", None)
-        if not self._config.native_publication_fallback or not callable(cancelled):
+        if not callable(cancelled):
             return messages
         if cancelled():
             return messages
@@ -640,14 +644,15 @@ class CompactionMixin:
             ):
                 return messages
         except Exception:
-            logger.warning("Native recovery after LCM publication conflict failed; retaining context")
+            logger.warning("Native recovery failed; retaining context")
             return messages
-        self._last_compression_status = "host_fallback"
-        self._last_compression_noop_reason = "LCM publication rejected; host-native summary recovery"
+        self._last_compression_status = "host_native"
+        self._last_summary_error = None
+        self._last_compression_noop_reason = ""
         self.compression_count += 1
         self._last_compress_aborted = False
-        logger.warning(
-            "LCM publication rejected; returning a native summary for the host's "
+        logger.info(
+            "Native recovery returned a summary for the host's "
             "archive transaction. LCM source history and frontier are unchanged."
         )
         return recovered
@@ -781,6 +786,9 @@ class CompactionMixin:
         # or provider context after the durable row has been written.
         working_messages = self._ingest_messages(messages)
         self._prepare_retained_user_anchor(working_messages)
+        if self._config.native_recovery:
+            recovered = self._compress_native_recovery(working_messages)
+            return messages if self._last_compress_aborted else recovered
         ingest_cleanup_changed_active_context = working_messages != messages
         cleanup_only_due_to_boundary_cooldown = bool(
             self._preflight_cleanup_only_due_to_boundary_cooldown

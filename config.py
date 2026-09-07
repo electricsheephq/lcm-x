@@ -481,7 +481,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("large_output_active_replay_stub_threshold_tokens", "LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS", int),
     _EnvFieldSpec("large_output_transcript_gc_enabled", "LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED", bool),
     _EnvFieldSpec("summary_model", "LCM_SUMMARY_MODEL", str),
-    _EnvFieldSpec("native_publication_fallback", "LCM_NATIVE_PUBLICATION_FALLBACK", bool),
+    _EnvFieldSpec("native_recovery", "LCM_NATIVE_RECOVERY", bool),
     _EnvFieldSpec("summary_circuit_breaker_failure_threshold", "LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD", int),
     _EnvFieldSpec("summary_circuit_breaker_cooldown_seconds", "LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS", int),
     _EnvFieldSpec("summary_spend_max_calls", "LCM_SUMMARY_SPEND_MAX_CALLS", int),
@@ -734,8 +734,8 @@ class LCMConfig:
     summary_reasoning_effort: str = ""
     # Optional fallback summary models tried after summary_model/task default.
     summary_fallback_models: list[str] = field(default_factory=list)
-    # Opt-in host recovery after a rejected LCM publication; never changes the frontier.
-    native_publication_fallback: bool = False
+    # Opt-in native context recovery; preserves LCM sources and never changes the frontier.
+    native_recovery: bool = False
     # Consecutive failed summary calls before a route is skipped temporarily.
     summary_circuit_breaker_failure_threshold: int = 2
     # Seconds to skip an open summary route before allowing a retry.

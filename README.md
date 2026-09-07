@@ -469,7 +469,7 @@ moved back to that assistant even when doing so exceeds a configured bound.
 | `LCM_EXPANSION_REASONING_EFFORT` | task/provider default | Expansion synthesis reasoning override with the same supported values and the same ignore-and-report handling; YAML key: `lcm.expansion_reasoning_effort` |
 | `LCM_EXPANSION_CONTEXT_TOKENS` | `32000` | Context budget used by the auxiliary LLM for `lcm_expand_query` |
 | `LCM_SUMMARY_TIMEOUT_MS` | `60000` | Timeout for one summarization call |
-| `LCM_NATIVE_PUBLICATION_FALLBACK` | `false` | Opt-in recovery for Hermes-hosted publication conflicts: generate a native active-context summary for the host's archive transaction. Retains LCM sources/recall and does not advance its frontier. Requires the host cancellation fence; failure retains context without trimming. |
+| `LCM_NATIVE_RECOVERY` | `false` | Opt-in recovery mode: ingest sources normally, then generate a native active-context summary for the Hermes host's archive transaction, without attempting LCM publication. Retains LCM sources/recall and does not advance its frontier. Requires the host cancellation fence; failure retains context without trimming. |
 | `LCM_EXPANSION_TIMEOUT_MS` | `120000` | Timeout for one `lcm_expand_query` synthesis call |
 | `LCM_CRITICAL_BUDGET_PRESSURE_RATIO` | `0.0` | Disabled at `0.0`; when set, permits critical-pressure bypasses for bounded deferred catch-up and cache-friendly follow-on condensation only |
 
