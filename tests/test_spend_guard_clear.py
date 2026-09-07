@@ -1,6 +1,7 @@
 """Regression tests for forced/manual compaction spend-guard recovery."""
 
 import logging
+import time
 import sys
 from types import ModuleType
 
@@ -63,11 +64,11 @@ def _messages():
 def test_backoff_open_reports_only_active_backoff():
     guard = SummarySpendGuard(max_calls=1, backoff_seconds=50)
 
-    assert guard.backoff_open(now=1000) is False
+    assert guard.is_tripped(now=1000) is False
     guard.record_call(now=1000)
-    assert guard.backoff_open(now=1000) is True
-    assert guard.backoff_open(now=1049) is True
-    assert guard.backoff_open(now=1050) is False
+    assert guard.is_tripped(now=1000) is True
+    assert guard.is_tripped(now=1049) is True
+    assert guard.is_tripped(now=1050) is False
 
 
 def test_forced_overflow_does_not_clear_backoff(tmp_path, monkeypatch, caplog):
@@ -87,12 +88,12 @@ def test_forced_overflow_does_not_clear_backoff(tmp_path, monkeypatch, caplog):
 
     monkeypatch.setattr("hermes_lcm.engine.summarize_with_escalation", fake_summary)
     engine._summary_spend_guard.record_call()
-    assert engine._summary_spend_guard.backoff_open()
+    assert engine._summary_spend_guard.is_tripped()
 
     try:
         with caplog.at_level(logging.INFO, logger="hermes_lcm.engine"):
             engine.compress(_messages())
-        still_open = engine._summary_spend_guard.backoff_open()
+        still_open = engine._summary_spend_guard.is_tripped()
     finally:
         engine.shutdown()
 
@@ -111,7 +112,7 @@ def test_manual_rotate_apply_clears_backoff(tmp_path, caplog):
         )
     engine._store._conn.commit()
     engine._summary_spend_guard.record_call()
-    assert engine._summary_spend_guard.backoff_open()
+    assert engine._summary_spend_guard.is_tripped()
 
     try:
         with caplog.at_level(logging.INFO, logger="hermes_lcm.engine"):
@@ -120,7 +121,7 @@ def test_manual_rotate_apply_clears_backoff(tmp_path, caplog):
         engine.shutdown()
 
     assert result["ok"] is True
-    assert engine._summary_spend_guard.backoff_open() is False
+    assert engine._summary_spend_guard.is_tripped() is False
     assert "[lcm] summary spend backoff cleared (manual rotate)" in caplog.text
 
 
@@ -137,13 +138,45 @@ def test_ordinary_compress_does_not_clear_backoff(tmp_path, monkeypatch):
         fake_summary_call,
     )
     engine._summary_spend_guard.record_call()
-    assert engine._summary_spend_guard.backoff_open()
+    assert engine._summary_spend_guard.is_tripped()
 
     try:
         engine.compress(_messages())
-        still_open = engine._summary_spend_guard.backoff_open()
+        still_open = engine._summary_spend_guard.is_tripped()
     finally:
         engine.shutdown()
 
     assert calls == []
     assert still_open is True
+
+
+def test_is_tripped_tracks_allows_and_manual_rotate_repairs_a_full_window(tmp_path, caplog):
+    """Regression for the PR #453 review (P2): ``is_tripped()`` must agree with
+    ``not allows()`` in every guard state, including "backoff timer expired but
+    the rolling window is still at capacity". That state is unreachable through
+    the production mutators today (``_record_call_locked`` empties the window on
+    the same append that opens the backoff, and ``try_record_call`` refuses while
+    a backoff is open), so it is constructed directly here; the predicate must
+    still see it, and a manual rotate must repair it."""
+    engine = _engine(tmp_path)
+    guard = engine._summary_spend_guard
+    assert guard.is_tripped() is False and guard.allows() is True
+
+    guard.record_call()  # trips: backoff opens, window reset
+    assert guard.is_tripped() is True and guard.allows() is False
+
+    guard._backoff_until = 0.0  # timer expired, window empty
+    assert guard.is_tripped() is False and guard.allows() is True
+
+    guard._calls = [time.monotonic()] * guard.max_calls  # timer expired, window full
+    assert guard.is_tripped() is True and guard.allows() is False
+
+    try:
+        with caplog.at_level(logging.INFO, logger="hermes_lcm.engine"):
+            result = engine.rotate_active_session(apply=True)
+    finally:
+        engine.shutdown()
+
+    assert result["ok"] is True
+    assert guard.is_tripped() is False and guard.allows() is True
+    assert "[lcm] summary spend backoff cleared (manual rotate)" in caplog.text

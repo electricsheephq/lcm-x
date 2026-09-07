@@ -6798,7 +6798,7 @@ class LCMEngine(
 
     def _clear_summary_spend_backoff(self, reason: str) -> bool:
         guard = self._summary_spend_guard
-        if not guard.backoff_open():
+        if not guard.is_tripped():
             return False
         guard.clear()
         logger.info("[lcm] summary spend backoff cleared (%s)", reason)

@@ -157,11 +157,23 @@ class SummarySpendGuard:
             self._prune(current_time)
             return len(self._calls) < self.max_calls
 
-    def backoff_open(self, *, now: float | None = None) -> bool:
-        """Return whether the guard is currently in its explicit backoff."""
+    def is_tripped(self, *, now: float | None = None) -> bool:
+        """Return whether the guard is currently denying provider calls.
+
+        True while the explicit backoff timer is open OR while the rolling call
+        window is at capacity (which would deny the next reservation and reopen
+        the backoff). Manual recovery must look at both states: with
+        ``backoff_seconds < window_seconds`` the timer can expire while the
+        window is still full.
+        """
+        if self.max_calls <= 0:
+            return False
         current_time = time.monotonic() if now is None else now
         with self._lock:
-            return current_time < self._backoff_until
+            if current_time < self._backoff_until:
+                return True
+            self._prune(current_time)
+            return len(self._calls) >= self.max_calls
 
     def try_record_call(self, *, now: float | None = None) -> bool:
         """Atomically reserve one provider call if the budget allows it."""
