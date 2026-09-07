@@ -15,6 +15,7 @@ lifecycle) through normal attribute lookup. ``LCMEngine`` mixes this in ahead of
 
 from __future__ import annotations
 
+import copy
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -579,7 +580,77 @@ class CompactionMixin:
             getattr(exc, "sqlite_errorcode", None),
             getattr(exc, "sqlite_errorname", None),
         )
+        if isinstance(exc, LifecyclePublicationConflictError):
+            fallback = self._native_after_publication_conflict(fallback)
         return fallback
+
+    def _native_after_publication_conflict(
+        self, messages: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Let the host archive a native summary without claiming LCM coverage.
+
+        Only an opted-in, cancellation-fenced Hermes invocation may use this
+        recovery. Its existing transaction owns archive/publish; this helper
+        writes no DAG, lifecycle, frontier, or host-session state. In particular
+        it must not use the bypass helper's deterministic tail-trimming path.
+        """
+        cancelled = getattr(self, "_compression_cancelled_check", None)
+        if not self._config.native_publication_fallback or not callable(cancelled):
+            return messages
+        if cancelled():
+            return messages
+        try:
+            from agent.context_compressor import ContextCompressor
+
+            # Fresh per attempt: a timed-out predecessor must never share its
+            # native compressor's mutable summary/cooldown state with a retry.
+            native = ContextCompressor(
+                model=self.model,
+                provider=self.provider,
+                api_mode=self.api_mode,
+                base_url=self.base_url,
+                api_key=self.api_key,
+                config_context_length=self.context_length,
+                threshold_percent=self.threshold_percent,
+                protect_first_n=self.protect_first_n,
+                protect_last_n=max(self.protect_last_n, self._config.fresh_tail_count),
+                summary_model_override=self._config.summary_model or None,
+                abort_on_summary_failure=True,
+                quiet_mode=True,
+            )
+            native.on_session_start(self._session_id)
+            native._compression_cancelled_check = cancelled
+            recovered = native.compress(
+                copy.deepcopy(messages),
+                current_tokens=count_messages_tokens(messages),
+                force=True,
+            )
+            if (
+                cancelled()
+                or getattr(self, "_compression_cancelled_check", None) is not cancelled
+                or native._last_compress_aborted
+                or not getattr(native, "_last_compression_made_progress", False)
+                or any(
+                    "[digest unavailable for segment " in str(m.get("content", ""))
+                    for m in recovered
+                )
+                or getattr(native, "_last_summary_fallback_used", False)
+                or not recovered
+                or count_messages_tokens(recovered) >= count_messages_tokens(messages)
+            ):
+                return messages
+        except Exception:
+            logger.warning("Native recovery after LCM publication conflict failed; retaining context")
+            return messages
+        self._last_compression_status = "host_fallback"
+        self._last_compression_noop_reason = "LCM publication rejected; host-native summary recovery"
+        self.compression_count += 1
+        self._last_compress_aborted = False
+        logger.warning(
+            "LCM publication rejected; returning a native summary for the host's "
+            "archive transaction. LCM source history and frontier are unchanged."
+        )
+        return recovered
 
     def _assemble_committed_compaction_context(
         self,
