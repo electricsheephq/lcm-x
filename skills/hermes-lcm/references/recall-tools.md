@@ -24,7 +24,7 @@ Do not treat a short search snippet as sufficient evidence for a detail-heavy an
 
 ### `lcm_describe`
 
-Use for inexpensive inspection of a known current-session summary node or externalized payload reference. With no handle it returns a current-session DAG overview. It is a planning step, not broad discovery.
+Use for inexpensive inspection of a known current-session summary node or externalized payload reference. Summary-node metadata includes `producer_model` and `escalation_level`. With no handle it returns a current-session DAG overview. It is a planning step, not broad discovery.
 
 ### `lcm_expand_query`
 
@@ -107,4 +107,4 @@ Use only over exact cited evidence validated by the compiler for supported date 
 
 ## Operator tools
 
-`lcm_status`, `lcm_inspect`, and `lcm_doctor` report health and metadata. They do not replace content retrieval.
+`lcm_status`, `lcm_inspect`, and `lcm_doctor` report health and metadata. Inspect reports per-node producing-model/escalation provenance, while doctor reports their session distributions. They do not replace content retrieval.

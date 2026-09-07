@@ -538,16 +538,19 @@ class TestProviderPrefixedAuxiliaryCalls:
 
         monkeypatch.setattr(escalation, "_call_llm_for_summary", fake_summary_call)
 
+        details = {}
         summary, level = escalation.summarize_with_escalation(
             "source text " * 80,
             source_tokens=200,
             token_budget=50,
             model="primary-model",
             fallback_models=["fallback-model"],
+            details=details,
         )
 
         assert summary == "fallback summary"
         assert level == 1
+        assert details == {"model": "fallback-model", "level": 1}
         assert calls == ["primary-model", "fallback-model"]
 
     def test_summary_fallback_chain_uses_next_model_after_non_compressing_primary(self, monkeypatch):
@@ -710,15 +713,18 @@ class TestProviderPrefixedAuxiliaryCalls:
         guard = SummarySpendGuard(max_calls=1, window_seconds=3600, backoff_seconds=3600)
         guard.record_call()
 
+        details = {}
         summary, level = escalation.summarize_with_escalation(
             "source text " * 80,
             source_tokens=200,
             token_budget=50,
             model="primary-model",
             spend_guard=guard,
+            details=details,
         )
 
         assert level == 3          # deterministic fallback, no spend
+        assert details == {"model": None, "level": 3}
         assert calls == []         # LLM never invoked while backing off
 
     def test_extraction_call_passes_provider_and_stripped_model(self, monkeypatch):
@@ -3745,6 +3751,14 @@ class TestSummaryDAG:
         finally:
             conn.close()
 
+    def test_new_database_has_summary_provenance_columns(self, dag):
+        columns = {
+            row[1]: row for row in dag._conn.execute("PRAGMA table_info(summary_nodes)")
+        }
+
+        assert columns["producer_model"][2:5] == ("TEXT", 1, "'unknown'")
+        assert columns["escalation_level"][2:5] == ("INTEGER", 1, "0")
+
     def test_noop_write_helpers_do_not_leave_database_locked(self, tmp_path):
         db_path = tmp_path / "noop-write-lock.db"
         dag = SummaryDAG(db_path)
@@ -4201,7 +4215,7 @@ class TestSummaryDAG:
         assert node.earliest_at == 1_700_000_000
         assert node.latest_at == 1_800_000_000
 
-    def test_existing_db_is_upgraded_with_summary_source_window_columns(self, tmp_path):
+    def test_existing_db_is_upgraded_with_summary_feature_columns(self, tmp_path):
         db_path = tmp_path / "legacy_dag.db"
         conn = sqlite3.connect(db_path)
         conn.executescript(
@@ -4228,6 +4242,10 @@ class TestSummaryDAG:
                 INSERT INTO nodes_fts(rowid, summary)
                     VALUES (new.node_id, new.summary);
             END;
+            INSERT INTO summary_nodes (
+                session_id, depth, summary, token_count, source_token_count,
+                source_ids, source_type, created_at, expand_hint
+            ) VALUES ('legacy', 0, 'legacy summary', 5, 10, '[1]', 'messages', 1.0, '');
             """
         )
         conn.commit()
@@ -4240,6 +4258,12 @@ class TestSummaryDAG:
 
         assert "earliest_at" in columns
         assert "latest_at" in columns
+        assert "producer_model" in columns
+        assert "escalation_level" in columns
+        legacy = dag.get_node(1)
+        assert legacy is not None
+        assert legacy.producer_model == "unknown"
+        assert legacy.escalation_level == 0
 
         dag.close()
 
@@ -4671,6 +4695,7 @@ class TestSummaryDAG:
         c1 = dag.add_node(SummaryNode(
             session_id="s1", depth=0, summary="Child 1",
             token_count=10, source_ids=[1], source_type="messages",
+            producer_model="fallback-model", escalation_level=2,
         ))
         c2 = dag.add_node(SummaryNode(
             session_id="s1", depth=0, summary="Child 2",
@@ -4679,10 +4704,15 @@ class TestSummaryDAG:
         parent = dag.add_node(SummaryNode(
             session_id="s1", depth=1, summary="Parent",
             token_count=20, source_ids=[c1, c2], source_type="nodes",
+            producer_model="primary-model", escalation_level=1,
         ))
         info = dag.describe_subtree(parent)
         assert info["depth"] == 1
+        assert info["producer_model"] == "primary-model"
+        assert info["escalation_level"] == 1
         assert len(info["children"]) == 2
+        assert info["children"][0]["producer_model"] == "fallback-model"
+        assert info["children"][0]["escalation_level"] == 2
 
 
 class TestEscalation:

@@ -153,6 +153,8 @@ class SummaryNode:
     earliest_at: float | None = None
     latest_at: float | None = None
     expand_hint: str = ""  # "Expand for details about: ..."
+    producer_model: str = "unknown"
+    escalation_level: int = 0
     search_rank: float | None = None
     search_directness: float = 0.0
 
@@ -197,7 +199,9 @@ class SummaryDAG:
                 created_at REAL NOT NULL,
                 earliest_at REAL,
                 latest_at REAL,
-                expand_hint TEXT DEFAULT ''
+                expand_hint TEXT DEFAULT '',
+                producer_model TEXT NOT NULL DEFAULT 'unknown',
+                escalation_level INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_nodes_session_depth
                 ON summary_nodes(session_id, depth, created_at);
@@ -216,10 +220,10 @@ class SummaryDAG:
             build_nodes_fts_spec(),
         )
         run_versioned_migrations(self._conn)
-        self._ensure_source_window_columns()
+        self._ensure_summary_node_feature_columns()
         self._conn.commit()
 
-    def _ensure_source_window_columns(self) -> None:
+    def _ensure_summary_node_feature_columns(self) -> None:
         columns = {
             row[1] for row in self._conn.execute("PRAGMA table_info(summary_nodes)").fetchall()
         }
@@ -230,6 +234,14 @@ class SummaryDAG:
         add_column_if_missing(
             self._conn, columns, "latest_at",
             "ALTER TABLE summary_nodes ADD COLUMN latest_at REAL",
+        )
+        add_column_if_missing(
+            self._conn, columns, "producer_model",
+            "ALTER TABLE summary_nodes ADD COLUMN producer_model TEXT NOT NULL DEFAULT 'unknown'",
+        )
+        add_column_if_missing(
+            self._conn, columns, "escalation_level",
+            "ALTER TABLE summary_nodes ADD COLUMN escalation_level INTEGER NOT NULL DEFAULT 0",
         )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_nodes_session_latest ON summary_nodes(session_id, latest_at, created_at)"
@@ -267,8 +279,9 @@ class SummaryDAG:
                 cur = conn.execute(
                     """INSERT INTO summary_nodes
                        (session_id, depth, summary, token_count, source_token_count,
-                        source_ids, source_type, created_at, earliest_at, latest_at, expand_hint)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        source_ids, source_type, created_at, earliest_at, latest_at, expand_hint,
+                        producer_model, escalation_level)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         node.session_id,
                         node.depth,
@@ -281,6 +294,8 @@ class SummaryDAG:
                         node.earliest_at,
                         node.latest_at,
                         node.expand_hint,
+                        node.producer_model,
+                        node.escalation_level,
                     ),
                 )
                 if cur.lastrowid is None:
@@ -866,6 +881,8 @@ class SummaryDAG:
                     "depth": child_node.depth,
                     "token_count": child_node.token_count,
                     "source_token_count": child_node.source_token_count,
+                    "producer_model": child_node.producer_model,
+                    "escalation_level": child_node.escalation_level,
                     "expand_hint": child_node.expand_hint,
                 })
 
@@ -878,6 +895,8 @@ class SummaryDAG:
             "num_sources": len(node.source_ids),
             "earliest_at": node.earliest_at,
             "latest_at": node.latest_at,
+            "producer_model": node.producer_model,
+            "escalation_level": node.escalation_level,
             "expand_hint": node.expand_hint,
             "children": children,
         }
@@ -898,7 +917,9 @@ class SummaryDAG:
             earliest_at=row[9],
             latest_at=row[10],
             expand_hint=row[11] or "",
-            search_rank=row[12] if len(row) > 12 else None,
+            producer_model=row[12] or "unknown",
+            escalation_level=int(row[13] or 0),
+            search_rank=row[14] if len(row) > 14 else None,
         )
 
     def close(self) -> None:

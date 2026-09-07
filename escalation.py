@@ -448,6 +448,20 @@ def _summary_model_chain(primary_model: str = "", fallback_models: list[str] | t
     return chain
 
 
+def producer_model_label(details: dict[str, object] | None, level: int) -> str:
+    """Provenance label persisted on a summary node (#441).
+
+    ``deterministic`` for the L3 fallback, the routed model name for L1/L2, and
+    ``host-default`` when the successful route was the empty (host-resolved)
+    model, so a freshly written row is never confused with a legacy ``unknown``
+    row that predates the column.
+    """
+    if level == 3:
+        return "deterministic"
+    model = (details or {}).get("model")
+    return str(model) if model else "host-default"
+
+
 def _invoke_summary_llm_chain(
     prompt: str,
     max_tokens: int,
@@ -459,6 +473,7 @@ def _invoke_summary_llm_chain(
     circuit_breaker: SummaryCircuitBreaker | None = None,
     spend_guard: "SummarySpendGuard | None" = None,
     accepts_result: Callable[[str], bool] | None = None,
+    details: dict[str, object] | None = None,
 ) -> Optional[str]:
     chain = _summary_model_chain(model, fallback_models)
     skipped = 0
@@ -492,6 +507,8 @@ def _invoke_summary_llm_chain(
         if result and (accepts_result is None or accepts_result(result)):
             if circuit_breaker is not None:
                 circuit_breaker.record_success(candidate_model)
+            if details is not None:
+                details["model"] = candidate_model or None
             return result
         if circuit_breaker is not None:
             circuit_breaker.record_failure(candidate_model)
@@ -659,8 +676,13 @@ def summarize_with_escalation(
     fallback_models: list[str] | tuple[str, ...] | None = None,
     circuit_breaker: SummaryCircuitBreaker | None = None,
     spend_guard: "SummarySpendGuard | None" = None,
+    details: dict[str, object] | None = None,
 ) -> tuple[str, int]:
     """Run 3-level escalation. Returns (summary, level_used).
+
+    When supplied, ``details`` is filled with the successful model route (or
+    ``None`` for deterministic L3) and the selected level without changing the
+    default return shape.
 
     Guarantees convergence: level 3 is deterministic and always produces
     output shorter than the source.
@@ -669,6 +691,7 @@ def summarize_with_escalation(
     l1_prompt = _build_l1_prompt(text, token_budget, depth,
                                  focus_topic=focus_topic,
                                  custom_instructions=custom_instructions)
+    level_details: dict[str, object] = {}
     l1_result = _invoke_summary_llm_chain(
         l1_prompt,
         token_budget * 2,
@@ -679,10 +702,13 @@ def summarize_with_escalation(
         circuit_breaker=circuit_breaker,
         spend_guard=spend_guard,
         accepts_result=lambda result: count_tokens(result) < source_tokens,
+        details=level_details,
     )
 
     if l1_result:
         logger.debug("L1 summarization succeeded (%d tokens)", count_tokens(l1_result))
+        if details is not None:
+            details.update(model=level_details.get("model"), level=1)
         return l1_result, 1
 
     # Level 2: aggressive bullets at reduced budget
@@ -690,6 +716,7 @@ def summarize_with_escalation(
     l2_prompt = _build_l2_prompt(text, l2_budget,
                                  focus_topic=focus_topic,
                                  custom_instructions=custom_instructions)
+    level_details = {}
     l2_result = _invoke_summary_llm_chain(
         l2_prompt,
         l2_budget * 2,
@@ -700,13 +727,18 @@ def summarize_with_escalation(
         circuit_breaker=circuit_breaker,
         spend_guard=spend_guard,
         accepts_result=lambda result: count_tokens(result) < source_tokens,
+        details=level_details,
     )
 
     if l2_result:
         logger.debug("L2 summarization succeeded (%d tokens)", count_tokens(l2_result))
+        if details is not None:
+            details.update(model=level_details.get("model"), level=2)
         return l2_result, 2
 
     # Level 3: deterministic truncation — guaranteed convergence
     l3_result = _deterministic_truncate(text, l3_truncate_tokens)
     logger.debug("L3 deterministic truncation (%d tokens)", count_tokens(l3_result))
+    if details is not None:
+        details.update(model=None, level=3)
     return l3_result, 3

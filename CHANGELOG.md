@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Summary nodes persist producing-model and escalation-level provenance and expose it through describe, inspect, and doctor diagnostics. (#441)
+
 ## v0.23.3 - maintenance point release
 
 - Session-end prefix matching extracted from `engine.py` into `prefix_matching.py` as a mixin;
