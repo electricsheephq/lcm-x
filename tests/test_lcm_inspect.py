@@ -109,6 +109,8 @@ def test_lcm_inspect_reports_bounded_metadata_without_content(tmp_path):
                 earliest_at=1.0,
                 latest_at=3.0,
                 expand_hint="setup",
+                producer_model="summary-model",
+                escalation_level=1,
             )
         )
         ref = _write_externalized_payload(engine)
@@ -139,6 +141,8 @@ def test_lcm_inspect_reports_bounded_metadata_without_content(tmp_path):
         assert "expand_hint" not in result["dag"]["latest_nodes"][0]
         assert result["dag"]["latest_nodes"][0]["expand_hint_available"] is True
         assert result["dag"]["latest_nodes"][0]["expand_hint_chars"] == len("setup")
+        assert result["dag"]["latest_nodes"][0]["producer_model"] == "summary-model"
+        assert result["dag"]["latest_nodes"][0]["escalation_level"] == 1
         assert result["externalized_refs"]["total_known"] == 1
         assert result["externalized_refs"]["items"][0]["externalized_ref"] == ref
         assert result["externalized_refs"]["items"][0]["readable"] is True

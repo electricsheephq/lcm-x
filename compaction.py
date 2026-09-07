@@ -25,6 +25,7 @@ from .message_content import text_content_for_pattern_matching
 from .sanitize import _contains_sensitive_redaction
 from .sqlite_util import _is_sqlite_locked_error
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
+from .escalation import producer_model_label
 
 _UNPROVEN_FILTER_EXCLUSION = object()
 
@@ -1093,6 +1094,7 @@ class CompactionMixin:
                     self._schedule_pre_compaction_assertions(summary_input_chunk)
 
                 try:
+                    self._last_leaf_summary_details = {}
                     summary_kwargs: dict[str, Any] = {"focus_topic": focus_topic}
                     if threshold_full_sweep_active:
                         summary_kwargs["deadline"] = sweep_deadline
@@ -1141,6 +1143,9 @@ class CompactionMixin:
             consumed_store_ids = sorted(dict.fromkeys(consumed_store_ids))
             earliest_at, latest_at = self._store.get_time_bounds(source_store_ids)
             summary_tokens = count_tokens(summary_text)
+            producer_model = producer_model_label(
+                getattr(self, "_last_leaf_summary_details", {}), _level
+            )
 
             node = SummaryNode(
                 session_id=self._session_id,
@@ -1154,6 +1159,8 @@ class CompactionMixin:
                 earliest_at=earliest_at,
                 latest_at=latest_at,
                 expand_hint=self._extract_expand_hint(summary_text),
+                producer_model=producer_model,
+                escalation_level=_level,
             )
             published_frontier = (
                 max(consumed_store_ids) if consumed_store_ids else 0

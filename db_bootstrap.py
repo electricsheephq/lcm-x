@@ -300,6 +300,7 @@ _V5_CORE_TABLE_COLUMNS: dict[str, frozenset[str]] = {
 # unrelated extra core column still fails closed as a genuinely newer shape.
 _V5_CORE_OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
     "messages": frozenset({"ingested_at", "observed_at", "observed_at_source"}),
+    "summary_nodes": frozenset({"producer_model", "escalation_level"}),
 }
 
 # Core FTS5 virtual tables: presence is enough — their column layout is owned by

@@ -395,7 +395,8 @@ def test_apply_imports_lossless_summaries_as_summary_nodes(tmp_path: Path):
     }
     rows = conn.execute(
         """SELECT node_id, depth, summary, source_token_count, source_ids,
-                  source_type, created_at, earliest_at, latest_at
+                  source_type, created_at, earliest_at, latest_at,
+                  producer_model, escalation_level
            FROM summary_nodes
            ORDER BY depth, node_id"""
     ).fetchall()
@@ -414,6 +415,10 @@ def test_apply_imports_lossless_summaries_as_summary_nodes(tmp_path: Path):
     assert json.loads(condensed["source_ids"]) == [leaf["node_id"]]
     assert leaf["source_token_count"] == 15
     assert condensed["source_token_count"] == 33
+    assert leaf["producer_model"] == "imported"
+    assert leaf["escalation_level"] == 0
+    assert condensed["producer_model"] == "imported"
+    assert condensed["escalation_level"] == 0
     dag = SummaryDAG(target_db)
     condensed_node = dag.get_node(condensed["node_id"])
     assert condensed_node is not None
@@ -427,6 +432,8 @@ def test_apply_imports_lossless_summaries_as_summary_nodes(tmp_path: Path):
             "depth": 0,
             "token_count": 5,
             "source_token_count": 15,
+            "producer_model": "imported",
+            "escalation_level": 0,
             "expand_hint": "leaf hint",
         }
     ]

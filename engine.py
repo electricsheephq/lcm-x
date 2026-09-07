@@ -41,6 +41,7 @@ from .engine_registry import (
     resolve_active_lcm_engine,  # noqa: F401  (re-exported: hosts import it from .engine)
 )
 from .escalation import (
+    producer_model_label,
     SummaryCircuitBreaker,
     SummarySpendGuard,
     summarize_with_escalation,
@@ -1810,6 +1811,7 @@ class LCMEngine(
                     if remaining_seconds <= 0:
                         raise TimeoutError("threshold full sweep time budget exhausted")
                     timeout_seconds = min(timeout_seconds, remaining_seconds)
+                summary_details: dict[str, object] = {}
                 summary_text, level = summarize_with_escalation(
                     text=serialized,
                     source_tokens=source_tokens,
@@ -1825,7 +1827,9 @@ class LCMEngine(
                     l3_truncate_tokens=self._config.l3_truncate_tokens,
                     focus_topic=focus_topic or "",
                     custom_instructions=self._config.custom_instructions,
+                    details=summary_details,
                 )
+                self._last_leaf_summary_details = summary_details
                 return attempt_chunk, source_tokens, summary_text, level, attempt_number
             except Exception as exc:
                 if attempt_number >= max_attempts or not self._is_retry_worthy_leaf_summary_error(exc):
@@ -6057,6 +6061,7 @@ class LCMEngine(
             if remaining_seconds <= 0:
                 raise TimeoutError("threshold full sweep time budget exhausted")
             timeout_seconds = min(timeout_seconds, remaining_seconds)
+        summary_details: dict[str, object] = {}
         summary_text, level = summarize_with_escalation(
             text=combined_text,
             source_tokens=source_tokens,
@@ -6072,6 +6077,7 @@ class LCMEngine(
             l3_truncate_tokens=self._config.l3_truncate_tokens,
             focus_topic=focus_topic or "",
             custom_instructions=self._config.custom_instructions,
+            details=summary_details,
         )
         earliest_at, latest_at = self._dag.get_source_time_window(
             [node.node_id for node in nodes]
@@ -6089,6 +6095,8 @@ class LCMEngine(
             earliest_at=earliest_at,
             latest_at=latest_at,
             expand_hint=self._extract_expand_hint(summary_text),
+            producer_model=producer_model_label(summary_details, level),
+            escalation_level=level,
         )
         self._dag.add_node(condensed_node)
         self._invalidate_rollups_for_published_node(condensed_node)

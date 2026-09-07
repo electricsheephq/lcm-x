@@ -724,7 +724,9 @@ def _ensure_summary_nodes_schema(conn: sqlite3.Connection) -> None:
             created_at REAL NOT NULL,
             earliest_at REAL,
             latest_at REAL,
-            expand_hint TEXT DEFAULT ''
+            expand_hint TEXT DEFAULT '',
+            producer_model TEXT NOT NULL DEFAULT 'unknown',
+            escalation_level INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_nodes_session_depth
             ON summary_nodes(session_id, depth, created_at);
@@ -735,6 +737,14 @@ def _ensure_summary_nodes_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE summary_nodes ADD COLUMN earliest_at REAL")
     if "latest_at" not in columns:
         conn.execute("ALTER TABLE summary_nodes ADD COLUMN latest_at REAL")
+    if "producer_model" not in columns:
+        conn.execute(
+            "ALTER TABLE summary_nodes ADD COLUMN producer_model TEXT NOT NULL DEFAULT 'unknown'"
+        )
+    if "escalation_level" not in columns:
+        conn.execute(
+            "ALTER TABLE summary_nodes ADD COLUMN escalation_level INTEGER NOT NULL DEFAULT 0"
+        )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_nodes_session_latest ON summary_nodes(session_id, latest_at, created_at)"
     )
@@ -826,8 +836,9 @@ def _insert_summary_node(
     cur = conn.execute(
         """INSERT INTO summary_nodes
            (session_id, depth, summary, token_count, source_token_count,
-            source_ids, source_type, created_at, earliest_at, latest_at, expand_hint)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            source_ids, source_type, created_at, earliest_at, latest_at, expand_hint,
+            producer_model, escalation_level)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'imported', 0)""",
         (
             candidate.target_session_id,
             depth,

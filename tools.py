@@ -6636,6 +6636,8 @@ def lcm_describe(args: Dict[str, Any], **kwargs) -> str:
                 {
                     "node_id": node.node_id,
                     "token_count": node.token_count,
+                    "producer_model": node.producer_model,
+                    "escalation_level": node.escalation_level,
                     "expand_hint": (
                         _session_expand_hint(node.node_id, node.session_id)
                         if session_id_explicit
@@ -7392,6 +7394,18 @@ def _summary_quality_stats(engine: "LCMEngine", session_id: str) -> dict[str, An
         """,
         (session_id,),
     ).fetchone()
+    escalation_distribution = conn.execute(
+        """SELECT escalation_level, COUNT(*)
+           FROM summary_nodes WHERE session_id = ?
+           GROUP BY escalation_level ORDER BY escalation_level""",
+        (session_id,),
+    ).fetchall()
+    producer_distribution = conn.execute(
+        """SELECT producer_model, COUNT(*)
+           FROM summary_nodes WHERE session_id = ?
+           GROUP BY producer_model ORDER BY producer_model""",
+        (session_id,),
+    ).fetchall()
     total_nodes = int(totals[0] or 0)
     total_source_tokens = int(totals[1] or 0)
     total_summary_tokens = int(totals[2] or 0)
@@ -7430,6 +7444,12 @@ def _summary_quality_stats(engine: "LCMEngine", session_id: str) -> dict[str, An
         },
         "extreme_ratio_nodes": extreme_ratio_nodes,
         "tiny_large_source_nodes": tiny_large_source_nodes,
+        "by_escalation_level": {
+            str(level): int(count) for level, count in escalation_distribution
+        },
+        "by_producer_model": {
+            str(model): int(count) for model, count in producer_distribution
+        },
         "worst_nodes": worst_nodes,
         "recommendation": (
             "Inspect worst_nodes with lcm_expand; tiny summaries for very large sources often indicate degraded fallback summarization."
@@ -7879,7 +7899,8 @@ def lcm_inspect(args: Dict[str, Any], **kwargs) -> str:
     latest_node_rows = engine._dag.connection.execute(
         """
         SELECT node_id, session_id, depth, token_count, source_token_count,
-               source_type, created_at, earliest_at, latest_at, expand_hint
+               source_type, created_at, earliest_at, latest_at, expand_hint,
+               producer_model, escalation_level
         FROM summary_nodes
         WHERE session_id = ?
         ORDER BY created_at DESC, node_id DESC
@@ -7900,6 +7921,8 @@ def lcm_inspect(args: Dict[str, Any], **kwargs) -> str:
             "latest_at": row[8],
             "expand_hint_available": bool(row[9]),
             "expand_hint_chars": len(row[9] or ""),
+            "producer_model": row[10],
+            "escalation_level": int(row[11] or 0),
         }
         for row in latest_node_rows
     ]

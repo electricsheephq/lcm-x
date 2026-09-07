@@ -1015,7 +1015,8 @@ LCM_DESCRIBE = {
         "Node and overview lookup default to the current session; pass an explicit session_id "
         "to inspect a known node or DAG from another LCM session. A node must belong to the "
         "requested session. externalized_ref remains current-session only. Returns token counts, "
-        "child manifest, expand hints, or externalized payload metadata/preview. If called with "
+        "producer model, escalation level, child manifest, expand hints, or externalized payload "
+        "metadata/preview. If called with "
         "no node_id or externalized_ref, returns the top-level overview for the selected session. "
         "This tool cannot discover session ids; for Hermes-tracked session history outside the "
         "LCM database, prefer session_search."
@@ -1144,7 +1145,7 @@ LCM_INSPECT = {
     "name": "lcm_inspect",
     "description": (
         "Inspect read-only LCM metadata for the current session: session/conversation "
-        "lineage, message frontier and fresh tail, DAG compaction frontier, latest "
+        "lineage, message frontier and fresh tail, DAG compaction frontier and node provenance, latest "
         "compaction skip/no-op reason, externalized payload refs and readability, "
         "and matched ignore/stateless patterns. This is an operator inventory tool; "
         "use lcm_grep/lcm_load_session/lcm_expand when you need actual content."
@@ -1166,8 +1167,8 @@ LCM_DOCTOR = {
     "name": "lcm_doctor",
     "description": (
         "Run diagnostics on the LCM database and configuration. Checks database "
-        "integrity, detects orphaned DAG nodes, validates configuration, and "
-        "reports potential issues. Use this to troubleshoot problems or verify "
+        "integrity, detects orphaned DAG nodes, validates configuration, reports summary "
+        "provenance distributions, and reports potential issues. Use this to troubleshoot or verify "
         "a healthy setup."
     ),
     "parameters": {

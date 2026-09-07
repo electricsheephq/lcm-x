@@ -1427,6 +1427,8 @@ def test_lcm_doctor_warns_on_extreme_summary_compression_ratios(engine):
         source_ids=[],
         source_type="messages",
         created_at=1.0,
+        producer_model="fallback-model",
+        escalation_level=2,
     ))
 
     payload = json.loads(engine.handle_tool_call("lcm_doctor", {}))
@@ -1436,6 +1438,8 @@ def test_lcm_doctor_warns_on_extreme_summary_compression_ratios(engine):
     assert check["detail"]["session_id"] == "test-session"
     assert check["detail"]["extreme_ratio_nodes"] == 1
     assert check["detail"]["tiny_large_source_nodes"] == 1
+    assert check["detail"]["by_escalation_level"] == {"2": 1}
+    assert check["detail"]["by_producer_model"] == {"fallback-model": 1}
     assert check["detail"]["worst_nodes"][0]["node_id"] == 1
     assert check["detail"]["worst_nodes"][0]["compression_ratio"] == 1800.0
 
@@ -11658,6 +11662,7 @@ class TestEngineCompress:
         original_fn = engine_module.summarize_with_escalation
 
         def mock_summary(**kwargs):
+            kwargs["details"].update(model="leaf-model", level=1)
             return "Leaf summary.\nExpand for details about: leaf window", 1
 
         engine_module.summarize_with_escalation = mock_summary
@@ -11667,8 +11672,44 @@ class TestEngineCompress:
             assert node.source_ids == expected_store_ids
             assert node.earliest_at == 1_700_000_000
             assert node.latest_at == 1_700_000_000 + len(expected_store_ids) - 1
+            assert node.producer_model == "leaf-model"
+            assert node.escalation_level == 1
         finally:
             engine_module.summarize_with_escalation = original_fn
+
+    @pytest.mark.parametrize(
+        ("level", "reported_model", "expected_model"),
+        [(2, "fallback-model", "fallback-model"), (3, None, "deterministic")],
+    )
+    def test_condensed_node_records_summary_provenance(
+        self, engine, monkeypatch, level, reported_model, expected_model
+    ):
+        source_ids = [
+            engine._dag.add_node(SummaryNode(
+                session_id="test-session",
+                depth=0,
+                summary=f"source summary {index}",
+                token_count=100,
+                source_token_count=200,
+                source_ids=[index],
+                source_type="messages",
+                created_at=float(index + 1),
+            ))
+            for index in range(2)
+        ]
+        source_nodes = [engine._dag.get_node(node_id) for node_id in source_ids]
+        assert all(node is not None for node in source_nodes)
+
+        def mock_summary(**kwargs):
+            kwargs["details"].update(model=reported_model, level=level)
+            return "condensed summary", level
+
+        monkeypatch.setattr(lcm_engine, "summarize_with_escalation", mock_summary)
+        engine._condense_summary_nodes(source_nodes)
+
+        condensed = engine._dag.get_session_nodes("test-session", depth=1)[0]
+        assert condensed.producer_model == expected_model
+        assert condensed.escalation_level == level
 
     def test_compress_leaf_node_tracks_source_ids_for_content_part_messages(self, tmp_path, monkeypatch):
         config = LCMConfig(
@@ -26635,11 +26676,15 @@ class TestEngineTools:
                 source_ids=[],
                 source_type="messages",
                 created_at=0,
+                producer_model="overview-model",
+                escalation_level=2,
             )
         )
 
         overview = json.loads(engine.handle_tool_call("lcm_describe", {}))
         assert "d2" in overview["depths"]
+        assert overview["depths"]["d2"]["nodes"][0]["producer_model"] == "overview-model"
+        assert overview["depths"]["d2"]["nodes"][0]["escalation_level"] == 2
 
     def test_handle_status_returns_session_overview(self, engine):
         engine._store.append("test-session", {"role": "user", "content": "hello world"})
@@ -29214,3 +29259,12 @@ class TestExtractionDuringCompress:
         result = eng.compress(messages)
         assert result[0]["role"] == "system"
         assert len(eng._dag.get_session_nodes("extract-fail")) > 0
+
+
+def test_producer_model_label_distinguishes_host_default_from_legacy_unknown():
+    from hermes_lcm.escalation import producer_model_label
+
+    assert producer_model_label({"model": "primary-model"}, 1) == "primary-model"
+    assert producer_model_label({"model": None}, 2) == "host-default"
+    assert producer_model_label({}, 1) == "host-default"
+    assert producer_model_label({"model": "primary-model"}, 3) == "deterministic"
