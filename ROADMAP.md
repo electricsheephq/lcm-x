@@ -1,6 +1,6 @@
 # LCM-X Product Roadmap
 
-Status: living document, reconciled 2026-08-24. GitHub issue #323 is the canonical work graph; this page explains the durable tracks without duplicating issue lifecycle state.
+Status: living document, reconciled 2026-09-07. GitHub issue #323 is the canonical work graph; this page explains the durable tracks without duplicating issue lifecycle state.
 
 ## What LCM-X is
 
@@ -8,14 +8,16 @@ LCM-X is Lossless Context Memory eXtension: a Hermes-compatible context engine t
 
 ## Current product baseline
 
-Latest stable is `v0.23.1@81d8d41197dddc4c09b57097f4955ebae32366a9`. The source snapshot for this roadmap is `main@3d4fbb4c979dc09aef0b831bb50d928e0e18d68f`.
+Latest GA is `v0.23.2@676bb48dde29f06899ff829a7cb8b1d9d2e262f6` (2026-08-27, the lossless-by-default point release, tracker #377). The current prerelease is `v0.23.3-rc1@62a34e512557fde216bde3d32594f9c73f3fbf15` under the weekly rc-first train (#419: GA every Wednesday; v0.24.0 is owner-cut). The source snapshot for this roadmap is `main@7fb19f8d3518080c8d07408a2a28c3c66c15c51b`.
 
 Stable and main are separate identities. Stable is the product-under-test and installed-runtime baseline; main is the continuing development line. #342 owns main's deferred version-metadata policy.
 
 Eva has accepted v0.23.1 with hosted `voyage-4-large`, 1024-dimensional float32 summary
 vectors under that release's fail-closed privacy identity (v0.23.1 coupled cloud embedding
 to durable redaction; main has since split the two flags — see docs/features-overview.md).
-The proof ceiling is Eva only.
+The proof ceiling is Eva only. v0.23.2 (#374) shipped the split: cloud-copy protection is
+default-on with a `privacy:off` opt-out; durable redaction is opt-in and stays default-off — lossless is
+the brand invariant.
 
 ## Track A — Exact-stable retrieval provenance
 
@@ -36,6 +38,8 @@ Roadmap ordering remains:
 5. #240 retains local auxiliary summary-envelope compatibility.
 
 Every score-sensitive prompt, summary, selection, or retrieval change requires #252 disposition and a comparable baseline.
+
+F61 (LoCoMo C2 B3-A attribution: 67.42 / 67.72 vs the 54.6 baseline, adversarial ~62 vs the mid-30s band) unlocked B3-A productization. Epic #379 is the v0.24.0 flagship; #317 (untrusted retrieved context) is its prerequisite and #324 its design input. The summarizer-input clamp (#440) must be pinned in run sheets before any F-series comparison of this track.
 
 ## Track C — Bounded active assembly
 
@@ -59,6 +63,17 @@ Issue `#328` is a P4 deterministic telemetry-test follow-up. Issue `#342` is the
 
 Teams remains separate from the current product/evaluation program. Dormant code, pilot enablement, host identity, connector behavior, and customer acceptance keep their own issues and milestones. Default-off code is not proof of safe enablement.
 
+## Track G — Parity with lossless-claw 1.0
+
+A read-only audit against Martian-Engineering/lossless-claw v1.0.0 (2026-09-07) is indexed in #451. LCM-X is ahead on memory, retrieval, privacy, teams, and evaluation; lossless-claw is ahead on robustness plumbing and operator tooling, and those gaps sit under live LCM-X bug families. Accepted items, in order:
+
+1. #436 structural message identity + durable turn ledger (retires the #7/#33/#59/#205/#260/#398 duplication class); #437 assembly output clamp at defaults (#59); landing the shared-SQLite-handle work already in PR #399 / #197.
+2. #438, #439, #440, #441, #442 — bounded summarization-boundary items; #440/#442 are score-sensitive and follow #252.
+3. Operator tooling under #321: #443 doctor batch, #444 log sink, #445 rollover-split repair, #446 CI host validator, #447 read-only CLI (packaging decision pending).
+4. #448/#449/#450 — problem classes lossless-claw's tracker surfaced that had no LCM-X issue.
+
+The background pending-summary pipeline (#36) is sequenced after #436. Prompt-aware eviction stays refused per #320. lossless-claw's issue tracker is treated as an early-warning feed for the shared problem classes listed in #451; re-run the audit against its next minor.
+
 ## Release discipline
 
 Release work requires:
@@ -79,10 +94,10 @@ Never restamp stable from main casually, move an existing tag, bypass the rulese
 
 ## Near-term sequence
 
-1. Finish canonical documentation and the default-off instrument through separate protected PRs.
-2. Bind the exact merged instrument to stable v0.23.1 without changing product bytes.
-3. Run seeded smoke, registered 95-question cached A/A-prime, then the full public 500-question audit within the privacy and cost caps.
-4. Record `KEEP CURRENT` or `FUSION DESIGN EARNED`, run the two blind final reviews, and close only the finite audit milestone.
+1. Land the v0.23.3 GA (#426 notes, #429 rc2) on the weekly train (#419), then v0.23.4.
+2. Ship v0.24.0 as the B3-A provenance flagship (#379 with #317/#324 children), owner-cut.
+3. Start Track G tier 1 (#436 stable-event-key slice, #437) alongside the Tosko4 queue (#397–#410) as contributor revisions arrive.
+4. Resume the bench lane: F53 V1-M re-bank (#380) once harness issues #235/#236 clear; the retrieval provenance audit chain (#345 → #353 → #347) stays pinned to exact-stable identities.
 5. Resume later quality work through the accepted issue/dependency graph rather than an all-features campaign.
 
 Benchmark discipline remains registration before spend, seeded sampling instead of first-N, deterministic A/A-prime noise floors, fail-closed accounting, and append-only corrections.
