@@ -38,6 +38,7 @@ Use `docs/operator-guide.md` as the complete current source. Start with:
 - `LCM_FRESH_TAIL_COUNT`: newest messages kept raw;
 - `LCM_LEAF_CHUNK_TOKENS`: maximum raw material per leaf compaction group;
 - `LCM_DATABASE_PATH`: profile-local SQLite path when the default is unsuitable;
+- `LCM_NATIVE_PUBLICATION_FALLBACK` (default `false`): after an LCM publication conflict, allow a cancellation-fenced Hermes host to summarize the active context through its native compressor and archive transaction. LCM history and recall stay available; its frontier is not advanced. Failed, cancelled, placeholder or non-shrinking summaries retain the active context. This is recovery, not repair of the underlying coverage mismatch;
 - `LCM_IGNORE_SESSION_PATTERNS` and `LCM_STATELESS_SESSION_PATTERNS`: storage ownership boundaries;
 - summary/embedding provider settings only after confirming credentials, cost, and data handling. Known cloud embedding providers require `LCM_SENSITIVE_PATTERNS_ENABLED=true` with a nonempty known pattern list; warmup binds that policy into vector identity and later query/backfill calls fail closed on drift.
 
