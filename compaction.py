@@ -695,7 +695,9 @@ class CompactionMixin:
         # assembly cap), which is exactly the sustained-over-cap state a runaway
         # compaction loop produces - clearing it per turn would defeat the guard
         # in the case it exists for. A tripped guard still converges the
-        # emergency via deterministic L3 truncation (no LLM spend).
+        # emergency via deterministic L3 truncation (no LLM spend). Only the
+        # operator-driven path (rotate_active_session(apply=True)) clears it
+        # (#438).
         recovery_assembly_cap = (
             self._overflow_recovery_assembly_cap(
                 observed_tokens=observed_prompt_tokens,

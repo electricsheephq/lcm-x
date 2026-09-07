@@ -124,8 +124,11 @@ class SummarySpendGuard:
     a pathologically looping compaction that succeeds every time but burns
     auxiliary-model spend without bound. When the call budget for the window is
     exhausted it opens a backoff during which the escalation path falls back to
-    deterministic L3 truncation (no spend, still converges). A forced/manual
-    compaction calls clear() so operator-driven repair is never blocked.
+    deterministic L3 truncation (no spend, still converges). A manual rotate
+    (``rotate_active_session(apply=True)``) calls clear() so operator-driven
+    repair is never blocked; automatic forced-overflow recovery deliberately
+    does not (see the NOTE in compaction.py), because force_overflow recurs
+    every over-cap turn and would defeat the guard.
     """
 
     max_calls: int = 24
@@ -153,6 +156,12 @@ class SummarySpendGuard:
                 return False
             self._prune(current_time)
             return len(self._calls) < self.max_calls
+
+    def backoff_open(self, *, now: float | None = None) -> bool:
+        """Return whether the guard is currently in its explicit backoff."""
+        current_time = time.monotonic() if now is None else now
+        with self._lock:
+            return current_time < self._backoff_until
 
     def try_record_call(self, *, now: float | None = None) -> bool:
         """Atomically reserve one provider call if the budget allows it."""

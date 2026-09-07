@@ -6796,6 +6796,14 @@ class LCMEngine(
             return False
         return tokens >= assembly_cap
 
+    def _clear_summary_spend_backoff(self, reason: str) -> bool:
+        guard = self._summary_spend_guard
+        if not guard.backoff_open():
+            return False
+        guard.clear()
+        logger.info("[lcm] summary spend backoff cleared (%s)", reason)
+        return True
+
     def _overflow_recovery_signal_tokens(
         self,
         observed_tokens: Optional[int] = None,
@@ -7138,6 +7146,8 @@ class LCMEngine(
             return {"ok": False, "reason": "session_ignored", "session_id": session_id}
         if self._session_stateless:
             return {"ok": False, "reason": "session_stateless", "session_id": session_id}
+        if apply:
+            self._clear_summary_spend_backoff("manual rotate")
 
         fresh_tail_count = max(1, int(self._config.fresh_tail_count))
         total_count = int(self._store.get_session_count(session_id))
