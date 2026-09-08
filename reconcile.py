@@ -1918,9 +1918,7 @@ class ReconcileMixin:
             None,
         )
         if callable(retained_anchor_loader):
-            retained_anchor = retained_anchor_loader() or getattr(
-                self, "_retiring_retained_user_anchor", None,
-            )
+            retained_anchor = retained_anchor_loader()
             retained_store_id = int(
                 retained_anchor.get("store_id") or 0
             ) if retained_anchor else 0

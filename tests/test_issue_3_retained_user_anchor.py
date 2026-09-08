@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hermes_lcm.engine as lcm_engine
+import pytest
 
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
@@ -548,12 +549,14 @@ def test_preflight_second_user_invalidates_prepared_anchor(
     try:
         engine.compress(first)
         assert engine._leading_anchor_count(first) == 2
+        registered_anchor = engine._store.read_metadata_json(engine._retained_user_anchor_metadata_key())
         engine.threshold_tokens = 1
         messages = [
             *first,
             {"role": "user", "content": "second user invalidates the anchor"},
         ]
         should_compress = engine.should_compress_preflight(messages)
+        assert engine._leading_anchor_count(messages) == 1
         anchor_metadata = engine._store.read_metadata_json(
             engine._retained_user_anchor_metadata_key()
         )
@@ -561,7 +564,7 @@ def test_preflight_second_user_invalidates_prepared_anchor(
         engine.shutdown()
 
     assert should_compress is True
-    assert anchor_metadata == {"store_id": 0, "version": 1}
+    assert anchor_metadata == registered_anchor
 
 
 def test_second_real_user_disqualifies_first_raw_anchor(
@@ -591,6 +594,7 @@ def test_second_real_user_disqualifies_first_raw_anchor(
                 *_tool_chain(),
             ]
         )
+        registered_anchor = engine._store.read_metadata_json(engine._retained_user_anchor_metadata_key())
         second_result = engine.compress(
             [
                 *first_result,
@@ -601,6 +605,10 @@ def test_second_real_user_disqualifies_first_raw_anchor(
         anchor_metadata = engine._store.read_metadata_json(
             engine._retained_user_anchor_metadata_key()
         )
+        # Supplying the returned projection is evidence of adoption; only now
+        # may the old exact-occurrence registration be retired.
+        engine.compress(second_result)
+        adopted_metadata = engine._store.read_metadata_json(engine._retained_user_anchor_metadata_key())
     finally:
         engine.shutdown()
 
@@ -611,4 +619,44 @@ def test_second_real_user_disqualifies_first_raw_anchor(
     ]
     assert any(second_user["content"] in content for content in user_contents)
     assert first_user["content"] not in user_contents
-    assert anchor_metadata == {"store_id": 0, "version": 1}
+    assert anchor_metadata == registered_anchor
+    assert adopted_metadata == {"store_id": 0, "version": 1}
+
+
+def test_retiring_anchor_proof_survives_timeout_and_unadopted_publication(tmp_path, monkeypatch):
+    config = LCMConfig(fresh_tail_count=4, leaf_chunk_tokens=1,
+        database_path=str(tmp_path / "retiring-proof.db"))
+    engine = LCMEngine(config=config)
+    engine.on_session_start("retiring-proof", platform="cli", context_length=200000)
+    first_user = {"role": "user", "content": "original exact occurrence"}
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _summary)
+    try:
+        first_result = engine.compress([
+            {"role": "system", "content": "stable system prompt"}, first_user, *_tool_chain()])
+        key = engine._retained_user_anchor_metadata_key()
+        registration = engine._store.read_metadata_json(key)
+        pending = [*first_result, {"role": "user", "content": "new current request"}, *_tool_chain(count=4)]
+        def timeout(**_kwargs):
+            raise TimeoutError("one synthetic summary failure")
+        monkeypatch.setattr(lcm_engine, "summarize_with_escalation", timeout)
+        with pytest.raises(TimeoutError):
+            engine.compress(pending)
+        after_timeout = engine._store.read_metadata_json(key)
+        monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _summary)
+        published = engine.compress(pending)
+        assert engine.last_compression_status == "compacted"
+        assert after_timeout == registration
+        assert engine._store.read_metadata_json(key) == registration
+        assert first_user not in published
+        # Publication is not host adoption: the unchanged host projection must
+        # still resolve this exact unprotected occurrence without inventing IDs.
+        assert engine._prepare_retained_user_anchor(pending) is None
+        assert engine._leading_anchor_count(pending) == 1
+        mapped = engine._get_store_id_map_for_messages(pending)
+        assert mapped[id(pending[1])] == registration["store_id"]
+        assert engine._store.read_metadata_json(key) == registration
+        # A subsequent supplied projection proves the caller has dropped it.
+        engine.compress(published)
+        assert engine._store.read_metadata_json(key) == {"version": 1, "store_id": 0}
+    finally:
+        engine.shutdown()
