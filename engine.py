@@ -2636,6 +2636,10 @@ class LCMEngine(
                     ),
                 )
                 return registered_row
+            # The row stops being protected, but its registered occurrence
+            # remains eligible for this attempt's leaf source mapping.
+            # compress() clears this transient proof on every exit.
+            self._retiring_retained_user_anchor = registered_row
             self._write_retained_user_anchor(None)
             return None
         durable_users = self._durable_real_user_messages()

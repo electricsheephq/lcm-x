@@ -1918,11 +1918,19 @@ class ReconcileMixin:
             None,
         )
         if callable(retained_anchor_loader):
-            retained_anchor = retained_anchor_loader()
+            retained_anchor = retained_anchor_loader() or getattr(
+                self, "_retiring_retained_user_anchor", None,
+            )
             retained_store_id = int(
                 retained_anchor.get("store_id") or 0
             ) if retained_anchor else 0
             if 0 < retained_store_id <= int(self._last_compacted_store_id or 0):
+                owned_rows = self._owner_history(after_store_id=retained_store_id - 1, limit=1)
+                if (not owned_rows or int(owned_rows[0]["store_id"]) != retained_store_id
+                    or self._retained_user_anchor_identity_digest(owned_rows[0], stored_row=True)
+                    != self._retained_user_anchor_identity_digest(retained_anchor, stored_row=True)):
+                    retained_anchor = None
+            if retained_anchor is not None and 0 < retained_store_id <= int(self._last_compacted_store_id or 0):
                 retained_identity = self._message_replay_identity(
                     retained_anchor,
                     stored_row=True,

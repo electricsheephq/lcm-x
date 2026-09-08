@@ -11058,6 +11058,11 @@ class TestEngineCompress:
         instance.on_session_start("backed-summary-session", platform="telegram", context_length=200000)
 
         summary_text = "backed compressed details\nExpand for details about: backed prior"
+        source_ids = instance._store.append_batch(
+            "backed-summary-session",
+            [{"role": "assistant", "content": "backed prior raw turn"}],
+            conversation_id=instance.current_conversation_id,
+        )
         node_id = instance._dag.add_node(
             SummaryNode(
                 session_id="backed-summary-session",
@@ -11065,7 +11070,7 @@ class TestEngineCompress:
                 summary=summary_text,
                 token_count=3,
                 source_token_count=50,
-                source_ids=[1],
+                source_ids=source_ids,
                 source_type="messages",
                 created_at=time.time(),
                 earliest_at=time.time(),
@@ -21309,7 +21314,7 @@ class TestSessionRollover:
             {"role": "user", "content": "epsilon " * 80},
             {"role": "assistant", "content": "zeta"},
         ]
-        engine.compress(messages)
+        first_result = engine.compress(messages)
 
         state = engine._lifecycle.get_by_conversation(engine._conversation_id)
         assert state is not None
@@ -21322,9 +21327,7 @@ class TestSessionRollover:
             lambda **kwargs: (_ for _ in ()).throw(TimeoutError("summary timed out")),
         )
         failing_messages = [
-            {"role": "system", "content": "sys"},
-            {"role": "user", "content": "epsilon " * 80},
-            {"role": "assistant", "content": "zeta " * 80},
+            *first_result,
             {"role": "user", "content": "eta " * 80},
             {"role": "assistant", "content": "theta " * 80},
             {"role": "user", "content": "iota " * 80},

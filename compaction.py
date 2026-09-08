@@ -495,6 +495,7 @@ class CompactionMixin:
                  focus_topic: Optional[str] = None,
                  force: bool = False) -> List[Dict[str, Any]]:
         """Run compaction and leave a terminal public status on every failure."""
+        self._retiring_retained_user_anchor = None
         try:
             with self._fresh_tail_pressure_yield_invocation():
                 return self._compress_impl(
@@ -507,6 +508,8 @@ class CompactionMixin:
             self._last_compression_status = "error"
             self._last_compression_noop_reason = ""
             raise
+        finally:
+            self._retiring_retained_user_anchor = None
 
     def _fail_open_after_publication_failure(
         self,
