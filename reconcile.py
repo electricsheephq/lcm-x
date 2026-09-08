@@ -1482,7 +1482,7 @@ class ReconcileMixin:
             return 0
 
         try:
-            session_count = self._store.get_session_count(self._session_id)
+            session_count = self._owner_history(count_only=True)
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation count failed: %s", exc)
             return 0
@@ -1517,7 +1517,7 @@ class ReconcileMixin:
             return 0
 
         tail_limit = min(max(len(messages) * 4, 64), session_count)
-        stored_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
+        stored_rows = self._owner_history(limit=tail_limit, latest=True)
         if not stored_rows:
             return 0
         stored_tail_rows = [
@@ -1565,10 +1565,7 @@ class ReconcileMixin:
             return cursor
 
         incoming_identities = self._effective_replay_identities(messages)
-        stored_head_rows = self._store.get_session_messages(
-            self._session_id,
-            limit=tail_limit,
-        )
+        stored_head_rows = self._owner_history(limit=tail_limit)
         stored_head = [self._message_replay_identity(row, stored_row=True) for row in stored_head_rows]
         # Stale-snapshot proof uses the raw durable prefix.  Ignore-message
         # filters may suppress noisy rows for tail reconciliation, but filtered
@@ -1654,11 +1651,11 @@ class ReconcileMixin:
         """
         if not self._session_id or cursor >= len(messages):
             return set()
-        session_count = self._store.get_session_count(self._session_id)
+        session_count = self._owner_history(count_only=True)
         if session_count <= 0:
             return set()
         tail_limit = min(max(len(messages) * 4, 64), session_count)
-        stored_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
+        stored_rows = self._owner_history(limit=tail_limit, latest=True)
         stored_identity_counts = Counter(
             identity
             for identity in (
@@ -1948,10 +1945,7 @@ class ReconcileMixin:
             candidates.sort(key=lambda candidate: int(candidate["store_id"]))
         next_candidate_after = self._last_compacted_store_id
         while True:
-            page = self._store.get_session_messages_after(
-                self._session_id,
-                after_store_id=next_candidate_after,
-            )
+            page = self._owner_history(after_store_id=next_candidate_after)
             if not page:
                 break
             candidates.extend(page)

@@ -382,11 +382,11 @@ def test_filter_exclusion_scan_pages_to_the_covered_end(
     last_page = [{"store_id": 10_001, "content": "DROP_ME"}]
     calls = []
 
-    def paged_rows(_session_id, after_store_id=0, limit=10_000):
+    def paged_rows(*, after_store_id=0, limit=10_000):
         calls.append((after_store_id, limit))
         return first_page if after_store_id == 0 else last_page
 
-    monkeypatch.setattr(engine._store, "get_session_messages_after", paged_rows)
+    monkeypatch.setattr(engine, "_owner_history", paged_rows)
     try:
         proofs = engine._stored_publication_filter_exclusions(
             0,

@@ -20,3 +20,7 @@ Run normal compaction before rotate when older material must be represented in s
 Rotate refuses ignored or stateless sessions. Repeating an already-satisfied rotate reports a no-op and preserves the previous known-good rolling backup.
 
 Use a separate session when the user wants a new active conversational boundary. Use rotate when the problem is active transcript/frontier size without changing identity.
+
+## Retained logical-conversation compaction
+
+Explicit message `conversation_id` ownership governs replay reconciliation, leaf publication, summary selection, and condensation across producer sessions. A shared producer session does not make another conversation's rows eligible. Blank legacy owners require a positive, unique durable lifecycle binding; unrelated ambiguous rows remain unchanged and unclaimed. Selected active occurrences without owned lineage fail safely. An existing summary can prove a leading covered prefix only when its complete owned lineage is valid and the summary remains selected in the assembled context. These rules do not relabel raw messages, deduplicate by text, or authorize a frontier reset.

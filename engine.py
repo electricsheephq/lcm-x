@@ -4452,13 +4452,42 @@ class LCMEngine(
 
     # -- Internal: message ingestion ---------------------------------------
 
+    def _owner_history(self, *, after_store_id=0, limit=10000, latest=False, count_only=False):
+        """Use the same durable ownership domain for replay and publication."""
+        conversation_id = str(self._conversation_id or "").strip()
+        if not conversation_id:
+            if count_only:
+                return self._store.get_session_count(self._session_id)
+            if latest:
+                return self._store.get_session_tail(self._session_id, limit=limit)
+            return self._store.get_session_messages_after(self._session_id,
+                after_store_id=after_store_id, limit=limit)
+        state = self._lifecycle.get_by_conversation(conversation_id)
+        bound = {str(value) for value in (
+            getattr(state, "current_session_id", None),
+            getattr(state, "last_finalized_session_id", None)) if value}
+        return self._store.get_conversation_messages_after(conversation_id,
+            legacy_session_ids=bound, after_store_id=after_store_id,
+            limit=limit, latest=latest, count_only=count_only)
+
+    def _owned_summary_roots(self):
+        from .lifecycle_state import admitted_summary_roots
+        if not self._conversation_id:
+            nodes = self._dag.get_session_nodes(self._session_id)
+            return [node for depth in sorted({n.depth for n in nodes}, reverse=True)
+                    for node in self._dag.get_uncondensed_at_depth(self._session_id, depth)]
+        admitted = admitted_summary_roots(self._dag._conn, self._conversation_id, self._session_id)
+        nodes = [self._dag.get_node(node_id) for node_id in admitted]
+        return sorted((node for node in nodes if node is not None),
+                      key=lambda node: (-node.depth, node.created_at, node.node_id))
+
     def _schedule_ingest_cursor_reconciliation(self) -> None:
         """Mark existing-session rebinds for cursor repair on next ingest."""
         self._ingest_cursor_needs_reconcile = False
         if not self._session_id or self._session_ignored or self._session_stateless:
             return
         try:
-            self._ingest_cursor_needs_reconcile = self._store.get_session_count(self._session_id) > 0
+            self._ingest_cursor_needs_reconcile = self._owner_history(count_only=True) > 0
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
             self._ingest_cursor_needs_reconcile = False
@@ -5979,7 +6008,7 @@ class LCMEngine(
         # the deepest existing node + 1, so condensation can always
         # create the next depth level.
         if max_depth < 0:
-            all_nodes = self._dag.get_session_nodes(self._session_id)
+            all_nodes = self._owned_summary_roots()
             upper = (max(n.depth for n in all_nodes) + 1) if all_nodes else 1
         else:
             upper = max_depth
@@ -5989,9 +6018,7 @@ class LCMEngine(
         fanin = max(1, self._config.condensation_fanin)
 
         for depth in range(upper):
-            uncondensed = self._dag.get_uncondensed_at_depth(
-                self._session_id, depth
-            )
+            uncondensed = [node for node in self._owned_summary_roots() if node.depth == depth]
             if len(uncondensed) < fanin:
                 continue
 
@@ -6096,14 +6123,7 @@ class LCMEngine(
 
     def _summary_frontier_nodes(self) -> List[SummaryNode]:
         """Return all provider-visible summary frontier nodes for the active session."""
-        all_nodes = self._dag.get_session_nodes(self._session_id, limit=100_000)
-        referenced = {
-            source_id
-            for node in all_nodes
-            if node.source_type == "nodes"
-            for source_id in node.source_ids
-        }
-        return [node for node in all_nodes if node.node_id not in referenced]
+        return self._owned_summary_roots()
 
     def _summary_frontier_tokens(self) -> int:
         return sum(node.token_count for node in self._summary_frontier_nodes())
@@ -6570,26 +6590,9 @@ class LCMEngine(
         # Node ids placed in the summary prefix — used to dedupe proactive-recall
         # injection against summaries already visible in the active context.
         active_summary_node_ids: set = set()
-        all_nodes = self._dag.get_session_nodes(self._session_id)
-        if all_nodes:
-            # Group by depth, take the most recent uncondensed at each level
-            # For active context, we want the highest-level summaries
-            # that haven't been condensed into even higher levels
-            depths = sorted(set(n.depth for n in all_nodes), reverse=True)
-            for d in depths:
-                uncondensed = self._dag.get_uncondensed_at_depth(self._session_id, d)
-                for node in uncondensed:
-                    active_summary_node_ids.add(node.node_id)
-                    depth_label = {
-                        0: "Recent",
-                        1: "Session Arc",
-                        2: "Durable",
-                    }.get(d, f"Depth-{d}")
-                    summary_parts.append(
-                        f"[{depth_label} Summary (d{d}, node {node.node_id})]\n"
-                        f"{node.summary}\n"
-                        f"[Expand for details: {node.expand_hint}]"
-                    )
+        for node in self._owned_summary_roots():
+            active_summary_node_ids.add(node.node_id)
+            summary_parts.append(self._summary_context_node_part(node))
 
         retained_generated_context_parts: list[str] = []
         if summary_parts:
@@ -6720,6 +6723,25 @@ class LCMEngine(
         # assembled by this engine. Ingested input is not trusted replay proof.
         self._remember_compacted_active_replay_snapshot(result)
         return result
+
+    @staticmethod
+    def _summary_context_node_part(
+        node: SummaryNode,
+        *,
+        node_label: str | None = None,
+    ) -> str:
+        """Format one DAG root exactly as active context assembly does."""
+        depth_label = {
+            0: "Recent",
+            1: "Session Arc",
+            2: "Durable",
+        }.get(node.depth, f"Depth-{node.depth}")
+        label = node_label if node_label is not None else str(node.node_id)
+        return (
+            f"[{depth_label} Summary (d{node.depth}, node {label})]\n"
+            f"{node.summary}\n"
+            f"[Expand for details: {node.expand_hint}]"
+        )
 
     def _is_budget_droppable_tail_message(self, message: Dict[str, Any]) -> bool:
         """Return whether an over-budget tail message may be evicted.

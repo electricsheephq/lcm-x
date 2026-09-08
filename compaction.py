@@ -616,10 +616,7 @@ class CompactionMixin:
         proofs = dict(initial_proofs)
         after_store_id = expected_frontier
         while after_store_id < covered_end:
-            rows = self._store.get_session_messages_after(
-                self._session_id,
-                after_store_id=after_store_id,
-            )
+            rows = self._owner_history(after_store_id=after_store_id)
             if not rows:
                 break
             for row in rows:
@@ -634,6 +631,97 @@ class CompactionMixin:
                     proofs[store_id] = row.get("content")
             after_store_id = int(rows[-1].get("store_id") or after_store_id)
         return proofs
+
+    def _retained_roots_selected_with_new_leaf(
+        self,
+        new_node: SummaryNode,
+        prospective_working_messages: List[Dict[str, Any]],
+        anchor_source_messages: List[Dict[str, Any]],
+        assembly_cap_override: int | None,
+    ) -> List[int]:
+        """Return the prior roots selected by the prospective assembly budget.
+
+        Publication may credit an already-covered leading ledger prefix only
+        through roots that remain provider-visible beside the new leaf. This
+        uses the assembler's ordered root selector and exact summary formatting;
+        publication revalidates every returned root's complete lineage.
+        """
+        roots = self._owned_summary_roots()
+        if not roots:
+            return []
+
+        assembly_cap = (
+            assembly_cap_override
+            if assembly_cap_override is not None
+            else self._effective_assembly_token_cap()
+        )
+        if assembly_cap is None:
+            return [int(node.node_id) for node in roots]
+
+        leading_count = self._leading_anchor_count(prospective_working_messages)
+        leading_messages = [
+            message.copy()
+            for message in prospective_working_messages[:leading_count]
+        ]
+        if (
+            leading_messages
+            and leading_messages[0].get("role") == "system"
+            and self.compression_count == 0
+        ):
+            leading_messages[0]["content"] = self._append_lcm_note_to_content(
+                leading_messages[0].get("content", "")
+            )
+        tail_messages = prospective_working_messages[leading_count:]
+        summary_budget = max(
+            0,
+            assembly_cap
+            - count_messages_tokens(leading_messages)
+            - count_messages_tokens(tail_messages),
+        )
+        anchor_leading_count = self._leading_anchor_count(anchor_source_messages)
+        anchor_part = self._latest_user_context_anchor(
+            anchor_source_messages[anchor_leading_count:],
+            tail_messages,
+        )
+        if leading_count == 2:
+            summary_role = "assistant"
+        elif not leading_messages or leading_messages[-1].get("role") == "system":
+            summary_role = "user"
+        else:
+            summary_role = (
+                "assistant"
+                if leading_messages[-1].get("role") != "assistant"
+                else "user"
+            )
+        parts: list[tuple[int | None, str]] = []
+        if anchor_part is not None:
+            parts.append((None, anchor_part))
+        parts.extend(
+            (int(node.node_id), self._summary_context_node_part(node))
+            for node in roots
+        )
+        parts.append(
+            (
+                None,
+                self._summary_context_node_part(
+                    new_node,
+                    node_label="99999999999999999999",
+                ),
+            )
+        )
+        selected_parts: list[str] = []
+        selected_root_ids: list[int] = []
+        for node_id, part in parts:
+            candidate_message = {
+                "role": summary_role,
+                "content": "\n\n---\n\n".join([*selected_parts, part]),
+            }
+            if count_message_tokens(candidate_message) > summary_budget:
+                continue
+            selected_parts.append(part)
+            if node_id is not None:
+                selected_root_ids.append(node_id)
+        return selected_root_ids
 
     def _compress_impl(self, messages: List[Dict[str, Any]],
                        current_tokens: int = None,
@@ -1059,6 +1147,16 @@ class CompactionMixin:
                 break
 
             selected_raw_chunk = to_compact
+            if any(id(message) not in self._current_compress_store_ids_by_message_id
+                   for message in selected_raw_chunk):
+                return self._fail_open_after_publication_failure(
+                    working_messages if leaf_passes else messages,
+                    LifecyclePublicationConflictError("Selected active occurrence has no owned lineage"),
+                    compress_started=_compress_started,
+                    threshold_full_sweep_active=threshold_full_sweep_active,
+                    recovery_assembly_cap=recovery_assembly_cap,
+                    leaf_passes=leaf_passes, context_is_assembled=True,
+                )
             summary_input_chunk = [
                 message for message in selected_raw_chunk if id(message) not in dependent_reply_message_ids
             ]
@@ -1164,6 +1262,10 @@ class CompactionMixin:
             expected_frontier = int(
                 getattr(publication_state, "current_frontier_store_id", 0)
             )
+            selected_retained_root_node_ids = self._retained_roots_selected_with_new_leaf(
+                node, working_messages[:leading_anchor_count] + remaining_messages,
+                anchor_source_messages, recovery_assembly_cap,
+            )
             filter_exclusion_proofs = self._stored_publication_filter_exclusions(
                 expected_frontier,
                 published_frontier,
@@ -1189,6 +1291,7 @@ class CompactionMixin:
                             consumed_store_ids,
                             publication_excluded_store_ids,
                             filter_exclusion_proofs,
+                            selected_retained_root_node_ids,
                         )
                     before_commit = stage_frontier
                 self._dag.add_node(node, before_commit=before_commit)
