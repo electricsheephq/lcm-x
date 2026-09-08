@@ -973,7 +973,7 @@ class LifecycleStateStore:
         )
 
     @staticmethod
-    def _retained_roots_represent_prefix(
+    def _potential_roots_are_admitted_and_retain_prefix(
         conn: sqlite3.Connection,
         *,
         conversation_id: str,
@@ -983,13 +983,14 @@ class LifecycleStateStore:
         selected_retained_root_node_ids: list[int],
         legacy_session_ids: set[str],
     ) -> bool:
-        """Prove selected roots are admitted and cover any leading prefix.
+        """Prove every potential root is admitted and selected roots cover a prefix.
 
         Only pre-publication nodes owned by the active session participate.
         Every traversed child and raw source must still exist and remain in the
-        same conversation owner domain. The caller supplies roots selected by
-        the existing context-assembly budget; this transaction revalidates
-        their frontier status and complete lineage before crediting the prefix.
+        same conversation owner domain. Ownership validation covers every root
+        the context assembler could emit, independent of its current token cap.
+        Leading-prefix credit remains narrower: the caller-supplied roots must
+        be selected by the existing conservative assembly-budget preflight.
         """
         prefix = {int(store_id) for store_id in retained_prefix_ids}
         selected_roots = {
@@ -997,9 +998,6 @@ class LifecycleStateStore:
             for node_id in selected_retained_root_node_ids
             if int(node_id) > 0
         }
-        if not selected_roots:
-            return False
-
         rows = conn.execute(
             """
             SELECT node_id, depth, LENGTH(summary), token_count,
@@ -1025,8 +1023,6 @@ class LifecycleStateStore:
                 str(row[5] or ""),
             )
 
-        if not selected_roots <= set(nodes):
-            return False
         referenced_by_higher_depth = {
             child_id
             for parent_id, (parent_depth, _length, _tokens, sources, source_type) in nodes.items()
@@ -1038,7 +1034,7 @@ class LifecycleStateStore:
         if not selected_roots <= provider_visible_roots:
             return False
 
-        represented_messages: set[int] = set()
+        represented_by_node: dict[int, set[int]] = {}
         validated_nodes: set[int] = set()
         visiting: set[int] = set()
 
@@ -1052,27 +1048,41 @@ class LifecycleStateStore:
             if summary_length <= 0 or token_count <= 0 or not source_ids:
                 return False
             if source_type == "nodes":
-                if any(
-                    child_id not in nodes
-                    or nodes[child_id][0] >= depth
-                    or not validate_node(child_id)
-                    for child_id in source_ids
-                ):
-                    return False
+                represented_messages: set[int] = set()
+                for child_id in source_ids:
+                    if (
+                        child_id not in nodes
+                        or nodes[child_id][0] >= depth
+                        or not validate_node(child_id)
+                    ):
+                        return False
+                    represented_messages.update(represented_by_node[child_id])
             elif source_type == "messages":
-                represented_messages.update(source_ids)
+                represented_messages = set(source_ids)
             else:
                 return False
             visiting.remove(node_id)
+            represented_by_node[node_id] = represented_messages
             validated_nodes.add(node_id)
             return True
 
-        if any(not validate_node(node_id) for node_id in selected_roots):
+        if any(not validate_node(node_id) for node_id in provider_visible_roots):
             return False
-        if not prefix <= represented_messages:
+        selected_messages = {
+            store_id
+            for node_id in selected_roots
+            for store_id in represented_by_node[node_id]
+        }
+        if prefix and (not selected_roots or not prefix <= selected_messages):
             return False
 
-        represented = sorted(represented_messages)
+        represented = sorted(
+            {
+                store_id
+                for node_id in provider_visible_roots
+                for store_id in represented_by_node[node_id]
+            }
+        )
         message_rows = []
         for offset in range(0, len(represented), 500):
             batch = represented[offset:offset + 500]
@@ -1272,7 +1282,7 @@ class LifecycleStateStore:
                 "Compaction publication source lineage is already claimed"
             )
         selected_retained_roots = selected_retained_root_node_ids or []
-        if selected_retained_roots and not self._retained_roots_represent_prefix(
+        if not self._potential_roots_are_admitted_and_retain_prefix(
             conn,
             conversation_id=conversation_id,
             session_id=session_id,
@@ -1282,11 +1292,7 @@ class LifecycleStateStore:
             legacy_session_ids=legacy_session_ids,
         ):
             raise LifecyclePublicationConflictError(
-                "Compaction publication selected summary lineage is not admitted"
-            )
-        if retained_prefix_ids and not selected_retained_roots:
-            raise LifecyclePublicationConflictError(
-                "Compaction publication leading coverage is not retained"
+                "Compaction publication potential summary lineage is not admitted"
             )
         self.stage_frontier_advance(
             conn,

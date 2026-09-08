@@ -2,6 +2,10 @@
 
 Hermes `/new` starts a new host session. LCM-X binds that session to its own lifecycle row and may carry eligible higher-depth summaries into the new current-session context. Source eligibility and exact expansion still come from descendant raw messages; carried summaries do not rewrite source ownership.
 
+Before publishing a compaction frontier, LCM-X validates the complete lineage of every current-session summary root that context assembly could emit. A tight context cap does not waive this ownership check: if any potential root contains missing, foreign, or ambiguously owned descendants, compaction refuses the publication and preserves the existing rows, nodes, and frontier. This conservative refusal can also reject legacy state whose invalid root would happen to be hidden by the current cap; repair that lineage explicitly rather than treating cap-dependent omission as ownership proof.
+
+Credit for an already summarized leading ledger prefix is narrower. The prior root that represents that exact prefix must also pass the conservative retained-context selection check. Valid ownership alone does not authorize advancing past a prefix that the resulting context may omit.
+
 Do not promise that `/new` deletes historical LCM data. Earlier rows remain in `lcm.db` unless an explicitly authorized cleanup removes them, and they remain available through bounded cross-session recall.
 
 ## `/lcm rotate`

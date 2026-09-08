@@ -1323,9 +1323,16 @@ class CompactionMixin:
                     and not isinstance(exc, LifecyclePublicationConflictError)
                 ):
                     raise
-                fallback = working_messages
-                context_is_assembled = False
-                if leaf_passes or dropped_replayed_scaffold_messages:
+                preserve_original_input = (
+                    not leaf_passes
+                    and isinstance(exc, LifecyclePublicationConflictError)
+                )
+                fallback = messages if preserve_original_input else working_messages
+                context_is_assembled = preserve_original_input
+                if leaf_passes or (
+                    dropped_replayed_scaffold_messages
+                    and not preserve_original_input
+                ):
                     fallback = self._assemble_committed_compaction_context(
                         working_messages,
                         anchor_source_messages,

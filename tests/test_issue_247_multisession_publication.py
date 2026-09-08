@@ -436,3 +436,62 @@ def test_compaction_rejects_an_emitted_root_with_foreign_descendants(
     assert state is not None and state.current_frontier_store_id == 0
     assert len(nodes) == before_node_count
     assert nodes[0].node_id == foreign_root.node_id
+
+
+def test_compaction_rejects_a_foreign_root_hidden_by_preflight_tail_budget(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    conversation_id = "issue-247-capped-emitted-root-owner"
+    session_id = "current-session"
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "capped-foreign-root.db"),
+            fresh_tail_count=2,
+            leaf_chunk_tokens=1,
+            incremental_max_depth=0,
+            max_assembly_tokens=140,
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _summary)
+    engine.on_session_start(
+        session_id,
+        platform="cli",
+        conversation_id=conversation_id,
+        context_length=200_000,
+    )
+    [foreign_source_id] = engine._store.append_batch(
+        "foreign-producer",
+        [{"role": "user", "content": "foreign source"}],
+        conversation_id="issue-247-capped-foreign-owner",
+    )
+    foreign_root = SummaryNode(
+        session_id=session_id,
+        depth=0,
+        summary="Foreign lineage root.",
+        token_count=3,
+        source_token_count=3,
+        source_ids=[foreign_source_id],
+        source_type="messages",
+    )
+    engine._dag.add_node(foreign_root)
+    context = [
+        {"role": "user", "content": "owned compactable turn"},
+        {"role": "assistant", "content": "oversized " * 300},
+        {"role": "user", "content": "owned fresh suffix"},
+    ]
+    before_node_count = len(engine._dag.get_session_nodes(session_id))
+
+    try:
+        result = engine.compress(context, force=True)
+        state = engine._lifecycle.get_by_conversation(conversation_id)
+        nodes = engine._dag.get_session_nodes(session_id)
+    finally:
+        engine.shutdown()
+
+    assert engine.last_compression_status == "error"
+    assert result == context
+    assert state is not None and state.current_frontier_store_id == 0
+    assert len(nodes) == before_node_count
+    assert nodes[0].node_id == foreign_root.node_id
