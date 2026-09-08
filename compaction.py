@@ -663,13 +663,12 @@ class CompactionMixin:
         anchor_source_messages: List[Dict[str, Any]],
         assembly_cap_override: int | None,
     ) -> List[int]:
-        """Return prior roots only when assembly is proven to retain them all.
+        """Return the prior roots selected by the prospective assembly budget.
 
         Publication may credit an already-covered leading ledger prefix only
-        when the existing context assembler will keep every current summary
-        root alongside the new leaf. This conservative proof uses the same
-        root selector and exact summary formatting as ``_assemble_context``;
-        if the complete summary block does not fit, no prior root is credited.
+        through roots that remain provider-visible beside the new leaf. This
+        uses the assembler's ordered root selector and exact summary formatting;
+        publication revalidates every returned root's complete lineage.
         """
         all_nodes = self._dag.get_session_nodes(self._session_id)
         roots: List[SummaryNode] = []
@@ -721,23 +720,35 @@ class CompactionMixin:
                 if leading_messages[-1].get("role") != "assistant"
                 else "user"
             )
-        parts = []
+        parts: list[tuple[int | None, str]] = []
         if anchor_part is not None:
-            parts.append(anchor_part)
-        parts.extend(self._summary_context_node_part(node) for node in roots)
+            parts.append((None, anchor_part))
+        parts.extend(
+            (int(node.node_id), self._summary_context_node_part(node))
+            for node in roots
+        )
         parts.append(
-            self._summary_context_node_part(
-                new_node,
-                node_label="99999999999999999999",
+            (
+                None,
+                self._summary_context_node_part(
+                    new_node,
+                    node_label="99999999999999999999",
+                ),
             )
         )
-        summary_message = {
-            "role": summary_role,
-            "content": "\n\n---\n\n".join(parts),
-        }
-        if count_message_tokens(summary_message) > summary_budget:
-            return []
-        return [int(node.node_id) for node in roots]
+        selected_parts: list[str] = []
+        selected_root_ids: list[int] = []
+        for node_id, part in parts:
+            candidate_message = {
+                "role": summary_role,
+                "content": "\n\n---\n\n".join([*selected_parts, part]),
+            }
+            if count_message_tokens(candidate_message) > summary_budget:
+                continue
+            selected_parts.append(part)
+            if node_id is not None:
+                selected_root_ids.append(node_id)
+        return selected_root_ids
 
     def _compress_impl(self, messages: List[Dict[str, Any]],
                        current_tokens: int = None,

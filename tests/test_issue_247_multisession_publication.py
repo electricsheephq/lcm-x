@@ -325,3 +325,114 @@ def test_blank_legacy_rows_require_an_unambiguous_conversation_binding(
         assert len(engine._dag.get_session_nodes(session_id)) == before_node_count
     finally:
         engine.shutdown()
+
+
+def test_publication_rejects_crossing_an_ambiguous_blank_legacy_row(
+    tmp_path,
+) -> None:
+    engine = LCMEngine(
+        config=LCMConfig(database_path=str(tmp_path / "crossed-ambiguous.db")),
+        hermes_home=str(tmp_path / "home"),
+    )
+    session_id = "shared-legacy-session"
+    first_conversation = "issue-247-first-owner"
+    second_conversation = "issue-247-second-owner"
+    engine._lifecycle.bind_session(session_id, conversation_id=first_conversation)
+    engine._lifecycle.finalize_session(first_conversation, session_id)
+    engine._lifecycle.bind_session(session_id, conversation_id=second_conversation)
+    [ambiguous_id] = engine._store.append_batch(
+        session_id,
+        [{"role": "user", "content": "ambiguous legacy row"}],
+    )
+    [covered_id] = engine._store.append_batch(
+        session_id,
+        [{"role": "assistant", "content": "explicitly owned row"}],
+        conversation_id=second_conversation,
+    )
+    candidate = SummaryNode(
+        session_id=session_id,
+        depth=0,
+        summary="Explicit candidate.",
+        token_count=2,
+        source_token_count=2,
+        source_ids=[covered_id],
+        source_type="messages",
+    )
+    before_node_count = len(engine._dag.get_session_nodes(session_id))
+
+    def stage_candidate(conn, candidate_id):
+        engine._lifecycle.stage_compaction_publication(
+            conn,
+            second_conversation,
+            session_id,
+            candidate_id,
+            0,
+            [covered_id],
+        )
+
+    try:
+        assert ambiguous_id < covered_id
+        with pytest.raises(LifecyclePublicationConflictError):
+            engine._dag.add_node(candidate, before_commit=stage_candidate)
+        state = engine._lifecycle.get_by_conversation(second_conversation)
+        assert state is not None and state.current_frontier_store_id == 0
+        assert len(engine._dag.get_session_nodes(session_id)) == before_node_count
+    finally:
+        engine.shutdown()
+
+
+def test_compaction_rejects_an_emitted_root_with_foreign_descendants(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    conversation_id = "issue-247-emitted-root-owner"
+    session_id = "current-session"
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "foreign-root.db"),
+            fresh_tail_count=1,
+            leaf_chunk_tokens=1,
+            incremental_max_depth=0,
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _summary)
+    engine.on_session_start(
+        session_id,
+        platform="cli",
+        conversation_id=conversation_id,
+        context_length=200_000,
+    )
+    [foreign_source_id] = engine._store.append_batch(
+        "foreign-producer",
+        [{"role": "user", "content": "foreign source"}],
+        conversation_id="issue-247-foreign-owner",
+    )
+    foreign_root = SummaryNode(
+        session_id=session_id,
+        depth=0,
+        summary="Foreign lineage root.",
+        token_count=3,
+        source_token_count=3,
+        source_ids=[foreign_source_id],
+        source_type="messages",
+    )
+    engine._dag.add_node(foreign_root)
+    context = [
+        {"role": "user", "content": "owned compactable turn"},
+        {"role": "user", "content": "owned fresh tail"},
+    ]
+    before_node_count = len(engine._dag.get_session_nodes(session_id))
+
+    try:
+        result = engine.compress(context, force=True)
+        state = engine._lifecycle.get_by_conversation(conversation_id)
+        nodes = engine._dag.get_session_nodes(session_id)
+    finally:
+        engine.shutdown()
+
+    assert engine.last_compression_status == "error"
+    assert result == context
+    assert state is not None and state.current_frontier_store_id == 0
+    assert len(nodes) == before_node_count
+    assert nodes[0].node_id == foreign_root.node_id

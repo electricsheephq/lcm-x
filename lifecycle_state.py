@@ -983,7 +983,7 @@ class LifecycleStateStore:
         selected_retained_root_node_ids: list[int],
         legacy_session_ids: set[str],
     ) -> bool:
-        """Prove a leading covered prefix remains in selected summary roots.
+        """Prove selected roots are admitted and cover any leading prefix.
 
         Only pre-publication nodes owned by the active session participate.
         Every traversed child and raw source must still exist and remain in the
@@ -997,7 +997,7 @@ class LifecycleStateStore:
             for node_id in selected_retained_root_node_ids
             if int(node_id) > 0
         }
-        if not prefix or not selected_roots:
+        if not selected_roots:
             return False
 
         rows = conn.execute(
@@ -1162,14 +1162,18 @@ class LifecycleStateStore:
                 "Compaction publication frontier generation changed "
                 f"(expected={expected_frontier}, actual={actual_frontier})"
             )
+        candidate_legacy_session_ids = {
+            str(value or "")
+            for value in (session_id, state_row[0], state_row[1])
+            if value
+        }
         legacy_session_ids = unambiguous_legacy_session_ids(
             conn,
             conversation_id,
-            {
-                str(value or "")
-                for value in (session_id, state_row[0], state_row[1])
-                if value
-            },
+            candidate_legacy_session_ids,
+        )
+        ambiguous_legacy_session_ids = (
+            candidate_legacy_session_ids - legacy_session_ids
         )
 
         def belongs_to_conversation(row: sqlite3.Row | tuple[Any, ...]) -> bool:
@@ -1214,6 +1218,14 @@ class LifecycleStateStore:
             """,
             (expected_frontier, covered_end),
         ).fetchall()
+        if any(
+            not str(row[2] or "").strip()
+            and str(row[1] or "") in ambiguous_legacy_session_ids
+            for row in rows
+        ):
+            raise LifecyclePublicationConflictError(
+                "Compaction publication crosses ambiguous legacy ownership"
+            )
         authoritative_ids = [
             int(row[0]) for row in rows if belongs_to_conversation(row)
         ]
@@ -1259,15 +1271,20 @@ class LifecycleStateStore:
             raise LifecyclePublicationConflictError(
                 "Compaction publication source lineage is already claimed"
             )
-        if retained_prefix_ids and not self._retained_roots_represent_prefix(
+        selected_retained_roots = selected_retained_root_node_ids or []
+        if selected_retained_roots and not self._retained_roots_represent_prefix(
             conn,
             conversation_id=conversation_id,
             session_id=session_id,
             publication_node_id=publication_node_id,
             retained_prefix_ids=retained_prefix_ids,
-            selected_retained_root_node_ids=selected_retained_root_node_ids or [],
+            selected_retained_root_node_ids=selected_retained_roots,
             legacy_session_ids=legacy_session_ids,
         ):
+            raise LifecyclePublicationConflictError(
+                "Compaction publication selected summary lineage is not admitted"
+            )
+        if retained_prefix_ids and not selected_retained_roots:
             raise LifecyclePublicationConflictError(
                 "Compaction publication leading coverage is not retained"
             )
