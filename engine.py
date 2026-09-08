@@ -6580,16 +6580,7 @@ class LCMEngine(
                 uncondensed = self._dag.get_uncondensed_at_depth(self._session_id, d)
                 for node in uncondensed:
                     active_summary_node_ids.add(node.node_id)
-                    depth_label = {
-                        0: "Recent",
-                        1: "Session Arc",
-                        2: "Durable",
-                    }.get(d, f"Depth-{d}")
-                    summary_parts.append(
-                        f"[{depth_label} Summary (d{d}, node {node.node_id})]\n"
-                        f"{node.summary}\n"
-                        f"[Expand for details: {node.expand_hint}]"
-                    )
+                    summary_parts.append(self._summary_context_node_part(node))
 
         retained_generated_context_parts: list[str] = []
         if summary_parts:
@@ -6720,6 +6711,25 @@ class LCMEngine(
         # assembled by this engine. Ingested input is not trusted replay proof.
         self._remember_compacted_active_replay_snapshot(result)
         return result
+
+    @staticmethod
+    def _summary_context_node_part(
+        node: SummaryNode,
+        *,
+        node_label: str | None = None,
+    ) -> str:
+        """Format one DAG root exactly as active context assembly does."""
+        depth_label = {
+            0: "Recent",
+            1: "Session Arc",
+            2: "Durable",
+        }.get(node.depth, f"Depth-{node.depth}")
+        label = node_label if node_label is not None else str(node.node_id)
+        return (
+            f"[{depth_label} Summary (d{node.depth}, node {label})]\n"
+            f"{node.summary}\n"
+            f"[Expand for details: {node.expand_hint}]"
+        )
 
     def _is_budget_droppable_tail_message(self, message: Dict[str, Any]) -> bool:
         """Return whether an over-budget tail message may be evicted.

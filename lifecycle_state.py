@@ -11,6 +11,7 @@ This is the smallest viable substrate for cross-turn/session lifecycle state:
 from __future__ import annotations
 
 import functools
+import json
 import sqlite3
 import threading
 import time
@@ -27,6 +28,47 @@ class LifecycleBindingChangedError(RuntimeError):
 
 class LifecyclePublicationConflictError(RuntimeError):
     """Raised when compaction publication cannot prove its source frontier."""
+
+
+def unambiguous_legacy_session_ids(
+    conn: sqlite3.Connection,
+    conversation_id: str,
+    session_ids: set[str],
+) -> set[str]:
+    """Return blank-row session owners with exactly one lifecycle binding.
+
+    Explicit ``messages.conversation_id`` values remain authoritative.  A
+    blank legacy row may use a session binding only when neither lifecycle
+    session index associates that session with another conversation.
+    """
+    candidates = {str(value) for value in session_ids if str(value)}
+    if not candidates:
+        return set()
+    return {
+        candidate
+        for candidate in candidates
+        if conn.execute(
+            """
+            SELECT NOT EXISTS(
+                SELECT 1
+                FROM lcm_lifecycle_state
+                     INDEXED BY idx_lcm_lifecycle_current_session
+                WHERE current_session_id = ? AND conversation_id != ?
+            ) AND NOT EXISTS(
+                SELECT 1
+                FROM lcm_lifecycle_state
+                     INDEXED BY idx_lcm_lifecycle_last_finalized_session
+                WHERE last_finalized_session_id = ? AND conversation_id != ?
+            )
+            """,
+            (
+                candidate,
+                conversation_id,
+                candidate,
+                conversation_id,
+            ),
+        ).fetchone()[0]
+    }
 
 
 def _synchronized(method):
@@ -930,6 +972,139 @@ class LifecycleStateStore:
             "Lifecycle session binding changed during summary publication"
         )
 
+    @staticmethod
+    def _potential_roots_are_admitted_and_retain_prefix(
+        conn: sqlite3.Connection,
+        *,
+        conversation_id: str,
+        session_id: str,
+        publication_node_id: int,
+        retained_prefix_ids: list[int],
+        selected_retained_root_node_ids: list[int],
+        legacy_session_ids: set[str],
+    ) -> bool:
+        """Prove every potential root is admitted and selected roots cover a prefix.
+
+        Only pre-publication nodes owned by the active session participate.
+        Every traversed child and raw source must still exist and remain in the
+        same conversation owner domain. Ownership validation covers every root
+        the context assembler could emit, independent of its current token cap.
+        Leading-prefix credit remains narrower: the caller-supplied roots must
+        be selected by the existing conservative assembly-budget preflight.
+        """
+        prefix = {int(store_id) for store_id in retained_prefix_ids}
+        selected_roots = {
+            int(node_id)
+            for node_id in selected_retained_root_node_ids
+            if int(node_id) > 0
+        }
+        rows = conn.execute(
+            """
+            SELECT node_id, depth, LENGTH(summary), token_count,
+                   source_ids, source_type
+            FROM summary_nodes
+            WHERE session_id = ? AND node_id < ?
+            ORDER BY depth, node_id
+            """,
+            (session_id, publication_node_id),
+        ).fetchall()
+        nodes: dict[int, tuple[int, int, int, list[int], str]] = {}
+        for row in rows:
+            try:
+                source_ids = [int(value) for value in json.loads(row[4] or "[]")]
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return False
+            node_id = int(row[0])
+            nodes[node_id] = (
+                int(row[1] or 0),
+                int(row[2] or 0),
+                int(row[3] or 0),
+                source_ids,
+                str(row[5] or ""),
+            )
+
+        referenced_by_higher_depth = {
+            child_id
+            for parent_id, (parent_depth, _length, _tokens, sources, source_type) in nodes.items()
+            if source_type == "nodes"
+            for child_id in sources
+            if child_id in nodes and parent_depth > nodes[child_id][0]
+        }
+        provider_visible_roots = set(nodes) - referenced_by_higher_depth
+        if not selected_roots <= provider_visible_roots:
+            return False
+
+        represented_by_node: dict[int, set[int]] = {}
+        validated_nodes: set[int] = set()
+        visiting: set[int] = set()
+
+        def validate_node(node_id: int) -> bool:
+            if node_id in validated_nodes:
+                return True
+            if node_id in visiting or node_id not in nodes:
+                return False
+            visiting.add(node_id)
+            depth, summary_length, token_count, source_ids, source_type = nodes[node_id]
+            if summary_length <= 0 or token_count <= 0 or not source_ids:
+                return False
+            if source_type == "nodes":
+                represented_messages: set[int] = set()
+                for child_id in source_ids:
+                    if (
+                        child_id not in nodes
+                        or nodes[child_id][0] >= depth
+                        or not validate_node(child_id)
+                    ):
+                        return False
+                    represented_messages.update(represented_by_node[child_id])
+            elif source_type == "messages":
+                represented_messages = set(source_ids)
+            else:
+                return False
+            visiting.remove(node_id)
+            represented_by_node[node_id] = represented_messages
+            validated_nodes.add(node_id)
+            return True
+
+        if any(not validate_node(node_id) for node_id in provider_visible_roots):
+            return False
+        selected_messages = {
+            store_id
+            for node_id in selected_roots
+            for store_id in represented_by_node[node_id]
+        }
+        if prefix and (not selected_roots or not prefix <= selected_messages):
+            return False
+
+        represented = sorted(
+            {
+                store_id
+                for node_id in provider_visible_roots
+                for store_id in represented_by_node[node_id]
+            }
+        )
+        message_rows = []
+        for offset in range(0, len(represented), 500):
+            batch = represented[offset:offset + 500]
+            placeholders = ",".join("?" for _ in batch)
+            message_rows.extend(
+                conn.execute(
+                    f"SELECT store_id, session_id, conversation_id "
+                    f"FROM messages WHERE store_id IN ({placeholders})",
+                    batch,
+                ).fetchall()
+            )
+        if {int(row[0]) for row in message_rows} != set(represented):
+            return False
+        return all(
+            str(row[2] or "").strip() == conversation_id
+            or (
+                not str(row[2] or "").strip()
+                and str(row[1] or "") in legacy_session_ids
+            )
+            for row in message_rows
+        )
+
     def stage_compaction_publication(
         self,
         conn: sqlite3.Connection,
@@ -940,6 +1115,7 @@ class LifecycleStateStore:
         covered_store_ids: list[int],
         excluded_store_ids: list[int] | None = None,
         filter_exclusion_proofs: dict[int, Any] | None = None,
+        selected_retained_root_node_ids: list[int] | None = None,
     ) -> int:
         """Validate and stage one contiguous compaction-frontier advance.
 
@@ -975,27 +1151,69 @@ class LifecycleStateStore:
         snapshot_ids = sorted(
             set(all_covered_ids + excluded_ids + list(exclusion_proofs))
         )
+        state_row = conn.execute(
+            """
+            SELECT current_session_id, last_finalized_session_id,
+                   current_frontier_store_id
+            FROM lcm_lifecycle_state
+            WHERE conversation_id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()
+        if state_row is None:
+            raise RuntimeError("Cannot publish summary without lifecycle state")
+        if str(state_row[0] or "") != session_id:
+            raise LifecycleBindingChangedError(
+                "Lifecycle session binding changed during summary publication"
+            )
+        actual_frontier = int(state_row[2] or 0)
+        if actual_frontier != expected_frontier:
+            raise LifecyclePublicationConflictError(
+                "Compaction publication frontier generation changed "
+                f"(expected={expected_frontier}, actual={actual_frontier})"
+            )
+        candidate_legacy_session_ids = {
+            str(value or "")
+            for value in (session_id, state_row[0], state_row[1])
+            if value
+        }
+        legacy_session_ids = unambiguous_legacy_session_ids(
+            conn,
+            conversation_id,
+            candidate_legacy_session_ids,
+        )
+        ambiguous_legacy_session_ids = (
+            candidate_legacy_session_ids - legacy_session_ids
+        )
+
+        def belongs_to_conversation(row: sqlite3.Row | tuple[Any, ...]) -> bool:
+            row_session_id = str(row[1] or "")
+            row_conversation_id = str(row[2] or "").strip()
+            return row_conversation_id == conversation_id or (
+                not row_conversation_id and row_session_id in legacy_session_ids
+            )
+
         snapshot_rows = conn.execute(
             """
-            SELECT m.store_id, m.conversation_id, m.content
+            SELECT m.store_id, m.session_id, m.conversation_id, m.content
             FROM json_each(?) AS source
             CROSS JOIN messages AS m
-            WHERE m.store_id = source.value AND m.session_id = ?
+            WHERE m.store_id = source.value
             ORDER BY m.store_id
             """,
-            (str(snapshot_ids), session_id),
+            (json.dumps(snapshot_ids),),
         ).fetchall()
         if [int(row[0]) for row in snapshot_rows] != snapshot_ids:
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )
-        if any(str(row[1] or "").strip() not in {"", conversation_id} for row in snapshot_rows):
+        if any(not belongs_to_conversation(row) for row in snapshot_rows):
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )
         snapshot_by_id = {int(row[0]): row for row in snapshot_rows}
         if any(
-            snapshot_by_id[store_id][2] != proof
+            snapshot_by_id[store_id][3] != proof
             for store_id, proof in exclusion_proofs.items()
         ):
             raise LifecyclePublicationConflictError(
@@ -1003,55 +1221,83 @@ class LifecycleStateStore:
             )
         rows = conn.execute(
             """
-            SELECT store_id, conversation_id, content
+            SELECT store_id, session_id, conversation_id, content
             FROM messages
-            WHERE session_id = ? AND store_id > ? AND store_id <= ?
+            WHERE store_id > ? AND store_id <= ?
             ORDER BY store_id
             """,
-            (session_id, expected_frontier, covered_end),
+            (expected_frontier, covered_end),
         ).fetchall()
-        authoritative_ids = [int(row[0]) for row in rows]
+        if any(
+            not str(row[2] or "").strip()
+            and str(row[1] or "") in ambiguous_legacy_session_ids
+            for row in rows
+        ):
+            raise LifecyclePublicationConflictError(
+                "Compaction publication crosses ambiguous legacy ownership"
+            )
+        authoritative_ids = [
+            int(row[0]) for row in rows if belongs_to_conversation(row)
+        ]
         proven_ids = sorted(covered_ids + excluded_ids)
-        if authoritative_ids != proven_ids:
+        first_new_index = (
+            authoritative_ids.index(proven_ids[0])
+            if proven_ids and proven_ids[0] in authoritative_ids
+            else -1
+        )
+        # Claiming a previously unclaimed source below the frontier does not
+        # cross any new interval. Full-source ownership and duplicate checks
+        # below still apply, and the frontier remains unchanged.
+        if not authoritative_ids and not proven_ids:
+            first_new_index = 0
+        retained_prefix_ids = (
+            authoritative_ids[:first_new_index]
+            if first_new_index >= 0
+            else []
+        )
+        if first_new_index < 0 or authoritative_ids[first_new_index:] != proven_ids:
             raise LifecyclePublicationConflictError(
                 "Compaction publication source coverage is not contiguous "
                 f"(expected_frontier={expected_frontier}, "
                 f"authoritative={authoritative_ids}, covered={covered_ids}, "
                 f"excluded={excluded_ids})"
             )
+        duplicate_node_session_ids = sorted(
+            legacy_session_ids
+            | {session_id}
+            | {str(row[1] or "") for row in snapshot_rows if str(row[1] or "")}
+        )
         if conn.execute(
             """
             SELECT 1
-            FROM summary_nodes AS node, json_each(node.source_ids) AS source
-            WHERE node.session_id = ? AND node.source_type = 'messages'
-              AND node.node_id != ?
+            FROM summary_nodes AS node INDEXED BY idx_nodes_session_latest,
+                 json_each(node.source_ids) AS source
+            WHERE node.source_type = 'messages' AND node.node_id != ?
+              AND node.session_id IN (SELECT value FROM json_each(?))
               AND source.value IN (SELECT value FROM json_each(?))
             LIMIT 1
             """,
-            (session_id, publication_node_id, str(all_covered_ids)),
+            (
+                publication_node_id,
+                json.dumps(duplicate_node_session_ids),
+                json.dumps(all_covered_ids),
+            ),
         ).fetchone():
             raise LifecyclePublicationConflictError(
                 "Compaction publication source lineage is already claimed"
             )
-        row = conn.execute(
-            """
-            SELECT current_session_id, current_frontier_store_id
-            FROM lcm_lifecycle_state
-            WHERE conversation_id = ?
-            """,
-            (conversation_id,),
-        ).fetchone()
-        if row is None:
-            raise RuntimeError("Cannot publish summary without lifecycle state")
-        if str(row[0] or "") != session_id:
-            raise LifecycleBindingChangedError(
-                "Lifecycle session binding changed during summary publication"
-            )
-        actual_frontier = int(row[1] or 0)
-        if actual_frontier != expected_frontier:
+        selected_retained_roots = selected_retained_root_node_ids or []
+        if not self._potential_roots_are_admitted_and_retain_prefix(
+            conn,
+            conversation_id=conversation_id,
+            session_id=session_id,
+            publication_node_id=publication_node_id,
+            retained_prefix_ids=retained_prefix_ids,
+            selected_retained_root_node_ids=selected_retained_roots,
+            legacy_session_ids=legacy_session_ids,
+        ):
             raise LifecyclePublicationConflictError(
-                "Compaction publication frontier generation changed "
-                f"(expected={expected_frontier}, actual={actual_frontier})"
+                "Compaction publication potential summary lineage is not admitted"
             )
         self.stage_frontier_advance(
             conn,
