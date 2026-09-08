@@ -12497,7 +12497,7 @@ class TestEngineCompress:
             dynamic_leaf_chunk_enabled=True,
             dynamic_leaf_chunk_max=120,
             condensation_fanin=2,
-            max_assembly_tokens=90,
+            max_assembly_tokens=300,
             database_path=str(tmp_path / "lcm_cache_friendly_overflow.db"),
         )
         config.cache_friendly_condensation_enabled = True
@@ -12521,8 +12521,8 @@ class TestEngineCompress:
 
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "A " * 40},
-            {"role": "assistant", "content": "B " * 40},
+            {"role": "user", "content": "A " * 300},
+            {"role": "assistant", "content": "B " * 300},
             {"role": "user", "content": "Tail " * 60},
         ]
 
@@ -12535,7 +12535,10 @@ class TestEngineCompress:
 
         monkeypatch.setattr(engine_module, "summarize_with_escalation", mock_summary)
 
-        engine.compress(messages, current_tokens=120)
+        # The leaf and system note must fit before condensation can run.
+        # Real message pressure exercises overflow without inventing overhead
+        # that would reduce the available assembly budget to a single token.
+        engine.compress(messages, current_tokens=count_messages_tokens(messages))
 
         depth1 = engine._dag.get_session_nodes("test-session", depth=1)
         assert len(depth1) == 1

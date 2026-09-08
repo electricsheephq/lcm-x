@@ -39,7 +39,7 @@ def unambiguous_legacy_session_ids(
 
     Explicit ``messages.conversation_id`` values remain authoritative.  A
     blank legacy row may use a session binding only when neither lifecycle
-    session index associates that session with another conversation.
+    index nor explicitly owned raw rows associate it with another conversation.
     """
     candidates = {str(value) for value in session_ids if str(value)}
     if not candidates:
@@ -63,11 +63,16 @@ def unambiguous_legacy_session_ids(
                 FROM lcm_lifecycle_state
                      INDEXED BY idx_lcm_lifecycle_last_finalized_session
                 WHERE last_finalized_session_id = ? AND conversation_id != ?
+            ) AND NOT EXISTS(
+                SELECT 1 FROM messages INDEXED BY idx_msg_session
+                WHERE session_id = ? AND TRIM(COALESCE(conversation_id, '')) != ''
+                  AND TRIM(conversation_id) != ?
             )
             """,
             (
                 conversation_id, candidate, candidate,
                 candidate, conversation_id, candidate, conversation_id,
+                candidate, conversation_id,
             ),
         ).fetchone()[0]
     }
@@ -87,11 +92,13 @@ def conversation_producers(conn, conversation_id, session_id):
     return producers | bound | {session_id}, unambiguous_legacy_session_ids(conn, conversation_id, bound)
 
 
-def admitted_summary_roots(conn, conversation_id, session_id, *, before_node_id=None):
+def admitted_summary_roots(conn, conversation_id, session_id, *, before_node_id=None,
+                           include_descendants=False):
     """Return roots with complete same-owner lineage, ignoring foreign roots.
 
     Queries use the existing producer index; raw ownership, never producer
     equality, admits a node. Invalid parents cannot hide valid child roots.
+    ``include_descendants`` applies the same validation to explicit expansion.
     """
     producers, legacy = conversation_producers(conn, conversation_id, session_id)
     rows = conn.execute(
@@ -154,7 +161,7 @@ def admitted_summary_roots(conn, conversation_id, session_id, *, before_node_id=
                 if validated[node_id] is not None and row[3] == "nodes"
                 for child in json.loads(row[2])}
     return {node_id: sources for node_id, sources in validated.items()
-            if sources is not None and node_id not in children}
+            if sources is not None and (include_descendants or node_id not in children)}
 
 
 def _synchronized(method):
@@ -1185,7 +1192,11 @@ class LifecycleStateStore:
         authoritative_ids = [
             int(row[0]) for row in rows if belongs_to_conversation(row)
         ]
-        proven_ids = sorted(covered_ids + excluded_ids)
+        # Exclusions may precede or interrupt the retained prefix; they do not
+        # move the boundary between retained and newly covered source rows.
+        excluded = set(excluded_ids)
+        authoritative_ids = [value for value in authoritative_ids if value not in excluded]
+        proven_ids = covered_ids
         first_new_index = (
             authoritative_ids.index(proven_ids[0])
             if proven_ids and proven_ids[0] in authoritative_ids

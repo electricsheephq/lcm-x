@@ -136,7 +136,7 @@ from .compaction import CompactionMixin
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
 from .prefix_matching import PrefixMatchingMixin
-from .lifecycle_state import LifecycleStateStore
+from .lifecycle_state import LifecycleStateStore, LifecyclePublicationConflictError
 from .message_content import (
     normalize_content_value,
     stored_text_content_for_pattern_matching,
@@ -5998,6 +5998,7 @@ class LCMEngine(
         leaf_compacted_this_turn: bool = False,
         force_overflow: bool = False,
         critical_budget_pressure: bool = False,
+        assembly_context=None,
     ) -> int:
         """Check if any depth level has enough nodes for condensation."""
         self._last_condensation_suppressed_reason = ""
@@ -6040,8 +6041,12 @@ class LCMEngine(
                 source_tokens, summary_tokens, level = self._condense_summary_nodes(
                     to_condense,
                     focus_topic=focus_topic,
+                    assembly_context=assembly_context,
                 )
             except Exception as exc:
+                if isinstance(exc, LifecyclePublicationConflictError):
+                    self._last_condensation_suppressed_reason = "replacement_not_visible"
+                    break
                 if _is_sqlite_locked_error(exc):
                     setattr(
                         exc,
@@ -6070,6 +6075,7 @@ class LCMEngine(
         *,
         focus_topic: Optional[str] = None,
         deadline: Optional[float] = None,
+        assembly_context=None,
     ) -> tuple[int, int, int]:
         """Persist one same-depth condensation and return source/output tokens and level."""
         if not nodes:
@@ -6119,6 +6125,17 @@ class LCMEngine(
             latest_at=latest_at,
             expand_hint=self._extract_expand_hint(summary_text),
         )
+        roots = self._owned_summary_roots()
+        replaced = {node.node_id for node in nodes}
+        context = assembly_context if assembly_context is not None else ([], [], None)
+        before = set(self._prospective_root_selection(roots, *context))
+        prospective = sorted(
+            [root for root in roots if root.node_id not in replaced] + [condensed_node],
+            key=lambda root: (-root.depth, root.created_at, root.node_id),
+        )
+        after = set(self._prospective_root_selection(prospective, *context))
+        if (before & replaced and condensed_node.node_id not in after) or not (before - replaced) <= after:
+            raise LifecyclePublicationConflictError("condensation replacement hides visible summary coverage")
         self._dag.add_node(condensed_node)
         self._invalidate_rollups_for_published_node(condensed_node)
         return source_tokens, summary_tokens, level
@@ -6160,6 +6177,7 @@ class LCMEngine(
         pass_budget: int,
         deadline: float,
         focus_topic: Optional[str] = None,
+        assembly_context=None,
     ) -> tuple[int, str]:
         """Condense an oversized summary frontier within the remaining sweep budget."""
         passes = 0
@@ -6177,6 +6195,7 @@ class LCMEngine(
                     group,
                     focus_topic=focus_topic,
                     deadline=deadline,
+                    assembly_context=assembly_context,
                 )
             except Exception as exc:
                 if _is_sqlite_locked_error(exc):
@@ -6484,6 +6503,42 @@ class LCMEngine(
         body = "\n".join([header, *lines])
         return f"<relevant-memories>\n{body}\n</relevant-memories>"
 
+    @staticmethod
+    def _select_summary_part_indices(parts, role, budget):
+        selected, indices = [], []
+        for index, part in enumerate(parts):
+            candidate = {"role": role, "content": "\n\n---\n\n".join([*selected, part])}
+            if budget is not None and count_message_tokens(candidate) > budget:
+                continue
+            selected.append(part)
+            indices.append(index)
+        return indices
+
+    def _prepare_assembly_tail(self, tail_messages, leading_messages, assembly_cap):
+        """Use the same provider-visible tail and budget for admission and assembly."""
+        prepared = self._stub_large_tool_results_for_active_replay(tail_messages)
+        if assembly_cap is None:
+            return prepared, None
+        used = count_messages_tokens(leading_messages)
+        kept_reversed = []
+        tail_tokens = 0
+        candidates = self._sanitize_active_context_messages(
+            prepared, insert_missing_tool_stubs=False, merge_adjacent_assistants=False,
+        )
+        skipped_gap = False
+        for message in reversed(candidates):
+            amount = count_message_tokens(message)
+            if used + tail_tokens + amount > assembly_cap:
+                if self._is_budget_droppable_tail_message(message):
+                    skipped_gap = True
+                    continue
+                break
+            if skipped_gap:
+                break
+            kept_reversed.append(message)
+            tail_tokens += amount
+        return list(reversed(kept_reversed)), max(0, assembly_cap - used - tail_tokens)
+
     def _assemble_context(
         self,
         system_msg: Optional[Dict[str, Any]],
@@ -6532,40 +6587,11 @@ class LCMEngine(
         # Stub durably externalized evictable tool payloads before the assembly
         # budget pass so the selector sees their reduced provider-visible cost.
         # The helper protects the configured fresh tail and is fail-open.
-        assembly_tail_messages = self._stub_large_tool_results_for_active_replay(tail_messages)
-        tail_selected = assembly_tail_messages
+        tail_selected, summary_budget = self._prepare_assembly_tail(tail_messages, result, assembly_cap)
         anchor_source = getattr(self, "_pending_context_anchor_messages", None)
         if anchor_source is None:
             anchor_source = tail_messages
         anchor_part: Optional[str] = None
-        summary_budget = None
-        if assembly_cap is not None:
-            used = count_messages_tokens(result)
-            kept_tail_reversed: list[Dict[str, Any]] = []
-            tail_token_total = 0
-            tail_for_selection = self._sanitize_active_context_messages(
-                assembly_tail_messages,
-                insert_missing_tool_stubs=False,
-                # Intermediate pass for per-turn token-budget selection: weigh
-                # each turn on its own; do NOT merge adjacent assistants here or
-                # a small tail turn glued to an oversized one gets dropped with
-                # it. The final assembled result is merged downstream.
-                merge_adjacent_assistants=False,
-            )
-            skipped_tail_gap = False
-            for msg in reversed(tail_for_selection):
-                msg_tokens = count_message_tokens(msg)
-                if used + tail_token_total + msg_tokens > assembly_cap:
-                    if self._is_budget_droppable_tail_message(msg):
-                        skipped_tail_gap = True
-                        continue
-                    break
-                if skipped_tail_gap:
-                    break
-                kept_tail_reversed.append(msg)
-                tail_token_total += msg_tokens
-            tail_selected = list(reversed(kept_tail_reversed))
-            summary_budget = max(0, assembly_cap - used - tail_token_total)
         if anchor_source is not None:
             anchor_part = self._latest_user_context_anchor(anchor_source, tail_selected)
 
@@ -6598,17 +6624,8 @@ class LCMEngine(
 
         retained_generated_context_parts: list[str] = []
         if summary_parts:
-            selected_parts = summary_parts
-            if summary_budget is not None:
-                selected_parts = []
-                for part in summary_parts:
-                    candidate = "\n\n---\n\n".join(selected_parts + [part])
-                    candidate_msg = {"role": summary_role, "content": candidate}
-                    if count_message_tokens(candidate_msg) > summary_budget:
-                        if part == anchor_part:
-                            continue
-                        continue
-                    selected_parts.append(part)
+            selected_parts = [summary_parts[index] for index in
+                self._select_summary_part_indices(summary_parts, summary_role, summary_budget)]
             if selected_parts:
                 combined = "\n\n---\n\n".join(selected_parts)
                 if retained_user_msg is not None:

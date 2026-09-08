@@ -289,7 +289,9 @@ def test_precommit_lock_preserves_redaction_and_overflow_convergence(
     engine = _engine(
         database_path,
         identity,
-        max_assembly_tokens=160,
+        # Admit the formatted leaf + LCM system note before exercising the
+        # precommit lock; an admission refusal deliberately preserves raw input.
+        max_assembly_tokens=240,
         sensitive_patterns_enabled=True,
         sensitive_patterns=["api_key"],
     )
@@ -303,7 +305,7 @@ def test_precommit_lock_preserves_redaction_and_overflow_convergence(
     )
 
     try:
-        result = engine.compress(messages, current_tokens=10_000)
+        result = engine.compress(messages, current_tokens=count_messages_tokens(messages))
         nodes = engine._dag.get_session_nodes(identity)
     finally:
         engine.shutdown()
@@ -311,6 +313,6 @@ def test_precommit_lock_preserves_redaction_and_overflow_convergence(
     result_text = "\n".join(str(message.get("content") or "") for message in result)
     assert secret not in result_text
     assert "fresh user turn" in result_text
-    assert count_messages_tokens(result) <= 160
+    assert count_messages_tokens(result) <= engine._config.max_assembly_tokens
     assert nodes == []
     assert engine.last_compression_status == "error"

@@ -110,7 +110,8 @@ def test_new_leaf_must_fit_beside_retained_owned_prefix_before_publication(tmp_p
             source_type="messages", created_at=2, expand_hint="turns")
         old_part = engine._summary_context_node_part(old)
         new_part = engine._summary_context_node_part(candidate, node_label="99999999999999999999")
-        cost = lambda content: count_message_tokens({"role": "user", "content": content})
+        def cost(content):
+            return count_message_tokens({"role": "user", "content": content})
         budget = max(cost(old_part), cost(new_part)) + 5
         assert cost(old_part) <= budget and cost(new_part) <= budget
         assert cost(old_part + "\n\n---\n\n" + new_part) > budget

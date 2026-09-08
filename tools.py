@@ -1496,6 +1496,7 @@ def _expand_child_nodes(
     source_offset: int = 0,
     source_limit: int | None = None,
     session_id: str | None = None,
+    owned_node_ids: set[int] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     from .tokens import count_tokens
 
@@ -1511,7 +1512,10 @@ def _expand_child_nodes(
     children: list[tuple[int, Any]] = []
     for relative_index, child_id in enumerate(selected_source_ids):
         child = engine._dag.get_node(child_id)
-        if child is None or child.session_id != session_id:
+        if child is None or (
+            child.node_id not in owned_node_ids if owned_node_ids is not None
+            else child.session_id != session_id
+        ):
             continue
         children.append((source_offset + relative_index, child))
 
@@ -6655,10 +6659,11 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
     Mode selection (exactly one is required):
     - ``externalized_ref``: open a stored externalized payload by ref filename (current session only)
     - ``store_id``: fetch a single raw message by store_id; works across sessions
-    - ``node_id``: expand a summary node to its source content (explicit ``session_id`` required cross-session)
+    - ``node_id``: expand a summary node to its source content
 
-    Omitting ``session_id`` preserves current-session node lookup. Carried-over
-    current-session nodes may reference raw source rows from the previous session.
+    Omitting ``session_id`` follows validated current-conversation ownership,
+    including retained producers and descendants. Explicit ``session_id`` keeps
+    the existing producer-session lookup for cross-conversation recall.
     """
     engine = _require_engine(kwargs)
     if engine is None:
@@ -6835,7 +6840,16 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
 
     assert raw_node_id_arg is not None
     node_id = raw_node_id_arg
-    node = _get_session_node(engine, node_id, session_id=session_id)
+    owned_node_ids = None
+    if not session_id_explicit and engine.current_conversation_id:
+        from .lifecycle_state import admitted_summary_roots
+        owned_node_ids = set(admitted_summary_roots(
+            engine._dag._conn, engine.current_conversation_id, engine.current_session_id,
+            include_descendants=True,
+        ))
+        node = engine._dag.get_node(node_id) if node_id in owned_node_ids else None
+    else:
+        node = _get_session_node(engine, node_id, session_id=session_id)
     if node is None:
         scope = f"session {session_id}" if session_id_explicit else "current session"
         return json.dumps({"error": f"Node {node_id} not found in {scope}"})
@@ -6868,6 +6882,7 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
             source_offset=source_offset,
             source_limit=source_limit,
             session_id=node.session_id,
+            owned_node_ids=owned_node_ids,
         )
         result = {
             "node_id": node_id,
