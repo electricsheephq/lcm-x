@@ -6,6 +6,7 @@ from hermes_lcm.engine import LCMEngine
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.lifecycle_state import unambiguous_legacy_session_ids
 from hermes_lcm.lifecycle_state import LifecyclePublicationConflictError
+from hermes_lcm.tokens import count_message_tokens, count_messages_tokens, count_tokens
 
 
 @pytest.mark.parametrize("old_producer", ["active", "previous"])
@@ -82,6 +83,88 @@ def test_owned_prefix_root_is_retained_without_foreign_summary(tmp_path, monkeyp
         assert original == [tuple(row) for row in engine._store._conn.execute("SELECT * FROM messages")]
         leaves = engine._dag.get_session_nodes("active", depth=0)
         assert sum(own_prefix[0] in leaf.source_ids for leaf in leaves) == 1
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("long_source", [False, True])
+def test_new_leaf_must_fit_beside_retained_owned_prefix_before_publication(tmp_path, monkeypatch, long_source):
+    engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db"),
+        fresh_tail_count=1, leaf_chunk_tokens=1, incremental_max_depth=0),
+        hermes_home=str(tmp_path / "home"))
+    summary = "new preserved fact " * 20 + "Expand for details: turns"
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", lambda **kw: (summary, 1))
+    engine.on_session_start("active", conversation_id="owned", platform="cli", context_length=200000)
+    try:
+        prefix = engine._store.append_batch("previous",
+            [{"role": "assistant", "content": "covered own turn"}], conversation_id="owned")
+        old = SummaryNode(session_id="active", depth=0, summary="old preserved fact " * 20,
+            token_count=60, source_token_count=100, source_ids=prefix,
+            source_type="messages", created_at=1, expand_hint="turns")
+        engine._dag.add_node(old)
+        active = [{"role": "assistant", "content": "new owned turn " * (100 if long_source else 1)},
+                  {"role": "user", "content": "latest tail"}]
+        own = engine._store.append_batch("active", active, conversation_id="owned")
+        candidate = SummaryNode(session_id="active", depth=0, summary=summary,
+            token_count=count_tokens(summary), source_token_count=400, source_ids=own[:-1],
+            source_type="messages", created_at=2, expand_hint="turns")
+        old_part = engine._summary_context_node_part(old)
+        new_part = engine._summary_context_node_part(candidate, node_label="99999999999999999999")
+        cost = lambda content: count_message_tokens({"role": "user", "content": content})
+        budget = max(cost(old_part), cost(new_part)) + 5
+        assert cost(old_part) <= budget and cost(new_part) <= budget
+        assert cost(old_part + "\n\n---\n\n" + new_part) > budget
+        engine._config.max_assembly_tokens = budget + count_messages_tokens(active[-1:])
+        engine._ingest_cursor = len(active)
+        engine._ingest_cursor_needs_reconcile = False
+        original = [tuple(row) for row in engine._store._conn.execute("SELECT * FROM messages")]
+        result = engine.compress(active, force=True)
+        assert any(message.get("content") == active[0]["content"] for message in result), \
+            "raw source was removed although the new leaf could not enter assembled context"
+        assert engine.last_compression_status == "error"
+        assert engine._last_compacted_store_id == 0
+        assert engine._lifecycle.get_by_conversation("owned").current_frontier_store_id == 0
+        assert result == active
+        assert engine._last_overflow_recovery_failed is long_source
+        assert [node.node_id for node in engine._dag.get_session_nodes("active")] == [old.node_id]
+        assert original == [tuple(row) for row in engine._store._conn.execute("SELECT * FROM messages")]
+    finally:
+        engine.shutdown()
+
+
+def test_budget_rejection_after_publication_keeps_summary_and_raw_suffix(tmp_path, monkeypatch):
+    engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db"),
+        fresh_tail_count=1, leaf_chunk_tokens=1, incremental_max_depth=0,
+        threshold_full_sweep_enabled=True), hermes_home=str(tmp_path / "home"))
+    engine.on_session_start("active", conversation_id="owned", platform="cli", context_length=200000)
+    engine.threshold_tokens = 1
+    calls = []
+    def summarize(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 2:
+            root_part = engine._summary_context_node_part(engine._owned_summary_roots()[0])
+            engine._config.max_assembly_tokens = count_message_tokens(
+                {"role": "user", "content": root_part}) + count_messages_tokens(active[-1:]) + 1
+        return "FIRST_COMMITTED_SUMMARY. Expand for details: turns", 1
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", summarize)
+    active = [{"role": "assistant", "content": "first owned turn"},
+        {"role": "assistant", "content": "rejected raw occurrence " * 100},
+        {"role": "user", "content": "untouched fresh tail"}]
+    try:
+        own = engine._store.append_batch("active", active, conversation_id="owned")
+        engine._ingest_cursor = len(active)
+        engine._ingest_cursor_needs_reconcile = False
+        original = [tuple(row) for row in engine._store._conn.execute("SELECT * FROM messages")]
+        result = engine.compress(active, current_tokens=100)
+        nodes = engine._dag.get_session_nodes("active")
+        assert len(calls) == 2 and len(nodes) == 1 and nodes[0].source_ids == own[:1]
+        assert engine.last_compression_status == "error"
+        assert engine._last_compacted_store_id == own[0]
+        assert engine._lifecycle.get_by_conversation("owned").current_frontier_store_id == own[0]
+        assert "FIRST_COMMITTED_SUMMARY" in str(result)
+        assert result[-2:] == active[1:]
+        assert engine._last_overflow_recovery_failed
+        assert original == [tuple(row) for row in engine._store._conn.execute("SELECT * FROM messages")]
     finally:
         engine.shutdown()
 

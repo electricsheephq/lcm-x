@@ -34,6 +34,10 @@ _THRESHOLD_FULL_SWEEP_MAX_PASSES = 12
 _THRESHOLD_FULL_SWEEP_MAX_SECONDS = 120.0
 
 
+class _NewLeafOutsideAssemblyBudget(LifecyclePublicationConflictError):
+    """Publication cannot discard sources whose replacement is not visible."""
+
+
 class CompactionMixin:
     def _maybe_reclassify_late_auxiliary_before_compaction_write(self) -> None:
         maybe_reclassify = getattr(
@@ -644,12 +648,10 @@ class CompactionMixin:
         Publication may credit an already-covered leading ledger prefix only
         through roots that remain provider-visible beside the new leaf. This
         uses the assembler's ordered root selector and exact summary formatting;
-        publication revalidates every returned root's complete lineage.
+        publication revalidates every returned root's complete lineage. The new
+        leaf must also be selected before its raw sources may be consumed.
         """
         roots = self._owned_summary_roots()
-        if not roots:
-            return []
-
         assembly_cap = (
             assembly_cap_override
             if assembly_cap_override is not None
@@ -711,7 +713,8 @@ class CompactionMixin:
         )
         selected_parts: list[str] = []
         selected_root_ids: list[int] = []
-        for node_id, part in parts:
+        new_leaf_selected = False
+        for part_index, (node_id, part) in enumerate(parts):
             candidate_message = {
                 "role": summary_role,
                 "content": "\n\n---\n\n".join([*selected_parts, part]),
@@ -719,8 +722,14 @@ class CompactionMixin:
             if count_message_tokens(candidate_message) > summary_budget:
                 continue
             selected_parts.append(part)
+            if part_index == len(parts) - 1:
+                new_leaf_selected = True
             if node_id is not None:
                 selected_root_ids.append(node_id)
+        if not new_leaf_selected:
+            raise _NewLeafOutsideAssemblyBudget(
+                "new summary leaf is outside prospective assembly budget"
+            )
         return selected_root_ids
 
     def _compress_impl(self, messages: List[Dict[str, Any]],
@@ -1267,10 +1276,6 @@ class CompactionMixin:
             expected_frontier = int(
                 getattr(publication_state, "current_frontier_store_id", 0)
             )
-            selected_retained_root_node_ids = self._retained_roots_selected_with_new_leaf(
-                node, working_messages[:leading_anchor_count] + remaining_messages,
-                anchor_source_messages, recovery_assembly_cap,
-            )
             filter_exclusion_proofs = self._stored_publication_filter_exclusions(
                 expected_frontier,
                 published_frontier,
@@ -1282,6 +1287,10 @@ class CompactionMixin:
             # prefix, including trailing dependent replies. Summary lineage
             # excludes those replies; their durable ledger drives replay cleanup.
             try:
+                selected_retained_root_node_ids = self._retained_roots_selected_with_new_leaf(
+                    node, working_messages[:leading_anchor_count] + remaining_messages,
+                    anchor_source_messages, recovery_assembly_cap,
+                )
                 before_commit = None
                 if self._session_id and self._conversation_id:
                     publication_session_id = self._session_id
@@ -1309,7 +1318,20 @@ class CompactionMixin:
                     raise
                 fallback = working_messages
                 context_is_assembled = False
-                if leaf_passes or dropped_replayed_scaffold_messages:
+                if isinstance(exc, _NewLeafOutsideAssemblyBudget):
+                    fallback = messages
+                    if leaf_passes:
+                        leading_count = self._leading_anchor_count(working_messages)
+                        # A failed admission must not use the size limit to
+                        # evict its rejected suffix or already-committed roots.
+                        fallback = self._assemble_committed_compaction_context(
+                            working_messages[:leading_count], anchor_source_messages, 2**63 - 1,
+                        ) + working_messages[leading_count:]
+                        self._remember_compacted_active_replay_snapshot(fallback)
+                    context_is_assembled = True
+                    if recovery_assembly_cap is None:
+                        recovery_assembly_cap = self._effective_assembly_token_cap()
+                elif leaf_passes or dropped_replayed_scaffold_messages:
                     fallback = self._assemble_committed_compaction_context(
                         working_messages,
                         anchor_source_messages,
