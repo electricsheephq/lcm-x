@@ -3089,9 +3089,14 @@ class LCMEngine(
             and session_id
             and source_session_id != session_id
         )
+        can_continue_in_place = bool(
+            source_session_id == session_id == previous_session_id
+            and _state_conversation_matches(source_state)
+        )
+        can_continue = can_reassign or can_continue_in_place
         boundary_placeholder_budget = {}
         boundary_placeholder_ordinals: dict[str, set[int]] = {}
-        if can_reassign:
+        if can_continue:
             if previous_session_id == source_session_id:
                 boundary_placeholder_budget = self._active_replay_generated_placeholder_digest_budget()
                 boundary_placeholder_ordinals = self._generated_placeholder_digest_ordinals_for_active_replay(
@@ -3161,7 +3166,7 @@ class LCMEngine(
                 session_id,
                 moved_nodes,
             )
-        elif old_session_id:
+        elif old_session_id and not can_continue_in_place:
             logger.warning(
                 "LCM compression boundary skipped carry-over: old_session_id=%s does not match bound session=%s",
                 old_session_id,
@@ -3193,7 +3198,7 @@ class LCMEngine(
             if state is not None:
                 self._last_compacted_store_id = state.current_frontier_store_id
         self._clear_pending_reset_boundary()
-        self._compression_boundary_ingest_pending = can_reassign
+        self._compression_boundary_ingest_pending = can_continue
         self._compression_boundary_active_placeholder_digest_budget = boundary_placeholder_budget
         self._compression_boundary_active_placeholder_digest_ordinals = boundary_placeholder_ordinals
         self._log_session_filter_diagnostics()
@@ -3216,7 +3221,7 @@ class LCMEngine(
         self._lcm_current_start_allows_bypass_lineage = False
         requested_platform = str(kwargs.get("platform") or self._session_platform or "")
         pre_reset_preserve_ambiguous_no_frame_old_session = False
-        if boundary_reason == "compression" and old_session_id and old_session_id != session_id:
+        if boundary_reason == "compression" and old_session_id:
             old_session_auxiliary_generation = self._in_process_auxiliary_caller_generation(
                 old_session_id
             )
@@ -3295,7 +3300,7 @@ class LCMEngine(
                     logger.debug("LCM host fallback compressor reset failed", exc_info=True)
             self._host_fallback_compressor = None
             self._host_fallback_session_id = ""
-        if boundary_reason == "compression" and old_session_id and old_session_id != session_id:
+        if boundary_reason == "compression" and old_session_id:
             old_session_is_suppressed_foreground = self._auxiliary_lineage_suppressed_as_foreground(
                 old_session_id
             )
@@ -3776,6 +3781,17 @@ class LCMEngine(
                 _SESSION_END_BUSY_TIMEOUT_MS,
             ):
                 is_current_session_full_history_end = session_id == self._session_id
+                cached_source = self._last_active_replay_source_identities
+                if (
+                    is_current_session_full_history_end
+                    and len(cached_source) > self._ingest_cursor
+                    and len(messages) >= len(cached_source)
+                    and [self._message_replay_identity(message) for message in messages[:len(cached_source)]]
+                    == cached_source
+                ):
+                    # Only an exact original-history prefix proves this cursor
+                    # belongs to the shorter projection returned by compress().
+                    self._schedule_ingest_cursor_reconciliation()
                 try:
                     # Best-effort final flush. Keep this path bounded because
                     # host gateways call session-end hooks from lifecycle paths

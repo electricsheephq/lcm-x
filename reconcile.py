@@ -944,6 +944,15 @@ class ReconcileMixin:
         # Every identity the tool-anchored terms are allowed to advance over
         # must itself be durable, on either the raw or the cleaned-up view.
         durable_replay_identities = set(stored_tail) | set(sanitized_replay_tail)
+        # Unregistered tool-pair proof belongs to the producer that emitted it.
+        # Owner-wide history remains available to registered snapshot carryover.
+        producer_rows = self._owner_history(
+            limit=max(len(stored_tail), 64), latest=True, producer_session_id=self._session_id,
+        )
+        producer_identities = [self._message_replay_identity(row, stored_row=True) for row in producer_rows]
+        producer_replay_identities = set(producer_identities) | set(
+            self._stored_tail_for_sanitized_active_replay(producer_identities)
+        )
         empty_prefix_cursor: int | None = None
         for cursor in range(len(messages), -1, -1):
             candidate_messages = messages[:cursor]
@@ -1324,7 +1333,8 @@ class ReconcileMixin:
             # from an external file, so it is not a durable-row match and gets
             # its own proof terms above.
             has_tool_id_anchored_replay = (
-                not candidate_has_persisted_marker
+                all(identity in producer_replay_identities for identity in candidate_prefix)
+                and not candidate_has_persisted_marker
                 and candidate_has_tool_anchor
                 and not candidate_has_lossy_redacted_replay_identity
                 and (

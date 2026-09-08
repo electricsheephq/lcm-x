@@ -206,3 +206,55 @@ def test_registered_covered_occurrence_maps_above_stale_frontier(engine, lineage
     assert engine._last_compacted_store_id == 0
     assert engine._get_store_id_map_for_messages([message]) == {id(message): source_id}
     assert engine._get_store_id_map_for_messages([message.copy(), message.copy()]) == {}
+
+
+@pytest.mark.parametrize("end_has_new_suffix", [False, True])
+def test_same_session_compression_boundary_survives_cold_resume(tmp_path, monkeypatch, end_has_new_suffix):
+    config = LCMConfig(database_path=str(tmp_path / "same-session.db"),
+        fresh_tail_count=80, leaf_chunk_tokens=1, incremental_max_depth=0)
+    value = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
+    value.on_session_start("same", conversation_id="conversation", platform="cli", context_length=200000)
+    messages = [{"role": "system", "content": "system"}] + [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"ordinary turn {i}"}
+        for i in range(120)
+    ]
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", lambda **kw: ("VISIBLE_BOUNDARY_SUMMARY", 1))
+    active = value.compress(messages, force=True)
+    assert value.last_compression_status == "compacted"
+    assert len(active) > 64 and active[-80:] == messages[-80:]
+    before = value._store.get_session_count("same")
+    assert len(value._last_active_replay_source_identities) > value._ingest_cursor
+    assert value._last_active_replay_source_identities == [value._message_replay_identity(msg) for msg in messages]
+    suffix = [{"role": "user", "content": "new turn in ending history"}] if end_has_new_suffix else []
+    # Hermes commit_memory_session forwards the ending history to on_session_end.
+    value.on_session_end("same", [*messages, *suffix])
+    before += len(suffix)
+    active = [*active, *suffix]
+    assert value._store.get_session_count("same") == before, "end flush duplicated original history"
+    value.on_session_start("same", old_session_id="same", boundary_reason="compression",
+        conversation_id="conversation", platform="cli", context_length=200000)
+    assert value._store.get_session_count("same") == before, "boundary duplicated raw history"
+    value.shutdown()
+    cold = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
+    try:
+        cold.on_session_start("same", conversation_id="conversation", platform="cli", context_length=200000)
+        cold.ingest(active)
+        assert cold._store.get_session_count("same") == before, "cold resume duplicated active history"
+        fresh = [*active, {"role": "user", "content": "one new turn after cold resume"}]
+        cold.ingest(fresh)
+        assert cold._store.get_session_count("same") == before + 1
+        cold.ingest(fresh)
+        assert cold._store.get_session_count("same") == before + 1
+    finally:
+        cold.shutdown()
+
+
+def test_new_producer_identical_tool_pair_is_not_unregistered_replay(engine):
+    pair = [{"role": "assistant", "content": "", "tool_calls": [{"id": "reused", "type": "function",
+        "function": {"name": "lookup", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "reused", "content": "same result"}]
+    engine._store.append_batch("previous", [{"role": "user", "content": "older request"}, *pair],
+        conversation_id="owned")
+    assert engine._reconcile_ingest_cursor_from_store(pair) == 0
+    engine.ingest(pair)
+    assert engine._store.get_session_count("active") == 2
