@@ -857,6 +857,7 @@ class MessageStore:
         limit: int = 10000,
         latest: bool = False,
         count_only: bool = False,
+        producer_session_id: str | None = None,
     ) -> List[Dict[str, Any]] | int:
         """Return one ordered logical-conversation owner set.
 
@@ -888,6 +889,9 @@ class MessageStore:
                 f"AND session_id IN ({placeholders}))"
             )
             owner_args.extend(legacy_sessions)
+        if producer_session_id is not None:
+            owner_sql = f"({owner_sql}) AND session_id = ?"
+            owner_args.append(producer_session_id)
         if count_only:
             return int(self._conn.execute(
                 f"SELECT COUNT(*) FROM messages WHERE ({owner_sql})", owner_args,

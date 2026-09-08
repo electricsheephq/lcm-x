@@ -4454,7 +4454,8 @@ class LCMEngine(
 
     # -- Internal: message ingestion ---------------------------------------
 
-    def _owner_history(self, *, after_store_id=0, limit=10000, latest=False, count_only=False):
+    def _owner_history(self, *, after_store_id=0, limit=10000, latest=False, count_only=False,
+                       producer_session_id=None):
         """Use the same durable ownership domain for replay and publication."""
         conversation_id = str(self._conversation_id or "").strip()
         if not conversation_id:
@@ -4470,7 +4471,8 @@ class LCMEngine(
             getattr(state, "last_finalized_session_id", None)) if value}
         return self._store.get_conversation_messages_after(conversation_id,
             legacy_session_ids=bound, after_store_id=after_store_id,
-            limit=limit, latest=latest, count_only=count_only)
+            limit=limit, latest=latest, count_only=count_only,
+            producer_session_id=producer_session_id)
 
     def _owned_summary_roots(self):
         from .lifecycle_state import admitted_summary_roots

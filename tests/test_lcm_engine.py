@@ -5001,6 +5001,43 @@ class TestEngineABC:
         )
         assert "skipped stale no-overlap snapshot" in caplog.text
 
+    def test_new_producer_preserves_repeated_owner_history_startup_prefix(self, tmp_path):
+        config = LCMConfig(database_path=str(tmp_path / "new-producer-startup.db"))
+        before_restart = LCMEngine(config=config)
+        before_restart.on_session_start(
+            "old-producer", platform="cli", conversation_id="shared-conversation",
+            context_length=200000,
+        )
+        startup = [
+            {"role": "system", "content": "You are concise."},
+            {"role": "user", "content": "repeated startup question"},
+        ]
+        persisted = startup + [
+            {"role": "user", "content": f"durable tail message {i}"}
+            for i in range(80)
+        ]
+        before_restart._ingest_messages(persisted)
+        before_restart._store.close()
+        before_restart._dag.close()
+        before_restart._lifecycle.close()
+
+        after_restart = LCMEngine(config=config)
+        after_restart.on_session_start(
+            "new-producer", platform="cli", conversation_id="shared-conversation",
+            context_length=200000,
+        )
+        after_restart._ingest_messages(startup)
+
+        rows = after_restart._store.get_session_messages("new-producer")
+        assert [(row["role"], row["content"]) for row in rows] == [
+            (message["role"], message["content"]) for message in startup
+        ]
+        assert after_restart._store.get_session_count("old-producer") == len(persisted)
+        assert after_restart._ingest_cursor == len(startup)
+        assert after_restart.get_status()["ingest_reconciliation"]["reason"] != (
+            "skipped stale no-overlap snapshot"
+        )
+
     def test_existing_session_restart_skips_stale_short_snapshot_with_externalized_head_payload(self, tmp_path):
         db_path = tmp_path / "restart-stale-externalized-head.db"
         config = LCMConfig(
@@ -21792,9 +21829,9 @@ class TestAssemblyGuardrails:
 
         config = LCMConfig(
             fresh_tail_count=2,
-            leaf_chunk_tokens=1,
+            leaf_chunk_tokens=1000,
             database_path=str(tmp_path / "lcm_guardrail_anchor_budget.db"),
-            max_assembly_tokens=120,
+            max_assembly_tokens=300,
         )
         instance = LCMEngine(config=config)
         instance._session_id = "guardrail-session"
@@ -21818,7 +21855,7 @@ class TestAssemblyGuardrails:
             lambda **kwargs: ("summary", 1),
         )
 
-        oversized_anchor = "current objective " * 7
+        oversized_anchor = "current objective " * 30
         messages = [
             {"role": "system", "content": "s" * 10},
             {"role": "user", "content": "stale"},
@@ -21827,11 +21864,19 @@ class TestAssemblyGuardrails:
             {"role": "tool", "tool_call_id": "call_anchor", "content": "t" * 50},
         ]
 
-        result = instance.compress(messages, current_tokens=140)
+        current_tokens = lcm_engine_module.count_messages_tokens(messages)
+        assert current_tokens > config.max_assembly_tokens
+        result = instance.compress(messages, current_tokens=current_tokens)
 
-        assert lcm_engine_module.count_messages_tokens(result) <= 120
+        assert lcm_engine_module.count_messages_tokens(result) <= config.max_assembly_tokens
         assert oversized_anchor not in [msg.get("content") for msg in result]
         assert not instance.get_status()["overflow_recovery_failed"]
+        nodes = instance._dag.get_session_nodes("guardrail-session")
+        assert nodes
+        assert all(
+            any(instance._summary_context_node_part(node) in msg.get("content", "") for msg in result)
+            for node in nodes
+        )
 
     def test_reserve_tokens_floor_warns_when_misconfigured(self, tmp_path, caplog):
         config = LCMConfig(
@@ -21853,7 +21898,7 @@ class TestAssemblyGuardrails:
             fresh_tail_count=2,
             leaf_chunk_tokens=100,
             database_path=str(tmp_path / "lcm_guardrail_forced.db"),
-            max_assembly_tokens=90,
+            max_assembly_tokens=300,
         )
         instance = LCMEngine(config=config)
         instance._session_id = "guardrail-session"
@@ -21879,18 +21924,25 @@ class TestAssemblyGuardrails:
 
         messages = [
             {"role": "system", "content": "s" * 10},
-            {"role": "user", "content": "a" * 20},
-            {"role": "assistant", "content": "b" * 20},
+            {"role": "user", "content": "a" * 125},
+            {"role": "assistant", "content": "b" * 125},
             {"role": "user", "content": "c" * 20},
             {"role": "assistant", "content": "d" * 20},
         ]
 
-        result = instance.compress(messages, current_tokens=90)
+        current_tokens = lcm_engine_module.count_messages_tokens(messages)
+        assert current_tokens == config.max_assembly_tokens
+        result = instance.compress(messages, current_tokens=current_tokens)
 
         assert len(result) < len(messages)
         assert result[-2:] == messages[-2:]
-        assert lcm_engine_module.count_messages_tokens(result) < 90
-        assert instance._dag.get_session_nodes("guardrail-session")
+        assert lcm_engine_module.count_messages_tokens(result) < config.max_assembly_tokens
+        nodes = instance._dag.get_session_nodes("guardrail-session")
+        assert nodes
+        assert all(
+            any(instance._summary_context_node_part(node) in msg.get("content", "") for msg in result)
+            for node in nodes
+        )
 
     def test_forced_overflow_tail_capping_updates_bookkeeping_without_middle_compaction(self, tmp_path, monkeypatch):
         import importlib

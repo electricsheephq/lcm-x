@@ -1565,7 +1565,9 @@ class ReconcileMixin:
             return cursor
 
         incoming_identities = self._effective_replay_identities(messages)
-        stored_head_rows = self._owner_history(limit=tail_limit)
+        # A repeated startup prefix proves staleness only for this producer.
+        # Another producer in the same conversation may submit identical new turns.
+        stored_head_rows = self._owner_history(limit=tail_limit, producer_session_id=self._session_id)
         stored_head = [self._message_replay_identity(row, stored_row=True) for row in stored_head_rows]
         # Stale-snapshot proof uses the raw durable prefix.  Ignore-message
         # filters may suppress noisy rows for tail reconciliation, but filtered
@@ -1901,6 +1903,19 @@ class ReconcileMixin:
         message has its durable identity, so content duplication cannot make the
         old row hijack another occurrence.
         """
+        # Validated leaf coverage may precede a retained conversation's frontier.
+        # Covered duplicates must not steal uncovered active occurrences.
+        covered_ids: set[int] = set()
+        if self._conversation_id:
+            from .lifecycle_state import admitted_summary_roots
+            roots = admitted_summary_roots(self._dag._conn, self._conversation_id, self._session_id)
+            covered_ids = {source_id for sources in roots.values() for source_id in sources}
+
+        def requires_explicit_lineage(store_id):
+            return 0 < store_id and (
+                store_id <= int(self._last_compacted_store_id or 0) or store_id in covered_ids
+            )
+
         candidates: list[Dict[str, Any]] = []
         active_lineage_identities = self._active_folded_tail_identity_overrides(
             messages
@@ -1908,9 +1923,7 @@ class ReconcileMixin:
         folded_lineage = self._load_folded_tail_lineage(messages)
         if folded_lineage is not None:
             _folded_message, source_row = folded_lineage
-            if int(source_row.get("store_id") or 0) <= int(
-                self._last_compacted_store_id or 0
-            ):
+            if requires_explicit_lineage(int(source_row.get("store_id") or 0)):
                 candidates.append(source_row)
         retained_anchor_loader = getattr(
             self,
@@ -1922,13 +1935,13 @@ class ReconcileMixin:
             retained_store_id = int(
                 retained_anchor.get("store_id") or 0
             ) if retained_anchor else 0
-            if 0 < retained_store_id <= int(self._last_compacted_store_id or 0):
+            if requires_explicit_lineage(retained_store_id):
                 owned_rows = self._owner_history(after_store_id=retained_store_id - 1, limit=1)
                 if (not owned_rows or int(owned_rows[0]["store_id"]) != retained_store_id
                     or self._retained_user_anchor_identity_digest(owned_rows[0], stored_row=True)
                     != self._retained_user_anchor_identity_digest(retained_anchor, stored_row=True)):
                     retained_anchor = None
-            if retained_anchor is not None and 0 < retained_store_id <= int(self._last_compacted_store_id or 0):
+            if retained_anchor is not None and requires_explicit_lineage(retained_store_id):
                 retained_identity = self._message_replay_identity(
                     retained_anchor,
                     stored_row=True,
@@ -1940,6 +1953,13 @@ class ReconcileMixin:
                 )
                 if active_matches == 1:
                     candidates.append(retained_anchor)
+        next_candidate_after = self._last_compacted_store_id
+        while True:
+            page = self._owner_history(after_store_id=next_candidate_after)
+            if not page:
+                break
+            candidates.extend(row for row in page if int(row["store_id"]) not in covered_ids)
+            next_candidate_after = page[-1]["store_id"]
         if candidates:
             candidates = list(
                 {
@@ -1949,13 +1969,6 @@ class ReconcileMixin:
                 }.values()
             )
             candidates.sort(key=lambda candidate: int(candidate["store_id"]))
-        next_candidate_after = self._last_compacted_store_id
-        while True:
-            page = self._owner_history(after_store_id=next_candidate_after)
-            if not page:
-                break
-            candidates.extend(page)
-            next_candidate_after = page[-1]["store_id"]
 
         def active_lineage_identity(
             message: Dict[str, Any],

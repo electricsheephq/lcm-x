@@ -148,3 +148,61 @@ def test_unmapped_long_suffix_after_commit_survives_finite_assembly_cap(engine, 
     assert result[-4:] == active[1:]
     assert engine._last_overflow_recovery_failed
     assert original == [tuple(row) for row in engine._store._conn.execute("SELECT * FROM messages")]
+
+
+def test_mapping_skips_owned_covered_duplicate_with_zero_frontier(engine, monkeypatch):
+    old = raw(engine, "repeated occurrence")
+    node(engine, [old], "previously covered occurrence")
+    active = [{"role": "assistant", "content": "repeated occurrence"},
+        {"role": "assistant", "content": "new reply"},
+        {"role": "user", "content": "fresh tail"}]
+    current = engine._store.append_batch("active", active, conversation_id="owned")
+    assert engine._last_compacted_store_id == 0
+    mapping = engine._get_store_id_map_for_messages(active)
+    assert [mapping[id(message)] for message in active] == current
+    engine._config.leaf_chunk_tokens = 1
+    engine._ingest_cursor = len(active)
+    engine._ingest_cursor_needs_reconcile = False
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", lambda **kw: ("NEW_VISIBLE_SUMMARY", 1))
+    result = engine.compress(active, force=True)
+    assert engine.last_compression_status == "compacted"
+    assert engine._lifecycle.get_by_conversation("owned").current_frontier_store_id == current[1]
+    assert any(value.source_ids == current[:2] for value in engine._dag.get_session_nodes("active"))
+    assert "NEW_VISIBLE_SUMMARY" in str(result)
+    assert result[-1] == active[-1]
+
+
+def test_shared_producer_foreign_startup_prefix_is_not_owned_replay(engine):
+    startup = [{"role": "system", "content": "You are concise."},
+        {"role": "user", "content": "repeated startup question"}]
+    engine._store.append_batch("active", startup, conversation_id="foreign")
+    durable = [{"role": "user", "content": f"owned durable tail {i}"} for i in range(80)]
+    engine._store.append_batch("active", durable, conversation_id="owned")
+    assert engine._reconcile_ingest_cursor_from_store(startup) == 0
+    engine._ingest_cursor = 0
+    engine._ingest_cursor_needs_reconcile = True
+    engine.ingest(startup)
+    assert [(row["role"], row["content"]) for row in engine._owner_history()[-2:]] == [
+        (message["role"], message["content"]) for message in startup
+    ]
+
+
+@pytest.mark.parametrize("lineage", ["retained", "folded"])
+def test_registered_covered_occurrence_maps_above_stale_frontier(engine, lineage):
+    if lineage == "retained":
+        active = [{"role": "system", "content": "system"},
+            {"role": "user", "content": "sole registered request"}]
+        engine.ingest(active)
+        engine._prepare_retained_user_anchor(active)
+        message = active[1]
+        source_id = engine._get_store_id_map_for_messages(active)[id(message)]
+    else:
+        message = {"role": "assistant", "content": "registered assistant"}
+        source_id = engine._store.append_batch("active", [message], conversation_id="owned")[0]
+        message = engine._prepend_generated_context_to_message(message,
+            "[Recent Summary (d0, node 1)]\nsummary\n[Expand for details: source]")
+        assert engine._write_folded_tail_lineage(message, source_id)
+    node(engine, [source_id], "already covered registered source")
+    assert engine._last_compacted_store_id == 0
+    assert engine._get_store_id_map_for_messages([message]) == {id(message): source_id}
+    assert engine._get_store_id_map_for_messages([message.copy(), message.copy()]) == {}
