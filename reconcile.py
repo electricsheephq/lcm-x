@@ -1947,11 +1947,32 @@ class ReconcileMixin:
             )
             candidates.sort(key=lambda candidate: int(candidate["store_id"]))
         next_candidate_after = self._last_compacted_store_id
+        conversation_id = str(getattr(self, "_conversation_id", "") or "").strip()
+        legacy_session_ids = {str(self._session_id or "")}
+        if conversation_id:
+            lifecycle = self._lifecycle.get_by_conversation(conversation_id)
+            if lifecycle is not None:
+                legacy_session_ids.update(
+                    str(value)
+                    for value in (
+                        lifecycle.current_session_id,
+                        lifecycle.last_finalized_session_id,
+                    )
+                    if value
+                )
+        legacy_session_ids.discard("")
         while True:
-            page = self._store.get_session_messages_after(
-                self._session_id,
-                after_store_id=next_candidate_after,
-            )
+            if conversation_id:
+                page = self._store.get_conversation_messages_after(
+                    conversation_id,
+                    legacy_session_ids=legacy_session_ids,
+                    after_store_id=next_candidate_after,
+                )
+            else:
+                page = self._store.get_session_messages_after(
+                    self._session_id,
+                    after_store_id=next_candidate_after,
+                )
             if not page:
                 break
             candidates.extend(page)

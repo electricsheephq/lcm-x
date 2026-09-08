@@ -615,11 +615,32 @@ class CompactionMixin:
         proven = {int(store_id) for store_id in already_proven_store_ids}
         proofs = dict(initial_proofs)
         after_store_id = expected_frontier
+        conversation_id = str(self._conversation_id or "").strip()
+        legacy_session_ids = {str(self._session_id or "")}
+        if conversation_id:
+            lifecycle = self._lifecycle.get_by_conversation(conversation_id)
+            if lifecycle is not None:
+                legacy_session_ids.update(
+                    str(value)
+                    for value in (
+                        lifecycle.current_session_id,
+                        lifecycle.last_finalized_session_id,
+                    )
+                    if value
+                )
+        legacy_session_ids.discard("")
         while after_store_id < covered_end:
-            rows = self._store.get_session_messages_after(
-                self._session_id,
-                after_store_id=after_store_id,
-            )
+            if conversation_id:
+                rows = self._store.get_conversation_messages_after(
+                    conversation_id,
+                    legacy_session_ids=legacy_session_ids,
+                    after_store_id=after_store_id,
+                )
+            else:
+                rows = self._store.get_session_messages_after(
+                    self._session_id,
+                    after_store_id=after_store_id,
+                )
             if not rows:
                 break
             for row in rows:
@@ -634,6 +655,89 @@ class CompactionMixin:
                     proofs[store_id] = row.get("content")
             after_store_id = int(rows[-1].get("store_id") or after_store_id)
         return proofs
+
+    def _retained_roots_selected_with_new_leaf(
+        self,
+        new_node: SummaryNode,
+        prospective_working_messages: List[Dict[str, Any]],
+        anchor_source_messages: List[Dict[str, Any]],
+        assembly_cap_override: int | None,
+    ) -> List[int]:
+        """Return prior roots only when assembly is proven to retain them all.
+
+        Publication may credit an already-covered leading ledger prefix only
+        when the existing context assembler will keep every current summary
+        root alongside the new leaf. This conservative proof uses the same
+        root selector and exact summary formatting as ``_assemble_context``;
+        if the complete summary block does not fit, no prior root is credited.
+        """
+        all_nodes = self._dag.get_session_nodes(self._session_id)
+        roots: List[SummaryNode] = []
+        for depth in sorted({node.depth for node in all_nodes}, reverse=True):
+            roots.extend(self._dag.get_uncondensed_at_depth(self._session_id, depth))
+        if not roots:
+            return []
+
+        assembly_cap = (
+            assembly_cap_override
+            if assembly_cap_override is not None
+            else self._effective_assembly_token_cap()
+        )
+        if assembly_cap is None:
+            return [int(node.node_id) for node in roots]
+
+        leading_count = self._leading_anchor_count(prospective_working_messages)
+        leading_messages = [
+            message.copy()
+            for message in prospective_working_messages[:leading_count]
+        ]
+        if (
+            leading_messages
+            and leading_messages[0].get("role") == "system"
+            and self.compression_count == 0
+        ):
+            leading_messages[0]["content"] = self._append_lcm_note_to_content(
+                leading_messages[0].get("content", "")
+            )
+        tail_messages = prospective_working_messages[leading_count:]
+        summary_budget = max(
+            0,
+            assembly_cap
+            - count_messages_tokens(leading_messages)
+            - count_messages_tokens(tail_messages),
+        )
+        anchor_leading_count = self._leading_anchor_count(anchor_source_messages)
+        anchor_part = self._latest_user_context_anchor(
+            anchor_source_messages[anchor_leading_count:],
+            tail_messages,
+        )
+        if leading_count == 2:
+            summary_role = "assistant"
+        elif not leading_messages or leading_messages[-1].get("role") == "system":
+            summary_role = "user"
+        else:
+            summary_role = (
+                "assistant"
+                if leading_messages[-1].get("role") != "assistant"
+                else "user"
+            )
+        parts = []
+        if anchor_part is not None:
+            parts.append(anchor_part)
+        parts.extend(self._summary_context_node_part(node) for node in roots)
+        parts.append(
+            self._summary_context_node_part(
+                new_node,
+                node_label="99999999999999999999",
+            )
+        )
+        summary_message = {
+            "role": summary_role,
+            "content": "\n\n---\n\n".join(parts),
+        }
+        if count_message_tokens(summary_message) > summary_budget:
+            return []
+        return [int(node.node_id) for node in roots]
 
     def _compress_impl(self, messages: List[Dict[str, Any]],
                        current_tokens: int = None,
@@ -1164,6 +1268,14 @@ class CompactionMixin:
             expected_frontier = int(
                 getattr(publication_state, "current_frontier_store_id", 0)
             )
+            selected_retained_root_node_ids = (
+                self._retained_roots_selected_with_new_leaf(
+                    node,
+                    working_messages[:leading_anchor_count] + remaining_messages,
+                    anchor_source_messages,
+                    recovery_assembly_cap,
+                )
+            )
             filter_exclusion_proofs = self._stored_publication_filter_exclusions(
                 expected_frontier,
                 published_frontier,
@@ -1189,6 +1301,7 @@ class CompactionMixin:
                             consumed_store_ids,
                             publication_excluded_store_ids,
                             filter_exclusion_proofs,
+                            selected_retained_root_node_ids,
                         )
                     before_commit = stage_frontier
                 self._dag.add_node(node, before_commit=before_commit)

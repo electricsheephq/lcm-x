@@ -847,6 +847,47 @@ class MessageStore:
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
+    def get_conversation_messages_after(
+        self,
+        conversation_id: str,
+        *,
+        legacy_session_ids: Collection[str] = (),
+        after_store_id: int = 0,
+        limit: int = 10000,
+    ) -> List[Dict[str, Any]]:
+        """Return one ordered logical-conversation owner set.
+
+        Explicit conversation ownership is authoritative across producing
+        sessions. Blank legacy rows are admitted only for lifecycle-proven
+        current or last-finalized sessions supplied by the caller.
+        """
+        conversation_id = str(conversation_id or "").strip()
+        legacy_sessions = tuple(
+            sorted({str(value) for value in legacy_session_ids if str(value)})
+        )
+        if not conversation_id:
+            return []
+        owner_sql = "conversation_id = ?"
+        owner_args: list[Any] = [conversation_id]
+        if legacy_sessions:
+            placeholders = ",".join("?" for _ in legacy_sessions)
+            owner_sql += (
+                " OR (COALESCE(conversation_id, '') = '' "
+                f"AND session_id IN ({placeholders}))"
+            )
+            owner_args.extend(legacy_sessions)
+        rows = self._conn.execute(
+            f"""SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages
+                WHERE store_id > ? AND ({owner_sql})
+                ORDER BY store_id LIMIT ?""",
+            (
+                int(after_store_id or 0),
+                *owner_args,
+                max(1, int(limit)),
+            ),
+        ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
     def get_session_tail(self, session_id: str, limit: int = 1000) -> List[Dict[str, Any]]:
         """Get the latest messages for a session, returned in store order."""
         if limit <= 0:
