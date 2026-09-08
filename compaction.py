@@ -1149,8 +1149,13 @@ class CompactionMixin:
             selected_raw_chunk = to_compact
             if any(id(message) not in self._current_compress_store_ids_by_message_id
                    for message in selected_raw_chunk):
+                fallback = messages
+                if leaf_passes:
+                    fallback = self._assemble_committed_compaction_context(
+                        working_messages, anchor_source_messages, recovery_assembly_cap,
+                    )
                 return self._fail_open_after_publication_failure(
-                    working_messages if leaf_passes else messages,
+                    fallback,
                     LifecyclePublicationConflictError("Selected active occurrence has no owned lineage"),
                     compress_started=_compress_started,
                     threshold_full_sweep_active=threshold_full_sweep_active,

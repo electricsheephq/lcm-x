@@ -108,7 +108,10 @@ def admitted_summary_roots(conn, conversation_id, session_id, *, before_node_id=
         if node_id in validated:
             return validated[node_id]
         row = nodes.get(node_id)
-        if row is None or node_id in visiting or not row[4] or not row[5]:
+        if node_id in visiting:
+            return None
+        if row is None or not row[4] or not row[5]:
+            validated[node_id] = None
             return None
         visiting.add(node_id)
         represented = set()
