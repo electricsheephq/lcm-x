@@ -1245,6 +1245,11 @@ class LifecycleStateStore:
             if proven_ids and proven_ids[0] in authoritative_ids
             else -1
         )
+        # Claiming a previously unclaimed source below the frontier does not
+        # cross any new interval. Full-source ownership and duplicate checks
+        # below still apply, and the frontier remains unchanged.
+        if not authoritative_ids and not proven_ids:
+            first_new_index = 0
         retained_prefix_ids = (
             authoritative_ids[:first_new_index]
             if first_new_index >= 0
