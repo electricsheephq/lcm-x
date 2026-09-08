@@ -29,6 +29,7 @@ from .db_bootstrap import (
 )
 from .config import LCMConfig
 from .ingest_protection import protect_message_for_ingest, protect_messages_for_ingest
+from .lifecycle_state import unambiguous_legacy_session_ids
 from .search_query import (
     build_snippet,
     compute_search_candidate_cap,
@@ -867,6 +868,15 @@ class MessageStore:
         )
         if not conversation_id:
             return []
+        legacy_sessions = tuple(
+            sorted(
+                unambiguous_legacy_session_ids(
+                    self._conn,
+                    conversation_id,
+                    set(legacy_sessions),
+                )
+            )
+        )
         owner_sql = "conversation_id = ?"
         owner_args: list[Any] = [conversation_id]
         if legacy_sessions:

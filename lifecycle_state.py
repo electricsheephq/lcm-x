@@ -30,6 +30,47 @@ class LifecyclePublicationConflictError(RuntimeError):
     """Raised when compaction publication cannot prove its source frontier."""
 
 
+def unambiguous_legacy_session_ids(
+    conn: sqlite3.Connection,
+    conversation_id: str,
+    session_ids: set[str],
+) -> set[str]:
+    """Return blank-row session owners with exactly one lifecycle binding.
+
+    Explicit ``messages.conversation_id`` values remain authoritative.  A
+    blank legacy row may use a session binding only when neither lifecycle
+    session index associates that session with another conversation.
+    """
+    candidates = {str(value) for value in session_ids if str(value)}
+    if not candidates:
+        return set()
+    return {
+        candidate
+        for candidate in candidates
+        if conn.execute(
+            """
+            SELECT NOT EXISTS(
+                SELECT 1
+                FROM lcm_lifecycle_state
+                     INDEXED BY idx_lcm_lifecycle_current_session
+                WHERE current_session_id = ? AND conversation_id != ?
+            ) AND NOT EXISTS(
+                SELECT 1
+                FROM lcm_lifecycle_state
+                     INDEXED BY idx_lcm_lifecycle_last_finalized_session
+                WHERE last_finalized_session_id = ? AND conversation_id != ?
+            )
+            """,
+            (
+                candidate,
+                conversation_id,
+                candidate,
+                conversation_id,
+            ),
+        ).fetchone()[0]
+    }
+
+
 def _synchronized(method):
     """Serialize a read-modify-write method on the store's reentrant lock.
 
@@ -1121,11 +1162,15 @@ class LifecycleStateStore:
                 "Compaction publication frontier generation changed "
                 f"(expected={expected_frontier}, actual={actual_frontier})"
             )
-        legacy_session_ids = {
-            str(value or "")
-            for value in (session_id, state_row[0], state_row[1])
-            if value
-        }
+        legacy_session_ids = unambiguous_legacy_session_ids(
+            conn,
+            conversation_id,
+            {
+                str(value or "")
+                for value in (session_id, state_row[0], state_row[1])
+                if value
+            },
+        )
 
         def belongs_to_conversation(row: sqlite3.Row | tuple[Any, ...]) -> bool:
             row_session_id = str(row[1] or "")
@@ -1190,15 +1235,26 @@ class LifecycleStateStore:
                 f"authoritative={authoritative_ids}, covered={covered_ids}, "
                 f"excluded={excluded_ids})"
             )
+        duplicate_node_session_ids = sorted(
+            legacy_session_ids
+            | {session_id}
+            | {str(row[1] or "") for row in snapshot_rows if str(row[1] or "")}
+        )
         if conn.execute(
             """
             SELECT 1
-            FROM summary_nodes AS node, json_each(node.source_ids) AS source
+            FROM summary_nodes AS node INDEXED BY idx_nodes_session_latest,
+                 json_each(node.source_ids) AS source
             WHERE node.source_type = 'messages' AND node.node_id != ?
+              AND node.session_id IN (SELECT value FROM json_each(?))
               AND source.value IN (SELECT value FROM json_each(?))
             LIMIT 1
             """,
-            (publication_node_id, json.dumps(proven_ids)),
+            (
+                publication_node_id,
+                json.dumps(duplicate_node_session_ids),
+                json.dumps(all_covered_ids),
+            ),
         ).fetchone():
             raise LifecyclePublicationConflictError(
                 "Compaction publication source lineage is already claimed"
