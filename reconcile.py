@@ -637,6 +637,42 @@ class ReconcileMixin:
             self._replay_snapshot_digest(messages, require_lcm_system_note=not trusted_assembly),
         )
 
+    def _owned_exact_snapshot_prefix(self, messages):
+        """Admit renewal only from a registered snapshot with current owned lineage."""
+        digest = self._replay_snapshot_digest(messages, require_lcm_system_note=False)
+        if not digest or digest not in self._load_compacted_active_replay_snapshot_digests():
+            return False
+        if any(_has_lossy_redacted_identity(self._message_replay_identity(m)) for m in messages):
+            return False
+        roots = {node.node_id: node for node in self._owned_summary_roots()}
+        seen = set()
+        raw = []
+        for message in messages:
+            if message.get("role") == "system":
+                continue
+            if self._is_replayed_context_scaffold_message(message):
+                content = normalize_content_value(message.get("content")) or ""
+                ids = {int(value) for value in re.findall(r"Summary \(d\d+, node (\d+)\)", content)}
+                if not ids or not ids <= roots.keys():
+                    return False
+                seen.update(ids)
+            else:
+                raw.append(message)
+        mapping = self._get_store_id_map_for_messages(raw)
+        ids = [mapping.get(id(message), 0) for message in raw]
+        if not seen or not ids or not all(ids) or ids != sorted(set(ids)):
+            return False
+        rows = self._store._conn.execute(
+            "SELECT conversation_id FROM messages WHERE store_id IN (SELECT value FROM json_each(?))",
+            (json.dumps(ids),),
+        ).fetchall()
+        return len(rows) == len(ids) and all(row[0] == self._conversation_id for row in rows)
+
+    def _snapshot_append_is_lossless(self, messages):
+        return all(not _has_lossy_redacted_identity(self._message_replay_identity(message))
+            and not self._is_replayed_context_scaffold_message(message)
+            and not self._matches_ignore_message_patterns(message) for message in messages)
+
     # -- Session-end full-history proof (consumed ONLY by current-session
     #    full-history session-end ingest) --
 
