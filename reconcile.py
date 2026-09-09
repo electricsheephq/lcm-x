@@ -662,10 +662,11 @@ class ReconcileMixin:
         ids = [mapping.get(id(message), 0) for message in raw]
         if not seen or not ids or not all(ids) or ids != sorted(set(ids)):
             return False
-        rows = self._store._conn.execute(
-            "SELECT conversation_id FROM messages WHERE store_id IN (SELECT value FROM json_each(?))",
-            (json.dumps(ids),),
-        ).fetchall()
+        with self._store._write_lock:
+            rows = self._store._conn.execute(
+                "SELECT conversation_id FROM messages WHERE store_id IN (SELECT value FROM json_each(?))",
+                (json.dumps(ids),),
+            ).fetchall()
         return len(rows) == len(ids) and all(row[0] == self._conversation_id for row in rows)
 
     def _snapshot_append_is_lossless(self, messages):

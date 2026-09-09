@@ -4890,9 +4890,6 @@ class LCMEngine(
             return self._redact_active_replay_messages(messages)
 
         append_binding = (self._conversation_id, self._session_id)
-        append_prefix_cursor = self._ingest_cursor
-        append_prefix_proven = bool(0 < append_prefix_cursor < len(messages)
-            and self._owned_exact_snapshot_prefix(messages[:append_prefix_cursor]))
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
         scan_start = 0 if self._ingest_cursor_needs_reconcile else cursor
@@ -5299,13 +5296,14 @@ class LCMEngine(
                 active_replay_messages[absolute_idx] = stubbed_message
 
         estimates = [count_message_tokens(m) for m in protected_messages]
-        renew_snapshot = bool(append_prefix_proven and cursor == append_prefix_cursor
+        renew_snapshot = bool(0 < cursor < n
+            and append_binding == (self._conversation_id, self._session_id)
+            and self._owned_exact_snapshot_prefix(messages[:cursor])
             and [idx for idx, _msg in messages_to_store_with_index] == list(range(cursor, n))
             and self._snapshot_append_is_lossless(messages[cursor:])
             and self._snapshot_append_is_lossless(active_replay_messages[cursor:])
             and all(self._message_replay_identity(active) == self._message_replay_identity(stored, stored_row=True)
                 for active, stored in zip(active_replay_messages[cursor:], protected_messages)))
-        append_floor = self._store._conn.execute("SELECT COALESCE(MAX(store_id), 0) FROM messages").fetchone()[0]
         def append_metadata(message, store_id):
             rows = self._real_user_scaffold_metadata_rows(message, store_id)
             if not renew_snapshot or append_binding != (self._conversation_id, self._session_id):
@@ -5316,8 +5314,8 @@ class LCMEngine(
             appended = self._store._conn.execute(
                 "SELECT COUNT(*) FROM messages WHERE store_id > ? AND session_id = ? AND conversation_id = ?",
                 (append_floor, append_binding[1], append_binding[0]),
-            ).fetchone()[0]
-            if appended != n - cursor or not self._owned_exact_snapshot_prefix(active_replay_messages[:cursor]):
+            ).fetchone()
+            if appended is None or appended[0] != n - cursor or not self._owned_exact_snapshot_prefix(active_replay_messages[:cursor]):
                 return rows
             digest = self._replay_snapshot_digest(active_replay_messages, require_lcm_system_note=False)
             if digest:
@@ -5325,17 +5323,25 @@ class LCMEngine(
                 rows.append((self._active_replay_snapshot_metadata_key(),
                     json.dumps({"version": 1, "digests": (digests + [digest])[-16:]}, sort_keys=True)))
             return rows
-        self._store._append_protected_batch(
-            self._session_id,
-            protected_messages,
-            estimates,
-            source=self._session_platform,
-            conversation_id=self._conversation_id,
-            metadata_factory=append_metadata,
-            metadata_messages=[
-                msg for _idx, msg in messages_to_store_with_index
-            ],
-        )
+        with self._store._write_lock:
+            append_floor = None
+            if renew_snapshot:
+                floor_row = self._store._conn.execute("SELECT COALESCE(MAX(store_id), 0) FROM messages").fetchone()
+                if floor_row is None:
+                    renew_snapshot = False
+                else:
+                    append_floor = floor_row[0]
+            self._store._append_protected_batch(
+                self._session_id,
+                protected_messages,
+                estimates,
+                source=self._session_platform,
+                conversation_id=self._conversation_id,
+                metadata_factory=append_metadata,
+                metadata_messages=[
+                    msg for _idx, msg in messages_to_store_with_index
+                ],
+            )
         # Rollup staleness is driven by summary-node PUBLICATION
         # (_invalidate_rollups_for_published_node at every add_node site), not by
         # raw ingest: marking a period stale before its covering summary exists
