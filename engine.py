@@ -2636,7 +2636,8 @@ class LCMEngine(
                     ),
                 )
                 return registered_row
-            self._write_retained_user_anchor(None)
+            # Keep exact occurrence proof until the host supplies a projection
+            # without this row; returning None removes anchor protection now.
             return None
         durable_users = self._durable_real_user_messages()
         if len(durable_users) != 1:
@@ -3087,9 +3088,14 @@ class LCMEngine(
             and session_id
             and source_session_id != session_id
         )
+        can_continue_in_place = bool(
+            source_session_id == session_id == previous_session_id
+            and _state_conversation_matches(source_state)
+        )
+        can_continue = can_reassign or can_continue_in_place
         boundary_placeholder_budget = {}
         boundary_placeholder_ordinals: dict[str, set[int]] = {}
-        if can_reassign:
+        if can_continue:
             if previous_session_id == source_session_id:
                 boundary_placeholder_budget = self._active_replay_generated_placeholder_digest_budget()
                 boundary_placeholder_ordinals = self._generated_placeholder_digest_ordinals_for_active_replay(
@@ -3159,7 +3165,7 @@ class LCMEngine(
                 session_id,
                 moved_nodes,
             )
-        elif old_session_id:
+        elif old_session_id and not can_continue_in_place:
             logger.warning(
                 "LCM compression boundary skipped carry-over: old_session_id=%s does not match bound session=%s",
                 old_session_id,
@@ -3191,7 +3197,9 @@ class LCMEngine(
             if state is not None:
                 self._last_compacted_store_id = state.current_frontier_store_id
         self._clear_pending_reset_boundary()
-        self._compression_boundary_ingest_pending = can_reassign
+        self._compression_boundary_ingest_pending = can_continue
+        if can_continue_in_place:
+            self._schedule_ingest_cursor_reconciliation()
         self._compression_boundary_active_placeholder_digest_budget = boundary_placeholder_budget
         self._compression_boundary_active_placeholder_digest_ordinals = boundary_placeholder_ordinals
         self._log_session_filter_diagnostics()
@@ -3214,7 +3222,7 @@ class LCMEngine(
         self._lcm_current_start_allows_bypass_lineage = False
         requested_platform = str(kwargs.get("platform") or self._session_platform or "")
         pre_reset_preserve_ambiguous_no_frame_old_session = False
-        if boundary_reason == "compression" and old_session_id and old_session_id != session_id:
+        if boundary_reason == "compression" and old_session_id:
             old_session_auxiliary_generation = self._in_process_auxiliary_caller_generation(
                 old_session_id
             )
@@ -3293,7 +3301,7 @@ class LCMEngine(
                     logger.debug("LCM host fallback compressor reset failed", exc_info=True)
             self._host_fallback_compressor = None
             self._host_fallback_session_id = ""
-        if boundary_reason == "compression" and old_session_id and old_session_id != session_id:
+        if boundary_reason == "compression" and old_session_id:
             old_session_is_suppressed_foreground = self._auxiliary_lineage_suppressed_as_foreground(
                 old_session_id
             )
@@ -3774,6 +3782,17 @@ class LCMEngine(
                 _SESSION_END_BUSY_TIMEOUT_MS,
             ):
                 is_current_session_full_history_end = session_id == self._session_id
+                cached_source = self._last_active_replay_source_identities
+                if (
+                    is_current_session_full_history_end
+                    and len(cached_source) > self._ingest_cursor
+                    and len(messages) >= len(cached_source)
+                    and [self._message_replay_identity(message) for message in messages[:len(cached_source)]]
+                    == cached_source
+                ):
+                    # Only an exact original-history prefix proves this cursor
+                    # belongs to the shorter projection returned by compress().
+                    self._schedule_ingest_cursor_reconciliation()
                 try:
                     # Best-effort final flush. Keep this path bounded because
                     # host gateways call session-end hooks from lifecycle paths
@@ -6587,6 +6606,7 @@ class LCMEngine(
         # Node ids placed in the summary prefix — used to dedupe proactive-recall
         # injection against summaries already visible in the active context.
         active_summary_node_ids: set = set()
+        owned_summary_parts = []
         all_nodes = self._owned_summary_roots()
         if all_nodes:
             # Group by depth, take the most recent uncondensed at each level
@@ -6607,7 +6627,9 @@ class LCMEngine(
                         f"{node.summary}\n"
                         f"[Expand for details: {node.expand_hint}]"
                     )
+                    owned_summary_parts.append(summary_parts[-1])
 
+        selected_parts = []
         retained_generated_context_parts: list[str] = []
         if summary_parts:
             selected_parts = summary_parts
@@ -6626,7 +6648,8 @@ class LCMEngine(
                 if retained_user_msg is not None:
                     retained_generated_context_parts.append(combined)
                 else:
-                    result.append({"role": summary_role, "content": combined})
+                    result.append({"role": summary_role, "content": combined,
+                        "_compressed_summary": True})
 
         # Proactive memory injection (SPEC F, default-off). One bounded block is
         # placed adjacent to the summary prefix — a stable position below the
@@ -6735,7 +6758,10 @@ class LCMEngine(
 
         # Persist proof only for the exact provider-visible compacted snapshot
         # assembled by this engine. Ingested input is not trusted replay proof.
-        self._remember_compacted_active_replay_snapshot(result)
+        trusted_assembly = any(part in selected_parts and any(
+            part in (normalize_content_value(message.get("content")) or "") for message in result
+        ) for part in owned_summary_parts)
+        self._remember_compacted_active_replay_snapshot(result, trusted_assembly=trusted_assembly)
         return result
 
     def _is_budget_droppable_tail_message(self, message: Dict[str, Any]) -> bool:

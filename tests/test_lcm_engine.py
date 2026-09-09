@@ -11058,6 +11058,9 @@ class TestEngineCompress:
         instance.on_session_start("backed-summary-session", platform="telegram", context_length=200000)
 
         summary_text = "backed compressed details\nExpand for details about: backed prior"
+        source_id = instance._store.append_batch(instance._session_id,
+            [{"role": "assistant", "content": "backed prior"}],
+            conversation_id=instance._conversation_id)[0]
         node_id = instance._dag.add_node(
             SummaryNode(
                 session_id="backed-summary-session",
@@ -11065,7 +11068,7 @@ class TestEngineCompress:
                 summary=summary_text,
                 token_count=3,
                 source_token_count=50,
-                source_ids=[1],
+                source_ids=[source_id],
                 source_type="messages",
                 created_at=time.time(),
                 earliest_at=time.time(),
@@ -11092,13 +11095,15 @@ class TestEngineCompress:
             {"role": "assistant", "content": "fresh tail answer"},
         ]
 
+        instance._store.append_batch(instance._session_id, messages[1:],
+            conversation_id=instance._conversation_id)
         try:
             result = instance.compress(messages)
             nodes = instance._dag.get_session_nodes("backed-summary-session")
         finally:
             instance.shutdown()
 
-        assert result == messages
+        assert result == [{**messages[0], "_compressed_summary": True}, *messages[1:]]
         assert len(nodes) == 1
         assert nodes[0].node_id == node_id
         assert instance._ingest_cursor == len(result)

@@ -25,7 +25,7 @@ def history():
 
 def test_compaction_cannot_map_foreign_copies(engine, monkeypatch):
     active = history()
-    foreign = engine._store.append_batch("producer", [*active, {"role": "assistant", "content": "other history"}], conversation_id="foreign")
+    engine._store.append_batch("producer", [*active, {"role": "assistant", "content": "other history"}], conversation_id="foreign")
     blank = engine._store.append_batch("producer", [{"role": "assistant", "content": "unknown blank"}], conversation_id="")
     original = [tuple(row) for row in engine._store._conn.execute("SELECT * FROM messages ORDER BY store_id")]
     engine.ingest(active)

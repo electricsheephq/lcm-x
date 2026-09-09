@@ -630,10 +630,11 @@ class ReconcileMixin:
     def _remember_compacted_active_replay_snapshot(
         self,
         messages: List[Dict[str, Any]],
+        *, trusted_assembly: bool = False,
     ) -> None:
         self._remember_replay_snapshot(
             _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX,
-            self._compacted_active_replay_snapshot_digest(messages),
+            self._replay_snapshot_digest(messages, require_lcm_system_note=not trusted_assembly),
         )
 
     # -- Session-end full-history proof (consumed ONLY by current-session
@@ -1009,7 +1010,7 @@ class ReconcileMixin:
                 and self._matches_store_tail_suffix(sanitized_replay_tail, candidate_prefix)
             )
             matches_raw_tail = self._matches_store_tail_suffix(stored_tail, candidate_prefix)
-            engine_snapshot_digest = self._compacted_active_replay_snapshot_digest(candidate_messages)
+            engine_snapshot_digest = self._replay_snapshot_digest(candidate_messages, require_lcm_system_note=False)
             session_end_snapshot_digest = (
                 self._session_end_replay_snapshot_digest(candidate_messages)
                 if allow_session_end_replay_proof
