@@ -6664,10 +6664,13 @@ class LCMEngine(
                         1: "Session Arc",
                         2: "Durable",
                     }.get(d, f"Depth-{d}")
+                    expand_hint = node.expand_hint
+                    if node.session_id != self.current_session_id:
+                        expand_hint = lcm_tools._session_expand_hint(node.node_id, node.session_id)
                     summary_parts.append(
                         f"[{depth_label} Summary (d{d}, node {node.node_id})]\n"
                         f"{node.summary}\n"
-                        f"[Expand for details: {node.expand_hint}]"
+                        f"[Expand for details: {expand_hint}]"
                     )
                     owned_summary_parts.append(summary_parts[-1])
 
