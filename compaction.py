@@ -15,7 +15,10 @@ lifecycle) through normal attribute lookup. ``LCMEngine`` mixes this in ahead of
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -35,6 +38,95 @@ _THRESHOLD_FULL_SWEEP_MAX_SECONDS = 120.0
 
 
 class CompactionMixin:
+    def _pending_compaction_key(self):
+        binding = json.dumps([self._conversation_id, self._session_id])
+        return "pending_compaction:" + hashlib.sha256(binding.encode()).hexdigest()
+
+    @staticmethod
+    def _pending_input_digest(messages):
+        try:
+            payload = json.dumps(messages, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError):
+            return None
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+    def _resume_pending_compaction(self, messages):
+        """Recover only an exact retained cumulative projection from Hermes.
+
+        Hermes passes conversation_history (or its explicit retained head), not
+        standalone fresh batches under an existing binding. New occurrences
+        appended to that history change its count/digest and cannot use this proof.
+        """
+        from .lifecycle_state import admitted_summary_roots
+        with self._store._write_lock:
+            row = self._store._conn.execute(
+                "SELECT value FROM metadata WHERE key = ?", (self._pending_compaction_key(),)
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                record = json.loads(row[0])
+                if (record["version"] != 1 or record["binding"] != [self._conversation_id, self._session_id]
+                        or record["count"] != len(messages)
+                        or record["digest"] != self._pending_input_digest(messages)):
+                    return None
+                state = self._lifecycle.get_by_conversation(self._conversation_id)
+                if (state is None or state.current_session_id != self._session_id
+                        or state.current_frontier_store_id != record["frontier"]):
+                    return None
+                pairs = record["consumed"]
+                positions = [p for p, _ in pairs]
+                sources = [s for _, s in pairs]
+                if (not pairs or any(type(x) is not int for x in positions + sources)
+                        or positions != sorted(set(positions)) or sources != sorted(set(sources))
+                        or positions[0] < 0 or positions[-1] >= len(messages)
+                        or max(sources) != record["frontier"] or record["excluded"]):
+                    return None
+                roots = admitted_summary_roots(self._store._conn, self._conversation_id, self._session_id)
+                descendants = admitted_summary_roots(
+                    self._store._conn, self._conversation_id, self._session_id, include_descendants=True)
+                represented = set()
+                for node_id in record["nodes"]:
+                    node_sources = descendants.get(node_id)
+                    if not node_sources or represented & node_sources:
+                        return None
+                    represented.update(node_sources)
+                if represented != set(sources):
+                    return None
+                raw = self._store._conn.execute(
+                    "SELECT store_id, session_id, source, role, content, tool_call_id, tool_calls, "
+                    "tool_name, timestamp, token_estimate, pinned, conversation_id, ingested_at, "
+                    "observed_at, observed_at_source FROM messages "
+                    "WHERE store_id IN (SELECT value FROM json_each(?)) ORDER BY store_id",
+                    (json.dumps(sources),),
+                ).fetchall()
+                if len(raw) != len(pairs) or any(
+                    self._message_replay_identity(messages[position]) !=
+                    self._message_replay_identity(self._store._row_to_dict(stored), stored_row=True)
+                    for (position, _), stored in zip(pairs, raw)
+                ):
+                    return None
+            except (ValueError, TypeError, KeyError, IndexError):
+                return None
+            # Never remove unrecorded occurrences, even if their text repeats.
+            remaining = [m for index, m in enumerate(messages) if index not in set(positions)]
+            assembled = self._assemble_committed_compaction_context(remaining, messages, None)
+            visible = {int(value) for m in assembled if m.get("_compressed_summary") is True
+                       for value in re.findall(
+                r"Summary \(d\d+, node (\d+)\)", str(m.get("content") or ""))}
+            visible_sources = set().union(*(roots[n] for n in visible if n in roots))
+            leading = self._leading_anchor_count(remaining)
+            suffix = remaining[leading:]
+            if (not set(sources) <= visible_sources
+                    or (suffix and assembled[-len(suffix):] != suffix)):
+                return None
+            self._ingest_cursor = len(assembled)
+            self._ingest_cursor_needs_reconcile = False
+            self._last_compression_status = "compacted"
+            self._last_compression_noop_reason = ""
+            self._last_compression_made_progress = True
+            return assembled
+
     def _maybe_reclassify_late_auxiliary_before_compaction_write(self) -> None:
         maybe_reclassify = getattr(
             self,
@@ -674,6 +766,15 @@ class CompactionMixin:
                 force=force,
             )
 
+        resumed = self._resume_pending_compaction(messages)
+        if resumed is not None:
+            return resumed
+        pending_digest = self._pending_input_digest(messages)
+        pending_count = len(messages)
+        pending_binding = [self._conversation_id, self._session_id]
+        pending_consumed = []
+        pending_nodes = []
+
         # ``current_tokens`` is optional in the ContextEngine contract. After a
         # yield-aware preflight, use the current active messages as the
         # pressure observation when the host calls ``compress(messages)`` so
@@ -706,6 +807,9 @@ class CompactionMixin:
         # replay-safe view so quarantined assistant loops do not enter summaries
         # or provider context after the durable row has been written.
         working_messages = self._ingest_messages(messages)
+        pending_positions = {id(message): index for index, message in enumerate(working_messages)}
+        pending_eligible = (pending_digest is not None and len(working_messages) == pending_count
+                            and len(pending_positions) == pending_count)
         self._prepare_retained_user_anchor(working_messages)
         ingest_cleanup_changed_active_context = working_messages != messages
         cleanup_only_due_to_boundary_cooldown = bool(
@@ -1182,6 +1286,9 @@ class CompactionMixin:
                 filter_exclusion_proofs,
             )
             publication_excluded_store_ids.extend(filter_exclusion_proofs)
+            pending_eligible = (pending_eligible and not publication_excluded_store_ids
+                and consumed_store_ids == source_store_ids
+                and all(id(message) in pending_positions for message in source_lookup_chunk))
             # The frontier consumes every durable row removed from the active
             # prefix, including trailing dependent replies. Summary lineage
             # excludes those replies; their durable ledger drives replay cleanup.
@@ -1201,6 +1308,24 @@ class CompactionMixin:
                             publication_excluded_store_ids,
                             filter_exclusion_proofs,
                         )
+                        # Persist recovery evidence in the SAME leaf/frontier transaction.
+                        # Filter/dependent exclusions need their own occurrence proof;
+                        # leave these cases on the existing conservative path.
+                        pairs = [(pending_positions.get(id(message)),
+                                  self._current_compress_store_ids_by_message_id.get(id(message)))
+                                 for message in source_lookup_chunk]
+                        if (pending_eligible and not publication_excluded_store_ids
+                                and consumed_store_ids == source_store_ids
+                                and all(type(p) is int and type(s) is int for p, s in pairs)
+                                and [self._conversation_id, self._session_id] == pending_binding):
+                            combined = sorted(pending_consumed + pairs)
+                            record = dict(version=1, binding=pending_binding, digest=pending_digest,
+                                          count=pending_count, consumed=combined, excluded=[],
+                                          expected_frontier=expected_frontier, frontier=published_frontier,
+                                          nodes=pending_nodes + [node_id])
+                            conn.execute("INSERT INTO metadata(key, value) VALUES (?, ?) "
+                                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                                         (self._pending_compaction_key(), json.dumps(record)))
                     before_commit = stage_frontier
                 self._dag.add_node(node, before_commit=before_commit)
             except Exception as exc:
@@ -1229,6 +1354,11 @@ class CompactionMixin:
                     context_is_assembled=context_is_assembled,
                 )
             self._last_compacted_store_id = published_frontier
+            if pending_eligible:
+                pending_consumed.extend((pending_positions.get(id(message)),
+                    self._current_compress_store_ids_by_message_id.get(id(message)))
+                    for message in source_lookup_chunk)
+                pending_nodes.append(node.node_id)
             self._invalidate_rollups_for_published_node(node)
 
             pressure_remaining_messages = pressure_messages[leading_anchor_count + selected_raw_len:]
