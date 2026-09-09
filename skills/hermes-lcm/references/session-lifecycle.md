@@ -16,6 +16,20 @@ This preserves attribution before it would be forgotten; it does not infer an
 owner for already-orphaned or ambiguous legacy rows. Operators must not use a
 neighboring row, a shared producer ID alone, or a carried summary as repair proof.
 
+## Interrupted compaction
+
+A summary and its source frontier can commit before Hermes accepts the shorter
+active context. LCM records the exact pending input and ordered source positions
+in its existing metadata transaction. Retrying that same retained input can reuse
+the committed summary, including after an engine restart, without another summary
+call or duplicate raw ingestion. Normal Hermes save and boundary callbacks still
+run through ingestion reconciliation, so subsequent fresh occurrences remain new.
+
+This proof is specific to the recorded input and binding. Changed input, stale
+frontiers or damaged records do not authorize adopting that pending projection.
+It does not reconstruct proof for older interrupted work that has no record.
+Preserve the original history when recovery cannot prove coverage.
+
 ## `/lcm rotate`
 
 `/lcm rotate` is different from `/new`:
