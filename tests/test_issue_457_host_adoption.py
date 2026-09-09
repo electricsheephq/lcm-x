@@ -8,12 +8,14 @@ import sys
 from copy import deepcopy
 from types import SimpleNamespace
 
-from agent import auxiliary_client as aux
-from agent.conversation_compression import CompressionCommitFence
+import pytest
+
+aux = pytest.importorskip("agent.auxiliary_client", reason="requires installed Hermes host")
+CompressionCommitFence = pytest.importorskip("agent.conversation_compression").CompressionCommitFence
 # Prefer the verified host's tools package over this plugin's tools.py.
 sys.path.insert(0, str(Path(aux.__file__).resolve().parents[1]))
-from hermes_state import SessionDB
-from run_agent import AIAgent
+SessionDB = pytest.importorskip("hermes_state").SessionDB
+AIAgent = pytest.importorskip("run_agent").AIAgent
 
 _fixture_spec = importlib.util.spec_from_file_location(
     "issue457_fixture", Path(__file__).with_name("test_issue_457_normal_cancel.py")
@@ -23,7 +25,8 @@ _fixture_spec.loader.exec_module(_fixture)
 _engine = _fixture._engine
 
 
-def test_cancel_cold_retry_commits_host_without_duplicate_end_flush(tmp_path, monkeypatch):
+@pytest.mark.parametrize("prior_compaction", [False, True], ids=["raw-input", "summary-input"])
+def test_cancel_cold_retry_commits_host_without_duplicate_end_flush(tmp_path, monkeypatch, prior_compaction):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
@@ -52,9 +55,11 @@ def test_cancel_cold_retry_commits_host_without_duplicate_end_flush(tmp_path, mo
     for i in range(96):
         db.append_message(sid, role="user" if i % 2 == 0 else "assistant",
                           content=f"host turn {i}: " + "retained detail " * 80)
+    original_limit = 96
     def original_rows():
         return [tuple(row) for row in db._conn.execute(
-            "SELECT id,role,content,tool_call_id,tool_calls FROM messages WHERE id<=96 ORDER BY id")]
+            "SELECT id,role,content,tool_call_id,tool_calls FROM messages WHERE id<=? ORDER BY id",
+            (original_limit,))]
     original = original_rows()
     old = db.get_messages_as_conversation(sid, include_row_ids=True, repair_alternation=True)
     original_input = deepcopy(old)
@@ -72,6 +77,20 @@ def test_cancel_cold_retry_commits_host_without_duplicate_end_flush(tmp_path, mo
         return a
     try:
         agent = build_agent()
+        if prior_compaction:
+            agent._compress_context(old, "Synthetic prior compaction.", approx_tokens=90_000, force=True)
+            prior_active = db.get_messages_as_conversation(sid, include_row_ids=True, repair_alternation=True)
+            assert any(m.get("_compressed_summary") for m in prior_active)
+            for i in range(72):
+                db.append_message(sid, role="user" if i % 2 == 0 else "assistant",
+                                  content=f"fresh retained turn {i}: " + "new detail " * 80)
+            old = db.get_messages_as_conversation(sid, include_row_ids=True, repair_alternation=True)
+            original_limit = db._conn.execute("SELECT MAX(id) FROM messages").fetchone()[0]
+            original = original_rows()
+            original_input = deepcopy(old)
+        before_active = len(old)
+        calls_before = len(calls)
+        prior_nodes = {node.node_id for node in engine._dag.get_session_nodes(sid)}
         engine.ingest(old)
         raw_before = engine._store._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
         fence = CompressionCommitFence()
@@ -85,8 +104,8 @@ def test_cancel_cold_retry_commits_host_without_duplicate_end_flush(tmp_path, mo
                                 force=True, commit_fence=fence)
         assert old == original_input
         assert original_rows() == original
-        assert len(db.get_messages_as_conversation(sid)) == 96
-        assert len(calls) == 1
+        assert len(db.get_messages_as_conversation(sid)) == before_active
+        assert len(calls) == calls_before + 1
         engine.shutdown()
         db.close()
         db = SessionDB(home / "state.db")
@@ -97,7 +116,9 @@ def test_cancel_cold_retry_commits_host_without_duplicate_end_flush(tmp_path, mo
         active = db.get_messages_as_conversation(sid, include_row_ids=True, repair_alternation=True)
         count_after_commit = engine._store._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
         receipt = {"in_place": bool(getattr(agent, "_last_compaction_in_place", False)),
-                   "before_active": 96, "after_active": len(active), "provider_calls": len(calls),
+                   "prior_compaction": prior_compaction,
+                   "before_active": before_active, "after_active": len(active),
+                   "provider_calls": len(calls) - calls_before,
                    "raw_before": raw_before, "raw_after_commit": count_after_commit,
                    "original_host_rows_preserved": original_rows() == original,
                    "tail_preserved": [engine._message_replay_identity(m) for m in active[-24:]] ==
@@ -107,10 +128,13 @@ def test_cancel_cold_retry_commits_host_without_duplicate_end_flush(tmp_path, mo
         engine.ingest(active)
         receipt["raw_after_cold_replay"] = engine._store._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
         print("HOST_ADOPTION_RECEIPT=" + json.dumps(receipt, sort_keys=True))
-        assert receipt["in_place"] and receipt["after_active"] < 96
+        assert receipt["in_place"] and receipt["after_active"] < before_active
         assert receipt["provider_calls"] == 1
         assert receipt["original_host_rows_preserved"] and receipt["tail_preserved"]
         assert receipt["raw_after_commit"] == receipt["raw_after_cold_replay"] == raw_before
+        visible = {int(value) for m in active for value in re.findall(
+            r"Summary \(d\d+, node (\d+)\)", str(m.get("content") or ""))}
+        assert prior_nodes <= visible
         continued = active + deepcopy(original_input[-2:])
         engine.ingest(continued)
         assert engine._store._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == raw_before + 2
