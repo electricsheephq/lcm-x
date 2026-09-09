@@ -11140,7 +11140,8 @@ class TestEngineCompress:
         finally:
             instance.shutdown()
 
-        assert result == messages
+        assert result == [{**messages[0], "_compressed_summary": True}, *messages[1:]]
+        assert "_compressed_summary" not in messages[0]
         assert len(nodes) == 1
         assert nodes[0].node_id == node_id
         assert instance._ingest_cursor == len(result)

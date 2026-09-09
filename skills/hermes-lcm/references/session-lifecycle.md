@@ -28,3 +28,11 @@ Explicit message `conversation_id` ownership governs replay reconciliation, leaf
 Hermes may keep the same session ID during in-place compaction. LCM handles that as a compression continuation, preserving the logical conversation and committed coverage without moving raw messages. The host may first flush the original, longer history; reconciliation must distinguish that already-ingested history from the shorter active projection. Ordinary session endings retain their proven ingestion cursor. A cold replay of the compacted projection must not append its existing messages again.
 
 Unregistered replay shortcuts require both conversation ownership and evidence from the producer that emitted the messages. Identical text or a reused tool-call ID from another producer does not prove that a new occurrence is a replay. Explicitly registered compacted snapshots retain their existing carry-over proof.
+
+Hermes keeps the system prompt outside the persisted conversation. LCM therefore
+registers its own assembled summary projection even when that projection has no
+system row. Standalone generated summary messages carry Hermes's existing
+`_compressed_summary` flag so host sequence repair preserves their boundary with
+the next real user turn. Real retained user messages and folded source messages
+do not receive this flag. The flag does not establish source ownership or replay
+proof; those still require LCM's committed lineage and registered snapshot.
