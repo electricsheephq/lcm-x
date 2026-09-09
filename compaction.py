@@ -612,7 +612,17 @@ class CompactionMixin:
     def _preserve_rejected_compaction_context(self, working_messages, anchor_source_messages, leaf_passes):
         """Retain sanitized raw input and every already-committed summary."""
         if not leaf_passes:
-            return working_messages
+            source_start = self._leading_anchor_count(anchor_source_messages)
+            present = {id(message) for message in working_messages}
+            removed_scaffolds = []
+            for message in anchor_source_messages[source_start:]:
+                if not self._is_replayed_context_scaffold_message(message):
+                    break
+                if id(message) not in present:
+                    removed_scaffolds.append(message)
+            leading_count = self._leading_anchor_count(working_messages)
+            return (working_messages[:leading_count] + removed_scaffolds
+                + working_messages[leading_count:])
         leading_count = self._leading_anchor_count(working_messages)
         # Refusal cannot spend the size budget by evicting the rejected suffix.
         fallback = self._assemble_committed_compaction_context(

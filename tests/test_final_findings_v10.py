@@ -150,3 +150,74 @@ def test_ordered_prefix_rules_out_older_producer_duplicate(engine):
     current = engine._store.append_batch("active", active, conversation_id="owned")
     mapping = engine._get_store_id_map_for_messages(active)
     assert [mapping[id(message)] for message in active] == current
+
+
+def test_late_root_cannot_hide_admitted_new_leaf(engine, monkeypatch):
+    from hermes_lcm.dag import SummaryDAG
+    source = raw(engine, "already covered history")
+    node(engine, [source], "oversized history " * 500)
+    source = raw(engine, "independent late-admission history")
+    engine._lifecycle.advance_frontier("owned", "active", source)
+    engine._last_compacted_store_id = source
+    engine._config.max_assembly_tokens = 220
+    active = [{"role": "assistant", "content": "new raw source"}, {"role": "user", "content": "tail"}]
+    engine.ingest(active)
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", lambda **kw: ("NEW_LEAF " * 12, 1))
+    original = engine._dag.add_node
+    concurrent = SummaryDAG(engine._config.database_path)
+    inserted = []
+    def insert(value, **kwargs):
+        if kwargs.get("before_commit"):
+            child = SummaryNode(session_id="active", depth=0, summary="late child " * 500,
+                token_count=1000, source_token_count=2000, source_ids=[source], source_type="messages", created_at=2)
+            concurrent.add_node(child)
+            parent = SummaryNode(session_id="active", depth=1, summary="parent " * 150,
+                token_count=count_tokens("parent " * 150), source_token_count=2000,
+                source_ids=[child.node_id], source_type="nodes", created_at=2)
+            concurrent.add_node(parent)
+            inserted.append(parent.node_id)
+        return original(value, **kwargs)
+    monkeypatch.setattr(engine._dag, "add_node", insert)
+    result = engine.compress(active, force=True)
+    assert inserted, "new leaf must pass prospective admission before the interleaving"
+    assert "NEW_LEAF" in str(result) or (
+        engine._last_compacted_store_id == source and result[-2:] == active)
+
+
+@pytest.mark.parametrize("refusal", ["lineage", "budget"])
+def test_first_pass_refusal_keeps_preexisting_summary(engine, monkeypatch, refusal):
+    covered = raw(engine, "covered history")
+    node(engine, [covered], "PREEXISTING_SUMMARY")
+    engine._lifecycle.advance_frontier("owned", "active", covered)
+    engine._last_compacted_store_id = covered
+    if refusal == "lineage":
+        raw(engine, "ambiguous reply", producer="previous")
+    else:
+        engine._config.max_assembly_tokens = 200
+        monkeypatch.setattr(engine_module, "summarize_with_escalation", lambda **kw: ("oversized new summary " * 500, 1))
+    raw_tail = [{"role": "assistant", "content": "ambiguous reply"},
+        {"role": "user", "content": "fresh request"}]
+    engine._store.append_batch("active", raw_tail, conversation_id="owned")
+    active = engine._assemble_context(None, raw_tail)
+    assert "PREEXISTING_SUMMARY" in str(active)
+    engine._ingest_cursor = len(active)
+    engine._ingest_cursor_needs_reconcile = False
+    result = engine.compress(active, force=True)
+    assert engine.last_compression_status == "error"
+    assert result[-2:] == raw_tail
+    assert engine._last_compacted_store_id == covered
+    assert "PREEXISTING_SUMMARY" in str(result)
+
+
+def test_first_pass_restore_does_not_resurrect_filtered_raw_or_duplicate_anchors(engine):
+    node(engine, [raw(engine, "covered history")], "PREEXISTING_SUMMARY")
+    system = {"role": "system", "content": "system"}
+    tail = {"role": "user", "content": "remaining request"}
+    source = engine._assemble_context(system, [tail])
+    filtered = {"role": "assistant", "content": "filtered original raw"}
+    source.insert(-1, filtered)
+    working = [source[0], source[-1]]
+    result = engine._preserve_rejected_compaction_context(working, source, 0)
+    assert result == [source[0], source[1], tail]
+    assert filtered not in result
+    assert engine._preserve_rejected_compaction_context(result, source, 0) == result
