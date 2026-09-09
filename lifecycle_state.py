@@ -178,7 +178,7 @@ def admitted_summary_roots(conn, conversation_id, session_id, *, before_node_id=
             continue
         if claimed & sources:
             raise LifecyclePublicationConflictError(
-                "Overlapping historical summary roots; original data retained"
+                "Overlapping historical summary roots: source lineage already claimed; original data retained"
             )
         claimed.update(sources)
     return {node_id: sources for node_id, sources in validated.items()

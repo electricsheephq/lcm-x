@@ -198,7 +198,7 @@ prepends the policy. The canonical file and digest source is
 
 ## Troubleshooting
 
-### `Overlapping historical summary roots; original data retained`
+### `Overlapping historical summary roots`
 
 LCM refuses to assemble or publish when two independent historical summaries
 claim the same stored occurrence. Older session-local publication could create
