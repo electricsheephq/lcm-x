@@ -4452,13 +4452,35 @@ class LCMEngine(
 
     # -- Internal: message ingestion ---------------------------------------
 
+    def _owner_history(self, *, after_store_id=0, limit=10000, latest=False,
+                       count_only=False, producer_session_id=None):
+        if not self._conversation_id:
+            producer = producer_session_id or self._session_id
+            if count_only:
+                return self._store.get_session_count(producer)
+            if latest:
+                return self._store.get_session_tail(producer, limit=limit)
+            return self._store.get_session_messages_after(producer, after_store_id=after_store_id, limit=limit)
+        return self._store.get_conversation_messages_after(self._conversation_id,
+            after_store_id=after_store_id, limit=limit, latest=latest,
+            count_only=count_only, producer_session_id=producer_session_id)
+
+    def _owned_summary_roots(self):
+        from .lifecycle_state import admitted_summary_roots
+        if not self._conversation_id:
+            nodes = self._dag.get_session_nodes(self._session_id)
+            return [node for depth in sorted({n.depth for n in nodes})
+                    for node in self._dag.get_uncondensed_at_depth(self._session_id, depth)]
+        roots = admitted_summary_roots(self._dag._conn, self._conversation_id, self._session_id)
+        return [self._dag.get_node(node_id) for node_id in sorted(roots)]
+
     def _schedule_ingest_cursor_reconciliation(self) -> None:
         """Mark existing-session rebinds for cursor repair on next ingest."""
         self._ingest_cursor_needs_reconcile = False
         if not self._session_id or self._session_ignored or self._session_stateless:
             return
         try:
-            self._ingest_cursor_needs_reconcile = self._store.get_session_count(self._session_id) > 0
+            self._ingest_cursor_needs_reconcile = self._owner_history(count_only=True, producer_session_id=self._session_id) > 0
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
             self._ingest_cursor_needs_reconcile = False
@@ -4537,11 +4559,8 @@ class LCMEngine(
         raw_identity = self._raw_externalized_placeholder_replay_identity(msg)
         after_store_id = 0
         while True:
-            rows = self._store.get_session_messages_after(
-                self._session_id,
-                after_store_id=after_store_id,
-                limit=1000,
-            )
+            rows = self._owner_history(after_store_id=after_store_id, limit=1000,
+                producer_session_id=self._session_id)
             if not rows:
                 return False
             for row in rows:
@@ -5989,9 +6008,7 @@ class LCMEngine(
         fanin = max(1, self._config.condensation_fanin)
 
         for depth in range(upper):
-            uncondensed = self._dag.get_uncondensed_at_depth(
-                self._session_id, depth
-            )
+            uncondensed = [node for node in self._owned_summary_roots() if node.depth == depth]
             if len(uncondensed) < fanin:
                 continue
 
@@ -6570,14 +6587,14 @@ class LCMEngine(
         # Node ids placed in the summary prefix — used to dedupe proactive-recall
         # injection against summaries already visible in the active context.
         active_summary_node_ids: set = set()
-        all_nodes = self._dag.get_session_nodes(self._session_id)
+        all_nodes = self._owned_summary_roots()
         if all_nodes:
             # Group by depth, take the most recent uncondensed at each level
             # For active context, we want the highest-level summaries
             # that haven't been condensed into even higher levels
             depths = sorted(set(n.depth for n in all_nodes), reverse=True)
             for d in depths:
-                uncondensed = self._dag.get_uncondensed_at_depth(self._session_id, d)
+                uncondensed = [node for node in all_nodes if node.depth == d]
                 for node in uncondensed:
                     active_summary_node_ids.add(node.node_id)
                     depth_label = {
