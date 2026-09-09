@@ -191,3 +191,33 @@ def test_same_session_cold_resume_preserves_committed_frontier(engine, monkeypat
         assert cold._store.get_session_count("producer") == count
     finally:
         cold.shutdown()
+
+
+@pytest.mark.parametrize("producer", ["producer", "prior'\\producer"])
+def test_cross_session_assembled_hint_expands_owned_sources(engine, monkeypatch, producer):
+    import ast
+    import json
+    import re
+    from hermes_lcm.tools import lcm_expand
+
+    engine.on_session_start(producer, conversation_id="owned", platform="cli", context_length=200000)
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", lambda **kw: ("Owned summary", 1))
+    active = engine.compress(history(), force=True)
+    node = engine._owned_summary_roots()[0]
+    assert f"[Expand for details: {node.expand_hint}]" in str(active)
+    rows = [tuple(row) for row in engine._store._conn.execute("SELECT * FROM messages ORDER BY store_id")]
+    engine.on_session_end(producer, active)
+    engine.on_session_start("new-producer", conversation_id="owned", platform="cli", context_length=200000)
+    assembled = engine._assemble_context(None, [history()[-1]])
+    content = "\n".join(message.get("content", "") for message in assembled)
+    assert f"[Recent Summary (d0, node {node.node_id})]" in content
+    hint = re.search(r"\[Expand for details: (.*?)\]", content).group(1)
+    call = ast.parse(hint, mode="eval").body
+    assert isinstance(call, ast.Call) and call.func.id == "lcm_expand"
+    args = {keyword.arg: ast.literal_eval(keyword.value) for keyword in call.keywords}
+    expanded = json.loads(lcm_expand(args, engine=engine))
+    assert "error" not in expanded, expanded
+    assert args["session_id"] == producer
+    assert [message["content"] for message in expanded["expanded"]] == [message["content"] for message in history()[:-1]]
+    assert [tuple(row) for row in engine._store._conn.execute("SELECT * FROM messages ORDER BY store_id")] == rows
+    assert engine._dag.get_node(node.node_id).session_id == producer
