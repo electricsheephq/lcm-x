@@ -1,5 +1,4 @@
 """Focused ownership and visibility regressions for retained conversations."""
-import json
 import pytest
 import hermes_lcm.engine as engine_module
 from hermes_lcm.config import LCMConfig
@@ -142,3 +141,12 @@ def test_registered_occurrence_wins_over_uncovered_duplicate(engine, lineage):
         assert engine._write_folded_tail_lineage(message, source)
     raw(engine, "registered occurrence", role="user" if lineage == "retained" else "assistant")
     assert engine._get_store_id_map_for_messages([message]) == {id(message): source}
+
+
+def test_ordered_prefix_rules_out_older_producer_duplicate(engine):
+    repeated = {"role": "assistant", "content": "same reply"}
+    engine._store.append_batch("previous", [repeated], conversation_id="owned")
+    active = [{"role": "user", "content": "distinct current request"}, repeated.copy()]
+    current = engine._store.append_batch("active", active, conversation_id="owned")
+    mapping = engine._get_store_id_map_for_messages(active)
+    assert [mapping[id(message)] for message in active] == current

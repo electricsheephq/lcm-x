@@ -929,6 +929,10 @@ class CompactionMixin:
                     sweep_stop_reason = "raw_prefix_drained"
                 break
 
+            # Keep current-pass ordering proof when scaffold rows are removed.
+            self._current_compress_store_ids_by_message_id = self._get_store_id_map_for_messages(
+                working_messages[leading_anchor_count:]
+            )
             candidate_start = leading_anchor_count
             while (
                 candidate_start < fresh_tail_start
@@ -951,9 +955,6 @@ class CompactionMixin:
                     break
 
             if candidate_start < fresh_tail_start:
-                self._current_compress_store_ids_by_message_id = self._get_store_id_map_for_messages(
-                    working_messages[leading_anchor_count:]
-                )
                 compactable_pairs = list(
                     zip(
                         working_messages[candidate_start:fresh_tail_start],

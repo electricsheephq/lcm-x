@@ -2092,6 +2092,8 @@ class ReconcileMixin:
                 probe_idx += 1
             return None
 
+        message_positions = {id(message): index for index, message in enumerate(messages)}
+
         def find_message_match_index(msg: Dict[str, Any], start_idx: int) -> int | None:
             msg_content = normalize_content_value(msg.get("content")) or ""
             if msg.get("store_id") is None and self._content_has_externalized_placeholder_ref(msg_content):
@@ -2102,11 +2104,17 @@ class ReconcileMixin:
 
             message_identity = active_lineage_identity(msg)
             explicit_id = explicit_source_ids.get(id(msg))
-            if (explicit_id is None and stored_identity_counts.get(message_identity, 0)
-                    > active_identity_counts.get(message_identity, 0)):
-                # More durable occurrences than active ones gives no unique
-                # allocation. Preserve the raw occurrence through fail-open.
-                return None
+            if explicit_id is None:
+                eligible = [index for index in range(start_idx, len(candidates))
+                    if stored_identities[index] == message_identity]
+                remaining = sum(active_lineage_identity(message) == message_identity
+                    for message in messages[message_positions[id(msg)]:])
+                producers = {candidates[index].get("session_id") for index in eligible}
+                if len(eligible) > remaining and len(producers) > 1:
+                    # Earlier ordered matches already ruled out rows before
+                    # start_idx. Keep canonical same-producer ordering, but
+                    # never allocate surplus copies across producers by text.
+                    return None
             wanted_cleanup_identity = self._active_cleanup_replay_identity(message_identity)
             probe_idx = start_idx
             while probe_idx < len(candidates):
