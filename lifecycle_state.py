@@ -142,7 +142,7 @@ def admitted_summary_roots(conn, conversation_id, session_id, *, before_node_id=
                     (json.dumps(sources),),
                 ).fetchall()
                 if len(raw) != len(sources) or any(
-                    str(item[1] or "").strip(_LEGACY_ASCII_WHITESPACE) != conversation_id and not
+                    str(item[1] or "") != conversation_id and not
                     (not str(item[1] or "").strip(_LEGACY_ASCII_WHITESPACE) and item[2] in legacy)
                     for item in raw
                 ):

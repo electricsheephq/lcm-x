@@ -82,3 +82,21 @@ def test_assembly_selects_only_valid_owned_lineage(engine):
             token_count=2, source_token_count=10, source_ids=[source], source_type="messages", created_at=1))
     assembled = str(engine._assemble_context(None, []))
     assert "OWNED" in assembled and "FOREIGN" not in assembled
+
+
+def test_nonblank_legacy_owner_is_exact_across_history_and_roots(tmp_path):
+    engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db")),
+        hermes_home=str(tmp_path / "home"))
+    try:
+        engine.on_session_start("producer", conversation_id="owned", platform="cli", context_length=200000)
+        source = engine._store.append_batch("producer", [{"role": "assistant", "content": "legacy source"}], conversation_id="owned")[0]
+        # Simulate a legacy raw import; current append normalizes owner values.
+        with engine._store._conn:
+            engine._store._conn.execute("UPDATE messages SET conversation_id = ? WHERE store_id = ?", (" owned ", source))
+        engine._dag.add_node(SummaryNode(session_id="producer", depth=0,
+            summary="legacy explicit owner", token_count=3, source_token_count=10,
+            source_ids=[source], source_type="messages", created_at=1))
+        assert engine._owner_history() == []
+        assert engine._owned_summary_roots() == []
+    finally:
+        engine.shutdown()
