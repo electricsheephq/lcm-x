@@ -199,6 +199,24 @@ def _synchronized(method):
     return wrapper
 
 
+def _ownership_transition(method):
+    """Keep proven legacy attribution and pointer changes in one write transaction."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            # This connection's public lifecycle methods own their autocommit
+            # transactions. Lock SQLite before reading the old ownership proof.
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                result = method(self, *args, **kwargs)
+                self._conn.commit()
+                return result
+            except BaseException:
+                self._conn.rollback()
+                raise
+    return wrapper
+
+
 @dataclass
 class LifecycleState:
     conversation_id: str
@@ -317,7 +335,22 @@ class LifecycleStateStore:
         ).fetchone()
         return self._row_to_state(row)
 
-    @_synchronized
+    def _promote_bound_legacy_rows(self, state: LifecycleState | None) -> None:
+        if state is None or self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages'"
+        ).fetchone() is None:
+            return
+        producers = {value for value in (state.current_session_id, state.last_finalized_session_id) if value}
+        proven = unambiguous_legacy_session_ids(self._conn, state.conversation_id, producers)
+        if proven:
+            self._conn.execute(
+                "UPDATE messages SET conversation_id = ? "
+                "WHERE session_id IN (SELECT value FROM json_each(?)) AND "
+                + legacy_blank_clause("conversation_id"),
+                (state.conversation_id, json.dumps(sorted(proven))),
+            )
+
+    @_ownership_transition
     def bind_session(
         self,
         session_id: str,
@@ -347,7 +380,8 @@ class LifecycleStateStore:
             )
             if existing.current_session_id == session_id:
                 if resume_frontier > existing.current_frontier_store_id:
-                    return self.advance_frontier(conversation_id, session_id, resume_frontier)
+                    self.stage_frontier_advance(self._conn, conversation_id, session_id, resume_frontier)
+                    return self.get_by_conversation(conversation_id)
                 return existing
             current_frontier = resume_frontier
             current_bound_at = (
@@ -374,6 +408,7 @@ class LifecycleStateStore:
             )
             last_reset_at = existing.last_reset_at
 
+        self._promote_bound_legacy_rows(existing)
         self._conn.execute(
             """
             INSERT INTO lcm_lifecycle_state(
@@ -424,12 +459,11 @@ class LifecycleStateStore:
                 now,
             ),
         )
-        self._conn.commit()
         state = self.get_by_conversation(conversation_id)
         assert state is not None
         return state
 
-    @_synchronized
+    @_ownership_transition
     def finalize_session(
         self,
         conversation_id: str | None,
@@ -439,6 +473,7 @@ class LifecycleStateStore:
         state = self.get_by_conversation(conversation_id)
         if state is None:
             return None
+        self._promote_bound_legacy_rows(state)
         now = time.time()
         current_session_id = state.current_session_id
         current_frontier = state.current_frontier_store_id
@@ -472,10 +507,9 @@ class LifecycleStateStore:
                 state.conversation_id,
             ),
         )
-        self._conn.commit()
         return self.get_by_conversation(state.conversation_id)
 
-    @_synchronized
+    @_ownership_transition
     def record_rollover(
         self,
         conversation_id: str,
@@ -492,6 +526,7 @@ class LifecycleStateStore:
         ):
             return state
 
+        self._promote_bound_legacy_rows(state)
         now = time.time()
         last_finalized_frontier = max(
             int(finalized_frontier_store_id or 0),
@@ -534,7 +569,6 @@ class LifecycleStateStore:
                 now,
             ),
         )
-        self._conn.commit()
         updated = self.get_by_conversation(conversation_id)
         assert updated is not None
         return updated
