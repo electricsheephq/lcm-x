@@ -100,3 +100,48 @@ def test_nonblank_legacy_owner_is_exact_across_history_and_roots(tmp_path):
         assert engine._owned_summary_roots() == []
     finally:
         engine.shutdown()
+
+
+def test_same_session_cold_resume_preserves_committed_frontier(engine, monkeypatch):
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", lambda **kw: ("Committed owned history", 1))
+    active = engine.compress(history(), force=True)
+    assert engine.last_compression_status == "compacted"
+    state = engine._lifecycle.get_by_conversation("owned")
+    committed = state.current_frontier_store_id
+    assert committed > 0
+    sources = {sid for node in engine._owned_summary_roots() for sid in node.source_ids}
+    assert sources == {row["store_id"] for row in engine._owner_history() if row["store_id"] <= committed}
+    count = engine._store.get_session_count("producer")
+    engine.on_session_end("producer", active)
+    ended = engine._lifecycle.get_by_conversation("owned")
+    assert ended.current_session_id is None
+    assert ended.last_finalized_session_id == "producer"
+    assert ended.last_finalized_frontier_store_id == committed
+    assert engine._store.get_session_count("producer") == count
+    config, home = engine._config, engine._hermes_home
+    engine.shutdown()
+    cold = LCMEngine(config=config, hermes_home=str(home))
+    try:
+        cold.on_session_start("producer", conversation_id="owned", platform="cli", context_length=200000)
+        resumed = cold._lifecycle.get_by_conversation("owned")
+        assert (resumed.current_frontier_store_id, cold._last_compacted_store_id) == (committed, committed)
+        assert cold._store.get_session_count("producer") == count
+        # Reproduce the already-rebound zero state written by the old version.
+        cold._lifecycle._conn.execute("UPDATE lcm_lifecycle_state SET current_frontier_store_id = 0 WHERE conversation_id = ?", ("owned",))
+        assert cold._lifecycle.bind_session("producer", conversation_id="owned").current_frontier_store_id == committed
+        # Publish the remaining tail normally, then ensure an older finalized
+        # checkpoint cannot rewind the newer committed frontier.
+        tail_id = max(row["store_id"] for row in cold._owner_history())
+        tail_node = SummaryNode(session_id="producer", depth=0, summary="tail", token_count=1,
+            source_token_count=2, source_ids=[tail_id], source_type="messages", created_at=2)
+        cold._dag.add_node(tail_node, before_commit=lambda conn, node_id: cold._lifecycle.stage_compaction_publication(
+            conn, "owned", "producer", node_id, committed, [tail_id]))
+        assert cold._lifecycle.bind_session("producer", conversation_id="owned").current_frontier_store_id == tail_id
+        assert cold._lifecycle.bind_session("other-producer", conversation_id="owned").current_frontier_store_id == 0
+        cold._lifecycle.finalize_session("owned", "producer", frontier_store_id=tail_id)
+        cold._lifecycle.record_reset("owned")
+        assert cold._lifecycle.bind_session("producer", conversation_id="owned").current_frontier_store_id == 0
+        assert cold._lifecycle.bind_session("other-producer", conversation_id="owned").current_frontier_store_id == 0
+        assert cold._store.get_session_count("producer") == count
+    finally:
+        cold.shutdown()

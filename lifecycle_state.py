@@ -328,11 +328,16 @@ class LifecycleStateStore:
         last_reset_at = None
 
         if existing is not None:
-            if existing.current_session_id == session_id:
-                return existing
-            current_frontier = (
-                existing.current_frontier_store_id if existing.current_session_id == session_id else 0
+            resume_frontier = (
+                existing.last_finalized_frontier_store_id
+                if existing.last_finalized_session_id == session_id
+                and existing.last_reset_at is None else 0
             )
+            if existing.current_session_id == session_id:
+                if resume_frontier > existing.current_frontier_store_id:
+                    return self.advance_frontier(conversation_id, session_id, resume_frontier)
+                return existing
+            current_frontier = resume_frontier
             current_bound_at = (
                 existing.current_bound_at if existing.current_session_id == session_id else now
             )
