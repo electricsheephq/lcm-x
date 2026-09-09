@@ -3199,6 +3199,8 @@ class LCMEngine(
                 self._last_compacted_store_id = state.current_frontier_store_id
         self._clear_pending_reset_boundary()
         self._compression_boundary_ingest_pending = can_continue
+        if can_continue_in_place:
+            self._schedule_ingest_cursor_reconciliation()
         self._compression_boundary_active_placeholder_digest_budget = boundary_placeholder_budget
         self._compression_boundary_active_placeholder_digest_ordinals = boundary_placeholder_ordinals
         self._log_session_filter_diagnostics()
@@ -6636,10 +6638,13 @@ class LCMEngine(
         # Node ids placed in the summary prefix — used to dedupe proactive-recall
         # injection against summaries already visible in the active context.
         active_summary_node_ids: set = set()
+        owned_summary_parts = []
         for node in self._owned_summary_roots():
             active_summary_node_ids.add(node.node_id)
-            summary_parts.append(self._summary_context_node_part(node))
+            owned_summary_parts.append(self._summary_context_node_part(node))
+            summary_parts.append(owned_summary_parts[-1])
 
+        selected_parts = []
         retained_generated_context_parts: list[str] = []
         if summary_parts:
             selected_parts = [summary_parts[index] for index in
@@ -6758,7 +6763,10 @@ class LCMEngine(
 
         # Persist proof only for the exact provider-visible compacted snapshot
         # assembled by this engine. Ingested input is not trusted replay proof.
-        self._remember_compacted_active_replay_snapshot(result)
+        trusted_assembly = any(part in selected_parts and any(
+            part in (normalize_content_value(message.get("content")) or "") for message in result
+        ) for part in owned_summary_parts)
+        self._remember_compacted_active_replay_snapshot(result, trusted_assembly=trusted_assembly)
         return result
 
     @staticmethod

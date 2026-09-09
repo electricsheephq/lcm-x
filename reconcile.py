@@ -629,10 +629,11 @@ class ReconcileMixin:
     def _remember_compacted_active_replay_snapshot(
         self,
         messages: List[Dict[str, Any]],
+        *, trusted_assembly: bool = False,
     ) -> None:
         self._remember_replay_snapshot(
             _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX,
-            self._compacted_active_replay_snapshot_digest(messages),
+            self._replay_snapshot_digest(messages, require_lcm_system_note=not trusted_assembly),
         )
 
     # -- Session-end full-history proof (consumed ONLY by current-session
@@ -953,6 +954,9 @@ class ReconcileMixin:
         producer_replay_identities = set(producer_identities) | set(
             self._stored_tail_for_sanitized_active_replay(producer_identities)
         )
+        registered_prefix_ends = [end for end in range(1, len(messages) + 1)
+            if self._replay_snapshot_digest(messages[:end], require_lcm_system_note=False)
+            in engine_snapshot_digests]
         empty_prefix_cursor: int | None = None
         for cursor in range(len(messages), -1, -1):
             candidate_messages = messages[:cursor]
@@ -1017,7 +1021,7 @@ class ReconcileMixin:
                 and self._matches_store_tail_suffix(sanitized_replay_tail, candidate_prefix)
             )
             matches_raw_tail = self._matches_store_tail_suffix(stored_tail, candidate_prefix)
-            engine_snapshot_digest = self._compacted_active_replay_snapshot_digest(candidate_messages)
+            engine_snapshot_digest = self._replay_snapshot_digest(candidate_messages, require_lcm_system_note=False)
             session_end_snapshot_digest = (
                 self._session_end_replay_snapshot_digest(candidate_messages)
                 if allow_session_end_replay_proof
@@ -1041,9 +1045,16 @@ class ReconcileMixin:
                     and all(store_id > 0 for store_id in ordered_store_ids)
                     and ordered_store_ids == sorted(set(ordered_store_ids))
                 )
+            has_registered_engine_extension = any(
+                end < cursor and all(
+                    not self._is_replayed_context_scaffold_message(message)
+                    and not self._matches_ignore_message_patterns(message)
+                    for message in messages[end:cursor]
+                ) for end in registered_prefix_ends
+            )
             has_durable_compacted_snapshot_replay = (
                 (
-                    has_registered_engine_snapshot
+                    has_registered_engine_snapshot or has_registered_engine_extension
                 )
                 or (
                     bool(session_end_snapshot_digest)
