@@ -8,6 +8,12 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## v0.23.3 - maintenance point release
 
+- Retained conversations use consistent ownership and ordered source coverage during compaction,
+  including in-place continuation and restored summary carriers. Fresh tool executions cannot
+  be consumed as replay from an older producer; ambiguous duplicate occurrences retain raw
+  context instead of publishing guessed lineage. No schema migration is required. (#458)
+- Telegram model replay needs the host to preserve stored summary markers before repairing
+  message alternation; the compatible host correction is tracked in NousResearch/hermes-agent#106353.
 - Session-end prefix matching extracted from `engine.py` into `prefix_matching.py` as a mixin;
   no behaviour change (verified AST-identical at review). (#155)
 - FastEmbed warmup prefers the locally cached model before enabling downloads; explicit warmup

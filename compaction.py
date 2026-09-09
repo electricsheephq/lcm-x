@@ -34,6 +34,10 @@ _THRESHOLD_FULL_SWEEP_MAX_PASSES = 12
 _THRESHOLD_FULL_SWEEP_MAX_SECONDS = 120.0
 
 
+class _NewLeafOutsideAssemblyBudget(LifecyclePublicationConflictError):
+    """Publication cannot discard sources whose replacement is not visible."""
+
+
 class CompactionMixin:
     def _maybe_reclassify_late_auxiliary_before_compaction_write(self) -> None:
         maybe_reclassify = getattr(
@@ -605,6 +609,28 @@ class CompactionMixin:
         finally:
             self._pending_context_anchor_messages = None
 
+    def _preserve_rejected_compaction_context(self, working_messages, anchor_source_messages, leaf_passes):
+        """Retain sanitized raw input and every already-committed summary."""
+        if not leaf_passes:
+            source_start = self._leading_anchor_count(anchor_source_messages)
+            present = {id(message) for message in working_messages}
+            removed_scaffolds = []
+            for message in anchor_source_messages[source_start:]:
+                if not self._is_replayed_context_scaffold_message(message):
+                    break
+                if id(message) not in present:
+                    removed_scaffolds.append(message)
+            leading_count = self._leading_anchor_count(working_messages)
+            return (working_messages[:leading_count] + removed_scaffolds
+                + working_messages[leading_count:])
+        leading_count = self._leading_anchor_count(working_messages)
+        # Refusal cannot spend the size budget by evicting the rejected suffix.
+        fallback = self._assemble_committed_compaction_context(
+            working_messages[:leading_count], anchor_source_messages, 2**63 - 1,
+        ) + working_messages[leading_count:]
+        self._remember_compacted_active_replay_snapshot(fallback)
+        return fallback
+
     def _stored_publication_filter_exclusions(
         self,
         expected_frontier: int,
@@ -616,10 +642,7 @@ class CompactionMixin:
         proofs = dict(initial_proofs)
         after_store_id = expected_frontier
         while after_store_id < covered_end:
-            rows = self._store.get_session_messages_after(
-                self._session_id,
-                after_store_id=after_store_id,
-            )
+            rows = self._owner_history(after_store_id=after_store_id)
             if not rows:
                 break
             for row in rows:
@@ -634,6 +657,79 @@ class CompactionMixin:
                     proofs[store_id] = row.get("content")
             after_store_id = int(rows[-1].get("store_id") or after_store_id)
         return proofs
+
+    def _prospective_root_selection(
+        self,
+        roots: List[SummaryNode],
+        prospective_working_messages: List[Dict[str, Any]],
+        anchor_source_messages: List[Dict[str, Any]],
+        assembly_cap_override: int | None,
+    ) -> List[int]:
+        """Select a prospective root set using canonical tail and summary budgets."""
+        assembly_cap = (
+            assembly_cap_override
+            if assembly_cap_override is not None
+            else self._effective_assembly_token_cap()
+        )
+        if assembly_cap is None:
+            return [int(node.node_id) for node in roots]
+
+        leading_count = self._leading_anchor_count(prospective_working_messages)
+        leading_messages = [
+            message.copy()
+            for message in prospective_working_messages[:leading_count]
+        ]
+        if (
+            leading_messages
+            and leading_messages[0].get("role") == "system"
+            and self.compression_count == 0
+        ):
+            leading_messages[0]["content"] = self._append_lcm_note_to_content(
+                leading_messages[0].get("content", "")
+            )
+        tail_messages = prospective_working_messages[leading_count:]
+        tail_messages, summary_budget = self._prepare_assembly_tail(
+            tail_messages, leading_messages, assembly_cap,
+        )
+        anchor_leading_count = self._leading_anchor_count(anchor_source_messages)
+        anchor_part = self._latest_user_context_anchor(
+            anchor_source_messages[anchor_leading_count:],
+            tail_messages,
+        )
+        if leading_count == 2:
+            summary_role = "assistant"
+        elif not leading_messages or leading_messages[-1].get("role") == "system":
+            summary_role = "user"
+        else:
+            summary_role = (
+                "assistant"
+                if leading_messages[-1].get("role") != "assistant"
+                else "user"
+            )
+        parts: list[tuple[int | None, str]] = []
+        if anchor_part is not None:
+            parts.append((None, anchor_part))
+        parts.extend(
+            (int(node.node_id), self._summary_context_node_part(
+                node, **({"node_label": "99999999999999999999"} if not node.node_id else {}),
+            ))
+            for node in roots
+        )
+        selected = self._select_summary_part_indices([part for _, part in parts], summary_role, summary_budget)
+        return [parts[index][0] for index in selected if parts[index][0] is not None]
+
+    def _retained_roots_selected_with_new_leaf(
+        self, new_node, prospective_working_messages, anchor_source_messages, assembly_cap_override,
+    ) -> List[int]:
+        roots = self._owned_summary_roots() + [new_node]
+        selected = self._prospective_root_selection(
+            roots, prospective_working_messages, anchor_source_messages, assembly_cap_override,
+        )
+        if new_node.node_id not in selected:
+            raise _NewLeafOutsideAssemblyBudget(
+                "new summary leaf is outside prospective assembly budget"
+            )
+        return [node_id for node_id in selected if node_id != new_node.node_id]
 
     def _compress_impl(self, messages: List[Dict[str, Any]],
                        current_tokens: int = None,
@@ -843,6 +939,10 @@ class CompactionMixin:
                     sweep_stop_reason = "raw_prefix_drained"
                 break
 
+            # Keep current-pass ordering proof when scaffold rows are removed.
+            self._current_compress_store_ids_by_message_id = self._get_store_id_map_for_messages(
+                working_messages[leading_anchor_count:]
+            )
             candidate_start = leading_anchor_count
             while (
                 candidate_start < fresh_tail_start
@@ -865,9 +965,6 @@ class CompactionMixin:
                     break
 
             if candidate_start < fresh_tail_start:
-                self._current_compress_store_ids_by_message_id = self._get_store_id_map_for_messages(
-                    working_messages[leading_anchor_count:]
-                )
                 compactable_pairs = list(
                     zip(
                         working_messages[candidate_start:fresh_tail_start],
@@ -1059,6 +1156,21 @@ class CompactionMixin:
                 break
 
             selected_raw_chunk = to_compact
+            if any(id(message) not in self._current_compress_store_ids_by_message_id
+                   for message in selected_raw_chunk):
+                fallback = self._preserve_rejected_compaction_context(
+                    working_messages, anchor_source_messages, leaf_passes,
+                )
+                if recovery_assembly_cap is None:
+                    recovery_assembly_cap = self._effective_assembly_token_cap()
+                return self._fail_open_after_publication_failure(
+                    fallback,
+                    LifecyclePublicationConflictError("Selected active occurrence has no owned lineage"),
+                    compress_started=_compress_started,
+                    threshold_full_sweep_active=threshold_full_sweep_active,
+                    recovery_assembly_cap=recovery_assembly_cap,
+                    leaf_passes=leaf_passes, context_is_assembled=True,
+                )
             summary_input_chunk = [
                 message for message in selected_raw_chunk if id(message) not in dependent_reply_message_ids
             ]
@@ -1175,6 +1287,10 @@ class CompactionMixin:
             # prefix, including trailing dependent replies. Summary lineage
             # excludes those replies; their durable ledger drives replay cleanup.
             try:
+                selected_retained_root_node_ids = self._retained_roots_selected_with_new_leaf(
+                    node, working_messages[:leading_anchor_count] + remaining_messages,
+                    anchor_source_messages, recovery_assembly_cap,
+                )
                 before_commit = None
                 if self._session_id and self._conversation_id:
                     publication_session_id = self._session_id
@@ -1189,6 +1305,7 @@ class CompactionMixin:
                             consumed_store_ids,
                             publication_excluded_store_ids,
                             filter_exclusion_proofs,
+                            selected_retained_root_node_ids,
                         )
                     before_commit = stage_frontier
                 self._dag.add_node(node, before_commit=before_commit)
@@ -1201,7 +1318,14 @@ class CompactionMixin:
                     raise
                 fallback = working_messages
                 context_is_assembled = False
-                if leaf_passes or dropped_replayed_scaffold_messages:
+                if isinstance(exc, _NewLeafOutsideAssemblyBudget):
+                    fallback = self._preserve_rejected_compaction_context(
+                        working_messages, anchor_source_messages, leaf_passes,
+                    )
+                    context_is_assembled = True
+                    if recovery_assembly_cap is None:
+                        recovery_assembly_cap = self._effective_assembly_token_cap()
+                elif leaf_passes or dropped_replayed_scaffold_messages:
                     fallback = self._assemble_committed_compaction_context(
                         working_messages,
                         anchor_source_messages,
@@ -1217,7 +1341,7 @@ class CompactionMixin:
                     leaf_passes=leaf_passes,
                     context_is_assembled=context_is_assembled,
                 )
-            self._last_compacted_store_id = published_frontier
+            self._last_compacted_store_id = max(expected_frontier, published_frontier)
             self._invalidate_rollups_for_published_node(node)
 
             pressure_remaining_messages = pressure_messages[leading_anchor_count + selected_raw_len:]
@@ -1403,6 +1527,7 @@ class CompactionMixin:
                             pass_budget=remaining_passes,
                             deadline=sweep_deadline,
                             focus_topic=focus_topic,
+                            assembly_context=(working_messages, anchor_source_messages, recovery_assembly_cap),
                         )
                     )
             else:
@@ -1411,6 +1536,7 @@ class CompactionMixin:
                     leaf_compacted_this_turn=True,
                     force_overflow=force_overflow,
                     critical_budget_pressure=critical_budget_pressure,
+                    assembly_context=(working_messages, anchor_source_messages, recovery_assembly_cap),
                 )
         except Exception as exc:
             if not _is_sqlite_locked_error(exc):

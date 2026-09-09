@@ -629,10 +629,11 @@ class ReconcileMixin:
     def _remember_compacted_active_replay_snapshot(
         self,
         messages: List[Dict[str, Any]],
+        *, trusted_assembly: bool = False,
     ) -> None:
         self._remember_replay_snapshot(
             _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX,
-            self._compacted_active_replay_snapshot_digest(messages),
+            self._replay_snapshot_digest(messages, require_lcm_system_note=not trusted_assembly),
         )
 
     # -- Session-end full-history proof (consumed ONLY by current-session
@@ -944,6 +945,25 @@ class ReconcileMixin:
         # Every identity the tool-anchored terms are allowed to advance over
         # must itself be durable, on either the raw or the cleaned-up view.
         durable_replay_identities = set(stored_tail) | set(sanitized_replay_tail)
+        # Unregistered tool-pair proof belongs to the producer that emitted it.
+        # Owner-wide history remains available to registered snapshot carryover.
+        producer_rows = self._owner_history(
+            limit=max(len(stored_tail), 64), latest=True, producer_session_id=self._session_id,
+        )
+        producer_identities = [self._message_replay_identity(row, stored_row=True) for row in producer_rows
+            if not self._matches_ignore_message_patterns(row, stored_row=True)]
+        producer_cleaned_identities = self._stored_tail_for_sanitized_active_replay(producer_identities)
+        producer_count = self._owner_history(count_only=True, producer_session_id=self._session_id)
+
+        def producer_window_matches(candidate):
+            return bool(candidate) and any(
+                sequence[start:start + len(candidate)] == candidate
+                for sequence in (producer_identities, producer_cleaned_identities)
+                for start in range(len(sequence) - len(candidate) + 1)
+            )
+        registered_prefix_ends = [end for end in range(1, len(messages) + 1)
+            if self._replay_snapshot_digest(messages[:end], require_lcm_system_note=False)
+            in engine_snapshot_digests]
         empty_prefix_cursor: int | None = None
         for cursor in range(len(messages), -1, -1):
             candidate_messages = messages[:cursor]
@@ -1008,7 +1028,7 @@ class ReconcileMixin:
                 and self._matches_store_tail_suffix(sanitized_replay_tail, candidate_prefix)
             )
             matches_raw_tail = self._matches_store_tail_suffix(stored_tail, candidate_prefix)
-            engine_snapshot_digest = self._compacted_active_replay_snapshot_digest(candidate_messages)
+            engine_snapshot_digest = self._replay_snapshot_digest(candidate_messages, require_lcm_system_note=False)
             session_end_snapshot_digest = (
                 self._session_end_replay_snapshot_digest(candidate_messages)
                 if allow_session_end_replay_proof
@@ -1032,9 +1052,31 @@ class ReconcileMixin:
                     and all(store_id > 0 for store_id in ordered_store_ids)
                     and ordered_store_ids == sorted(set(ordered_store_ids))
                 )
+            extends_registered_prefix = any(end < cursor for end in registered_prefix_ends)
+            extension_store_ids = []
+            if extends_registered_prefix and not has_registered_engine_snapshot:
+                mapping = self._get_store_id_map_for_messages(candidate_identity_messages)
+                extension_store_ids = [int(mapping.get(id(message)) or 0)
+                    for message in candidate_identity_messages]
+            has_ordered_extension = bool(extension_store_ids) and all(extension_store_ids) and (
+                extension_store_ids == sorted(set(extension_store_ids)))
+            has_registered_engine_extension = has_ordered_extension and any(
+                end < cursor and all(
+                    not _has_lossy_redacted_identity(active_identity(message))
+                    and not self._is_replayed_context_scaffold_message(message)
+                    and not self._matches_ignore_message_patterns(message)
+                    for message in messages[end:cursor]
+                ) for end in registered_prefix_ends
+            )
+            # A registered prefix fixes the occurrence boundary. Weaker raw/tool
+            # resemblance must not consume an unproved extension past it.
+            if (extends_registered_prefix and not has_registered_engine_snapshot
+                    and not has_registered_engine_extension
+                    and session_end_snapshot_digest not in session_end_snapshot_digests):
+                continue
             has_durable_compacted_snapshot_replay = (
                 (
-                    has_registered_engine_snapshot
+                    has_registered_engine_snapshot or has_registered_engine_extension
                 )
                 or (
                     bool(session_end_snapshot_digest)
@@ -1324,7 +1366,8 @@ class ReconcileMixin:
             # from an external file, so it is not a durable-row match and gets
             # its own proof terms above.
             has_tool_id_anchored_replay = (
-                not candidate_has_persisted_marker
+                producer_window_matches(candidate_prefix)
+                and not candidate_has_persisted_marker
                 and candidate_has_tool_anchor
                 and not candidate_has_lossy_redacted_replay_identity
                 and (
@@ -1345,12 +1388,15 @@ class ReconcileMixin:
                 or has_raw_persisted_marker_exact_replay
             )
             has_effective_full_replay = (
-                has_persisted_marker_specific_replay_evidence
-                and matches_sanitized_tail
-                and len(candidate_prefix) >= effective_session_count
+                producer_count > 0
+                and producer_count <= len(producer_rows)
+                and candidate_prefix == producer_cleaned_identities
+                and has_persisted_marker_specific_replay_evidence
+                and len(candidate_prefix) >= len(producer_cleaned_identities)
                 and (
                     candidate_has_system
-                    or (effective_session_count > 1 and not sanitized_tail_collapsed)
+                    or (len(producer_cleaned_identities) > 1
+                        and len(producer_cleaned_identities) == len(producer_identities))
                     or has_quarantined_singleton_replay
                     or has_filtered_full_replay
                 )
@@ -1360,11 +1406,12 @@ class ReconcileMixin:
                 self._is_replayed_context_scaffold_message(msg) for msg in candidate_messages
             )
             has_raw_full_replay = (
-                has_persisted_marker_specific_replay_evidence
-                and matches_raw_tail
+                producer_count > 1
+                and producer_count <= len(producer_rows)
+                and candidate_prefix == producer_identities
+                and has_persisted_marker_specific_replay_evidence
                 and not has_scaffold_evidence
-                and len(candidate_messages) >= raw_session_count
-                and raw_session_count > 1
+                and len(candidate_messages) >= producer_count
             )
             has_preserved_objective_scaffold = any(
                 str(msg.get("role") or "") != "system"
@@ -1482,7 +1529,7 @@ class ReconcileMixin:
             return 0
 
         try:
-            session_count = self._store.get_session_count(self._session_id)
+            session_count = self._owner_history(count_only=True)
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation count failed: %s", exc)
             return 0
@@ -1517,7 +1564,7 @@ class ReconcileMixin:
             return 0
 
         tail_limit = min(max(len(messages) * 4, 64), session_count)
-        stored_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
+        stored_rows = self._owner_history(limit=tail_limit, latest=True)
         if not stored_rows:
             return 0
         stored_tail_rows = [
@@ -1565,10 +1612,9 @@ class ReconcileMixin:
             return cursor
 
         incoming_identities = self._effective_replay_identities(messages)
-        stored_head_rows = self._store.get_session_messages(
-            self._session_id,
-            limit=tail_limit,
-        )
+        # A repeated startup prefix proves staleness only for this producer.
+        # Another producer in the same conversation may submit identical new turns.
+        stored_head_rows = self._owner_history(limit=tail_limit, producer_session_id=self._session_id)
         stored_head = [self._message_replay_identity(row, stored_row=True) for row in stored_head_rows]
         # Stale-snapshot proof uses the raw durable prefix.  Ignore-message
         # filters may suppress noisy rows for tail reconciliation, but filtered
@@ -1654,11 +1700,11 @@ class ReconcileMixin:
         """
         if not self._session_id or cursor >= len(messages):
             return set()
-        session_count = self._store.get_session_count(self._session_id)
+        session_count = self._owner_history(count_only=True, producer_session_id=self._session_id)
         if session_count <= 0:
             return set()
         tail_limit = min(max(len(messages) * 4, 64), session_count)
-        stored_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
+        stored_rows = self._owner_history(limit=tail_limit, latest=True, producer_session_id=self._session_id)
         stored_identity_counts = Counter(
             identity
             for identity in (
@@ -1904,16 +1950,29 @@ class ReconcileMixin:
         message has its durable identity, so content duplication cannot make the
         old row hijack another occurrence.
         """
+        # Validated leaf coverage may precede a retained conversation's frontier.
+        # Covered duplicates must not steal uncovered active occurrences.
+        covered_ids: set[int] = set()
+        if self._conversation_id:
+            from .lifecycle_state import admitted_summary_roots
+            roots = admitted_summary_roots(self._dag._conn, self._conversation_id, self._session_id)
+            covered_ids = {source_id for sources in roots.values() for source_id in sources}
+
+        def requires_explicit_lineage(store_id):
+            return 0 < store_id and (
+                store_id <= int(self._last_compacted_store_id or 0) or store_id in covered_ids
+            )
+
         candidates: list[Dict[str, Any]] = []
+        explicit_source_ids: dict[int, int] = {}
         active_lineage_identities = self._active_folded_tail_identity_overrides(
             messages
         )
         folded_lineage = self._load_folded_tail_lineage(messages)
         if folded_lineage is not None:
             _folded_message, source_row = folded_lineage
-            if int(source_row.get("store_id") or 0) <= int(
-                self._last_compacted_store_id or 0
-            ):
+            explicit_source_ids[id(_folded_message)] = int(source_row["store_id"])
+            if requires_explicit_lineage(int(source_row.get("store_id") or 0)):
                 candidates.append(source_row)
         retained_anchor_loader = getattr(
             self,
@@ -1925,7 +1984,13 @@ class ReconcileMixin:
             retained_store_id = int(
                 retained_anchor.get("store_id") or 0
             ) if retained_anchor else 0
-            if 0 < retained_store_id <= int(self._last_compacted_store_id or 0):
+            if requires_explicit_lineage(retained_store_id):
+                owned_rows = self._owner_history(after_store_id=retained_store_id - 1, limit=1)
+                if (not owned_rows or int(owned_rows[0]["store_id"]) != retained_store_id
+                    or self._retained_user_anchor_identity_digest(owned_rows[0], stored_row=True)
+                    != self._retained_user_anchor_identity_digest(retained_anchor, stored_row=True)):
+                    retained_anchor = None
+            if retained_anchor is not None:
                 retained_identity = self._message_replay_identity(
                     retained_anchor,
                     stored_row=True,
@@ -1936,7 +2001,18 @@ class ReconcileMixin:
                     if self._message_replay_identity(message) == retained_identity
                 )
                 if active_matches == 1:
-                    candidates.append(retained_anchor)
+                    if requires_explicit_lineage(retained_store_id):
+                        candidates.append(retained_anchor)
+                    for message in messages:
+                        if self._message_replay_identity(message) == retained_identity:
+                            explicit_source_ids[id(message)] = retained_store_id
+        next_candidate_after = self._last_compacted_store_id
+        while True:
+            page = self._owner_history(after_store_id=next_candidate_after)
+            if not page:
+                break
+            candidates.extend(row for row in page if int(row["store_id"]) not in covered_ids)
+            next_candidate_after = page[-1]["store_id"]
         if candidates:
             candidates = list(
                 {
@@ -1946,16 +2022,6 @@ class ReconcileMixin:
                 }.values()
             )
             candidates.sort(key=lambda candidate: int(candidate["store_id"]))
-        next_candidate_after = self._last_compacted_store_id
-        while True:
-            page = self._store.get_session_messages_after(
-                self._session_id,
-                after_store_id=next_candidate_after,
-            )
-            if not page:
-                break
-            candidates.extend(page)
-            next_candidate_after = page[-1]["store_id"]
 
         def active_lineage_identity(
             message: Dict[str, Any],
@@ -2051,6 +2117,8 @@ class ReconcileMixin:
                 probe_idx += 1
             return None
 
+        message_positions = {id(message): index for index, message in enumerate(messages)}
+
         def find_message_match_index(msg: Dict[str, Any], start_idx: int) -> int | None:
             msg_content = normalize_content_value(msg.get("content")) or ""
             if msg.get("store_id") is None and self._content_has_externalized_placeholder_ref(msg_content):
@@ -2060,10 +2128,25 @@ class ReconcileMixin:
                     return raw_match_idx
 
             message_identity = active_lineage_identity(msg)
+            explicit_id = explicit_source_ids.get(id(msg))
+            if explicit_id is None:
+                eligible = [index for index in range(start_idx, len(candidates))
+                    if stored_identities[index] == message_identity]
+                remaining = sum(active_lineage_identity(message) == message_identity
+                    for message in messages[message_positions[id(msg)]:])
+                producers = {candidates[index].get("session_id") for index in eligible}
+                if len(eligible) > remaining and len(producers) > 1:
+                    # Earlier ordered matches already ruled out rows before
+                    # start_idx. Keep canonical same-producer ordering, but
+                    # never allocate surplus copies across producers by text.
+                    return None
             wanted_cleanup_identity = self._active_cleanup_replay_identity(message_identity)
             probe_idx = start_idx
             while probe_idx < len(candidates):
                 stored_identity = stored_identities[probe_idx]
+                if explicit_id is not None and int(candidates[probe_idx]["store_id"]) != explicit_id:
+                    probe_idx += 1
+                    continue
                 if stored_identity == message_identity:
                     return probe_idx
                 if (

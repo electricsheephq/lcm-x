@@ -29,6 +29,7 @@ from .db_bootstrap import (
 )
 from .config import LCMConfig
 from .ingest_protection import protect_message_for_ingest, protect_messages_for_ingest
+from .lifecycle_state import legacy_blank_clause, unambiguous_legacy_session_ids
 from .search_query import (
     build_snippet,
     compute_search_candidate_cap,
@@ -72,8 +73,7 @@ def _legacy_blank_source_clause(column: str) -> str:
     # SQLite TRIM() only strips spaces unless given an explicit character set.
     # Match Python's write-time `str.strip()` behavior for common ASCII whitespace
     # so legacy tabs/newlines do not become a fake attributed source bucket.
-    whitespace_chars = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
-    return f"({column} IS NULL OR TRIM({column}, {whitespace_chars}) = '')"
+    return legacy_blank_clause(column)
 
 
 def _normalize_source_value(source: str | None) -> str:
@@ -846,6 +846,69 @@ class MessageStore:
             (session_id, after_store_id, limit),
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
+
+    def get_conversation_messages_after(
+        self,
+        conversation_id: str,
+        *,
+        legacy_session_ids: Collection[str] = (),
+        after_store_id: int = 0,
+        limit: int = 10000,
+        latest: bool = False,
+        count_only: bool = False,
+        producer_session_id: str | None = None,
+    ) -> List[Dict[str, Any]] | int:
+        """Return one ordered logical-conversation owner set.
+
+        Explicit conversation ownership is authoritative across producing
+        sessions. Blank legacy rows are admitted only for lifecycle-proven
+        current or last-finalized sessions supplied by the caller.
+        """
+        conversation_id = str(conversation_id or "").strip()
+        legacy_sessions = tuple(
+            sorted({str(value) for value in legacy_session_ids if str(value)})
+        )
+        if not conversation_id:
+            return []
+        legacy_sessions = tuple(
+            sorted(
+                unambiguous_legacy_session_ids(
+                    self._conn,
+                    conversation_id,
+                    set(legacy_sessions),
+                )
+            )
+        )
+        owner_sql = "conversation_id = ?"
+        owner_args: list[Any] = [conversation_id]
+        if legacy_sessions:
+            placeholders = ",".join("?" for _ in legacy_sessions)
+            owner_sql += (
+                f" OR ({legacy_blank_clause('conversation_id')} "
+                f"AND session_id IN ({placeholders}))"
+            )
+            owner_args.extend(legacy_sessions)
+        if producer_session_id is not None:
+            owner_sql = f"({owner_sql}) AND session_id = ?"
+            owner_args.append(producer_session_id)
+        if count_only:
+            return int(self._conn.execute(
+                f"SELECT COUNT(*) FROM messages WHERE ({owner_sql})", owner_args,
+            ).fetchone()[0])
+        order = "DESC" if latest else "ASC"
+        rows = self._conn.execute(
+            f"""SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages
+                WHERE store_id > ? AND ({owner_sql})
+                ORDER BY store_id {order} LIMIT ?""",
+            (
+                int(after_store_id or 0),
+                *owner_args,
+                max(1, int(limit)),
+            ),
+        ).fetchall()
+        if latest:
+            rows.reverse()
+        return [self._row_to_dict(row) for row in rows]
 
     def get_session_tail(self, session_id: str, limit: int = 1000) -> List[Dict[str, Any]]:
         """Get the latest messages for a session, returned in store order."""

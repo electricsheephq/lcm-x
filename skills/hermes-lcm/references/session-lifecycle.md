@@ -20,3 +20,25 @@ Run normal compaction before rotate when older material must be represented in s
 Rotate refuses ignored or stateless sessions. Repeating an already-satisfied rotate reports a no-op and preserves the previous known-good rolling backup.
 
 Use a separate session when the user wants a new active conversational boundary. Use rotate when the problem is active transcript/frontier size without changing identity.
+
+## Retained logical-conversation compaction
+
+Explicit message `conversation_id` ownership governs replay reconciliation, leaf publication, summary selection, and condensation across producer sessions. A shared producer session does not make another conversation's rows eligible. Blank legacy owners require a positive, unique durable lifecycle binding; unrelated ambiguous rows remain unchanged and unclaimed. Selected active occurrences without owned lineage fail safely. An existing summary can prove a leading covered prefix only when its complete owned lineage is valid and the summary remains selected in the assembled context. These rules do not relabel raw messages, deduplicate by text, or authorize a frontier reset.
+
+Hermes may keep the same session ID during in-place compaction. LCM handles that as a compression continuation, preserving the logical conversation and committed coverage without moving raw messages. The host may first flush the original, longer history; reconciliation must distinguish that already-ingested history from the shorter active projection. Ordinary session endings retain their proven ingestion cursor. A cold replay of the compacted projection must not append its existing messages again.
+
+Unregistered replay shortcuts require ordered evidence from the same conversation and producer, including the number of occurrences. Identical text or a reused tool-call ID from another producer does not prove replay. An extension of a registered compacted snapshot must map its visible occurrences to distinct, increasing source IDs; a covered earlier duplicate cannot supply a fresh suffix occurrence. Exact registered snapshots retain their existing carry-over proof.
+
+Lifecycle transitions preserve proven legacy producer attribution in the existing metadata table, in the same transaction as the binding change. This keeps blank-owned source rows reachable through later rollovers without changing their original ownership fields. Conflicting historical bindings remain ambiguous. Newly binding a session cannot claim pre-existing unbound blank rows, and already-forgotten attribution requires an explicit repair supported by durable evidence.
+
+Hermes keeps the system prompt outside the persisted conversation. LCM therefore
+registers its own assembled summary projection even when that projection has no
+system row. Standalone generated summary messages carry Hermes's existing
+`_compressed_summary` flag so host sequence repair preserves their boundary with
+the next real user turn. Real retained user messages and folded source messages
+do not receive this flag. The flag does not establish source ownership or replay
+proof; those still require LCM's committed lineage and registered snapshot.
+
+### Ambiguous raw occurrence mapping
+
+Unregistered replay shortcuts require both the logical owner and emitting producer. When multiple uncovered durable occurrences could match fewer active occurrences, compaction preserves the ambiguous raw input and leaves the frontier unchanged. It does not choose an older row or prefer the current producer by text alone. Existing exact retained-user and folded-tail registrations continue to identify their own occurrences. Legacy blank owners use the same common-ASCII whitespace convention for admission, history queries, and publication coverage.

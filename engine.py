@@ -136,7 +136,7 @@ from .compaction import CompactionMixin
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
 from .prefix_matching import PrefixMatchingMixin
-from .lifecycle_state import LifecycleStateStore
+from .lifecycle_state import LifecycleStateStore, LifecyclePublicationConflictError
 from .message_content import (
     normalize_content_value,
     stored_text_content_for_pattern_matching,
@@ -2636,7 +2636,9 @@ class LCMEngine(
                     ),
                 )
                 return registered_row
-            self._write_retained_user_anchor(None)
+            # Protection ends now; exact occurrence lineage must survive a
+            # timeout or a host declining the returned context. A later supplied
+            # projection that no longer starts with this user clears it below.
             return None
         durable_users = self._durable_real_user_messages()
         if len(durable_users) != 1:
@@ -3087,9 +3089,14 @@ class LCMEngine(
             and session_id
             and source_session_id != session_id
         )
+        can_continue_in_place = bool(
+            source_session_id == session_id == previous_session_id
+            and _state_conversation_matches(source_state)
+        )
+        can_continue = can_reassign or can_continue_in_place
         boundary_placeholder_budget = {}
         boundary_placeholder_ordinals: dict[str, set[int]] = {}
-        if can_reassign:
+        if can_continue:
             if previous_session_id == source_session_id:
                 boundary_placeholder_budget = self._active_replay_generated_placeholder_digest_budget()
                 boundary_placeholder_ordinals = self._generated_placeholder_digest_ordinals_for_active_replay(
@@ -3159,7 +3166,7 @@ class LCMEngine(
                 session_id,
                 moved_nodes,
             )
-        elif old_session_id:
+        elif old_session_id and not can_continue_in_place:
             logger.warning(
                 "LCM compression boundary skipped carry-over: old_session_id=%s does not match bound session=%s",
                 old_session_id,
@@ -3191,7 +3198,9 @@ class LCMEngine(
             if state is not None:
                 self._last_compacted_store_id = state.current_frontier_store_id
         self._clear_pending_reset_boundary()
-        self._compression_boundary_ingest_pending = can_reassign
+        self._compression_boundary_ingest_pending = can_continue
+        if can_continue_in_place:
+            self._schedule_ingest_cursor_reconciliation()
         self._compression_boundary_active_placeholder_digest_budget = boundary_placeholder_budget
         self._compression_boundary_active_placeholder_digest_ordinals = boundary_placeholder_ordinals
         self._log_session_filter_diagnostics()
@@ -3214,7 +3223,7 @@ class LCMEngine(
         self._lcm_current_start_allows_bypass_lineage = False
         requested_platform = str(kwargs.get("platform") or self._session_platform or "")
         pre_reset_preserve_ambiguous_no_frame_old_session = False
-        if boundary_reason == "compression" and old_session_id and old_session_id != session_id:
+        if boundary_reason == "compression" and old_session_id:
             old_session_auxiliary_generation = self._in_process_auxiliary_caller_generation(
                 old_session_id
             )
@@ -3293,7 +3302,7 @@ class LCMEngine(
                     logger.debug("LCM host fallback compressor reset failed", exc_info=True)
             self._host_fallback_compressor = None
             self._host_fallback_session_id = ""
-        if boundary_reason == "compression" and old_session_id and old_session_id != session_id:
+        if boundary_reason == "compression" and old_session_id:
             old_session_is_suppressed_foreground = self._auxiliary_lineage_suppressed_as_foreground(
                 old_session_id
             )
@@ -3774,6 +3783,17 @@ class LCMEngine(
                 _SESSION_END_BUSY_TIMEOUT_MS,
             ):
                 is_current_session_full_history_end = session_id == self._session_id
+                cached_source = self._last_active_replay_source_identities
+                if (
+                    is_current_session_full_history_end
+                    and len(cached_source) > self._ingest_cursor
+                    and len(messages) >= len(cached_source)
+                    and [self._message_replay_identity(message) for message in messages[:len(cached_source)]]
+                    == cached_source
+                ):
+                    # Only an exact original-history prefix proves this cursor
+                    # belongs to the shorter projection returned by compress().
+                    self._schedule_ingest_cursor_reconciliation()
                 try:
                     # Best-effort final flush. Keep this path bounded because
                     # host gateways call session-end hooks from lifecycle paths
@@ -4452,13 +4472,44 @@ class LCMEngine(
 
     # -- Internal: message ingestion ---------------------------------------
 
+    def _owner_history(self, *, after_store_id=0, limit=10000, latest=False, count_only=False,
+                       producer_session_id=None):
+        """Use the same durable ownership domain for replay and publication."""
+        conversation_id = str(self._conversation_id or "").strip()
+        if not conversation_id:
+            if count_only:
+                return self._store.get_session_count(self._session_id)
+            if latest:
+                return self._store.get_session_tail(self._session_id, limit=limit)
+            return self._store.get_session_messages_after(self._session_id,
+                after_store_id=after_store_id, limit=limit)
+        state = self._lifecycle.get_by_conversation(conversation_id)
+        bound = {str(value) for value in (
+            getattr(state, "current_session_id", None),
+            getattr(state, "last_finalized_session_id", None)) if value}
+        return self._store.get_conversation_messages_after(conversation_id,
+            legacy_session_ids=bound, after_store_id=after_store_id,
+            limit=limit, latest=latest, count_only=count_only,
+            producer_session_id=producer_session_id)
+
+    def _owned_summary_roots(self):
+        from .lifecycle_state import admitted_summary_roots
+        if not self._conversation_id:
+            nodes = self._dag.get_session_nodes(self._session_id)
+            return [node for depth in sorted({n.depth for n in nodes}, reverse=True)
+                    for node in self._dag.get_uncondensed_at_depth(self._session_id, depth)]
+        admitted = admitted_summary_roots(self._dag._conn, self._conversation_id, self._session_id)
+        nodes = [self._dag.get_node(node_id) for node_id in admitted]
+        return sorted((node for node in nodes if node is not None),
+                      key=lambda node: (-node.depth, node.created_at, node.node_id))
+
     def _schedule_ingest_cursor_reconciliation(self) -> None:
         """Mark existing-session rebinds for cursor repair on next ingest."""
         self._ingest_cursor_needs_reconcile = False
         if not self._session_id or self._session_ignored or self._session_stateless:
             return
         try:
-            self._ingest_cursor_needs_reconcile = self._store.get_session_count(self._session_id) > 0
+            self._ingest_cursor_needs_reconcile = self._owner_history(count_only=True) > 0
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
             self._ingest_cursor_needs_reconcile = False
@@ -5967,6 +6018,7 @@ class LCMEngine(
         leaf_compacted_this_turn: bool = False,
         force_overflow: bool = False,
         critical_budget_pressure: bool = False,
+        assembly_context=None,
     ) -> int:
         """Check if any depth level has enough nodes for condensation."""
         self._last_condensation_suppressed_reason = ""
@@ -5979,7 +6031,7 @@ class LCMEngine(
         # the deepest existing node + 1, so condensation can always
         # create the next depth level.
         if max_depth < 0:
-            all_nodes = self._dag.get_session_nodes(self._session_id)
+            all_nodes = self._owned_summary_roots()
             upper = (max(n.depth for n in all_nodes) + 1) if all_nodes else 1
         else:
             upper = max_depth
@@ -5989,9 +6041,7 @@ class LCMEngine(
         fanin = max(1, self._config.condensation_fanin)
 
         for depth in range(upper):
-            uncondensed = self._dag.get_uncondensed_at_depth(
-                self._session_id, depth
-            )
+            uncondensed = [node for node in self._owned_summary_roots() if node.depth == depth]
             if len(uncondensed) < fanin:
                 continue
 
@@ -6011,8 +6061,12 @@ class LCMEngine(
                 source_tokens, summary_tokens, level = self._condense_summary_nodes(
                     to_condense,
                     focus_topic=focus_topic,
+                    assembly_context=assembly_context,
                 )
             except Exception as exc:
+                if isinstance(exc, LifecyclePublicationConflictError):
+                    self._last_condensation_suppressed_reason = "replacement_not_visible"
+                    break
                 if _is_sqlite_locked_error(exc):
                     setattr(
                         exc,
@@ -6041,6 +6095,7 @@ class LCMEngine(
         *,
         focus_topic: Optional[str] = None,
         deadline: Optional[float] = None,
+        assembly_context=None,
     ) -> tuple[int, int, int]:
         """Persist one same-depth condensation and return source/output tokens and level."""
         if not nodes:
@@ -6090,20 +6145,24 @@ class LCMEngine(
             latest_at=latest_at,
             expand_hint=self._extract_expand_hint(summary_text),
         )
+        roots = self._owned_summary_roots()
+        replaced = {node.node_id for node in nodes}
+        context = assembly_context if assembly_context is not None else ([], [], None)
+        before = set(self._prospective_root_selection(roots, *context))
+        prospective = sorted(
+            [root for root in roots if root.node_id not in replaced] + [condensed_node],
+            key=lambda root: (-root.depth, root.created_at, root.node_id),
+        )
+        after = set(self._prospective_root_selection(prospective, *context))
+        if (before & replaced and condensed_node.node_id not in after) or not (before - replaced) <= after:
+            raise LifecyclePublicationConflictError("condensation replacement hides visible summary coverage")
         self._dag.add_node(condensed_node)
         self._invalidate_rollups_for_published_node(condensed_node)
         return source_tokens, summary_tokens, level
 
     def _summary_frontier_nodes(self) -> List[SummaryNode]:
         """Return all provider-visible summary frontier nodes for the active session."""
-        all_nodes = self._dag.get_session_nodes(self._session_id, limit=100_000)
-        referenced = {
-            source_id
-            for node in all_nodes
-            if node.source_type == "nodes"
-            for source_id in node.source_ids
-        }
-        return [node for node in all_nodes if node.node_id not in referenced]
+        return self._owned_summary_roots()
 
     def _summary_frontier_tokens(self) -> int:
         return sum(node.token_count for node in self._summary_frontier_nodes())
@@ -6138,6 +6197,7 @@ class LCMEngine(
         pass_budget: int,
         deadline: float,
         focus_topic: Optional[str] = None,
+        assembly_context=None,
     ) -> tuple[int, str]:
         """Condense an oversized summary frontier within the remaining sweep budget."""
         passes = 0
@@ -6155,6 +6215,7 @@ class LCMEngine(
                     group,
                     focus_topic=focus_topic,
                     deadline=deadline,
+                    assembly_context=assembly_context,
                 )
             except Exception as exc:
                 if _is_sqlite_locked_error(exc):
@@ -6462,6 +6523,42 @@ class LCMEngine(
         body = "\n".join([header, *lines])
         return f"<relevant-memories>\n{body}\n</relevant-memories>"
 
+    @staticmethod
+    def _select_summary_part_indices(parts, role, budget):
+        selected, indices = [], []
+        for index, part in enumerate(parts):
+            candidate = {"role": role, "content": "\n\n---\n\n".join([*selected, part])}
+            if budget is not None and count_message_tokens(candidate) > budget:
+                continue
+            selected.append(part)
+            indices.append(index)
+        return indices
+
+    def _prepare_assembly_tail(self, tail_messages, leading_messages, assembly_cap):
+        """Use the same provider-visible tail and budget for admission and assembly."""
+        prepared = self._stub_large_tool_results_for_active_replay(tail_messages)
+        if assembly_cap is None:
+            return prepared, None
+        used = count_messages_tokens(leading_messages)
+        kept_reversed = []
+        tail_tokens = 0
+        candidates = self._sanitize_active_context_messages(
+            prepared, insert_missing_tool_stubs=False, merge_adjacent_assistants=False,
+        )
+        skipped_gap = False
+        for message in reversed(candidates):
+            amount = count_message_tokens(message)
+            if used + tail_tokens + amount > assembly_cap:
+                if self._is_budget_droppable_tail_message(message):
+                    skipped_gap = True
+                    continue
+                break
+            if skipped_gap:
+                break
+            kept_reversed.append(message)
+            tail_tokens += amount
+        return list(reversed(kept_reversed)), max(0, assembly_cap - used - tail_tokens)
+
     def _assemble_context(
         self,
         system_msg: Optional[Dict[str, Any]],
@@ -6510,40 +6607,11 @@ class LCMEngine(
         # Stub durably externalized evictable tool payloads before the assembly
         # budget pass so the selector sees their reduced provider-visible cost.
         # The helper protects the configured fresh tail and is fail-open.
-        assembly_tail_messages = self._stub_large_tool_results_for_active_replay(tail_messages)
-        tail_selected = assembly_tail_messages
+        tail_selected, summary_budget = self._prepare_assembly_tail(tail_messages, result, assembly_cap)
         anchor_source = getattr(self, "_pending_context_anchor_messages", None)
         if anchor_source is None:
             anchor_source = tail_messages
         anchor_part: Optional[str] = None
-        summary_budget = None
-        if assembly_cap is not None:
-            used = count_messages_tokens(result)
-            kept_tail_reversed: list[Dict[str, Any]] = []
-            tail_token_total = 0
-            tail_for_selection = self._sanitize_active_context_messages(
-                assembly_tail_messages,
-                insert_missing_tool_stubs=False,
-                # Intermediate pass for per-turn token-budget selection: weigh
-                # each turn on its own; do NOT merge adjacent assistants here or
-                # a small tail turn glued to an oversized one gets dropped with
-                # it. The final assembled result is merged downstream.
-                merge_adjacent_assistants=False,
-            )
-            skipped_tail_gap = False
-            for msg in reversed(tail_for_selection):
-                msg_tokens = count_message_tokens(msg)
-                if used + tail_token_total + msg_tokens > assembly_cap:
-                    if self._is_budget_droppable_tail_message(msg):
-                        skipped_tail_gap = True
-                        continue
-                    break
-                if skipped_tail_gap:
-                    break
-                kept_tail_reversed.append(msg)
-                tail_token_total += msg_tokens
-            tail_selected = list(reversed(kept_tail_reversed))
-            summary_budget = max(0, assembly_cap - used - tail_token_total)
         if anchor_source is not None:
             anchor_part = self._latest_user_context_anchor(anchor_source, tail_selected)
 
@@ -6570,46 +6638,24 @@ class LCMEngine(
         # Node ids placed in the summary prefix — used to dedupe proactive-recall
         # injection against summaries already visible in the active context.
         active_summary_node_ids: set = set()
-        all_nodes = self._dag.get_session_nodes(self._session_id)
-        if all_nodes:
-            # Group by depth, take the most recent uncondensed at each level
-            # For active context, we want the highest-level summaries
-            # that haven't been condensed into even higher levels
-            depths = sorted(set(n.depth for n in all_nodes), reverse=True)
-            for d in depths:
-                uncondensed = self._dag.get_uncondensed_at_depth(self._session_id, d)
-                for node in uncondensed:
-                    active_summary_node_ids.add(node.node_id)
-                    depth_label = {
-                        0: "Recent",
-                        1: "Session Arc",
-                        2: "Durable",
-                    }.get(d, f"Depth-{d}")
-                    summary_parts.append(
-                        f"[{depth_label} Summary (d{d}, node {node.node_id})]\n"
-                        f"{node.summary}\n"
-                        f"[Expand for details: {node.expand_hint}]"
-                    )
+        owned_summary_parts = []
+        for node in self._owned_summary_roots():
+            active_summary_node_ids.add(node.node_id)
+            owned_summary_parts.append(self._summary_context_node_part(node))
+            summary_parts.append(owned_summary_parts[-1])
 
+        selected_parts = []
         retained_generated_context_parts: list[str] = []
         if summary_parts:
-            selected_parts = summary_parts
-            if summary_budget is not None:
-                selected_parts = []
-                for part in summary_parts:
-                    candidate = "\n\n---\n\n".join(selected_parts + [part])
-                    candidate_msg = {"role": summary_role, "content": candidate}
-                    if count_message_tokens(candidate_msg) > summary_budget:
-                        if part == anchor_part:
-                            continue
-                        continue
-                    selected_parts.append(part)
+            selected_parts = [summary_parts[index] for index in
+                self._select_summary_part_indices(summary_parts, summary_role, summary_budget)]
             if selected_parts:
                 combined = "\n\n---\n\n".join(selected_parts)
                 if retained_user_msg is not None:
                     retained_generated_context_parts.append(combined)
                 else:
-                    result.append({"role": summary_role, "content": combined})
+                    result.append({"role": summary_role, "content": combined,
+                        "_compressed_summary": True})
 
         # Proactive memory injection (SPEC F, default-off). One bounded block is
         # placed adjacent to the summary prefix — a stable position below the
@@ -6718,8 +6764,30 @@ class LCMEngine(
 
         # Persist proof only for the exact provider-visible compacted snapshot
         # assembled by this engine. Ingested input is not trusted replay proof.
-        self._remember_compacted_active_replay_snapshot(result)
+        trusted_assembly = any(part in selected_parts and any(
+            part in (normalize_content_value(message.get("content")) or "") for message in result
+        ) for part in owned_summary_parts)
+        self._remember_compacted_active_replay_snapshot(result, trusted_assembly=trusted_assembly)
         return result
+
+    @staticmethod
+    def _summary_context_node_part(
+        node: SummaryNode,
+        *,
+        node_label: str | None = None,
+    ) -> str:
+        """Format one DAG root exactly as active context assembly does."""
+        depth_label = {
+            0: "Recent",
+            1: "Session Arc",
+            2: "Durable",
+        }.get(node.depth, f"Depth-{node.depth}")
+        label = node_label if node_label is not None else str(node.node_id)
+        return (
+            f"[{depth_label} Summary (d{node.depth}, node {label})]\n"
+            f"{node.summary}\n"
+            f"[Expand for details: {node.expand_hint}]"
+        )
 
     def _is_budget_droppable_tail_message(self, message: Dict[str, Any]) -> bool:
         """Return whether an over-budget tail message may be evicted.
