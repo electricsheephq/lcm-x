@@ -16,7 +16,7 @@ def test_owned_history_compacts_among_foreign_producer_rows(tmp_path, monkeypatc
         hermes_home=str(tmp_path / "home"))
     monkeypatch.setattr(engine_module, "summarize_with_escalation",
         lambda **kw: ("Owned conversation. Expand for details: owned turns", 1))
-    engine.on_session_start("active", conversation_id="owned", platform="cli", context_length=200000)
+    engine.on_session_start(old_producer, conversation_id="owned", platform="cli", context_length=200000)
     active = [{"role": "user", "content": "first owned turn"},
         {"role": "assistant", "content": "", "tool_calls": [{"id": "owned-call", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]},
         {"role": "tool", "content": "owned result", "tool_call_id": "owned-call"},
@@ -26,6 +26,15 @@ def test_owned_history_compacts_among_foreign_producer_rows(tmp_path, monkeypatc
         foreign = engine._store.append_batch(old_producer,
             [{"role": "assistant", "content": "foreign turn"}], conversation_id="foreign")
         own = engine._store.append_batch(old_producer, active, conversation_id="owned")
+        engine._dag.add_node(SummaryNode(session_id=old_producer, depth=0, summary="owned prefix",
+            token_count=2, source_token_count=10, source_ids=own[:1], source_type="messages", created_at=1))
+        active = engine._assemble_context(None, active[1:])
+        assert engine._load_compacted_active_replay_snapshot_digests()
+        if old_producer != "active":
+            engine.on_session_start("active", old_session_id=old_producer, boundary_reason="compression",
+                conversation_id="owned", platform="cli", context_length=200000)
+            active = engine._assemble_context(None, active[1:])
+            assert engine._load_compacted_active_replay_snapshot_digests()
         config = engine._config
         engine.shutdown()
         engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))

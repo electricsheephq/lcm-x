@@ -39,6 +39,45 @@ def legacy_blank_clause(column: str) -> str:
     return f"({column} IS NULL OR TRIM({column}, {chars}) = '')"
 
 
+def _legacy_attribution(conn, kind, identity):
+    row = conn.execute("SELECT value FROM metadata WHERE key = ?",
+        ("lcm_legacy_attribution:" + kind + ":" + json.dumps(identity),)).fetchone()
+    if row is None:
+        return None
+    try:
+        values = json.loads(row[0])
+        return set(values) if isinstance(values, list) and all(isinstance(v, str) for v in values) else set()
+    except (ValueError, TypeError):
+        return set()
+
+
+def _write_legacy_attribution(conn, kind, identity, values):
+    conn.execute("INSERT INTO metadata(key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        ("lcm_legacy_attribution:" + kind + ":" + json.dumps(identity), json.dumps(sorted(values))))
+
+
+def _record_legacy_bindings(conn, conversation_id, new_session_id):
+    row = conn.execute("SELECT current_session_id, last_finalized_session_id "
+        "FROM lcm_lifecycle_state WHERE conversation_id = ?", (conversation_id,)).fetchone()
+    bound = {value for value in (row or ()) if value}
+    proven = unambiguous_legacy_session_ids(conn, conversation_id, bound)
+    history = _legacy_attribution(conn, "conversation", conversation_id) or set()
+    for producer in bound | {new_session_id}:
+        owners = _legacy_attribution(conn, "producer", producer)
+        if owners is None:
+            has_blank = conn.execute("SELECT 1 FROM messages WHERE session_id = ? AND "
+                + legacy_blank_clause("conversation_id") + " LIMIT 1", (producer,)).fetchone()
+            owners = {conversation_id} if producer in proven or not has_blank else set()
+        elif owners:
+            owners.add(conversation_id)
+        # Empty is a durable refusal: a newly bound SID cannot adopt old blanks.
+        _write_legacy_attribution(conn, "producer", producer, owners)
+        if conversation_id in owners:
+            history.add(producer)
+    _write_legacy_attribution(conn, "conversation", conversation_id, history)
+
+
 def unambiguous_legacy_session_ids(
     conn: sqlite3.Connection,
     conversation_id: str,
@@ -51,18 +90,20 @@ def unambiguous_legacy_session_ids(
     index nor explicitly owned raw rows associate it with another conversation.
     """
     candidates = {str(value) for value in session_ids if str(value)}
+    candidates |= _legacy_attribution(conn, "conversation", conversation_id) or set()
     if not candidates:
         return set()
     return {
         candidate
         for candidate in candidates
-        if conn.execute(
+        if (_legacy_attribution(conn, "producer", candidate) in (None, {conversation_id}))
+        and conn.execute(
             f"""
-            SELECT EXISTS(
+            SELECT (? OR EXISTS(
                 SELECT 1 FROM lcm_lifecycle_state
                 WHERE conversation_id = ?
                   AND (current_session_id = ? OR last_finalized_session_id = ?)
-            ) AND NOT EXISTS(
+            )) AND NOT EXISTS(
                 SELECT 1
                 FROM lcm_lifecycle_state
                      INDEXED BY idx_lcm_lifecycle_current_session
@@ -79,6 +120,7 @@ def unambiguous_legacy_session_ids(
             )
             """,
             (
+                _legacy_attribution(conn, "producer", candidate) == {conversation_id},
                 conversation_id, candidate, candidate,
                 candidate, conversation_id, candidate, conversation_id,
                 candidate, conversation_id,
@@ -98,7 +140,8 @@ def conversation_producers(conn, conversation_id, session_id):
         "SELECT DISTINCT session_id FROM messages WHERE conversation_id = ?",
         (conversation_id,),
     )}
-    return producers | bound | {session_id}, unambiguous_legacy_session_ids(conn, conversation_id, bound)
+    legacy = unambiguous_legacy_session_ids(conn, conversation_id, bound)
+    return producers | bound | legacy | {session_id}, legacy
 
 
 def admitted_summary_roots(conn, conversation_id, session_id, *, before_node_id=None,
@@ -205,6 +248,20 @@ class LifecycleState:
     updated_at: float
 
 
+def _binding_transaction(method):
+    @functools.wraps(method)
+    def wrapped(self, *args, **kwargs):
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            result = method(self, *args, **kwargs)
+            self._conn.commit()
+            return result
+        except BaseException:
+            self._conn.rollback()
+            raise
+    return wrapped
+
+
 class LifecycleStateStore:
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
@@ -306,6 +363,7 @@ class LifecycleStateStore:
         return self._row_to_state(row)
 
     @_synchronized
+    @_binding_transaction
     def bind_session(
         self,
         session_id: str,
@@ -314,6 +372,7 @@ class LifecycleStateStore:
     ) -> LifecycleState:
         existing = self.get_by_conversation(conversation_id) if conversation_id else self.get_by_session(session_id)
         conversation_id = conversation_id or (existing.conversation_id if existing else session_id)
+        _record_legacy_bindings(self._conn, conversation_id, session_id)
         now = time.time()
         current_frontier = 0
         current_bound_at = now
@@ -413,6 +472,7 @@ class LifecycleStateStore:
         return state
 
     @_synchronized
+    @_binding_transaction
     def finalize_session(
         self,
         conversation_id: str | None,
@@ -422,6 +482,7 @@ class LifecycleStateStore:
         state = self.get_by_conversation(conversation_id)
         if state is None:
             return None
+        _record_legacy_bindings(self._conn, conversation_id, session_id)
         now = time.time()
         current_session_id = state.current_session_id
         current_frontier = state.current_frontier_store_id
@@ -459,6 +520,7 @@ class LifecycleStateStore:
         return self.get_by_conversation(state.conversation_id)
 
     @_synchronized
+    @_binding_transaction
     def record_rollover(
         self,
         conversation_id: str,
@@ -468,6 +530,7 @@ class LifecycleStateStore:
         finalized_frontier_store_id: int = 0,
     ) -> LifecycleState:
         state = self.get_by_conversation(conversation_id)
+        _record_legacy_bindings(self._conn, conversation_id, new_session_id)
         if (
             state is not None
             and state.current_session_id == new_session_id

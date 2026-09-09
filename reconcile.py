@@ -950,10 +950,17 @@ class ReconcileMixin:
         producer_rows = self._owner_history(
             limit=max(len(stored_tail), 64), latest=True, producer_session_id=self._session_id,
         )
-        producer_identities = [self._message_replay_identity(row, stored_row=True) for row in producer_rows]
-        producer_replay_identities = set(producer_identities) | set(
-            self._stored_tail_for_sanitized_active_replay(producer_identities)
-        )
+        producer_identities = [self._message_replay_identity(row, stored_row=True) for row in producer_rows
+            if not self._matches_ignore_message_patterns(row, stored_row=True)]
+        producer_cleaned_identities = self._stored_tail_for_sanitized_active_replay(producer_identities)
+        producer_count = self._owner_history(count_only=True, producer_session_id=self._session_id)
+
+        def producer_window_matches(candidate):
+            return bool(candidate) and any(
+                sequence[start:start + len(candidate)] == candidate
+                for sequence in (producer_identities, producer_cleaned_identities)
+                for start in range(len(sequence) - len(candidate) + 1)
+            )
         registered_prefix_ends = [end for end in range(1, len(messages) + 1)
             if self._replay_snapshot_digest(messages[:end], require_lcm_system_note=False)
             in engine_snapshot_digests]
@@ -1045,7 +1052,15 @@ class ReconcileMixin:
                     and all(store_id > 0 for store_id in ordered_store_ids)
                     and ordered_store_ids == sorted(set(ordered_store_ids))
                 )
-            has_registered_engine_extension = any(
+            extends_registered_prefix = any(end < cursor for end in registered_prefix_ends)
+            extension_store_ids = []
+            if extends_registered_prefix and not has_registered_engine_snapshot:
+                mapping = self._get_store_id_map_for_messages(candidate_identity_messages)
+                extension_store_ids = [int(mapping.get(id(message)) or 0)
+                    for message in candidate_identity_messages]
+            has_ordered_extension = bool(extension_store_ids) and all(extension_store_ids) and (
+                extension_store_ids == sorted(set(extension_store_ids)))
+            has_registered_engine_extension = has_ordered_extension and any(
                 end < cursor and all(
                     not _has_lossy_redacted_identity(active_identity(message))
                     and not self._is_replayed_context_scaffold_message(message)
@@ -1053,6 +1068,12 @@ class ReconcileMixin:
                     for message in messages[end:cursor]
                 ) for end in registered_prefix_ends
             )
+            # A registered prefix fixes the occurrence boundary. Weaker raw/tool
+            # resemblance must not consume an unproved extension past it.
+            if (extends_registered_prefix and not has_registered_engine_snapshot
+                    and not has_registered_engine_extension
+                    and session_end_snapshot_digest not in session_end_snapshot_digests):
+                continue
             has_durable_compacted_snapshot_replay = (
                 (
                     has_registered_engine_snapshot or has_registered_engine_extension
@@ -1345,7 +1366,7 @@ class ReconcileMixin:
             # from an external file, so it is not a durable-row match and gets
             # its own proof terms above.
             has_tool_id_anchored_replay = (
-                all(identity in producer_replay_identities for identity in candidate_prefix)
+                producer_window_matches(candidate_prefix)
                 and not candidate_has_persisted_marker
                 and candidate_has_tool_anchor
                 and not candidate_has_lossy_redacted_replay_identity
@@ -1367,12 +1388,15 @@ class ReconcileMixin:
                 or has_raw_persisted_marker_exact_replay
             )
             has_effective_full_replay = (
-                has_persisted_marker_specific_replay_evidence
-                and matches_sanitized_tail
-                and len(candidate_prefix) >= effective_session_count
+                producer_count > 0
+                and producer_count <= len(producer_rows)
+                and candidate_prefix == producer_cleaned_identities
+                and has_persisted_marker_specific_replay_evidence
+                and len(candidate_prefix) >= len(producer_cleaned_identities)
                 and (
                     candidate_has_system
-                    or (effective_session_count > 1 and not sanitized_tail_collapsed)
+                    or (len(producer_cleaned_identities) > 1
+                        and len(producer_cleaned_identities) == len(producer_identities))
                     or has_quarantined_singleton_replay
                     or has_filtered_full_replay
                 )
@@ -1382,11 +1406,12 @@ class ReconcileMixin:
                 self._is_replayed_context_scaffold_message(msg) for msg in candidate_messages
             )
             has_raw_full_replay = (
-                has_persisted_marker_specific_replay_evidence
-                and matches_raw_tail
+                producer_count > 1
+                and producer_count <= len(producer_rows)
+                and candidate_prefix == producer_identities
+                and has_persisted_marker_specific_replay_evidence
                 and not has_scaffold_evidence
-                and len(candidate_messages) >= raw_session_count
-                and raw_session_count > 1
+                and len(candidate_messages) >= producer_count
             )
             has_preserved_objective_scaffold = any(
                 str(msg.get("role") or "") != "system"

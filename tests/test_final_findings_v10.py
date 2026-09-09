@@ -221,3 +221,78 @@ def test_first_pass_restore_does_not_resurrect_filtered_raw_or_duplicate_anchors
     assert result == [source[0], source[1], tail]
     assert filtered not in result
     assert engine._preserve_rejected_compaction_context(result, source, 0) == result
+
+
+def test_registered_duplicate_tail_extension_keeps_new_occurrence(engine, monkeypatch):
+    messages = [{"role": "user", "content": "identical request"} for _ in range(2)]
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", lambda **kw: ("covered first request", 1))
+    snapshot = engine.compress(messages, force=True)
+    assert engine.last_compression_status == "compacted"
+    assert engine._store.get_session_count("active") == 2
+    assert snapshot[-1] == messages[-1]
+    config, home = engine._config, engine._hermes_home
+    engine.shutdown()
+    cold = LCMEngine(config=config, hermes_home=str(home))
+    try:
+        cold.on_session_start("active", conversation_id="owned", platform="cli", context_length=200000)
+        cold.ingest([*snapshot, messages[-1].copy()])
+        assert cold._store.get_session_count("active") == 3
+    finally:
+        cold.shutdown()
+
+
+def test_blank_legacy_summary_survives_two_compression_rollovers(engine):
+    source = raw(engine, "legacy retained history", owner="")
+    leaf = node(engine, [source], "LEGACY_RETAINED_SUMMARY")
+    assert leaf.node_id in {value.node_id for value in engine._owned_summary_roots()}
+    for previous, current in [("active", "next"), ("next", "later")]:
+        engine.on_session_start(current, old_session_id=previous, boundary_reason="compression",
+            conversation_id="owned", platform="cli", context_length=200000)
+        assert leaf.node_id in {value.node_id for value in engine._owned_summary_roots()}, current
+    assert "LEGACY_RETAINED_SUMMARY" in str(engine._assemble_context(None, []))
+    parent = node(engine, [leaf.node_id], "CONDENSED_LEGACY_SUMMARY", producer="later", depth=1)
+    config, home = engine._config, engine._hermes_home
+    engine.shutdown()
+    cold = LCMEngine(config=config, hermes_home=str(home))
+    try:
+        cold.on_session_start("later", conversation_id="owned", platform="cli", context_length=200000)
+        assert parent.node_id in {value.node_id for value in cold._owned_summary_roots()}
+        assert source in {row["store_id"] for row in cold._owner_history()}
+        assert cold._store.get(source)["session_id"] == "active"
+        assert cold._store.get(source)["conversation_id"] == ""
+    finally:
+        cold.shutdown()
+
+
+def test_new_producer_repeating_full_unregistered_history_is_persisted(engine):
+    messages = [{"role": "user", "content": "same request"},
+        {"role": "assistant", "content": "same answer"}]
+    engine._store.append_batch("previous", messages, conversation_id="owned")
+    assert engine._load_compacted_active_replay_snapshot_digests() == []
+    engine._ingest_cursor = 0
+    engine._ingest_cursor_needs_reconcile = True
+    engine.ingest(messages)
+    assert engine._store.get_session_count("active") == 2
+
+
+def test_tool_replay_preserves_current_producer_multiplicity(engine):
+    repeated = pair("same-call")
+    engine._store.append_batch("previous", [{"role": "user", "content": "older"}, *repeated], conversation_id="owned")
+    engine._store.append_batch("active", repeated, conversation_id="owned")
+    assert engine._reconcile_ingest_cursor_from_store([*repeated, *repeated]) == 2
+
+
+def test_historical_blank_producer_cannot_be_claimed_by_foreign_binding(engine):
+    raw(engine, "legacy owner evidence", owner="")
+    for previous, current in [("active", "next"), ("next", "later")]:
+        engine.on_session_start(current, old_session_id=previous, boundary_reason="compression",
+            conversation_id="owned", platform="cli", context_length=200000)
+    engine._lifecycle.bind_session("active", conversation_id="foreign")
+    assert unambiguous_legacy_session_ids(engine._store._conn, "foreign", {"active"}) == set()
+
+
+def test_new_binding_does_not_adopt_unbound_legacy_rows(engine):
+    source = raw(engine, "unbound legacy", owner="", producer="forgotten")
+    engine._lifecycle.bind_session("forgotten", conversation_id="owned")
+    assert "forgotten" not in unambiguous_legacy_session_ids(engine._store._conn, "owned", {"forgotten"})
+    assert source not in {row["store_id"] for row in engine._owner_history()}
