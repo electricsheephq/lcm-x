@@ -1675,11 +1675,11 @@ class ReconcileMixin:
         """
         if not self._session_id or cursor >= len(messages):
             return set()
-        session_count = self._owner_history(count_only=True)
+        session_count = self._owner_history(count_only=True, producer_session_id=self._session_id)
         if session_count <= 0:
             return set()
         tail_limit = min(max(len(messages) * 4, 64), session_count)
-        stored_rows = self._owner_history(limit=tail_limit, latest=True)
+        stored_rows = self._owner_history(limit=tail_limit, latest=True, producer_session_id=self._session_id)
         stored_identity_counts = Counter(
             identity
             for identity in (
@@ -1939,12 +1939,14 @@ class ReconcileMixin:
             )
 
         candidates: list[Dict[str, Any]] = []
+        explicit_source_ids: dict[int, int] = {}
         active_lineage_identities = self._active_folded_tail_identity_overrides(
             messages
         )
         folded_lineage = self._load_folded_tail_lineage(messages)
         if folded_lineage is not None:
             _folded_message, source_row = folded_lineage
+            explicit_source_ids[id(_folded_message)] = int(source_row["store_id"])
             if requires_explicit_lineage(int(source_row.get("store_id") or 0)):
                 candidates.append(source_row)
         retained_anchor_loader = getattr(
@@ -1963,7 +1965,7 @@ class ReconcileMixin:
                     or self._retained_user_anchor_identity_digest(owned_rows[0], stored_row=True)
                     != self._retained_user_anchor_identity_digest(retained_anchor, stored_row=True)):
                     retained_anchor = None
-            if retained_anchor is not None and requires_explicit_lineage(retained_store_id):
+            if retained_anchor is not None:
                 retained_identity = self._message_replay_identity(
                     retained_anchor,
                     stored_row=True,
@@ -1974,7 +1976,11 @@ class ReconcileMixin:
                     if self._message_replay_identity(message) == retained_identity
                 )
                 if active_matches == 1:
-                    candidates.append(retained_anchor)
+                    if requires_explicit_lineage(retained_store_id):
+                        candidates.append(retained_anchor)
+                    for message in messages:
+                        if self._message_replay_identity(message) == retained_identity:
+                            explicit_source_ids[id(message)] = retained_store_id
         next_candidate_after = self._last_compacted_store_id
         while True:
             page = self._owner_history(after_store_id=next_candidate_after)
@@ -2095,10 +2101,19 @@ class ReconcileMixin:
                     return raw_match_idx
 
             message_identity = active_lineage_identity(msg)
+            explicit_id = explicit_source_ids.get(id(msg))
+            if (explicit_id is None and stored_identity_counts.get(message_identity, 0)
+                    > active_identity_counts.get(message_identity, 0)):
+                # More durable occurrences than active ones gives no unique
+                # allocation. Preserve the raw occurrence through fail-open.
+                return None
             wanted_cleanup_identity = self._active_cleanup_replay_identity(message_identity)
             probe_idx = start_idx
             while probe_idx < len(candidates):
                 stored_identity = stored_identities[probe_idx]
+                if explicit_id is not None and int(candidates[probe_idx]["store_id"]) != explicit_id:
+                    probe_idx += 1
+                    continue
                 if stored_identity == message_identity:
                     return probe_idx
                 if (

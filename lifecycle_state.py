@@ -30,6 +30,15 @@ class LifecyclePublicationConflictError(RuntimeError):
     """Raised when compaction publication cannot prove its source frontier."""
 
 
+_LEGACY_ASCII_WHITESPACE = "\t\n\v\f\r "
+
+
+def legacy_blank_clause(column: str) -> str:
+    """Use the existing legacy common-ASCII whitespace convention in SQL."""
+    chars = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
+    return f"({column} IS NULL OR TRIM({column}, {chars}) = '')"
+
+
 def unambiguous_legacy_session_ids(
     conn: sqlite3.Connection,
     conversation_id: str,
@@ -48,7 +57,7 @@ def unambiguous_legacy_session_ids(
         candidate
         for candidate in candidates
         if conn.execute(
-            """
+            f"""
             SELECT EXISTS(
                 SELECT 1 FROM lcm_lifecycle_state
                 WHERE conversation_id = ?
@@ -65,8 +74,8 @@ def unambiguous_legacy_session_ids(
                 WHERE last_finalized_session_id = ? AND conversation_id != ?
             ) AND NOT EXISTS(
                 SELECT 1 FROM messages INDEXED BY idx_msg_session
-                WHERE session_id = ? AND TRIM(COALESCE(conversation_id, '')) != ''
-                  AND TRIM(conversation_id) != ?
+                WHERE session_id = ? AND NOT {legacy_blank_clause('conversation_id')}
+                  AND conversation_id != ?
             )
             """,
             (
@@ -133,8 +142,8 @@ def admitted_summary_roots(conn, conversation_id, session_id, *, before_node_id=
                     (json.dumps(sources),),
                 ).fetchall()
                 if len(raw) != len(sources) or any(
-                    str(item[1] or "").strip() != conversation_id and not
-                    (not str(item[1] or "").strip() and item[2] in legacy)
+                    str(item[1] or "").strip(_LEGACY_ASCII_WHITESPACE) != conversation_id and not
+                    (not str(item[1] or "").strip(_LEGACY_ASCII_WHITESPACE) and item[2] in legacy)
                     for item in raw
                 ):
                     raise ValueError("foreign or missing source")
@@ -1145,7 +1154,7 @@ class LifecycleStateStore:
 
         def belongs_to_conversation(row: sqlite3.Row | tuple[Any, ...]) -> bool:
             row_session_id = str(row[1] or "")
-            row_conversation_id = str(row[2] or "").strip()
+            row_conversation_id = str(row[2] or "").strip(_LEGACY_ASCII_WHITESPACE)
             return row_conversation_id == conversation_id or (
                 not row_conversation_id and row_session_id in legacy_session_ids
             )
@@ -1177,12 +1186,12 @@ class LifecycleStateStore:
                 "Compaction publication filter exclusion changed"
             )
         rows = conn.execute(
-            """
+            f"""
             SELECT store_id, session_id, conversation_id, content
             FROM messages
             WHERE store_id > ? AND store_id <= ?
               AND (conversation_id = ? OR
-                   (COALESCE(conversation_id, '') = '' AND session_id IN
+                   ({legacy_blank_clause('conversation_id')} AND session_id IN
                     (SELECT value FROM json_each(?))))
             ORDER BY store_id
             """,

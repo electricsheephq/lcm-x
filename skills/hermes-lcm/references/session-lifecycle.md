@@ -36,3 +36,7 @@ system row. Standalone generated summary messages carry Hermes's existing
 the next real user turn. Real retained user messages and folded source messages
 do not receive this flag. The flag does not establish source ownership or replay
 proof; those still require LCM's committed lineage and registered snapshot.
+
+### Ambiguous raw occurrence mapping
+
+Unregistered replay shortcuts require both the logical owner and emitting producer. When multiple uncovered durable occurrences could match fewer active occurrences, compaction preserves the ambiguous raw input and leaves the frontier unchanged. It does not choose an older row or prefer the current producer by text alone. Existing exact retained-user and folded-tail registrations continue to identify their own occurrences. Legacy blank owners use the same common-ASCII whitespace convention for admission, history queries, and publication coverage.

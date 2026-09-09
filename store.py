@@ -29,7 +29,7 @@ from .db_bootstrap import (
 )
 from .config import LCMConfig
 from .ingest_protection import protect_message_for_ingest, protect_messages_for_ingest
-from .lifecycle_state import unambiguous_legacy_session_ids
+from .lifecycle_state import legacy_blank_clause, unambiguous_legacy_session_ids
 from .search_query import (
     build_snippet,
     compute_search_candidate_cap,
@@ -73,8 +73,7 @@ def _legacy_blank_source_clause(column: str) -> str:
     # SQLite TRIM() only strips spaces unless given an explicit character set.
     # Match Python's write-time `str.strip()` behavior for common ASCII whitespace
     # so legacy tabs/newlines do not become a fake attributed source bucket.
-    whitespace_chars = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
-    return f"({column} IS NULL OR TRIM({column}, {whitespace_chars}) = '')"
+    return legacy_blank_clause(column)
 
 
 def _normalize_source_value(source: str | None) -> str:
@@ -885,7 +884,7 @@ class MessageStore:
         if legacy_sessions:
             placeholders = ",".join("?" for _ in legacy_sessions)
             owner_sql += (
-                " OR (COALESCE(conversation_id, '') = '' "
+                f" OR ({legacy_blank_clause('conversation_id')} "
                 f"AND session_id IN ({placeholders}))"
             )
             owner_args.extend(legacy_sessions)
