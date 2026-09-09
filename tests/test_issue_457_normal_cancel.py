@@ -10,8 +10,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent import auxiliary_client as aux
-from agent.conversation_compression import CompressionCommitFence, _run_summary_dispatch
+aux = pytest.importorskip("agent.auxiliary_client", reason="requires real Hermes worker hooks")
+_host_compression = pytest.importorskip("agent.conversation_compression")
+CompressionCommitFence = _host_compression.CompressionCommitFence
+_run_summary_dispatch = _host_compression._run_summary_dispatch
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 
