@@ -169,6 +169,18 @@ def admitted_summary_roots(conn, conversation_id, session_id, *, before_node_id=
     children = {int(child) for node_id, row in nodes.items()
                 if validated[node_id] is not None and row[3] == "nodes"
                 for child in json.loads(row[2])}
+    # Older session-local publication could re-summarize a source after an
+    # A->B->A rollover. Never expose both claims or silently choose one: retain
+    # the database and require an explicit recovery of that ambiguous history.
+    claimed = set()
+    for node_id, sources in validated.items():
+        if sources is None or node_id in children:
+            continue
+        if claimed & sources:
+            raise LifecyclePublicationConflictError(
+                "Overlapping historical summary roots; original data retained"
+            )
+        claimed.update(sources)
     return {node_id: sources for node_id, sources in validated.items()
             if sources is not None and (include_descendants or node_id not in children)}
 
