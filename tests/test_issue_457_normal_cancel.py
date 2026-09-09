@@ -38,7 +38,7 @@ def _engine(tmp_path, tail=1):
 
 @pytest.mark.parametrize("restart", [False, True], ids=["same-engine", "cold-engine"])
 @pytest.mark.parametrize("tail", [1, 24, 32])
-def test_normal_leaf_late_cancel_cold_retry(tmp_path, monkeypatch, restart, tail):
+def test_normal_leaf_late_cancel_cold_retry(tmp_path, monkeypatch, restart, tail, end_flush=False):
     def deny_network(*args, **kwargs):
         raise AssertionError("Network is forbidden in this synthetic fixture")
 
@@ -141,6 +141,15 @@ def test_normal_leaf_late_cancel_cold_retry(tmp_path, monkeypatch, restart, tail
         assert receipt["untouched_suffix"]
         assert receipt["returned_summary"], "Cold retry returned old raw input without the committed summary"
         assert len(calls) == 1, "Recovery must not repeat provider work"
+        if end_flush:
+            engine.on_session_end("synthetic-cancel", messages)
+            after_end = len(rows())
+            engine.on_session_start("synthetic-cancel", old_session_id="synthetic-cancel",
+                boundary_reason="compression", conversation_id="synthetic-conversation",
+                platform="cli", context_length=200_000)
+            print("END_FLUSH_RECEIPT=" + json.dumps({"before": len(before),
+                "after_end": after_end, "after_boundary": len(rows())}))
+            assert after_end == len(rows()) == len(before)
         # New equal text is a new occurrence at a new cumulative position.
         continued = resumed + deepcopy(original[-2:])
         engine.ingest(continued)
@@ -149,6 +158,10 @@ def test_normal_leaf_late_cancel_cold_retry(tmp_path, monkeypatch, restart, tail
         assert len(rows()) == len(before) + 2
     finally:
         engine.shutdown()
+
+
+def test_cold_retry_original_history_end_flush(tmp_path, monkeypatch):
+    test_normal_leaf_late_cancel_cold_retry(tmp_path, monkeypatch, True, 24, end_flush=True)
 
 
 @pytest.mark.parametrize("fail_at", [1, 2])
