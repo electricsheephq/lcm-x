@@ -5306,7 +5306,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         # has already proven a partial replay.
         replayed_tool_segment_indexes = (
             self._replayed_tool_segment_indexes_after_cursor(reconcile_messages, cursor)
-            if reconciled_existing_session and cursor > 0
+            if (reconciled_existing_session and cursor > 0
+                # An exact owned engine projection already consumed its durable
+                # tool occurrences. Reusing them here would erase new repeats
+                # appended after that cumulative prefix.
+                and not self._owned_exact_snapshot_prefix(reconcile_messages[:cursor]))
             else set()
         )
         if replayed_tool_segment_indexes:

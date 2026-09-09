@@ -120,11 +120,6 @@ class CompactionMixin:
             if (not set(sources) <= visible_sources
                     or (suffix and assembled[-len(suffix):] != suffix)):
                 return None
-            self._ingest_cursor = len(assembled)
-            self._ingest_cursor_needs_reconcile = False
-            self._last_compression_status = "compacted"
-            self._last_compression_noop_reason = ""
-            self._last_compression_made_progress = True
             return assembled
 
     def _maybe_reclassify_late_auxiliary_before_compaction_write(self) -> None:
@@ -768,7 +763,10 @@ class CompactionMixin:
 
         resumed = self._resume_pending_compaction(messages)
         if resumed is not None:
-            return resumed
+            # The exact pending input is the old cumulative projection, while
+            # this instance may still have the shorter returned-context cursor.
+            # Run the ordinary reconciliation/preparation before finalizing it.
+            self._schedule_ingest_cursor_reconciliation()
         pending_digest = self._pending_input_digest(messages)
         pending_count = len(messages)
         pending_binding = [self._conversation_id, self._session_id]
@@ -811,6 +809,13 @@ class CompactionMixin:
         pending_eligible = (pending_digest is not None and len(working_messages) == pending_count
                             and len(pending_positions) == pending_count)
         self._prepare_retained_user_anchor(working_messages)
+        if resumed is not None:
+            self._ingest_cursor = len(resumed)
+            self._ingest_cursor_needs_reconcile = False
+            self._last_compression_status = "compacted"
+            self._last_compression_noop_reason = ""
+            self._last_compression_made_progress = True
+            return resumed
         ingest_cleanup_changed_active_context = working_messages != messages
         cleanup_only_due_to_boundary_cooldown = bool(
             self._preflight_cleanup_only_due_to_boundary_cooldown
