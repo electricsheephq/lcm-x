@@ -1,98 +1,236 @@
-name: CI
+name: Release qualification (synthetic, no publication)
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+    inputs:
+      rc_tag:
+        type: choice
+        options: [v0.23.3-rc2]
+        required: true
+      expected_sha:
+        description: Full reviewed commit SHA resolved from the RC tag
+        type: string
+        required: true
+      phase:
+        type: choice
+        options: [A, C-evidence]
+        required: true
 
 permissions:
   contents: read
+concurrency:
+  group: lcm-release-qualification
+  cancel-in-progress: false
 
 jobs:
-  workflow-lint:
-    runs-on: ubuntu-latest
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    environment: eva-lcm-release
+    env:
+      RC_TAG: ${{ inputs.rc_tag }}
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+      OPERATOR_SHA: ${{ github.sha }}
+      HERMES_HOME: ${{ runner.temp }}/qualification-home
+      OUT: ${{ runner.temp }}/qualification-receipts
+      PYTHONDONTWRITEBYTECODE: '1'
+      TOKENIZERS_PARALLELISM: 'false'
+      OMP_NUM_THREADS: '2'
+      LCM_SUMMARY_MODEL: gpt-6-astra
+      LCM_SUMMARY_REASONING_EFFORT: medium
+      LCM_SUMMARY_TIMEOUT_MS: '120000'
+      LCM_SUMMARY_FALLBACK_MODELS: '[]'
+      LCM_SUMMARY_SPEND_MAX_CALLS: '6'
+      LCM_SUMMARY_SPEND_WINDOW_SECONDS: '7200'
+      LCM_LEAF_CHUNK_TOKENS: '8000'
+      LCM_FRESH_TAIL_COUNT: '8'
+      LCM_EMBEDDINGS_ENABLED: 'false'
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Install actionlint
-        run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
-
-      - name: Lint GitHub Actions workflows
-        run: |
-          "$(go env GOPATH)"/bin/actionlint
-
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
-          python-version: "3.11"
-
-      - name: Install ruff
-        run: pip install ruff==0.15.13
-
-      - name: Lint with ruff
-        run: ruff check .
-
-  test:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+          ref: ${{ github.sha }}
+          path: operator
+          persist-credentials: false
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install test dependencies
-        run: pip install pytest numpy
-
-      - name: Stub hermes-agent ABC
+          ref: ${{ inputs.rc_tag }}
+          fetch-depth: 0
+          path: lcm
+          persist-credentials: false
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          repository: 100yenadmin/hermes-agent-for-upstream-PR-only
+          ref: 21091eb43914d7268239e0991563a7be861bc226
+          path: hermes
+          persist-credentials: false
+      - name: Bind exact candidate and clean isolated output
+        shell: bash
         run: |
-          mkdir -p agent
-          cat > agent/__init__.py <<'STUB'
-          STUB
-          cat > agent/context_engine.py <<'STUB'
-          """Minimal stub of hermes-agent ContextEngine ABC for CI."""
-          class ContextEngine:
-              """Base class stub — just enough for LCMEngine to import."""
-              def __init__(self, **kwargs):
-                  self.compression_count = 0
-                  self.last_prompt_tokens = 0
-              def compress(self, messages, current_tokens=None, **kwargs):
-                  raise NotImplementedError
-              def on_session_start(self, session_id, **kwargs):
-                  pass
-              def on_session_end(self, **kwargs):
-                  pass
-              def on_session_reset(self):
-                  self.compression_count = 0
-                  self.last_prompt_tokens = 0
-              def get_tool_schemas(self):
-                  return []
-              def handle_tool_call(self, name, args, **kwargs):
-                  raise NotImplementedError
-              def get_status(self):
-                  return {}
-          STUB
-
-      - name: Run pytest under low file descriptor limit
+          set -euo pipefail
+          [[ "$RC_TAG" == v0.23.3-rc2 && "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git -C operator rev-parse HEAD)" = "$OPERATOR_SHA"
+          test "$(git -C lcm rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$(git -C lcm rev-parse "$RC_TAG^{commit}")" = "$EXPECTED_SHA"
+          test "$(git -C hermes rev-parse HEAD)" = 21091eb43914d7268239e0991563a7be861bc226
+          umask 077
+          mkdir "$HERMES_HOME" "$OUT"
+          git -C lcm rev-parse HEAD HEAD^{tree} > "$OUT/candidate.txt"
+          git -C hermes rev-parse HEAD >> "$OUT/candidate.txt"
+          git -C operator rev-parse HEAD HEAD^{tree} >> "$OUT/candidate.txt"
+          sha256sum operator/bench/instruments/compaction_probe/drive_hermes_acp.py >> "$OUT/candidate.txt"
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: '3.11'
+      - name: Install existing host and gauntlet dependencies (remote only)
         run: |
-          ulimit -n 1024
-          python -m pytest tests/ -q
-
-      - name: Run static validation
+          pwd
+          python -m pip install './hermes[acp]' fastembed numpy
+      - name: Phase A cloud/local matrix and privacy batteries
+        if: inputs.phase == 'A'
+        timeout-minutes: 20
+        env:
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
         run: |
-          python -m compileall -q .
-          python -m py_compile scripts/import_lossless_claw.py
-          bash -n scripts/install.sh scripts/update.sh
-          git diff --check
+          test -n "$VOYAGE_API_KEY"
+          pwd
+          timeout 1100s python lcm/bench/instruments/release_gauntlet/phase_a_tool_matrix.py --worktree lcm --hermes-repo hermes --release --rc-tag "$RC_TAG" --out "$OUT/phase-a"
+      - name: Prepare bounded Phase C synthetic run
+        if: inputs.phase == 'C-evidence'
+        env:
+          LCM_RELEASE_CODEX_ACCESS_TOKEN: ${{ secrets.LCM_RELEASE_CODEX_ACCESS_TOKEN }}
+        run: |
+          python - <<'PY'
+          import base64, json, os, pathlib, time
+          import yaml
+          home = pathlib.Path(os.environ['HERMES_HOME'])
+          token = os.environ.get('LCM_RELEASE_CODEX_ACCESS_TOKEN', '')
+          if not token:
+              raise SystemExit('Missing release-environment Codex access token')
+          try:
+              part = token.split('.')[1]
+              claims = json.loads(base64.urlsafe_b64decode(part + '=' * (-len(part) % 4)))
+              valid = float(claims.get('exp', 0)) > time.time() + 7200
+          except Exception:
+              valid = False
+          if not valid:
+              raise SystemExit('Release token must remain valid for at least two hours')
+          # Pinned Hermes auth_codex.resolve_codex_runtime_credentials supports
+          # this pool-only access-token route. No refresh token is copied/rotated.
+          auth = {'credential_pool': {'openai-codex': [{'id': 'qualification',
+              'source': 'manual:api_key', 'auth_type': 'api_key', 'access_token': token}]}}
+          (home / 'auth.json').write_text(json.dumps(auth))
+          (home / 'auth.json').chmod(0o600)
+          config = {'model': {'default': 'gpt-6-astra', 'provider': 'openai-codex'},
+              'agent': {'max_turns': 3, 'run_budget_seconds': 600, 'reasoning_effort': 'medium'},
+              'plugins': {'enabled': ['hermes-lcm']}, 'context': {'engine': 'lcm'},
+              'auxiliary': {'compression': {'provider': 'openai-codex',
+                  'model': 'gpt-6-astra', 'reasoning_effort': 'medium', 'timeout': 120}},
+              'compression': {'context_timeout_seconds': 150, 'context_total_ceiling_seconds': 600},
+              'lcm': {'context_threshold': 0.10, 'summary_reasoning_effort': 'medium'}}
+          (home / 'config.yaml').write_text(yaml.safe_dump(config))
+          PY
+          bash lcm/scripts/install.sh
+          python lcm/bench/instruments/compaction_probe/gen_material.py --seed 230302 --out-dir "$OUT/material" --turns 30 --tokens-per-turn 2000
+          # Existing probes are bounded by the fixed generator seed, not user input.
+          python - <<'PY'
+          import json, os, pathlib
+          out = pathlib.Path(os.environ['OUT'])
+          probes = out / 'material/driver-probes.jsonl'
+          probes.write_text((out / 'material/probes.jsonl').read_text())
+          count = len(probes.read_text().splitlines())
+          if count > 60:
+              raise SystemExit('Synthetic probe budget exceeds 60 turns')
+          with probes.open('a') as f:
+              f.write(json.dumps({'id': 'doctor-close', 'text': 'Call lcm_status, then lcm_doctor now and report its exact overall status and failed checks.'}) + '\n')
+          (out / 'C-LIMITS.txt').write_text('30 material turns, at most 61 probes; 3 iterations/turn; 6 summary calls; 50-minute driver ceiling. Actual model window retained; compaction threshold deliberately lowered to 0.10. This run is evidence only.\n')
+          PY
+      - name: Phase C actual plugin registration preflight
+        if: inputs.phase == 'C-evidence'
+        run: |
+          python - <<'PY'
+          import inspect, pathlib, yaml, os
+          from agent.agent_init import _select_context_engine
+          from hermes_cli.plugins import discover_plugins, get_plugin_manager
+          discover_plugins()
+          cfg = yaml.safe_load((pathlib.Path(os.environ['HERMES_HOME']) / 'config.yaml').read_text())
+          engine = _select_context_engine(cfg)
+          assert engine is not None and engine.name == 'lcm', 'Native fallback refused'
+          assert pathlib.Path('lcm').resolve() in pathlib.Path(inspect.getfile(type(engine))).resolve().parents
+          assert get_plugin_manager()._hooks.get('post_llm_call'), 'Missing post-turn hook'
+          engine.shutdown()
+          PY
+      - name: Phase C ACP driver and existing probe scorer
+        if: inputs.phase == 'C-evidence'
+        timeout-minutes: 52
+        run: |
+          pwd
+          timeout 3000s python operator/bench/instruments/compaction_probe/drive_hermes_acp.py --hermes-home "$HERMES_HOME" --material "$OUT/material/turns.jsonl" --probes "$OUT/material/driver-probes.jsonl" --canaries "$OUT/material/canaries.json" --expect-engine lcm --expect-model gpt-6-astra --turn-timeout 600 --runtime-evidence --log "$OUT/phase-c-raw.log" --results "$OUT/phase-c-results.jsonl" --manifest "$OUT/phase-c-manifest.json"
+          python lcm/bench/instruments/compaction_probe/score_probes.py --results "$OUT/phase-c-results.jsonl" --canaries "$OUT/material/canaries.json" --probes "$OUT/material/probes.jsonl" --out "$OUT/phase-c-scores.json"
+      - name: Retain isolated engine logs including available rotations
+        if: always() && inputs.phase == 'C-evidence'
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, re, shutil
+          home, out = pathlib.Path(os.environ['HERMES_HOME']), pathlib.Path(os.environ['OUT'])
+          logs = home / 'logs'
+          dest = out / 'phase-c-engine-logs'
+          dest.mkdir(exist_ok=True)
+          copied = []
+          if logs.is_dir() and not logs.is_symlink():
+              for path in sorted(logs.iterdir()):
+                  if re.fullmatch(r'(agent|errors)\.log(?:\.\d+)?', path.name):
+                      if path.is_symlink() or not path.is_file():
+                          raise SystemExit('Unsafe synthetic log path')
+                      shutil.copyfile(path, dest / path.name)
+                      copied.append(path.name)
+          (out / 'phase-c-log-inventory.json').write_text(json.dumps({
+              'files': copied, 'complete_history_proven': False,
+              'limit': 'Available rotations only; review for rollover loss and missing startup logs.'}))
+          PY
+      - name: Keep Phase C release gate incomplete pending observed postconditions
+        if: always() && inputs.phase == 'C-evidence'
+        run: |
+          printf '%s\n' 'GATE INCOMPLETE: driver success is not Phase C acceptance. Review exact-tree receipts for threshold crossing, actual LCM/no native fallback throughout, successful recall probes, final lcm_doctor healthy, and zero unexpected log errors/publication conflicts. Phase B remains separate.' > "$OUT/PHASE-C-RECEIPT.md"
+          exit 1
+      - name: Redact execution credentials from synthetic diagnostics
+        id: redact
+        if: always() && inputs.phase == 'C-evidence'
+        run: |
+          python - <<'PY'
+          import json, os, pathlib
+          home, out = pathlib.Path(os.environ['HERMES_HOME']), pathlib.Path(os.environ['OUT'])
+          auth = home / 'auth.json'
+          if not auth.is_file():
+              raise SystemExit('Credential redaction input unavailable; artifacts withheld')
+          if auth.exists():
+              entries = json.loads(auth.read_text()).get('credential_pool', {}).get('openai-codex', [])
+              if not entries or any(not entry.get('access_token') for entry in entries):
+                  raise SystemExit('Credential redaction input incomplete; artifacts withheld')
+              paths = [out / name for name in ('phase-c-raw.log', 'phase-c-results.jsonl', 'phase-c-scores.json', 'phase-c-manifest.json')]
+              paths += list((out / 'phase-c-engine-logs').glob('*.log*'))
+              for path in paths:
+                  if not path.exists():
+                      continue
+                  text = path.read_text()
+                  for entry in entries:
+                      if entry.get('access_token'):
+                          text = text.replace(entry['access_token'], '[REDACTED]')
+                  path.write_text(text)
+          PY
+      - name: Upload only selected synthetic receipts
+        if: always() && (inputs.phase == 'A' || steps.redact.outcome == 'success')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: qualification-${{ inputs.rc_tag }}-${{ inputs.phase }}-${{ github.run_id }}
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/qualification-receipts/candidate.txt
+            ${{ runner.temp }}/qualification-receipts/phase-a/PHASE-A-RECEIPT.md
+            ${{ runner.temp }}/qualification-receipts/PHASE-C-RECEIPT.md
+            ${{ runner.temp }}/qualification-receipts/C-LIMITS.txt
+            ${{ runner.temp }}/qualification-receipts/phase-c-scores.json
+            ${{ runner.temp }}/qualification-receipts/phase-c-manifest.json
+            ${{ runner.temp }}/qualification-receipts/phase-c-results.jsonl
+            ${{ runner.temp }}/qualification-receipts/phase-c-raw.log
+            ${{ runner.temp }}/qualification-receipts/phase-c-engine-logs/
+            ${{ runner.temp }}/qualification-receipts/phase-c-log-inventory.json

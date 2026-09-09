@@ -358,6 +358,7 @@ class StdioJsonRpc:
             self._selector.register(self.process.stdout, selectors.EVENT_READ)
             self._stdout_buffer = bytearray()
             self._next_id = 1
+            self.tool_updates: list[dict[str, Any]] = []
             self._stdin_closed = False
             self.stderr_bytes = 0
             self._stderr_buffer = bytearray()
@@ -473,6 +474,14 @@ class StdioJsonRpc:
                     if "id" in message:
                         self._send_error(message.get("id"))
                     else:
+                        params = message.get("params", {})
+                        update = params.get("update", {}) if isinstance(params, dict) else {}
+                        if (message.get("method") == "session/update" and isinstance(update, dict)
+                                and update.get("sessionUpdate", update.get("session_update"))
+                                in {"tool_call", "tool_call_update"}):
+                            # Preserve the actual ACP event, including completion content/status.
+                            # Structured tool JSON may already be formatted by the host adapter.
+                            self.tool_updates.append(update)
                         chunk = agent_message_chunk(message)
                         if chunk is not None and answer_chunks is not None:
                             answer_chunks.append(chunk)
@@ -507,6 +516,7 @@ class StdioJsonRpc:
         return result["sessionId"]
 
     def prompt(self, session_id: str, text: str, timeout_seconds: float) -> tuple[str, bool]:
+        self.tool_updates = []
         chunks: list[str] = []
         turn_state = {"lcm_tool_fired": False}
         request_id = self.send(
@@ -689,6 +699,57 @@ def diagnostics(home: Path) -> dict[str, Any]:
     }
 
 
+def runtime_evidence(home: Path) -> dict[str, Any]:
+    """Read committed synthetic-run evidence, never open/create a missing database.
+
+    These observations support review; neither counters nor configured routes
+    constitute a release verdict. No transcript, configuration, or auth is copied.
+    """
+    evidence: dict[str, Any] = {"ts": utc_now()}
+    for name in ("lcm.db", "state.db"):
+        path = home / name
+        if not path.is_file() or path.is_symlink():
+            evidence[name] = {"available": False}
+            continue
+        conn = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True, timeout=5)
+        try:
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            item: dict[str, Any] = {"available": True}
+            if name == "lcm.db" and "summary_nodes" in tables:
+                item["leaf_nodes"], item["leaf_source_tokens"], item["leaf_summary_tokens"] = conn.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(source_token_count),0), COALESCE(SUM(token_count),0) "
+                    "FROM summary_nodes WHERE source_type='messages'").fetchone()
+                item["leaf_source_references"], item["distinct_leaf_sources"] = conn.execute(
+                    "SELECT COUNT(*), COUNT(DISTINCT j.value) FROM summary_nodes n, json_each(n.source_ids) j "
+                    "WHERE n.source_type='messages'").fetchone()
+            if name == "lcm.db" and "lcm_lifecycle_state" in tables:
+                item["lifecycle_watermarks"] = [list(r) for r in conn.execute(
+                    "SELECT current_frontier_store_id,last_finalized_frontier_store_id "
+                    "FROM lcm_lifecycle_state ORDER BY conversation_id")]
+            if name == "lcm.db" and "metadata" in tables:
+                keys = {"total_compactions", "compression_count_at_record", "last_leaf_compaction_at",
+                    "last_compaction_duration_ms", "turns_since_leaf_compaction",
+                    "peak_prompt_tokens_since_leaf_compaction", "prompt_tokens"}
+                item["compaction_telemetry"] = []
+                for row in conn.execute("SELECT value FROM metadata WHERE key LIKE 'compaction_telemetry:%'"):
+                    value = json.loads(row[0])
+                    if isinstance(value, dict):
+                        item["compaction_telemetry"].append({k: v for k, v in value.items() if k in keys})
+            if name == "state.db" and "messages" in tables:
+                item["message_counts"] = [list(r) for r in conn.execute(
+                    "SELECT active,role,COUNT(*) FROM messages GROUP BY active,role ORDER BY active,role")]
+                # Exact persisted tool output, including doctor checks omitted by ACP formatting.
+                item["diagnostic_tool_results"] = [dict(zip(("tool_name", "content"), r)) for r in conn.execute(
+                    "SELECT tool_name,content FROM messages WHERE role='tool' "
+                    "AND tool_name IN ('lcm_doctor','lcm_status') ORDER BY id")]
+            evidence[name] = item
+        except (sqlite3.Error, ValueError, TypeError) as exc:
+            evidence[name] = {"available": False, "error_class": type(exc).__name__}
+        finally:
+            conn.close()
+    return evidence
+
+
 def run(args: argparse.Namespace) -> int:
     home = Path(args.hermes_home).expanduser()
     if home.suffix in {".yaml", ".yml"} or not home.is_dir():
@@ -766,6 +827,8 @@ def run(args: argparse.Namespace) -> int:
                 sys.stderr.write(f"[driver] ABORT: ACP initialization timed out: {exc}\n")
                 return TIMEOUT_EXIT_CODE
             manifest["acp_sessions"].append(session_id)
+            if args.runtime_evidence:
+                manifest.setdefault("runtime_before_turns", []).append(runtime_evidence(home))
             write_manifest(manifest_path, manifest)
             for kind, row in phase:
                 if kind == "probe" and not config_checked_before_probes:
@@ -804,6 +867,9 @@ def run(args: argparse.Namespace) -> int:
                     entry["lcm_tool_fired"] = lcm_tool_fired
                 if stop_reason is not None:
                     entry["stop_reason"] = stop_reason
+                if args.runtime_evidence:
+                    entry["acp_tool_updates"] = list(client.tool_updates)
+                    entry["runtime_evidence"] = runtime_evidence(home)
                 write_jsonl(results_path, entry)
                 sys.stderr.write(
                     f"[driver] sent {kind} turn {turn_index}: {text[:60]!r}"
@@ -828,6 +894,8 @@ def run(args: argparse.Namespace) -> int:
 
     assert_config(config_path, config_sha, values, args)
     manifest["diagnostics"] = diagnostics(home)
+    if args.runtime_evidence:
+        manifest["runtime_after_close"] = runtime_evidence(home)
     write_manifest(manifest_path, manifest)
     sys.stderr.write("[driver] done\n")
     return 0
@@ -847,6 +915,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--canaries")
     parser.add_argument("--turn-timeout", type=float, default=DEFAULT_TURN_TIMEOUT)
     parser.add_argument("--restart-before-probes", action="store_true")
+    parser.add_argument("--runtime-evidence", action="store_true",
+                        help="retain tool events and committed DB diagnostics; synthetic isolated homes only")
     return parser
 
 
