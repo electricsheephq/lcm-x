@@ -50,6 +50,23 @@ def test_foreign_full_history_cannot_prove_current_replay(engine):
     assert sum(row["conversation_id"] == "owned" for row in engine._store.get_session_messages("producer")) == len(active)
 
 
+def test_empty_filtered_history_boundary_stores_next_fresh_turn(engine):
+    class DropOnlyPattern:
+        pattern = "DROP_SYNTHETIC"
+        def search(self, text, timeout=None):
+            return object() if self.pattern in str(text) else None
+    engine._compiled_ignore_message_patterns = [DropOnlyPattern()]
+    engine.ingest([{"role": "user", "content": "DROP_SYNTHETIC"}])
+    assert engine._owner_history(count_only=True) == 0
+    assert engine._ingest_cursor == 1
+    engine.on_session_start("producer", conversation_id="owned", platform="cli",
+        context_length=200000, boundary_reason="compression", old_session_id="producer")
+    fresh = [{"role": "user", "content": "fresh unfiltered user turn"}]
+    engine.ingest(fresh)
+    engine.ingest(fresh)
+    assert [row["content"] for row in engine._owner_history()] == [fresh[0]["content"]]
+
+
 def test_explicit_owned_other_producer_is_publication_source(engine):
     message = {"role": "assistant", "content": "owned prior producer source"}
     source = engine._store.append_batch("earlier", [message], conversation_id="owned")[0]
