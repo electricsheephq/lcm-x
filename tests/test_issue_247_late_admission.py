@@ -291,3 +291,32 @@ def test_registered_prefix_does_not_prove_unmatched_suffix(engine, suffix_kind):
         supplied = [{"role": "user", "content": "ignored suffix"}, *suffix]
     incoming = [*snapshot, *supplied]
     assert engine._reconcile_ingest_cursor_from_store(incoming) < len(incoming)
+
+
+@pytest.mark.parametrize("field", ["content", "tool_calls"])
+def test_registered_prefix_does_not_prove_lossy_suffix(engine, field):
+    engine._config.sensitive_patterns_enabled = True
+    engine._config.sensitive_patterns = ["password_assignment"]
+    node(engine, [raw(engine, "covered source")], "owned summary")
+    tail = [{"role": "user", "content": "durable tail"}]
+    engine._store.append_batch("active", tail, conversation_id="owned")
+    snapshot = engine._assemble_context(None, tail)
+    def suffix(value):
+        message = {"role": "assistant", "content": "visible result"}
+        if field == "content":
+            message["content"] = "password=" + value
+        else:
+            message["tool_calls"] = [{"id": "lossy", "type": "function",
+                "function": {"name": "lookup", "arguments": json.dumps({"password": value})}}]
+        return message
+    first, second = suffix("abcdef"), suffix("ghijkl")
+    redacted_first, redacted_second = engine._redact_active_replay_messages([first, second])
+    assert first != second and redacted_first == redacted_second
+    engine._store.append_batch("active", [redacted_first], conversation_id="owned")
+    incoming = [*snapshot, redacted_second]
+    assert engine._reconcile_ingest_cursor_from_store(incoming) < len(incoming)
+    engine._ingest_cursor_needs_reconcile = True
+    engine.ingest([*snapshot, second])
+    identity = engine._message_replay_identity(redacted_first)
+    assert sum(engine._message_replay_identity(row, stored_row=True) == identity
+        for row in engine._owner_history()) == 2

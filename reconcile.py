@@ -1047,7 +1047,8 @@ class ReconcileMixin:
                 )
             has_registered_engine_extension = any(
                 end < cursor and all(
-                    not self._is_replayed_context_scaffold_message(message)
+                    not _has_lossy_redacted_identity(active_identity(message))
+                    and not self._is_replayed_context_scaffold_message(message)
                     and not self._matches_ignore_message_patterns(message)
                     for message in messages[end:cursor]
                 ) for end in registered_prefix_ends
