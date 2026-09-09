@@ -188,3 +188,66 @@ def test_renewal_metadata_and_rows_rollback_together(tmp_path, monkeypatch):
         assert engine._store._conn.execute("SELECT value FROM metadata WHERE key='test-original-scaffold-proof'").fetchone() is None
     finally:
         engine.shutdown()
+
+
+def test_direct_assistant_after_compression_boundary_renews_snapshot(tmp_path, monkeypatch):
+    engine, active = _renewal_engine(tmp_path, monkeypatch)
+    try:
+        # Force another compaction, then exercise the exact host callback order.
+        history = [*active, *[{"role": "user" if i % 2 == 0 else "assistant",
+            "content": f"additional turn {i}"} for i in range(20)]]
+        adopted = engine.compress(history, force=True)
+        before = engine._store.get_session_count("same")
+        engine.on_session_end("same", history)
+        engine.on_session_start("same", old_session_id="same", boundary_reason="compression",
+            conversation_id="owned", platform="cli", context_length=200000)
+        appended = [*adopted, {"role": "assistant", "content": "final assistant response"}]
+        engine.ingest(appended)
+        assert engine._store.get_session_count("same") == before + 1
+        digest = engine._replay_snapshot_digest(appended, require_lcm_system_note=False)
+        assert digest in engine._load_compacted_active_replay_snapshot_digests()
+        config, home = engine._config, engine._hermes_home
+        engine.shutdown()
+        cold = LCMEngine(config=config, hermes_home=str(home))
+        try:
+            cold.on_session_start("same", conversation_id="owned", platform="cli", context_length=200000)
+            cold.ingest(appended)
+            assert cold._store.get_session_count("same") == before + 1
+        finally:
+            cold.shutdown()
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("missing", ["floor", "count"])
+def test_missing_renewal_readback_preserves_fresh_ingestion(tmp_path, monkeypatch, missing):
+    engine, active = _renewal_engine(tmp_path, monkeypatch)
+    connection = engine._store._conn
+    class MissingReadback:
+        def fetchone(self):
+            return None
+    class ConnectionProxy:
+        def __enter__(self):
+            connection.__enter__()
+            return self
+        def __exit__(self, *args):
+            return connection.__exit__(*args)
+        def __getattr__(self, name):
+            return getattr(connection, name)
+        def execute(self, query, parameters=()):
+            if ((missing == "floor" and query == "SELECT COALESCE(MAX(store_id), 0) FROM messages")
+                or (missing == "count" and query.startswith("SELECT COUNT(*) FROM messages WHERE store_id >"))):
+                assert engine._store._write_lock._is_owned()
+                return MissingReadback()
+            return connection.execute(query, parameters)
+    try:
+        before = engine._store.get_session_count("same")
+        proofs = engine._load_compacted_active_replay_snapshot_digests()
+        engine._store._conn = ConnectionProxy()
+        appended = [*active, {"role": "assistant", "content": "fresh despite missing readback"}]
+        engine._ingest_messages(appended)
+        assert engine._store.get_session_count("same") == before + 1
+        assert engine._load_compacted_active_replay_snapshot_digests() == proofs
+    finally:
+        engine._store._conn = connection
+        engine.shutdown()
