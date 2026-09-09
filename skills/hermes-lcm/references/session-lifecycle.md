@@ -4,6 +4,18 @@ Hermes `/new` starts a new host session. LCM-X binds that session to its own lif
 
 Do not promise that `/new` deletes historical LCM data. Earlier rows remain in `lcm.db` unless an explicitly authorized cleanup removes them, and they remain available through bounded cross-session recall.
 
+Before binding, finalization, or rollover replaces existing lifecycle pointers,
+LCM makes already-proven legacy ownership explicit on rows whose conversation ID
+is blank. This requires the existing unambiguous binding predicate: another
+conversation binding or any explicitly foreign row under that producer prevents
+promotion. The proof read, blank-owner update, and lifecycle transition share one
+SQLite write transaction. Source IDs, producer session IDs, content, and nonblank
+conversation IDs remain unchanged.
+
+This preserves attribution before it would be forgotten; it does not infer an
+owner for already-orphaned or ambiguous legacy rows. Operators must not use a
+neighboring row, a shared producer ID alone, or a carried summary as repair proof.
+
 ## `/lcm rotate`
 
 `/lcm rotate` is different from `/new`:
