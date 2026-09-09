@@ -4,6 +4,7 @@ import hermes_lcm.engine as engine_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.lifecycle_state import LifecyclePublicationConflictError, admitted_summary_roots
 
 
 @pytest.fixture
@@ -82,6 +83,34 @@ def test_assembly_selects_only_valid_owned_lineage(engine):
             token_count=2, source_token_count=10, source_ids=[source], source_type="messages", created_at=1))
     assembled = str(engine._assemble_context(None, []))
     assert "OWNED" in assembled and "FOREIGN" not in assembled
+
+
+@pytest.mark.parametrize("include_descendants", [False, True])
+def test_legacy_rollover_overlap_refuses_admission_without_mutation(engine, monkeypatch, include_descendants):
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", lambda **kw: ("First summary", 1))
+    active = engine.compress(history(), force=True)
+    first = engine._dag.get_session_nodes("producer")[0]
+    engine.rollover_session("producer", "successor", previous_messages=active,
+        boundary_reason="compression", platform="cli", context_length=200000)
+    engine.on_session_end("successor", [])
+    engine.on_session_start("producer", conversation_id="owned", platform="cli", context_length=200000)
+    # Reproduce the persisted second root from the executed main7fb A->B->A
+    # lifecycle trace. That version reset A's frontier and checked only A nodes,
+    # allowing this second publication while the first root remained under B.
+    engine._dag.add_node(SummaryNode(session_id="producer", depth=0,
+        summary="Second independently generated summary", token_count=5,
+        source_token_count=first.source_token_count, source_ids=first.source_ids,
+        source_type="messages", created_at=first.created_at + 1))
+    def snapshot():
+        return {table: [tuple(row) for row in engine._store._conn.execute(f"SELECT * FROM {table}")]
+                for table in ("messages", "summary_nodes", "lcm_lifecycle_state")}
+    before = snapshot()
+    with pytest.raises(LifecyclePublicationConflictError, match="Overlapping historical summary roots"):
+        admitted_summary_roots(engine._store._conn, "owned", "producer",
+            include_descendants=include_descendants)
+    with pytest.raises(LifecyclePublicationConflictError, match="Overlapping historical summary roots"):
+        engine._assemble_context(None, [])
+    assert snapshot() == before
 
 
 def test_nonblank_legacy_owner_is_exact_across_history_and_roots(tmp_path):
