@@ -616,10 +616,7 @@ class CompactionMixin:
         proofs = dict(initial_proofs)
         after_store_id = expected_frontier
         while after_store_id < covered_end:
-            rows = self._store.get_session_messages_after(
-                self._session_id,
-                after_store_id=after_store_id,
-            )
+            rows = self._owner_history(after_store_id=after_store_id)
             if not rows:
                 break
             for row in rows:
@@ -1139,6 +1136,20 @@ class CompactionMixin:
             source_store_ids = sorted(dict.fromkeys(source_store_ids))
             consumed_store_ids = self._get_store_ids_for_messages(source_lookup_chunk)
             consumed_store_ids = sorted(dict.fromkeys(consumed_store_ids))
+            required_messages = [message for message in source_lookup_chunk
+                if not self._is_replayed_context_scaffold_message(message)]
+            required_ids = self._get_store_ids_for_messages(required_messages)
+            if len(set(required_ids)) != len(required_messages):
+                fallback = anchor_source_messages
+                if leaf_passes:
+                    fallback = self._assemble_committed_compaction_context(
+                        working_messages, anchor_source_messages, 2**63 - 1)
+                return self._fail_open_after_publication_failure(
+                    fallback, LifecyclePublicationConflictError("Unmapped required source occurrence"),
+                    compress_started=_compress_started,
+                    threshold_full_sweep_active=threshold_full_sweep_active,
+                    recovery_assembly_cap=recovery_assembly_cap,
+                    leaf_passes=leaf_passes, context_is_assembled=True)
             earliest_at, latest_at = self._store.get_time_bounds(source_store_ids)
             summary_tokens = count_tokens(summary_text)
 

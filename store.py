@@ -27,6 +27,7 @@ from .db_bootstrap import (
     refuse_schema_version_too_new,
     run_versioned_migrations,
 )
+from .lifecycle_state import legacy_blank_clause, unambiguous_legacy_session_ids
 from .config import LCMConfig
 from .ingest_protection import protect_message_for_ingest, protect_messages_for_ingest
 from .search_query import (
@@ -795,6 +796,26 @@ class MessageStore:
             args,
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
+
+    def get_conversation_messages_after(self, conversation_id, *, after_store_id=0,
+            limit=10000, latest=False, count_only=False, producer_session_id=None):
+        """Read the explicit logical owner plus uniquely bound legacy rows."""
+        state = self._conn.execute("SELECT current_session_id, last_finalized_session_id "
+            "FROM lcm_lifecycle_state WHERE conversation_id = ?", (conversation_id,)).fetchone()
+        legacy = unambiguous_legacy_session_ids(self._conn, conversation_id,
+            {value for value in (state or ()) if value})
+        where = ["(conversation_id = ? OR (" + legacy_blank_clause("conversation_id")
+            + ") AND session_id IN (SELECT value FROM json_each(?)))", "store_id > ?"]
+        args = [conversation_id, json.dumps(sorted(legacy)), after_store_id]
+        if producer_session_id is not None:
+            where.append("session_id = ?")
+            args.append(producer_session_id)
+        if count_only:
+            return self._conn.execute("SELECT COUNT(*) FROM messages WHERE " + " AND ".join(where), args).fetchone()[0]
+        rows = self._conn.execute(f"SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages WHERE "
+            + " AND ".join(where) + (" ORDER BY store_id DESC" if latest else " ORDER BY store_id")
+            + " LIMIT ?", [*args, limit]).fetchall()
+        return [self._row_to_dict(row) for row in (reversed(rows) if latest else rows)]
 
     def load_session_window(
         self,
