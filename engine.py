@@ -6654,7 +6654,8 @@ class LCMEngine(
                 if retained_user_msg is not None:
                     retained_generated_context_parts.append(combined)
                 else:
-                    result.append({"role": summary_role, "content": combined})
+                    result.append({"role": summary_role, "content": combined,
+                        "_compressed_summary": True})
 
         # Proactive memory injection (SPEC F, default-off). One bounded block is
         # placed adjacent to the summary prefix — a stable position below the

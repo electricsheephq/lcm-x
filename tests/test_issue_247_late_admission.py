@@ -31,6 +31,28 @@ def node(engine, sources, text, producer="active", depth=0):
     return value
 
 
+def test_only_standalone_summary_has_host_carrier_marker(engine):
+    node(engine, [raw(engine, "covered history")], "owned summary")
+    tail = [{"role": "user", "content": "fresh real request"},
+        {"role": "assistant", "content": "fresh real response"}]
+    engine._store.append_batch("active", tail, conversation_id="owned")
+    standalone = engine._assemble_context(None, tail)
+    assert standalone[0]["_compressed_summary"] is True
+    assert "owned summary" in standalone[0]["content"]
+    assert standalone[1:] == tail
+    assert all("_compressed_summary" not in message for message in tail)
+
+    retained = {"role": "user", "content": "sole original request"}
+    raw(engine, retained["content"], role="user")
+    folded = engine._assemble_context(None, tail[1:], retained_user_message=retained)
+    assert folded[0] == retained
+    assert len(folded) == 2
+    assert "owned summary" in folded[1]["content"]
+    assert folded[1]["content"].endswith(tail[1]["content"])
+    assert all("_compressed_summary" not in message for message in folded)
+    assert tail[1] == {"role": "assistant", "content": "fresh real response"}
+
+
 def test_explicit_foreign_rows_veto_blank_legacy_binding_after_rollover(engine):
     blank = raw(engine, "unclaimed blank", owner="")
     raw(engine, "foreign durable evidence", owner="foreign")
