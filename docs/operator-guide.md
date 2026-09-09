@@ -198,6 +198,16 @@ prepends the policy. The canonical file and digest source is
 
 ## Troubleshooting
 
+### `Overlapping historical summary roots`
+
+LCM refuses to assemble or publish when two independent historical summaries
+claim the same stored occurrence. Older session-local publication could create
+this state when reopening A after an A→B compression rollover. All raw rows,
+summaries and lifecycle state remain stored; retrying does not select a winner.
+Preserve a coherent database backup and investigate the conflicting source
+lineage on a copy. Do not delete a summary, reset the conversation or advance the
+frontier merely to clear the error.
+
 ### `hermes plugins` shows `lcm (not found)` but LCM tools exist
 
 If `plugins.enabled` contains `hermes-lcm`, `context.engine: lcm` is set, and

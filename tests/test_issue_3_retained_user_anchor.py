@@ -548,12 +548,16 @@ def test_preflight_second_user_invalidates_prepared_anchor(
     try:
         engine.compress(first)
         assert engine._leading_anchor_count(first) == 2
+        registered = engine._store.read_metadata_json(engine._retained_user_anchor_metadata_key())
+        assert registered["store_id"] > 0
         engine.threshold_tokens = 1
         messages = [
             *first,
             {"role": "user", "content": "second user invalidates the anchor"},
         ]
         should_compress = engine.should_compress_preflight(messages)
+        assert engine._prepared_retained_user_anchor is None
+        assert engine._leading_anchor_count(messages) == 1
         anchor_metadata = engine._store.read_metadata_json(
             engine._retained_user_anchor_metadata_key()
         )
@@ -561,7 +565,7 @@ def test_preflight_second_user_invalidates_prepared_anchor(
         engine.shutdown()
 
     assert should_compress is True
-    assert anchor_metadata == {"store_id": 0, "version": 1}
+    assert anchor_metadata == registered
 
 
 def test_second_real_user_disqualifies_first_raw_anchor(
@@ -598,6 +602,13 @@ def test_second_real_user_disqualifies_first_raw_anchor(
                 *_tool_chain(count=4),
             ]
         )
+        assert engine._prepared_retained_user_anchor is None
+        # The host now supplies the adopted projection; stale proof can retire.
+        adopted = engine.compress(second_result)
+        assert adopted
+        source_ids = [source_id for node in engine._dag.get_session_nodes(engine._session_id)
+            if node.source_type == "messages" for source_id in node.source_ids]
+        assert len(source_ids) == len(set(source_ids))
         anchor_metadata = engine._store.read_metadata_json(
             engine._retained_user_anchor_metadata_key()
         )

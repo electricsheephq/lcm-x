@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional
 
 from .externalize import (
     extract_externalized_ref,
+    is_externalized_placeholder,
     externalized_tool_result_has_persisted_output_marker,
     find_externalized_tool_result_content_for_call,
     load_externalized_payload,
@@ -467,7 +468,7 @@ class ReconcileMixin:
                 session_id=session_id,
             )
             tool_calls = self._restore_ingest_payload_placeholders_in_value(tool_calls, session_id=session_id)
-        ref = extract_externalized_ref(content)
+        ref = extract_externalized_ref(content) if is_externalized_placeholder(content) else None
         if ref and "quarantined_assistant_output" not in content:
             payload = load_externalized_payload(
                 ref,
@@ -629,11 +630,49 @@ class ReconcileMixin:
     def _remember_compacted_active_replay_snapshot(
         self,
         messages: List[Dict[str, Any]],
+        *, trusted_assembly: bool = False,
     ) -> None:
         self._remember_replay_snapshot(
             _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX,
-            self._compacted_active_replay_snapshot_digest(messages),
+            self._replay_snapshot_digest(messages, require_lcm_system_note=not trusted_assembly),
         )
+
+    def _owned_exact_snapshot_prefix(self, messages):
+        """Admit renewal only from a registered snapshot with current owned lineage."""
+        digest = self._replay_snapshot_digest(messages, require_lcm_system_note=False)
+        if not digest or digest not in self._load_compacted_active_replay_snapshot_digests():
+            return False
+        if any(_has_lossy_redacted_identity(self._message_replay_identity(m)) for m in messages):
+            return False
+        roots = {node.node_id: node for node in self._owned_summary_roots()}
+        seen = set()
+        raw = []
+        for message in messages:
+            if message.get("role") == "system":
+                continue
+            if self._is_replayed_context_scaffold_message(message):
+                content = normalize_content_value(message.get("content")) or ""
+                ids = {int(value) for value in re.findall(r"Summary \(d\d+, node (\d+)\)", content)}
+                if not ids or not ids <= roots.keys():
+                    return False
+                seen.update(ids)
+            else:
+                raw.append(message)
+        mapping = self._get_store_id_map_for_messages(raw)
+        ids = [mapping.get(id(message), 0) for message in raw]
+        if not seen or not ids or not all(ids) or ids != sorted(set(ids)):
+            return False
+        with self._store._write_lock:
+            rows = self._store._conn.execute(
+                "SELECT conversation_id FROM messages WHERE store_id IN (SELECT value FROM json_each(?))",
+                (json.dumps(ids),),
+            ).fetchall()
+        return len(rows) == len(ids) and all(row[0] == self._conversation_id for row in rows)
+
+    def _snapshot_append_is_lossless(self, messages):
+        return all(not _has_lossy_redacted_identity(self._message_replay_identity(message))
+            and not self._is_replayed_context_scaffold_message(message)
+            and not self._matches_ignore_message_patterns(message) for message in messages)
 
     # -- Session-end full-history proof (consumed ONLY by current-session
     #    full-history session-end ingest) --
@@ -1008,7 +1047,7 @@ class ReconcileMixin:
                 and self._matches_store_tail_suffix(sanitized_replay_tail, candidate_prefix)
             )
             matches_raw_tail = self._matches_store_tail_suffix(stored_tail, candidate_prefix)
-            engine_snapshot_digest = self._compacted_active_replay_snapshot_digest(candidate_messages)
+            engine_snapshot_digest = self._replay_snapshot_digest(candidate_messages, require_lcm_system_note=False)
             session_end_snapshot_digest = (
                 self._session_end_replay_snapshot_digest(candidate_messages)
                 if allow_session_end_replay_proof
@@ -1482,7 +1521,7 @@ class ReconcileMixin:
             return 0
 
         try:
-            session_count = self._store.get_session_count(self._session_id)
+            session_count = self._owner_history(count_only=True, producer_session_id=self._session_id)
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation count failed: %s", exc)
             return 0
@@ -1517,7 +1556,7 @@ class ReconcileMixin:
             return 0
 
         tail_limit = min(max(len(messages) * 4, 64), session_count)
-        stored_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
+        stored_rows = self._owner_history(limit=tail_limit, latest=True, producer_session_id=self._session_id)
         if not stored_rows:
             return 0
         stored_tail_rows = [
@@ -1565,10 +1604,7 @@ class ReconcileMixin:
             return cursor
 
         incoming_identities = self._effective_replay_identities(messages)
-        stored_head_rows = self._store.get_session_messages(
-            self._session_id,
-            limit=tail_limit,
-        )
+        stored_head_rows = self._owner_history(limit=tail_limit, producer_session_id=self._session_id)
         stored_head = [self._message_replay_identity(row, stored_row=True) for row in stored_head_rows]
         # Stale-snapshot proof uses the raw durable prefix.  Ignore-message
         # filters may suppress noisy rows for tail reconciliation, but filtered
@@ -1654,11 +1690,11 @@ class ReconcileMixin:
         """
         if not self._session_id or cursor >= len(messages):
             return set()
-        session_count = self._store.get_session_count(self._session_id)
+        session_count = self._owner_history(count_only=True, producer_session_id=self._session_id)
         if session_count <= 0:
             return set()
         tail_limit = min(max(len(messages) * 4, 64), session_count)
-        stored_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
+        stored_rows = self._owner_history(limit=tail_limit, latest=True, producer_session_id=self._session_id)
         stored_identity_counts = Counter(
             identity
             for identity in (
@@ -1937,6 +1973,13 @@ class ReconcileMixin:
                 )
                 if active_matches == 1:
                     candidates.append(retained_anchor)
+        if candidates and self._conversation_id:
+            from .lifecycle_state import unambiguous_legacy_session_ids
+            legacy = unambiguous_legacy_session_ids(self._store._conn, self._conversation_id,
+                {row.get("session_id") for row in candidates if row.get("session_id")})
+            candidates = [row for row in candidates if row.get("conversation_id") == self._conversation_id
+                or (not str(row.get("conversation_id") or "").strip("\t\n\v\f\r ")
+                    and row.get("session_id") in legacy)]
         if candidates:
             candidates = list(
                 {
@@ -1948,10 +1991,7 @@ class ReconcileMixin:
             candidates.sort(key=lambda candidate: int(candidate["store_id"]))
         next_candidate_after = self._last_compacted_store_id
         while True:
-            page = self._store.get_session_messages_after(
-                self._session_id,
-                after_store_id=next_candidate_after,
-            )
+            page = self._owner_history(after_store_id=next_candidate_after)
             if not page:
                 break
             candidates.extend(page)

@@ -11,6 +11,7 @@ This is the smallest viable substrate for cross-turn/session lifecycle state:
 from __future__ import annotations
 
 import functools
+import json
 import sqlite3
 import threading
 import time
@@ -29,6 +30,161 @@ class LifecyclePublicationConflictError(RuntimeError):
     """Raised when compaction publication cannot prove its source frontier."""
 
 
+_LEGACY_ASCII_WHITESPACE = "\t\n\v\f\r "
+
+
+def legacy_blank_clause(column: str) -> str:
+    """Use the existing legacy common-ASCII whitespace convention in SQL."""
+    chars = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
+    return f"({column} IS NULL OR TRIM({column}, {chars}) = '')"
+
+
+def unambiguous_legacy_session_ids(
+    conn: sqlite3.Connection,
+    conversation_id: str,
+    session_ids: set[str],
+) -> set[str]:
+    """Return blank-row session owners with exactly one lifecycle binding.
+
+    Explicit ``messages.conversation_id`` values remain authoritative.  A
+    blank legacy row may use a session binding only when neither lifecycle
+    index nor explicitly owned raw rows associate it with another conversation.
+    """
+    candidates = {str(value) for value in session_ids if str(value)}
+    if not candidates:
+        return set()
+    return {
+        candidate
+        for candidate in candidates
+        if conn.execute(
+            f"""
+            SELECT EXISTS(
+                SELECT 1 FROM lcm_lifecycle_state
+                WHERE conversation_id = ?
+                  AND (current_session_id = ? OR last_finalized_session_id = ?)
+            ) AND NOT EXISTS(
+                SELECT 1
+                FROM lcm_lifecycle_state
+                     INDEXED BY idx_lcm_lifecycle_current_session
+                WHERE current_session_id = ? AND conversation_id != ?
+            ) AND NOT EXISTS(
+                SELECT 1
+                FROM lcm_lifecycle_state
+                     INDEXED BY idx_lcm_lifecycle_last_finalized_session
+                WHERE last_finalized_session_id = ? AND conversation_id != ?
+            ) AND NOT EXISTS(
+                SELECT 1 FROM messages INDEXED BY idx_msg_session
+                WHERE session_id = ? AND NOT {legacy_blank_clause('conversation_id')}
+                  AND conversation_id != ?
+            )
+            """,
+            (
+                conversation_id, candidate, candidate,
+                candidate, conversation_id, candidate, conversation_id,
+                candidate, conversation_id,
+            ),
+        ).fetchone()[0]
+    }
+
+
+def conversation_producers(conn, conversation_id, session_id):
+    """Bound candidate queries by explicit producers and durable bindings."""
+    row = conn.execute(
+        "SELECT current_session_id, last_finalized_session_id FROM lcm_lifecycle_state "
+        "WHERE conversation_id = ?", (conversation_id,),
+    ).fetchone()
+    bound = {str(value) for value in (row or ()) if value}
+    producers = {str(row[0]) for row in conn.execute(
+        "SELECT DISTINCT session_id FROM messages WHERE conversation_id = ?",
+        (conversation_id,),
+    )}
+    return producers | bound | {session_id}, unambiguous_legacy_session_ids(conn, conversation_id, bound)
+
+
+def admitted_summary_roots(conn, conversation_id, session_id, *, before_node_id=None,
+                           include_descendants=False):
+    """Return roots with complete same-owner lineage, ignoring foreign roots.
+
+    Queries use the existing producer index; raw ownership, never producer
+    equality, admits a node. Invalid parents cannot hide valid child roots.
+    ``include_descendants`` applies the same validation to explicit expansion.
+    """
+    producers, legacy = conversation_producers(conn, conversation_id, session_id)
+    rows = conn.execute(
+        "SELECT node_id, depth, source_ids, source_type, LENGTH(summary), token_count "
+        "FROM summary_nodes INDEXED BY idx_nodes_session_latest "
+        "WHERE session_id IN (SELECT value FROM json_each(?)) "
+        "AND (? IS NULL OR node_id < ?)",
+        (json.dumps(sorted(producers)), before_node_id, before_node_id),
+    ).fetchall()
+    nodes = {int(row[0]): row for row in rows}
+    validated, visiting = {}, set()
+
+    def validate(node_id):
+        if node_id in validated:
+            return validated[node_id]
+        row = nodes.get(node_id)
+        if node_id in visiting:
+            return None
+        if row is None or not row[4] or not row[5]:
+            validated[node_id] = None
+            return None
+        visiting.add(node_id)
+        represented = set()
+        try:
+            sources = [int(value) for value in json.loads(row[2])]
+            if not sources or len(sources) != len(set(sources)):
+                raise ValueError("invalid source list")
+            if row[3] == "messages":
+                raw = conn.execute(
+                    "SELECT store_id, conversation_id, session_id FROM messages "
+                    "WHERE store_id IN (SELECT value FROM json_each(?))",
+                    (json.dumps(sources),),
+                ).fetchall()
+                if len(raw) != len(sources) or any(
+                    str(item[1] or "") != conversation_id and not
+                    (not str(item[1] or "").strip(_LEGACY_ASCII_WHITESPACE) and item[2] in legacy)
+                    for item in raw
+                ):
+                    raise ValueError("foreign or missing source")
+                represented.update(sources)
+            elif row[3] == "nodes":
+                for child in sources:
+                    if child not in nodes or nodes[child][1] >= row[1]:
+                        raise ValueError("invalid child")
+                    child_sources = validate(child)
+                    if child_sources is None or represented & child_sources:
+                        raise ValueError("invalid or repeated lineage")
+                    represented.update(child_sources)
+            else:
+                raise ValueError("invalid source type")
+        except (ValueError, TypeError):
+            represented = None
+        visiting.remove(node_id)
+        validated[node_id] = represented
+        return represented
+
+    for node_id in nodes:
+        validate(node_id)
+    children = {int(child) for node_id, row in nodes.items()
+                if validated[node_id] is not None and row[3] == "nodes"
+                for child in json.loads(row[2])}
+    # Older session-local publication could re-summarize a source after an
+    # A->B->A rollover. Never expose both claims or silently choose one: retain
+    # the database and require an explicit recovery of that ambiguous history.
+    claimed = set()
+    for node_id, sources in validated.items():
+        if sources is None or node_id in children:
+            continue
+        if claimed & sources:
+            raise LifecyclePublicationConflictError(
+                "Overlapping historical summary roots: source lineage already claimed; original data retained"
+            )
+        claimed.update(sources)
+    return {node_id: sources for node_id, sources in validated.items()
+            if sources is not None and (include_descendants or node_id not in children)}
+
+
 def _synchronized(method):
     """Serialize a read-modify-write method on the store's reentrant lock.
 
@@ -40,6 +196,24 @@ def _synchronized(method):
     def wrapper(self, *args, **kwargs):
         with self._lock:
             return method(self, *args, **kwargs)
+    return wrapper
+
+
+def _ownership_transition(method):
+    """Keep proven legacy attribution and pointer changes in one write transaction."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            # This connection's public lifecycle methods own their autocommit
+            # transactions. Lock SQLite before reading the old ownership proof.
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                result = method(self, *args, **kwargs)
+                self._conn.commit()
+                return result
+            except BaseException:
+                self._conn.rollback()
+                raise
     return wrapper
 
 
@@ -161,7 +335,22 @@ class LifecycleStateStore:
         ).fetchone()
         return self._row_to_state(row)
 
-    @_synchronized
+    def _promote_bound_legacy_rows(self, state: LifecycleState | None) -> None:
+        if state is None or self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages'"
+        ).fetchone() is None:
+            return
+        producers = {value for value in (state.current_session_id, state.last_finalized_session_id) if value}
+        proven = unambiguous_legacy_session_ids(self._conn, state.conversation_id, producers)
+        if proven:
+            self._conn.execute(
+                "UPDATE messages SET conversation_id = ? "
+                "WHERE session_id IN (SELECT value FROM json_each(?)) AND "
+                + legacy_blank_clause("conversation_id"),
+                (state.conversation_id, json.dumps(sorted(proven))),
+            )
+
+    @_ownership_transition
     def bind_session(
         self,
         session_id: str,
@@ -184,11 +373,17 @@ class LifecycleStateStore:
         last_reset_at = None
 
         if existing is not None:
-            if existing.current_session_id == session_id:
-                return existing
-            current_frontier = (
-                existing.current_frontier_store_id if existing.current_session_id == session_id else 0
+            resume_frontier = (
+                existing.last_finalized_frontier_store_id
+                if existing.last_finalized_session_id == session_id
+                and existing.last_reset_at is None else 0
             )
+            if existing.current_session_id == session_id:
+                if resume_frontier > existing.current_frontier_store_id:
+                    self.stage_frontier_advance(self._conn, conversation_id, session_id, resume_frontier)
+                    return self.get_by_conversation(conversation_id)
+                return existing
+            current_frontier = resume_frontier
             current_bound_at = (
                 existing.current_bound_at if existing.current_session_id == session_id else now
             )
@@ -213,6 +408,7 @@ class LifecycleStateStore:
             )
             last_reset_at = existing.last_reset_at
 
+        self._promote_bound_legacy_rows(existing)
         self._conn.execute(
             """
             INSERT INTO lcm_lifecycle_state(
@@ -263,12 +459,11 @@ class LifecycleStateStore:
                 now,
             ),
         )
-        self._conn.commit()
         state = self.get_by_conversation(conversation_id)
         assert state is not None
         return state
 
-    @_synchronized
+    @_ownership_transition
     def finalize_session(
         self,
         conversation_id: str | None,
@@ -278,6 +473,7 @@ class LifecycleStateStore:
         state = self.get_by_conversation(conversation_id)
         if state is None:
             return None
+        self._promote_bound_legacy_rows(state)
         now = time.time()
         current_session_id = state.current_session_id
         current_frontier = state.current_frontier_store_id
@@ -311,10 +507,9 @@ class LifecycleStateStore:
                 state.conversation_id,
             ),
         )
-        self._conn.commit()
         return self.get_by_conversation(state.conversation_id)
 
-    @_synchronized
+    @_ownership_transition
     def record_rollover(
         self,
         conversation_id: str,
@@ -331,6 +526,7 @@ class LifecycleStateStore:
         ):
             return state
 
+        self._promote_bound_legacy_rows(state)
         now = time.time()
         last_finalized_frontier = max(
             int(finalized_frontier_store_id or 0),
@@ -373,7 +569,6 @@ class LifecycleStateStore:
                 now,
             ),
         )
-        self._conn.commit()
         updated = self.get_by_conversation(conversation_id)
         assert updated is not None
         return updated
@@ -975,15 +1170,18 @@ class LifecycleStateStore:
         snapshot_ids = sorted(
             set(all_covered_ids + excluded_ids + list(exclusion_proofs))
         )
+        _producers, legacy = conversation_producers(conn, conversation_id, session_id)
+        owner_sql = "(m.conversation_id = ? OR (" + legacy_blank_clause("m.conversation_id") + ") AND m.session_id IN (SELECT value FROM json_each(?)))"
+        owner_args = (conversation_id, json.dumps(sorted(legacy)))
         snapshot_rows = conn.execute(
-            """
+            f"""
             SELECT m.store_id, m.conversation_id, m.content
             FROM json_each(?) AS source
             CROSS JOIN messages AS m
-            WHERE m.store_id = source.value AND m.session_id = ?
+            WHERE m.store_id = source.value AND {owner_sql}
             ORDER BY m.store_id
             """,
-            (str(snapshot_ids), session_id),
+            (str(snapshot_ids), *owner_args),
         ).fetchall()
         if [int(row[0]) for row in snapshot_rows] != snapshot_ids:
             raise LifecyclePublicationConflictError(
@@ -1002,13 +1200,13 @@ class LifecycleStateStore:
                 "Compaction publication filter exclusion changed"
             )
         rows = conn.execute(
-            """
-            SELECT store_id, conversation_id, content
-            FROM messages
-            WHERE session_id = ? AND store_id > ? AND store_id <= ?
-            ORDER BY store_id
+            f"""
+            SELECT m.store_id, m.conversation_id, m.content
+            FROM messages AS m
+            WHERE {owner_sql} AND m.store_id > ? AND m.store_id <= ?
+            ORDER BY m.store_id
             """,
-            (session_id, expected_frontier, covered_end),
+            (*owner_args, expected_frontier, covered_end),
         ).fetchall()
         authoritative_ids = [int(row[0]) for row in rows]
         proven_ids = sorted(covered_ids + excluded_ids)
@@ -1019,17 +1217,9 @@ class LifecycleStateStore:
                 f"authoritative={authoritative_ids}, covered={covered_ids}, "
                 f"excluded={excluded_ids})"
             )
-        if conn.execute(
-            """
-            SELECT 1
-            FROM summary_nodes AS node, json_each(node.source_ids) AS source
-            WHERE node.session_id = ? AND node.source_type = 'messages'
-              AND node.node_id != ?
-              AND source.value IN (SELECT value FROM json_each(?))
-            LIMIT 1
-            """,
-            (session_id, publication_node_id, str(all_covered_ids)),
-        ).fetchone():
+        claimed = admitted_summary_roots(conn, conversation_id, session_id, include_descendants=True)
+        if any(node_id != publication_node_id and set(all_covered_ids) & sources
+               for node_id, sources in claimed.items()):
             raise LifecyclePublicationConflictError(
                 "Compaction publication source lineage is already claimed"
             )

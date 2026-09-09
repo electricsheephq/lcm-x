@@ -75,7 +75,7 @@ def test_scaffold_shaped_real_user_requires_atomic_provenance(tmp_path) -> None:
     assert mapped[id(active[1])] == prompt_row["store_id"]
 
 
-def test_second_real_user_clears_retained_anchor_registration(tmp_path) -> None:
+def test_second_real_user_retires_protection_before_omitted_anchor_proof(tmp_path) -> None:
     engine = _engine(tmp_path, "retained-lineage-clear")
     initial = [
         {"role": "system", "content": "stable system"},
@@ -90,7 +90,11 @@ def test_second_real_user_clears_retained_anchor_registration(tmp_path) -> None:
 
     try:
         engine.compress(initial)
+        registered = engine._store.read_metadata_json(engine._retained_user_anchor_metadata_key())
+        assert registered["store_id"] > 0
         active = engine.compress(later)
+        assert engine._prepared_retained_user_anchor is None
+        assert engine._leading_anchor_count(active) == 1
         engine._last_compacted_store_id = max(
             row["store_id"]
             for row in engine._store.get_session_messages(engine._session_id)
@@ -99,11 +103,16 @@ def test_second_real_user_clears_retained_anchor_registration(tmp_path) -> None:
         metadata = engine._store.read_metadata_json(
             engine._retained_user_anchor_metadata_key()
         )
+        assert metadata == registered
+        assert mapped[id(active[1])] == registered["store_id"]
+        engine.compress([initial[0], *later[3:]])
+        metadata = engine._store.read_metadata_json(engine._retained_user_anchor_metadata_key())
+        mapped_after_omission = engine._get_store_id_map_for_messages([active[1]])
     finally:
         engine.shutdown()
 
     assert metadata == {"store_id": 0, "version": 1}
-    assert id(active[1]) not in mapped
+    assert id(active[1]) not in mapped_after_omission
 
 
 def test_duplicate_active_identity_cannot_claim_registered_occurrence(tmp_path) -> None:
