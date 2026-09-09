@@ -4889,6 +4889,10 @@ class LCMEngine(
             )
             return self._redact_active_replay_messages(messages)
 
+        append_binding = (self._conversation_id, self._session_id)
+        append_prefix_cursor = self._ingest_cursor
+        append_prefix_proven = bool(0 < append_prefix_cursor < len(messages)
+            and self._owned_exact_snapshot_prefix(messages[:append_prefix_cursor]))
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
         scan_start = 0 if self._ingest_cursor_needs_reconcile else cursor
@@ -5295,13 +5299,39 @@ class LCMEngine(
                 active_replay_messages[absolute_idx] = stubbed_message
 
         estimates = [count_message_tokens(m) for m in protected_messages]
+        renew_snapshot = bool(append_prefix_proven and cursor == append_prefix_cursor
+            and [idx for idx, _msg in messages_to_store_with_index] == list(range(cursor, n))
+            and self._snapshot_append_is_lossless(messages[cursor:])
+            and self._snapshot_append_is_lossless(active_replay_messages[cursor:])
+            and all(self._message_replay_identity(active) == self._message_replay_identity(stored, stored_row=True)
+                for active, stored in zip(active_replay_messages[cursor:], protected_messages)))
+        append_floor = self._store._conn.execute("SELECT COALESCE(MAX(store_id), 0) FROM messages").fetchone()[0]
+        def append_metadata(message, store_id):
+            rows = self._real_user_scaffold_metadata_rows(message, store_id)
+            if not renew_snapshot or append_binding != (self._conversation_id, self._session_id):
+                return rows
+            state = self._lifecycle.get_by_conversation(append_binding[0])
+            if state is None or state.current_session_id != append_binding[1]:
+                return rows
+            appended = self._store._conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE store_id > ? AND session_id = ? AND conversation_id = ?",
+                (append_floor, append_binding[1], append_binding[0]),
+            ).fetchone()[0]
+            if appended != n - cursor or not self._owned_exact_snapshot_prefix(active_replay_messages[:cursor]):
+                return rows
+            digest = self._replay_snapshot_digest(active_replay_messages, require_lcm_system_note=False)
+            if digest:
+                digests = [d for d in self._load_compacted_active_replay_snapshot_digests() if d != digest]
+                rows.append((self._active_replay_snapshot_metadata_key(),
+                    json.dumps({"version": 1, "digests": (digests + [digest])[-16:]}, sort_keys=True)))
+            return rows
         self._store._append_protected_batch(
             self._session_id,
             protected_messages,
             estimates,
             source=self._session_platform,
             conversation_id=self._conversation_id,
-            metadata_factory=self._real_user_scaffold_metadata_rows,
+            metadata_factory=append_metadata,
             metadata_messages=[
                 msg for _idx, msg in messages_to_store_with_index
             ],
