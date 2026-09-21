@@ -810,6 +810,7 @@ class CompactionMixin:
                             and len(pending_positions) == pending_count)
         self._prepare_retained_user_anchor(working_messages)
         if resumed is not None:
+            resumed = self._redact_active_replay_messages(resumed)
             self._ingest_cursor = len(resumed)
             self._ingest_cursor_needs_reconcile = False
             self._last_compression_status = "compacted"

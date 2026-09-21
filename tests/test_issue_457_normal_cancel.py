@@ -18,7 +18,7 @@ from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 
 
-def _engine(tmp_path, tail=1):
+def _engine(tmp_path, tail=1, sensitive=False):
     engine = LCMEngine(
         config=LCMConfig(
             database_path=str(tmp_path / "cancel.db"),
@@ -28,6 +28,8 @@ def _engine(tmp_path, tail=1):
             context_threshold=0.01,
             threshold_full_sweep_enabled=False,
             summary_prefix_target_tokens=100_000,
+            sensitive_patterns_enabled=sensitive,
+            sensitive_patterns=["api_key"],
         ),
         hermes_home=str(tmp_path / "home"),
     )
@@ -164,6 +166,84 @@ def test_normal_leaf_late_cancel_cold_retry(tmp_path, monkeypatch, restart, tail
 
 def test_cold_retry_original_history_end_flush(tmp_path, monkeypatch):
     test_normal_leaf_late_cancel_cold_retry(tmp_path, monkeypatch, True, 24, end_flush=True)
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["same-engine", "cold-engine"])
+def test_pending_retry_redacts_active_tail_without_mutating_raw_rows(
+    tmp_path, monkeypatch, restart
+):
+    monkeypatch.setattr(socket.socket, "connect", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("Network is forbidden in this synthetic fixture")
+    ))
+    calls = []
+
+    def provider(**kwargs):
+        calls.append(1)
+        policy = str(kwargs["messages"][0].get("content") or "")
+        match = re.search(r'<lcm-summary nonce="[0-9a-f]+">', policy)
+        assert match is not None
+        content = (
+            f"{match.group(0)}\nDurable synthetic summary preserves ordered decisions, "
+            "constraints, active work, and the exact recovery boundary.\n"
+            "Expand for details about: synthetic cancellation qualification\n</lcm-summary>"
+        )
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content=content)
+        )])
+
+    monkeypatch.setattr(aux, "call_llm", provider)
+    canary = "sk-synthetic-redaction-canary-1234567890-cdef"
+    messages = [
+        {"role": "user" if i % 2 == 0 else "assistant",
+         "content": f"owned turn {i} " + "detail " * 60}
+        for i in range(31)
+    ]
+    messages[-1]["content"] = f"api_key={canary} active tail"
+    original = deepcopy(messages)
+    engine = _engine(tmp_path, tail=24, sensitive=True)
+    fence, stop = CompressionCommitFence(), Event()
+
+    def rows():
+        return list(engine._store._conn.execute("SELECT * FROM messages ORDER BY store_id"))
+
+    def dispatch(compress_fn, current_fence, event, generation):
+        return _run_summary_dispatch(
+            SimpleNamespace(context_compressor=engine, session_id=engine._session_id),
+            messages, compress_fn, {"current_tokens": 50_000, "force": True},
+            commit_fence=current_fence, attempt_generation=generation,
+            hard_cancel_event=event,
+        )
+
+    try:
+        engine.ingest(messages)
+        before = rows()
+
+        def cancel_after_compress(*args, **kwargs):
+            result = engine.compress(*args, **kwargs)
+            assert fence.try_cancel_before_commit() is True
+            stop.set()
+            return result
+
+        with pytest.raises(aux.AuxiliaryExplicitCancellation):
+            dispatch(cancel_after_compress, fence, stop, 1)
+        assert rows() == before and messages == original
+        if restart:
+            engine.shutdown()
+            engine = _engine(tmp_path, tail=24, sensitive=True)
+        resumed = dispatch(engine.compress, CompressionCommitFence(), None, 2)
+        replay = json.dumps(resumed, sort_keys=True)
+        assert any(m.get("_compressed_summary") is True for m in resumed)
+        assert canary not in replay
+        assert "[LCM sensitive redaction:" in replay
+        assert rows() == before and messages == original
+        assert len(calls) == 1
+        continued = resumed + deepcopy(original[-2:])
+        engine.ingest(continued)
+        assert len(rows()) == len(before) + 2
+        engine.ingest(continued)
+        assert len(rows()) == len(before) + 2
+    finally:
+        engine.shutdown()
 
 
 @pytest.mark.parametrize("fail_at", [1, 2])
