@@ -78,6 +78,7 @@ class CompactionMixin:
 
     def _should_compress_preflight_impl(self, messages):
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
+        self._native_recovery_preflight_cleanup_only = False
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         if self._bypasses_lcm_context_management():
             # Bypassed traffic observes nothing about the pressured session's
@@ -153,6 +154,14 @@ class CompactionMixin:
                 messages=replay_messages,
             )
             if cleanup_requested:
+                self._native_recovery_preflight_cleanup_only = bool(
+                    self._config.native_recovery
+                    and not force_overflow_requested
+                    and (
+                        self.threshold_tokens <= 0
+                        or max(rough, replay_rough) < self.threshold_tokens
+                    )
+                )
                 if (
                     not force_overflow_requested
                     and self._compression_boundary_cooldown_active()
@@ -786,16 +795,30 @@ class CompactionMixin:
         # or provider context after the durable row has been written.
         working_messages = self._ingest_messages(messages)
         self._prepare_retained_user_anchor(working_messages)
-        if self._config.native_recovery:
+        native_cleanup_only = bool(
+            self._config.native_recovery
+            and self._native_recovery_preflight_cleanup_only
+            and not force
+            and not force_overflow
+            and (
+                self.threshold_tokens <= 0
+                or observed_prompt_tokens < self.threshold_tokens
+            )
+        )
+        self._native_recovery_preflight_cleanup_only = False
+        if self._config.native_recovery and not native_cleanup_only:
             recovered = self._compress_native_recovery(working_messages)
             return messages if self._last_compress_aborted else recovered
         ingest_cleanup_changed_active_context = working_messages != messages
-        cleanup_only_due_to_boundary_cooldown = bool(
-            self._preflight_cleanup_only_due_to_boundary_cooldown
+        cleanup_only_requested = bool(
+            (
+                self._preflight_cleanup_only_due_to_boundary_cooldown
+                or native_cleanup_only
+            )
             and not force_overflow
         )
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
-        if cleanup_only_due_to_boundary_cooldown:
+        if cleanup_only_requested:
             sanitized_messages = self._sanitize_active_context_messages(
                 working_messages,
                 insert_missing_tool_stubs=False,
@@ -807,6 +830,8 @@ class CompactionMixin:
             self._ingest_cursor = len(sanitized_messages)
             self._last_compression_status = "sanitized"
             self._last_compression_noop_reason = ""
+            if native_cleanup_only:
+                self._last_compress_aborted = False
             self._note_fresh_tail_pressure_relieved()
             self._write_generated_ignored_placeholder_hash_counts(
                 self._generated_placeholder_digest_budget_for_active_replay(

@@ -1,5 +1,6 @@
 """Native recovery must not convert a rejected LCM claim into committed coverage."""
 import copy
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 import hermes_lcm.engine as engine_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.externalize import extract_externalized_ref, load_externalized_payload
 
 
 @pytest.fixture
@@ -81,6 +83,75 @@ def test_native_recovery_preserves_sources_and_tools(candidate, monkeypatch):
     assert candidate._store._conn.execute("SELECT * FROM messages ORDER BY store_id").fetchall() == before
     assert candidate._dag._conn.execute("SELECT COUNT(*) FROM summary_nodes").fetchone()[0] == 0
     assert any(s.get("name", s.get("function", {}).get("name")) == "lcm_recall" for s in candidate.get_tool_schemas())
+
+
+def test_subthreshold_ingest_cleanup_adopts_safe_replay_without_native_summary(candidate, monkeypatch):
+    calls = install_native(monkeypatch)
+    candidate._config.sensitive_patterns_enabled = True
+    candidate._config.sensitive_patterns = ["api_key"]
+    candidate._config.large_output_externalization_enabled = True
+    candidate._config.large_output_externalization_threshold_chars = 12_000
+    secret = "sk-synthetic-cleanup-canary-1234567890-cdef"
+    retained_payload = "synthetic observed raw payload " * 2_100
+    messages = [
+        {
+            "role": "user",
+            "content": f"api_key={secret} retain this request\n{retained_payload}",
+        },
+        {"role": "assistant", "content": "calling lookup", "tool_calls": [{
+            "id": "call-cleanup", "type": "function",
+            "function": {"name": "lookup", "arguments": "{}"},
+        }]},
+        {"role": "tool", "tool_call_id": "call-cleanup", "content": "synthetic result"},
+        {"role": "assistant", "content": "synthetic acknowledgement"},
+    ]
+    original = copy.deepcopy(messages)
+
+    assert candidate.should_compress_preflight(messages) is True
+    before = candidate._store._conn.execute(
+        "SELECT * FROM messages ORDER BY store_id"
+    ).fetchall()
+    result = candidate.compress(messages, current_tokens=40_000)
+    serialized = json.dumps(result, sort_keys=True)
+
+    assert calls == []
+    assert secret not in serialized
+    assert result[0]["content"].startswith(
+        "[Externalized payload: kind=raw_payload; role=user;"
+    )
+    ref = extract_externalized_ref(result[0]["content"])
+    assert ref is not None
+    payload = load_externalized_payload(
+        ref,
+        config=candidate._config,
+        hermes_home=candidate._hermes_home,
+    )
+    assert payload is not None
+    assert secret not in payload["content"]
+    assert "[LCM sensitive redaction:" in payload["content"]
+    assert retained_payload in payload["content"]
+    assert [message["role"] for message in result] == ["user", "assistant", "tool", "assistant"]
+    assert result[2]["tool_call_id"] == result[1]["tool_calls"][0]["id"]
+    assert messages == original
+    assert candidate._store._conn.execute(
+        "SELECT * FROM messages ORDER BY store_id"
+    ).fetchall() == before
+
+
+@pytest.mark.parametrize(
+    ("current_tokens", "force"),
+    [(250_000, False), (300_000, False), (40_000, True)],
+    ids=["threshold", "overflow", "explicit-force"],
+)
+def test_pressure_overflow_and_force_still_dispatch_native_summary(
+    candidate, monkeypatch, current_tokens, force
+):
+    calls = install_native(monkeypatch)
+    result = candidate.compress(history(), current_tokens=current_tokens, force=force)
+
+    assert len(calls) == 1
+    assert candidate.last_compression_status == "host_native"
+    assert len(result) < len(history())
 
 
 @pytest.mark.parametrize("kind", ["exception", "aborted", "placeholder", "empty", "grows", "cancelled", "superseded", "prune_only", "digest_failure"])

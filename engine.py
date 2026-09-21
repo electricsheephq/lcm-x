@@ -622,6 +622,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         # One-shot handoff from preflight: adopt an already-durable replay
         # cleanup during boundary cooldown without running summary work.
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
+        # One-shot handoff for native recovery: deterministic ingest cleanup at
+        # low pressure must be adopted without invoking the native summarizer.
+        self._native_recovery_preflight_cleanup_only = False
         # Temporary source window used only while compress() assembles context.
         # _assemble_context also serves tests and recovery paths directly, so
         # keep anchoring opt-in rather than changing its public behavior.
