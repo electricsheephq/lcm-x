@@ -1,6 +1,6 @@
 ---
 name: review-pr
-description: Assess electricsheephq/lcm-x pull-request readiness without writes, binding protected checks and content-free exact-head AI review receipts.
+description: Assess electricsheephq/lcm-x pull-request readiness without writes, binding protected checks and original exact-head AI review assessments.
 ---
 
 # Review LCM-X Pull Requests
@@ -66,13 +66,13 @@ gate class and terminal disposition.
 Return exactly one:
 
 - `READY_FOR_AUTHORIZED_LANDING`: accepted scope, exact-head protected checks, required AI
-  receipts, dispositions, and threads pass;
+  assessments, dispositions, and threads pass;
 - `NOT_READY`: a concrete readiness gate is unsatisfied;
 - `NOT_DIRECTLY_LANDABLE`: the PR does not target protected `main`;
 - `OWNER_GATE`: accepted work, product/security ownership, or trusted policy is unavailable;
 - `STATE_DRIFT`: repository, PR, base, head, or evaluated identity changed.
 
-Include exact PR/head/base/ruleset identities, matched check pairs, receipt and thread summary,
+Include exact PR/head/base/ruleset identities, matched check pairs, assessment and thread summary,
 linked issue, blocker codes, finding dispositions, and proof boundary. Even a ready decision is
 read-only advice. A maintainer must separately authorize landing PR N at exact head H.
 

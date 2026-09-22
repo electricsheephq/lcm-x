@@ -128,8 +128,11 @@ uncertain, comment or report the relationship; do not close the issue.
 ## 7. Merge Deterministically
 
 Immediately before merging, repeat the paginated thread query from Section 4, reapply every
-Section 4 gate, and require the exact-head AI check to remain successful. Only after those checks
-pass, run:
+Section 4 gate, and require the exact-head AI check to remain successful. Re-fetch every
+`review_artifact_refs[].review_id` from GitHub's pull-request reviews API and compare its live
+publisher ID/login/type, state, commit, submitted time, body, and assessment binding with the
+packet used by the successful check. A missing, dismissed, edited, or mismatched review blocks
+landing. Only after those checks pass, run:
 
 ```bash
 current_head="$(gh pr view <PR> --repo electricsheephq/lcm-x --json headRefOid --jq .headRefOid)"

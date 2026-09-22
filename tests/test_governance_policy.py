@@ -178,6 +178,10 @@ def test_codeowners_and_landing_policy_use_the_exact_head_ai_gate():
     assert "AI review exact-head" in review
     assert "Analyze (actions)" not in landing
     assert "non-author code owner" not in landing.lower()
+    assert "review_artifact_refs[].review_id" in landing
+    assert "publisher ID/login/type, state, commit, submitted time, body" in landing
+    assert "missing, dismissed, edited, or mismatched review blocks" in landing.lower()
+    assert "review receipts" not in review.lower()
 
 
 def test_triage_prompt_and_contributor_automation_scope_are_bounded():

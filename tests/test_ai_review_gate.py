@@ -88,6 +88,9 @@ def _run_workflow_scenario(
         "s15": {"dispatch": True, "prs": [1, 2], "target": 1},
         "s16": {"dispatch": True, "prs": [1, 2], "target": 1},
         "s16b": {"dispatch": True, "prs": [1, 2], "target": 1, "invalidPr": 2},
+        "s17": {"dispatch": True, "prs": [1], "target": 1, "truncatedPr": 1},
+        "s18": {"dispatch": True, "prs": [1], "target": 1, "unauthorized": True},
+        "s19": {"dispatch": True, "prs": [1], "target": 1, "malformedRefs": True},
     }
     config = {"name": name, **scenarios[name]}
     script = _extract_reconcile_script(workflow_path or _workflow_under_test())
@@ -106,13 +109,16 @@ if (cfg.name === 's12')
   // whose live-state fingerprint no longer validates (preserve: false below).
   checks.push({{id: 0, name: 'AI review exact-head', external_id: 'ai-review-gate:1:base-1:head-1',
     head_sha: 'head-1', status: 'completed', conclusion: 'success', app: {{id: 15368}},
-    output: {{summary: JSON.stringify({{dispatch_id: 'dispatch-fresh'}})}}}});
+    output: {{summary: JSON.stringify({{dispatch_id: 'dispatch-fresh', review_artifact_refs:
+      [{{lane: 'acceptance', review_id: 8001}}, {{lane: 'adversarial', review_id: 8002}}]}})}}}});
 const pullCalls = new Map();
 const filesCalls = new Map();
+const reviewFetchIds = [];
 let branchCalls = 0;
 let nextCheckId = 1;
 const original = number => ({{number, base: {{ref: 'main', sha: `base-${{number}}`}},
-  head: {{sha: `head-${{number}}`}}, state: 'open', draft: false}});
+  head: {{sha: `head-${{number}}`}}, state: 'open', draft: false,
+  changed_files: cfg.truncatedPr === number ? 2 : 1}});
 const record = (run, conclusion, summary, operation) => {{
   const match = run.external_id.match(/^ai-review-gate:(\\d+):([^:]+):(.+)$/);
   emissions.push({{pr: Number(match[1]), base: match[2], head: match[3], conclusion,
@@ -135,10 +141,10 @@ const checksApi = {{
 }};
 const pullsApi = {{
   list: async () => cfg.prs.map(original),
-  getReview: async ({{review_id}}) => ({{data: {{id: review_id, state: 'COMMENTED',
+  getReview: async ({{review_id}}) => {{ reviewFetchIds.push(review_id); return ({{data: {{id: review_id, state: 'COMMENTED',
     commit_id: `head-${{cfg.target || 1}}`, submitted_at: '2026-08-24T11:00:00Z',
     user: {{id: review_id, login: `reviewer-${{review_id}}`, type: 'Bot'}},
-    body: 'synthetic'}}}}),
+    body: 'synthetic'}}}}); }},
   get: async ({{pull_number}}) => {{
     const count = (pullCalls.get(pull_number) || 0) + 1;
     pullCalls.set(pull_number, count);
@@ -191,10 +197,14 @@ const github = {{
 const context = {{repo: {{owner: 'electricsheephq', repo: 'lcm-x'}},
   eventName: cfg.dispatch ? 'repository_dispatch' : 'push',
   payload: cfg.dispatch ? {{client_payload: {{pr_number: cfg.target,
-    review_artifact_refs: [{{lane: 'acceptance', review_id: 9001}},
-      {{lane: 'adversarial', review_id: 9002}}],
+    review_artifact_refs: cfg.malformedRefs
+      ? [{{lane: 'acceptance', review_id: 9001}}, {{lane: 'adversarial', review_id: 9002}},
+        {{lane: 'acceptance', review_id: 9003}}]
+      : [{{lane: 'acceptance', review_id: 9001}}, {{lane: 'adversarial', review_id: 9002}}],
     dispatch_id: 'dispatch-fresh'}}, sender: {{login: '100yenadmin', id: 239388517,
-    type: 'User'}}}} : {{}}, actor: '100yenadmin', ref: 'refs/heads/main', sha: 'protected'}};
+    type: 'User'}}}} : {{}}, actor: cfg.unauthorized ? 'attacker' : '100yenadmin',
+  ref: 'refs/heads/main', sha: 'protected'}};
+if (cfg.unauthorized) context.payload.sender.login = 'attacker';
 const core = {{setFailed: message => failures.push(message)}};
 Object.assign(process.env, {{GITHUB_RUN_ATTEMPT: '1', GITHUB_ACTOR_ID: '239388517',
   GITHUB_RUN_ID: 'run-1'}});
@@ -243,7 +253,8 @@ async function fakeRunValidator(input) {{
 async function main() {{
 {script}
 }}
-main().then(() => console.log(JSON.stringify({{emissions, failures}}))).catch(error => {{
+main().then(() => console.log(JSON.stringify({{emissions, failures, reviewFetchIds,
+  pullCalls: [...pullCalls.entries()]}}))).catch(error => {{
   console.error(error.stack); process.exitCode = 1;
 }});
 """
@@ -416,6 +427,20 @@ def test_behavioral_s12_state_invalidated_prior_packet_still_blocks_replay():
     result = _run_workflow_scenario("s12")
     assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
     assert _failure_tuples(result) == {(1, "base-1", "head-1")}
+    assert {8001, 8002, 9001, 9002}.issubset(set(result["reviewFetchIds"]))
+
+
+def test_behavioral_s17_truncated_changed_file_list_fails_closed():
+    result = _run_workflow_scenario("s17")
+    assert _failure_tuples(result) == {(1, "base-1", "head-1")}
+    assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
+
+
+@pytest.mark.parametrize("scenario", ["s18", "s19"])
+def test_dispatch_auth_and_ref_bounds_precede_target_or_review_fetch(scenario):
+    result = _run_workflow_scenario(scenario)
+    assert result["reviewFetchIds"] == []
+    assert result["pullCalls"] == []
 
 
 def test_behavioral_s13_partial_peer_snapshot_fails_live_and_listed_tuples():
@@ -531,7 +556,12 @@ def test_routine_requires_one_original_acceptance_assessment():
     assert "Independent acceptance review completed." in result["packet"]["assessments"][0]["original_body"]
 
 
-@pytest.mark.parametrize("path", ["AGENTS.md", "store.py"])
+@pytest.mark.parametrize("path", [
+    "AGENTS.md",
+    ".agents/skills/review-pr/SKILL.md",
+    ".github/PULL_REQUEST_TEMPLATE.md",
+    "store.py",
+])
 def test_named_risks_require_distinct_adversarial_assessment(path):
     dispatch = _v2_dispatch(_v2_snapshot(350, changed_paths=[path]))
     assert evaluate_reconciliation(dispatch, NOW)["decision"] == "PASS"
@@ -589,6 +619,33 @@ def test_duplicate_v2_markers_are_rejected():
     result = evaluate_reconciliation(dispatch, NOW)
     assert result["decision"] == "FAIL"
     assert "ACCEPTANCE_REVIEW_BODY_INVALID" in result["blockers"]
+
+
+def test_duplicate_fields_in_original_review_body_are_rejected():
+    dispatch = _v2_dispatch(_v2_snapshot(350))
+    artifact = dispatch["target"]["review_artifacts"][0]
+    artifact["body"] = artifact["body"].replace(
+        '"verdict":"PASS"', '"verdict":"BLOCKED","verdict":"PASS"', 1,
+    )
+
+    result = evaluate_reconciliation(dispatch, NOW)
+
+    assert result["decision"] == "FAIL"
+    assert "ACCEPTANCE_REVIEW_BODY_INVALID" in result["blockers"]
+
+
+def test_duplicate_fields_in_stored_packet_are_rejected():
+    peer = _v2_snapshot(350)
+    peer["check_runs"][0]["output_summary"] = peer["check_runs"][0][
+        "output_summary"
+    ].replace('"kind":', '"kind":"duplicate","kind":', 1)
+
+    result = evaluate_reconciliation(
+        {"schema_version": "2", "mode": "peer_only", "peers": [peer]}, NOW,
+    )["peers"][0]
+
+    assert result["decision"] == "FAIL"
+    assert "PACKET_MALFORMED" in result["blockers"]
 
 
 def test_legacy_numeric_review_body_is_rejected():
@@ -846,7 +903,7 @@ def test_incomplete_dispatch_target_still_resets_known_peers():
     dispatch = workflow.index("if (dispatchEvent) {")
     authenticated = workflow.index("if (sender?.login !== '100yenadmin'", dispatch)
     packet_guard = workflow.index(
-        "if (!Array.isArray(dispatch.review_artifact_refs)", dispatch
+        "dispatchRefs = boundedArtifactRefs(dispatch.review_artifact_refs)", dispatch
     )
     protected_ref = workflow.index("if (context.ref !== `refs/heads/${defaultBranch}`", dispatch)
     reconciliation_guard = workflow.index("if (reconciled.failures.length)", dispatch)
@@ -894,7 +951,7 @@ def test_workflow_rechecks_complete_target_state_before_success():
     ).read_text(encoding="utf-8")
 
     assert workflow.count("github.paginate(github.rest.pulls.listFiles") == 1
-    assert workflow.count("listFiles(prNumber)") >= 2
+    assert workflow.count("listFiles(prNumber,") >= 2
     assert workflow.count("reviewThreads(first:100") == 1
     assert workflow.count("unresolvedThreads(prNumber)") >= 2
     assert "live.data.head.sha !== head" in workflow
@@ -911,6 +968,33 @@ def test_workflow_rechecks_complete_target_state_before_success():
     assert "review_artifact_errors: reviewArtifacts.errors" in workflow
     assert "matches.length > 1" in workflow
     assert "DUPLICATE_TRUSTED_CHECK" in workflow
+
+
+def test_workflow_bounds_review_fetches_and_changed_file_completeness():
+    workflow = _workflow_under_test().read_text(encoding="utf-8")
+
+    assert "boundedArtifactRefs(dispatch.review_artifact_refs)" in workflow
+    assert "refs.length > 2" in workflow
+    assert "Number.isSafeInteger(ref.review_id)" in workflow
+    assert "check.external_id === expectedExternalId" in workflow
+    assert "check.head_sha === expectedHead" in workflow
+    assert "check.status === 'completed' && check.conclusion === 'success'" in workflow
+    assert "files.length !== expectedCount" in workflow
+    assert "new Set(currentNames).size !== expectedCount" in workflow
+    assert "listFiles(prNumber, pr.changed_files)" in workflow
+    assert "listFiles(prNumber, live.data.changed_files)" in workflow
+
+
+def test_workflow_authenticates_and_bounds_dispatch_before_reconciliation():
+    workflow = _workflow_under_test().read_text(encoding="utf-8")
+    dispatch = workflow.index("if (dispatchEvent) {")
+    authenticated = workflow.index("if (sender?.login !== '100yenadmin'", dispatch)
+    bounded = workflow.index("dispatchRefs = boundedArtifactRefs", authenticated)
+    target = workflow.index("prNumber = dispatch.pr_number", bounded)
+    target_read = workflow.index("github.rest.pulls.get", target)
+    reconcile = workflow.index("const reconciled = await reconcileOpenPullRequests", target_read)
+
+    assert dispatch < authenticated < bounded < target < target_read < reconcile
 
 
 def test_workflow_reconciliation_failure_is_terminal_before_target_promotion():
@@ -1157,6 +1241,7 @@ def test_workflow_dispatch_validation_failure_is_terminal_before_target_promotio
 
 def _lanes_for_paths(paths: list[str]) -> list[str]:
     protected = {
+        ".agents/skills/review-pr/SKILL.md", ".github/PULL_REQUEST_TEMPLATE.md",
         ".github/workflows/ai-review-gate.yml", "AGENTS.md", "CONTRIBUTING.md",
         "docs/review-evidence-provenance.md", "scripts/ai_review_gate.py",
         "scripts/maintainer_gate.py", "store.py",
@@ -1396,11 +1481,10 @@ def test_workflow_keeps_both_rename_paths_for_risk_mapping():
     node = shutil.which("node")
     if not node:
         pytest.skip("node is required")
-    fixture = [{"filename": "docs/moved.md", "previous_filename": "docs/review-evidence-provenance.md"},
-               {"filename": "docs/moved.md"}]
+    fixture = [{"filename": "docs/moved.md", "previous_filename": "docs/review-evidence-provenance.md"}]
     program = ("const owner='test',repo='test'; const github={rest:{pulls:{listFiles:{}}},"
                + "paginate:async()=>" + json.dumps(fixture) + "};\n"
-               + script[start:end] + "\nlistFiles(1).then(paths=>console.log(JSON.stringify(paths)));")
+               + script[start:end] + "\nlistFiles(1, 1).then(paths=>console.log(JSON.stringify(paths)));")
     result = subprocess.run([node, "-e", program], check=True, capture_output=True, text=True)
     paths = json.loads(result.stdout)
     assert paths == ["docs/moved.md", "docs/review-evidence-provenance.md"]

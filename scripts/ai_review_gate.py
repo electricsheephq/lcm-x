@@ -27,6 +27,7 @@ WITHDRAWN_RECEIPT_IDS = frozenset({
     "5a6b05ee-c573-4cd9-b6f4-9a944fba61ee",
 })
 REVIEW_POLICY_FILES = {
+    ".agents/skills/review-pr/SKILL.md", ".github/PULL_REQUEST_TEMPLATE.md",
     ".github/workflows/ai-review-gate.yml", "AGENTS.md", "CONTRIBUTING.md",
     "docs/review-evidence-provenance.md", "scripts/ai_review_gate.py",
     "scripts/maintainer_gate.py",
@@ -96,6 +97,15 @@ def _identifier(value: Any) -> bool:
     return isinstance(value, str) and SAFE_ID.fullmatch(value) is not None
 
 
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate object key: {key}")
+        result[key] = value
+    return result
+
+
 def _named_risks(paths: Any) -> list[str]:
     if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
         return []
@@ -120,7 +130,7 @@ def _sha(value: Any) -> str:
 
 
 def state_fingerprint(live: dict[str, Any]) -> str:
-    """Hash only the exact-head state that receipt reuse is allowed to bind."""
+    """Hash only the exact-head state that assessment reuse is allowed to bind."""
     paths = live.get("changed_paths")
     events = live.get("timeline_events", [])
     if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
@@ -247,7 +257,7 @@ def _review_artifact_assessments(
         marker_at = body.rfind(REVIEW_ARTIFACT_MARKER)
         encoded = body[marker_at + len(REVIEW_ARTIFACT_MARKER):-len(REVIEW_ARTIFACT_SUFFIX)]
         try:
-            assessment = json.loads(encoded)
+            assessment = json.loads(encoded, object_pairs_hook=_unique_object)
         except (TypeError, ValueError, json.JSONDecodeError):
             blockers.append(f"{lane.upper()}_REVIEW_BODY_INVALID")
             continue
@@ -535,7 +545,7 @@ def _check_blockers(live: dict[str, Any]) -> tuple[list[str], dict[str, Any] | N
     if not isinstance(summary, str) or len(summary.encode("utf-8")) > MAX_PACKET_BYTES:
         return ["PACKET_MISSING_OR_OVERSIZED"], None
     try:
-        packet = json.loads(summary)
+        packet = json.loads(summary, object_pairs_hook=_unique_object)
     except (TypeError, ValueError, json.JSONDecodeError):
         return ["PACKET_MALFORMED"], None
     return [], packet
@@ -665,7 +675,7 @@ def evaluate(data: Any, now: datetime | None = None) -> dict[str, Any]:
 
 def main() -> int:
     try:
-        result = evaluate(json.load(sys.stdin))
+        result = evaluate(json.load(sys.stdin, object_pairs_hook=_unique_object))
     except (json.JSONDecodeError, TypeError, ValueError):
         result = {"decision": "FAIL", "blockers": ["INPUT_INVALID"]}
     print(json.dumps(result, sort_keys=True))
