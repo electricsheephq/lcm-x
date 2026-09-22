@@ -1,9 +1,31 @@
 # Changelog
 
-This file is the repository-root version history. LCM-X currently publishes
-version tags but does not have a destination GitHub Release object for RC2.
+This file is the repository-root version history. Curated notes under `.github/release-notes/` exist for
+every `v0.x` tag from v0.21.0-rc2 onward (plus a `v0.21.0-rc1` file with no matching tag today); older tags,
+including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are published from tags (rc tags as prereleases).
 
 ## Unreleased
+
+## v0.23.3 - maintenance point release
+
+- Session-end prefix matching extracted from `engine.py` into `prefix_matching.py` as a mixin;
+  no behaviour change (verified AST-identical at review). (#155)
+- FastEmbed warmup prefers the locally cached model before enabling downloads; explicit warmup
+  stays the only path that may download a missing model. (#404, addresses #235 — contributed by
+  @Tosko4)
+- Teams scope backfill is linear (ascending rowid cursor through session, derived and rollup
+  backfills). (#408, closes #386 — contributed by @Tosko4)
+- Test: the atomic compaction-telemetry contention regression no longer depends on runner
+  scheduling; production's 100 ms best-effort policy is unchanged. (#407, closes #328 —
+  contributed by @Tosko4)
+- Governance: the exact-head receipt gate preserves valid peer receipts when one pull request's
+  gate fails cleanly, fails closed on a transient error during its final read, and requires a
+  `dispatch_id` in receipt dispatches. (#362)
+- Records: BASELINE-LEDGER rows for the v0.23.2 security/privacy train plus the #155 refactor
+  row, "ledger entry only, no re-baseline" (#412); the F53 V1-M
+  re-bank registration (#413) and its park record FINDING-F62 (#416); contributor credits and
+  full v0.23.2 PR coverage (#396). Documentation names v0.23.2 as the latest stable release and
+  carries the forward identity `hermes-lcm v0.23.3 (15 tools)`.
 
 ## v0.23.2 - security + lossless point release
 
@@ -20,6 +42,23 @@ version tags but does not have a destination GitHub Release object for RC2.
   snippets are transformed before leaving the machine when privacy is ON. (#371)
 - Releases containing product code are rc-first: `bench/specs/RELEASE-READINESS-V1.md` is
   the GA gate. (#373)
+- SECURITY: fixed a private-key redaction ordering bypass that could leak PEM key material to
+  cloud embedding providers (#365 → #366); the rc gauntlet then caught and closed a truncated-PEM
+  leak (#383 → #384) and its over-block regression (#389 → #391) through successive adversarial
+  review rounds. The cloud-embedding redaction is
+  best-effort by design (durable store is lossless regardless); boundary of record: #394.
+- Current-schema database clones now open read-only, so a Hermes per-agent host clone no
+  longer fails against a concurrent WAL writer and silently falls back to the built-in lossy
+  compressor (#364 — contributed by @Tosko4).
+- Stable release identity: `0.23.2` across plugin manifest, README, and operator docs, with
+  rc/GA expressed only in tags and notes filenames; non-tautological downgrade guard (#385 → #388).
+- Release/benchmark integrity: rc-first gauntlet is the GA gate (#373) with live-battery and
+  runner hardening (#382 #390); privacy-trio/instrument boundary rows reconciled into the
+  baseline ledger (#368); FINDING-F61 attribution result registered (#381); exact-head review
+  governance hardening (#349 #358).
+- Contributors: external code this release: @Tosko4 (#364). Review signal:
+  chatgpt-codex-connector, evaos-code-review-bot, CodeRabbit, CodeQL, plus independent
+  cross-model adversarial reviews recorded on the PRs.
 
 ## v0.23.1 - 2026-08-23
 
@@ -64,6 +103,8 @@ boundary row.
   last-push-approval deadlock removed, `--admin` an exception not the path (#241).
   Release-validation storage isolation (#325); regression coverage salvaged from closed PRs
   (#254 #257); gpt-5.4 retirement note (#262).
+- Contributors: upstream-carried work from @stephenschoettler (#168), @Tosko4 (#173),
+  @masidigital (#177), @davidrobertson (#183), @TurgutKural (#203, #205-prep).
 
 ## v0.23.0-rc1 - 2026-08-21
 

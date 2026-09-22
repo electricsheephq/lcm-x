@@ -170,16 +170,16 @@ After following the exact-stable upgrade steps above, typical output is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm v0.23.1 (15 tools)
+  ✓ hermes-lcm v0.23.2 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm
 ```
 
 An untagged checkout of the reconciled `main` baseline instead reports
-`hermes-lcm v0.23.2 (15 tools)`. Version text alone is not release proof;
-verify the loaded commit and tag. `0.23.2` is the stable identity the next GA
-tag (`v0.23.2`) will carry unchanged — the release candidate and the GA cut
+`hermes-lcm v0.23.3 (15 tools)`. Version text alone is not release proof;
+verify the loaded commit and tag. `0.23.3` is the stable identity the next GA
+tag (`v0.23.3`) will carry unchanged — the release candidate and the GA cut
 share this exact tree and differ only by the added release-notes file, so this
 guide stays accurate across that transition without an edit.
 

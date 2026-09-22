@@ -26,6 +26,12 @@ prose flag unset — disclosed, F49-class).
 > #332/#333/#338 (shipped in v0.23.1) plus any subsequent embedding-transform revision change
 > (e.g. the pending #365/#366 privacy-revision bump, which adds its own ledger row at merge) —
 > not the version label alone.
+> **Update 2026-09-05 (FINDING-F62):** the registered re-bank (RUN-SHEET-V1M-REBANK, merged 22c12b21) executed on the
+> shipped posture and **PARKED at the pre-spend gate**: the production provider-copy transform re-shapes 599 unit
+> occurrences (248 of 500 questions) of this corpus and the residual validator REFUSES 3 distinct units (17 questions; §4.2 transform-change count 617 occurrences = 93 unique units in 258 questions),
+> so the production `lcm_recall` arm cannot be run over LongMemEval-M at 22c12b21 without a posture or product change.
+> This settles the note above one step short of a number: F53 is **not executable under the shipped posture as of
+> 22c12b21**; the raw path F53 was measured on has not been re-run; F53 remains the row of record and the freeze stands.
 
 
 ## 1. The row (500 questions, 6 shards, fail-closed accounting)

@@ -1,5 +1,6 @@
 """Tests for B2 compaction telemetry (per-conversation snapshot in metadata)."""
 
+from contextlib import contextmanager
 import json
 import sqlite3
 import threading
@@ -8,6 +9,7 @@ import time
 import pytest
 
 from hermes_lcm import tools as lcm_tools
+from hermes_lcm import store as lcm_store
 from hermes_lcm.command import handle_lcm_command
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
@@ -228,7 +230,27 @@ def test_total_compactions_rebaseline_when_session_id_binds_new_conversation(eng
 
 
 @pytest.mark.parametrize("record_mode", ["successful_compaction", "response_hook"])
-def test_compactions_increment_total_atomically_across_engines(tmp_path, record_mode):
+def test_compactions_increment_total_atomically_across_engines(
+    tmp_path,
+    record_mode,
+    monkeypatch,
+):
+    runtime_busy_timeout = lcm_store._temporary_sqlite_busy_timeout
+
+    @contextmanager
+    def deterministic_test_busy_timeout(connections, timeout_ms):
+        assert timeout_ms == 100
+        with runtime_busy_timeout(connections, 5_000):
+            yield
+
+    # This test proves that two overlapping writers serialize their increments.
+    # Production intentionally skips best-effort telemetry after 100 ms, so use
+    # a test-only wait that cannot mistake that documented skip for a lost update.
+    monkeypatch.setattr(
+        lcm_store,
+        "_temporary_sqlite_busy_timeout",
+        deterministic_test_busy_timeout,
+    )
     config = LCMConfig(database_path=str(tmp_path / "lcm_test.db"))
     engines = [
         LCMEngine(config=config, hermes_home=str(tmp_path / "hermes_home_a")),

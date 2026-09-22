@@ -1876,7 +1876,10 @@ class FastembedProvider(_ResilientProvider):
     def warmup(self) -> list[float]:
         """The only path allowed to download a missing FastEmbed model."""
         if self._model is None:
-            self._model = self._construct(allow_download=True)
+            try:
+                self._model = self._construct(allow_download=False)
+            except ProviderNotWarmedUp:
+                self._model = self._construct(allow_download=True)
         return self.embed_query("warmup")
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:

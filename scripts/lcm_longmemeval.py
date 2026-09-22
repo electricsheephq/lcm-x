@@ -27,6 +27,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+import benchmarking.longmemeval as _longmemeval  # noqa: E402
+
 from benchmarking.longmemeval import (  # noqa: E402
     DATASET_COORDS,
     EMBED_CACHE_ENV,
@@ -160,6 +162,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     prewarm.add_argument("--provider", default="voyage", choices=PROVIDERS)
     prewarm.add_argument("--model", required=True)
     prewarm.add_argument("--timeout", type=float, default=300.0)
+    prewarm.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report uncached embedding units without populating the cache.",
+    )
+    prewarm.add_argument(
+        "--changed-manifest",
+        metavar="PATH",
+        help=(
+            "Write one JSONL record per privacy-transformed request unit for this scan "
+            "(the file is rewritten each scan and must not alias the cache or any input)."
+        ),
+    )
 
     probe = sub.add_parser(
         "determinism-probe",
@@ -263,6 +278,61 @@ def _validated_dump_candidates_path(
     return dump_path
 
 
+def _checkpoint_has_header(checkpoint_path: Path) -> bool:
+    """True only when ``--resume`` could actually continue: the checkpoint's first
+    non-empty line is the harness header object. A refusal raised before the header
+    is written (policy resolution, provider/template initialization) leaves no such
+    file, and the honest recovery is a fresh run, not a resume."""
+    try:
+        with checkpoint_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                return (
+                    isinstance(record, dict)
+                    and _longmemeval._CHECKPOINT_HEADER_KEY in record
+                )
+    except (OSError, ValueError):
+        return False
+    return False
+
+
+def _run_privacy_block_report(
+    exc: BaseException, *, checkpoint_path: Path
+) -> dict | None:
+    """Structured, redacted receipt for a privacy refusal raised inside a run.
+
+    Documents are validated by the prewarm dry run before any spend, but question
+    texts are protected only at run time, so a query-only refusal surfaces here.
+    The blocked question has no checkpoint row (``--resume`` re-runs it); the
+    receipt carries its id and the per-question counters the harness attached.
+    ``resumable`` reflects the durable state: true only when the checkpoint header
+    already exists on disk; otherwise ``checkpoint`` is null and the run is
+    re-launched fresh. Returns None for any other exception.
+    """
+    try:
+        from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
+    except ImportError:
+        return None
+    if not isinstance(exc, EmbeddingPrivacyPolicyError):
+        return None
+    privacy = getattr(exc, "question_privacy", None)
+    if privacy is None:
+        privacy = getattr(exc, "privacy_counts", None)
+    if privacy is None:
+        privacy = dict(_longmemeval._PRIVACY_COUNTS)
+    resumable = _checkpoint_has_header(checkpoint_path)
+    return {
+        "status": "blocked",
+        "question_id": getattr(exc, "question_id", None),
+        "privacy": privacy,
+        "checkpoint": str(checkpoint_path) if resumable else None,
+        "resumable": resumable,
+        "error": str(exc),
+    }
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     if args.provider != "stub" and not args.model:
         raise SystemExit(f"--model is required for --provider {args.provider}")
@@ -364,8 +434,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 resume=args.resume,
                 selected_question_ids=selected_question_ids,
             )
-    except (OSError, ValueError) as exc:
-        raise SystemExit(str(exc)) from exc
+    except Exception as exc:
+        blocked = _run_privacy_block_report(
+            exc, checkpoint_path=output_dir / PER_QUESTION_CHECKPOINT_FILENAME
+        )
+        if blocked is not None:
+            print(json.dumps(blocked, indent=2, sort_keys=True))
+            return 2
+        if isinstance(exc, (OSError, ValueError)):
+            raise SystemExit(str(exc)) from exc
+        raise
 
     metrics_path = output_dir / "longmemeval_metrics.json"
     metrics_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
@@ -380,12 +458,87 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def _prepared_shard_questions(args: argparse.Namespace):
+class _ShardSelection:
+    """Manifest-selected questions plus how much of the prepared corpus they cover.
+
+    ``coverage`` lets ``prewarm-cache`` label its privacy counters truthfully: a
+    shard union that misses a manifest or a question is a partial scan, and its
+    report must say so instead of claiming ``privacy_scope: corpus``. Extra ids are
+    refused by the prepared dataset and duplicates by the shard loader, so equal
+    counts mean an exact partition.
+    """
+
+    def __init__(self, prepared, question_ids: tuple[str, ...]) -> None:
+        self._prepared = prepared
+        self._question_ids = question_ids
+        self.coverage = {
+            "selected": len(set(question_ids)),
+            "prepared": len(prepared.questions),
+        }
+
+    def __iter__(self):
+        return self._prepared.iter_question_ids(self._question_ids)
+
+
+def _prepared_shard_questions(args: argparse.Namespace) -> _ShardSelection:
     prepared = load_prepared_dataset(
         Path(args.prepared_dir), dataset_label=args.dataset_label
     )
     question_ids = load_shard_question_ids(Path(args.shards_manifest))
-    return prepared.iter_question_ids(question_ids)
+    return _ShardSelection(prepared, tuple(question_ids))
+
+
+def _refuse_changed_manifest_input_alias(
+    changed_manifest: Path, args: argparse.Namespace
+) -> None:
+    """Refuse a --changed-manifest that names or sits inside one of the command's inputs.
+
+    The manifest is opened for writing before the scan; an alias of the prepared
+    corpus manifest or a shard manifest (path, symlink or hard link) would destroy
+    the run's own provenance. The harness separately refuses the cache file.
+    """
+    target = changed_manifest.resolve()
+    shards = Path(args.shards_manifest)
+    guarded_dirs = [
+        Path(args.prepared_dir).resolve(),
+        shards.resolve() if shards.is_dir() else shards.resolve().parent,
+    ]
+    for directory in guarded_dirs:
+        if target == directory or target.is_relative_to(directory):
+            raise SystemExit(
+                "Refusing --changed-manifest inside an input location "
+                f"(it is rewritten each scan): {changed_manifest}"
+            )
+    if not changed_manifest.exists():
+        return
+    prepared_dir = Path(args.prepared_dir)
+    manifests = [shards, prepared_dir / "manifest.json"]
+    if shards.is_dir():
+        manifests.extend(sorted(shards.glob("shard-*/manifest.json")))
+    inputs: list[Path] = list(manifests)
+    # Every question file a manifest references is an input too: a hard link to
+    # one resolves outside the guarded directories yet names the same inode.
+    for manifest in manifests:
+        if not manifest.is_file():
+            continue
+        try:
+            entries = json.loads(manifest.read_text(encoding="utf-8")).get("questions", [])
+        except (OSError, ValueError, AttributeError):
+            entries = []
+        for entry in entries if isinstance(entries, list) else []:
+            name = entry.get("file") if isinstance(entry, dict) else None
+            if isinstance(name, str) and name:
+                inputs.append(manifest.parent / name)
+                inputs.append(prepared_dir / name)
+    seen: set[Path] = set()
+    for candidate in inputs:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.exists() and os.path.samefile(changed_manifest, candidate):
+            raise SystemExit(
+                f"Refusing --changed-manifest that is the same file as an input: {candidate}"
+            )
 
 
 def _cmd_prewarm_cache(args: argparse.Namespace) -> int:
@@ -393,6 +546,11 @@ def _cmd_prewarm_cache(args: argparse.Namespace) -> int:
         raise SystemExit(f"{EMBED_CACHE_ENV} must name the SQLite cache file")
     if args.timeout <= 0:
         raise SystemExit("--timeout must be positive")
+    if args.changed_manifest is not None:
+        _refuse_changed_manifest_input_alias(Path(args.changed_manifest), args)
+    _longmemeval._ensure_hermes_lcm_package()
+    from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
+
     try:
         questions = _prepared_shard_questions(args)
         provider = resolve_harness_provider(
@@ -404,10 +562,33 @@ def _cmd_prewarm_cache(args: argparse.Namespace) -> int:
         report = prewarm_embedding_cache(
             questions,
             provider,
+            # Progress is operator chatter; stdout stays one JSON object so
+            # consumers can json.loads() the success, dry-run and blocked reports.
             progress=lambda processed: print(
-                f"prewarm processed={processed}", flush=True
+                f"prewarm processed={processed}", file=sys.stderr, flush=True
             ),
+            dry_run=args.dry_run,
+            changed_manifest=args.changed_manifest,
+            # None when a caller hands in a bare iterable; the shard selection
+            # carries the counts that decide "corpus" vs "partial".
+            question_coverage=getattr(questions, "coverage", None),
         )
+    except EmbeddingPrivacyPolicyError as exc:
+        privacy = getattr(exc, "privacy_counts", None)
+        if privacy is None:
+            privacy = dict(_longmemeval._PRIVACY_COUNTS)
+        print(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "privacy": privacy,
+                    "error": str(exc),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 2
     except (OSError, RuntimeError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
     print(json.dumps(report, indent=2, sort_keys=True))
@@ -419,6 +600,9 @@ def _cmd_determinism_probe(args: argparse.Namespace) -> int:
         raise SystemExit("--sample-size must be positive")
     if args.timeout <= 0:
         raise SystemExit("--timeout must be positive")
+    _longmemeval._ensure_hermes_lcm_package()
+    from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
+
     try:
         questions = _prepared_shard_questions(args)
         # Measurement-neutrality requires two fresh live API passes. Ignore the
@@ -436,6 +620,22 @@ def _cmd_determinism_probe(args: argparse.Namespace) -> int:
             sample_size=args.sample_size,
             seed=args.seed,
         )
+    except EmbeddingPrivacyPolicyError as exc:
+        privacy = getattr(exc, "privacy_counts", None)
+        if privacy is None:
+            privacy = dict(_longmemeval._PRIVACY_COUNTS)
+        print(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "privacy": privacy,
+                    "error": str(exc),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 2
     except (OSError, RuntimeError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
     print(json.dumps(report, indent=2, sort_keys=True))

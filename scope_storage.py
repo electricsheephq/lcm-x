@@ -618,14 +618,18 @@ def _backfill_session_table(
     batch_size: int,
 ) -> int:
     updated = 0
+    last_rowid: int | None = None
     while True:
+        lower_sql, lower_values = _rowid_keyset_lower_bound(last_rowid)
         rows = conn.execute(
             f'SELECT rowid, session_id FROM "{table}" '
-            f"WHERE {ACCESS_SCOPE_COLUMN} IS NULL ORDER BY rowid LIMIT ?",
-            (batch_size,),
+            f"WHERE {ACCESS_SCOPE_COLUMN} IS NULL{lower_sql} "
+            f"ORDER BY rowid LIMIT ?",
+            (*lower_values, batch_size),
         ).fetchall()
         if not rows:
             return updated
+        last_rowid = int(rows[-1][0])
         values = [(_resolve_scope(resolver, row[1]), int(row[0])) for row in rows]
         cursor = conn.executemany(
             f'UPDATE "{table}" SET {ACCESS_SCOPE_COLUMN}=? WHERE rowid=? '
@@ -638,6 +642,17 @@ def _backfill_session_table(
         # written -- and `total_updated` is the number an operator reads to
         # confirm an enable.
         updated += _rows_written(cursor)
+
+
+def _rowid_keyset_lower_bound(
+    last_rowid: int | None,
+    *,
+    expression: str = "rowid",
+) -> tuple[str, tuple[int, ...]]:
+    """Return no lower bound for page one, then an exclusive rowid cursor."""
+    if last_rowid is None:
+        return "", ()
+    return f" AND {expression} > ?", (last_rowid,)
 
 
 def _rows_written(cursor: sqlite3.Cursor) -> int:
@@ -657,22 +672,41 @@ def _backfill_joined_table(
     """Copy a source row's already-stamped scope to a derived item table."""
 
     updated = 0
+    last_rowid: int | None = None
     while True:
+        batch_start = last_rowid
+        lower_sql, lower_values = _rowid_keyset_lower_bound(last_rowid)
+        target_rows = conn.execute(
+            f"SELECT rowid FROM {table} "
+            f"WHERE {ACCESS_SCOPE_COLUMN} IS NULL{lower_sql} "
+            f"ORDER BY rowid LIMIT ?",
+            (*lower_values, batch_size),
+        ).fetchall()
+        if not target_rows:
+            return updated
+        last_rowid = int(target_rows[-1][0])
         # DISTINCT on the pair: the join can return several source rows for one
         # target rowid, and every duplicate past the first no-ops against the
         # `IS NULL` guard while still being counted.
+        source_lower_sql, source_lower_values = _rowid_keyset_lower_bound(
+            batch_start,
+            expression="target.rowid",
+        )
         rows = conn.execute(
             f"""
             SELECT DISTINCT target.rowid, source.access_scope
             FROM {table} AS target
             JOIN {source_table} AS source ON {join_sql}
-            WHERE target.access_scope IS NULL AND source.access_scope IS NOT NULL
-            ORDER BY target.rowid LIMIT ?
+            WHERE target.access_scope IS NULL
+              AND source.access_scope IS NOT NULL
+              {source_lower_sql}
+              AND target.rowid <= ?
+            ORDER BY target.rowid
             """,
-            (batch_size,),
+            (*source_lower_values, last_rowid),
         ).fetchall()
         if not rows:
-            return updated
+            continue
         # A conflict is not an answer -- the same rule the session-owner
         # resolver applies. DISTINCT collapses duplicate PAIRS, not duplicate
         # rowids: a target joining sources with DIFFERENT owners came back once
@@ -714,14 +748,18 @@ def _backfill_rollup_table(
     """Attribute rollup bookkeeping from its unchanged partition key."""
 
     updated = 0
+    last_rowid: int | None = None
     while True:
+        lower_sql, lower_values = _rowid_keyset_lower_bound(last_rowid)
         rows = conn.execute(
             f'SELECT rowid, scope FROM "{table}" '
-            f"WHERE {ACCESS_SCOPE_COLUMN} IS NULL ORDER BY rowid LIMIT ?",
-            (batch_size,),
+            f"WHERE {ACCESS_SCOPE_COLUMN} IS NULL{lower_sql} "
+            f"ORDER BY rowid LIMIT ?",
+            (*lower_values, batch_size),
         ).fetchall()
         if not rows:
             return updated
+        last_rowid = int(rows[-1][0])
         values = [(_resolve_scope(resolver, row[1]), int(row[0])) for row in rows]
         cursor = conn.executemany(
             f'UPDATE "{table}" SET {ACCESS_SCOPE_COLUMN}=? WHERE rowid=? '

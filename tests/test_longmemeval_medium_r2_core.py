@@ -571,6 +571,54 @@ def test_resume_rejects_null_metric_with_line_and_field(tmp_path, monkeypatch):
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("privacy", {"documents": -1}, "malformed privacy.documents=-1"),
+        ("privacy", {"documents": "7"}, "malformed privacy.documents='7'"),
+        ("embed_cache", {"hits": True}, "malformed embed_cache.hits=True"),
+        ("privacy", "x", "malformed privacy='x'"),
+    ],
+)
+def test_resume_rejects_present_malformed_count_metrics(
+    tmp_path, field, value, expected
+):
+    checkpoint = tmp_path / lme.PER_QUESTION_CHECKPOINT_FILENAME
+    record = lme._question_checkpoint_record(_question("q0"), _scored("q0"))
+    record[field] = value
+    _write_checkpoint(checkpoint, _header_record(), record)
+
+    with pytest.raises(ValueError) as raised:
+        _run_with_checkpoint(
+            tmp_path,
+            [_question("q0")],
+            checkpoint,
+            resume=True,
+            selected_question_ids=["q0"],
+        )
+
+    assert str(raised.value) == f"checkpoint row q0: {expected}"
+
+
+def test_resume_accepts_null_privacy_as_legacy_zero_counts(tmp_path):
+    checkpoint = tmp_path / lme.PER_QUESTION_CHECKPOINT_FILENAME
+    record = lme._question_checkpoint_record(_question("q0"), _scored("q0"))
+    record["privacy"] = None
+    _write_checkpoint(checkpoint, _header_record(), record)
+
+    report = _run_with_checkpoint(
+        tmp_path,
+        [_question("q0")],
+        checkpoint,
+        resume=True,
+        selected_question_ids=["q0"],
+    )
+
+    assert report["ingest"]["privacy"] == {
+        key: 0 for key in lme._PRIVACY_KEYS
+    }
+
+
 def test_resume_rejects_headerless_checkpoint(tmp_path, monkeypatch):
     checkpoint = tmp_path / lme.PER_QUESTION_CHECKPOINT_FILENAME
     _write_checkpoint(

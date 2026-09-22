@@ -24,6 +24,7 @@ from benchmarking.longmemeval import (
     Question,
     chunk_sessions,
     deterministic_session_summary,
+    embedding_determinism_report,
     evaluate_question,
     evidence_sessions,
     evidence_turns,
@@ -692,6 +693,14 @@ def test_stub_run_end_to_end_produces_report_and_fts_recovers_evidence(tmp_path)
     assert report["rerank"]["mode"] == RERANK_MODE_PLACEHOLDER
     assert report["ingest"]["reuse_db_template"] is True
     assert "per_question_ms" in report["ingest"]
+    assert report["ingest"]["privacy"] == {
+        "documents": 0,
+        "changed": 0,
+        "blocked": 0,
+        "queries": 0,
+        "queries_changed": 0,
+        "queries_blocked": 0,
+    }
 
 
 def test_dump_candidates_off_leaves_checkpoint_byte_identical(tmp_path, monkeypatch):
@@ -1318,6 +1327,254 @@ class _ProductionContextualIdentityEmbedder(_ContextualIdentityEmbedder):
             )
 
 
+class _FlatOnlyContextualIdentityEmbedder(_ContextualIdentityEmbedder):
+    def embed_chunk_group_batches(self, groups, *, before_dispatch=None):
+        raise AssertionError("grouped embedding must not be called in flat mode")
+
+
+def _chunk_mode_question(question_id="q-chunk-mode"):
+    return parse_question(
+        _make_raw(
+            question_id,
+            "single-session-user",
+            sessions={
+                "s-evidence": [
+                    {
+                        "role": "user",
+                        "content": "chunk embedding mode evidence " * 40,
+                        "has_answer": True,
+                    }
+                ]
+            },
+            answer_session_ids=["s-evidence"],
+            question="where is the chunk embedding mode evidence",
+        )
+    )
+
+
+def _install_provider_set(monkeypatch, summary, chunk):
+    import benchmarking.longmemeval as lme
+
+    provider_set = lme.HarnessProviderSet(
+        summary=summary,
+        chunk=chunk,
+        summary_binding=("voyage", summary.model_id),
+        chunk_binding=("voyage", chunk.model_id),
+    )
+    monkeypatch.setattr(
+        lme, "resolve_harness_providers", lambda *_args, **_kwargs: provider_set
+    )
+
+
+def test_flat_mode_forces_grouping_provider_through_flat_cacheable_path(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, "flat")
+    monkeypatch.setattr(lme, "production_recall_hits", lambda *_args, **_kwargs: [])
+    summary = _IdentityEmbedder("voyage-4-large")
+    chunk = _FlatOnlyContextualIdentityEmbedder("voyage-context-4")
+    _install_provider_set(monkeypatch, summary, chunk)
+
+    report = run_harness(
+        [_chunk_mode_question()],
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path,
+        reuse_db_template=False,
+    )
+
+    assert chunk.document_calls > 0
+    assert report["ingest"]["chunk_embedding_mode"] == "flat"
+
+
+def test_auto_mode_uses_contextual_grouping_without_cache(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, "auto")
+    monkeypatch.setattr(lme, "production_recall_hits", lambda *_args, **_kwargs: [])
+    summary = _IdentityEmbedder("voyage-4-large")
+    chunk = _ContextualIdentityEmbedder("voyage-context-4")
+    _install_provider_set(monkeypatch, summary, chunk)
+
+    report = run_harness(
+        [_chunk_mode_question()],
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path,
+        reuse_db_template=False,
+    )
+
+    assert chunk.contextual_groups
+    assert chunk.document_calls == 0
+    assert report["ingest"]["chunk_embedding_mode"] == "contextual"
+
+
+@pytest.mark.parametrize("mode", ["auto", "contextual"])
+def test_contextual_cache_conflict_fails_loud(tmp_path, monkeypatch, mode):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, mode)
+    raw = _FlatOnlyContextualIdentityEmbedder("voyage-context-4")
+    cached = lme.ContentHashEmbeddingCache(raw, tmp_path / f"{mode}.sqlite3")
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "contextual chunk grouping is not cache-backed: set "
+            "LCM_LONGMEMEVAL_CHUNK_EMBEDDING_MODE=flat or unset "
+            "LCM_LONGMEMEVAL_EMBED_CACHE"
+        ),
+    ):
+        evaluate_question(
+            _chunk_mode_question(f"q-{mode}-cache"),
+            _IdentityEmbedder("voyage-4-large"),
+            chunk_provider=cached,
+            provider_name="voyage",
+            tmp_dir=tmp_path,
+            embeddings_enabled=True,
+        )
+
+    assert raw.document_calls == 0
+    assert cached.hits == 0
+    assert cached.misses == 0
+
+
+def test_flat_mode_uses_wrapped_contextual_provider_cache(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+
+    cache_path = tmp_path / "flat.sqlite3"
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, "flat")
+    monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(cache_path))
+    monkeypatch.setattr(lme, "production_recall_hits", lambda *_args, **_kwargs: [])
+    summary = _IdentityEmbedder("voyage-4-large")
+    raw = _FlatOnlyContextualIdentityEmbedder("voyage-context-4")
+    cached = lme.ContentHashEmbeddingCache(raw, cache_path)
+    _install_provider_set(monkeypatch, summary, cached)
+
+    report = run_harness(
+        [_chunk_mode_question("q-flat-cache")],
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path,
+        reuse_db_template=False,
+    )
+
+    assert raw.document_calls > 0
+    assert cached.misses > 0
+    assert report["ingest"]["embed_cache"]["misses"] == cached.misses
+    assert report["ingest"]["chunk_embedding_mode"] == "flat"
+
+
+def test_contextual_mode_requires_grouping_capability(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, "contextual")
+    with pytest.raises(
+        ValueError,
+        match=(
+            "contextual chunk embedding requested but the chunk provider does not "
+            "support contextualized grouping"
+        ),
+    ):
+        evaluate_question(
+            _chunk_mode_question("q-contextual-unsupported"),
+            _IdentityEmbedder("voyage-4-large"),
+            provider_name="voyage",
+            tmp_dir=tmp_path,
+            embeddings_enabled=True,
+        )
+
+
+def test_lexical_only_cache_run_records_none_without_resolving_chunk_mode(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as lme
+
+    cache_path = tmp_path / "lexical-only.sqlite3"
+    provider = _ContextualIdentityEmbedder("voyage-4-large")
+    cached = lme.ContentHashEmbeddingCache(
+        provider,
+        cache_path,
+        provider_id="voyage",
+        model_id="voyage-4-large",
+    )
+    monkeypatch.setenv(lme.EMBED_CACHE_ENV, str(cache_path))
+    monkeypatch.delenv(lme.CHUNK_EMBEDDING_MODE_ENV, raising=False)
+    monkeypatch.setattr(
+        lme,
+        "resolve_harness_provider",
+        lambda *_args, **_kwargs: cached,
+    )
+
+    def forbidden_chunk_mode(*_args, **_kwargs):
+        raise AssertionError("must not be called")
+
+    monkeypatch.setattr(lme, "_resolved_chunk_embedding_mode", forbidden_chunk_mode)
+    question = _chunk_mode_question("q-lexical-cache")
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    report = run_harness(
+        [question],
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path / "tmp",
+        embeddings_enabled=False,
+        checkpoint_path=checkpoint,
+        reuse_db_template=False,
+    )
+
+    assert report["ingest"]["chunk_embedding_mode"] == "none"
+    rows = [json.loads(line) for line in checkpoint.read_text().splitlines()[1:]]
+    assert rows and all(row["chunk_embedding_mode"] == "none" for row in rows)
+
+
+def test_lexical_only_contextual_request_with_flat_provider_records_none(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, "contextual")
+    monkeypatch.setattr(
+        lme,
+        "resolve_harness_provider",
+        lambda *_args, **_kwargs: _IdentityEmbedder("voyage-4-large"),
+    )
+    report = run_harness(
+        [_chunk_mode_question("q-lexical-contextual")],
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path,
+        embeddings_enabled=False,
+        reuse_db_template=False,
+    )
+
+    assert report["ingest"]["chunk_embedding_mode"] == "none"
+
+
+def test_bad_chunk_embedding_mode_fails_loud(monkeypatch):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, "surprise")
+    with pytest.raises(ValueError, match="auto, flat, contextual"):
+        lme._chunk_embedding_mode()
+
+
+def test_prewarm_rejects_contextual_mode(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, "contextual")
+    cached = lme.ContentHashEmbeddingCache(
+        _ContextualIdentityEmbedder("voyage-context-4"),
+        tmp_path / "prewarm-contextual.sqlite3",
+    )
+    with pytest.raises(
+        ValueError,
+        match="prewarm-cache populates flat chunk units; contextual mode is not cache-backed",
+    ):
+        lme.prewarm_embedding_cache([_chunk_mode_question()], cached)
+
+
 class _CapturingIdentityEmbedder(_IdentityEmbedder):
     def __init__(self, model_id, *, provider_id="voyage"):
         super().__init__(model_id)
@@ -1471,7 +1728,7 @@ def test_cloud_query_is_protected_before_provider_dispatch(tmp_path, monkeypatch
     summary = _CapturingIdentityEmbedder("voyage-4-large")
     chunk = _CapturingIdentityEmbedder("voyage-context-4")
 
-    evaluate_question(
+    scored = evaluate_question(
         _privacy_question("q-private-query", question=_PRIVACY_TEXT),
         summary,
         chunk_provider=chunk,
@@ -1484,6 +1741,38 @@ def test_cloud_query_is_protected_before_provider_dispatch(tmp_path, monkeypatch
     assert outbound
     assert all(_PRIVACY_PLACEHOLDER in text for text in outbound)
     assert all(_PRIVACY_SECRET not in text for text in outbound)
+    assert scored["privacy"]["queries"] == 2
+    assert scored["privacy"]["queries_changed"] == 2
+
+
+def test_query_dispatch_validator_block_increments_query_counter(tmp_path, monkeypatch):
+    from hermes_lcm import ingest_protection
+    from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
+
+    query = "query validator refusal token"
+
+    def _validator(texts, *_args, **_kwargs):
+        if list(texts) == [query]:
+            raise EmbeddingPrivacyPolicyError("privacy policy blocked query dispatch")
+
+    monkeypatch.setattr(
+        ingest_protection, "validate_embedding_privacy_dispatch", _validator
+    )
+    provider = _CapturingIdentityEmbedder("voyage-4-large")
+
+    with pytest.raises(EmbeddingPrivacyPolicyError) as raised:
+        evaluate_question(
+            _privacy_question("q-query-validator-block", question=query),
+            provider,
+            chunk_provider=provider,
+            provider_name="voyage",
+            tmp_dir=tmp_path,
+            embeddings_enabled=True,
+        )
+
+    assert raised.value.privacy_counts["queries_blocked"] == 1
+    assert raised.value.privacy_counts["blocked"] == 0
+    assert provider.captured_queries == []
 
 
 def test_stub_query_reaches_provider_byte_identical(tmp_path, monkeypatch):
@@ -1521,6 +1810,141 @@ def test_prewarm_cloud_documents_are_protected_before_dispatch(tmp_path):
     assert all(_PRIVACY_SECRET not in text for text in outbound)
 
 
+def test_prewarm_reports_privacy_transform_counts(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+
+    documents = [
+        "ordinary document one",
+        "password: hunter2000abc",
+        "ordinary document two",
+    ]
+    monkeypatch.setattr(
+        lme,
+        "iter_ingest_embedding_request_units",
+        lambda _question: iter(documents),
+    )
+    raw = _CapturingIdentityEmbedder("voyage-context-4")
+    cached = lme.ContentHashEmbeddingCache(raw, tmp_path / "prewarm.sqlite3")
+
+    report = lme.prewarm_embedding_cache(
+        [_privacy_question("q-private-prewarm-counts")], cached, progress_every=100
+    )
+
+    assert report["privacy"] == {
+        "documents": 3,
+        "changed": 1,
+        "blocked": 0,
+        "queries": 0,
+        "queries_changed": 0,
+        "queries_blocked": 0,
+    }
+    outbound = _flatten_document_calls(raw)
+    assert _PRIVACY_PLACEHOLDER in outbound[1]
+    assert _PRIVACY_SECRET not in outbound[1]
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_prewarm_changed_manifest_records_exact_transformed_unit(
+    tmp_path, monkeypatch, dry_run
+):
+    import benchmarking.longmemeval as lme
+    from hermes_lcm.ingest_protection import protect_embedding_text
+
+    documents = ["ordinary document", "password: hunter2000abc"]
+    monkeypatch.setattr(
+        lme,
+        "iter_ingest_embedding_request_units",
+        lambda _question: iter(documents),
+    )
+    raw = _CapturingIdentityEmbedder("voyage-context-4")
+    cached = lme.ContentHashEmbeddingCache(raw, tmp_path / "manifest-cache.sqlite3")
+    manifest = tmp_path / "nested" / "changed.jsonl"
+
+    report = lme.prewarm_embedding_cache(
+        [_privacy_question("q-changed-manifest")],
+        cached,
+        dry_run=dry_run,
+        changed_manifest=manifest,
+    )
+
+    rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()]
+    privacy_config, privacy_revision = lme._embedding_privacy_context(
+        "voyage", "voyage-context-4"
+    )
+    protected, _revision, changed = protect_embedding_text(
+        documents[1],
+        privacy_config,
+        expected_revision=privacy_revision,
+    )
+    assert changed is True
+    assert rows == [
+        {
+            "question_id": "q-changed-manifest",
+            "unit_index": 1,
+            "raw_sha256": cached.content_sha256(documents[1]),
+            "protected_sha256": cached.content_sha256(protected),
+        }
+    ]
+    assert report["changed_manifest"] == str(manifest)
+    assert report["changed_units"] == report["privacy"]["changed"] == 1
+    assert report["chunk_embedding_mode"] == "flat"
+
+
+def test_prewarm_changed_manifest_stays_empty_without_transform(tmp_path):
+    import benchmarking.longmemeval as lme
+
+    manifest = tmp_path / "unchanged.jsonl"
+    cached = lme.ContentHashEmbeddingCache(
+        lme.StubEmbedder(),
+        tmp_path / "unchanged-cache.sqlite3",
+        provider_id="stub",
+        model_id="stub-hash-64",
+    )
+
+    report = lme.prewarm_embedding_cache(
+        [_chunk_mode_question("q-unchanged-manifest")],
+        cached,
+        changed_manifest=manifest,
+    )
+
+    assert report["changed_units"] == report["privacy"]["changed"] == 0
+    assert manifest.read_text(encoding="utf-8") == ""
+
+
+def test_prewarm_privacy_block_is_counted_and_reraised(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+    from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
+
+    orphan_pem = (
+        "trunc -----BEGIN PRIVATE KEY-----\n"
+        "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj\n"
+        "ok.\n"
+        "MHcCAQEEIQD1eJ7yhkG0987xyzABCDEFghijkLMNOPqrstuvwxyz0987654321pq"
+    )
+    monkeypatch.setattr(
+        lme,
+        "iter_ingest_embedding_request_units",
+        lambda _question: iter([orphan_pem]),
+    )
+    raw = _CapturingIdentityEmbedder("voyage-context-4")
+    cached = lme.ContentHashEmbeddingCache(raw, tmp_path / "prewarm.sqlite3")
+
+    with pytest.raises(EmbeddingPrivacyPolicyError):
+        lme.prewarm_embedding_cache(
+            [_privacy_question("q-private-prewarm-blocked")], cached
+        )
+
+    assert lme._PRIVACY_COUNTS == {
+        "documents": 1,
+        "changed": 0,
+        "blocked": 1,
+        "queries": 0,
+        "queries_changed": 0,
+        "queries_blocked": 0,
+    }
+    assert raw.captured_documents == []
+
+
 def test_determinism_probe_cloud_documents_are_protected_before_dispatch(tmp_path):
     import benchmarking.longmemeval as lme
 
@@ -1534,9 +1958,468 @@ def test_determinism_probe_cloud_documents_are_protected_before_dispatch(tmp_pat
 
     outbound = _flatten_document_calls(provider)
     assert report["sample_size"] == 1
+    assert report["privacy"] == {
+        "documents": 1,
+        "changed": 1,
+        "blocked": 0,
+        "queries": 0,
+        "queries_changed": 0,
+        "queries_blocked": 0,
+    }
     assert outbound
     assert all(_PRIVACY_PLACEHOLDER in text for text in outbound)
     assert all(_PRIVACY_SECRET not in text for text in outbound)
+
+
+def test_determinism_probe_privacy_counts_are_sample_scoped(tmp_path):
+    question = parse_question(
+        _make_raw(
+            "q-private-determinism-sample",
+            "single-session-user",
+            sessions={
+                "s0": [{"role": "user", "content": "password: alpha-secret"}],
+                "s1": [{"role": "user", "content": "password: bravo-secret"}],
+                "s2": [{"role": "user", "content": "password: charlie-secret"}],
+            },
+            answer_session_ids=["s0"],
+        )
+    )
+    provider = _CapturingIdentityEmbedder("voyage-4-large")
+
+    report = embedding_determinism_report(
+        [question], provider, sample_size=1, seed=0
+    )
+
+    assert report["privacy_scope"] == "sample"
+    assert report["privacy"]["documents"] == 1
+    assert report["privacy"]["changed"] == 1
+
+
+def test_determinism_validator_block_counts_sample_batch(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+    from hermes_lcm import ingest_protection
+    from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
+
+    question = parse_question(
+        _make_raw(
+            "q-determinism-validator-block",
+            "single-session-user",
+            sessions={
+                f"s{index}": [
+                    {"role": "user", "content": f"unique session {index}"}
+                ]
+                for index in range(3)
+            },
+            answer_session_ids=["s0"],
+        )
+    )
+
+    def _blocked(*_args, **_kwargs):
+        raise EmbeddingPrivacyPolicyError("privacy policy blocked probe dispatch")
+
+    monkeypatch.setattr(
+        ingest_protection, "validate_embedding_privacy_dispatch", _blocked
+    )
+    with pytest.raises(EmbeddingPrivacyPolicyError) as raised:
+        lme.embedding_determinism_report(
+            [question], _CapturingIdentityEmbedder("voyage-4-large"), sample_size=3
+        )
+
+    assert raised.value.privacy_counts["blocked"] == 3
+    assert raised.value.privacy_counts["documents"] == 3
+
+
+def test_determinism_probe_block_counts_even_during_uncounted_scan(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+    from hermes_lcm import ingest_protection
+    from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
+
+    question = parse_question(
+        _make_raw(
+            "q-private-determinism-blocked-scan",
+            "single-session-user",
+            sessions={
+                "s0": [{"role": "user", "content": "first scanned session"}],
+                "s1": [{"role": "user", "content": "second scanned session"}],
+            },
+            answer_session_ids=["s0"],
+        )
+    )
+
+    def _blocked(*_args, **_kwargs):
+        raise EmbeddingPrivacyPolicyError("privacy policy blocked scan")
+
+    monkeypatch.setattr(ingest_protection, "protect_embedding_text", _blocked)
+    with pytest.raises(EmbeddingPrivacyPolicyError) as raised:
+        lme.embedding_determinism_report(
+            [question], _CapturingIdentityEmbedder("voyage-4-large"), sample_size=1
+        )
+
+    assert raised.value.privacy_counts["blocked"] == 1
+    assert raised.value.privacy_counts["documents"] == 0
+
+
+def test_per_question_privacy_and_corpus_counts_resume_without_header_change(tmp_path):
+    question = parse_question(
+        _make_raw(
+            "q-instrument-counts",
+            "single-session-user",
+            sessions={
+                "s-counts": [
+                    {"role": "user", "content": "first toy message"},
+                    {"role": "assistant", "content": "second toy message", "has_answer": True},
+                ]
+            },
+            answer_session_ids=["s-counts"],
+            question="what was in the toy message",
+        )
+    )
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+
+    run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "initial",
+        checkpoint_path=checkpoint,
+    )
+
+    lines = checkpoint.read_text(encoding="utf-8").splitlines()
+    header = json.loads(lines[0])
+    header_line = lines[0]
+    row = json.loads(lines[1])
+    assert set(header) == {"__checkpoint_header__"}
+    assert row["privacy"] == {
+        "documents": 0,
+        "changed": 0,
+        "blocked": 0,
+        "queries": 0,
+        "queries_changed": 0,
+        "queries_blocked": 0,
+    }
+    assert row["corpus_counts"] == {"messages": 2, "summary_nodes": 1, "chunks": 0}
+    assert row["embed_cache"] == {"hits": 0, "misses": 0}
+    assert "corpus_counts" not in row["arms"]
+    assert "embed_cache" not in row["arms"]
+    assert set(row["arms"]) == set(ARMS)
+
+    # Simulate a previously completed privacy-accounted question (all six keys
+    # present). The legacy three-key row shape is covered by the next test.
+    row["privacy"]["documents"] = 3
+    row["privacy"]["changed"] = 1
+    checkpoint.write_text(
+        header_line + "\n" + json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    resumed = run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "resume",
+        checkpoint_path=checkpoint,
+        resume=True,
+        selected_question_ids=[question.question_id],
+    )
+    assert resumed["question_count"] == 1
+    assert resumed["ingest"]["privacy"] == {
+        "documents": 3,
+        "changed": 1,
+        "blocked": 0,
+        "queries": 0,
+        "queries_changed": 0,
+        "queries_blocked": 0,
+    }
+    resumed_header_line = checkpoint.read_text(encoding="utf-8").splitlines()[0]
+    assert resumed_header_line == header_line
+    assert set(json.loads(resumed_header_line)) == {"__checkpoint_header__"}
+
+
+@pytest.mark.parametrize(
+    ("error_message", "should_raise"),
+    [("no such table: lcm_chunk_meta", False), ("database is locked", True)],
+)
+def test_chunk_count_only_swallows_missing_table_operational_error(
+    tmp_path, monkeypatch, error_message, should_raise
+):
+    import benchmarking.longmemeval as lme
+    import hermes_lcm.vector_store as vector_store_module
+
+    real_vector_store = vector_store_module.VectorStore
+
+    class _ConnectionProxy:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, sql, *args, **kwargs):
+            if "lcm_chunk_meta" in str(sql):
+                raise sqlite3.OperationalError(error_message)
+            return self._connection.execute(sql, *args, **kwargs)
+
+    class _VectorStoreProxy:
+        def __init__(self, *args, **kwargs):
+            self._inner = real_vector_store(*args, **kwargs)
+            self.connection = _ConnectionProxy(self._inner.connection)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def close(self):
+            self._inner.close()
+
+    monkeypatch.setattr(vector_store_module, "VectorStore", _VectorStoreProxy)
+    question = _chunk_mode_question(f"q-operational-{should_raise}")
+    kwargs = {
+        "provider_name": "stub",
+        "tmp_dir": tmp_path,
+        "embeddings_enabled": False,
+    }
+
+    if should_raise:
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            evaluate_question(question, lme.StubEmbedder(), **kwargs)
+    else:
+        scored = evaluate_question(question, lme.StubEmbedder(), **kwargs)
+        assert scored["corpus_counts"]["chunks"] == 0
+
+
+def test_resume_restores_legacy_three_key_privacy_rows(tmp_path):
+    question = parse_question(
+        _make_raw(
+            "q-legacy-privacy-row",
+            "single-session-user",
+            sessions={
+                "s-legacy": [
+                    {"role": "user", "content": "first toy message"},
+                    {"role": "assistant", "content": "second toy message", "has_answer": True},
+                ]
+            },
+            answer_session_ids=["s-legacy"],
+            question="what was in the toy message",
+        )
+    )
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "initial",
+        checkpoint_path=checkpoint,
+    )
+    lines = checkpoint.read_text(encoding="utf-8").splitlines()
+    row = json.loads(lines[1])
+    # A pre-r2 row carried only the three document counters.
+    row["privacy"] = {"documents": 5, "changed": 2, "blocked": 0}
+    checkpoint.write_text(
+        lines[0] + "\n" + json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    resumed = run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "resume",
+        checkpoint_path=checkpoint,
+        resume=True,
+        selected_question_ids=[question.question_id],
+    )
+    assert resumed["question_count"] == 1
+    assert resumed["ingest"]["privacy"] == {
+        "documents": 5,
+        "changed": 2,
+        "blocked": 0,
+        "queries": 0,
+        "queries_changed": 0,
+        "queries_blocked": 0,
+    }
+
+
+def test_resume_validates_restored_corpus_counts(tmp_path):
+    question = parse_question(
+        _make_raw(
+            "q-corpus-counts-row",
+            "single-session-user",
+            sessions={
+                "s-counts": [
+                    {"role": "user", "content": "first toy message"},
+                    {"role": "assistant", "content": "second toy message", "has_answer": True},
+                ]
+            },
+            answer_session_ids=["s-counts"],
+            question="what was in the toy message",
+        )
+    )
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "initial",
+        checkpoint_path=checkpoint,
+    )
+    header, row_line = checkpoint.read_text(encoding="utf-8").splitlines()[:2]
+    assert json.loads(row_line)["corpus_counts"] == {
+        "messages": 2,
+        "summary_nodes": 1,
+        "chunks": 0,
+    }
+
+    def _write(row):
+        checkpoint.write_text(
+            header + "\n" + json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+
+    def _resume(label):
+        return run_harness(
+            [question],
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / label,
+            checkpoint_path=checkpoint,
+            resume=True,
+            selected_question_ids=[question.question_id],
+        )
+
+    # A present value must be exactly the three non-negative integer counters.
+    malformed = {
+        "non-object": [2, 1, 0],
+        "missing-key": {"messages": 2, "summary_nodes": 1},
+        "extra-key": {"messages": 2, "summary_nodes": 1, "chunks": 0, "turns": 2},
+        "negative": {"messages": -1, "summary_nodes": 1, "chunks": 0},
+        "bool": {"messages": True, "summary_nodes": 1, "chunks": 0},
+        "float": {"messages": 2.0, "summary_nodes": 1, "chunks": 0},
+    }
+    for label, value in malformed.items():
+        row = json.loads(row_line)
+        row["corpus_counts"] = value
+        _write(row)
+        with pytest.raises(ValueError, match="corpus_counts"):
+            _resume(f"resume-{label}")
+    # A legacy row without the field (or with an explicit null) still resumes;
+    # the recompute reports its counts as unavailable, never as zeros.
+    row = json.loads(row_line)
+    del row["corpus_counts"]
+    _write(row)
+    assert _resume("resume-legacy")["question_count"] == 1
+    row = json.loads(row_line)
+    row["corpus_counts"] = None
+    _write(row)
+    assert _resume("resume-null")["question_count"] == 1
+
+
+def test_resume_rejects_partial_privacy_or_embed_cache_objects(tmp_path):
+    question = parse_question(
+        _make_raw(
+            "q-partial-counters",
+            "single-session-user",
+            sessions={
+                "s-partial": [
+                    {"role": "user", "content": "first toy message"},
+                    {"role": "assistant", "content": "second toy message", "has_answer": True},
+                ]
+            },
+            answer_session_ids=["s-partial"],
+            question="what was in the toy message",
+        )
+    )
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "initial",
+        checkpoint_path=checkpoint,
+    )
+    header, row_line = checkpoint.read_text(encoding="utf-8").splitlines()[:2]
+
+    def _write(row):
+        checkpoint.write_text(
+            header + "\n" + json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+
+    def _resume(label):
+        return run_harness(
+            [question],
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / label,
+            checkpoint_path=checkpoint,
+            resume=True,
+            selected_question_ids=[question.question_id],
+        )
+
+    # A present object must carry its exact key set: a missing key would
+    # otherwise restore as a silent zero inside the cache-pair / privacy evidence.
+    partial = {
+        "embed-cache-missing-misses": ("embed_cache", {"hits": 12}),
+        "embed-cache-extra-key": ("embed_cache", {"hits": 12, "misses": 0, "evictions": 1}),
+        "privacy-five-keys": (
+            "privacy",
+            {"documents": 1, "changed": 0, "blocked": 0, "queries": 1, "queries_changed": 0},
+        ),
+        "privacy-mixed-sets": (
+            "privacy",
+            {"documents": 1, "changed": 0, "blocked": 0, "queries_blocked": 0},
+        ),
+        "privacy-partial-legacy": ("privacy", {"documents": 1, "changed": 0}),
+    }
+    for label, (field, value) in partial.items():
+        row = json.loads(row_line)
+        row[field] = value
+        _write(row)
+        with pytest.raises(ValueError, match=field):
+            _resume(f"resume-{label}")
+    # The untouched row (all six privacy keys, both cache keys) still resumes.
+    _write(json.loads(row_line))
+    assert _resume("resume-intact")["question_count"] == 1
+
+
+def test_run_time_privacy_block_is_bound_to_its_question_and_leaves_no_row(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as harness
+    from hermes_lcm.ingest_protection import EmbeddingPrivacyPolicyError
+
+    question = parse_question(
+        _make_raw(
+            "q-runtime-block",
+            "single-session-user",
+            sessions={
+                "s-block": [
+                    {"role": "user", "content": "first toy message"},
+                    {"role": "assistant", "content": "second toy message", "has_answer": True},
+                ]
+            },
+            answer_session_ids=["s-block"],
+            question="what was in the toy message",
+        )
+    )
+
+    def _blocked(*_args, **_kwargs):
+        # Query texts are protected only at run time; emulate a query refusal
+        # after the per-question counters observed the dispatch.
+        harness._PRIVACY_QUESTION.update({"queries": 1, "queries_blocked": 1})
+        raise EmbeddingPrivacyPolicyError("privacy policy blocked query dispatch")
+
+    monkeypatch.setattr(harness, "evaluate_question", _blocked)
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    with pytest.raises(EmbeddingPrivacyPolicyError) as raised:
+        run_harness(
+            [question],
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / "initial",
+            checkpoint_path=checkpoint,
+        )
+
+    assert raised.value.question_id == "q-runtime-block"
+    assert raised.value.question_privacy["queries_blocked"] == 1
+    # No row for the blocked question: --resume re-runs it (fail-closed, resumable).
+    lines = checkpoint.read_text(encoding="utf-8").splitlines() if checkpoint.exists() else []
+    assert len(lines) <= 1
+    assert all("q-runtime-block" not in line for line in lines[1:])
 
 
 def test_embeddings_disabled_preserves_raw_corpus_text_in_fts(tmp_path):
@@ -2051,6 +2934,342 @@ def test_content_cache_exposes_internal_split_dispatches_and_usage(tmp_path):
     assert row["provider_dispatches"] == 2
     assert row["usage_tokens"] == 10
     assert row["usage_tokens_complete"] is True
+
+
+def test_partial_resume_rejects_mismatched_chunk_embedding_mode_before_evaluation(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, "auto")
+    monkeypatch.setattr(lme, "production_recall_hits", lambda *_args, **_kwargs: [])
+    summary = _IdentityEmbedder("voyage-4-large")
+    chunk = _ContextualIdentityEmbedder("voyage-context-4")
+    _install_provider_set(monkeypatch, summary, chunk)
+    questions = [
+        _chunk_mode_question("q-partial-mismatch-1"),
+        _chunk_mode_question("q-partial-mismatch-2"),
+    ]
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        [questions[0]],
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path / "initial",
+        checkpoint_path=checkpoint,
+        reuse_db_template=False,
+    )
+    lines = checkpoint.read_text(encoding="utf-8").splitlines()
+    row = json.loads(lines[1])
+    row["chunk_embedding_mode"] = "flat"
+    checkpoint.write_text(
+        lines[0] + "\n" + json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    before = checkpoint.read_bytes()
+    calls = 0
+    original_evaluate = lme.evaluate_question
+
+    def counting_evaluate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(lme, "evaluate_question", counting_evaluate)
+    with pytest.raises(
+        ValueError,
+        match=(
+            "checkpoint row q-partial-mismatch-1: "
+            "chunk_embedding_mode='flat' but the resumed run resolves 'contextual'"
+        ),
+    ):
+        run_harness(
+            questions,
+            provider_name="voyage",
+            model="voyage-4-large",
+            tmp_dir=tmp_path / "resume",
+            checkpoint_path=checkpoint,
+            resume=True,
+            selected_question_ids=[question.question_id for question in questions],
+            reuse_db_template=False,
+        )
+    assert calls == 0
+    assert checkpoint.read_bytes() == before
+
+
+def test_partial_resume_rejects_legacy_row_without_chunk_embedding_mode(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, "contextual")
+    monkeypatch.setattr(lme, "production_recall_hits", lambda *_args, **_kwargs: [])
+    summary = _IdentityEmbedder("voyage-4-large")
+    chunk = _ContextualIdentityEmbedder("voyage-context-4")
+    _install_provider_set(monkeypatch, summary, chunk)
+    questions = [
+        _chunk_mode_question("q-partial-missing-1"),
+        _chunk_mode_question("q-partial-missing-2"),
+    ]
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        [questions[0]],
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path / "initial",
+        checkpoint_path=checkpoint,
+        reuse_db_template=False,
+    )
+    lines = checkpoint.read_text(encoding="utf-8").splitlines()
+    row = json.loads(lines[1])
+    row.pop("chunk_embedding_mode")
+    checkpoint.write_text(
+        lines[0] + "\n" + json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    before = checkpoint.read_bytes()
+    calls = 0
+    original_evaluate = lme.evaluate_question
+
+    def counting_evaluate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(lme, "evaluate_question", counting_evaluate)
+    with pytest.raises(
+        ValueError,
+        match="checkpoint row q-partial-missing-1: missing chunk_embedding_mode",
+    ):
+        run_harness(
+            questions,
+            provider_name="voyage",
+            model="voyage-4-large",
+            tmp_dir=tmp_path / "resume",
+            checkpoint_path=checkpoint,
+            resume=True,
+            selected_question_ids=[question.question_id for question in questions],
+            reuse_db_template=False,
+        )
+    assert calls == 0
+    assert checkpoint.read_bytes() == before
+
+
+def test_partial_resume_matching_chunk_embedding_mode_proceeds(tmp_path, monkeypatch):
+    import benchmarking.longmemeval as lme
+
+    monkeypatch.setenv(lme.CHUNK_EMBEDDING_MODE_ENV, "flat")
+    monkeypatch.setattr(lme, "production_recall_hits", lambda *_args, **_kwargs: [])
+    summary = _IdentityEmbedder("voyage-4-large")
+    chunk = _ContextualIdentityEmbedder("voyage-context-4")
+    _install_provider_set(monkeypatch, summary, chunk)
+    questions = [
+        _chunk_mode_question("q-partial-match-1"),
+        _chunk_mode_question("q-partial-match-2"),
+    ]
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        [questions[0]],
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path / "initial",
+        checkpoint_path=checkpoint,
+        reuse_db_template=False,
+    )
+    report = run_harness(
+        questions,
+        provider_name="voyage",
+        model="voyage-4-large",
+        tmp_dir=tmp_path / "resume",
+        checkpoint_path=checkpoint,
+        resume=True,
+        selected_question_ids=[question.question_id for question in questions],
+        reuse_db_template=False,
+    )
+    assert report["ingest"]["chunk_embedding_mode"] == "flat"
+
+
+def test_completed_resume_of_legacy_rows_records_unknown_without_provider_resolution(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as lme
+
+    question = _chunk_mode_question("q-completed-legacy-mode")
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "initial",
+        checkpoint_path=checkpoint,
+        reuse_db_template=False,
+    )
+    lines = checkpoint.read_text(encoding="utf-8").splitlines()
+    row = json.loads(lines[1])
+    row.pop("chunk_embedding_mode")
+    checkpoint.write_text(
+        lines[0] + "\n" + json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    def forbidden_resolution(*_args, **_kwargs):
+        raise AssertionError("must not be called")
+
+    monkeypatch.setattr(lme, "resolve_harness_providers", forbidden_resolution)
+    report = run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "resume",
+        checkpoint_path=checkpoint,
+        resume=True,
+        selected_question_ids=[question.question_id],
+        reuse_db_template=False,
+    )
+    assert report["ingest"]["chunk_embedding_mode"] == "unknown"
+
+
+def test_completed_resume_of_lexical_rows_records_none_without_provider_resolution(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as lme
+
+    question = _chunk_mode_question("q-completed-lexical-mode")
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "initial",
+        embeddings_enabled=False,
+        checkpoint_path=checkpoint,
+        reuse_db_template=False,
+    )
+
+    def forbidden_resolution(*_args, **_kwargs):
+        raise AssertionError("must not be called")
+
+    monkeypatch.setattr(lme, "resolve_harness_providers", forbidden_resolution)
+    report = run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "resume",
+        embeddings_enabled=False,
+        checkpoint_path=checkpoint,
+        resume=True,
+        selected_question_ids=[question.question_id],
+        reuse_db_template=False,
+    )
+
+    assert report["ingest"]["chunk_embedding_mode"] == "none"
+
+
+def test_completed_resume_rejects_unrecognized_chunk_embedding_mode(
+    tmp_path, monkeypatch
+):
+    import benchmarking.longmemeval as lme
+
+    question = _chunk_mode_question("q-completed-unrecognized-mode")
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        [question],
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "initial",
+        embeddings_enabled=False,
+        checkpoint_path=checkpoint,
+        reuse_db_template=False,
+    )
+    lines = checkpoint.read_text(encoding="utf-8").splitlines()
+    row = json.loads(lines[1])
+    row["chunk_embedding_mode"] = "sideways"
+    checkpoint.write_text(
+        lines[0] + "\n" + json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    def forbidden_resolution(*_args, **_kwargs):
+        raise AssertionError("must not be called")
+
+    monkeypatch.setattr(lme, "resolve_harness_providers", forbidden_resolution)
+    with pytest.raises(ValueError, match="unrecognized chunk_embedding_mode.*sideways"):
+        run_harness(
+            [question],
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / "resume",
+            embeddings_enabled=False,
+            checkpoint_path=checkpoint,
+            resume=True,
+            selected_question_ids=[question.question_id],
+            reuse_db_template=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        ("drop", "mix legacy rows without chunk_embedding_mode.*'none'"),
+        ("bogus", "unrecognized chunk_embedding_mode.*bogus"),
+    ],
+)
+def test_completed_resume_reconciles_chunk_mode_over_every_row(
+    tmp_path, monkeypatch, mutation, expected
+):
+    """A single valid row must not label a checkpoint whose other rows lack the
+    key or carry an invalid value; every row participates in the reconciliation."""
+    import benchmarking.longmemeval as lme
+
+    questions = [
+        _chunk_mode_question("q-mode-reconcile-a"),
+        _chunk_mode_question("q-mode-reconcile-b"),
+    ]
+    checkpoint = tmp_path / "run" / "per_question_checkpoint.jsonl"
+    run_harness(
+        questions,
+        provider_name="stub",
+        model="",
+        tmp_dir=tmp_path / "initial",
+        embeddings_enabled=False,
+        checkpoint_path=checkpoint,
+        reuse_db_template=False,
+    )
+    lines = checkpoint.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 3
+    first = json.loads(lines[1])
+    assert first["chunk_embedding_mode"] == "none"
+    second = json.loads(lines[2])
+    if mutation == "drop":
+        del second["chunk_embedding_mode"]
+    else:
+        second["chunk_embedding_mode"] = "bogus"
+    checkpoint.write_text(
+        lines[0]
+        + "\n"
+        + lines[1]
+        + "\n"
+        + json.dumps(second, sort_keys=True, separators=(",", ":"))
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def forbidden_resolution(*_args, **_kwargs):
+        raise AssertionError("must not be called")
+
+    monkeypatch.setattr(lme, "resolve_harness_providers", forbidden_resolution)
+    with pytest.raises(ValueError, match=expected):
+        run_harness(
+            questions,
+            provider_name="stub",
+            model="",
+            tmp_dir=tmp_path / "resume",
+            embeddings_enabled=False,
+            checkpoint_path=checkpoint,
+            resume=True,
+            selected_question_ids=[q.question_id for q in questions],
+            reuse_db_template=False,
+        )
 
 
 def test_completed_resume_and_binding_mismatch_do_not_resolve_provider(
