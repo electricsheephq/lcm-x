@@ -18,6 +18,13 @@ PACKET_KIND = "ai-review-exact-head"
 PRODUCER_LOGIN = "100yenadmin"
 PRODUCER_ID = 239388517
 MAX_PACKET_BYTES = 65000
+MAX_REVIEW_BODY_BYTES = 8192
+# Public withdrawal: PR462 issuecomment-5771571369. These producer-assigned
+# scores were not issued by the reviewers. Never accept or preserve them.
+WITHDRAWN_RECEIPT_IDS = frozenset({
+    "52eca5d8-1628-4f03-9128-34a5e1d5746f",
+    "5a6b05ee-c573-4cd9-b6f4-9a944fba61ee",
+})
 HIGH_RISK = {
     "governance", "security", "data-integrity", "migration", "persistence",
     "lifecycle", "runtime", "hermes-contract", "workflow-policy", "unknown",
@@ -48,11 +55,19 @@ RECEIPT_FIELDS = {
     "policy_version",
     "integration_id",
 }
+REVIEW_ARTIFACT_REF_FIELDS = {"lane", "review_id"}
+REVIEW_ARTIFACT_FIELDS = {"review_id", "state", "commit_id", "submitted_at", "user", "body"}
+REVIEW_ARTIFACT_BODY_FIELDS = {"schema_version", "repository", "pr_number", "base_sha", "head_sha", "lane",
+    "task_id", "verdict", "score", "findings", "evidence_digest", "expires_at", "policy_version"}
+REVIEW_ARTIFACT_PREFIX = "<!-- lcm-x-ai-review:v1\n"
+REVIEW_ARTIFACT_SUFFIX = "\n-->"
+# Protected identities supply no verdict or score without a valid review body.
+REVIEW_PUBLISHERS = {"acceptance": {"id": 298367747, "login": "evaos-code-review-bot[bot]"}, "adversarial": {"id": 199175422, "login": "chatgpt-codex-connector[bot]"}}
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z")
 PACKET_FIELDS = {
     "schema_version", "kind", "repository", "pr_number", "base_sha",
     "head_sha", "state_fingerprint", "receipts", "producer", "run",
-    "dispatch_id",
+    "dispatch_id", "review_artifact_refs",
 }
 SNAPSHOT_FAILURE_BLOCKERS = {
     "LIVE_STATE_INVALID", "REPOSITORY_MISMATCH", "PR_INVALID",
@@ -119,6 +134,7 @@ def state_fingerprint(live: dict[str, Any]) -> str:
 def build_packet(
     live: dict[str, Any],
     receipts: list[dict[str, Any]],
+    review_artifact_refs: list[dict[str, Any]],
     *,
     producer: dict[str, Any],
     run: dict[str, Any],
@@ -138,6 +154,7 @@ def build_packet(
         "head_sha": live.get("head_sha"),
         "state_fingerprint": state_fingerprint(live),
         "receipts": receipts,
+        "review_artifact_refs": review_artifact_refs,
         "producer": producer,
         "run": run,
         "dispatch_id": dispatch_id,
@@ -150,6 +167,123 @@ def build_packet(
 
 def _sha40(value: Any) -> bool:
     return isinstance(value, str) and bool(re.fullmatch(r"[0-9a-f]{40}", value))
+
+
+def _review_artifact_receipts(
+    refs: Any,
+    artifacts: Any,
+    live: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Derive receipts only from review objects fetched by the workflow."""
+    blockers: list[str] = []
+    if not isinstance(refs, list) or len(refs) != 2:
+        return [], ["REVIEW_ARTIFACT_REF_SET_INVALID"]
+    if not isinstance(artifacts, list):
+        return [], ["REVIEW_ARTIFACTS_INVALID"]
+    artifact_ids = [
+        artifact.get("review_id") for artifact in artifacts
+        if isinstance(artifact, dict)
+    ]
+    if len(artifact_ids) != len(set(artifact_ids)):
+        blockers.append("DUPLICATE_REVIEW_ARTIFACT")
+    receipts: list[dict[str, Any]] = []
+    for lane in ("acceptance", "adversarial"):
+        lane_refs = [
+            ref for ref in refs
+            if isinstance(ref, dict) and ref.get("lane") == lane
+        ]
+        if len(lane_refs) != 1:
+            blockers.append(f"{lane.upper()}_REVIEW_ARTIFACT_REF_COUNT_INVALID")
+            continue
+        ref = lane_refs[0]
+        if set(ref) != REVIEW_ARTIFACT_REF_FIELDS:
+            blockers.append(f"{lane.upper()}_REVIEW_ARTIFACT_REF_SCHEMA_INVALID")
+        review_id = ref.get("review_id")
+        if type(review_id) is not int or review_id <= 0:
+            blockers.append(f"{lane.upper()}_REVIEW_ARTIFACT_ID_INVALID")
+            continue
+        matches = [
+            artifact for artifact in artifacts
+            if isinstance(artifact, dict) and artifact.get("review_id") == review_id
+        ]
+        if len(matches) != 1:
+            blockers.append(f"{lane.upper()}_REVIEW_ARTIFACT_COUNT_INVALID")
+            continue
+        artifact = matches[0]
+        if set(artifact) != REVIEW_ARTIFACT_FIELDS:
+            blockers.append(f"{lane.upper()}_REVIEW_ARTIFACT_SCHEMA_INVALID")
+        publisher = REVIEW_PUBLISHERS[lane]
+        user = artifact.get("user")
+        if (
+            not isinstance(user, dict)
+            or set(user) != {"id", "login", "type"}
+            or type(user.get("id")) is not int
+            or user.get("id") != publisher["id"]
+            or user.get("login") != publisher["login"]
+            or user.get("type") != "Bot"
+        ):
+            blockers.append(f"{lane.upper()}_REVIEW_PUBLISHER_INVALID")
+            continue
+        if artifact.get("state") not in {"APPROVED", "COMMENTED"}:
+            blockers.append(f"{lane.upper()}_REVIEW_STATE_INVALID")
+        if artifact.get("commit_id") != live.get("head_sha"):
+            blockers.append(f"{lane.upper()}_REVIEW_COMMIT_MISMATCH")
+        body = artifact.get("body")
+        if (
+            not isinstance(body, str)
+            or len(body.encode("utf-8")) > MAX_REVIEW_BODY_BYTES
+            or not body.startswith(REVIEW_ARTIFACT_PREFIX)
+            or not body.endswith(REVIEW_ARTIFACT_SUFFIX)
+        ):
+            blockers.append(f"{lane.upper()}_REVIEW_BODY_INVALID")
+            continue
+        encoded = body[len(REVIEW_ARTIFACT_PREFIX):-len(REVIEW_ARTIFACT_SUFFIX)]
+        try:
+            assessment = json.loads(encoded)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            blockers.append(f"{lane.upper()}_REVIEW_BODY_INVALID")
+            continue
+        if not isinstance(assessment, dict) or set(assessment) != REVIEW_ARTIFACT_BODY_FIELDS:
+            blockers.append(f"{lane.upper()}_REVIEW_BODY_SCHEMA_INVALID")
+            continue
+        expected = {
+            "schema_version": "1",
+            "repository": REPOSITORY,
+            "pr_number": live.get("pr_number"),
+            "base_sha": live.get("base_sha"),
+            "head_sha": live.get("head_sha"),
+            "lane": lane,
+            "policy_version": POLICY_VERSION,
+        }
+        if (type(assessment.get("pr_number")) is not int
+                or any(assessment.get(key) != value for key, value in expected.items())):
+            blockers.append(f"{lane.upper()}_REVIEW_BINDING_MISMATCH")
+        submitted_at = artifact.get("submitted_at")
+        try:
+            _time(submitted_at)
+        except (TypeError, ValueError):
+            blockers.append(f"{lane.upper()}_REVIEW_SUBMISSION_TIME_INVALID")
+        receipts.append({
+            "schema_version": "1",
+            "repository": REPOSITORY,
+            "pr_number": live.get("pr_number"),
+            "base_sha": live.get("base_sha"),
+            "head_sha": live.get("head_sha"),
+            "risk_class": _risk(live.get("changed_paths")),
+            "lane": lane,
+            "reviewer_id": f"github-user:{user['id']}",
+            "task_id": assessment.get("task_id"),
+            "receipt_id": f"github-review:{review_id}",
+            "verdict": assessment.get("verdict"),
+            "score": assessment.get("score"),
+            "findings": assessment.get("findings"),
+            "evidence_digest": assessment.get("evidence_digest"),
+            "issued_at": submitted_at,
+            "expires_at": assessment.get("expires_at"),
+            "policy_version": POLICY_VERSION,
+            "integration_id": INTEGRATION_ID,
+        })
+    return receipts, blockers
 
 
 def _live_blockers(live: Any) -> list[str]:
@@ -183,6 +317,8 @@ def _live_blockers(live: Any) -> list[str]:
         blockers.append("STATE_INCOMPLETE:" + str(exc).replace(" ", "_"))
     if not isinstance(live.get("check_runs"), list):
         blockers.append("CHECKS_INCOMPLETE")
+    if not isinstance(live.get("review_artifacts"), list):
+        blockers.append("REVIEW_ARTIFACTS_INCOMPLETE")
     return blockers
 
 
@@ -217,6 +353,8 @@ def _receipt_blockers(
             continue
         receipt = matches[0]
         selected.append(receipt)
+        if isinstance(receipt.get("receipt_id"), str) and receipt["receipt_id"] in WITHDRAWN_RECEIPT_IDS:
+            blockers.append(f"{lane.upper()}_RECEIPT_WITHDRAWN")
         if set(receipt) != RECEIPT_FIELDS:
             blockers.append(f"{lane.upper()}_SCHEMA_INVALID")
         if type(receipt.get("pr_number")) is not int or receipt["pr_number"] <= 0:
@@ -251,7 +389,10 @@ def _receipt_blockers(
 
 def _dispatch_envelope_result(data: dict[str, Any], now: datetime) -> dict[str, Any]:
     blockers: list[str] = []
-    if set(data) != {"schema_version", "mode", "target", "receipts", "dispatch_id"}:
+    if set(data) != {
+        "schema_version", "mode", "target", "review_artifact_refs",
+        "review_artifacts", "dispatch_id",
+    }:
         blockers.append("DISPATCH_ENVELOPE_SCHEMA_INVALID")
     target = data.get("target")
     if not isinstance(target, dict) or set(target) != {
@@ -270,9 +411,11 @@ def _dispatch_envelope_result(data: dict[str, Any], now: datetime) -> dict[str, 
             blockers.append(f"{field.upper()}_INVALID")
     if not _identifier(data.get("dispatch_id")):
         blockers.append("DISPATCH_ID_INVALID")
-    blockers.extend(
-        _receipt_blockers(data.get("receipts"), target, now, bind_risk=False)
+    receipts, artifact_blockers = _review_artifact_receipts(
+        data.get("review_artifact_refs"), data.get("review_artifacts"), target,
     )
+    blockers.extend(artifact_blockers)
+    blockers.extend(_receipt_blockers(receipts, target, now, bind_risk=False))
     return {
         "decision": "PASS" if not blockers else "FAIL",
         "blockers": sorted(set(blockers)),
@@ -306,7 +449,15 @@ def _packet_blockers(packet: Any, live: dict[str, Any], now: datetime) -> list[s
     encoded = _canonical(packet).encode("utf-8")
     if len(encoded) > MAX_PACKET_BYTES:
         blockers.append("PACKET_OVERSIZED")
-    blockers.extend(_receipt_blockers(packet.get("receipts"), live, now, check_freshness=False))
+    blockers.extend(
+        _receipt_blockers(packet.get("receipts"), live, now, check_freshness=False)
+    )
+    receipts, artifact_blockers = _review_artifact_receipts(
+        packet.get("review_artifact_refs"), live.get("review_artifacts"), live,
+    )
+    blockers.extend(artifact_blockers)
+    if _canonical(packet.get("receipts")) != _canonical(receipts):
+        blockers.append("PACKET_REVIEW_ARTIFACT_MISMATCH")
     return blockers
 
 
@@ -390,10 +541,17 @@ def evaluate_reconciliation(data: Any, now: datetime | None = None) -> dict[str,
     known = data.get("prior_dispatch_ids", [])
     if not isinstance(known, list) or dispatch_id in known:
         blockers.append("DISPATCH_ID_NOT_FRESH")
-    receipts = data.get("receipts")
+    review_artifact_refs = data.get("review_artifact_refs")
+    receipts, artifact_blockers = _review_artifact_receipts(
+        review_artifact_refs, target.get("review_artifacts"), target,
+    )
+    blockers.extend(artifact_blockers)
     blockers.extend(_receipt_blockers(receipts, target, current))
     try:
-        packet = build_packet(target, receipts, producer=producer, run=run, dispatch_id=dispatch_id)
+        packet = build_packet(
+            target, receipts, review_artifact_refs,
+            producer=producer, run=run, dispatch_id=dispatch_id,
+        )
         blockers.extend(_packet_blockers(packet, target, current))
     except (TypeError, ValueError):
         blockers.append("PACKET_INVALID")
@@ -454,6 +612,12 @@ def evaluate(data: Any, now: datetime | None = None) -> dict[str, Any]:
         blockers.append("UNRESOLVED_REVIEW_THREAD")
 
     receipts = data.get("receipts")
+    artifact_receipts, artifact_blockers = _review_artifact_receipts(
+        data.get("review_artifact_refs"), data.get("review_artifacts"), data,
+    )
+    blockers.extend(artifact_blockers)
+    if _canonical(receipts) != _canonical(artifact_receipts):
+        blockers.append("RECEIPT_REVIEW_ARTIFACT_MISMATCH")
     # Review lanes are a fixed policy requirement.  Mutable PR labels and other
     # event metadata are organizational inputs only and cannot lower the gate.
     required_lanes = {"acceptance", "adversarial"}
@@ -473,6 +637,8 @@ def evaluate(data: Any, now: datetime | None = None) -> dict[str, Any]:
             continue
         receipt = matches[0]
         selected.append(receipt)
+        if isinstance(receipt.get("receipt_id"), str) and receipt["receipt_id"] in WITHDRAWN_RECEIPT_IDS:
+            blockers.append(f"{lane.upper()}_RECEIPT_WITHDRAWN")
         if set(receipt) != RECEIPT_FIELDS:
             blockers.append(f"{lane.upper()}_SCHEMA_INVALID")
         if type(receipt.get("integration_id")) is not int:
