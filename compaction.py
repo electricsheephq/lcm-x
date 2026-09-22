@@ -660,6 +660,10 @@ class CompactionMixin:
         self._last_compression_noop_reason = ""
         self.compression_count += 1
         self._last_compress_aborted = False
+        # The host will replay this shorter context. New turns must be ingested
+        # from its end, not skipped behind the pre-compression message count.
+        self._ingest_cursor = len(recovered)
+        self._ingest_cursor_needs_reconcile = False
         logger.info(
             "Native recovery returned a summary for the host's "
             "archive transaction. LCM source history and frontier are unchanged."

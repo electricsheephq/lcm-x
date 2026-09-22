@@ -85,6 +85,33 @@ def test_native_recovery_preserves_sources_and_tools(candidate, monkeypatch):
     assert any(s.get("name", s.get("function", {}).get("name")) == "lcm_recall" for s in candidate.get_tool_schemas())
 
 
+@pytest.mark.parametrize("rollover", [False, True])
+def test_native_recovery_persists_subsequent_turns(candidate, monkeypatch, rollover):
+    install_native(monkeypatch)
+    messages = history()
+    compressed = candidate.compress(messages, current_tokens=250000, force=True)
+    before = candidate._store._conn.execute(
+        "SELECT * FROM messages ORDER BY store_id"
+    ).fetchall()
+    if rollover:
+        candidate.on_session_start(
+            "retained-child", boundary_reason="compression", old_session_id="retained",
+        )
+    new_turns = [
+        {"role": "user", "content": "Post-compaction constraint: preserve ORCHID-937."},
+        {"role": "assistant", "content": "Acknowledged ORCHID-937."},
+    ]
+    candidate._ingest_messages(compressed + new_turns)
+    after = candidate._store._conn.execute(
+        "SELECT * FROM messages ORDER BY store_id"
+    ).fetchall()
+    assert after[:len(before)] == before
+    assert len(after) == len(before) + len(new_turns)
+    assert candidate._store._conn.execute(
+        "SELECT role, content FROM messages ORDER BY store_id DESC LIMIT 2"
+    ).fetchall() == [(m["role"], m["content"]) for m in reversed(new_turns)]
+
+
 def test_subthreshold_ingest_cleanup_adopts_safe_replay_without_native_summary(candidate, monkeypatch):
     calls = install_native(monkeypatch)
     candidate._config.sensitive_patterns_enabled = True
@@ -222,10 +249,14 @@ def test_failed_recovery_preserves_exact_input(candidate, monkeypatch, kind):
     candidate._compression_cancelled_check = lambda: cancelled[0]
     install_native(monkeypatch, behavior)
     snapshot = copy.deepcopy(original)
+    candidate._ingest_cursor = len(original)
+    candidate._ingest_cursor_needs_reconcile = True
     result = candidate._compress_native_recovery(original)
     assert result is original
     assert original == snapshot
     assert candidate._last_compress_aborted is True
+    assert candidate._ingest_cursor == len(original)
+    assert candidate._ingest_cursor_needs_reconcile is True
 
 
 @pytest.mark.parametrize("mode", ["disabled", "unfenced", "cancelled"])
