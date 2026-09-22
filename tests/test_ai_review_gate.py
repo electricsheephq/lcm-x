@@ -563,6 +563,8 @@ def test_routine_requires_one_original_acceptance_assessment():
     "AGENTS.md",
     ".agents/skills/review-pr/SKILL.md",
     ".github/PULL_REQUEST_TEMPLATE.md",
+    "access_policy/resolution.py",
+    "command.py",
     "scripts/import_lossless_claw.py",
     "store.py",
 ])

@@ -33,7 +33,7 @@ REVIEW_POLICY_FILES = {
     "scripts/maintainer_gate.py",
 }
 MEMORY_PRESERVATION_FILES = {
-    "__init__.py", "assertion_store.py", "aux_session.py", "compaction.py",
+    "__init__.py", "assertion_store.py", "aux_session.py", "command.py", "compaction.py",
     "dag.py", "db_bootstrap.py", "engine.py", "engine_registry.py",
     "externalize.py", "fresh_tail.py", "ingest_protection.py",
     "lifecycle_state.py", "maintenance.py", "placeholder_ledger.py",
@@ -114,7 +114,10 @@ def _named_risks(paths: Any) -> list[str]:
     risks: list[str] = []
     if any(path in REVIEW_POLICY_FILES or path.startswith(".agents/skills/land-pr/") for path in paths):
         risks.append("review-provenance-policy")
-    if any(path in MEMORY_PRESERVATION_FILES for path in paths):
+    if any(
+        path in MEMORY_PRESERVATION_FILES or path.startswith("access_policy/")
+        for path in paths
+    ):
         risks.append("lcm-memory-preservation")
     return risks
 
