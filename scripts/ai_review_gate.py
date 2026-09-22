@@ -66,7 +66,8 @@ ASSESSMENT_FIELDS = {
 REVIEW_ARTIFACT_REF_FIELDS = {"lane", "review_id"}
 REVIEW_ARTIFACT_FIELDS = {"review_id", "state", "commit_id", "submitted_at", "user", "body"}
 REVIEW_ARTIFACT_BODY_FIELDS = {"schema_version", "repository", "pr_number", "base_sha", "head_sha", "lane",
-    "verdict", "scope", "findings", "limitations", "acceptance_evidence", "policy_version"}
+    "verdict", "scope", "named_risks", "findings", "limitations",
+    "acceptance_evidence", "policy_version"}
 REVIEW_ARTIFACT_MARKER = "<!-- lcm-x-ai-review:v2\n"
 REVIEW_ARTIFACT_SUFFIX = "\n-->"
 # Protected identities supply no verdict or score without a valid review body.
@@ -193,6 +194,7 @@ def _review_artifact_assessments(
     """Derive assessments only from review objects fetched by the workflow."""
     blockers: list[str] = []
     required_lanes = _required_lanes(live)
+    expected_named_risks = _named_risks(live.get("changed_paths"))
     if not isinstance(refs, list) or len(refs) != len(required_lanes):
         return [], ["REVIEW_ARTIFACT_REF_SET_INVALID"]
     if not isinstance(artifacts, list):
@@ -282,6 +284,8 @@ def _review_artifact_assessments(
         scope = assessment.get("scope")
         if not isinstance(scope, str) or not scope.strip():
             blockers.append(f"{lane.upper()}_REVIEW_SCOPE_INVALID")
+        if assessment.get("named_risks") != expected_named_risks:
+            blockers.append(f"{lane.upper()}_REVIEW_RISK_BINDING_MISMATCH")
         findings = assessment.get("findings")
         if not isinstance(findings, list) or not all(
             isinstance(item, str) and item.strip() for item in findings
@@ -309,7 +313,7 @@ def _review_artifact_assessments(
             "pr_number": live.get("pr_number"),
             "base_sha": live.get("base_sha"),
             "head_sha": live.get("head_sha"),
-            "named_risks": _named_risks(live.get("changed_paths")),
+            "named_risks": expected_named_risks,
             "lane": lane,
             "reviewer_id": f"github-user:{user['id']}",
             "review_id": review_id,

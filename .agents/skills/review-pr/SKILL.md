@@ -41,7 +41,7 @@ the provenance of caller-supplied facts and never grants write or merge authorit
 
 Read the successful `AI review exact-head` check on the exact head and its original-review packet.
 Bind repository, PR, base/head SHA, policy version, original GitHub review IDs, authors and
-bodies, explicit verdict, scope, findings, limitations and acceptance evidence. Tracking hashes
+bodies, explicit verdict, scope, exact mapped named risks, findings, limitations and acceptance evidence. Tracking hashes
 and expiry are workflow metadata, not reviewer-issued claims.
 
 - Every PR requires one exact-head `acceptance` assessment with an explicit original `PASS`

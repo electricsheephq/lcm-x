@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from scripts.ai_review_gate import (
+    _named_risks,
     _review_artifact_assessments,
     build_packet,
     evaluate,
@@ -486,6 +487,7 @@ def assessment_body(
     head_sha: str = HEAD,
     verdict: str = "PASS",
     findings: list[str] | None = None,
+    named_risks: list[str] | None = None,
 ):
     return {
         "schema_version": "2",
@@ -496,6 +498,7 @@ def assessment_body(
         "lane": lane,
         "verdict": verdict,
         "scope": f"{lane} review of the exact PR head",
+        "named_risks": [] if named_risks is None else named_risks,
         "findings": [] if findings is None else findings,
         "limitations": [],
         "acceptance_evidence": ["independent reviewer execution completed"],
@@ -571,6 +574,20 @@ def test_named_risks_require_distinct_adversarial_assessment(path):
     result = evaluate_reconciliation(dispatch, NOW)
     assert result["decision"] == "FAIL"
     assert "REVIEW_ARTIFACT_REF_SET_INVALID" in result["blockers"]
+
+
+def test_adversarial_assessment_must_bind_the_exact_mapped_risk():
+    dispatch = _v2_dispatch(_v2_snapshot(350, changed_paths=["store.py"]))
+    adversarial = next(
+        artifact for artifact in dispatch["target"]["review_artifacts"]
+        if artifact["review_id"] == REVIEWERS["adversarial"][2]
+    )
+    set_review_body_field(adversarial, "named_risks", ["review-provenance-policy"])
+
+    result = evaluate_reconciliation(dispatch, NOW)
+
+    assert result["decision"] == "FAIL"
+    assert "ADVERSARIAL_REVIEW_RISK_BINDING_MISMATCH" in result["blockers"]
 
 
 def test_producer_assessment_claim_is_ignored_in_favor_of_fetched_review():
@@ -1276,7 +1293,10 @@ def _v2_snapshot(
         "draft": False,
     }
     lanes = _lanes_for_paths(live["changed_paths"])
-    bodies = [assessment_body(lane, pr_number=pr_number) for lane in lanes]
+    named_risks = _named_risks(live["changed_paths"])
+    bodies = [assessment_body(
+        lane, pr_number=pr_number, named_risks=named_risks,
+    ) for lane in lanes]
     refs, artifacts = review_bundle(bodies)
     live["review_artifacts"] = artifacts
     live["review_artifact_errors"] = []
@@ -1297,10 +1317,11 @@ def _v2_dispatch(
 ):
     target = deepcopy(target)
     lanes = _lanes_for_paths(target["changed_paths"])
+    named_risks = _named_risks(target["changed_paths"])
     bodies = [assessment_body(
         lane, pr_number=target["pr_number"], base_sha=target["base_sha"],
         head_sha=target["head_sha"], verdict=verdict,
-        findings=findings,
+        findings=findings, named_risks=named_risks,
     ) for lane in lanes]
     refs, artifacts = review_bundle(bodies)
     target["review_artifacts"] = artifacts

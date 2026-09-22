@@ -16,14 +16,15 @@ object:
   submission time becomes the assessment issue time.
 - The review author must publish one terminal structured marker after any
   human-readable review summary. The marker supplies the repository, pull
-  request, base and head SHAs, lane, explicit verdict, scope, string findings,
-  string limitations, acceptance evidence, and policy version.
+  request, base and head SHAs, lane, explicit verdict, scope, the exact mapped
+  named-risk list, string findings, string limitations, acceptance evidence,
+  and policy version.
 
 ```text
 Human-readable review summary.
 
 <!-- lcm-x-ai-review:v2
-{"acceptance_evidence":["<evidence>"],"base_sha":"<40 lowercase hex>","findings":[],"head_sha":"<40 lowercase hex>","lane":"acceptance|adversarial","limitations":[],"policy_version":"2","pr_number":123,"repository":"electricsheephq/lcm-x","schema_version":"2","scope":"<reviewed scope>","verdict":"PASS|BLOCKED|ABSTAIN"}
+{"acceptance_evidence":["<evidence>"],"base_sha":"<40 lowercase hex>","findings":[],"head_sha":"<40 lowercase hex>","lane":"acceptance|adversarial","limitations":[],"named_risks":["review-provenance-policy|lcm-memory-preservation"],"policy_version":"2","pr_number":123,"repository":"electricsheephq/lcm-x","schema_version":"2","scope":"<reviewed scope>","verdict":"PASS|BLOCKED|ABSTAIN"}
 -->
 ```
 
@@ -42,6 +43,8 @@ plus the LCM storage, compaction, lifecycle, and memory-preservation modules.
 This is the protected automatic map, not a claim that other changes can never
 need targeted adversarial review in their recorded PR acceptance. Labels and
 dispatch claims cannot add or remove a mapped required lane.
+Each original assessment must carry exactly the validator-computed named-risk
+list, so an unrelated adversarial scope cannot satisfy a protected-path gate.
 
 Protected policy currently binds `acceptance` to GitHub account ID `298367747`
 (`evaos-code-review-bot[bot]`) and `adversarial` to account ID `199175422`
