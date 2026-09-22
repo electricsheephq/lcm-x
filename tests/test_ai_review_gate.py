@@ -580,6 +580,7 @@ def test_routine_requires_one_original_acceptance_assessment():
     "AGENTS.md",
     ".agents/skills/review-pr/SKILL.md",
     ".github/PULL_REQUEST_TEMPLATE.md",
+    "access_context/validation.py",
     "access_policy/resolution.py",
     "command.py",
     "config.py",
@@ -587,6 +588,7 @@ def test_routine_requires_one_original_acceptance_assessment():
     "scripts/backfill_externalized_tool_outputs.py",
     "scripts/import_lossless_claw.py",
     "store.py",
+    "teams/catalog.py",
 ])
 def test_named_risks_require_distinct_adversarial_assessment(path):
     dispatch = _v2_dispatch(_v2_snapshot(350, changed_paths=[path]))

@@ -118,7 +118,8 @@ def _named_risks(paths: Any) -> list[str]:
     if any(path in REVIEW_POLICY_FILES or path.startswith(".agents/skills/land-pr/") for path in paths):
         risks.append("review-provenance-policy")
     if any(
-        path in MEMORY_PRESERVATION_FILES or path.startswith("access_policy/")
+        path in MEMORY_PRESERVATION_FILES
+        or path.startswith(("access_context/", "access_policy/", "teams/"))
         for path in paths
     ):
         risks.append("lcm-memory-preservation")
