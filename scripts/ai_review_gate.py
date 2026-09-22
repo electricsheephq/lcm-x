@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate content-free, exact-head AI review receipts."""
+"""Validate original, exact-head AI review assessments."""
 
 from __future__ import annotations
 
@@ -7,12 +7,13 @@ import json
 import hashlib
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 REPOSITORY = "electricsheephq/lcm-x"
 INTEGRATION_ID = 15368
-POLICY_VERSION = "1"
+POLICY_VERSION = "2"
+ASSESSMENT_SCHEMA_VERSION = "2"
 PACKET_SCHEMA_VERSION = "2"
 PACKET_KIND = "ai-review-exact-head"
 PRODUCER_LOGIN = "100yenadmin"
@@ -25,48 +26,54 @@ WITHDRAWN_RECEIPT_IDS = frozenset({
     "52eca5d8-1628-4f03-9128-34a5e1d5746f",
     "5a6b05ee-c573-4cd9-b6f4-9a944fba61ee",
 })
-HIGH_RISK = {
-    "governance", "security", "data-integrity", "migration", "persistence",
-    "lifecycle", "runtime", "hermes-contract", "workflow-policy", "unknown",
+REVIEW_POLICY_FILES = {
+    ".github/workflows/ai-review-gate.yml", "AGENTS.md", "CONTRIBUTING.md",
+    "docs/review-evidence-provenance.md", "scripts/ai_review_gate.py",
+    "scripts/maintainer_gate.py",
 }
-ROUTINE_PREFIXES = ("bench/", "benchmarking/", "benchmarks/", "docs/", "tests/")
-ROUTINE_FILES = {
-    "README.md",
-    "ROADMAP.md",
-    "scripts/lcm_longmemeval.py",
+MEMORY_PRESERVATION_FILES = {
+    "__init__.py", "assertion_store.py", "aux_session.py", "compaction.py",
+    "dag.py", "db_bootstrap.py", "engine.py", "engine_registry.py",
+    "externalize.py", "fresh_tail.py", "ingest_protection.py",
+    "lifecycle_state.py", "maintenance.py", "placeholder_ledger.py",
+    "query_view_store.py", "reconcile.py", "reset_state.py", "rollup_store.py",
+    "schemas.py", "scope_storage.py", "sqlite_util.py", "store.py",
+    "trajectory_store.py", "vector_store.py",
 }
-RECEIPT_FIELDS = {
+ASSESSMENT_FIELDS = {
     "schema_version",
     "repository",
     "pr_number",
     "base_sha",
     "head_sha",
-    "risk_class",
+    "named_risks",
     "lane",
     "reviewer_id",
-    "task_id",
-    "receipt_id",
+    "review_id",
     "verdict",
-    "score",
     "findings",
-    "evidence_digest",
+    "scope",
+    "limitations",
+    "acceptance_evidence",
     "issued_at",
-    "expires_at",
+    "original_body",
+    "producer_tracking_digest",
+    "producer_tracking_expires_at",
     "policy_version",
     "integration_id",
 }
 REVIEW_ARTIFACT_REF_FIELDS = {"lane", "review_id"}
 REVIEW_ARTIFACT_FIELDS = {"review_id", "state", "commit_id", "submitted_at", "user", "body"}
 REVIEW_ARTIFACT_BODY_FIELDS = {"schema_version", "repository", "pr_number", "base_sha", "head_sha", "lane",
-    "task_id", "verdict", "score", "findings", "evidence_digest", "expires_at", "policy_version"}
-REVIEW_ARTIFACT_PREFIX = "<!-- lcm-x-ai-review:v1\n"
+    "verdict", "scope", "findings", "limitations", "acceptance_evidence", "policy_version"}
+REVIEW_ARTIFACT_MARKER = "<!-- lcm-x-ai-review:v2\n"
 REVIEW_ARTIFACT_SUFFIX = "\n-->"
 # Protected identities supply no verdict or score without a valid review body.
 REVIEW_PUBLISHERS = {"acceptance": {"id": 298367747, "login": "evaos-code-review-bot[bot]"}, "adversarial": {"id": 199175422, "login": "chatgpt-codex-connector[bot]"}}
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z")
 PACKET_FIELDS = {
     "schema_version", "kind", "repository", "pr_number", "base_sha",
-    "head_sha", "state_fingerprint", "receipts", "producer", "run",
+    "head_sha", "state_fingerprint", "assessments", "producer", "run",
     "dispatch_id", "review_artifact_refs",
 }
 SNAPSHOT_FAILURE_BLOCKERS = {
@@ -89,20 +96,19 @@ def _identifier(value: Any) -> bool:
     return isinstance(value, str) and SAFE_ID.fullmatch(value) is not None
 
 
-def _risk(paths: Any) -> str:
-    if not isinstance(paths, list) or not paths or not all(isinstance(p, str) for p in paths):
-        return "unknown"
-    if any(
-        path.startswith((".github/", ".agents/"))
-        or path in {"AGENTS.md", "CONTRIBUTING.md"}
-        or path.startswith("scripts/maintainer_gate.py")
-        or path.startswith("scripts/ai_review_gate.py")
-        for path in paths
-    ):
-        return "governance"
-    if all(path in ROUTINE_FILES or path.startswith(ROUTINE_PREFIXES) for path in paths):
-        return "routine"
-    return "unknown"
+def _named_risks(paths: Any) -> list[str]:
+    if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+        return []
+    risks: list[str] = []
+    if any(path in REVIEW_POLICY_FILES or path.startswith(".agents/skills/land-pr/") for path in paths):
+        risks.append("review-provenance-policy")
+    if any(path in MEMORY_PRESERVATION_FILES for path in paths):
+        risks.append("lcm-memory-preservation")
+    return risks
+
+
+def _required_lanes(live: dict[str, Any]) -> tuple[str, ...]:
+    return ("acceptance", "adversarial") if _named_risks(live.get("changed_paths")) else ("acceptance",)
 
 
 def _canonical(value: Any) -> str:
@@ -133,14 +139,14 @@ def state_fingerprint(live: dict[str, Any]) -> str:
 
 def build_packet(
     live: dict[str, Any],
-    receipts: list[dict[str, Any]],
+    assessments: list[dict[str, Any]],
     review_artifact_refs: list[dict[str, Any]],
     *,
     producer: dict[str, Any],
     run: dict[str, Any],
     dispatch_id: str,
 ) -> dict[str, Any]:
-    """Create the bounded, canonical, content-free schema-v2 receipt packet."""
+    """Create the bounded, exact-head packet from fetched original reviews."""
     if not isinstance(live, dict) or type(live.get("pr_number")) is not int or live["pr_number"] <= 0:
         raise ValueError("pr number invalid")
     if producer != {"login": PRODUCER_LOGIN, "id": PRODUCER_ID, "type": "User"}:
@@ -153,7 +159,7 @@ def build_packet(
         "base_sha": live.get("base_sha"),
         "head_sha": live.get("head_sha"),
         "state_fingerprint": state_fingerprint(live),
-        "receipts": receipts,
+        "assessments": assessments,
         "review_artifact_refs": review_artifact_refs,
         "producer": producer,
         "run": run,
@@ -169,14 +175,15 @@ def _sha40(value: Any) -> bool:
     return isinstance(value, str) and bool(re.fullmatch(r"[0-9a-f]{40}", value))
 
 
-def _review_artifact_receipts(
+def _review_artifact_assessments(
     refs: Any,
     artifacts: Any,
     live: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Derive receipts only from review objects fetched by the workflow."""
+    """Derive assessments only from review objects fetched by the workflow."""
     blockers: list[str] = []
-    if not isinstance(refs, list) or len(refs) != 2:
+    required_lanes = _required_lanes(live)
+    if not isinstance(refs, list) or len(refs) != len(required_lanes):
         return [], ["REVIEW_ARTIFACT_REF_SET_INVALID"]
     if not isinstance(artifacts, list):
         return [], ["REVIEW_ARTIFACTS_INVALID"]
@@ -186,8 +193,8 @@ def _review_artifact_receipts(
     ]
     if len(artifact_ids) != len(set(artifact_ids)):
         blockers.append("DUPLICATE_REVIEW_ARTIFACT")
-    receipts: list[dict[str, Any]] = []
-    for lane in ("acceptance", "adversarial"):
+    assessments: list[dict[str, Any]] = []
+    for lane in required_lanes:
         lane_refs = [
             ref for ref in refs
             if isinstance(ref, dict) and ref.get("lane") == lane
@@ -232,12 +239,13 @@ def _review_artifact_receipts(
         if (
             not isinstance(body, str)
             or len(body.encode("utf-8")) > MAX_REVIEW_BODY_BYTES
-            or not body.startswith(REVIEW_ARTIFACT_PREFIX)
+            or body.count(REVIEW_ARTIFACT_MARKER) != 1
             or not body.endswith(REVIEW_ARTIFACT_SUFFIX)
         ):
             blockers.append(f"{lane.upper()}_REVIEW_BODY_INVALID")
             continue
-        encoded = body[len(REVIEW_ARTIFACT_PREFIX):-len(REVIEW_ARTIFACT_SUFFIX)]
+        marker_at = body.rfind(REVIEW_ARTIFACT_MARKER)
+        encoded = body[marker_at + len(REVIEW_ARTIFACT_MARKER):-len(REVIEW_ARTIFACT_SUFFIX)]
         try:
             assessment = json.loads(encoded)
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -247,7 +255,7 @@ def _review_artifact_receipts(
             blockers.append(f"{lane.upper()}_REVIEW_BODY_SCHEMA_INVALID")
             continue
         expected = {
-            "schema_version": "1",
+            "schema_version": ASSESSMENT_SCHEMA_VERSION,
             "repository": REPOSITORY,
             "pr_number": live.get("pr_number"),
             "base_sha": live.get("base_sha"),
@@ -258,32 +266,56 @@ def _review_artifact_receipts(
         if (type(assessment.get("pr_number")) is not int
                 or any(assessment.get(key) != value for key, value in expected.items())):
             blockers.append(f"{lane.upper()}_REVIEW_BINDING_MISMATCH")
+        verdict = assessment.get("verdict")
+        if verdict not in {"PASS", "BLOCKED", "ABSTAIN"}:
+            blockers.append(f"{lane.upper()}_REVIEW_VERDICT_INVALID")
+        scope = assessment.get("scope")
+        if not isinstance(scope, str) or not scope.strip():
+            blockers.append(f"{lane.upper()}_REVIEW_SCOPE_INVALID")
+        findings = assessment.get("findings")
+        if not isinstance(findings, list) or not all(
+            isinstance(item, str) and item.strip() for item in findings
+        ):
+            blockers.append(f"{lane.upper()}_REVIEW_FINDINGS_INVALID")
+        limitations = assessment.get("limitations")
+        if not isinstance(limitations, list) or not all(
+            isinstance(item, str) for item in limitations
+        ):
+            blockers.append(f"{lane.upper()}_REVIEW_LIMITATIONS_INVALID")
+        evidence = assessment.get("acceptance_evidence")
+        if not isinstance(evidence, list) or not evidence or not all(
+            isinstance(item, str) and item.strip() for item in evidence
+        ):
+            blockers.append(f"{lane.upper()}_REVIEW_EVIDENCE_INVALID")
         submitted_at = artifact.get("submitted_at")
         try:
-            _time(submitted_at)
+            issued_at = _time(submitted_at)
         except (TypeError, ValueError):
             blockers.append(f"{lane.upper()}_REVIEW_SUBMISSION_TIME_INVALID")
-        receipts.append({
-            "schema_version": "1",
+            continue
+        assessments.append({
+            "schema_version": ASSESSMENT_SCHEMA_VERSION,
             "repository": REPOSITORY,
             "pr_number": live.get("pr_number"),
             "base_sha": live.get("base_sha"),
             "head_sha": live.get("head_sha"),
-            "risk_class": _risk(live.get("changed_paths")),
+            "named_risks": _named_risks(live.get("changed_paths")),
             "lane": lane,
             "reviewer_id": f"github-user:{user['id']}",
-            "task_id": assessment.get("task_id"),
-            "receipt_id": f"github-review:{review_id}",
-            "verdict": assessment.get("verdict"),
-            "score": assessment.get("score"),
-            "findings": assessment.get("findings"),
-            "evidence_digest": assessment.get("evidence_digest"),
+            "review_id": review_id,
+            "verdict": verdict,
+            "scope": scope,
+            "findings": findings,
+            "limitations": limitations,
+            "acceptance_evidence": evidence,
             "issued_at": submitted_at,
-            "expires_at": assessment.get("expires_at"),
+            "original_body": body,
+            "producer_tracking_digest": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            "producer_tracking_expires_at": (issued_at + timedelta(hours=24)).isoformat().replace("+00:00", "Z"),
             "policy_version": POLICY_VERSION,
             "integration_id": INTEGRATION_ID,
         })
-    return receipts, blockers
+    return assessments, blockers
 
 
 def _live_blockers(live: Any) -> list[str]:
@@ -319,68 +351,79 @@ def _live_blockers(live: Any) -> list[str]:
         blockers.append("CHECKS_INCOMPLETE")
     if not isinstance(live.get("review_artifacts"), list):
         blockers.append("REVIEW_ARTIFACTS_INCOMPLETE")
+    errors = live.get("review_artifact_errors")
+    if not isinstance(errors, list):
+        blockers.append("REVIEW_ARTIFACT_ERRORS_INCOMPLETE")
     return blockers
 
 
-def _receipt_blockers(
-    receipts: Any,
+def _assessment_blockers(
+    assessments: Any,
     live: dict[str, Any],
     now: datetime,
     *,
-    bind_risk: bool = True,
     check_freshness: bool = True,
 ) -> list[str]:
-    # Receipt freshness is an acceptance-time property: a new dispatch must
-    # carry unexpired receipts, but a packet that was already promoted keeps
-    # its exact-head verdict until the state fingerprint changes; passage of
-    # time alone never revokes it (check_freshness=False for stored packets).
+    # Tracking freshness is workflow metadata, derived from GitHub's submitted
+    # time. It is not part of the reviewer's assessment body.
     blockers: list[str] = []
-    if not isinstance(receipts, list) or len(receipts) != 2:
-        return ["RECEIPT_SET_INVALID"]
+    required_lanes = _required_lanes(live)
+    if not isinstance(assessments, list) or len(assessments) != len(required_lanes):
+        return ["ASSESSMENT_SET_INVALID"]
     selected: list[dict[str, Any]] = []
     expected = {
-        "schema_version": "1", "repository": REPOSITORY,
+        "schema_version": ASSESSMENT_SCHEMA_VERSION, "repository": REPOSITORY,
         "pr_number": live.get("pr_number"), "base_sha": live.get("base_sha"),
         "head_sha": live.get("head_sha"),
+        "named_risks": _named_risks(live.get("changed_paths")),
         "policy_version": POLICY_VERSION, "integration_id": INTEGRATION_ID,
     }
-    if bind_risk:
-        expected["risk_class"] = _risk(live.get("changed_paths"))
-    for lane in ("acceptance", "adversarial"):
-        matches = [item for item in receipts if isinstance(item, dict) and item.get("lane") == lane]
+    for lane in required_lanes:
+        matches = [item for item in assessments if isinstance(item, dict) and item.get("lane") == lane]
         if len(matches) != 1:
-            blockers.append(f"{lane.upper()}_RECEIPT_COUNT_INVALID")
+            blockers.append(f"{lane.upper()}_ASSESSMENT_COUNT_INVALID")
             continue
-        receipt = matches[0]
-        selected.append(receipt)
-        if isinstance(receipt.get("receipt_id"), str) and receipt["receipt_id"] in WITHDRAWN_RECEIPT_IDS:
-            blockers.append(f"{lane.upper()}_RECEIPT_WITHDRAWN")
-        if set(receipt) != RECEIPT_FIELDS:
+        assessment = matches[0]
+        selected.append(assessment)
+        if set(assessment) != ASSESSMENT_FIELDS:
             blockers.append(f"{lane.upper()}_SCHEMA_INVALID")
-        if type(receipt.get("pr_number")) is not int or receipt["pr_number"] <= 0:
+        if type(assessment.get("pr_number")) is not int or assessment["pr_number"] <= 0:
             blockers.append(f"{lane.upper()}_PR_NUMBER_INVALID")
-        if type(receipt.get("integration_id")) is not int:
+        if type(assessment.get("integration_id")) is not int:
             blockers.append(f"{lane.upper()}_INTEGRATION_ID_INVALID")
-        if any(receipt.get(k) != v for k, v in expected.items()):
+        if any(assessment.get(k) != v for k, v in expected.items()):
             blockers.append(f"{lane.upper()}_BINDING_MISMATCH")
-        if not bind_risk and receipt.get("risk_class") not in HIGH_RISK | {"routine"}:
-            blockers.append(f"{lane.upper()}_RISK_INVALID")
-        if not all(_identifier(receipt.get(k)) for k in ("reviewer_id", "task_id", "receipt_id")):
+        if not _identifier(assessment.get("reviewer_id")) or type(assessment.get("review_id")) is not int:
             blockers.append(f"{lane.upper()}_IDENTITY_INVALID")
-        digest = receipt.get("evidence_digest")
+        digest = assessment.get("producer_tracking_digest")
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             blockers.append(f"{lane.upper()}_DIGEST_INVALID")
-        if receipt.get("verdict") != "PASS" or type(receipt.get("score")) is not int or receipt.get("score", 0) < 95:
-            blockers.append(f"{lane.upper()}_VERDICT_INVALID")
-        if type(receipt.get("findings")) is not int or receipt.get("findings") != 0:
+        body = assessment.get("original_body")
+        if not isinstance(body, str) or hashlib.sha256(body.encode("utf-8")).hexdigest() != digest:
+            blockers.append(f"{lane.upper()}_ORIGINAL_BODY_MISMATCH")
+        if assessment.get("verdict") != "PASS":
+            blockers.append(f"{lane.upper()}_VERDICT_NOT_PASS")
+        if assessment.get("findings") != []:
             blockers.append(f"{lane.upper()}_FINDINGS_UNRESOLVED")
+        if not isinstance(assessment.get("scope"), str) or not assessment["scope"].strip():
+            blockers.append(f"{lane.upper()}_SCOPE_INVALID")
+        if not isinstance(assessment.get("limitations"), list) or not all(
+            isinstance(item, str) for item in assessment["limitations"]
+        ):
+            blockers.append(f"{lane.upper()}_LIMITATIONS_INVALID")
+        evidence = assessment.get("acceptance_evidence")
+        if not isinstance(evidence, list) or not evidence or not all(
+            isinstance(item, str) and item.strip() for item in evidence
+        ):
+            blockers.append(f"{lane.upper()}_EVIDENCE_INVALID")
         try:
-            issued, expires = _time(receipt.get("issued_at")), _time(receipt.get("expires_at"))
+            issued = _time(assessment.get("issued_at"))
+            expires = _time(assessment.get("producer_tracking_expires_at"))
             if check_freshness and (issued > now or expires <= now):
-                blockers.append(f"{lane.upper()}_RECEIPT_STALE")
+                blockers.append(f"{lane.upper()}_ASSESSMENT_STALE")
         except (TypeError, ValueError):
             blockers.append(f"{lane.upper()}_TIMESTAMP_INVALID")
-    for key in ("reviewer_id", "task_id", "receipt_id"):
+    for key in ("reviewer_id", "review_id"):
         values = [item.get(key) for item in selected]
         if len(values) != len(set(values)):
             blockers.append(f"DUPLICATE_{key.upper()}")
@@ -391,34 +434,45 @@ def _dispatch_envelope_result(data: dict[str, Any], now: datetime) -> dict[str, 
     blockers: list[str] = []
     if set(data) != {
         "schema_version", "mode", "target", "review_artifact_refs",
-        "review_artifacts", "dispatch_id",
+        "dispatch_id", "producer", "run",
     }:
         blockers.append("DISPATCH_ENVELOPE_SCHEMA_INVALID")
     target = data.get("target")
-    if not isinstance(target, dict) or set(target) != {
-        "repository", "pr_number", "base_sha", "head_sha",
-    }:
+    if not isinstance(target, dict):
         return {
             "decision": "FAIL",
             "blockers": sorted(set(blockers + ["DISPATCH_TARGET_INVALID"])),
+            "packet": None,
         }
-    if target.get("repository") != REPOSITORY:
-        blockers.append("REPOSITORY_MISMATCH")
-    if type(target.get("pr_number")) is not int or target["pr_number"] <= 0:
-        blockers.append("PR_INVALID")
-    for field in ("base_sha", "head_sha"):
-        if not _sha40(target.get(field)):
-            blockers.append(f"{field.upper()}_INVALID")
+    blockers.extend(_live_blockers(target))
+    producer = data.get("producer")
+    if producer != {"login": PRODUCER_LOGIN, "id": PRODUCER_ID, "type": "User"}:
+        blockers.append("PRODUCER_UNAUTHENTICATED")
+    run = data.get("run")
+    if not isinstance(run, dict) or set(run) != {"id", "attempt"} or not _identifier(run.get("id")):
+        blockers.append("RUN_ID_INVALID")
+    elif run.get("attempt") != 1:
+        blockers.append("RUN_ATTEMPT_INVALID")
     if not _identifier(data.get("dispatch_id")):
         blockers.append("DISPATCH_ID_INVALID")
-    receipts, artifact_blockers = _review_artifact_receipts(
-        data.get("review_artifact_refs"), data.get("review_artifacts"), target,
+    assessments, artifact_blockers = _review_artifact_assessments(
+        data.get("review_artifact_refs"), target.get("review_artifacts"), target,
     )
     blockers.extend(artifact_blockers)
-    blockers.extend(_receipt_blockers(receipts, target, now, bind_risk=False))
+    blockers.extend(_assessment_blockers(assessments, target, now))
+    packet = None
+    try:
+        packet = build_packet(
+            target, assessments, data.get("review_artifact_refs"),
+            producer=producer, run=run, dispatch_id=data.get("dispatch_id"),
+        )
+        blockers.extend(_packet_blockers(packet, target, now))
+    except (TypeError, ValueError):
+        blockers.append("PACKET_INVALID")
     return {
         "decision": "PASS" if not blockers else "FAIL",
         "blockers": sorted(set(blockers)),
+        "packet": packet if not blockers else None,
     }
 
 
@@ -450,13 +504,13 @@ def _packet_blockers(packet: Any, live: dict[str, Any], now: datetime) -> list[s
     if len(encoded) > MAX_PACKET_BYTES:
         blockers.append("PACKET_OVERSIZED")
     blockers.extend(
-        _receipt_blockers(packet.get("receipts"), live, now, check_freshness=False)
+        _assessment_blockers(packet.get("assessments"), live, now, check_freshness=False)
     )
-    receipts, artifact_blockers = _review_artifact_receipts(
+    assessments, artifact_blockers = _review_artifact_assessments(
         packet.get("review_artifact_refs"), live.get("review_artifacts"), live,
     )
     blockers.extend(artifact_blockers)
-    if _canonical(packet.get("receipts")) != _canonical(receipts):
+    if _canonical(packet.get("assessments")) != _canonical(assessments):
         blockers.append("PACKET_REVIEW_ARTIFACT_MISMATCH")
     return blockers
 
@@ -542,14 +596,15 @@ def evaluate_reconciliation(data: Any, now: datetime | None = None) -> dict[str,
     if not isinstance(known, list) or dispatch_id in known:
         blockers.append("DISPATCH_ID_NOT_FRESH")
     review_artifact_refs = data.get("review_artifact_refs")
-    receipts, artifact_blockers = _review_artifact_receipts(
+    assessments, artifact_blockers = _review_artifact_assessments(
         review_artifact_refs, target.get("review_artifacts"), target,
     )
     blockers.extend(artifact_blockers)
-    blockers.extend(_receipt_blockers(receipts, target, current))
+    blockers.extend(_assessment_blockers(assessments, target, current))
+    packet = None
     try:
         packet = build_packet(
-            target, receipts, review_artifact_refs,
+            target, assessments, review_artifact_refs,
             producer=producer, run=run, dispatch_id=dispatch_id,
         )
         blockers.extend(_packet_blockers(packet, target, current))
@@ -584,107 +639,27 @@ def evaluate(data: Any, now: datetime | None = None) -> dict[str, Any]:
         or "peers" in data
     ):
         return evaluate_reconciliation(data, now)
-    blockers: list[str] = []
     if not isinstance(data, dict):
         return {"decision": "FAIL", "blockers": ["INPUT_INVALID"]}
-    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    expected = {
-        "schema_version": "1",
-        "repository": REPOSITORY,
-        "pr_number": data.get("pr_number"),
-        "base_sha": data.get("base_sha"),
-        "head_sha": data.get("head_sha"),
-        "risk_class": _risk(data.get("changed_paths")),
-        "policy_version": POLICY_VERSION,
-        "integration_id": INTEGRATION_ID,
-    }
-    if data.get("repository") != REPOSITORY:
-        blockers.append("REPOSITORY_MISMATCH")
-    if type(data.get("pr_number")) is not int or data["pr_number"] <= 0:
-        blockers.append("PR_INVALID")
-    for name in ("base_sha", "head_sha"):
-        value = data.get(name)
-        if not isinstance(value, str) or len(value) != 40 or any(c not in "0123456789abcdef" for c in value):
-            blockers.append(f"{name.upper()}_INVALID")
-    if data.get("api_complete") is not True or data.get("pagination_complete") is not True:
-        blockers.append("LIVE_STATE_INCOMPLETE")
-    if type(data.get("unresolved_threads")) is not int or data.get("unresolved_threads") != 0:
-        blockers.append("UNRESOLVED_REVIEW_THREAD")
-
+    blockers = ["LEGACY_REVIEW_FORMAT_REJECTED"]
     receipts = data.get("receipts")
-    artifact_receipts, artifact_blockers = _review_artifact_receipts(
-        data.get("review_artifact_refs"), data.get("review_artifacts"), data,
-    )
-    blockers.extend(artifact_blockers)
-    if _canonical(receipts) != _canonical(artifact_receipts):
-        blockers.append("RECEIPT_REVIEW_ARTIFACT_MISMATCH")
-    # Review lanes are a fixed policy requirement.  Mutable PR labels and other
-    # event metadata are organizational inputs only and cannot lower the gate.
-    required_lanes = {"acceptance", "adversarial"}
-    selected: list[dict[str, Any]] = []
-    if not isinstance(receipts, list):
-        blockers.append("RECEIPTS_INVALID")
-        receipts = []
-    actual_lanes = {
-        receipt.get("lane") for receipt in receipts if isinstance(receipt, dict)
-    }
-    if actual_lanes != required_lanes or len(receipts) != len(required_lanes):
-        blockers.append("RECEIPT_SET_INVALID")
-    for lane in required_lanes:
-        matches = [r for r in receipts if isinstance(r, dict) and r.get("lane") == lane]
-        if len(matches) != 1:
-            blockers.append(f"{lane.upper()}_RECEIPT_COUNT_INVALID")
-            continue
-        receipt = matches[0]
-        selected.append(receipt)
-        if isinstance(receipt.get("receipt_id"), str) and receipt["receipt_id"] in WITHDRAWN_RECEIPT_IDS:
-            blockers.append(f"{lane.upper()}_RECEIPT_WITHDRAWN")
-        if set(receipt) != RECEIPT_FIELDS:
-            blockers.append(f"{lane.upper()}_SCHEMA_INVALID")
-        if type(receipt.get("integration_id")) is not int:
-            blockers.append(f"{lane.upper()}_INTEGRATION_ID_INVALID")
-        if any(receipt.get(k) != v for k, v in expected.items()):
-            blockers.append(f"{lane.upper()}_BINDING_MISMATCH")
-        ids = (receipt.get("reviewer_id"), receipt.get("task_id"), receipt.get("receipt_id"))
-        if not all(_identifier(value) for value in ids):
-            blockers.append(f"{lane.upper()}_IDENTITY_INVALID")
-        digest = receipt.get("evidence_digest")
-        if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
-            blockers.append(f"{lane.upper()}_DIGEST_INVALID")
-        if receipt.get("verdict") != "PASS" or type(receipt.get("score")) is not int or receipt.get("score", 0) < 95:
-            blockers.append(f"{lane.upper()}_VERDICT_INVALID")
-        if type(receipt.get("findings")) is not int or receipt.get("findings") != 0:
-            blockers.append(f"{lane.upper()}_FINDINGS_UNRESOLVED")
-        try:
-            if _time(receipt.get("issued_at")) > current or _time(receipt.get("expires_at")) <= current:
-                blockers.append(f"{lane.upper()}_RECEIPT_STALE")
-        except (TypeError, ValueError):
-            blockers.append(f"{lane.upper()}_TIMESTAMP_INVALID")
-    for key in ("reviewer_id", "task_id", "receipt_id"):
-        values = [r.get(key) for r in selected]
-        if len(values) != len(set(values)):
-            blockers.append(f"DUPLICATE_{key.upper()}")
-    evidence = [
-        {
-            "lane": receipt.get("lane"),
-            "reviewer_id": receipt.get("reviewer_id"),
-            "task_id": receipt.get("task_id"),
-            "receipt_id": receipt.get("receipt_id"),
-            "evidence_digest": receipt.get("evidence_digest"),
-            "score": receipt.get("score"),
-        }
-        for receipt in selected
-    ]
+    if isinstance(receipts, list):
+        for receipt in receipts:
+            if not isinstance(receipt, dict):
+                continue
+            receipt_id = receipt.get("receipt_id")
+            if isinstance(receipt_id, str) and receipt_id in WITHDRAWN_RECEIPT_IDS:
+                lane = receipt.get("lane")
+                prefix = lane.upper() if lane in {"acceptance", "adversarial"} else "LEGACY"
+                blockers.append(f"{prefix}_RECEIPT_WITHDRAWN")
     return {
-        "decision": "PASS" if not blockers else "FAIL",
+        "decision": "FAIL",
         "repository": data.get("repository"),
         "pr_number": data.get("pr_number"),
         "base_sha": data.get("base_sha"),
         "head_sha": data.get("head_sha"),
-        "risk_class": expected["risk_class"],
         "policy_version": POLICY_VERSION,
         "blockers": sorted(set(blockers)),
-        "receipts": sorted(evidence, key=lambda item: str(item.get("lane"))),
     }
 
 

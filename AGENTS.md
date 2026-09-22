@@ -98,9 +98,10 @@ Run `actionlint` when workflows change. Record exact commands and results in the
   authorization immediately before an authorized write.
 - Model output alone cannot close, label, assign, push, approve, or merge.
 - Automated repair is opt-in and limited to the exact accepted issue and current gate.
-- Security and data-integrity changes require distinct exact-head acceptance and adversarial AI
-  review receipts, each passing at 95 or above. Public disclosure still requires an explicit
-  maintainer decision. Classification alone does not elevate routine reversible issue metadata.
+- Every change requires one exact-head acceptance assessment with an explicit original `PASS`
+  and no unresolved findings. Changes mapped by protected source to review-provenance policy or
+  LCM memory-preservation risk also require a distinct targeted adversarial assessment. Public
+  disclosure still requires an explicit maintainer decision.
 - Use `.agents/skills/triage-backlog/SKILL.md` read-only unless a maintainer explicitly
   authorizes one exact mutation; never use it for an automatic backlog sweep.
 - Invoking a skill never creates write authority. Routine reversible issue metadata needs one
@@ -113,14 +114,15 @@ Run `actionlint` when workflows change. Record exact commands and results in the
 
 - Use `.agents/skills/land-pr/SKILL.md` when deciding readiness or landing a PR.
 - Pin the PR base SHA and `headRefOid`; checks and semantic review must cover that exact pair or
-  an explicitly bounded delta. A protected-base change invalidates prior AI receipts.
+  an explicitly bounded delta. A protected-base change invalidates prior AI assessments.
 - Keep strict required-status enforcement enabled. If a base-push reset API call fails, GitHub's
   up-to-date requirement must still block merging until a head synchronization resets the AI
-  check and fresh exact-base/head receipts pass.
+  check and fresh exact-base/head assessments pass.
 - Require the protected `AI review exact-head` check. Every PR, including routine, docs, and
-  benchmark changes, requires distinct exact-head `acceptance` and `adversarial` receipts.
-  Every receipt must bind the exact head, pass at 95 or above, and report zero findings;
-  labels cannot reduce the required lanes.
+  benchmark changes, requires one exact-head `acceptance` assessment. Protected changed-path
+  mappings add `adversarial` only for review-provenance policy and LCM memory-preservation risk.
+  Each required original review must bind the exact repository, PR, base and head, explicitly
+  report `PASS`, and contain no unresolved findings; labels cannot change the required lanes.
 - Do not merge with failing/pending required checks, unresolved actionable threads, a changed
   head, missing issue acceptance, or unowned product/security decisions.
 - Never push directly to `main`, bypass the ruleset, use auto-merge, or force-push/delete

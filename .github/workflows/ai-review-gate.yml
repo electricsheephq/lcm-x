@@ -91,21 +91,25 @@ jobs:
               return refs;
             };
             const fetchReviewArtifacts = async (prNumber, refs) => {
-              if (!Array.isArray(refs)) return [];
+              if (!Array.isArray(refs)) return {artifacts: [], errors: []};
               const ids = [...new Set(refs
                 .map(ref => ref?.review_id)
                 .filter(id => Number.isInteger(id) && id > 0))];
-              const artifacts = [];
+              const artifacts = [], errors = [];
               for (const review_id of ids) {
-                const response = await github.rest.pulls.getReview({owner, repo,
-                  pull_number: prNumber, review_id});
-                const review = response.data;
-                artifacts.push({review_id: review.id, state: review.state,
-                  commit_id: review.commit_id, submitted_at: review.submitted_at,
-                  user: {id: review.user?.id, login: review.user?.login,
-                    type: review.user?.type}, body: review.body});
+                try {
+                  const response = await github.rest.pulls.getReview({owner, repo,
+                    pull_number: prNumber, review_id});
+                  const review = response.data;
+                  artifacts.push({review_id: review.id, state: review.state,
+                    commit_id: review.commit_id, submitted_at: review.submitted_at,
+                    user: {id: review.user?.id, login: review.user?.login,
+                      type: review.user?.type}, body: review.body});
+                } catch (error) {
+                  errors.push({review_id, status: Number.isInteger(error?.status) ? error.status : null});
+                }
               }
-              return artifacts;
+              return {artifacts, errors};
             };
             const runValidator = async (input, protectedSha) => {
               const source = await github.rest.repos.getContent({owner, repo,
@@ -130,7 +134,8 @@ jobs:
                   base_ref: pr.base.ref, base_sha: pr.base.sha, head_sha: pr.head.sha,
                   changed_paths: files, timeline_events: timeline,
                   unresolved_threads: unresolved, check_runs: checks,
-                  review_artifacts: reviewArtifacts,
+                  review_artifacts: reviewArtifacts.artifacts,
+                  review_artifact_errors: reviewArtifacts.errors,
                   api_complete: true, pagination_complete: true,
                   draft: pr.draft, state: pr.state, default_branch: defaultBranch};
               } catch (error) {
@@ -160,7 +165,8 @@ jobs:
                     head_sha: live?.head_sha ?? candidate.head?.sha, state: live?.state ?? candidate.state,
                     draft: live?.draft ?? candidate.draft, default_branch: defaultBranch,
                     api_complete: false, pagination_complete: false, api_error: true,
-                    changed_paths: [], timeline_events: [], check_runs: [], review_artifacts: []});
+                    changed_paths: [], timeline_events: [], check_runs: [], review_artifacts: [],
+                    review_artifact_errors: []});
                   if (live && candidate.base?.sha && candidate.head?.sha &&
                       (live.base_sha !== candidate.base.sha || live.head_sha !== candidate.head.sha))
                     listedTuples.push({pr_number: candidate.number, base_sha: candidate.base.sha, head_sha: candidate.head.sha});
@@ -325,9 +331,10 @@ jobs:
                     priorTarget.state !== 'open' || priorTarget.draft)
                   throw Error('dispatch target missing or drifted from reconciliation');
                 const envelopeValidated = await runValidator({schema_version: '2', mode: 'dispatch_envelope',
-                  target: {repository: `${owner}/${repo}`, pr_number: prNumber, base_sha: base, head_sha: head},
+                  target: priorTarget,
                   review_artifact_refs: dispatch.review_artifact_refs,
-                  review_artifacts: priorTarget.review_artifacts,
+                  producer: {login: sender.login, id: Number(sender.id), type: sender.type},
+                  run: {id: process.env.GITHUB_RUN_ID, attempt: run_attempt},
                   dispatch_id: dispatch.dispatch_id}, protectedSha);
                 if (envelopeValidated.run.status !== 0 || envelopeValidated.result.decision !== 'PASS')
                   throw Error('dispatch packet invalid');
@@ -396,7 +403,7 @@ jobs:
                   const suffix = writeFailures.length ? `; failure writes: ${writeFailures.join(',')}` : '';
                   throw Error(`peer reconciliation validation failed: ${error.message}${suffix}`);
                 }
-                if (result.decision !== 'PASS') throw Error('receipt validation failed');
+                if (result.decision !== 'PASS') throw Error('review assessment validation failed');
                 const live = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
                 liveTuple = [live.data.base.sha, live.data.head.sha];
                 const liveBranch = await github.rest.repos.getBranch({owner, repo, branch: defaultBranch});
@@ -405,12 +412,19 @@ jobs:
                 const liveUnresolved = await unresolvedThreads(prNumber);
                 const finalReviewArtifacts = await fetchReviewArtifacts(prNumber,
                   dispatch.review_artifact_refs);
+                const finalTarget = {...target, repository: `${owner}/${repo}`,
+                  pr_number: prNumber, base_ref: live.data.base.ref,
+                  base_sha: live.data.base.sha, head_sha: live.data.head.sha,
+                  changed_paths: liveFiles, timeline_events: liveTimeline,
+                  unresolved_threads: liveUnresolved,
+                  review_artifacts: finalReviewArtifacts.artifacts,
+                  review_artifact_errors: finalReviewArtifacts.errors,
+                  draft: live.data.draft, state: live.data.state};
                 const finalArtifactValidation = await runValidator({schema_version: '2',
-                  mode: 'dispatch_envelope', target: {repository: `${owner}/${repo}`,
-                    pr_number: prNumber, base_sha: live.data.base.sha,
-                    head_sha: live.data.head.sha},
+                  mode: 'dispatch_envelope', target: finalTarget,
                   review_artifact_refs: dispatch.review_artifact_refs,
-                  review_artifacts: finalReviewArtifacts,
+                  producer: {login: sender.login, id: Number(sender.id), type: sender.type},
+                  run: {id: process.env.GITHUB_RUN_ID, attempt: run_attempt},
                   dispatch_id: dispatch.dispatch_id}, protectedSha);
                 if (target.head_sha !== head || target.base_sha !== base ||
                     live.data.head.sha !== head || live.data.base.sha !== base ||
@@ -422,7 +436,8 @@ jobs:
                   throw Error('PR, protected-base, files, or threads drift');
                 }
                 if (finalArtifactValidation.run.status !== 0 ||
-                    finalArtifactValidation.result.decision !== 'PASS')
+                    finalArtifactValidation.result.decision !== 'PASS' ||
+                    JSON.stringify(finalArtifactValidation.result.packet) !== JSON.stringify(result.packet))
                   throw Error('review artifacts changed or became unavailable');
                 conclusion = 'success'; summary = JSON.stringify(result.packet);
               } else {
