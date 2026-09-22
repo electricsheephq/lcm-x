@@ -92,6 +92,7 @@ def _run_workflow_scenario(
         "s17": {"dispatch": True, "prs": [1], "target": 1, "truncatedPr": 1},
         "s18": {"dispatch": True, "prs": [1], "target": 1, "unauthorized": True},
         "s19": {"dispatch": True, "prs": [1], "target": 1, "malformedRefs": True},
+        "s20": {"dispatch": True, "prs": [1], "target": 1, "supersededReview": True},
     }
     config = {"name": name, **scenarios[name]}
     script = _extract_reconcile_script(workflow_path or _workflow_under_test())
@@ -142,6 +143,12 @@ const checksApi = {{
 }};
 const pullsApi = {{
   list: async () => cfg.prs.map(original),
+  listReviews: async ({{pull_number}}) => cfg.supersededReview ? [{{
+    id: 9101, state: 'COMMENTED', commit_id: `head-${{pull_number}}`,
+    submitted_at: '2026-08-24T11:01:00Z',
+    user: {{id: 9001, login: 'reviewer-9001', type: 'Bot'}},
+    body: 'New contradictory assessment.\\n\\n<!-- lcm-x-ai-review:v2\\n{{"verdict":"BLOCKED"}}\\n-->'
+  }}] : [],
   getReview: async ({{review_id}}) => {{ reviewFetchIds.push(review_id); return ({{data: {{id: review_id, state: 'COMMENTED',
     commit_id: `head-${{cfg.target || 1}}`, submitted_at: '2026-08-24T11:00:00Z',
     user: {{id: review_id, login: `reviewer-${{review_id}}`, type: 'Bot'}},
@@ -211,6 +218,9 @@ Object.assign(process.env, {{GITHUB_RUN_ATTEMPT: '1', GITHUB_ACTOR_ID: '23938851
   GITHUB_RUN_ID: 'run-1'}});
 const peerResult = (peer, preserve) => ({{pr_number: peer.pr_number, preserve}});
 async function fakeRunValidator(input) {{
+  if (input.mode === 'dispatch_envelope' && cfg.name === 's20' &&
+      input.target.review_artifacts.length !== input.review_artifact_refs.length)
+    return {{run: {{status: 1}}, result: {{decision: 'FAIL', packet: null}}}};
   if (input.mode === 'dispatch_envelope')
     return {{run: {{status: 0}}, result: {{decision: 'PASS', packet: {{scenario: cfg.name}}}}}};
   if (cfg.name === 's1' && input.target)
@@ -437,6 +447,13 @@ def test_behavioral_s17_truncated_changed_file_list_fails_closed():
     assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
 
 
+def test_behavioral_s20_superseded_original_review_fails_before_promotion():
+    result = _run_workflow_scenario("s20")
+    assert _failure_tuples(result) == {(1, "base-1", "head-1")}
+    assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
+    assert 9001 in result["reviewFetchIds"]
+
+
 @pytest.mark.parametrize("scenario", ["s18", "s19"])
 def test_dispatch_auth_and_ref_bounds_precede_target_or_review_fetch(scenario):
     result = _run_workflow_scenario(scenario)
@@ -567,6 +584,7 @@ def test_routine_requires_one_original_acceptance_assessment():
     "command.py",
     "config.py",
     "rollup_builder.py",
+    "scripts/backfill_externalized_tool_outputs.py",
     "scripts/import_lossless_claw.py",
     "store.py",
 ])
@@ -818,6 +836,8 @@ def test_workflow_is_base_trusted_and_resets_each_head():
     ).read_text(encoding="utf-8")
 
     assert "pull_request_target:" in workflow
+    assert "pull_request_review:" in workflow
+    assert "types: [submitted, edited, dismissed]" in workflow
     assert "push:" in workflow
     assert "repository_dispatch:" in workflow
     assert "types: [ai-review-receipts]" in workflow
@@ -846,6 +866,7 @@ def test_workflow_is_base_trusted_and_resets_each_head():
     assert "pull_request.head" not in workflow
     assert "eval(" not in workflow
     assert "github.rest.pulls.getReview" in workflow
+    assert "github.rest.pulls.listReviews" in workflow
     assert "review_artifact_refs" in workflow
     assert "'receipts' in dispatch" in workflow
     assert "dispatch.receipts" not in workflow
@@ -983,6 +1004,8 @@ def test_workflow_rechecks_complete_target_state_before_success():
     assert "JSON.stringify(liveFiles) !== JSON.stringify(target.changed_paths)" in workflow
     assert "target.unresolved_threads !== 0" in workflow
     assert "const finalReviewArtifacts = await fetchReviewArtifacts" in workflow
+    assert "superseded_by: superseding.id" in workflow
+    assert "candidate.user?.id === review.user?.id" in workflow
     assert "const finalArtifactValidation = await runValidator" in workflow
     assert "review artifacts changed or became unavailable" in workflow
     assert "JSON.stringify(finalArtifactValidation.result.packet) !== JSON.stringify(result.packet)" in workflow

@@ -42,6 +42,7 @@ MEMORY_PRESERVATION_FILES = {
     "rollup_store.py",
     "schemas.py", "scope_storage.py", "sqlite_util.py", "store.py",
     "trajectory_store.py", "vector_store.py",
+    "scripts/backfill_externalized_tool_outputs.py",
     "scripts/import_lossless_claw.py",
 }
 ASSESSMENT_FIELDS = {

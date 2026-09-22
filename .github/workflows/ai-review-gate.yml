@@ -6,6 +6,9 @@ on:
   pull_request_target:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
+  pull_request_review:
+    branches: [main]
+    types: [submitted, edited, dismissed]
   repository_dispatch:
     types: [ai-review-receipts]
 
@@ -118,12 +121,35 @@ jobs:
               const ids = [...new Set(refs
                 .map(ref => ref?.review_id)
                 .filter(id => Number.isInteger(id) && id > 0))];
+              const marker = '<!-- lcm-x-ai-review:v2\n', suffix = '\n-->';
+              const listed = ids.length ? await github.paginate(github.rest.pulls.listReviews,
+                {owner, repo, pull_number: prNumber, per_page: 100}) : [];
+              const isAssessment = review => typeof review?.body === 'string' &&
+                review.body.split(marker).length === 2 && review.body.endsWith(suffix);
+              const isNewer = (candidate, selected) => {
+                const candidateTime = Date.parse(candidate?.submitted_at);
+                const selectedTime = Date.parse(selected?.submitted_at);
+                if (!Number.isFinite(candidateTime) || !Number.isFinite(selectedTime) ||
+                    !Number.isSafeInteger(candidate?.id) || !Number.isSafeInteger(selected?.id))
+                  throw Error('review submission identity invalid');
+                return candidateTime > selectedTime ||
+                  (candidateTime === selectedTime && candidate.id > selected.id);
+              };
               const artifacts = [], errors = [];
               for (const review_id of ids) {
                 try {
                   const response = await github.rest.pulls.getReview({owner, repo,
                     pull_number: prNumber, review_id});
                   const review = response.data;
+                  const superseding = listed.find(candidate =>
+                    candidate.id !== review.id && candidate.user?.id === review.user?.id &&
+                    candidate.commit_id === review.commit_id && candidate.state !== 'DISMISSED' &&
+                    candidate.state !== 'PENDING' && isAssessment(candidate) &&
+                    isNewer(candidate, review));
+                  if (superseding) {
+                    errors.push({review_id, status: null, superseded_by: superseding.id});
+                    continue;
+                  }
                   artifacts.push({review_id: review.id, state: review.state,
                     commit_id: review.commit_id, submitted_at: review.submitted_at,
                     user: {id: review.user?.id, login: review.user?.login,

@@ -131,8 +131,10 @@ Immediately before merging, repeat the paginated thread query from Section 4, re
 Section 4 gate, and require the exact-head AI check to remain successful. Re-fetch every
 `review_artifact_refs[].review_id` from GitHub's pull-request reviews API and compare its live
 publisher ID/login/type, state, commit, submitted time, body, and assessment binding with the
-packet used by the successful check. A missing, dismissed, edited, or mismatched review blocks
-landing. Only after those checks pass, run:
+packet used by the successful check. Also paginate all reviews for the PR and reject a referenced
+assessment when a newer non-dismissed v2 assessment from the same protected publisher exists on
+the same exact head, regardless of the newer verdict. A missing, dismissed, edited, mismatched,
+or superseded review blocks landing. Only after those checks pass, run:
 
 ```bash
 current_head="$(gh pr view <PR> --repo electricsheephq/lcm-x --json headRefOid --jq .headRefOid)"

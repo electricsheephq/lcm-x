@@ -180,7 +180,9 @@ def test_codeowners_and_landing_policy_use_the_exact_head_ai_gate():
     assert "non-author code owner" not in landing.lower()
     assert "review_artifact_refs[].review_id" in landing
     assert "publisher ID/login/type, state, commit, submitted time, body" in landing
-    assert "missing, dismissed, edited, or mismatched review blocks" in landing.lower()
+    assert "paginate all reviews for the PR" in landing
+    assert "newer non-dismissed v2 assessment" in landing
+    assert "or superseded review blocks" in landing.lower()
     assert "review receipts" not in review.lower()
 
 
