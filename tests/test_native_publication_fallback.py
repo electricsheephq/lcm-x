@@ -259,6 +259,40 @@ def test_failed_recovery_preserves_exact_input(candidate, monkeypatch, kind):
     assert candidate._ingest_cursor_needs_reconcile is True
 
 
+@pytest.mark.parametrize("failure", ["exception", "aborted", "cancelled", "placeholder"])
+def test_native_abort_preserves_sanitized_active_replay(candidate, monkeypatch, failure):
+    candidate._config.sensitive_patterns_enabled = True
+    candidate._config.sensitive_patterns = ["api_key"]
+    secret = "sk-synthetic-abort-canary-1234567890-cdef"
+    messages = history()
+    messages[0]["content"] += f" api_key={secret}"
+    original = copy.deepcopy(messages)
+    cancelled = [False]
+    candidate._compression_cancelled_check = lambda: cancelled[0]
+
+    def fail(native, incoming):
+        assert secret not in json.dumps(incoming)
+        if failure == "exception":
+            raise RuntimeError("synthetic provider failure")
+        if failure == "aborted":
+            native._last_compress_aborted = True
+        if failure == "cancelled":
+            cancelled[0] = True
+        if failure == "placeholder":
+            native._last_summary_fallback_used = True
+        return [{"role": "assistant", "content": "rejected summary"}]
+
+    install_native(monkeypatch, fail)
+    result = candidate.compress(messages, current_tokens=250_000, force=True)
+    assert secret not in json.dumps(result)
+    assert "[LCM sensitive redaction:" in result[0]["content"]
+    assert result[1:] == original[1:]
+    assert len(result) == len(original)
+    assert messages == original
+    assert candidate._last_compress_aborted is True
+    assert candidate.last_compression_status == "error"
+
+
 @pytest.mark.parametrize("mode", ["disabled", "unfenced", "cancelled"])
 def test_no_native_dispatch_without_admission(candidate, monkeypatch, mode):
     calls = install_native(monkeypatch)

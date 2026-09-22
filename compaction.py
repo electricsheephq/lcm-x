@@ -811,8 +811,10 @@ class CompactionMixin:
         )
         self._native_recovery_preflight_cleanup_only = False
         if self._config.native_recovery and not native_cleanup_only:
-            recovered = self._compress_native_recovery(working_messages)
-            return messages if self._last_compress_aborted else recovered
+            # Even a rejected summary must retain ingest's replay protections.
+            # The helper preserves its error/aborted status and returns the
+            # sanitized working input when native recovery cannot finish.
+            return self._compress_native_recovery(working_messages)
         ingest_cleanup_changed_active_context = working_messages != messages
         cleanup_only_requested = bool(
             (
