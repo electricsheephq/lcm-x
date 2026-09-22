@@ -40,6 +40,7 @@ MEMORY_PRESERVATION_FILES = {
     "query_view_store.py", "reconcile.py", "reset_state.py", "rollup_store.py",
     "schemas.py", "scope_storage.py", "sqlite_util.py", "store.py",
     "trajectory_store.py", "vector_store.py",
+    "scripts/import_lossless_claw.py",
 }
 ASSESSMENT_FIELDS = {
     "schema_version",

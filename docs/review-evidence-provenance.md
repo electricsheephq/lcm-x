@@ -39,7 +39,8 @@ Every PR requires one acceptance assessment. An adversarial assessment is also
 required when protected source maps the changed paths to either named risk:
 `review-provenance-policy` or `lcm-memory-preservation`. The mapping covers the
 review workflow, validator, contributor/agent review rules and landing skill,
-plus the LCM storage, compaction, lifecycle, and memory-preservation modules.
+plus the LCM storage, compaction, lifecycle, lossless import, and
+memory-preservation modules.
 This is the protected automatic map, not a claim that other changes can never
 need targeted adversarial review in their recorded PR acceptance. Labels and
 dispatch claims cannot add or remove a mapped required lane.

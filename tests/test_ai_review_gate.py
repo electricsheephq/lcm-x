@@ -563,6 +563,7 @@ def test_routine_requires_one_original_acceptance_assessment():
     "AGENTS.md",
     ".agents/skills/review-pr/SKILL.md",
     ".github/PULL_REQUEST_TEMPLATE.md",
+    "scripts/import_lossless_claw.py",
     "store.py",
 ])
 def test_named_risks_require_distinct_adversarial_assessment(path):
@@ -1257,14 +1258,8 @@ def test_workflow_dispatch_validation_failure_is_terminal_before_target_promotio
 
 
 def _lanes_for_paths(paths: list[str]) -> list[str]:
-    protected = {
-        ".agents/skills/review-pr/SKILL.md", ".github/PULL_REQUEST_TEMPLATE.md",
-        ".github/workflows/ai-review-gate.yml", "AGENTS.md", "CONTRIBUTING.md",
-        "docs/review-evidence-provenance.md", "scripts/ai_review_gate.py",
-        "scripts/maintainer_gate.py", "store.py",
-    }
     lanes = ["acceptance"]
-    if any(path in protected or path.startswith(".agents/skills/land-pr/") for path in paths):
+    if _named_risks(paths):
         lanes.append("adversarial")
     return lanes
 
