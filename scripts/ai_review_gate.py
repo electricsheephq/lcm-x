@@ -34,10 +34,12 @@ REVIEW_POLICY_FILES = {
 }
 MEMORY_PRESERVATION_FILES = {
     "__init__.py", "assertion_store.py", "aux_session.py", "command.py", "compaction.py",
+    "config.py",
     "dag.py", "db_bootstrap.py", "engine.py", "engine_registry.py",
     "externalize.py", "fresh_tail.py", "ingest_protection.py",
     "lifecycle_state.py", "maintenance.py", "placeholder_ledger.py",
-    "query_view_store.py", "reconcile.py", "reset_state.py", "rollup_store.py",
+    "query_view_store.py", "reconcile.py", "reset_state.py", "rollup_builder.py",
+    "rollup_store.py",
     "schemas.py", "scope_storage.py", "sqlite_util.py", "store.py",
     "trajectory_store.py", "vector_store.py",
     "scripts/import_lossless_claw.py",

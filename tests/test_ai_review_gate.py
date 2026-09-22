@@ -565,6 +565,8 @@ def test_routine_requires_one_original_acceptance_assessment():
     ".github/PULL_REQUEST_TEMPLATE.md",
     "access_policy/resolution.py",
     "command.py",
+    "config.py",
+    "rollup_builder.py",
     "scripts/import_lossless_claw.py",
     "store.py",
 ])
