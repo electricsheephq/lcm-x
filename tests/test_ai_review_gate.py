@@ -585,10 +585,12 @@ def test_routine_requires_one_original_acceptance_assessment():
     "command.py",
     "config.py",
     "rollup_builder.py",
+    "rollup_periods.py",
     "scripts/backfill_externalized_tool_outputs.py",
     "scripts/import_lossless_claw.py",
     "store.py",
     "teams/catalog.py",
+    "tools.py",
 ])
 def test_named_risks_require_distinct_adversarial_assessment(path):
     dispatch = _v2_dispatch(_v2_snapshot(350, changed_paths=[path]))
@@ -599,6 +601,16 @@ def test_named_risks_require_distinct_adversarial_assessment(path):
     result = evaluate_reconciliation(dispatch, NOW)
     assert result["decision"] == "FAIL"
     assert "REVIEW_ARTIFACT_REF_SET_INVALID" in result["blockers"]
+
+
+@pytest.mark.parametrize("path", [
+    "bench/instruments/compaction_probe/drive_codex.py",
+    "docs/operator-guide.md",
+    "scripts/lcm_benchmark.py",
+    "teams_backup/catalog.py",
+])
+def test_non_runtime_paths_do_not_gain_a_named_risk(path):
+    assert _named_risks([path]) == []
 
 
 def test_adversarial_assessment_must_bind_the_exact_mapped_risk():

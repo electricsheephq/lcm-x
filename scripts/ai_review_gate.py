@@ -32,16 +32,7 @@ REVIEW_POLICY_FILES = {
     "docs/review-evidence-provenance.md", "scripts/ai_review_gate.py",
     "scripts/maintainer_gate.py",
 }
-MEMORY_PRESERVATION_FILES = {
-    "__init__.py", "assertion_store.py", "aux_session.py", "command.py", "compaction.py",
-    "config.py",
-    "dag.py", "db_bootstrap.py", "engine.py", "engine_registry.py",
-    "externalize.py", "fresh_tail.py", "ingest_protection.py",
-    "lifecycle_state.py", "maintenance.py", "placeholder_ledger.py",
-    "query_view_store.py", "reconcile.py", "reset_state.py", "rollup_builder.py",
-    "rollup_store.py",
-    "schemas.py", "scope_storage.py", "sqlite_util.py", "store.py",
-    "trajectory_store.py", "vector_store.py",
+MEMORY_MIGRATION_FILES = {
     "scripts/backfill_externalized_tool_outputs.py",
     "scripts/import_lossless_claw.py",
 }
@@ -118,7 +109,8 @@ def _named_risks(paths: Any) -> list[str]:
     if any(path in REVIEW_POLICY_FILES or path.startswith(".agents/skills/land-pr/") for path in paths):
         risks.append("review-provenance-policy")
     if any(
-        path in MEMORY_PRESERVATION_FILES
+        ("/" not in path and path.endswith(".py"))
+        or path in MEMORY_MIGRATION_FILES
         or path.startswith(("access_context/", "access_policy/", "teams/"))
         for path in paths
     ):
