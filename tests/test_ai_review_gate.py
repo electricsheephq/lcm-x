@@ -1375,3 +1375,33 @@ def test_workflow_identifies_dispatch_target_before_peer_enumeration():
     assert target_number < target_tuple < enumeration
     assert "if (prNumber && base && head) {" in workflow
     assert "for (const tuple of [resnapshotTuple, liveTuple])" in workflow
+
+
+@pytest.mark.parametrize("verdict", [["PASS"], {"verdict": "PASS"}])
+def test_malformed_verdict_invalidates_only_its_review(verdict):
+    target = _v2_snapshot(350)
+    peer = _v2_snapshot(351)
+    dispatch = _v2_dispatch(target, peers=[peer])
+    set_review_body_field(dispatch["target"]["review_artifacts"][0], "verdict", verdict)
+    result = evaluate_reconciliation(dispatch, NOW)
+    assert result["decision"] == "FAIL"
+    assert "ACCEPTANCE_REVIEW_VERDICT_INVALID" in result["blockers"]
+    assert result["peers"][0]["preserve"] is True
+
+
+def test_workflow_keeps_both_rename_paths_for_risk_mapping():
+    script = _extract_reconcile_script(_workflow_under_test())
+    start = script.index("const listFiles =")
+    end = script.index("const listTimeline =", start)
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required")
+    fixture = [{"filename": "docs/moved.md", "previous_filename": "docs/review-evidence-provenance.md"},
+               {"filename": "docs/moved.md"}]
+    program = ("const owner='test',repo='test'; const github={rest:{pulls:{listFiles:{}}},"
+               + "paginate:async()=>" + json.dumps(fixture) + "};\n"
+               + script[start:end] + "\nlistFiles(1).then(paths=>console.log(JSON.stringify(paths)));")
+    result = subprocess.run([node, "-e", program], check=True, capture_output=True, text=True)
+    paths = json.loads(result.stdout)
+    assert paths == ["docs/moved.md", "docs/review-evidence-provenance.md"]
+    assert _lanes_for_paths(paths) == ["acceptance", "adversarial"]

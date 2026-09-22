@@ -101,7 +101,7 @@ Run `actionlint` when workflows change. Record exact commands and results in the
 - Every change requires one exact-head acceptance assessment with an explicit original `PASS`
   and no unresolved findings. Changes mapped by protected source to review-provenance policy or
   LCM memory-preservation risk also require a distinct targeted adversarial assessment. Public
-  disclosure still requires an explicit maintainer decision.
+  disclosure still requires an explicit maintainer decision. Classification alone does not elevate routine reversible issue metadata.
 - Use `.agents/skills/triage-backlog/SKILL.md` read-only unless a maintainer explicitly
   authorizes one exact mutation; never use it for an automatic backlog sweep.
 - Invoking a skill never creates write authority. Routine reversible issue metadata needs one

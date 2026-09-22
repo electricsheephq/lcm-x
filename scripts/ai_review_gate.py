@@ -267,7 +267,7 @@ def _review_artifact_assessments(
                 or any(assessment.get(key) != value for key, value in expected.items())):
             blockers.append(f"{lane.upper()}_REVIEW_BINDING_MISMATCH")
         verdict = assessment.get("verdict")
-        if verdict not in {"PASS", "BLOCKED", "ABSTAIN"}:
+        if not isinstance(verdict, str) or verdict not in {"PASS", "BLOCKED", "ABSTAIN"}:
             blockers.append(f"{lane.upper()}_REVIEW_VERDICT_INVALID")
         scope = assessment.get("scope")
         if not isinstance(scope, str) or not scope.strip():

@@ -71,41 +71,18 @@ def test_pull_request_template_separates_behavior_and_release_evidence():
     assert "immediately before any authorized GitHub write" in template
 
 
-def test_every_pr_requires_two_exact_head_lanes_and_labels_cannot_reduce_them():
-    policy = " ".join((REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8").split())
-    guide = " ".join((REPO_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8").split())
-    template = " ".join(
-        (REPO_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md")
-        .read_text(encoding="utf-8")
-        .split()
-    )
-    landing = " ".join(
-        (REPO_ROOT / ".agents" / "skills" / "land-pr" / "SKILL.md")
-        .read_text(encoding="utf-8")
-        .split()
-    )
-    reviewing = " ".join(
-        (REPO_ROOT / ".agents" / "skills" / "review-pr" / "SKILL.md")
-        .read_text(encoding="utf-8")
-        .split()
-    )
-
-    assert (
-        "Every PR, including routine, docs, and benchmark changes, requires distinct exact-head"
-        " `acceptance` and `adversarial` receipts."
-    ) in policy
-    assert "labels cannot reduce the required lanes" in policy
-    assert (
-        "every PR requires distinct exact-head `acceptance` and `adversarial` receipts,"
-        " including routine/docs/benchmark changes, each at 95 or above;"
-    ) in guide
-    assert "Every PR has distinct exact-head `acceptance` and `adversarial` receipts at 95+;" in template
-    assert "Every PR requires distinct exact-head `acceptance` and `adversarial` receipts" in landing
-    assert "Every PR, including routine/docs/benchmark work, requires distinct `acceptance` and" in reviewing
-    assert "zero findings; labels cannot reduce the required lanes" in policy
-    assert "Routine/docs/benchmark changes require one `acceptance` receipt" not in landing
-    assert "Routine/docs/benchmark work has one acceptance receipt" not in template
-    assert "Routine/docs/benchmark work requires one `acceptance` receipt" not in reviewing
+def test_review_policy_requires_acceptance_and_named_risk_without_scores():
+    paths = ["AGENTS.md", "CONTRIBUTING.md", ".github/PULL_REQUEST_TEMPLATE.md",
+             ".agents/skills/land-pr/SKILL.md", ".agents/skills/review-pr/SKILL.md"]
+    for path in paths:
+        text = " ".join((REPO_ROOT / path).read_text(encoding="utf-8").split())
+        assert "exact-head `acceptance` assessment" in text
+        assert "`adversarial`" in text
+        assert "risk" in text
+        assert "`PASS`" in text
+        assert "unresolved findings" in text
+        assert "95" not in text
+        assert "PASS >=" not in text
 
 
 def test_triage_skill_is_bounded_and_read_only_by_default():
@@ -181,8 +158,8 @@ def test_repository_policy_states_the_automation_boundary():
     assert "## Automation Boundary" in policy
     assert "Model output alone cannot close, label, assign, push, approve, or merge." in policy
     assert "Automated repair is opt-in" in policy
-    assert "distinct exact-head acceptance and adversarial AI review receipts" in normalized_policy
-    assert "each passing at 95 or above" in normalized_policy
+    assert "one exact-head acceptance assessment with an explicit original `PASS`" in normalized_policy
+    assert "distinct targeted adversarial assessment" in normalized_policy
     assert "Classification alone does not elevate routine reversible issue metadata" in policy
 
 

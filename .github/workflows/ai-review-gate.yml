@@ -60,7 +60,8 @@ jobs:
             };
             const listFiles = (prNumber) => github.paginate(github.rest.pulls.listFiles,
               {owner, repo, pull_number: prNumber, per_page: 100})
-              .then(files => files.map(file => file.filename));
+              .then(files => [...new Set(files.flatMap(file =>
+                [file.filename, file.previous_filename].filter(Boolean)))].sort());
             const listTimeline = (prNumber) => github.paginate(
               github.rest.issues.listEventsForTimeline,
               {owner, repo, issue_number: prNumber, per_page: 100})

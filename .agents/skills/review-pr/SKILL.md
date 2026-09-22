@@ -39,16 +39,18 @@ the provenance of caller-supplied facts and never grants write or merge authorit
 
 ## 3. Verify Review Evidence
 
-Read the successful `AI review exact-head` check on the exact head and its content-free summary.
-Bind repository, PR, base/head SHA, risk class, policy version, lane, reviewer/task/receipt IDs,
-verdict, score, findings, evidence digest, and expiry.
+Read the successful `AI review exact-head` check on the exact head and its original-review packet.
+Bind repository, PR, base/head SHA, policy version, original GitHub review IDs, authors and
+bodies, explicit verdict, scope, findings, limitations and acceptance evidence. Tracking hashes
+and expiry are workflow metadata, not reviewer-issued claims.
 
-- Every PR, including routine/docs/benchmark work, requires distinct `acceptance` and
-  `adversarial` receipts, each `PASS >=95`.
-- Risk classification still binds each receipt to the changed paths, but labels and risk class
-  never reduce the two required lanes.
-- Scores are never averaged. Duplicate identities, stale bindings, any finding, or an unresolved
-  GitHub review thread is blocking.
+- Every PR requires one exact-head `acceptance` assessment with an explicit original `PASS`
+  and no unresolved findings.
+- Protected changed-path mappings require a distinct targeted `adversarial` assessment for
+  review-provenance policy and LCM memory-preservation risk. Labels cannot change required lanes.
+- No numeric scores are accepted. Comments, empty responses and absence of findings alone are
+  not `PASS`. Duplicate identities, stale bindings, missing or withdrawn original evidence,
+  any unresolved finding or an unresolved GitHub review thread is blocking.
 
 CI, the author, this skill, ordinary comments, and untrusted same-name checks do not count.
 
