@@ -836,8 +836,6 @@ def test_workflow_is_base_trusted_and_resets_each_head():
     ).read_text(encoding="utf-8")
 
     assert "pull_request_target:" in workflow
-    assert "pull_request_review:" in workflow
-    assert "types: [submitted, edited, dismissed]" in workflow
     assert "push:" in workflow
     assert "repository_dispatch:" in workflow
     assert "types: [ai-review-receipts]" in workflow

@@ -6,9 +6,6 @@ on:
   pull_request_target:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, edited]
-  pull_request_review:
-    branches: [main]
-    types: [submitted, edited, dismissed]
   repository_dispatch:
     types: [ai-review-receipts]
 
