@@ -116,10 +116,11 @@ def test_subthreshold_ingest_cleanup_adopts_safe_replay_without_native_summary(c
 
     assert calls == []
     assert secret not in serialized
-    assert result[0]["content"].startswith(
-        "[Externalized payload: kind=raw_payload; role=user;"
-    )
-    ref = extract_externalized_ref(result[0]["content"])
+    assert retained_payload in result[0]["content"]
+    stored_content = candidate._store._conn.execute(
+        "SELECT content FROM messages WHERE role='user' ORDER BY store_id LIMIT 1"
+    ).fetchone()[0]
+    ref = extract_externalized_ref(stored_content)
     assert ref is not None
     payload = load_externalized_payload(
         ref,
@@ -136,6 +137,45 @@ def test_subthreshold_ingest_cleanup_adopts_safe_replay_without_native_summary(c
     assert candidate._store._conn.execute(
         "SELECT * FROM messages ORDER BY store_id"
     ).fetchall() == before
+
+
+@pytest.mark.parametrize("native_enabled", [True, False])
+def test_user_storage_stub_does_not_hide_sanitized_native_input(
+    candidate, monkeypatch, native_enabled
+):
+    candidate._config.native_recovery = native_enabled
+    candidate._config.large_output_externalization_enabled = True
+    candidate._config.large_output_externalization_threshold_chars = 12_000
+    candidate._config.sensitive_patterns_enabled = True
+    candidate._config.sensitive_patterns = ["api_key"]
+    secret = "sk-synthetic-recall-test-1234567890-cdef"
+    fact = "The approved project name is amber-lantern."
+    messages = [{"role": "user", "content":
+                 f"api_key={secret}\n" + "ordinary retained prose " * 2800 + fact}]
+    messages += history()
+    original = copy.deepcopy(messages)
+    replay = candidate._ingest_messages(messages)
+    assert secret not in json.dumps(replay)
+    assert (fact in replay[0]["content"]) is native_enabled
+    stored = candidate._store._conn.execute(
+        "SELECT content FROM messages WHERE role='user' ORDER BY store_id LIMIT 1"
+    ).fetchone()[0]
+    ref = extract_externalized_ref(stored)
+    assert ref is not None
+    payload = load_externalized_payload(
+        ref, config=candidate._config, hermes_home=candidate._hermes_home
+    )
+    assert fact in payload["content"] and secret not in payload["content"]
+    if native_enabled:
+        seen = []
+        def capture(native, incoming):
+            seen.extend(copy.deepcopy(incoming))
+            return [{"role": "assistant", "content": "summary: " + fact}] + incoming[-2:]
+        install_native(monkeypatch, capture)
+        candidate.compress(replay, current_tokens=250_000, force=True)
+        assert fact in seen[0]["content"]
+        assert secret not in json.dumps(seen)
+    assert messages == original
 
 
 @pytest.mark.parametrize(

@@ -5573,7 +5573,13 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 # invisible to both.  The store still holds the externalized
                 # version for durable recovery via lcm_expand.
                 _orig_role = str(active_replay_messages[absolute_idx].get("role") or "")
-                if _orig_role == "assistant":
+                # Native recovery summarizes this active replay, not the LCM
+                # storage references. Keep already-redacted/filtered user text
+                # visible to that compressor and subsequent turns. The protected
+                # durable copy remains externalized below, as before.
+                if _orig_role == "assistant" or (
+                    _orig_role == "user" and self._config.native_recovery
+                ):
                     continue
                 if active_replay_messages is replay_messages:
                     active_replay_messages = self._copy_active_replay_messages_preserving_generated_ids(
