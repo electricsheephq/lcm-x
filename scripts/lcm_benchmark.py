@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run deterministic hermes-lcm benchmark replays."""
+"""Run deterministic LCM-X benchmark replays."""
 
 from __future__ import annotations
 

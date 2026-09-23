@@ -1,27 +1,28 @@
 # LCM-X project state
 
-This page separates released product identity, current development source, evaluation evidence, and later roadmap work. GitHub issues, pull requests, tags, releases, and exact commit heads are the live source of truth. This snapshot was reconciled on 2026-09-05.
+This page separates released product identity, current development source, evaluation evidence, and later roadmap work. GitHub issues, pull requests, tags, releases, and exact commit heads are the live source of truth. This snapshot was reconciled on 2026-09-05; the naming table and latest-stable identity were updated on 2026-09-24 for the #471 rename.
 
 ## Naming and compatibility
 
-The project is **LCM-X — Lossless Context Memory eXtension**. Compatibility identifiers remain stable:
+The project is **LCM-X — Lossless Context Memory eXtension**. From v0.24.0 (unreleased, #471) the plugin and engine identifiers are:
 
 | Surface | Identifier |
 | --- | --- |
 | Repository and project | `electricsheephq/lcm-x` / LCM-X |
-| Plugin manifest, install directory, and skill | `hermes-lcm` |
-| Runtime context engine | `lcm` |
-| Latest stable | `v0.23.2@676bb48dde29f06899ff829a7cb8b1d9d2e262f6` |
+| Plugin manifest and install directory | `hermes-lcm-x` (legacy, v0.23.x and earlier: `hermes-lcm`) |
+| Runtime context engine | `lcm-x` (legacy alias `lcm` accepted with a deprecation warning) |
+| Bundled skill | `hermes-lcm` (unchanged) |
+| Latest stable | `v0.23.3@523161769329174514a0b995025201e3dc316df2` (still ships `hermes-lcm` / `lcm`) |
 
-Changing `hermes-lcm` or `lcm` requires a separately designed migration. Historical notes and upstream evidence retain the names and identities used when they were created.
+The rename is a breaking change with a documented migration path; see the operator guide's migration section. Historical notes and upstream evidence retain the names and identities used when they were created.
 
 ## Released product and development source
 
-The latest stable release is `v0.23.2` at `676bb48dde29f06899ff829a7cb8b1d9d2e262f6`. GitHub publishes it as a non-prerelease release. Because GitHub reports the tag as mutable, operators and evidence packets must verify the exact SHA rather than trust the tag name alone.
+The latest stable release is `v0.23.3` at `523161769329174514a0b995025201e3dc316df2`. GitHub publishes it as a non-prerelease release. Because GitHub reports the tag as mutable, operators and evidence packets must verify the exact SHA rather than trust the tag name alone.
 
 The source snapshot used for this reconciliation is `main@7b894b65d01c70046194c7b0fd10aae1448b2a07`. Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits.
 
-Main carries the forward identity `0.23.3` for the next point release (rc-first under `bench/specs/RELEASE-READINESS-V1.md`); the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
+Main carries the forward identity `0.24.0` (`hermes-lcm-x`, #471) for the next minor release (rc-first under `bench/specs/RELEASE-READINESS-V1.md`); the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
 
 v0.23.2 (2026-08-27) shipped those contracts: durable redaction and cloud-embedding privacy are
 independent flags (`LCM_SENSITIVE_PATTERNS_ENABLED` vs `LCM_EMBEDDING_PRIVACY_ENABLED`, #374),

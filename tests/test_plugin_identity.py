@@ -157,3 +157,62 @@ def test_lcm_status_and_doctor_surface_the_migration(monkeypatch):
     check = next(c for c in doctor["checks"] if c["check"] == "identity_migration")
     assert check["status"] == "warn"
     assert "`context.engine: lcm-x`" in check["detail"]["message"]
+
+
+class _ForeignLcmEngine:
+    """Stands in for a separate pre-rename copy's engine (different module)."""
+
+    name = "lcm"
+
+
+class _HookCtx:
+    def __init__(self, existing):
+        self._manager = types.SimpleNamespace(_context_engine=existing)
+        self.engine = None
+        self.hooks = {}
+
+    def register_context_engine(self, engine):
+        self.engine = engine
+
+    def register_hook(self, name, callback):
+        self.hooks.setdefault(name, []).append(callback)
+
+
+def _load_module(module_name):
+    repo_root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        module_name, str(repo_root / "__init__.py"), submodule_search_locations=[str(repo_root)]
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_second_lcm_generation_stays_inert(caplog):
+    """#471 fix round 1: a separate hermes-lcm copy loaded first must stay the only writer."""
+    module = _load_module("hermes_lcm_identity_dual_guard")
+    ctx = _HookCtx(_ForeignLcmEngine())
+    with caplog.at_level(logging.INFO):
+        module.register(ctx)
+
+    assert ctx.engine is None
+    assert ctx.hooks == {}
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert "Another LCM generation is already loaded" in errors[0].getMessage()
+    assert "replace `hermes-lcm` with `hermes-lcm-x` in plugins.enabled" in errors[0].getMessage()
+    assert "LCM plugin loaded" not in caplog.text
+
+
+@pytest.mark.parametrize("existing_name", [None, "compressor-plus"])
+def test_guard_ignores_no_engine_or_non_lcm_engine(existing_name):
+    module = _load_module(f"hermes_lcm_identity_guard_{existing_name}")
+    existing = None if existing_name is None else types.SimpleNamespace(name=existing_name)
+    ctx = _HookCtx(existing)
+    module.register(ctx)
+    try:
+        assert ctx.engine is not None
+        assert "pre_llm_call" in ctx.hooks
+    finally:
+        ctx.engine.shutdown()
