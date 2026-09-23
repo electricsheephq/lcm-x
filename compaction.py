@@ -177,6 +177,14 @@ class CompactionMixin:
             # summarizer spend.
             if self._compression_boundary_cooldown_active():
                 return False
+            if (
+                self._config.native_recovery
+                and self.threshold_tokens > 0
+                and replay_rough >= self.threshold_tokens
+            ):
+                return self._mark_preflight_compression_requested(
+                    depends_on_pressure_yield=self._pressure_yield_preflight_candidate,
+                )
             if pre_ingest_placeholder_cleanup_requested:
                 return self._mark_preflight_compression_requested(
                     depends_on_pressure_yield=True,
@@ -239,6 +247,10 @@ class CompactionMixin:
         if self._should_force_overflow_recovery(observed_tokens=rough):
             return self._mark_preflight_compression_requested()
         if self.threshold_tokens > 0 and rough >= self.threshold_tokens:
+            if self._config.native_recovery:
+                return self._mark_preflight_compression_requested(
+                    depends_on_pressure_yield=self._pressure_yield_preflight_candidate,
+                )
             if pre_ingest_placeholder_cleanup_requested:
                 return self._mark_preflight_compression_requested(
                     depends_on_pressure_yield=True,

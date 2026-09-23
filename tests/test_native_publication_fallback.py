@@ -235,6 +235,17 @@ def test_cleanup_only_handoff_precedes_native_summary_and_is_consumed(candidate,
     assert candidate._native_recovery_preflight_cleanup_only is False
 
 
+def test_native_preflight_admits_threshold_pressure_without_lcm_leaf(candidate):
+    candidate.threshold_tokens = 100
+    candidate._config.leaf_chunk_tokens = 1_000_000
+    candidate._config.threshold_full_sweep_enabled = False
+    messages = history()
+
+    eligible, _reason = candidate._leaf_compaction_candidate_status(messages)
+    assert eligible is False
+    assert candidate.should_compress_preflight(messages) is True
+
+
 def test_subthreshold_ingest_cleanup_adopts_safe_replay_without_native_summary(candidate, monkeypatch):
     calls = install_native(monkeypatch)
     candidate._config.sensitive_patterns_enabled = True
