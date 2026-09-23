@@ -97,9 +97,10 @@ Maintainers use the protected-main `.agents/skills/land-pr/SKILL.md`:
 
 - required checks must pass on the pinned `headRefOid` with trusted workflow identities;
 - the protected `AI review exact-head` check must pass on the current head;
-- every PR requires distinct exact-head `acceptance` and `adversarial` receipts, including
-  routine/docs/benchmark changes, each at 95 or above;
-- labels cannot reduce the required lanes, and every receipt must report zero findings;
+- every PR requires one exact-head `acceptance` assessment with an explicit original `PASS` and
+  no unresolved findings;
+- protected changed-path mappings additionally require targeted `adversarial` review for
+  review-provenance policy and LCM memory-preservation risk; labels cannot change the lanes;
 - every actionable review thread needs a terminal disposition and resolution;
 - accepted issues, exact-head state, and product/security decisions are re-fetched before merge;
 - merges use merge commits only—never squash, rebase, direct-main push, auto-merge, or bypass.
@@ -119,8 +120,8 @@ commit may differ from the passing rc tree by exactly the added release-notes fi
 AI and bot output is proposal and evidence by default. Models may triage, reproduce, implement,
 test, and review, but deterministic tooling must re-fetch live state before any authorized write.
 Model output alone cannot close, label, assign, push, approve, or merge. Automated repair is
-opt-in and limited to the exact accepted issue and current gate. Exact-head content-free AI
-review receipts are evidence consumed by the protected deterministic gate; they do not create
+opt-in and limited to the exact accepted issue and current gate. Exact-head original AI review
+assessments are evidence consumed by the protected deterministic gate; they do not create
 write or merge authority. Public sensitive disclosure remains an explicit maintainer decision.
 
 Use the read-only `.agents/skills/triage-backlog/SKILL.md` for one issue, pull request, or duplicate

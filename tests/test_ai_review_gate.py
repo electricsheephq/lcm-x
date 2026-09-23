@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 
 from scripts.ai_review_gate import (
+    _named_risks,
+    _review_artifact_assessments,
     build_packet,
     evaluate,
     evaluate_reconciliation,
@@ -21,8 +23,9 @@ from scripts.ai_review_gate import (
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
 HEAD = "1" * 40
 BASE = "2" * 40
-DIGEST = "3" * 64
 REPO_ROOT = Path(__file__).resolve().parent.parent
+REVIEWERS = {"acceptance": (298367747, "evaos-code-review-bot[bot]", 9001),
+             "adversarial": (199175422, "chatgpt-codex-connector[bot]", 9002)}
 
 
 def _workflow_under_test() -> Path:
@@ -86,6 +89,10 @@ def _run_workflow_scenario(
         "s15": {"dispatch": True, "prs": [1, 2], "target": 1},
         "s16": {"dispatch": True, "prs": [1, 2], "target": 1},
         "s16b": {"dispatch": True, "prs": [1, 2], "target": 1, "invalidPr": 2},
+        "s17": {"dispatch": True, "prs": [1], "target": 1, "truncatedPr": 1},
+        "s18": {"dispatch": True, "prs": [1], "target": 1, "unauthorized": True},
+        "s19": {"dispatch": True, "prs": [1], "target": 1, "malformedRefs": True},
+        "s20": {"dispatch": True, "prs": [1], "target": 1, "supersededReview": True},
     }
     config = {"name": name, **scenarios[name]}
     script = _extract_reconcile_script(workflow_path or _workflow_under_test())
@@ -104,13 +111,16 @@ if (cfg.name === 's12')
   // whose live-state fingerprint no longer validates (preserve: false below).
   checks.push({{id: 0, name: 'AI review exact-head', external_id: 'ai-review-gate:1:base-1:head-1',
     head_sha: 'head-1', status: 'completed', conclusion: 'success', app: {{id: 15368}},
-    output: {{summary: JSON.stringify({{dispatch_id: 'dispatch-fresh'}})}}}});
+    output: {{summary: JSON.stringify({{dispatch_id: 'dispatch-fresh', review_artifact_refs:
+      [{{lane: 'acceptance', review_id: 8001}}, {{lane: 'adversarial', review_id: 8002}}]}})}}}});
 const pullCalls = new Map();
 const filesCalls = new Map();
+const reviewFetchIds = [];
 let branchCalls = 0;
 let nextCheckId = 1;
 const original = number => ({{number, base: {{ref: 'main', sha: `base-${{number}}`}},
-  head: {{sha: `head-${{number}}`}}, state: 'open', draft: false}});
+  head: {{sha: `head-${{number}}`}}, state: 'open', draft: false,
+  changed_files: cfg.truncatedPr === number ? 2 : 1}});
 const record = (run, conclusion, summary, operation) => {{
   const match = run.external_id.match(/^ai-review-gate:(\\d+):([^:]+):(.+)$/);
   emissions.push({{pr: Number(match[1]), base: match[2], head: match[3], conclusion,
@@ -133,6 +143,16 @@ const checksApi = {{
 }};
 const pullsApi = {{
   list: async () => cfg.prs.map(original),
+  listReviews: async ({{pull_number}}) => cfg.supersededReview ? [{{
+    id: 9101, state: 'COMMENTED', commit_id: `head-${{pull_number}}`,
+    submitted_at: '2026-08-24T11:01:00Z',
+    user: {{id: 9001, login: 'reviewer-9001', type: 'Bot'}},
+    body: 'New contradictory assessment.\\n\\n<!-- lcm-x-ai-review:v2\\n{{"verdict":"BLOCKED"}}\\n-->'
+  }}] : [],
+  getReview: async ({{review_id}}) => {{ reviewFetchIds.push(review_id); return ({{data: {{id: review_id, state: 'COMMENTED',
+    commit_id: `head-${{cfg.target || 1}}`, submitted_at: '2026-08-24T11:00:00Z',
+    user: {{id: review_id, login: `reviewer-${{review_id}}`, type: 'Bot'}},
+    body: 'synthetic'}}}}); }},
   get: async ({{pull_number}}) => {{
     const count = (pullCalls.get(pull_number) || 0) + 1;
     pullCalls.set(pull_number, count);
@@ -184,16 +204,25 @@ const github = {{
 }};
 const context = {{repo: {{owner: 'electricsheephq', repo: 'lcm-x'}},
   eventName: cfg.dispatch ? 'repository_dispatch' : 'push',
-  payload: cfg.dispatch ? {{client_payload: {{pr_number: cfg.target, receipts: [],
+  payload: cfg.dispatch ? {{client_payload: {{pr_number: cfg.target,
+    review_artifact_refs: cfg.malformedRefs
+      ? [{{lane: 'acceptance', review_id: 9001}}, {{lane: 'adversarial', review_id: 9002}},
+        {{lane: 'acceptance', review_id: 9003}}]
+      : [{{lane: 'acceptance', review_id: 9001}}, {{lane: 'adversarial', review_id: 9002}}],
     dispatch_id: 'dispatch-fresh'}}, sender: {{login: '100yenadmin', id: 239388517,
-    type: 'User'}}}} : {{}}, actor: '100yenadmin', ref: 'refs/heads/main', sha: 'protected'}};
+    type: 'User'}}}} : {{}}, actor: cfg.unauthorized ? 'attacker' : '100yenadmin',
+  ref: 'refs/heads/main', sha: 'protected'}};
+if (cfg.unauthorized) context.payload.sender.login = 'attacker';
 const core = {{setFailed: message => failures.push(message)}};
 Object.assign(process.env, {{GITHUB_RUN_ATTEMPT: '1', GITHUB_ACTOR_ID: '239388517',
   GITHUB_RUN_ID: 'run-1'}});
 const peerResult = (peer, preserve) => ({{pr_number: peer.pr_number, preserve}});
 async function fakeRunValidator(input) {{
+  if (input.mode === 'dispatch_envelope' && cfg.name === 's20' &&
+      input.target.review_artifacts.length !== input.review_artifact_refs.length)
+    return {{run: {{status: 1}}, result: {{decision: 'FAIL', packet: null}}}};
   if (input.mode === 'dispatch_envelope')
-    return {{run: {{status: 0}}, result: {{decision: 'PASS'}}}};
+    return {{run: {{status: 0}}, result: {{decision: 'PASS', packet: {{scenario: cfg.name}}}}}};
   if (cfg.name === 's1' && input.target)
     return {{run: {{status: 1}}, result: {{decision: 'FAIL',
       peers: input.peers.map(peer => peerResult(peer, true))}}}};
@@ -235,7 +264,8 @@ async function fakeRunValidator(input) {{
 async function main() {{
 {script}
 }}
-main().then(() => console.log(JSON.stringify({{emissions, failures}}))).catch(error => {{
+main().then(() => console.log(JSON.stringify({{emissions, failures, reviewFetchIds,
+  pullCalls: [...pullCalls.entries()]}}))).catch(error => {{
   console.error(error.stack); process.exitCode = 1;
 }});
 """
@@ -408,6 +438,27 @@ def test_behavioral_s12_state_invalidated_prior_packet_still_blocks_replay():
     result = _run_workflow_scenario("s12")
     assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
     assert _failure_tuples(result) == {(1, "base-1", "head-1")}
+    assert {8001, 8002, 9001, 9002}.issubset(set(result["reviewFetchIds"]))
+
+
+def test_behavioral_s17_truncated_changed_file_list_fails_closed():
+    result = _run_workflow_scenario("s17")
+    assert _failure_tuples(result) == {(1, "base-1", "head-1")}
+    assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
+
+
+def test_behavioral_s20_superseded_original_review_fails_before_promotion():
+    result = _run_workflow_scenario("s20")
+    assert _failure_tuples(result) == {(1, "base-1", "head-1")}
+    assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
+    assert 9001 in result["reviewFetchIds"]
+
+
+@pytest.mark.parametrize("scenario", ["s18", "s19"])
+def test_dispatch_auth_and_ref_bounds_precede_target_or_review_fetch(scenario):
+    result = _run_workflow_scenario(scenario)
+    assert result["reviewFetchIds"] == []
+    assert result["pullCalls"] == []
 
 
 def test_behavioral_s13_partial_peer_snapshot_fails_live_and_listed_tuples():
@@ -445,240 +496,352 @@ def test_behavioral_s14b_falsy_throw_in_peer_only_mode_resets_known_tuples():
     assert not any(emit["conclusion"] == "success" for emit in result["emissions"])
 
 
-def receipt(lane: str, *, risk: str = "routine", reviewer: str | None = None):
+def assessment_body(
+    lane: str,
+    *,
+    pr_number: int = 350,
+    base_sha: str = BASE,
+    head_sha: str = HEAD,
+    verdict: str = "PASS",
+    findings: list[str] | None = None,
+    named_risks: list[str] | None = None,
+):
+    return {
+        "schema_version": "2",
+        "repository": "electricsheephq/lcm-x",
+        "pr_number": pr_number,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "lane": lane,
+        "verdict": verdict,
+        "scope": f"{lane} review of the exact PR head",
+        "named_risks": [] if named_risks is None else named_risks,
+        "findings": [] if findings is None else findings,
+        "limitations": [],
+        "acceptance_evidence": ["independent reviewer execution completed"],
+        "policy_version": "2",
+    }
+
+
+def review_bundle(assessments: list[dict[str, object]]):
+    refs, artifacts = [], []
+    for item in assessments:
+        reviewer_id, login, review_id = REVIEWERS[item["lane"]]
+        refs.append({"lane": item["lane"], "review_id": review_id})
+        artifacts.append({
+            "review_id": review_id,
+            "state": "COMMENTED",
+            "commit_id": item["head_sha"],
+            "submitted_at": "2026-08-24T11:00:00Z",
+            "user": {"id": reviewer_id, "login": login, "type": "Bot"},
+            "body": f"Independent {item['lane']} review completed.\n\n<!-- lcm-x-ai-review:v2\n"
+            + json.dumps(item, sort_keys=True, separators=(",", ":"))
+            + "\n-->",
+        })
+    return refs, artifacts
+
+
+def set_review_body_field(artifact: dict[str, object], field: str, value: object):
+    marker, suffix = "<!-- lcm-x-ai-review:v2\n", "\n-->"
+    body = artifact["body"]
+    marker_at = body.rfind(marker)
+    prefix = body[:marker_at + len(marker)]
+    assessment = json.loads(body[marker_at + len(marker):-len(suffix)])
+    assessment[field] = value
+    artifact["body"] = prefix + json.dumps(assessment, sort_keys=True,
+        separators=(",", ":")) + suffix
+
+
+def legacy_payload(withdrawn_id: str | None = None):
+    receipt_id = withdrawn_id or "legacy-producer-receipt"
     return {
         "schema_version": "1",
         "repository": "electricsheephq/lcm-x",
         "pr_number": 350,
         "base_sha": BASE,
         "head_sha": HEAD,
-        "risk_class": risk,
-        "lane": lane,
-        "reviewer_id": reviewer or f"reviewer-{lane}",
-        "task_id": f"task-{lane}",
-        "receipt_id": f"receipt-{lane}",
-        "verdict": "PASS",
-        "score": 97,
-        "findings": 0,
-        "evidence_digest": DIGEST,
-        "issued_at": "2026-08-24T11:00:00Z",
-        "expires_at": "2026-08-25T11:00:00Z",
-        "policy_version": "1",
-        "integration_id": 15368,
+        "receipts": [{"lane": "acceptance", "receipt_id": receipt_id,
+                      "score": 100, "verdict": "PASS"}],
     }
 
 
-def payload(paths: list[str] | None = None):
-    return {
-        "repository": "electricsheephq/lcm-x",
-        "pr_number": 350,
-        "base_sha": BASE,
-        "head_sha": HEAD,
-        "changed_paths": paths or ["docs/operator-guide.md"],
-        "receipts": [receipt("acceptance"), receipt("adversarial")],
-        "unresolved_threads": 0,
-        "api_complete": True,
-        "pagination_complete": True,
-    }
-
-
-def test_routine_distinct_acceptance_and_adversarial_receipts_pass():
-    result = evaluate(payload(), NOW)
+def test_routine_requires_one_original_acceptance_assessment():
+    result = evaluate_reconciliation(_v2_dispatch(_v2_snapshot(350)), NOW)
 
     assert result["decision"] == "PASS"
-    assert result["risk_class"] == "routine"
     assert result["base_sha"] == BASE
     assert result["head_sha"] == HEAD
     assert result["blockers"] == []
-    assert result["receipts"][0]["evidence_digest"] == DIGEST
+    assert [item["lane"] for item in result["packet"]["assessments"]] == ["acceptance"]
+    assert "Independent acceptance review completed." in result["packet"]["assessments"][0]["original_body"]
 
 
-def test_governance_requires_distinct_acceptance_and_adversarial_receipts():
-    data = payload([".github/workflows/ai-review-gate.yml"])
-    data["receipts"] = [
-        receipt("acceptance", risk="governance"),
-        receipt("adversarial", risk="governance"),
-    ]
+@pytest.mark.parametrize("path", [
+    "AGENTS.md",
+    ".agents/skills/review-pr/SKILL.md",
+    ".github/PULL_REQUEST_TEMPLATE.md",
+    "access_context/validation.py",
+    "access_policy/resolution.py",
+    "command.py",
+    "config.py",
+    "rollup_builder.py",
+    "rollup_periods.py",
+    "scripts/backfill_externalized_tool_outputs.py",
+    "scripts/import_lossless_claw.py",
+    "store.py",
+    "teams/catalog.py",
+    "tools.py",
+])
+def test_named_risks_require_distinct_adversarial_assessment(path):
+    dispatch = _v2_dispatch(_v2_snapshot(350, changed_paths=[path]))
+    assert evaluate_reconciliation(dispatch, NOW)["decision"] == "PASS"
 
-    assert evaluate(data, NOW)["decision"] == "PASS"
-
-    data["receipts"][1]["reviewer_id"] = "reviewer-acceptance"
-    result = evaluate(data, NOW)
+    dispatch["review_artifact_refs"] = dispatch["review_artifact_refs"][:1]
+    dispatch["target"]["review_artifacts"] = dispatch["target"]["review_artifacts"][:1]
+    result = evaluate_reconciliation(dispatch, NOW)
     assert result["decision"] == "FAIL"
-    assert "DUPLICATE_REVIEWER_ID" in result["blockers"]
+    assert "REVIEW_ARTIFACT_REF_SET_INVALID" in result["blockers"]
 
 
-def test_unknown_risk_fails_closed_to_two_lanes():
-    data = payload(["access_context/tools.py"])
-    data["receipts"] = [receipt("acceptance", risk="unknown")]
-    result = evaluate(data, NOW)
-
-    assert result["risk_class"] == "unknown"
-    assert "ADVERSARIAL_RECEIPT_COUNT_INVALID" in result["blockers"]
-
-
-def test_missing_or_extra_receipts_fail():
-    data = payload()
-    data["receipts"] = []
-    assert "RECEIPT_SET_INVALID" in evaluate(data, NOW)["blockers"]
-
-    data = payload()
-    data["receipts"].append(receipt("adversarial"))
-    assert "RECEIPT_SET_INVALID" in evaluate(data, NOW)["blockers"]
+@pytest.mark.parametrize("path", [
+    "bench/instruments/compaction_probe/drive_codex.py",
+    "docs/operator-guide.md",
+    "scripts/lcm_benchmark.py",
+    "teams_backup/catalog.py",
+])
+def test_non_runtime_paths_do_not_gain_a_named_risk(path):
+    assert _named_risks([path]) == []
 
 
-def test_stale_sub95_findings_and_malformed_digest_fail():
-    cases = {
-        "expires_at": ("2026-08-24T11:59:59Z", "ACCEPTANCE_RECEIPT_STALE"),
-        "score": (94, "ACCEPTANCE_VERDICT_INVALID"),
-        "findings": (1, "ACCEPTANCE_FINDINGS_UNRESOLVED"),
-        "evidence_digest": ("not-a-digest", "ACCEPTANCE_DIGEST_INVALID"),
-    }
-    for field, (value, blocker) in cases.items():
-        data = payload()
-        data["receipts"][0][field] = value
-        assert blocker in evaluate(data, NOW)["blockers"]
+def test_adversarial_assessment_must_bind_the_exact_mapped_risk():
+    dispatch = _v2_dispatch(_v2_snapshot(350, changed_paths=["store.py"]))
+    adversarial = next(
+        artifact for artifact in dispatch["target"]["review_artifacts"]
+        if artifact["review_id"] == REVIEWERS["adversarial"][2]
+    )
+    set_review_body_field(adversarial, "named_risks", ["review-provenance-policy"])
+
+    result = evaluate_reconciliation(dispatch, NOW)
+
+    assert result["decision"] == "FAIL"
+    assert "ADVERSARIAL_REVIEW_RISK_BINDING_MISMATCH" in result["blockers"]
 
 
-def test_wrong_head_base_integration_policy_and_repository_fail():
-    cases = {
-        "head_sha": "4" * 40,
-        "base_sha": "5" * 40,
-        "integration_id": 999,
-        "policy_version": "stale",
-        "repository": "someone/fork",
-    }
-    for field, value in cases.items():
-        data = payload()
-        data["receipts"][0][field] = value
-        assert "ACCEPTANCE_BINDING_MISMATCH" in evaluate(data, NOW)["blockers"]
+def test_producer_assessment_claim_is_ignored_in_favor_of_fetched_review():
+    data = _v2_dispatch(_v2_snapshot(350))
+    data["assessments"] = [{"lane": "acceptance", "verdict": "PASS"}]
+
+    result = evaluate_reconciliation(data, NOW)
+
+    assert result["decision"] == "PASS"
+    assert result["packet"]["assessments"] != data["assessments"]
+    assert result["packet"]["assessments"][0]["verdict"] == "PASS"
+    assert result["packet"]["assessments"][0]["original_body"] == data[
+        "target"
+    ]["review_artifacts"][0]["body"]
 
 
-def test_receipt_rejects_raw_or_unregistered_fields_and_unsafe_ids():
-    data = payload()
-    data["receipts"][0]["raw_text"] = "must never enter a receipt"
-    assert "ACCEPTANCE_SCHEMA_INVALID" in evaluate(data, NOW)["blockers"]
+@pytest.mark.parametrize("verdict", ["BLOCKED", "ABSTAIN"])
+def test_explicit_original_non_pass_verdict_fails(verdict):
+    dispatch = _v2_dispatch(_v2_snapshot(350), verdict=verdict)
 
-    data = payload()
-    data["receipts"][0]["reviewer_id"] = "unsafe reviewer text"
-    assert "ACCEPTANCE_IDENTITY_INVALID" in evaluate(data, NOW)["blockers"]
+    result = evaluate_reconciliation(dispatch, NOW)
+
+    assert result["decision"] == "FAIL"
+    assert "ACCEPTANCE_VERDICT_NOT_PASS" in result["blockers"]
+
+
+def test_pass_with_unresolved_findings_fails():
+    dispatch = _v2_dispatch(_v2_snapshot(350), findings=["unresolved defect"])
+    result = evaluate_reconciliation(dispatch, NOW)
+    assert result["decision"] == "FAIL"
+    assert "ACCEPTANCE_FINDINGS_UNRESOLVED" in result["blockers"]
+
+
+def test_ordinary_github_review_state_never_becomes_pass_without_v2_body():
+    dispatch = _v2_dispatch(_v2_snapshot(350))
+    dispatch["target"]["review_artifacts"][0]["body"] = "Looks good"
+    result = evaluate_reconciliation(dispatch, NOW)
+    assert result["decision"] == "FAIL"
+    assert "ACCEPTANCE_REVIEW_BODY_INVALID" in result["blockers"]
+
+
+def test_duplicate_v2_markers_are_rejected():
+    dispatch = _v2_dispatch(_v2_snapshot(350))
+    artifact = dispatch["target"]["review_artifacts"][0]
+    artifact["body"] = "<!-- lcm-x-ai-review:v2\n{}\n-->\n\n" + artifact["body"]
+    result = evaluate_reconciliation(dispatch, NOW)
+    assert result["decision"] == "FAIL"
+    assert "ACCEPTANCE_REVIEW_BODY_INVALID" in result["blockers"]
+
+
+def test_duplicate_fields_in_original_review_body_are_rejected():
+    dispatch = _v2_dispatch(_v2_snapshot(350))
+    artifact = dispatch["target"]["review_artifacts"][0]
+    artifact["body"] = artifact["body"].replace(
+        '"verdict":"PASS"', '"verdict":"BLOCKED","verdict":"PASS"', 1,
+    )
+
+    result = evaluate_reconciliation(dispatch, NOW)
+
+    assert result["decision"] == "FAIL"
+    assert "ACCEPTANCE_REVIEW_BODY_INVALID" in result["blockers"]
+
+
+def test_duplicate_fields_in_stored_packet_are_rejected():
+    peer = _v2_snapshot(350)
+    peer["check_runs"][0]["output_summary"] = peer["check_runs"][0][
+        "output_summary"
+    ].replace('"kind":', '"kind":"duplicate","kind":', 1)
+
+    result = evaluate_reconciliation(
+        {"schema_version": "2", "mode": "peer_only", "peers": [peer]}, NOW,
+    )["peers"][0]
+
+    assert result["decision"] == "FAIL"
+    assert "PACKET_MALFORMED" in result["blockers"]
+
+
+def test_legacy_numeric_review_body_is_rejected():
+    dispatch = _v2_dispatch(_v2_snapshot(350))
+    dispatch["target"]["review_artifacts"][0]["body"] = (
+        '<!-- lcm-x-ai-review:v1\n{"verdict":"PASS","score":100,"findings":0}\n-->'
+    )
+    result = evaluate_reconciliation(dispatch, NOW)
+    assert result["decision"] == "FAIL"
+    assert "ACCEPTANCE_REVIEW_BODY_INVALID" in result["blockers"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("repository", "someone/fork"),
+        ("pr_number", 999),
+        ("base_sha", "4" * 40),
+        ("head_sha", "5" * 40),
+    ],
+)
+def test_fetched_review_artifact_requires_exact_target_binding(field, value):
+    dispatch = _v2_dispatch(_v2_snapshot(350))
+    set_review_body_field(dispatch["target"]["review_artifacts"][0], field, value)
+
+    result = evaluate_reconciliation(dispatch, NOW)
+
+    assert result["decision"] == "FAIL"
+    assert "ACCEPTANCE_REVIEW_BINDING_MISMATCH" in result["blockers"]
+
+
+def test_preserved_packet_rechecks_fetched_review_publisher_identity():
+    peer = _v2_snapshot(350)
+    peer["review_artifacts"][0]["user"]["id"] = 12345
+
+    result = evaluate_reconciliation(
+        {"schema_version": "2", "mode": "peer_only", "peers": [peer]}, NOW,
+    )["peers"][0]
+
+    assert result["decision"] == "FAIL"
+    assert result["preserve"] is False
+    assert "ACCEPTANCE_REVIEW_PUBLISHER_INVALID" in result["blockers"]
+
+
+@pytest.mark.parametrize("withdrawn_id", [
+    "52eca5d8-1628-4f03-9128-34a5e1d5746f",
+    "5a6b05ee-c573-4cd9-b6f4-9a944fba61ee",
+])
+@pytest.mark.parametrize("mode", ["legacy", "dispatch", "preserved"])
+def test_publicly_withdrawn_receipts_cannot_approve_or_remain_preserved(withdrawn_id, mode):
+    # These IDs were publicly withdrawn in PR462 comment5771571369.
+    # All other fields are synthetic valid fixtures, never a real dispatch.
+    data = legacy_payload(withdrawn_id)
+    if mode == "legacy":
+        result = evaluate(data, NOW)
+    elif mode == "dispatch":
+        dispatch = _v2_dispatch(_v2_snapshot(350))
+        dispatch["review_artifact_refs"][0]["review_id"] = withdrawn_id
+        result = evaluate_reconciliation(dispatch, NOW)
+    else:
+        peer = _v2_snapshot(350)
+        packet = json.loads(peer["check_runs"][0]["output_summary"])
+        packet["receipts"] = data["receipts"]
+        peer["check_runs"][0]["output_summary"] = json.dumps(packet)
+        result = evaluate_reconciliation(
+            {"schema_version": "2", "mode": "peer_only", "peers": [peer]}, NOW,
+        )["peers"][0]
+        assert result["preserve"] is False
+    assert result["decision"] == "FAIL"
+    expected = (
+        "ACCEPTANCE_REVIEW_ARTIFACT_ID_INVALID"
+        if mode == "dispatch"
+        else ("PACKET_SCHEMA_INVALID" if mode == "preserved" else "ACCEPTANCE_RECEIPT_WITHDRAWN")
+    )
+    assert expected in result["blockers"]
 
 
 def test_live_state_and_thread_failures_fail_closed():
     for field, value in (("api_complete", False), ("pagination_complete", False),
                          ("unresolved_threads", 1), ("pr_number", True)):
-        data = payload()
-        data[field] = value
-        assert evaluate(data, NOW)["decision"] == "FAIL"
+        data = _v2_dispatch(_v2_snapshot(350))
+        data["target"][field] = value
+        assert evaluate_reconciliation(data, NOW)["decision"] == "FAIL"
 
 
-def test_nested_receipt_pr_number_requires_exact_integer_type():
+def test_review_body_pr_number_requires_exact_integer_binding():
     for invalid_pr_number in (True, 1.0):
-        receipts = [receipt("acceptance"), receipt("adversarial")]
-        for item in receipts:
-            item["pr_number"] = 1
-        receipts[0]["pr_number"] = invalid_pr_number
-
-        result = evaluate_reconciliation(
-            _v2_dispatch(_v2_snapshot(1), receipts_override=receipts), NOW
+        dispatch = _v2_dispatch(_v2_snapshot(1))
+        set_review_body_field(
+            dispatch["target"]["review_artifacts"][0], "pr_number", invalid_pr_number
         )
+        result = evaluate_reconciliation(dispatch, NOW)
 
         assert result["decision"] == "FAIL"
-        assert "ACCEPTANCE_PR_NUMBER_INVALID" in result["blockers"]
+        assert "ACCEPTANCE_REVIEW_BINDING_MISMATCH" in result["blockers"]
 
 
-def test_dispatch_envelope_preflight_rejects_malformed_receipts():
+def test_dispatch_envelope_preflight_returns_the_bound_packet():
+    target = _v2_snapshot(350, changed_paths=["AGENTS.md"])
     envelope = {
         "schema_version": "2",
         "mode": "dispatch_envelope",
-        "target": {
-            "repository": "electricsheephq/lcm-x",
-            "pr_number": 350,
-            "base_sha": BASE,
-            "head_sha": HEAD,
-        },
-        "receipts": [
-            receipt("acceptance", risk="governance"),
-            receipt("adversarial", risk="governance"),
-        ],
+        "target": target,
+        "review_artifact_refs": json.loads(target["check_runs"][0]["output_summary"])["review_artifact_refs"],
+        "producer": {"login": "100yenadmin", "id": 239388517, "type": "User"},
+        "run": {"id": "run-envelope", "attempt": 1},
         "dispatch_id": "dispatch-envelope-fresh",
     }
 
-    assert evaluate_reconciliation(envelope, NOW)["decision"] == "PASS"
+    valid = evaluate_reconciliation(envelope, NOW)
+    assert valid["decision"] == "PASS"
+    assert valid["packet"]["assessments"][0]["original_body"] == target["review_artifacts"][0]["body"]
 
     for malformed in ([], [{}]):
         candidate = deepcopy(envelope)
-        candidate["receipts"] = malformed
+        candidate["review_artifact_refs"] = malformed
         result = evaluate_reconciliation(candidate, NOW)
         assert result["decision"] == "FAIL"
-        assert "RECEIPT_SET_INVALID" in result["blockers"]
+        assert "REVIEW_ARTIFACT_REF_SET_INVALID" in result["blockers"]
 
 
-def test_receipt_integration_id_requires_exact_integer_type():
-    for invalid_integration_id in (True, 15368.0):
-        legacy = payload()
-        legacy["receipts"][0]["integration_id"] = invalid_integration_id
-        assert "ACCEPTANCE_INTEGRATION_ID_INVALID" in evaluate(legacy, NOW)[
-            "blockers"
-        ]
-
-        envelope = {
-            "schema_version": "2",
-            "mode": "dispatch_envelope",
-            "target": {
-                "repository": "electricsheephq/lcm-x",
-                "pr_number": 350,
-                "base_sha": BASE,
-                "head_sha": HEAD,
-            },
-            "receipts": [receipt("acceptance"), receipt("adversarial")],
-            "dispatch_id": "dispatch-envelope-fresh",
-        }
-        envelope["receipts"][0]["integration_id"] = invalid_integration_id
-        assert "ACCEPTANCE_INTEGRATION_ID_INVALID" in evaluate_reconciliation(
-            envelope, NOW
+def test_publisher_id_requires_exact_integer_type():
+    for invalid_integration_id in (True, 298367747.0):
+        dispatch = _v2_dispatch(_v2_snapshot(350))
+        dispatch["target"]["review_artifacts"][0]["user"]["id"] = (
+            invalid_integration_id
+        )
+        assert "ACCEPTANCE_REVIEW_PUBLISHER_INVALID" in evaluate_reconciliation(
+            dispatch, NOW
         )["blockers"]
 
 
-def test_duplicate_task_and_receipt_ids_fail():
-    data = payload(["AGENTS.md"])
-    data["receipts"] = [
-        receipt("acceptance", risk="governance"),
-        receipt("adversarial", risk="governance"),
-    ]
-    for key in ("task_id", "receipt_id"):
-        candidate = deepcopy(data)
-        candidate["receipts"][1][key] = candidate["receipts"][0][key]
-        assert f"DUPLICATE_{key.upper()}" in evaluate(candidate, NOW)["blockers"]
-
-
-def test_every_risk_class_requires_both_distinct_lanes():
-    for path, risk in (
-        (["docs/operator-guide.md"], "routine"),
-        ([".github/workflows/ai-review-gate.yml"], "governance"),
-        (["access_context/tools.py"], "unknown"),
-    ):
-        data = payload(path)
-        data["receipts"] = [
-            receipt("acceptance", risk=risk),
-            receipt("adversarial", risk=risk),
-        ]
-        assert evaluate(data, NOW)["decision"] == "PASS"
-
-
-def test_labels_are_organizational_metadata_only():
-    data = payload()
-    baseline = evaluate(data, NOW)
-    data["labels"] = ["routine", "security"]
-    assert evaluate(data, NOW) == baseline
-
-
-def test_duplicate_or_conflicting_receipts_fail_closed_for_each_identity():
-    data = payload(["AGENTS.md"])
-    for key in ("reviewer_id", "task_id", "receipt_id"):
-        candidate = deepcopy(data)
-        candidate["receipts"][1][key] = candidate["receipts"][0][key]
-        assert f"DUPLICATE_{key.upper()}" in evaluate(candidate, NOW)["blockers"]
+def test_original_body_digest_is_rechecked_for_preserved_packet():
+    peer = _v2_snapshot(350)
+    packet = json.loads(peer["check_runs"][0]["output_summary"])
+    packet["assessments"][0]["original_body"] += "tampered"
+    peer["check_runs"][0]["output_summary"] = json.dumps(packet)
+    result = evaluate_reconciliation(
+        {"schema_version": "2", "mode": "peer_only", "peers": [peer]}, NOW
+    )["peers"][0]
+    assert result["decision"] == "FAIL"
+    assert "ACCEPTANCE_ORIGINAL_BODY_MISMATCH" in result["blockers"]
 
 
 def test_workflow_is_base_trusted_and_resets_each_head():
@@ -714,6 +877,11 @@ def test_workflow_is_base_trusted_and_resets_each_head():
     assert "actions/checkout" not in workflow
     assert "pull_request.head" not in workflow
     assert "eval(" not in workflow
+    assert "github.rest.pulls.getReview" in workflow
+    assert "github.rest.pulls.listReviews" in workflow
+    assert "review_artifact_refs" in workflow
+    assert "'receipts' in dispatch" in workflow
+    assert "dispatch.receipts" not in workflow
 
 
 def test_workflow_reconciles_all_open_prs_before_dispatch_evaluation():
@@ -774,7 +942,7 @@ def test_dispatch_reconciliation_failure_resets_every_known_snapshot():
         "throw Error(`open PR reconciliation incomplete", reconciliation_guard
     )
     target_snapshot = workflow.index(
-        "target = await snapshot(prNumber, defaultBranch);", reconciliation_guard
+        "target = await snapshot(prNumber, defaultBranch,", reconciliation_guard
     )
 
     assert reconciliation_guard < peer_resets < terminal < target_snapshot
@@ -789,7 +957,9 @@ def test_incomplete_dispatch_target_still_resets_known_peers():
 
     dispatch = workflow.index("if (dispatchEvent) {")
     authenticated = workflow.index("if (sender?.login !== '100yenadmin'", dispatch)
-    packet_guard = workflow.index("if (!Array.isArray(dispatch.receipts)", dispatch)
+    packet_guard = workflow.index(
+        "dispatchRefs = boundedArtifactRefs(dispatch.review_artifact_refs)", dispatch
+    )
     protected_ref = workflow.index("if (context.ref !== `refs/heads/${defaultBranch}`", dispatch)
     reconciliation_guard = workflow.index("if (reconciled.failures.length)", dispatch)
     peer_resets = workflow.index(
@@ -811,19 +981,19 @@ def test_incomplete_dispatch_target_still_resets_known_peers():
     )
 
 
-def test_dispatch_envelope_preflight_precedes_peer_resets():
+def test_dispatch_artifact_validation_follows_complete_reconciliation():
     workflow = (
         REPO_ROOT / ".github" / "workflows" / "ai-review-gate.yml"
     ).read_text(encoding="utf-8")
 
     dispatch = workflow.index("if (dispatchEvent) {")
     authenticated = workflow.index("if (sender?.login !== '100yenadmin'", dispatch)
-    preflight = workflow.index("mode: 'dispatch_envelope'", authenticated)
-    preflight_stop = workflow.index("throw Error('dispatch packet invalid')", preflight)
-    reconciliation_guard = workflow.index("if (reconciled.failures.length)", preflight_stop)
+    reconciliation_guard = workflow.index("if (reconciled.failures.length)", authenticated)
     peer_resets = workflow.index("await failKnownSnapshots(snapshots", reconciliation_guard)
+    preflight = workflow.index("mode: 'dispatch_envelope'", peer_resets)
+    preflight_stop = workflow.index("throw Error('dispatch packet invalid')", preflight)
 
-    assert authenticated < preflight < preflight_stop < reconciliation_guard < peer_resets
+    assert authenticated < reconciliation_guard < peer_resets < preflight < preflight_stop
     assert "envelopeValidated.run.status !== 0" in workflow[preflight:preflight_stop]
     assert "envelopeValidated.result.decision !== 'PASS'" in workflow[
         preflight:preflight_stop
@@ -836,7 +1006,7 @@ def test_workflow_rechecks_complete_target_state_before_success():
     ).read_text(encoding="utf-8")
 
     assert workflow.count("github.paginate(github.rest.pulls.listFiles") == 1
-    assert workflow.count("listFiles(prNumber)") >= 2
+    assert workflow.count("listFiles(prNumber,") >= 2
     assert workflow.count("reviewThreads(first:100") == 1
     assert workflow.count("unresolvedThreads(prNumber)") >= 2
     assert "live.data.head.sha !== head" in workflow
@@ -845,8 +1015,43 @@ def test_workflow_rechecks_complete_target_state_before_success():
     assert "context.ref !== `refs/heads/${defaultBranch}`" in workflow
     assert "JSON.stringify(liveFiles) !== JSON.stringify(target.changed_paths)" in workflow
     assert "target.unresolved_threads !== 0" in workflow
+    assert "const finalReviewArtifacts = await fetchReviewArtifacts" in workflow
+    assert "superseded_by: superseding.id" in workflow
+    assert "candidate.user?.id === review.user?.id" in workflow
+    assert "const finalArtifactValidation = await runValidator" in workflow
+    assert "review artifacts changed or became unavailable" in workflow
+    assert "JSON.stringify(finalArtifactValidation.result.packet) !== JSON.stringify(result.packet)" in workflow
+    assert "errors.push({review_id, status:" in workflow
+    assert "review_artifact_errors: reviewArtifacts.errors" in workflow
     assert "matches.length > 1" in workflow
     assert "DUPLICATE_TRUSTED_CHECK" in workflow
+
+
+def test_workflow_bounds_review_fetches_and_changed_file_completeness():
+    workflow = _workflow_under_test().read_text(encoding="utf-8")
+
+    assert "boundedArtifactRefs(dispatch.review_artifact_refs)" in workflow
+    assert "refs.length > 2" in workflow
+    assert "Number.isSafeInteger(ref.review_id)" in workflow
+    assert "check.external_id === expectedExternalId" in workflow
+    assert "check.head_sha === expectedHead" in workflow
+    assert "check.status === 'completed' && check.conclusion === 'success'" in workflow
+    assert "files.length !== expectedCount" in workflow
+    assert "new Set(currentNames).size !== expectedCount" in workflow
+    assert "listFiles(prNumber, pr.changed_files)" in workflow
+    assert "listFiles(prNumber, live.data.changed_files)" in workflow
+
+
+def test_workflow_authenticates_and_bounds_dispatch_before_reconciliation():
+    workflow = _workflow_under_test().read_text(encoding="utf-8")
+    dispatch = workflow.index("if (dispatchEvent) {")
+    authenticated = workflow.index("if (sender?.login !== '100yenadmin'", dispatch)
+    bounded = workflow.index("dispatchRefs = boundedArtifactRefs", authenticated)
+    target = workflow.index("prNumber = dispatch.pr_number", bounded)
+    target_read = workflow.index("github.rest.pulls.get", target)
+    reconcile = workflow.index("const reconciled = await reconcileOpenPullRequests", target_read)
+
+    assert dispatch < authenticated < bounded < target < target_read < reconcile
 
 
 def test_workflow_reconciliation_failure_is_terminal_before_target_promotion():
@@ -859,7 +1064,7 @@ def test_workflow_reconciliation_failure_is_terminal_before_target_promotion():
         "throw Error(`open PR reconciliation incomplete"
     )
     target_snapshot = workflow.index(
-        "target = await snapshot(prNumber, defaultBranch);"
+        "target = await snapshot(prNumber, defaultBranch,"
     )
     target_success = workflow.index("conclusion = 'success';")
 
@@ -897,7 +1102,7 @@ def test_workflow_captures_exact_target_dispatch_id_before_reset():
         "await emit(prNumber, base, head, 'failure', 'Protected base changed"
     )
     target_snapshot = workflow.index(
-        "target = await snapshot(prNumber, defaultBranch);"
+        "target = await snapshot(prNumber, defaultBranch,"
     )
 
     assert (
@@ -941,7 +1146,7 @@ def test_workflow_invalid_prior_target_does_not_abort_fresh_renewal():
         optional_history,
     )
     target_snapshot = workflow.index(
-        "target = await snapshot(prNumber, defaultBranch);",
+        "target = await snapshot(prNumber, defaultBranch,",
         target_reset,
     )
 
@@ -1056,7 +1261,7 @@ def test_workflow_dispatch_validation_failure_is_terminal_before_target_promotio
         "await emit(prNumber, base, head, 'failure', 'Protected base changed", wrapping
     )
     target_snapshot = workflow.index(
-        "target = await snapshot(prNumber, defaultBranch);", target_reset
+        "target = await snapshot(prNumber, defaultBranch,", target_reset
     )
     validator = workflow.index(
         "const validated = await runValidator(input, protectedSha);", input_packet
@@ -1091,6 +1296,13 @@ def test_workflow_dispatch_validation_failure_is_terminal_before_target_promotio
     assert "failure writes:" in workflow[peer_resets:terminal]
 
 
+def _lanes_for_paths(paths: list[str]) -> list[str]:
+    lanes = ["acceptance"]
+    if _named_risks(paths):
+        lanes.append("adversarial")
+    return lanes
+
+
 def _v2_snapshot(
     pr_number: int,
     *,
@@ -1114,11 +1326,17 @@ def _v2_snapshot(
         "state": "open",
         "draft": False,
     }
-    risk = "unknown" if changed_paths == [] else "routine"
-    receipts = [receipt("acceptance", risk=risk), receipt("adversarial", risk=risk)]
-    for item in receipts:
-        item["pr_number"] = pr_number
-    packet = build_packet(live, receipts, producer={"login": "100yenadmin", "id": 239388517, "type": "User"},
+    lanes = _lanes_for_paths(live["changed_paths"])
+    named_risks = _named_risks(live["changed_paths"])
+    bodies = [assessment_body(
+        lane, pr_number=pr_number, named_risks=named_risks,
+    ) for lane in lanes]
+    refs, artifacts = review_bundle(bodies)
+    live["review_artifacts"] = artifacts
+    live["review_artifact_errors"] = []
+    assessments, blockers = _review_artifact_assessments(refs, artifacts, live)
+    assert blockers == []
+    packet = build_packet(live, assessments, refs, producer={"login": "100yenadmin", "id": 239388517, "type": "User"},
                           run={"id": f"run-{pr_number}", "attempt": 1}, dispatch_id=f"dispatch-{pr_number}")
     check = {"name": "AI review exact-head", "app_id": 15368,
              "external_id": f"ai-review-gate:{pr_number}:{base}:{head}", "head_sha": head,
@@ -1127,15 +1345,28 @@ def _v2_snapshot(
     return {**live, "check_runs": [check]}
 
 
-def _v2_dispatch(target: dict[str, object], *, receipts_override=None, **extra):
+def _v2_dispatch(
+    target: dict[str, object], *, verdict: str = "PASS",
+    findings: list[str] | None = None, **extra
+):
+    target = deepcopy(target)
+    lanes = _lanes_for_paths(target["changed_paths"])
+    named_risks = _named_risks(target["changed_paths"])
+    bodies = [assessment_body(
+        lane, pr_number=target["pr_number"], base_sha=target["base_sha"],
+        head_sha=target["head_sha"], verdict=verdict,
+        findings=findings, named_risks=named_risks,
+    ) for lane in lanes]
+    refs, artifacts = review_bundle(bodies)
+    target["review_artifacts"] = artifacts
+    target["review_artifact_errors"] = []
     data = {key: target[key] for key in (
         "repository", "pr_number", "base_sha", "head_sha", "changed_paths",
         "timeline_events", "unresolved_threads", "api_complete", "pagination_complete",
     )}
     data.update({
         "schema_version": "2", "target": target,
-        "receipts": receipts_override
-        or [receipt("acceptance"), receipt("adversarial")],
+        "review_artifact_refs": refs,
         "producer": {"login": "100yenadmin", "id": 239388517, "type": "User"},
         "run": {"id": "run-target", "attempt": 1},
         "dispatch_id": "dispatch-target-fresh",
@@ -1195,6 +1426,22 @@ def test_invalid_peer_fails_only_that_peer_but_incomplete_snapshot_blocks_target
     assert "PEER_SNAPSHOT_INCOMPLETE" in incomplete["blockers"]
 
 
+def test_missing_target_review_artifact_fails_target_without_revoking_peer():
+    peer = _v2_snapshot(351)
+    dispatch = _v2_dispatch(_v2_snapshot(350), peers=[peer])
+    dispatch["target"]["review_artifacts"] = []
+    dispatch["target"]["review_artifact_errors"] = [
+        {"review_id": 9001, "status": 404}
+    ]
+
+    result = evaluate_reconciliation(dispatch, NOW)
+
+    assert result["decision"] == "FAIL"
+    assert "ACCEPTANCE_REVIEW_ARTIFACT_COUNT_INVALID" in result["blockers"]
+    assert result["peers"][0]["preserve"] is True
+    assert result["peers"][0]["decision"] == "PASS"
+
+
 def test_complete_zero_file_peer_is_not_a_repository_snapshot_failure():
     peer = _v2_snapshot(351, changed_paths=[])
 
@@ -1219,10 +1466,10 @@ def test_preserved_peer_does_not_overwrite_fresh_target_packet():
     assert result["peers"][0]["preserve"] is True
 
 
-def test_expired_receipts_do_not_revoke_a_promoted_packet_but_block_a_fresh_dispatch():
+def test_expired_tracking_metadata_does_not_revoke_a_promoted_packet_but_blocks_fresh_dispatch():
     # Freshness is an acceptance-time property: a stored packet stays
-    # preservable after its receipts age out (its lifetime is governed by the
-    # state fingerprint), while the same receipts cannot promote a new dispatch.
+    # preservable after tracking metadata ages out (its lifetime is governed by
+    # the state fingerprint), while the same assessment cannot promote a new dispatch.
     from scripts.ai_review_gate import evaluate as _evaluate
 
     later = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
@@ -1237,7 +1484,7 @@ def test_expired_receipts_do_not_revoke_a_promoted_packet_but_block_a_fresh_disp
         _v2_dispatch(_v2_snapshot(350), peers=[_v2_snapshot(351)]), later
     )
     assert result["decision"] == "FAIL"
-    assert "ACCEPTANCE_RECEIPT_STALE" in result["blockers"]
+    assert "ACCEPTANCE_ASSESSMENT_STALE" in result["blockers"]
     assert result["peers"][0]["preserve"] is True
 
 
@@ -1259,7 +1506,7 @@ def test_workflow_identifies_dispatch_target_before_peer_enumeration():
     target_number = workflow.index("prNumber = dispatch.pr_number;")
     target_tuple = workflow.index("base = tuple.base.sha; head = tuple.head.sha;")
     enumeration = workflow.index(
-        "const reconciled = await reconcileOpenPullRequests(defaultBranch);"
+        "const reconciled = await reconcileOpenPullRequests(defaultBranch, prNumber, dispatchRefs);"
     )
 
     # A rejection of the top-level open-PR enumeration must still reach the
@@ -1268,3 +1515,32 @@ def test_workflow_identifies_dispatch_target_before_peer_enumeration():
     assert target_number < target_tuple < enumeration
     assert "if (prNumber && base && head) {" in workflow
     assert "for (const tuple of [resnapshotTuple, liveTuple])" in workflow
+
+
+@pytest.mark.parametrize("verdict", [["PASS"], {"verdict": "PASS"}])
+def test_malformed_verdict_invalidates_only_its_review(verdict):
+    target = _v2_snapshot(350)
+    peer = _v2_snapshot(351)
+    dispatch = _v2_dispatch(target, peers=[peer])
+    set_review_body_field(dispatch["target"]["review_artifacts"][0], "verdict", verdict)
+    result = evaluate_reconciliation(dispatch, NOW)
+    assert result["decision"] == "FAIL"
+    assert "ACCEPTANCE_REVIEW_VERDICT_INVALID" in result["blockers"]
+    assert result["peers"][0]["preserve"] is True
+
+
+def test_workflow_keeps_both_rename_paths_for_risk_mapping():
+    script = _extract_reconcile_script(_workflow_under_test())
+    start = script.index("const listFiles =")
+    end = script.index("const listTimeline =", start)
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required")
+    fixture = [{"filename": "docs/moved.md", "previous_filename": "docs/review-evidence-provenance.md"}]
+    program = ("const owner='test',repo='test'; const github={rest:{pulls:{listFiles:{}}},"
+               + "paginate:async()=>" + json.dumps(fixture) + "};\n"
+               + script[start:end] + "\nlistFiles(1, 1).then(paths=>console.log(JSON.stringify(paths)));")
+    result = subprocess.run([node, "-e", program], check=True, capture_output=True, text=True)
+    paths = json.loads(result.stdout)
+    assert paths == ["docs/moved.md", "docs/review-evidence-provenance.md"]
+    assert _lanes_for_paths(paths) == ["acceptance", "adversarial"]

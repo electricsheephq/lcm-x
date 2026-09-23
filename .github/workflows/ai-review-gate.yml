@@ -58,9 +58,18 @@ jobs:
               } while (cursor);
               return unresolved;
             };
-            const listFiles = (prNumber) => github.paginate(github.rest.pulls.listFiles,
-              {owner, repo, pull_number: prNumber, per_page: 100})
-              .then(files => files.map(file => file.filename));
+            const listFiles = async (prNumber, expectedCount) => {
+              const files = await github.paginate(github.rest.pulls.listFiles,
+                {owner, repo, pull_number: prNumber, per_page: 100});
+              const currentNames = files.map(file => file?.filename);
+              if (!Number.isInteger(expectedCount) || expectedCount < 0 ||
+                  files.length !== expectedCount ||
+                  currentNames.some(name => typeof name !== 'string' || !name) ||
+                  new Set(currentNames).size !== expectedCount)
+                throw Error('changed files incomplete');
+              return [...new Set(files.flatMap(file =>
+                [file.filename, file.previous_filename].filter(Boolean)))].sort();
+            };
             const listTimeline = (prNumber) => github.paginate(
               github.rest.issues.listEventsForTimeline,
               {owner, repo, issue_number: prNumber, per_page: 100})
@@ -74,6 +83,80 @@ jobs:
                 .map(run => ({name: run.name, app_id: run.app?.id, external_id: run.external_id,
                   head_sha: run.head_sha, status: run.status, conclusion: run.conclusion,
                   output: run.output, output_summary: run.output?.summary})));
+            const boundedArtifactRefs = (refs) => {
+              if (!Array.isArray(refs) || refs.length < 1 || refs.length > 2)
+                throw Error('review artifact refs invalid');
+              const lanes = new Set(), ids = new Set();
+              for (const ref of refs) {
+                if (!ref || typeof ref !== 'object' || Array.isArray(ref) ||
+                    Object.keys(ref).sort().join(',') !== 'lane,review_id' ||
+                    !['acceptance', 'adversarial'].includes(ref.lane) ||
+                    !Number.isSafeInteger(ref.review_id) || ref.review_id <= 0 ||
+                    lanes.has(ref.lane) || ids.has(ref.review_id))
+                  throw Error('review artifact refs invalid');
+                lanes.add(ref.lane); ids.add(ref.review_id);
+              }
+              return refs;
+            };
+            const artifactRefsFromChecks = (checks, expectedExternalId, expectedHead) => {
+              const exact = checks.filter(check => check.app_id === 15368 &&
+                check.external_id === expectedExternalId && check.head_sha === expectedHead &&
+                check.status === 'completed' && check.conclusion === 'success');
+              if (exact.length > 1) throw Error('DUPLICATE_TRUSTED_CHECK');
+              if (exact.length === 0) return [];
+              const summary = exact[0].output_summary || exact[0].output?.summary;
+              try {
+                return boundedArtifactRefs(JSON.parse(summary).review_artifact_refs);
+              } catch (_) {
+                // Packet validity belongs to the protected validator. Malformed
+                // packets supply no API-fetch locators and grant no authority.
+                return [];
+              }
+            };
+            const fetchReviewArtifacts = async (prNumber, refs) => {
+              if (!Array.isArray(refs)) return {artifacts: [], errors: []};
+              const ids = [...new Set(refs
+                .map(ref => ref?.review_id)
+                .filter(id => Number.isInteger(id) && id > 0))];
+              const marker = '<!-- lcm-x-ai-review:v2\n', suffix = '\n-->';
+              const listed = ids.length ? await github.paginate(github.rest.pulls.listReviews,
+                {owner, repo, pull_number: prNumber, per_page: 100}) : [];
+              const isAssessment = review => typeof review?.body === 'string' &&
+                review.body.split(marker).length === 2 && review.body.endsWith(suffix);
+              const isNewer = (candidate, selected) => {
+                const candidateTime = Date.parse(candidate?.submitted_at);
+                const selectedTime = Date.parse(selected?.submitted_at);
+                if (!Number.isFinite(candidateTime) || !Number.isFinite(selectedTime) ||
+                    !Number.isSafeInteger(candidate?.id) || !Number.isSafeInteger(selected?.id))
+                  throw Error('review submission identity invalid');
+                return candidateTime > selectedTime ||
+                  (candidateTime === selectedTime && candidate.id > selected.id);
+              };
+              const artifacts = [], errors = [];
+              for (const review_id of ids) {
+                try {
+                  const response = await github.rest.pulls.getReview({owner, repo,
+                    pull_number: prNumber, review_id});
+                  const review = response.data;
+                  const superseding = listed.find(candidate =>
+                    candidate.id !== review.id && candidate.user?.id === review.user?.id &&
+                    candidate.commit_id === review.commit_id && candidate.state !== 'DISMISSED' &&
+                    candidate.state !== 'PENDING' && isAssessment(candidate) &&
+                    isNewer(candidate, review));
+                  if (superseding) {
+                    errors.push({review_id, status: null, superseded_by: superseding.id});
+                    continue;
+                  }
+                  artifacts.push({review_id: review.id, state: review.state,
+                    commit_id: review.commit_id, submitted_at: review.submitted_at,
+                    user: {id: review.user?.id, login: review.user?.login,
+                      type: review.user?.type}, body: review.body});
+                } catch (error) {
+                  errors.push({review_id, status: Number.isInteger(error?.status) ? error.status : null});
+                }
+              }
+              return {artifacts, errors};
+            };
             const runValidator = async (input, protectedSha) => {
               const source = await github.rest.repos.getContent({owner, repo,
                 path: 'scripts/ai_review_gate.py', ref: protectedSha});
@@ -83,18 +166,24 @@ jobs:
               if (run.error) throw run.error;
               return {run, result: JSON.parse(run.stdout || '{}')};
             };
-            const snapshot = async (prNumber, defaultBranch) => {
+            const snapshot = async (prNumber, defaultBranch, extraArtifactRefs = []) => {
               const live = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
               const pr = live.data;
               try {
-                const files = await listFiles(prNumber);
+                const files = await listFiles(prNumber, pr.changed_files);
                 const unresolved = await unresolvedThreads(prNumber);
                 const timeline = await listTimeline(prNumber);
                 const checks = await listTrustedChecks(pr.head.sha);
+                const expectedExternalId = `ai-review-gate:${pr.number}:${pr.base.sha}:${pr.head.sha}`;
+                const reviewArtifacts = await fetchReviewArtifacts(prNumber,
+                  artifactRefsFromChecks(checks, expectedExternalId, pr.head.sha)
+                    .concat(extraArtifactRefs));
                 return {repository: `${owner}/${repo}`, pr_number: pr.number,
                   base_ref: pr.base.ref, base_sha: pr.base.sha, head_sha: pr.head.sha,
                   changed_paths: files, timeline_events: timeline,
                   unresolved_threads: unresolved, check_runs: checks,
+                  review_artifacts: reviewArtifacts.artifacts,
+                  review_artifact_errors: reviewArtifacts.errors,
                   api_complete: true, pagination_complete: true,
                   draft: pr.draft, state: pr.state, default_branch: defaultBranch};
               } catch (error) {
@@ -107,12 +196,13 @@ jobs:
                 throw carrier;
               }
             };
-            const reconcileOpenPullRequests = async (defaultBranch) => {
+            const reconcileOpenPullRequests = async (defaultBranch, dispatchTarget, dispatchRefs) => {
               const open = await github.paginate(github.rest.pulls.list,
                 {owner, repo, state: 'open', base: defaultBranch, per_page: 100});
               const snapshots = [], failures = [], listedTuples = [];
               for (const candidate of open) {
-                try { snapshots.push(await snapshot(candidate.number, defaultBranch)); }
+                try { snapshots.push(await snapshot(candidate.number, defaultBranch,
+                  candidate.number === dispatchTarget ? dispatchRefs : [])); }
                 catch (error) {
                   failures.push(`${candidate.number}:${error?.message ?? String(error)}`);
                   // Prefer the tuple pulls.get observed over the (possibly stale)
@@ -123,7 +213,8 @@ jobs:
                     head_sha: live?.head_sha ?? candidate.head?.sha, state: live?.state ?? candidate.state,
                     draft: live?.draft ?? candidate.draft, default_branch: defaultBranch,
                     api_complete: false, pagination_complete: false, api_error: true,
-                    changed_paths: [], timeline_events: [], check_runs: []});
+                    changed_paths: [], timeline_events: [], check_runs: [], review_artifacts: [],
+                    review_artifact_errors: []});
                   if (live && candidate.base?.sha && candidate.head?.sha &&
                       (live.base_sha !== candidate.base.sha || live.head_sha !== candidate.head.sha))
                     listedTuples.push({pr_number: candidate.number, base_sha: candidate.base.sha, head_sha: candidate.head.sha});
@@ -242,6 +333,8 @@ jobs:
             const protectedSha = branch.data.commit.sha;
             const dispatchEvent = context.eventName === 'repository_dispatch';
             let prNumber = null, base = null, head = null, result = null;
+            let dispatchRefs = [];
+            let dispatch = null, sender = null, run_attempt = null;
             let liveTuple = null, resnapshotTuple = null;
             let conclusion = 'failure', summary = 'Validation failed closed.';
             try {
@@ -249,34 +342,29 @@ jobs:
                 // Identify the dispatch target before any broader API work: an
                 // identifiable target must reach the fail-closed emit even when
                 // open-PR enumeration itself rejects.
-                const dispatch = context.payload.client_payload;
+                dispatch = context.payload.client_payload;
                 if (!dispatch || typeof dispatch !== 'object' || Array.isArray(dispatch))
                   throw Error('dispatch payload invalid');
-                if (typeof dispatch.pr_number !== 'number' || !Number.isInteger(dispatch.pr_number) || dispatch.pr_number <= 0) throw Error('dispatch PR number invalid');
-                prNumber = dispatch.pr_number;
-                const tuple = (await github.rest.pulls.get({owner, repo, pull_number: prNumber})).data;
-                base = tuple.base.sha; head = tuple.head.sha;
-              }
-              const reconciled = await reconcileOpenPullRequests(defaultBranch);
-              const snapshots = reconciled.snapshots;
-              if (dispatchEvent) {
-                const dispatch = context.payload.client_payload;
-                const sender = context.payload.sender;
-                const run_attempt = Number(process.env.GITHUB_RUN_ATTEMPT || '1');
+                sender = context.payload.sender;
+                run_attempt = Number(process.env.GITHUB_RUN_ATTEMPT || '1');
                 if (sender?.login !== '100yenadmin' || Number(sender?.id) !== 239388517 ||
                     sender?.type !== 'User' || context.actor !== '100yenadmin' || Number(process.env.GITHUB_ACTOR_ID) !== 239388517)
                   throw Error('dispatch producer unauthenticated');
                 if (!Number.isInteger(run_attempt) || run_attempt !== 1)
                   throw Error('repository dispatch reruns cannot promote');
-                if (!Array.isArray(dispatch.receipts) || typeof dispatch.dispatch_id !== 'string')
+                if (typeof dispatch.pr_number !== 'number' || !Number.isInteger(dispatch.pr_number) || dispatch.pr_number <= 0) throw Error('dispatch PR number invalid');
+                if ('receipts' in dispatch || typeof dispatch.dispatch_id !== 'string')
                   throw Error('dispatch packet invalid');
+                dispatchRefs = boundedArtifactRefs(dispatch.review_artifact_refs);
                 if (context.ref !== `refs/heads/${defaultBranch}` || context.sha !== protectedSha)
                   throw Error('dispatch must execute from current protected default branch');
-                const envelopeValidated = await runValidator({schema_version: '2', mode: 'dispatch_envelope',
-                  target: {repository: `${owner}/${repo}`, pr_number: prNumber, base_sha: base, head_sha: head},
-                  receipts: dispatch.receipts, dispatch_id: dispatch.dispatch_id}, protectedSha);
-                if (envelopeValidated.run.status !== 0 || envelopeValidated.result.decision !== 'PASS')
-                  throw Error('dispatch packet invalid');
+                prNumber = dispatch.pr_number;
+                const tuple = (await github.rest.pulls.get({owner, repo, pull_number: prNumber})).data;
+                base = tuple.base.sha; head = tuple.head.sha;
+              }
+              const reconciled = await reconcileOpenPullRequests(defaultBranch, prNumber, dispatchRefs);
+              const snapshots = reconciled.snapshots;
+              if (dispatchEvent) {
                 if (reconciled.failures.length) {
                   const writeFailures = await failKnownSnapshots(snapshots.concat(reconciled.listedTuples),
                     'Open PR reconciliation failed closed.');
@@ -289,6 +377,14 @@ jobs:
                     priorTarget.base_ref !== defaultBranch || priorTarget.base_sha !== base || priorTarget.head_sha !== head ||
                     priorTarget.state !== 'open' || priorTarget.draft)
                   throw Error('dispatch target missing or drifted from reconciliation');
+                const envelopeValidated = await runValidator({schema_version: '2', mode: 'dispatch_envelope',
+                  target: priorTarget,
+                  review_artifact_refs: dispatch.review_artifact_refs,
+                  producer: {login: sender.login, id: Number(sender.id), type: sender.type},
+                  run: {id: process.env.GITHUB_RUN_ID, attempt: run_attempt},
+                  dispatch_id: dispatch.dispatch_id}, protectedSha);
+                if (envelopeValidated.run.status !== 0 || envelopeValidated.result.decision !== 'PASS')
+                  throw Error('dispatch packet invalid');
                 const expectedExternalId = `ai-review-gate:${prNumber}:${base}:${head}`;
                 const priorExactChecks = (priorTarget?.check_runs || []).filter(check =>
                   check.app_id === 15368 && check.external_id === expectedExternalId &&
@@ -326,10 +422,12 @@ jobs:
                   // class — the validator evaluated every peer, so peers keep their
                   // own verdicts and only the dispatch target fails (below).
                   await emit(prNumber, base, head, 'failure', 'Protected base changed or stored packet invalid; validation started and fails closed until complete.');
-                  target = await snapshot(prNumber, defaultBranch);
+                  target = await snapshot(prNumber, defaultBranch,
+                    dispatch.review_artifact_refs);
                   resnapshotTuple = [target.base_sha, target.head_sha];
                   const input = {schema_version: '2', target, peers: snapshots.filter(item => item.pr_number !== prNumber),
-                    receipts: dispatch.receipts, producer: {login: sender.login, id: Number(sender.id), type: sender.type},
+                    review_artifact_refs: dispatch.review_artifact_refs,
+                    producer: {login: sender.login, id: Number(sender.id), type: sender.type},
                     run: {id: process.env.GITHUB_RUN_ID, attempt: run_attempt},
                     dispatch_id: dispatch.dispatch_id, prior_dispatch_ids: priorDispatchIds};
                   const validated = await runValidator(input, protectedSha);
@@ -352,13 +450,29 @@ jobs:
                   const suffix = writeFailures.length ? `; failure writes: ${writeFailures.join(',')}` : '';
                   throw Error(`peer reconciliation validation failed: ${error.message}${suffix}`);
                 }
-                if (result.decision !== 'PASS') throw Error('receipt validation failed');
+                if (result.decision !== 'PASS') throw Error('review assessment validation failed');
                 const live = await github.rest.pulls.get({owner, repo, pull_number: prNumber});
                 liveTuple = [live.data.base.sha, live.data.head.sha];
                 const liveBranch = await github.rest.repos.getBranch({owner, repo, branch: defaultBranch});
-                const liveFiles = await listFiles(prNumber);
+                const liveFiles = await listFiles(prNumber, live.data.changed_files);
                 const liveTimeline = await listTimeline(prNumber);
                 const liveUnresolved = await unresolvedThreads(prNumber);
+                const finalReviewArtifacts = await fetchReviewArtifacts(prNumber,
+                  dispatch.review_artifact_refs);
+                const finalTarget = {...target, repository: `${owner}/${repo}`,
+                  pr_number: prNumber, base_ref: live.data.base.ref,
+                  base_sha: live.data.base.sha, head_sha: live.data.head.sha,
+                  changed_paths: liveFiles, timeline_events: liveTimeline,
+                  unresolved_threads: liveUnresolved,
+                  review_artifacts: finalReviewArtifacts.artifacts,
+                  review_artifact_errors: finalReviewArtifacts.errors,
+                  draft: live.data.draft, state: live.data.state};
+                const finalArtifactValidation = await runValidator({schema_version: '2',
+                  mode: 'dispatch_envelope', target: finalTarget,
+                  review_artifact_refs: dispatch.review_artifact_refs,
+                  producer: {login: sender.login, id: Number(sender.id), type: sender.type},
+                  run: {id: process.env.GITHUB_RUN_ID, attempt: run_attempt},
+                  dispatch_id: dispatch.dispatch_id}, protectedSha);
                 if (target.head_sha !== head || target.base_sha !== base ||
                     live.data.head.sha !== head || live.data.base.sha !== base ||
                     live.data.base.ref !== defaultBranch || live.data.state !== 'open' || live.data.draft ||
@@ -368,6 +482,10 @@ jobs:
                     liveUnresolved !== 0 || target.unresolved_threads !== 0) {
                   throw Error('PR, protected-base, files, or threads drift');
                 }
+                if (finalArtifactValidation.run.status !== 0 ||
+                    finalArtifactValidation.result.decision !== 'PASS' ||
+                    JSON.stringify(finalArtifactValidation.result.packet) !== JSON.stringify(result.packet))
+                  throw Error('review artifacts changed or became unavailable');
                 conclusion = 'success'; summary = JSON.stringify(result.packet);
               } else {
                 let validated;
