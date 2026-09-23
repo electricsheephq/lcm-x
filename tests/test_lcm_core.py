@@ -8562,7 +8562,7 @@ class TestLCMEngineCloning:
 
             assert clone != "built-in-compressor-fallback"
             assert isinstance(clone, LCMEngine)
-            assert clone.name == "lcm"
+            assert clone.name == "lcm-x"
             assert clone is not prototype
             assert clone._store is not prototype._store
             assert clone._dag is not prototype._dag

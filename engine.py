@@ -81,6 +81,7 @@ from .ingest_protection import (
     restore_ingest_payload_placeholders,
     sensitive_pattern_status,
 )
+from .plugin_identity import ENGINE_NAME, LEGACY_ENGINE_NAME, PLUGIN_NAME
 from .runtime_identity import (
     _PLUGIN_ROOT,
     _git_runtime_identity,
@@ -682,6 +683,24 @@ class LCMEngine(
         # The scheduler associates this identity only with outstanding work, so
         # diagnostic drains do not retain every historical session key forever.
         self._rollup_maintenance_owner = object()
+        # Host-facing engine name: ENGINE_NAME, or the legacy alias when the
+        # active Hermes config still selects ``context.engine: lcm`` (#471).
+        self._engine_name = ENGINE_NAME
+        self._identity_migration: Dict[str, Any] | None = None
+
+    def apply_identity_migration(self, notice: Dict[str, Any] | None) -> None:
+        """Answer to the legacy engine name while the config still uses it."""
+        self._identity_migration = dict(notice) if notice else None
+        self._engine_name = (
+            LEGACY_ENGINE_NAME
+            if notice and notice.get("legacy_engine_alias_active")
+            else ENGINE_NAME
+        )
+
+    @property
+    def identity_migration(self) -> Dict[str, Any] | None:
+        notice = getattr(self, "_identity_migration", None)
+        return dict(notice) if notice else None
 
     def clone_for_agent(self) -> "LCMEngine":
         """Return a fresh runtime engine for one AIAgent instance.
@@ -727,6 +746,7 @@ class LCMEngine(
         # must still be able to replace the copied prototype route.
         clone._update_model_pending_session_start = False
         clone._lcm_current_start_allows_bypass_lineage = False
+        clone.apply_identity_migration(self.identity_migration)
         return clone
 
     def __deepcopy__(self, memo: dict[int, object]) -> "LCMEngine":
@@ -1083,7 +1103,7 @@ class LCMEngine(
 
     @property
     def name(self) -> str:
-        return "lcm"
+        return getattr(self, "_engine_name", ENGINE_NAME)
 
     @property
     def last_compression_status(self) -> str:
@@ -4172,8 +4192,9 @@ class LCMEngine(
                 lifecycle_error = str(exc)
 
         identity: Dict[str, Any] = {
-            "engine": self.name,
-            "plugin_name": metadata.get("name", "hermes-lcm"),
+            "engine": ENGINE_NAME,
+            "engine_selected_as": self.name,
+            "plugin_name": metadata.get("name", PLUGIN_NAME),
             "plugin_version": metadata.get("version", "unknown"),
             "plugin_path": str(_PLUGIN_ROOT),
             "module_path": str(Path(__file__).resolve()),
@@ -4287,7 +4308,8 @@ class LCMEngine(
             total_compactions += pending_compactions
         status["total_compactions"] = total_compactions
         status["total_compactions_scope"] = _TOTAL_COMPACTIONS_SCOPE
-        status["engine"] = "lcm"
+        status["engine"] = ENGINE_NAME
+        status["identity_migration"] = self.identity_migration
         status["runtime_identity"] = self.get_runtime_identity()
         status["ingest_protection"] = sensitive_pattern_status(self._config)
         try:

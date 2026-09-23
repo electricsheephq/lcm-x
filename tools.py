@@ -8007,6 +8007,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps({
             "error": "No active session",
             "runtime_identity": engine.get_runtime_identity(),
+            "identity_migration": getattr(engine, "identity_migration", None),
         })
 
     # Store stats
@@ -8141,6 +8142,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         "preset_suggestion": preset_status_payload(engine),
         "ingest_reconciliation": ingest_reconciliation,
         "runtime_identity": runtime_identity,
+        "identity_migration": full_status.get("identity_migration"),
         "lifecycle": lifecycle,
         "lifecycle_fragmentation": lifecycle_fragmentation,
     })
@@ -8157,6 +8159,14 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     # currently owns engine._session_id. Falls back to the bound id when no
     # foreground has ever been bound.
     session_id = engine.current_session_id
+
+    # 0. Plugin identity: legacy hermes-lcm / context.engine: lcm config (#471).
+    identity_migration = getattr(engine, "identity_migration", None)
+    checks.append({
+        "check": "identity_migration",
+        "status": "warn" if identity_migration else "pass",
+        "detail": identity_migration or "config uses hermes-lcm-x / lcm-x",
+    })
 
     # 1. Database integrity
     try:

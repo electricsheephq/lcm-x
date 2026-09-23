@@ -11,9 +11,39 @@ else
   TARGET_ROOT="$HERMES_HOME_DIR"
 fi
 
-PLUGIN_TARGET="$TARGET_ROOT/plugins/hermes-lcm"
+PLUGIN_TARGET="$TARGET_ROOT/plugins/hermes-lcm-x"
 SKILL_SOURCE="$REPO_ROOT/skills/hermes-lcm"
-SKILL_TARGET="$TARGET_ROOT/skills/hermes-lcm"
+SKILL_TARGET="$TARGET_ROOT/skills/hermes-lcm-x"
+CONFIG_FILE="$TARGET_ROOT/config.yaml"
+
+# LCM-X 0.23.x and earlier installed as plugins/hermes-lcm (#471). Hermes
+# matches plugins.enabled against the manifest name, not the directory, so an
+# existing link to this checkout is reused instead of adding a second copy that
+# would register the engine twice. Nothing here edits config or deletes files.
+LEGACY_PLUGIN_TARGET="$TARGET_ROOT/plugins/hermes-lcm"
+LEGACY_SKILL_TARGET="$TARGET_ROOT/skills/hermes-lcm"
+LEGACY_LEFTOVERS=()
+if [[ -d "$LEGACY_PLUGIN_TARGET" ]]; then
+  if [[ "$(cd "$LEGACY_PLUGIN_TARGET" && pwd -P)" == "$REPO_ROOT" ]]; then
+    PLUGIN_TARGET="$LEGACY_PLUGIN_TARGET"
+  else
+    LEGACY_LEFTOVERS+=("$LEGACY_PLUGIN_TARGET")
+  fi
+fi
+if [[ -d "$LEGACY_SKILL_TARGET" ]]; then
+  if [[ "$(cd "$LEGACY_SKILL_TARGET" && pwd -P)" == "$(cd "$SKILL_SOURCE" && pwd -P)" ]]; then
+    SKILL_TARGET="$LEGACY_SKILL_TARGET"
+  else
+    LEGACY_LEFTOVERS+=("$LEGACY_SKILL_TARGET")
+  fi
+fi
+LEGACY_CONFIG=0
+if [[ -f "$CONFIG_FILE" ]] && grep -Eq \
+  -e '(^|[^[:alnum:]_-])hermes-lcm([^[:alnum:]_-]|$)' \
+  -e '^[[:space:]]*engine:[[:space:]]*["'"'"']?lcm["'"'"']?[[:space:]]*(#.*)?$' \
+  "$CONFIG_FILE"; then
+  LEGACY_CONFIG=1
+fi
 
 preflight_target() {
   local label="$1"
@@ -63,7 +93,7 @@ if [[ ! -e "$SKILL_TARGET" && ! -L "$SKILL_TARGET" ]]; then
 fi
 
 cat <<EOF
-Installed hermes-lcm at:
+Installed hermes-lcm-x at:
   $PLUGIN_TARGET
 
 Discoverable skill:
@@ -73,14 +103,37 @@ Activation requires both:
 
 plugins:
   enabled:
-    - hermes-lcm
+    - hermes-lcm-x
 
 context:
-  engine: lcm
+  engine: lcm-x
 
 Verification:
   1. Restart Hermes.
   2. Run: hermes plugins
-  3. Confirm the plugin list includes hermes-lcm and the selected context engine is lcm.
+  3. Confirm the plugin list includes hermes-lcm-x and the selected context engine is lcm-x.
   4. Confirm the available skills include hermes-lcm.
 EOF
+
+if [[ "$LEGACY_CONFIG" == 1 || "$PLUGIN_TARGET" == "$LEGACY_PLUGIN_TARGET" || ${#LEGACY_LEFTOVERS[@]} -gt 0 ]]; then
+  cat <<EOF
+
+MIGRATION from hermes-lcm (LCM-X 0.23.x and earlier) - BREAKING in 0.24.0.
+install.sh does not edit config.yaml and does not delete anything.
+  1. In $CONFIG_FILE add hermes-lcm-x to plugins.enabled (keeping
+     hermes-lcm there is harmless) and set context.engine: lcm-x. The legacy
+     context.engine: lcm still works but logs a deprecation warning.
+  2. Restart Hermes; confirm hermes plugins lists hermes-lcm-x and the log shows
+     "LCM plugin loaded — lossless context management active".
+EOF
+  if [[ ${#LEGACY_LEFTOVERS[@]} -gt 0 ]]; then
+    echo "  3. After verifying, remove the old install so two copies do not both"
+    echo "     register the engine:"
+    printf '       %s\n' "${LEGACY_LEFTOVERS[@]}"
+  fi
+  cat <<EOF
+If step 1 is skipped, Hermes logs "Context engine 'lcm' not found — falling back
+to built-in compressor" and runs without LCM. lcm.db is untouched; enabling
+hermes-lcm-x restores LCM with no data loss.
+EOF
+fi

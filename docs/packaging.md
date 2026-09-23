@@ -2,16 +2,17 @@
 
 ## Current decision
 
-LCM-X intentionally remains a clone-or-symlink Hermes user plugin for now. The
-compatibility plugin name and install directory remain `hermes-lcm`. The
-supported install path is:
+LCM-X intentionally remains a clone-or-symlink Hermes user plugin for now. From
+v0.24.0 the plugin name and install directory are `hermes-lcm-x` and the context
+engine is `lcm-x` (#471; breaking for configs that enable only `hermes-lcm` — see
+the operator guide's migration section). The supported install path is:
 
 ```bash
 git clone https://github.com/electricsheephq/lcm-x \
-  ~/.hermes/plugins/hermes-lcm
+  ~/.hermes/plugins/hermes-lcm-x
 ```
 
-For profile-specific installs, clone under `~/.hermes/profiles/<profile>/plugins/hermes-lcm`. For development checkouts, `scripts/install.sh` creates a profile-aware symlink into the active Hermes plugin directory and refuses to overwrite an existing checkout or unrelated symlink.
+For profile-specific installs, clone under `~/.hermes/profiles/<profile>/plugins/hermes-lcm-x`. For development checkouts, `scripts/install.sh` creates a profile-aware symlink into the active Hermes plugin directory and refuses to overwrite an existing checkout or unrelated symlink.
 
 ## Why not pip-style packaging yet?
 
@@ -32,7 +33,7 @@ Make packaging a separate implementation lane only when one of these is true:
 2. Users need version-pinned installs without direct git checkouts.
 3. Release automation needs packaged artifacts beyond GitHub tags/releases.
 
-The narrow next step would be packaging metadata plus tests that prove a packaged install still exposes `hermes-lcm`, context engine `lcm`, and all 15 LCM tools through `hermes plugins`. Until then, clone/symlink remains the documented path.
+The narrow next step would be packaging metadata plus tests that prove a packaged install still exposes `hermes-lcm-x`, context engine `lcm-x`, and all 15 LCM tools through `hermes plugins`. Until then, clone/symlink remains the documented path.
 
 ## Current install and update references
 

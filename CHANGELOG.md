@@ -6,6 +6,34 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+## v0.24.0 - BREAKING: plugin renamed to hermes-lcm-x, engine to lcm-x (unreleased)
+
+**BREAKING.** The plugin manifest is renamed `hermes-lcm` → `hermes-lcm-x` and the context engine
+`lcm` → `lcm-x`, to give LCM-X a distinct identity for Hermes plugin-catalog admission. (#471)
+Hermes matches `plugins.enabled` against the manifest name, not the install directory, so a
+config that enables only `hermes-lcm` stops loading LCM-X after an in-place update.
+
+Migration:
+
+1. Config: add `hermes-lcm-x` to `plugins.enabled` (keeping `hermes-lcm` is harmless) and set
+   `context.engine: lcm-x`. The legacy `context.engine: lcm` still selects LCM-X through an
+   alias, with a once-per-process `DEPRECATED LCM-X config` warning, an `identity_migration`
+   field in `lcm_status`, and an `identity_migration` `warn` check in `lcm_doctor`.
+2. If step 1 is skipped, Hermes logs `Context engine 'lcm' not found — falling back to built-in
+   compressor` and runs without LCM. `lcm.db` is untouched; enabling `hermes-lcm-x` and
+   restarting restores LCM with no data loss.
+3. Managed fleets (PCS / managed-plugin payloads) stay pinned to v0.23.x until their config
+   stages `hermes-lcm-x` in `plugins.enabled`; that staging is a separate fleet-migration
+   change owned outside this repository.
+4. `scripts/install.sh` now installs `plugins/hermes-lcm-x` and `skills/hermes-lcm-x`, reuses an
+   existing `plugins/hermes-lcm` link to the same checkout, and prints these steps when it
+   finds a legacy install or config. It never edits `config.yaml` or deletes the old directory;
+   remove an older separate copy after verifying so two copies do not both register the engine.
+
+Unchanged: `lcm.db` (name and location), the `lcm:` config block, `LCM_*` environment
+variables, all `lcm_*` tool names, `/lcm`, the bundled skill name `hermes-lcm`, and the log line
+`LCM plugin loaded — lossless context management active`.
+
 ## v0.23.3 - maintenance point release
 
 - Session-end prefix matching extracted from `engine.py` into `prefix_matching.py` as a mixin;

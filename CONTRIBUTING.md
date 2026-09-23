@@ -83,8 +83,8 @@ Packaging or install-flow changes should also verify the standalone user-plugin 
 ```bash
 export HERMES_HOME=/tmp/hermes-lcm-smoke
 mkdir -p "$HERMES_HOME/plugins"
-git clone https://github.com/electricsheephq/lcm-x "$HERMES_HOME/plugins/hermes-lcm"
-# then enable `hermes-lcm` in plugins.enabled and set context.engine: lcm
+git clone https://github.com/electricsheephq/lcm-x "$HERMES_HOME/plugins/hermes-lcm-x"
+# then enable `hermes-lcm-x` in plugins.enabled and set context.engine: lcm-x
 hermes plugins
 ```
 

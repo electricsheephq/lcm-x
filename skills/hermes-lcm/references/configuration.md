@@ -1,16 +1,23 @@
 # Configuration and activation
 
-LCM-X is a general Hermes plugin and a context engine. Its compatibility
-identifiers must both be active:
+LCM-X is a general Hermes plugin and a context engine. Both identifiers must be
+active:
 
 ```yaml
 plugins:
   enabled:
-    - hermes-lcm
+    - hermes-lcm-x
 
 context:
-  engine: lcm
+  engine: lcm-x
 ```
+
+Migrating from v0.23.x (`hermes-lcm` / `lcm`, BREAKING in v0.24.0): add
+`hermes-lcm-x` to `plugins.enabled` and set `context.engine: lcm-x`. A config
+that enables only `hermes-lcm` no longer loads LCM-X; Hermes logs
+`Context engine 'lcm' not found — falling back to built-in compressor`, and
+`lcm.db` is untouched. Legacy `context.engine: lcm` still works through an alias
+with a warning and an `identity_migration` field in `lcm_status` / `lcm_doctor`.
 
 Restart Hermes after changing plugin or context-engine configuration. Verify with `hermes plugins`, then use `lcm_status` after a normal message has bound the session.
 
@@ -25,10 +32,12 @@ HERMES_PROFILE=myprofile ./scripts/install.sh
 
 The installer exposes both:
 
-- `plugins/hermes-lcm` for plugin loading;
-- `skills/hermes-lcm` for normal skill discovery.
+- `plugins/hermes-lcm-x` for plugin loading;
+- `skills/hermes-lcm-x` for normal skill discovery (the skill name stays `hermes-lcm`).
 
-It refuses conflicting paths rather than overwriting an existing install.
+It refuses conflicting paths rather than overwriting an existing install, reuses
+an existing `plugins/hermes-lcm` link to the same checkout, and prints migration
+steps for a legacy install without editing config or deleting anything.
 
 ## High-impact controls
 

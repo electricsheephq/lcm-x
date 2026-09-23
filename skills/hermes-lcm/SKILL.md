@@ -1,17 +1,17 @@
 ---
 name: hermes-lcm
-description: Use, configure, diagnose, and retrieve exact evidence with LCM-X, whose compatibility plugin name is hermes-lcm.
+description: Use, configure, diagnose, and retrieve exact evidence with LCM-X (plugin hermes-lcm-x, context engine lcm-x).
 ---
 
 # LCM-X
 
 Use this skill when a task concerns LCM-X setup, operation, compaction,
 diagnostics, session behavior, or recall from compacted and cross-conversation
-history. The skill and plugin compatibility name remains `hermes-lcm`.
+history. The plugin is `hermes-lcm-x` (formerly `hermes-lcm`); this skill keeps the name `hermes-lcm`.
 
 Start here:
 
-1. Confirm that the `hermes-lcm` plugin is enabled and `context.engine` is `lcm`.
+1. Confirm that the `hermes-lcm-x` plugin is enabled and `context.engine` is `lcm-x` (legacy `lcm` works with a deprecation warning; see `lcm_doctor` `identity_migration`).
 2. For exact historical claims, use the recall workflow instead of trusting a compacted summary.
 3. Use `lcm_status`, `lcm_inspect`, and `lcm_doctor` before changing configuration or attempting repair.
 4. Treat slash-command apply paths as mutations: preview first, keep backups, and require the user's authorization.

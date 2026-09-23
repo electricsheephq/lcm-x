@@ -1,5 +1,5 @@
-name: hermes-lcm
-version: 0.23.3
+name: hermes-lcm-x
+version: 0.24.0
 description: "LCM-X — Lossless Context Memory eXtension for Hermes, with a recoverable DAG-based context engine"
 author: "Voltropy / Hermes Community"
 provides_tools:

@@ -3,7 +3,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
-IDENTITY_VERSION = "0.23.3"
+IDENTITY_VERSION = "0.24.0"
 RC_TAG = "0.23.3-rc1"
 RELEASE_NOTES = REPO_ROOT / ".github" / "release-notes" / f"v{RC_TAG}.md"
 
@@ -37,8 +37,8 @@ def test_release_candidate_identity_surfaces_are_synchronized():
     ).read_text(encoding="utf-8")
 
     assert f"version: {IDENTITY_VERSION}" in manifest
-    assert f"hermes-lcm v{IDENTITY_VERSION} (15 tools)" in readme
-    assert f"hermes-lcm v{IDENTITY_VERSION} (15 tools)" in operator_guide
+    assert f"hermes-lcm-x v{IDENTITY_VERSION} (15 tools)" in readme
+    assert f"hermes-lcm-x v{IDENTITY_VERSION} (15 tools)" in operator_guide
     assert f"## v{IDENTITY_VERSION} - " in changelog
     assert f"Exact commit SHA for v{IDENTITY_VERSION} or main" in bug_report
 

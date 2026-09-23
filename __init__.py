@@ -414,6 +414,14 @@ def register(ctx):
 
     engine = LCMEngine(config=config, hermes_home=hermes_home)
 
+    # Hermes selects the engine whose ``name`` equals ``context.engine``; keep a
+    # legacy ``context.engine: lcm`` config working, loudly (#471).
+    from . import plugin_identity as _identity
+
+    identity_notice = _identity.identity_migration_notice(_identity.load_hermes_config())
+    engine.apply_identity_migration(identity_notice)
+    _identity.warn_identity_migration_once(identity_notice)
+
     # Register as the context engine (replaces ContextCompressor)
     ctx.register_context_engine(engine)
 
@@ -592,7 +600,7 @@ def register(ctx):
             if not history:
                 return
             host_engine = kwargs.get("context_compressor")
-            if getattr(host_engine, "name", None) != "lcm":
+            if not _identity.is_lcm_engine_name(getattr(host_engine, "name", None)):
                 host_engine = None
 
             session_id = str(kwargs.get("session_id") or "")

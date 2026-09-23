@@ -141,7 +141,7 @@ class TestRegistrationGating:
         module.register(ctx)
 
         assert ctx.engine is not None
-        assert ctx.engine.name == "lcm"
+        assert ctx.engine.name == "lcm-x"
         assert registered_tools == []
         assert EXPECTED_LCM_TOOLS.issubset(
             {schema["name"] for schema in ctx.engine.get_tool_schemas()}
@@ -182,7 +182,7 @@ class TestRegistrationGating:
         ctx = _Ctx()
         module.register(ctx)
         assert ctx.engine is not None
-        assert ctx.engine.name == "lcm"
+        assert ctx.engine.name == "lcm-x"
 
     def test_logs_hermes_home_import_failure_and_uses_env_fallback(
         self, monkeypatch, tmp_path, caplog

@@ -382,16 +382,17 @@ def test_install_script_creates_profile_aware_symlink_and_prints_activation_step
         text=True,
     )
 
-    target = hermes_home / "profiles" / "sandbox" / "plugins" / "hermes-lcm"
-    skill_target = hermes_home / "profiles" / "sandbox" / "skills" / "hermes-lcm"
+    target = hermes_home / "profiles" / "sandbox" / "plugins" / "hermes-lcm-x"
+    skill_target = hermes_home / "profiles" / "sandbox" / "skills" / "hermes-lcm-x"
     assert target.is_symlink()
     assert target.resolve() == repo_root.resolve()
     assert skill_target.is_symlink()
     assert skill_target.resolve() == (repo_root / "skills" / "hermes-lcm").resolve()
     assert "plugins:" in result.stdout
-    assert "- hermes-lcm" in result.stdout
+    assert "- hermes-lcm-x" in result.stdout
     assert "context:" in result.stdout
-    assert "engine: lcm" in result.stdout
+    assert "engine: lcm-x" in result.stdout
+    assert "MIGRATION" not in result.stdout
     assert "Discoverable skill:" in result.stdout
     assert str(skill_target) in result.stdout
 
@@ -414,8 +415,8 @@ def test_install_script_is_idempotent_for_plugin_and_skill_links(tmp_path):
             text=True,
         )
 
-    assert (hermes_home / "plugins" / "hermes-lcm").resolve() == repo_root.resolve()
-    assert (hermes_home / "skills" / "hermes-lcm").resolve() == (
+    assert (hermes_home / "plugins" / "hermes-lcm-x").resolve() == repo_root.resolve()
+    assert (hermes_home / "skills" / "hermes-lcm-x").resolve() == (
         repo_root / "skills" / "hermes-lcm"
     ).resolve()
 
@@ -423,7 +424,7 @@ def test_install_script_is_idempotent_for_plugin_and_skill_links(tmp_path):
 def test_install_script_preflights_skill_conflict_before_creating_plugin_link(tmp_path):
     repo_root = Path(__file__).resolve().parent.parent
     hermes_home = tmp_path / "hermes-home"
-    skill_target = hermes_home / "skills" / "hermes-lcm"
+    skill_target = hermes_home / "skills" / "hermes-lcm-x"
     skill_target.mkdir(parents=True)
     (skill_target / "SKILL.md").write_text("existing skill\n", encoding="utf-8")
 
@@ -441,7 +442,7 @@ def test_install_script_preflights_skill_conflict_before_creating_plugin_link(tm
 
     assert result.returncode != 0
     assert "Refusing to replace existing skill path" in result.stderr
-    assert not (hermes_home / "plugins" / "hermes-lcm").exists()
+    assert not (hermes_home / "plugins" / "hermes-lcm-x").exists()
 
 
 def test_install_script_accepts_checkout_already_in_canonical_plugin_path(tmp_path):
@@ -470,15 +471,110 @@ def test_install_script_accepts_checkout_already_in_canonical_plugin_path(tmp_pa
 
     assert result.returncode == 0, result.stderr
     assert checkout.is_dir()
-    skill_target = hermes_home / "skills" / "hermes-lcm"
+    # A pre-0.24 checkout at plugins/hermes-lcm is reused in place (Hermes
+    # matches the manifest name, not the directory); no second copy (#471).
+    assert not (hermes_home / "plugins" / "hermes-lcm-x").exists()
+    skill_target = hermes_home / "skills" / "hermes-lcm-x"
     assert skill_target.is_symlink()
     assert skill_target.resolve() == (checkout / "skills" / "hermes-lcm").resolve()
+    assert "MIGRATION from hermes-lcm" in result.stdout
+    assert "remove the old install" not in result.stdout
+
+
+def test_install_script_reuses_legacy_links_to_this_checkout(tmp_path):
+    repo_root = Path(__file__).resolve().parent.parent
+    hermes_home = tmp_path / "hermes-home"
+    (hermes_home / "plugins").mkdir(parents=True)
+    (hermes_home / "skills").mkdir(parents=True)
+    (hermes_home / "plugins" / "hermes-lcm").symlink_to(repo_root)
+    (hermes_home / "skills" / "hermes-lcm").symlink_to(repo_root / "skills" / "hermes-lcm")
+
+    result = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "install.sh")],
+        cwd=repo_root,
+        env={"HOME": str(tmp_path / "home"), "HERMES_HOME": str(hermes_home)},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert not (hermes_home / "plugins" / "hermes-lcm-x").exists()
+    assert not (hermes_home / "skills" / "hermes-lcm-x").exists()
+    assert (hermes_home / "plugins" / "hermes-lcm").resolve() == repo_root.resolve()
+    assert "MIGRATION from hermes-lcm" in result.stdout
+    assert "remove the old install" not in result.stdout
+
+
+def test_install_script_prints_migration_for_legacy_install_without_touching_it(tmp_path):
+    repo_root = Path(__file__).resolve().parent.parent
+    hermes_home = tmp_path / "hermes-home"
+    legacy_plugin = hermes_home / "plugins" / "hermes-lcm"
+    legacy_skill = hermes_home / "skills" / "hermes-lcm"
+    legacy_plugin.mkdir(parents=True)
+    (legacy_plugin / "plugin.yaml").write_text("name: hermes-lcm\n", encoding="utf-8")
+    legacy_skill.mkdir(parents=True)
+    (legacy_skill / "SKILL.md").write_text("---\nname: hermes-lcm\n---\n", encoding="utf-8")
+    config = hermes_home / "config.yaml"
+    config_text = "plugins:\n  enabled:\n    - hermes-lcm\ncontext:\n  engine: lcm\n"
+    config.write_text(config_text, encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "install.sh")],
+        cwd=repo_root,
+        env={"HOME": str(tmp_path / "home"), "HERMES_HOME": str(hermes_home)},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert (hermes_home / "plugins" / "hermes-lcm-x").resolve() == repo_root.resolve()
+    assert "MIGRATION from hermes-lcm" in result.stdout
+    assert "add hermes-lcm-x to plugins.enabled" in " ".join(result.stdout.split())
+    assert "remove the old install" in result.stdout
+    assert str(legacy_plugin) in result.stdout
+    assert str(legacy_skill) in result.stdout
+    assert "Context engine 'lcm' not found" in " ".join(result.stdout.split())
+    # Never auto-edits config or deletes the old install.
+    assert config.read_text(encoding="utf-8") == config_text
+    assert (legacy_plugin / "plugin.yaml").is_file()
+    assert (legacy_skill / "SKILL.md").is_file()
+
+
+def test_install_script_prints_migration_for_legacy_config_only(tmp_path):
+    repo_root = Path(__file__).resolve().parent.parent
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir()
+    config = hermes_home / "config.yaml"
+    config.write_text("plugins:\n  enabled: [hermes-lcm]\n", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "install.sh")],
+        cwd=repo_root,
+        env={"HOME": str(tmp_path / "home"), "HERMES_HOME": str(hermes_home)},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "MIGRATION from hermes-lcm" in result.stdout
+    assert "remove the old install" not in result.stdout
+
+    config.write_text("plugins:\n  enabled: [hermes-lcm-x]\ncontext:\n  engine: lcm-x\n", encoding="utf-8")
+    current = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "install.sh")],
+        cwd=repo_root,
+        env={"HOME": str(tmp_path / "home"), "HERMES_HOME": str(hermes_home)},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "MIGRATION" not in current.stdout
 
 
 def test_install_script_refuses_to_replace_existing_non_symlink_path(tmp_path):
     repo_root = Path(__file__).resolve().parent.parent
     hermes_home = tmp_path / "hermes-home"
-    target = hermes_home / "plugins" / "hermes-lcm"
+    target = hermes_home / "plugins" / "hermes-lcm-x"
     target.mkdir(parents=True)
     (target / "README.txt").write_text("existing checkout", encoding="utf-8")
 
@@ -527,11 +623,11 @@ def test_plugin_entrypoint_registers_lcm_context_engine(_isolate_plugin_registra
     engine = _register_plugin_engine("hermes_lcm_packaging_entrypoint")
 
     assert engine is not None
-    assert engine.name == "lcm"
+    assert engine.name == "lcm-x"
     identity = engine.get_status()["runtime_identity"]
     repo_root = Path(__file__).resolve().parent.parent
-    assert identity["plugin_name"] == "hermes-lcm"
-    assert identity["plugin_version"] == "0.23.3"
+    assert identity["plugin_name"] == "hermes-lcm-x"
+    assert identity["plugin_version"] == "0.24.0"
     assert Path(identity["plugin_path"]) == repo_root
     assert identity["database_path_source"] == "hermes_home"
     assert Path(identity["database_path"]) == _isolate_plugin_registration_storage / "lcm.db"
@@ -656,7 +752,7 @@ def test_register_gracefully_degrades_when_host_lacks_register_tool():
     module.register(ctx)
 
     assert ctx.engine is not None
-    assert ctx.engine.name == "lcm"
+    assert ctx.engine.name == "lcm-x"
 
 
 def test_plugin_entrypoint_registers_bundled_skill_and_keeps_recall_policy_out_of_user_context(
@@ -1179,7 +1275,7 @@ def test_plugin_entrypoint_gracefully_degrades_without_skill_or_hook_registratio
     module.register(ctx)
 
     assert ctx.engine is not None
-    assert ctx.engine.name == "lcm"
+    assert ctx.engine.name == "lcm-x"
     ctx.engine.shutdown()
 
 
@@ -1204,7 +1300,7 @@ def test_register_gracefully_degrades_when_register_tool_hook_raises():
     module.register(ctx)
 
     assert ctx.engine is not None
-    assert ctx.engine.name == "lcm"
+    assert ctx.engine.name == "lcm-x"
     assert ctx.register_tool_calls
 
 
@@ -1308,7 +1404,7 @@ def test_plugin_entrypoint_registration_is_repeatable_and_returns_lcm_engine():
     engine = _register_plugin_engine("hermes_lcm_packaging_entrypoint_repeat")
 
     assert engine is not None
-    assert engine.name == "lcm"
+    assert engine.name == "lcm-x"
 
 
 def test_register_gracefully_degrades_when_legacy_host_lacks_register_tool():
@@ -1325,7 +1421,7 @@ def test_register_gracefully_degrades_when_legacy_host_lacks_register_tool():
     # Must not raise AttributeError on hosts without register_tool
     module.register(ctx)
     assert ctx.engine is not None
-    assert ctx.engine.name == "lcm"
+    assert ctx.engine.name == "lcm-x"
 
 
 def test_register_continues_when_register_tool_raises_type_error():
@@ -1346,7 +1442,7 @@ def test_register_continues_when_register_tool_raises_type_error():
     # Must not raise — should log warning and continue
     module.register(ctx)
     assert ctx.engine is not None
-    assert ctx.engine.name == "lcm"
+    assert ctx.engine.name == "lcm-x"
 
 
 def test_registered_tool_handler_forwards_messages_to_engine_handle_tool_call(monkeypatch):

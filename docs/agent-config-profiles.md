@@ -38,9 +38,9 @@ Nothing to configure. Enable the plugin and stop:
 # ~/.hermes/config.yaml
 plugins:
   enabled:
-    - hermes-lcm
+    - hermes-lcm-x
 context:
-  engine: lcm
+  engine: lcm-x
 ```
 
 You get bounded active context, the summary DAG, lossless recovery, and the
