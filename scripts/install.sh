@@ -23,10 +23,12 @@ CONFIG_FILE="$TARGET_ROOT/config.yaml"
 LEGACY_PLUGIN_TARGET="$TARGET_ROOT/plugins/hermes-lcm"
 LEGACY_SKILL_TARGET="$TARGET_ROOT/skills/hermes-lcm"
 LEGACY_LEFTOVERS=()
+LEGACY_PLUGIN_SEPARATE=0
 if [[ -d "$LEGACY_PLUGIN_TARGET" ]]; then
   if [[ "$(cd "$LEGACY_PLUGIN_TARGET" && pwd -P)" == "$REPO_ROOT" ]]; then
     PLUGIN_TARGET="$LEGACY_PLUGIN_TARGET"
   else
+    LEGACY_PLUGIN_SEPARATE=1
     LEGACY_LEFTOVERS+=("$LEGACY_PLUGIN_TARGET")
   fi
 fi
@@ -52,7 +54,10 @@ preflight_target() {
 
   if [[ -L "$target" ]]; then
     local current_target
-    current_target="$(readlink "$target")"
+    # Compare canonical paths so a relative link to this checkout is reused.
+    if ! current_target="$(cd -P "$target" 2>/dev/null && pwd -P)"; then
+      current_target="$(readlink "$target")"
+    fi
     if [[ "$current_target" != "$expected" ]]; then
       if [[ "$label" == "plugin" ]]; then
         echo "Refusing to replace existing symlink: $target -> $current_target" >&2
@@ -120,20 +125,35 @@ if [[ "$LEGACY_CONFIG" == 1 || "$PLUGIN_TARGET" == "$LEGACY_PLUGIN_TARGET" || ${
 
 MIGRATION from hermes-lcm (LCM-X 0.23.x and earlier) - BREAKING in 0.24.0.
 install.sh does not edit config.yaml and does not delete anything.
-  1. In $CONFIG_FILE add hermes-lcm-x to plugins.enabled (keeping
-     hermes-lcm there is harmless) and set context.engine: lcm-x. The legacy
+Run exactly one LCM copy, and change the config while Hermes is stopped:
+  1. Stop Hermes.
+  2. In $CONFIG_FILE replace hermes-lcm with hermes-lcm-x
+     in plugins.enabled and set context.engine: lcm-x. The legacy
      context.engine: lcm still works but logs a deprecation warning.
-  2. Restart Hermes; confirm hermes plugins lists hermes-lcm-x and the log shows
+EOF
+  if [[ "$LEGACY_PLUGIN_SEPARATE" == 1 ]]; then
+    cat <<EOF
+     Do NOT keep both names enabled: a separate older copy is installed at
+       $LEGACY_PLUGIN_TARGET
+     and would load too (LCM-X then stays inert and is not running).
+EOF
+  elif [[ "$PLUGIN_TARGET" == "$LEGACY_PLUGIN_TARGET" ]]; then
+    echo "     plugins/hermes-lcm is this checkout, so also keeping hermes-lcm listed is harmless."
+  fi
+  cat <<EOF
+  3. Start Hermes; confirm hermes plugins lists hermes-lcm-x and the log shows
      "LCM plugin loaded — lossless context management active".
 EOF
   if [[ ${#LEGACY_LEFTOVERS[@]} -gt 0 ]]; then
-    echo "  3. After verifying, remove the old install so two copies do not both"
-    echo "     register the engine:"
+    echo "  4. Later, after verifying, remove the old copy by hand (keep it until"
+    echo "     then for rollback):"
     printf '       %s\n' "${LEGACY_LEFTOVERS[@]}"
   fi
   cat <<EOF
-If step 1 is skipped, Hermes logs "Context engine 'lcm' not found — falling back
-to built-in compressor" and runs without LCM. lcm.db is untouched; enabling
-hermes-lcm-x restores LCM with no data loss.
+If the config is not updated, Hermes logs "Context engine 'lcm' not found —
+falling back to built-in compressor" and runs without LCM-X. The existing lcm.db
+is untouched, but turns handled while Hermes runs without LCM-X are not in
+lcm.db and their compacted content may not be recoverable. Update the config
+before restarting Hermes after the update.
 EOF
 fi

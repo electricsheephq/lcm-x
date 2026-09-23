@@ -12,12 +12,18 @@ context:
   engine: lcm-x
 ```
 
-Migrating from v0.23.x (`hermes-lcm` / `lcm`, BREAKING in v0.24.0): add
-`hermes-lcm-x` to `plugins.enabled` and set `context.engine: lcm-x`. A config
-that enables only `hermes-lcm` no longer loads LCM-X; Hermes logs
-`Context engine 'lcm' not found — falling back to built-in compressor`, and
-`lcm.db` is untouched. Legacy `context.engine: lcm` still works through an alias
-with a warning and an `identity_migration` field in `lcm_status` / `lcm_doctor`.
+Migrating from v0.23.x (`hermes-lcm` / `lcm`, BREAKING in v0.24.0): stop Hermes,
+update the code, replace `hermes-lcm` with `hermes-lcm-x` in `plugins.enabled`,
+set `context.engine: lcm-x`, then start Hermes. Keep `hermes-lcm` listed only
+when `plugins/hermes-lcm` is this same checkout; with a separate older copy
+installed, LCM-X logs `Another LCM generation is already loaded` and stays inert.
+A config that enables only `hermes-lcm` no longer loads LCM-X: Hermes logs
+`Context engine 'lcm' not found — falling back to built-in compressor`. The
+existing `lcm.db` is untouched, but turns handled while Hermes runs without
+LCM-X are not in `lcm.db` and their compacted content may not be recoverable, so
+update the config before restarting Hermes after the update. Legacy
+`context.engine: lcm` still works through an alias with a warning and an
+`identity_migration` field in `lcm_status` / `lcm_doctor`.
 
 Restart Hermes after changing plugin or context-engine configuration. Verify with `hermes plugins`, then use `lcm_status` after a normal message has bound the session.
 

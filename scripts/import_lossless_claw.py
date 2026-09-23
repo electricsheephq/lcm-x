@@ -3215,7 +3215,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Directory containing OpenClaw session JSONL exports. May be repeated.",
     )
-    parser.add_argument("--target-db", required=True, help="Path to the target hermes-lcm SQLite DB")
+    parser.add_argument("--target-db", required=True, help="Path to the target LCM-X SQLite DB (lcm.db)")
     parser.add_argument(
         "--namespace",
         help=(

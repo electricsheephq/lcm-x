@@ -6,8 +6,8 @@ exact install/config detail see the [Operator guide](operator-guide.md); for
 tool contracts see the [Retrieval tools reference](retrieval-tools.md); for
 embedding provider setup see [Embeddings setup](embeddings-setup.md).
 
-The installed plugin and skill still use the compatibility identifier
-`hermes-lcm`; the runtime engine remains `lcm`.
+From v0.24.0 the installed plugin is `hermes-lcm-x` and the runtime engine is
+`lcm-x` (#471); the bundled skill keeps the name `hermes-lcm`.
 
 **Every feature below ships default-off.** A stock install behaves exactly
 like the previous release until an operator opts in with an environment

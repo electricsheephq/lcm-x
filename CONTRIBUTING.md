@@ -7,9 +7,10 @@ for Hermes. The project preserves its MIT license, original commit authorship, a
 Read [AGENTS.md](AGENTS.md) before opening work. It defines the lossless-data, Hermes
 compatibility, validation, review, and merge invariants for contributors, maintainers, and bots.
 
-LCM-X is the project name. The installed plugin, skill, and directory remain
-`hermes-lcm`, and the runtime context engine remains `lcm`; preserve those
-compatibility identifiers unless a separately approved migration changes them.
+LCM-X is the project name. From v0.24.0 (#471) the installed plugin and
+directory are `hermes-lcm-x` and the runtime context engine is `lcm-x`; the
+bundled skill keeps the name `hermes-lcm`. `hermes-lcm` / `lcm` are the legacy
+v0.23.x identifiers, accepted only through the documented migration path.
 
 ## Workflow
 ### Start With An Accepted Issue

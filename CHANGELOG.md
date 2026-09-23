@@ -13,22 +13,33 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 Hermes matches `plugins.enabled` against the manifest name, not the install directory, so a
 config that enables only `hermes-lcm` stops loading LCM-X after an in-place update.
 
-Migration:
+Migration (run exactly one LCM copy; change the config while Hermes is stopped):
 
-1. Config: add `hermes-lcm-x` to `plugins.enabled` (keeping `hermes-lcm` is harmless) and set
-   `context.engine: lcm-x`. The legacy `context.engine: lcm` still selects LCM-X through an
-   alias, with a once-per-process `DEPRECATED LCM-X config` warning, an `identity_migration`
-   field in `lcm_status`, and an `identity_migration` `warn` check in `lcm_doctor`.
-2. If step 1 is skipped, Hermes logs `Context engine 'lcm' not found — falling back to built-in
-   compressor` and runs without LCM. `lcm.db` is untouched; enabling `hermes-lcm-x` and
-   restarting restores LCM with no data loss.
-3. Managed fleets (PCS / managed-plugin payloads) stay pinned to v0.23.x until their config
+1. Stop Hermes, then update the code: `git pull --ff-only` in the existing clone (it may stay at
+   `plugins/hermes-lcm`) or install a new checkout with `scripts/install.sh`.
+2. Config: in `plugins.enabled`, replace `hermes-lcm` with `hermes-lcm-x`, and set
+   `context.engine: lcm-x`. Keeping `hermes-lcm` listed is harmless only when `plugins/hermes-lcm`
+   is this same checkout; with a separate older copy installed, both would load. LCM-X then
+   logs `Another LCM generation is already loaded` and stays inert (it registers no engine,
+   tools or ingestion hooks), so only one copy writes `lcm.db`. The legacy
+   `context.engine: lcm` still selects LCM-X through an alias, with a once-per-process
+   `DEPRECATED LCM-X config` warning, an `identity_migration` field in `lcm_status`, and an
+   `identity_migration` `warn` check in `lcm_doctor`.
+3. Start Hermes and verify `hermes plugins` lists `hermes-lcm-x` and the log shows
+   `LCM plugin loaded — lossless context management active`. Remove a separate old directory by
+   hand later; keep it until then for rollback.
+4. If the config is not updated, Hermes logs `Context engine 'lcm' not found — falling back to
+   built-in compressor` and runs without LCM-X. The existing `lcm.db` is untouched, but turns
+   handled while Hermes runs without LCM-X (built-in compressor) are not in `lcm.db` and their
+   compacted content may not be recoverable; update the config before restarting Hermes after
+   the update.
+5. Managed fleets (PCS / managed-plugin payloads) stay pinned to v0.23.x until their config
    stages `hermes-lcm-x` in `plugins.enabled`; that staging is a separate fleet-migration
    change owned outside this repository.
-4. `scripts/install.sh` now installs `plugins/hermes-lcm-x` and `skills/hermes-lcm-x`, reuses an
-   existing `plugins/hermes-lcm` link to the same checkout, and prints these steps when it
-   finds a legacy install or config. It never edits `config.yaml` or deletes the old directory;
-   remove an older separate copy after verifying so two copies do not both register the engine.
+6. `scripts/install.sh` now installs `plugins/hermes-lcm-x` and `skills/hermes-lcm-x`, reuses an
+   existing `plugins/hermes-lcm` link to the same checkout (relative links included), and
+   prints these steps when it finds a legacy install or config. It never edits `config.yaml`
+   or deletes the old directory.
 
 Unchanged: `lcm.db` (name and location), the `lcm:` config block, `LCM_*` environment
 variables, all `lcm_*` tool names, `/lcm`, the bundled skill name `hermes-lcm`, and the log line

@@ -478,7 +478,8 @@ def test_install_script_accepts_checkout_already_in_canonical_plugin_path(tmp_pa
     assert skill_target.is_symlink()
     assert skill_target.resolve() == (checkout / "skills" / "hermes-lcm").resolve()
     assert "MIGRATION from hermes-lcm" in result.stdout
-    assert "remove the old install" not in result.stdout
+    assert "remove the old copy" not in result.stdout
+    assert "Do NOT keep both names enabled" not in result.stdout
 
 
 def test_install_script_reuses_legacy_links_to_this_checkout(tmp_path):
@@ -502,7 +503,9 @@ def test_install_script_reuses_legacy_links_to_this_checkout(tmp_path):
     assert not (hermes_home / "skills" / "hermes-lcm-x").exists()
     assert (hermes_home / "plugins" / "hermes-lcm").resolve() == repo_root.resolve()
     assert "MIGRATION from hermes-lcm" in result.stdout
-    assert "remove the old install" not in result.stdout
+    assert "is this checkout, so also keeping hermes-lcm listed is harmless" in result.stdout
+    assert "remove the old copy" not in result.stdout
+    assert "Do NOT keep both names enabled" not in result.stdout
 
 
 def test_install_script_prints_migration_for_legacy_install_without_touching_it(tmp_path):
@@ -529,8 +532,14 @@ def test_install_script_prints_migration_for_legacy_install_without_touching_it(
 
     assert (hermes_home / "plugins" / "hermes-lcm-x").resolve() == repo_root.resolve()
     assert "MIGRATION from hermes-lcm" in result.stdout
-    assert "add hermes-lcm-x to plugins.enabled" in " ".join(result.stdout.split())
-    assert "remove the old install" in result.stdout
+    flat = " ".join(result.stdout.split())
+    assert "replace hermes-lcm with hermes-lcm-x in plugins.enabled" in flat
+    assert "Do NOT keep both names enabled" in result.stdout
+    assert "harmless" not in result.stdout
+    assert flat.index("1. Stop Hermes.") < flat.index("replace hermes-lcm") < flat.index("3. Start Hermes")
+    assert "remove the old copy by hand" in result.stdout
+    assert "no data loss" not in flat
+    assert "compacted content may not be recoverable" in flat
     assert str(legacy_plugin) in result.stdout
     assert str(legacy_skill) in result.stdout
     assert "Context engine 'lcm' not found" in " ".join(result.stdout.split())
@@ -557,7 +566,8 @@ def test_install_script_prints_migration_for_legacy_config_only(tmp_path):
     )
 
     assert "MIGRATION from hermes-lcm" in result.stdout
-    assert "remove the old install" not in result.stdout
+    assert "remove the old copy" not in result.stdout
+    assert "Do NOT keep both names enabled" not in result.stdout
 
     config.write_text("plugins:\n  enabled: [hermes-lcm-x]\ncontext:\n  engine: lcm-x\n", encoding="utf-8")
     current = subprocess.run(
@@ -1946,3 +1956,31 @@ def test_post_llm_hook_does_not_rebind_live_singleton_on_exact_alias_miss(monkey
     assert ctx.engine.current_session_id == "discord-topic-a"
     assert ctx.engine.current_conversation_id == "agent:main:discord:thread:a:a"
     ctx.engine.shutdown()
+
+
+@pytest.mark.parametrize("plugin_dir", ["hermes-lcm", "hermes-lcm-x"])
+def test_install_script_reuses_relative_symlinks_to_this_checkout(tmp_path, plugin_dir):
+    """A relative link that resolves to this checkout is reused, not rejected (#471)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    hermes_home = tmp_path / "hermes-home"
+    plugins = hermes_home / "plugins"
+    skills = hermes_home / "skills"
+    plugins.mkdir(parents=True)
+    skills.mkdir(parents=True)
+    skill_dir = "hermes-lcm" if plugin_dir == "hermes-lcm" else "hermes-lcm-x"
+    (plugins / plugin_dir).symlink_to(os.path.relpath(repo_root, plugins))
+    (skills / skill_dir).symlink_to(os.path.relpath(repo_root / "skills" / "hermes-lcm", skills))
+
+    result = subprocess.run(
+        ["bash", str(repo_root / "scripts" / "install.sh")],
+        cwd=repo_root,
+        env={"HOME": str(tmp_path / "home"), "HERMES_HOME": str(hermes_home)},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert sorted(p.name for p in plugins.iterdir()) == [plugin_dir]
+    assert sorted(p.name for p in skills.iterdir()) == [skill_dir]
+    assert not os.path.isabs(os.readlink(plugins / plugin_dir))
