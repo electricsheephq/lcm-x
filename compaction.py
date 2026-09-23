@@ -15,6 +15,7 @@ lifecycle) through normal attribute lookup. ``LCMEngine`` mixes this in ahead of
 
 from __future__ import annotations
 
+import copy
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -77,6 +78,7 @@ class CompactionMixin:
 
     def _should_compress_preflight_impl(self, messages):
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
+        self._native_recovery_preflight_cleanup_only = False
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         if self._bypasses_lcm_context_management():
             # Bypassed traffic observes nothing about the pressured session's
@@ -152,6 +154,14 @@ class CompactionMixin:
                 messages=replay_messages,
             )
             if cleanup_requested:
+                self._native_recovery_preflight_cleanup_only = bool(
+                    self._config.native_recovery
+                    and not force_overflow_requested
+                    and (
+                        self.threshold_tokens <= 0
+                        or max(rough, replay_rough) < self.threshold_tokens
+                    )
+                )
                 if (
                     not force_overflow_requested
                     and self._compression_boundary_cooldown_active()
@@ -167,6 +177,14 @@ class CompactionMixin:
             # summarizer spend.
             if self._compression_boundary_cooldown_active():
                 return False
+            if (
+                self._config.native_recovery
+                and self.threshold_tokens > 0
+                and replay_rough >= self.threshold_tokens
+            ):
+                return self._mark_preflight_compression_requested(
+                    depends_on_pressure_yield=self._pressure_yield_preflight_candidate,
+                )
             if pre_ingest_placeholder_cleanup_requested:
                 return self._mark_preflight_compression_requested(
                     depends_on_pressure_yield=True,
@@ -229,6 +247,10 @@ class CompactionMixin:
         if self._should_force_overflow_recovery(observed_tokens=rough):
             return self._mark_preflight_compression_requested()
         if self.threshold_tokens > 0 and rough >= self.threshold_tokens:
+            if self._config.native_recovery:
+                return self._mark_preflight_compression_requested(
+                    depends_on_pressure_yield=self._pressure_yield_preflight_candidate,
+                )
             if pre_ingest_placeholder_cleanup_requested:
                 return self._mark_preflight_compression_requested(
                     depends_on_pressure_yield=True,
@@ -581,6 +603,123 @@ class CompactionMixin:
         )
         return fallback
 
+    def _compress_native_recovery(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        current_tokens: int | None = None,
+    ) -> List[Dict[str, Any]]:
+        """Let the host archive a native summary without claiming LCM coverage.
+
+        Only an opted-in, cancellation-fenced Hermes invocation may use this
+        recovery. Its existing transaction owns archive/publish; this helper
+        writes no DAG, lifecycle, frontier, or host-session state. In particular
+        it must not use the bypass helper's deterministic tail-trimming path.
+        """
+        if not self._config.native_recovery:
+            return messages
+        self._last_compress_aborted = True
+        self._last_compression_status = "error"
+        self._last_compression_noop_reason = "native recovery did not produce a usable summary"
+        self._last_summary_error = self._last_compression_noop_reason
+        cancelled = getattr(self, "_compression_cancelled_check", None)
+        if not callable(cancelled):
+            return messages
+        if cancelled():
+            return messages
+        try:
+            from agent.context_compressor import ContextCompressor
+
+            fresh_tail = self._fresh_tail_boundary(messages)
+            protected_tail = messages[fresh_tail.start:]
+
+            # Fresh per attempt: a timed-out predecessor must never share its
+            # native compressor's mutable summary/cooldown state with a retry.
+            native = ContextCompressor(
+                model=self.model,
+                provider=self.provider,
+                api_mode=self.api_mode,
+                base_url=self.base_url,
+                api_key=self.api_key,
+                config_context_length=self.context_length,
+                threshold_percent=self.threshold_percent,
+                protect_first_n=self.protect_first_n,
+                protect_last_n=fresh_tail.count,
+                summary_model_override=self._config.summary_model or None,
+                abort_on_summary_failure=True,
+                quiet_mode=True,
+            )
+            if fresh_tail.tokens > 0:
+                native.tail_token_budget = fresh_tail.tokens
+            native.on_session_start(self._session_id)
+            native._compression_cancelled_check = cancelled
+            recovered = native.compress(
+                copy.deepcopy(messages),
+                current_tokens=(
+                    current_tokens
+                    if current_tokens is not None and current_tokens > 0
+                    else count_messages_tokens(messages)
+                ),
+                force=True,
+            )
+            def _native_source_rows(
+                rows: List[Dict[str, Any]],
+            ) -> List[Dict[str, Any]]:
+                source_rows: List[Dict[str, Any]] = []
+                for row in rows:
+                    projected = ContextCompressor._strip_context_summary_handoff_message(row)
+                    if projected is not None:
+                        source_rows.append(projected)
+                return source_rows
+
+            recovered_source_rows = _native_source_rows(recovered)
+            protected_source_rows = _native_source_rows(protected_tail)
+            recovered_tail = (
+                recovered_source_rows[-len(protected_source_rows):]
+                if protected_source_rows
+                else []
+            )
+            if (
+                cancelled()
+                or getattr(self, "_compression_cancelled_check", None) is not cancelled
+                or native._last_compress_aborted
+                or not getattr(native, "_last_compression_made_progress", False)
+                or any(
+                    "[digest unavailable for segment " in str(m.get("content", ""))
+                    for m in recovered
+                )
+                or getattr(native, "_last_summary_fallback_used", False)
+                or not recovered
+                or count_messages_tokens(recovered) >= count_messages_tokens(messages)
+                or [
+                    self._message_replay_identity(message)
+                    for message in recovered_tail
+                ] != [
+                    self._message_replay_identity(message)
+                    for message in protected_source_rows
+                ]
+            ):
+                return messages
+        except Exception:
+            logger.warning("Native recovery failed; retaining context")
+            return messages
+        self._last_compression_status = "host_native"
+        self._last_summary_error = None
+        self._last_compression_noop_reason = ""
+        self.compression_count += 1
+        self._last_compress_aborted = False
+        # The helper returns before the host's archive transaction commits.
+        # Persist exact replay proof, then reconcile the next host snapshot so
+        # both adoption and rejection retain every subsequent turn.
+        self._remember_native_recovery_replay_snapshot(recovered)
+        self._ingest_cursor = 0
+        self._ingest_cursor_needs_reconcile = True
+        logger.info(
+            "Native recovery returned a summary for the host's "
+            "archive transaction. LCM source history and frontier are unchanged."
+        )
+        return recovered
+
     def _assemble_committed_compaction_context(
         self,
         working_messages: List[Dict[str, Any]],
@@ -647,6 +786,18 @@ class CompactionMixin:
         4. Check if condensation is needed
         5. Assemble new active context: summaries + fresh tail
         """
+        # Preflight handoffs are one-shot instructions for this invocation.
+        # Consume them before every early return so a later unrelated turn can
+        # never inherit stale cleanup-only state.
+        native_cleanup_only_requested = bool(
+            self._native_recovery_preflight_cleanup_only
+        )
+        boundary_cleanup_only_requested = bool(
+            self._preflight_cleanup_only_due_to_boundary_cooldown
+        )
+        self._native_recovery_preflight_cleanup_only = False
+        self._preflight_cleanup_only_due_to_boundary_cooldown = False
+
         if not messages:
             self._last_compression_status = "noop"
             self._last_compression_noop_reason = "empty message list"
@@ -710,13 +861,25 @@ class CompactionMixin:
         # or provider context after the durable row has been written.
         working_messages = self._ingest_messages(messages)
         self._prepare_retained_user_anchor(working_messages)
+        native_cleanup_only = bool(
+            self._config.native_recovery
+            and native_cleanup_only_requested
+            and not force
+            and not force_overflow
+            and (
+                self.threshold_tokens <= 0
+                or observed_prompt_tokens < self.threshold_tokens
+            )
+        )
         ingest_cleanup_changed_active_context = working_messages != messages
-        cleanup_only_due_to_boundary_cooldown = bool(
-            self._preflight_cleanup_only_due_to_boundary_cooldown
+        cleanup_only_requested = bool(
+            (
+                boundary_cleanup_only_requested
+                or native_cleanup_only
+            )
             and not force_overflow
         )
-        self._preflight_cleanup_only_due_to_boundary_cooldown = False
-        if cleanup_only_due_to_boundary_cooldown:
+        if cleanup_only_requested:
             sanitized_messages = self._sanitize_active_context_messages(
                 working_messages,
                 insert_missing_tool_stubs=False,
@@ -728,6 +891,8 @@ class CompactionMixin:
             self._ingest_cursor = len(sanitized_messages)
             self._last_compression_status = "sanitized"
             self._last_compression_noop_reason = ""
+            if native_cleanup_only:
+                self._last_compress_aborted = False
             self._note_fresh_tail_pressure_relieved()
             self._write_generated_ignored_placeholder_hash_counts(
                 self._generated_placeholder_digest_budget_for_active_replay(
@@ -740,6 +905,14 @@ class CompactionMixin:
                 )
             )
             return sanitized_messages
+        if self._config.native_recovery:
+            # Even a rejected summary must retain ingest's replay protections.
+            # The helper preserves its error/aborted status and returns the
+            # sanitized working input when native recovery cannot finish.
+            return self._compress_native_recovery(
+                working_messages,
+                current_tokens=observed_prompt_tokens,
+            )
         anchor_source_messages = list(working_messages)
         pressure_messages = messages if len(messages) == len(working_messages) else working_messages
         leaf_compacted_this_turn = False

@@ -631,6 +631,9 @@ class LCMEngine(
         # One-shot handoff from preflight: adopt an already-durable replay
         # cleanup during boundary cooldown without running summary work.
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
+        # One-shot handoff for native recovery: deterministic ingest cleanup at
+        # low pressure must be adopted without invoking the native summarizer.
+        self._native_recovery_preflight_cleanup_only = False
         # Temporary source window used only while compress() assembles context.
         # _assemble_context also serves tests and recovery paths directly, so
         # keep anchoring opt-in rather than changing its public behavior.
@@ -3087,6 +3090,11 @@ class LCMEngine(
             and session_id
             and source_session_id != session_id
         )
+        boundary_native_recovery_snapshot_digests = (
+            self._load_native_recovery_replay_snapshot_digests(source_session_id)
+            if can_reassign
+            else []
+        )
         boundary_placeholder_budget = {}
         boundary_placeholder_ordinals: dict[str, set[int]] = {}
         if can_reassign:
@@ -3181,6 +3189,14 @@ class LCMEngine(
 
         self._apply_session_start_metadata(session_id, kwargs)
         self._bind_lifecycle_state(session_id, conversation_id=conversation_id)
+        for digest in boundary_native_recovery_snapshot_digests:
+            self._remember_native_recovery_replay_snapshot_digest(digest)
+        if boundary_native_recovery_snapshot_digests:
+            # A compression boundary is the host's positive archive-adoption
+            # signal. Reconcile the exact emitted snapshot in the new, empty
+            # segment and ingest only turns appended after it.
+            self._ingest_cursor = 0
+            self._ingest_cursor_needs_reconcile = True
         self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
         if frontier > 0:
             state = self._lifecycle.advance_frontier(
@@ -5233,7 +5249,13 @@ class LCMEngine(
                 # invisible to both.  The store still holds the externalized
                 # version for durable recovery via lcm_expand.
                 _orig_role = str(active_replay_messages[absolute_idx].get("role") or "")
-                if _orig_role == "assistant":
+                # Native recovery summarizes this active replay, not the LCM
+                # storage references. Keep already-redacted/filtered user text
+                # visible to that compressor and subsequent turns. The protected
+                # durable copy remains externalized below, as before.
+                if _orig_role == "assistant" or (
+                    _orig_role == "user" and self._config.native_recovery
+                ):
                     continue
                 if active_replay_messages is replay_messages:
                     active_replay_messages = self._copy_active_replay_messages_preserving_generated_ids(
