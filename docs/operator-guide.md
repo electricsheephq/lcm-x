@@ -77,11 +77,16 @@ For a profile-specific install:
 cd ~/.hermes/profiles/myprofile/plugins/hermes-lcm-x && git pull --ff-only
 ```
 
-If you installed a symlink from a separate checkout:
+If you installed a symlink from a separate checkout, update that checkout and
+rerun the installer (it is idempotent):
 
 ```bash
-./scripts/update.sh
+git -C /path/to/lcm-x pull --ff-only && /path/to/lcm-x/scripts/install.sh
 ```
+
+A catalog install (`hermes plugins install hermes-lcm-x`) updates only through
+the reviewed catalog pin: `hermes plugins update hermes-lcm-x`. LCM-X ships no
+self-updater.
 
 Restart Hermes after updating.
 

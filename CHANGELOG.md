@@ -30,6 +30,20 @@ Migration:
    finds a legacy install or config. It never edits `config.yaml` or deletes the old directory;
    remove an older separate copy after verifying so two copies do not both register the engine.
 
+Hermes plugin-catalog admission (#471):
+
+- `post_llm_call` is registered through `ctx.register_hook` (direct `PluginManager._hooks` append
+  kept only for hosts without `register_hook`); `plugin.yaml` declares `provides_hooks`
+  (`pre_llm_call`, `post_llm_call`, `subagent_start`, `subagent_stop`).
+- `scripts/update.sh` is removed (catalog rule: no self-updater). Update a checkout with
+  `git pull --ff-only` + `scripts/install.sh`; catalog installs use
+  `hermes plugins update hermes-lcm-x`.
+- Install-scanner `dangerous` hits neutralized without behavior change (PEM markers in planted
+  bench fixtures built by concatenation, bench env captures without piping the `env` listing, one code
+  comment reworded); `hermes plugins validate` reports `security scan — safe`. The README lists
+  the remaining informational findings.
+- `FINDINGS-VERDICTS-*.md` moved from the repository root to `docs/history/`.
+
 Unchanged: `lcm.db` (name and location), the `lcm:` config block, `LCM_*` environment
 variables, all `lcm_*` tool names, `/lcm`, the bundled skill name `hermes-lcm`, and the log line
 `LCM plugin loaded — lossless context management active`.
