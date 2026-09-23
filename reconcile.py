@@ -95,7 +95,7 @@ _OOB_MESSAGE_BLOCK_MARKER = "[OUT-OF-BAND USER MESSAGE"
 # a duplicate on pathologically long sessions.
 _OOB_DURABILITY_SCAN_LIMIT = 512
 
-# Replay-proof metadata namespaces. Both are session-scoped, versioned, bounded
+# Replay-proof metadata namespaces. All are session-scoped, versioned, bounded
 # and best-effort. They are kept strictly separate so provenance controls
 # consumption:
 #   * ENGINE-assembled compacted snapshots (proven by this engine emitting them
@@ -103,9 +103,13 @@ _OOB_DURABILITY_SCAN_LIMIT = 512
 #   * SESSION-END full-history snapshots (proven only by a successful
 #     current-session ``on_session_end`` persistence) are consumed ONLY by the
 #     current-session full-history session-end ingest, never by ordinary ingest.
+#   * NATIVE-RECOVERY snapshots are exact engine-emitted host handoffs. Ordinary
+#     ingest consumes them, and a host-confirmed compression boundary may copy
+#     them to the new session segment.
 # Host-supplied session-end history must never leak proof into normal ingest.
 _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX = "compacted_active_replay_snapshot_digests"
 _SESSION_END_REPLAY_METADATA_PREFIX = "session_end_replay_snapshot_digests"
+_NATIVE_RECOVERY_REPLAY_METADATA_PREFIX = "native_recovery_replay_snapshot_digests"
 
 
 def _contains_identity_window(
@@ -562,22 +566,58 @@ class ReconcileMixin:
         """Fingerprint summary-only full history for session-end proof only."""
         return self._replay_snapshot_digest(messages, require_lcm_system_note=False)
 
-    def _replay_snapshot_metadata_key(self, prefix: str) -> str:
-        return f"{prefix}:{getattr(self, '_session_id', '')}"
+    def _native_recovery_replay_snapshot_digest(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> str:
+        """Fingerprint an exact host-native recovery result.
 
-    def _load_replay_snapshot_digests(self, prefix: str) -> list[str]:
+        This deliberately has no content heuristic. The digest is trusted only
+        after this engine has emitted the exact snapshot from a successful,
+        cancellation-fenced native recovery, and it lives in its own namespace.
+        That lets the next ingest distinguish host adoption from rejection
+        without treating arbitrary summary-looking user content as replay.
+        """
+        if not messages:
+            return ""
+        identities = [list(self._message_replay_identity(message)) for message in messages]
+        payload = json.dumps(
+            {"version": 1, "messages": identities},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _replay_snapshot_metadata_key(
+        self,
+        prefix: str,
+        session_id: str | None = None,
+    ) -> str:
+        return f"{prefix}:{session_id if session_id is not None else getattr(self, '_session_id', '')}"
+
+    def _load_replay_snapshot_digests(
+        self,
+        prefix: str,
+        session_id: str | None = None,
+    ) -> list[str]:
         """Load a bounded, versioned digest list from a replay-proof namespace.
 
         Any missing/corrupt/unreadable metadata resolves to an empty list, so a
         caller can never mistake a load failure for durable replay proof.
         """
-        if not getattr(self, "_session_id", ""):
+        effective_session_id = (
+            session_id if session_id is not None else getattr(self, "_session_id", "")
+        )
+        if not effective_session_id:
             return []
         store = getattr(self, "_store", None)
         if store is None:
             return []
         try:
-            data = store.read_metadata_json(self._replay_snapshot_metadata_key(prefix))
+            data = store.read_metadata_json(
+                self._replay_snapshot_metadata_key(prefix, effective_session_id)
+            )
         except Exception:
             logger.debug("LCM replay snapshot metadata load failed", exc_info=True)
             return []
@@ -633,6 +673,33 @@ class ReconcileMixin:
         self._remember_replay_snapshot(
             _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX,
             self._compacted_active_replay_snapshot_digest(messages),
+        )
+
+    def _load_native_recovery_replay_snapshot_digests(
+        self,
+        session_id: str | None = None,
+    ) -> list[str]:
+        return self._load_replay_snapshot_digests(
+            _NATIVE_RECOVERY_REPLAY_METADATA_PREFIX,
+            session_id,
+        )
+
+    def _remember_native_recovery_replay_snapshot_digest(
+        self,
+        digest: str,
+    ) -> None:
+        self._remember_replay_snapshot(
+            _NATIVE_RECOVERY_REPLAY_METADATA_PREFIX,
+            digest,
+        )
+
+    def _remember_native_recovery_replay_snapshot(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> None:
+        self._remember_replay_snapshot(
+            _NATIVE_RECOVERY_REPLAY_METADATA_PREFIX,
+            self._native_recovery_replay_snapshot_digest(messages),
         )
 
     # -- Session-end full-history proof (consumed ONLY by current-session
@@ -889,6 +956,9 @@ class ReconcileMixin:
         # ingest/compress/tool-call reconciliation must never consume it, so a
         # host-supplied session-end history cannot silently skip a fresh delta.
         engine_snapshot_digests = set(self._load_compacted_active_replay_snapshot_digests())
+        native_recovery_snapshot_digests = set(
+            self._load_native_recovery_replay_snapshot_digests()
+        )
         session_end_snapshot_digests = (
             set(self._load_session_end_replay_snapshot_digests())
             if allow_session_end_replay_proof
@@ -947,6 +1017,15 @@ class ReconcileMixin:
         empty_prefix_cursor: int | None = None
         for cursor in range(len(messages), -1, -1):
             candidate_messages = messages[:cursor]
+            native_recovery_snapshot_digest = (
+                self._native_recovery_replay_snapshot_digest(candidate_messages)
+            )
+            if (
+                native_recovery_snapshot_digest
+                and native_recovery_snapshot_digest
+                in native_recovery_snapshot_digests
+            ):
+                return cursor
             candidate_visible_messages = [
                 msg
                 for msg in candidate_messages
@@ -1487,6 +1566,26 @@ class ReconcileMixin:
             logger.debug("LCM ingest cursor reconciliation count failed: %s", exc)
             return 0
         if session_count <= 0:
+            native_recovery_snapshot_digests = set(
+                self._load_native_recovery_replay_snapshot_digests()
+            )
+            if native_recovery_snapshot_digests:
+                for cursor in range(len(messages), 0, -1):
+                    digest = self._native_recovery_replay_snapshot_digest(
+                        messages[:cursor]
+                    )
+                    if digest not in native_recovery_snapshot_digests:
+                        continue
+                    self._record_ingest_reconciliation(
+                        action="advanced cursor",
+                        reason="replayed adopted native recovery in empty rollover session",
+                        cursor=cursor,
+                        incoming=len(messages),
+                        session_count=session_count,
+                        stored_tail_count=0,
+                        effective_incoming=cursor,
+                    )
+                    return cursor
             placeholder_budget = self._load_generated_ignored_placeholder_hash_counts()
             placeholder_ordinals = self._load_generated_ignored_placeholder_hash_ordinals()
             if placeholder_budget and placeholder_ordinals:

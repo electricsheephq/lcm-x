@@ -740,8 +740,6 @@ class LCMConfig:
     summary_reasoning_effort: str = ""
     # Optional fallback summary models tried after summary_model/task default.
     summary_fallback_models: list[str] = field(default_factory=list)
-    # Opt-in native context recovery; preserves LCM sources and never changes the frontier.
-    native_recovery: bool = False
     # Consecutive failed summary calls before a route is skipped temporarily.
     summary_circuit_breaker_failure_threshold: int = 2
     # Seconds to skip an open summary route before allowing a retry.
@@ -952,6 +950,11 @@ class LCMConfig:
     config_sources: dict[str, str] = field(default_factory=dict)
     config_source_warnings: list[str] = field(default_factory=list)
     ignored_config_yaml_lcm_keys: list[str] = field(default_factory=list)
+
+    # Appended for positional-constructor compatibility with every field that
+    # predates native recovery. Keyword construction remains preferred.
+    # Opt-in native context recovery; preserves LCM sources and never changes the frontier.
+    native_recovery: bool = False
 
     @classmethod
     def from_env(cls) -> "LCMConfig":

@@ -40,13 +40,25 @@ def install_native(monkeypatch, behavior=None):
             assert kwargs["abort_on_summary_failure"] is True
             assert kwargs["model"] == "gpt-6-astra"
             assert kwargs["provider"] == "openai-codex"
+            self.init_kwargs = kwargs
             calls.append(self)
 
         def on_session_start(self, sid):
             assert sid == "retained"
 
+        @classmethod
+        def _strip_context_summary_handoff_message(cls, message):
+            if message.get("content") == "native summary":
+                return None
+            if "_test_native_merged_source" in message:
+                projected = copy.deepcopy(message)
+                projected["content"] = projected.pop("_test_native_merged_source")
+                return projected
+            return copy.deepcopy(message)
+
         def compress(self, messages, **kwargs):
             assert callable(self._compression_cancelled_check)
+            self.compress_kwargs = kwargs
             if behavior:
                 return behavior(self, messages)
             return [{"role": "assistant", "content": "native summary"}] + messages[-2:]
@@ -110,6 +122,117 @@ def test_native_recovery_persists_subsequent_turns(candidate, monkeypatch, rollo
     assert candidate._store._conn.execute(
         "SELECT role, content FROM messages ORDER BY store_id DESC LIMIT 2"
     ).fetchall() == [(m["role"], m["content"]) for m in reversed(new_turns)]
+
+
+def test_native_recovery_host_rejection_reconciles_original_snapshot(candidate, monkeypatch):
+    install_native(monkeypatch)
+    messages = history()
+    candidate.compress(messages, current_tokens=250_000, force=True)
+    before = candidate._store._conn.execute(
+        "SELECT * FROM messages ORDER BY store_id"
+    ).fetchall()
+    new_turns = [
+        {"role": "user", "content": "Host rejected the archive; keep COBALT-418."},
+        {"role": "assistant", "content": "COBALT-418 retained."},
+    ]
+
+    candidate._ingest_messages(messages + new_turns)
+
+    after = candidate._store._conn.execute(
+        "SELECT * FROM messages ORDER BY store_id"
+    ).fetchall()
+    assert after[:len(before)] == before
+    assert len(after) == len(before) + len(new_turns)
+    assert candidate._store._conn.execute(
+        "SELECT role, content FROM messages ORDER BY store_id DESC LIMIT 2"
+    ).fetchall() == [(m["role"], m["content"]) for m in reversed(new_turns)]
+
+
+def test_native_recovery_replay_proof_survives_cold_restart(tmp_path, monkeypatch):
+    cfg = LCMConfig(
+        database_path=str(tmp_path / "restart-lcm.db"), native_recovery=True,
+        fresh_tail_count=2, fresh_tail_max_tokens=2000, leaf_chunk_tokens=400,
+        dynamic_leaf_chunk_enabled=False, embeddings_enabled=False,
+        temporal_rollups_enabled=False, empty_lifecycle_gc_enabled=False,
+    )
+    first = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    first.on_session_start("retained", conversation_id="restart-conversation")
+    first.model, first.provider, first.api_mode = "gpt-6-astra", "openai-codex", "codex_responses"
+    first.context_length, first.threshold_tokens = 272000, 204000
+    first._compression_cancelled_check = lambda: False
+    calls = install_native(monkeypatch)
+    messages = history()
+    recovered = first.compress(messages, current_tokens=250_000, force=True)
+    assert calls
+    first.shutdown()
+
+    second = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    second.on_session_start("retained", conversation_id="restart-conversation")
+    new_turns = [
+        {"role": "user", "content": "Cold restart constraint: preserve VIOLET-772."},
+        {"role": "assistant", "content": "VIOLET-772 retained."},
+    ]
+    try:
+        before_count = second._store.get_session_count("retained")
+        second._ingest_messages(recovered + new_turns)
+        assert second._store.get_session_count("retained") == before_count + len(new_turns)
+        assert second._store._conn.execute(
+            "SELECT role, content FROM messages ORDER BY store_id DESC LIMIT 2"
+        ).fetchall() == [(m["role"], m["content"]) for m in reversed(new_turns)]
+    finally:
+        second.shutdown()
+
+
+def test_native_recovery_honors_resolved_tail_and_host_token_observation(candidate, monkeypatch):
+    candidate._config.fresh_tail_count = 5
+    candidate._config.fresh_tail_max_tokens = 120
+    messages = history()
+    expected_tail = candidate._fresh_tail_boundary(messages)
+
+    def preserve_resolved_tail(native, incoming):
+        return [{"role": "assistant", "content": "native summary"}] + incoming[-expected_tail.count:]
+
+    calls = install_native(monkeypatch, preserve_resolved_tail)
+    observed_tokens = 231_337
+    recovered = candidate.compress(messages, current_tokens=observed_tokens, force=True)
+
+    assert candidate.last_compression_status == "host_native"
+    assert calls[0].init_kwargs["protect_last_n"] == expected_tail.count
+    assert calls[0].tail_token_budget == expected_tail.tokens
+    assert calls[0].compress_kwargs["current_tokens"] == observed_tokens
+    assert [candidate._message_replay_identity(message) for message in recovered[-expected_tail.count:]] == [
+        candidate._message_replay_identity(message) for message in messages[expected_tail.start:]
+    ]
+
+
+def test_native_recovery_accepts_summary_merged_into_protected_tail(candidate, monkeypatch):
+    messages = history()
+
+    def merge_summary_into_tail(native, incoming):
+        tail = copy.deepcopy(incoming[-2:])
+        tail[0]["_test_native_merged_source"] = tail[0]["content"]
+        tail[0]["content"] = "native summary plus preserved tail carrier"
+        return tail
+
+    install_native(monkeypatch, merge_summary_into_tail)
+    recovered = candidate.compress(messages, current_tokens=250_000, force=True)
+
+    assert recovered != messages
+    assert candidate.last_compression_status == "host_native"
+
+
+def test_cleanup_only_handoff_precedes_native_summary_and_is_consumed(candidate, monkeypatch):
+    calls = install_native(monkeypatch)
+    candidate._preflight_cleanup_only_due_to_boundary_cooldown = True
+
+    result = candidate.compress(history(), current_tokens=190_000)
+
+    assert calls == []
+    assert result == history()
+    assert candidate._preflight_cleanup_only_due_to_boundary_cooldown is False
+    candidate._native_recovery_preflight_cleanup_only = True
+    assert candidate.compress([]) == []
+    assert candidate._native_recovery_preflight_cleanup_only is False
 
 
 def test_subthreshold_ingest_cleanup_adopts_safe_replay_without_native_summary(candidate, monkeypatch):

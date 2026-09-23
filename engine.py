@@ -3090,6 +3090,11 @@ class LCMEngine(
             and session_id
             and source_session_id != session_id
         )
+        boundary_native_recovery_snapshot_digests = (
+            self._load_native_recovery_replay_snapshot_digests(source_session_id)
+            if can_reassign
+            else []
+        )
         boundary_placeholder_budget = {}
         boundary_placeholder_ordinals: dict[str, set[int]] = {}
         if can_reassign:
@@ -3184,6 +3189,14 @@ class LCMEngine(
 
         self._apply_session_start_metadata(session_id, kwargs)
         self._bind_lifecycle_state(session_id, conversation_id=conversation_id)
+        for digest in boundary_native_recovery_snapshot_digests:
+            self._remember_native_recovery_replay_snapshot_digest(digest)
+        if boundary_native_recovery_snapshot_digests:
+            # A compression boundary is the host's positive archive-adoption
+            # signal. Reconcile the exact emitted snapshot in the new, empty
+            # segment and ingest only turns appended after it.
+            self._ingest_cursor = 0
+            self._ingest_cursor_needs_reconcile = True
         self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
         if frontier > 0:
             state = self._lifecycle.advance_frontier(
