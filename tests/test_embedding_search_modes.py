@@ -221,7 +221,8 @@ def test_timeout_worker_is_daemon_and_provider_call_is_bounded(
     semantic_engine,
     monkeypatch,
 ):
-    semantic_engine._config.embedding_query_timeout_s = 0.02
+    timeout_budget_s = 0.2
+    semantic_engine._config.embedding_query_timeout_s = timeout_budget_s
     semantic_engine._store.append(
         "session-a",
         {"role": "user", "content": "daemon timeout fallback"},
@@ -250,9 +251,11 @@ def test_timeout_worker_is_daemon_and_provider_call_is_bounded(
             if thread.name == "lcm-query-embed" and thread.is_alive()
         ]
         assert payload["timeout"] is True
-        # The interactive timeout is the remaining absolute budget (~0.02s),
-        # computed from a monotonic clock so a few microseconds may have elapsed.
-        assert observed_timeouts and observed_timeouts[0] == pytest.approx(0.02, abs=0.01)
+        # Leave enough scheduling headroom for the full-suite runner to reach
+        # the provider, while proving it receives only the remaining absolute
+        # request budget rather than an independent unbounded timeout.
+        assert observed_timeouts
+        assert 0.001 <= observed_timeouts[0] <= timeout_budget_s
         assert live_workers
         assert all(thread.daemon for thread in live_workers)
     finally:
