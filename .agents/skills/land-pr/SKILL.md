@@ -74,10 +74,10 @@ printf '%s\n' "$files" \
     printf '%s\n' '{"changed_files": "unknown", "named_risks": null, "required_review_lanes": ["acceptance", "adversarial"]}'
     false; }
 
-gh api graphql --paginate \
+gh api graphql \
   -F owner=electricsheephq -F name=lcm-x -F number=<PR> \
   -f query='
-query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       headRefOid reviewDecision
@@ -94,7 +94,7 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
       reviewThreads(first: 100, after: $endCursor) {
         nodes {
           isResolved
-          comments(first: 100) { nodes { url body author { login __typename } } }
+          comments(first: 100) { totalCount nodes { url body author { login __typename } } }
         }
         pageInfo { hasNextPage endCursor }
       }
@@ -121,7 +121,8 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
   thread whose opening comment author is a `Bot`, read the comment bodies: the thread needs a
   comment by a `User` author that records one of those dispositions. A bot comment after it does
   not undo it, and a reply that records none of them does not count; list and stop on a resolved
-  bot thread without one.
+  bot thread without one. The query returns at most 100 comments per thread: when a thread's
+  `totalCount` exceeds 100, open its `url` and read every comment before deciding.
 - After a review-driven head change, require new reviews for the changed risk surface and
   re-read the head SHA and checks.
 - Give every verified finding one terminal disposition. Do not turn unverified possibilities

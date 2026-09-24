@@ -186,7 +186,11 @@ def test_codeowners_and_landing_policy_use_exact_head_ci_and_review_obligation()
     assert "check the head it names equals `$head`" in " ".join(landing.split())
     assert "A readiness-only invocation stays read-only." in " ".join(landing.split())
     assert "`REVIEWED_LANE_ONLY`" in review
-    assert "comments(first: 100) { nodes { url body author { login __typename } } }" in landing
+    assert "comments(first: 100) { totalCount nodes { url body author { login __typename } } }" in landing
+    assert "when a thread's `totalCount` exceeds 100, open its `url` and read every comment" in " ".join(
+        landing.split()
+    )
+    assert "query($owner: String!, $name: String!, $number: Int!) {" in landing
     assert "needs a comment by a `User` author that records one of those dispositions" in " ".join(
         landing.split()
     )
