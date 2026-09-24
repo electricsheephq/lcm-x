@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import os
+
 import hermes_lcm.engine as lcm_engine_module
+import pytest
 
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.tokens import count_message_tokens
 from tests.test_compression_boundary import _stub_summarizer
+
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("LCM_SCALE_TESTS") != "1",
+    reason="opt-in: set LCM_SCALE_TESTS=1",
+)
 
 
 def _message(role: str, index: int, padding_words: int) -> dict[str, str]:
