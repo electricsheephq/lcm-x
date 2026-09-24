@@ -23,8 +23,14 @@ from typing import Any, Dict, List, Optional
 
 from .dag import SummaryNode
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
+from .message_analysis import _matched_tool_call_ids
 from .message_content import text_content_for_pattern_matching
-from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, _COMPACTION_COMMIT_PROOF_VERSION, _commit_proof_identity_digest
+from .reconcile import (
+    _COMPACTION_COMMIT_PROOF_METADATA_PREFIX,
+    _COMPACTION_COMMIT_PROOF_VERSION,
+    _commit_proof_identity_digest,
+    _has_lossy_redacted_identity,
+)
 from .sanitize import _contains_sensitive_redaction
 from .sqlite_util import _is_sqlite_locked_error
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
@@ -564,14 +570,22 @@ class CompactionMixin:
                 # No-progress compress: Hermes has nothing to commit, and an
                 # end call with this list must stay a real session end.
                 return
-            proof["output_effective"] = [
-                self._proof_replay_identity(m)
-                for m in result
-                if not self._is_replayed_context_scaffold_message(m)
-            ]
+            effective_rows = [m for m in result if not self._is_replayed_context_scaffold_message(m)]
+            proof["output_effective"] = [self._proof_replay_identity(m) for m in effective_rows]
+            proof["native"] = self._last_compression_status == "host_native"
+            if proof["native"]:
+                matched_tool_ids = _matched_tool_call_ids(result)
+                proof["droppable"] = [
+                    identity[0] == "tool"
+                    and bool(identity[2])
+                    and identity[2] not in matched_tool_ids
+                    and not _has_lossy_redacted_identity(identity)
+                    for identity in proof["output_effective"]
+                ]
+                proof["native_summary_index"] = getattr(self, "_last_native_summary_index", None)
             proof["published"] = self._last_compression_status == "compacted"
             self._compress_commit_proof = proof
-            if proof["published"]:
+            if proof["published"] or proof["native"]:
                 self._persist_compress_commit_proof(proof)
         except Exception:
             self._compress_commit_proof = None
@@ -580,8 +594,8 @@ class CompactionMixin:
         """Durable twin of the process-local proof: lets a restarted/resumed
         process re-index the host's post-compaction list without guessing.
 
-        Written only for a published compaction; ``last_store_id`` marks where
-        the rows stored after the compaction begin.
+        Written for a published LCM compaction or adopted native recovery;
+        ``last_store_id`` marks where later rows begin.
         """
         try:
             tail = self._store.get_session_tail(self._session_id, limit=1)
@@ -597,6 +611,9 @@ class CompactionMixin:
                     _commit_proof_identity_digest(identity) for identity in proof["output_effective"]
                 ],
                 "last_store_id": int(tail[-1]["store_id"]) if tail else 0,
+                "native": bool(proof.get("native")),
+                "droppable": list(proof.get("droppable") or []),
+                "native_summary_index": proof.get("native_summary_index"),
             }
             if not proof["output_effective"]:
                 # Scaffold-only output: bind the proof to the emitted rows (#484 item 11l).
@@ -708,13 +725,9 @@ class CompactionMixin:
             self._last_compression_noop_reason = reason
             logger.warning(
                 "Native recovery rejected; retaining context "
-                "(reason=%s, input_rows=%d, recovered_rows=%d, "
-                "protected_rows=%d, details=%s)",
-                reason,
-                len(messages),
-                int(details.pop("recovered_rows", 0)),
-                int(details.pop("protected_rows", 0)),
-                details or None,
+                "(reason=%s, input_rows=%d, recovered_rows=%d, protected_rows=%d, details=%s)",
+                reason, len(messages), int(details.pop("recovered_rows", 0)),
+                int(details.pop("protected_rows", 0)), details or None,
             )
             return messages
 
@@ -735,11 +748,7 @@ class CompactionMixin:
             persisted_key = getattr(context_compressor, "_DB_PERSISTED_MARKER", None)
             split = bool(tail_key and persisted_key and protected_tail)
             if split and len(prefix) <= self.protect_first_n + 4:
-                return _reject(
-                    "prefix_too_short",
-                    protected_rows=len(protected_tail),
-                    prefix_rows=len(prefix),
-                )
+                return _reject("prefix_too_short", protected_rows=len(protected_tail), prefix_rows=len(prefix))
 
             # Fresh per attempt: a timed-out predecessor must never share its
             # native compressor's mutable summary/cooldown state with a retry.
@@ -768,8 +777,7 @@ class CompactionMixin:
             )
             suffix_has_real_user = any(
                 message.get("role") == "user"
-                and isinstance(message.get("content"), str)
-                and bool(message["content"].strip())
+                and isinstance(message.get("content"), str) and bool(message["content"].strip())
                 and not (callable(synthetic_user) and synthetic_user(message))
                 for message in protected_tail
             )
@@ -790,25 +798,20 @@ class CompactionMixin:
                 **native_kwargs,
             )
             if split:
-                carried_tail = []
-                for message in protected_tail:
+                def _carry(message):
                     carried = copy.deepcopy(message)
                     carried.pop(persisted_key, None)
                     carried[tail_key] = True
-                    carried_tail.append(carried)
-                recovered = recovered_head + carried_tail
+                    return carried
+                recovered = recovered_head + [_carry(message) for message in protected_tail]
             else:
                 recovered = recovered_head
 
-            def _native_source_rows(
-                rows: List[Dict[str, Any]],
-            ) -> List[Dict[str, Any]]:
-                source_rows: List[Dict[str, Any]] = []
-                for row in rows:
-                    projected = ContextCompressor._strip_context_summary_handoff_message(row)
-                    if projected is not None:
-                        source_rows.append(projected)
-                return source_rows
+            def _native_source_rows(rows):
+                return [
+                    projected for row in rows
+                    if (projected := ContextCompressor._strip_context_summary_handoff_message(row)) is not None
+                ]
 
             recovered_source_rows = _native_source_rows(recovered)
             protected_source_rows = _native_source_rows(protected_tail)
@@ -817,67 +820,36 @@ class CompactionMixin:
                 if protected_source_rows
                 else []
             )
-            guard_counts = {
-                "recovered_rows": len(recovered),
-                "protected_rows": len(protected_source_rows),
-            }
-            if cancelled():
-                return _reject("cancelled", **guard_counts)
-            if getattr(self, "_compression_cancelled_check", None) is not cancelled:
-                return _reject("binding_changed", **guard_counts)
-            if native._last_compress_aborted:
-                telemetry = getattr(native, "_last_compression_telemetry", {})
-                return _reject(
-                    "native_aborted",
-                    failure_class=(telemetry or {}).get("failure_class"),
-                    **guard_counts,
-                )
-            if not getattr(native, "_last_compression_made_progress", False):
-                return _reject("no_progress", **guard_counts)
-            if any(
-                "[digest unavailable for segment " in str(message.get("content", ""))
-                for message in recovered
-            ):
-                return _reject("digest_unavailable", **guard_counts)
-            if getattr(native, "_last_summary_fallback_used", False):
-                return _reject("fallback_used", **guard_counts)
-            if not recovered_head:
-                return _reject("empty", **guard_counts)
             recovered_tokens = count_messages_tokens(recovered)
             input_tokens = count_messages_tokens(messages)
-            if recovered_tokens >= input_tokens:
-                return _reject(
-                    "not_smaller",
-                    input_tokens=input_tokens,
-                    recovered_tokens=recovered_tokens,
-                    **guard_counts,
-                )
             recovered_identities = [
                 self._message_replay_identity(message) for message in recovered_tail
             ]
             protected_identities = [
                 self._message_replay_identity(message) for message in protected_source_rows
             ]
-            if recovered_identities != protected_identities:
-                changed_offsets = [
-                    index
-                    for index, pair in enumerate(zip(recovered_identities, protected_identities))
-                    if pair[0] != pair[1]
-                ]
-                changed_rows = len(changed_offsets) + abs(
-                    len(recovered_identities) - len(protected_identities)
-                )
-                first_changed_offset = (
-                    changed_offsets[0]
-                    if changed_offsets
-                    else min(len(recovered_identities), len(protected_identities))
-                )
-                return _reject(
-                    "suffix_changed",
-                    changed_rows=changed_rows,
-                    first_changed_offset=first_changed_offset,
-                    **guard_counts,
-                )
+            reason = next((name for name, failed in (
+                ("cancelled", cancelled()),
+                ("binding_changed", getattr(self, "_compression_cancelled_check", None) is not cancelled),
+                ("native_aborted", native._last_compress_aborted),
+                ("no_progress", not getattr(native, "_last_compression_made_progress", False)),
+                ("digest_unavailable", any("[digest unavailable for segment " in str(m.get("content", "")) for m in recovered)),
+                ("fallback_used", getattr(native, "_last_summary_fallback_used", False)),
+                ("empty", not recovered_head),
+                ("not_smaller", recovered_tokens >= input_tokens),
+                ("suffix_changed", recovered_identities != protected_identities),
+            ) if failed), "")
+            if reason:
+                details = {"recovered_rows": len(recovered), "protected_rows": len(protected_source_rows)}
+                if reason == "native_aborted":
+                    details["failure_class"] = (getattr(native, "_last_compression_telemetry", {}) or {}).get("failure_class")
+                elif reason == "not_smaller":
+                    details.update(input_tokens=input_tokens, recovered_tokens=recovered_tokens)
+                elif reason == "suffix_changed":
+                    changed_offsets = [index for index, pair in enumerate(zip(recovered_identities, protected_identities)) if pair[0] != pair[1]]
+                    details["changed_rows"] = len(changed_offsets) + abs(len(recovered_identities) - len(protected_identities))
+                    details["first_changed_offset"] = changed_offsets[0] if changed_offsets else min(len(recovered_identities), len(protected_identities))
+                return _reject(reason, **details)
         except Exception as exc:
             self._last_native_recovery_rejection = "exception"
             self._last_compression_noop_reason = "exception"
@@ -892,14 +864,14 @@ class CompactionMixin:
         self.compression_count += 1
         self._last_compress_aborted = False
         # The helper returns before the host's archive transaction commits.
-        # Persist exact replay proof, then reconcile the next host snapshot so
-        # both adoption and rejection retain every subsequent turn.
         self._remember_native_recovery_replay_snapshot(recovered)
-        self._ingest_cursor = 0
-        self._ingest_cursor_needs_reconcile = True
+        self._ingest_cursor = len(recovered)
+        self._ingest_cursor_needs_reconcile = False
+        self._last_native_summary_index = next((i for i, row in enumerate(recovered) if ContextCompressor._strip_context_summary_handoff_message(row) != row), None)
         logger.info(
-            "Native recovery returned a summary for the host's "
-            "archive transaction. LCM source history and frontier are unchanged."
+            "Native recovery returned a summary for the host archive transaction "
+            "(input_rows=%d, recovered_rows=%d, cursor=%d); LCM source history and frontier are unchanged.",
+            len(messages), len(recovered), self._ingest_cursor,
         )
         return recovered
 

@@ -17,10 +17,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   LCM never saw before a crash is covered too), the durable proof walk, and the in-order store-id
   mapper (either form, one-to-one). Full-replay and tail classification stay exact.
   The durable commit proof moves to version 3; version-2 (rc3) proofs are still honoured.
-- Native recovery now runs Hermes compression only on history before LCM-X's
-  protected fresh tail, then carries that tail forward verbatim with Hermes's
-  compaction markers. This prevents host pruning, deduplication, and media
-  cleanup from rewriting protected replay rows. (#482)
+- Native recovery now compresses only history before LCM-X's protected fresh
+  tail, carries that tail forward verbatim, and records adopted-output proof so
+  host commits do not duplicate durable rows. (#482, #487)
 
 ## v0.24.0 - BREAKING: plugin renamed to hermes-lcm-x, engine to lcm-x (unreleased)
 

@@ -1,6 +1,7 @@
 """Native recovery must not convert a rejected LCM claim into committed coverage."""
 import copy
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +10,7 @@ import hermes_lcm.engine as engine_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.externalize import extract_externalized_ref, load_externalized_payload
+from hermes_lcm.reconcile import _commit_proof_identity_digest
 
 
 @pytest.fixture
@@ -690,3 +692,118 @@ def test_native_recovery_stores_unverified_summary_shaped_user_text(candidate, m
     candidate._ingest_messages(recovered + [{"role": "user", "content": forged}])
     stored = [content for (content,) in candidate._store._conn.execute("SELECT content FROM messages")]
     assert any("FRESH-6620" in (content or "") for content in stored)
+
+
+def _native_proof(engine, rows, droppable, summary_index=0):
+    return {
+        "output_effective": [engine._message_replay_identity(row) for row in rows],
+        "droppable": droppable,
+        "native_summary_index": summary_index,
+    }
+
+
+def test_native_host_repair_remap_is_orphan_tool_only(candidate):
+    summary = {"role": "assistant", "content": "native summary"}
+    orphan = {"role": "tool", "tool_call_id": "orphan", "content": "dropped"}
+    kept = {"role": "user", "content": "kept source"}
+    fresh = {"role": "assistant", "content": "fresh delta"}
+    proof = _native_proof(candidate, [summary, orphan, kept], [False, True, False])
+
+    assert candidate._remap_cursor_through_native_host_repair([summary, orphan, kept], proof) == 3
+    assert candidate._remap_cursor_through_native_host_repair([summary, kept, fresh], proof) == 2
+
+    non_tool_gap = _native_proof(candidate, [summary, fresh, kept], [False, False, False])
+    assert candidate._remap_cursor_through_native_host_repair([summary, kept], non_tool_gap) == 1
+    assert candidate._remap_cursor_through_native_host_repair([fresh, summary, kept], proof) is None
+
+
+def test_native_host_repair_keeps_new_identity_duplicate_after_orphan_gap(candidate):
+    summary = {"role": "assistant", "content": "native summary"}
+    orphan = {"role": "tool", "tool_call_id": "orphan", "content": "dropped"}
+    adopted = {"role": "user", "content": "same visible row"}
+    proof = _native_proof(candidate, [summary, orphan, adopted], [False, True, False])
+
+    # The first copy is the adopted row; the identical second copy is new and
+    # must remain the delta start instead of being consumed as replay.
+    host = [summary, adopted, dict(adopted)]
+    assert candidate._remap_cursor_through_native_host_repair(host, proof) == 2
+
+
+def _write_durable_native_proof(engine, rows, droppable, *, native=True):
+    payload = {
+        "version": 2,
+        "hermes_home": str(engine._hermes_home or ""),
+        "conversation_id": engine._conversation_id,
+        "created_at": time.time(),
+        "effective_sha256": [
+            _commit_proof_identity_digest(engine._message_replay_identity(row)) for row in rows
+        ],
+        "last_store_id": 0,
+        "native": native,
+        "droppable": droppable,
+        "native_summary_index": 0,
+    }
+    engine._store.write_metadata_json(["compaction_commit_proof:retained"], json.dumps(payload))
+
+
+def test_durable_native_proof_skips_only_orphan_tool_results(candidate):
+    summary = {"role": "assistant", "content": "native summary"}
+    orphan = {"role": "tool", "tool_call_id": "orphan", "content": "dropped"}
+    kept = {"role": "user", "content": "kept source"}
+    _write_durable_native_proof(candidate, [summary, orphan, kept], [False, True, False])
+    assert candidate._cursor_from_durable_commit_proof([summary, kept]) == 2
+
+    _write_durable_native_proof(candidate, [summary, orphan, kept], [False, True, False], native=False)
+    assert candidate._cursor_from_durable_commit_proof([summary, kept]) is None
+
+
+def test_durable_native_proof_refuses_lossy_identity_before_matching(candidate):
+    lossy = {
+        "role": "user",
+        "content": "[LCM sensitive redaction: name=password_assignment; chars=12]",
+    }
+    _write_durable_native_proof(candidate, [lossy], [False])
+    assert candidate._cursor_from_durable_commit_proof([lossy]) is None
+
+
+def test_native_rejection_prefix_refuses_lossy_identity_before_matching(candidate):
+    lossy = {
+        "role": "user",
+        "content": "[LCM sensitive redaction: name=password_assignment; chars=12]",
+    }
+    identity = candidate._message_replay_identity(lossy)
+    candidate._compress_commit_proof = {
+        "session_id": "retained", "conversation_id": "conversation", "consulted": False,
+        "output": [identity], "input": [identity], "native": True,
+    }
+    candidate._ingest_cursor = 1
+
+    candidate._ingest_messages([lossy])
+
+    assert candidate._store._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
+
+
+def test_consumed_native_proof_rekeys_on_rotation(candidate, monkeypatch):
+    install_native(monkeypatch)
+    messages = history()
+    recovered = candidate.compress(messages, current_tokens=250_000, force=True)
+    candidate.on_session_end("retained", messages)
+    assert candidate._compress_commit_proof["end_consumed"] is True
+
+    candidate.on_session_start("retained-child", boundary_reason="compression", old_session_id="retained")
+    assert candidate._ingest_cursor == len(recovered)
+    assert candidate._ingest_cursor_needs_reconcile is False
+    assert candidate._compress_commit_proof["session_id"] == "retained-child"
+    assert candidate._store.read_metadata_json("compaction_commit_proof:retained-child")["native"] is True
+
+
+def test_unconsumed_native_proof_still_reconciles_on_rotation(candidate, monkeypatch):
+    install_native(monkeypatch)
+    messages = history()
+    candidate.compress(messages, current_tokens=250_000, force=True)
+    assert candidate._compress_commit_proof["end_consumed"] is False
+
+    candidate.on_session_start("retained-child", boundary_reason="compression", old_session_id="retained")
+    assert candidate._compress_commit_proof is None
+    assert candidate._ingest_cursor == 0
+    assert candidate._ingest_cursor_needs_reconcile is True

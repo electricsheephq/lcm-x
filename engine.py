@@ -133,6 +133,7 @@ from .message_patterns import compile_message_patterns, matches_message_pattern
 from .aux_session import AuxiliarySessionMixin
 from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+from .reconcile import _has_lossy_redacted_identity
 from .compaction import CompactionMixin
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
@@ -3266,7 +3267,13 @@ class LCMEngine(
         self._bind_lifecycle_state(session_id, conversation_id=conversation_id)
         for digest in boundary_native_recovery_snapshot_digests:
             self._remember_native_recovery_replay_snapshot_digest(digest)
-        if boundary_native_recovery_snapshot_digests:
+        commit_proof = getattr(self, "_compress_commit_proof", None)
+        native_proof_carries = bool(
+            commit_proof and commit_proof.get("native") and commit_proof.get("end_consumed")
+            and commit_proof.get("session_id") == source_session_id and not self._ingest_cursor_needs_reconcile
+            and self._ingest_cursor == len(commit_proof.get("output") or ())
+        )
+        if boundary_native_recovery_snapshot_digests and not native_proof_carries:
             # A compression boundary is the host's positive archive-adoption
             # signal. Reconcile the exact emitted snapshot in the new, empty
             # segment and ingest only turns appended after it.
@@ -3285,7 +3292,6 @@ class LCMEngine(
         self._compression_boundary_ingest_pending = can_reassign
         self._compression_boundary_active_placeholder_digest_budget = boundary_placeholder_budget
         self._compression_boundary_active_placeholder_digest_ordinals = boundary_placeholder_ordinals
-        commit_proof = getattr(self, "_compress_commit_proof", None)
         if (
             can_reassign
             and commit_proof
@@ -3300,7 +3306,7 @@ class LCMEngine(
             # trusting a positional cursor, and persist it for a resumed child.
             commit_proof["session_id"] = session_id
             commit_proof["input"] = None
-            if commit_proof.get("published"):
+            if commit_proof.get("published") or commit_proof.get("native"):
                 self._persist_compress_commit_proof(commit_proof)
         elif can_reassign:
             # No transferred commit proof (proof creation failed, an end that
@@ -4814,6 +4820,26 @@ class LCMEngine(
                 return None
         return len(messages) if effective == target else None
 
+    def _remap_cursor_through_native_host_repair(self, messages, proof) -> Optional[int]:
+        target, droppable, summary_index = list(proof.get("output_effective") or []), list(proof.get("droppable") or []), proof.get("native_summary_index")
+        if summary_index is None or len(droppable) != len(target) or any(_has_lossy_redacted_identity(i) for i in target):
+            return None
+        matched = 0
+        for index, message in enumerate(messages):
+            if self._is_verified_replay_scaffold_message(message):
+                continue
+            identity = self._proof_replay_identity(message)
+            if _has_lossy_redacted_identity(identity):
+                return None
+            try:
+                next_match = target.index(identity, matched)
+            except ValueError:
+                return index if matched > int(summary_index) else None
+            if not all(droppable[matched:next_match]):
+                return index if matched > int(summary_index) else None
+            matched = next_match + 1
+        return len(messages) if matched > int(summary_index) and all(droppable[matched:]) else None
+
     _LCM_SUMMARY_PART_HEADER_RE = re.compile(
         r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d(\d+), node (\d+)\)\]\n"
     )
@@ -5151,20 +5177,27 @@ class LCMEngine(
             # reconciled cursor that equals len(output) must not re-arm it.
             proof["consulted"] = True
             host_input = proof.get("input")
-            if n >= self._ingest_cursor and [
+            native_lossy = proof.get("native") and any(
+                _has_lossy_redacted_identity(identity)
+                for identities in (proof.get("output"), host_input)
+                for identity in identities or ()
+            )
+            if native_lossy:
+                self._ingest_cursor_needs_reconcile = True
+            elif n >= self._ingest_cursor and [
                 self._proof_replay_identity(m) for m in messages[: self._ingest_cursor]
             ] == proof["output"]:
                 self._compress_commit_proof = None
-            elif proof.get("end_consumed") and host_input is not None and n >= len(host_input) and [
+            elif (proof.get("end_consumed") or proof.get("native")) and host_input is not None and n >= len(host_input) and [
                 self._proof_replay_identity(m) for m in messages[: len(host_input)]
             ] == host_input:
-                # The host committed, then kept the compress() input (anti-growth
-                # refusal or rollback): every row of it is durable, resume after it.
                 self._ingest_cursor = len(host_input)
                 cursor = self._ingest_cursor
                 self._compress_commit_proof = None
             else:
                 remapped = self._remap_cursor_through_host_merge(messages, proof)
+                if remapped is None and proof.get("native"):
+                    remapped = self._remap_cursor_through_native_host_repair(messages, proof)
                 if remapped is not None:
                     self._ingest_cursor = remapped
                     cursor = remapped
