@@ -27,6 +27,7 @@ from .db_bootstrap import (
 )
 from .diagnostics import (
     COMPACTION_REPLAY_DUPLICATES_ACTION,
+    COMPACTION_REPLAY_SCAN_INCOMPLETE,
     _has_lifecycle_fragmentation,
     _state_db_path_for_engine,
     doctor_guidance_for_checks,
@@ -1621,10 +1622,15 @@ def _doctor_text(engine) -> str:
             observations.append(
                 "compaction_replay_duplicates: "
                 f"{replay_duplicates['replayed_rows_total']} row(s) in "
-                f"{replay_duplicates['sessions_with_replayed_runs']} session(s) repeat an earlier run "
+                f"{replay_duplicates['sessions_with_replayed_runs']} session(s) form candidate replay runs "
                 f"(#483 class, detect-only); sample={sample}"
             )
             recommended_actions.append(COMPACTION_REPLAY_DUPLICATES_ACTION)
+        elif not replay_duplicates["scan_complete"]:
+            observations.append(
+                "compaction_replay_duplicates: none within scanned coverage "
+                f"({replay_duplicates['rows_scanned']} rows; window {replay_duplicates['window']})"
+            )
         else:
             observations.append("compaction_replay_duplicates: none")
 
@@ -1719,12 +1725,19 @@ def _doctor_text(engine) -> str:
     if lifecycle_stats.get("error") or _has_lifecycle_fragmentation(lifecycle_stats):
         lifecycle_status = "fail" if lifecycle_stats.get("error") else "warn"
         triage_checks.append({"check": "lifecycle_fragmentation", "status": lifecycle_status, "detail": lifecycle_stats})
-    if replay_duplicates.get("error") or replay_duplicates.get("replayed_rows_total"):
-        triage_checks.append({
+    if (
+        replay_duplicates.get("error")
+        or replay_duplicates.get("replayed_rows_total")
+        or replay_duplicates.get("scan_complete") is False
+    ):
+        replay_check = {
             "check": "compaction_replay_duplicates",
             "status": "fail" if replay_duplicates.get("error") else "warn",
             "detail": replay_duplicates,
-        })
+        }
+        if replay_duplicates.get("scan_complete") is False:
+            replay_check["reason"] = COMPACTION_REPLAY_SCAN_INCOMPLETE
+        triage_checks.append(replay_check)
     triage_guidance = doctor_guidance_for_checks(triage_checks)
 
     doctor_status = "issues-found" if integrity != "ok" or issues else (

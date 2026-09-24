@@ -3295,7 +3295,14 @@ class LCMEngine(
         self._compression_boundary_active_placeholder_digest_budget = boundary_placeholder_budget
         self._compression_boundary_active_placeholder_digest_ordinals = boundary_placeholder_ordinals
         commit_proof = getattr(self, "_compress_commit_proof", None)
-        if can_reassign and commit_proof and commit_proof.get("session_id") == source_session_id:
+        if (
+            can_reassign
+            and commit_proof
+            and commit_proof.get("session_id") == source_session_id
+            and commit_proof.get("end_consumed")
+            and not self._ingest_cursor_needs_reconcile
+            and self._ingest_cursor == len(commit_proof.get("output") or ())
+        ):
             # The child segment starts from compress()'s output: re-key the proof
             # so its first ingest re-indexes a host-merged prefix instead of
             # trusting a positional cursor, and persist it for a resumed child.
@@ -3303,6 +3310,13 @@ class LCMEngine(
             commit_proof["input"] = None
             if commit_proof.get("published"):
                 self._persist_compress_commit_proof(commit_proof)
+        elif can_reassign:
+            # No transferred commit proof (proof creation failed, an end that
+            # ingested, native recovery): the cursor does not index the child's
+            # list. Reconcile it against the store (#484 round 2).
+            self._compress_commit_proof = None
+            self._ingest_cursor = 0
+            self._ingest_cursor_needs_reconcile = True
         self._log_session_filter_diagnostics()
 
     def on_session_start(self, session_id: str, **kwargs) -> None:
@@ -3890,12 +3904,24 @@ class LCMEngine(
             and len(messages) == len(proof["input"])
             and [self._message_replay_identity(m) for m in messages] == proof["input"]
         ):
-            # Compaction commit, not a real session end (#483): every input row
-            # is already durable and the cursor indexes compress()'s output.
-            proof["end_consumed"] = True  # one-shot; a second identical end finalizes
+            # Compaction commit (#483): every input row is already durable and the
+            # cursor indexes compress()'s output, so skip the re-ingest. Still
+            # finalize: the end may be a real exit after a cancelled commit, and
+            # the compression start rebinds this session's own frontier (C3).
+            proof["end_consumed"] = True  # one-shot; a second identical end re-ingests
+            try:
+                with _temporary_sqlite_busy_timeout(
+                    [getattr(self._lifecycle, "_conn", None)], _SESSION_END_BUSY_TIMEOUT_MS
+                ):
+                    self._lifecycle.finalize_session(
+                        self._conversation_id,
+                        session_id,
+                        frontier_store_id=self._last_compacted_store_id,
+                    )
+            except (Exception, KeyboardInterrupt) as exc:
+                logger.warning("LCM compaction-commit session-end finalization skipped: %r", exc)
             logger.info(
-                "LCM treated session-end for %s as a compaction commit; "
-                "no re-ingest, lifecycle left bound",
+                "LCM treated session-end for %s as a compaction commit; no re-ingest, finalized",
                 session_id,
             )
             return
@@ -4604,8 +4630,10 @@ class LCMEngine(
             self._ingest_cursor_needs_reconcile = (
                 self._store.get_session_count(self._session_id) > 0
                 # An empty rotation child resumed after a restart still has to
-                # re-index the host's post-compaction list (#483, C7).
+                # re-index the host's post-compaction list (#483, C7), from a
+                # commit proof or a carried native recovery proof.
                 or self._durable_commit_proof_payload() is not None
+                or bool(self._load_native_recovery_replay_snapshot_digests())
             )
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
@@ -4782,7 +4810,7 @@ class LCMEngine(
         for index, message in enumerate(messages):
             if len(effective) == len(target):
                 return index if effective == target else None
-            if self._is_commit_proof_scaffold_message(message):
+            if self._is_verified_replay_scaffold_message(message):
                 continue
             effective.append(self._message_replay_identity(message))
             if effective != target[: len(effective)]:
@@ -4850,13 +4878,13 @@ class LCMEngine(
                 return rest if rest.strip() else None
         return None
 
-    def _is_commit_proof_scaffold_message(self, msg: Dict[str, Any]) -> bool:
-        """Scaffold test for the commit-proof matchers (C4 remap, C6).
+    def _is_verified_replay_scaffold_message(self, msg: Dict[str, Any]) -> bool:
+        """Scaffold test for ingest-cursor reconciliation (commit proofs and the store matcher).
 
         Stricter than ``_is_replayed_context_scaffold_message``: summary-shaped
         content counts as scaffold only when it is a pure LCM summary verified
-        against the DAG. Unverified summary-shaped text (edited, forged, wrong
-        node id) is real content there, so a proof never skips it (#484 round 1).
+        against the DAG. Unverified summary-shaped text (edited, forged, wrong or
+        pruned node) is real content there, so reconciliation never skips it (#486).
         """
         if not self._is_replayed_context_scaffold_message(msg):
             return False

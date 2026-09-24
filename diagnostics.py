@@ -70,9 +70,10 @@ COMPACTION_REPLAY_MIN_RUN = 3
 COMPACTION_REPLAY_WINDOW = 2000
 COMPACTION_REPLAY_MAX_ROWS = 1_000_000
 COMPACTION_REPLAY_DUPLICATES_ACTION = (
-    "duplicate rows from a pre-fix compaction replay (#483) are present; recall may show repeats; "
-    "a repair tool is tracked in a follow-up; do not delete rows by hand"
+    "candidate replay runs (repeated rows, likely from a pre-fix compaction replay, #483) are present; "
+    "recall may show repeats; a repair tool is tracked in a follow-up; do not delete rows by hand"
 )
+COMPACTION_REPLAY_SCAN_INCOMPLETE = "scan incomplete"
 _COMPACTION_REPLAY_CANDIDATES_PER_KEY = 8
 
 
@@ -83,14 +84,16 @@ def scan_compaction_replay_duplicates(
     window: int = COMPACTION_REPLAY_WINDOW,
     max_rows: int = COMPACTION_REPLAY_MAX_ROWS,
 ) -> dict[str, Any]:
-    """Count #483-class duplicate rows per session. Read-only; never mutates.
+    """Count candidate replay runs (#483 class) per session. Read-only; never mutates.
 
     A stale compaction-commit ingest re-stores an already durable run of rows:
     a contiguous run of at least ``COMPACTION_REPLAY_MIN_RUN`` rows that repeats,
     in order, an earlier run of the same session within ``window`` rows. Lone
     organic repeats ("ok", "continue") are not counted. Rows are streamed and at
     most ``window`` of them are tracked per session; the scan stops after
-    ``max_rows`` rows and reports ``scan_truncated``.
+    ``max_rows`` rows and reports ``scan_truncated``. ``window_limited_sessions``
+    counts sessions longer than the window; with either bound hit, a zero count
+    covers only the scanned rows (``scan_complete`` is False).
     """
     sessions: dict[str, dict[str, int]] = {}
     counter: _ReplayRunCounter | None = None
@@ -98,12 +101,15 @@ def scan_compaction_replay_duplicates(
     rows_scanned = 0
     peak_tracked_rows = 0
     truncated = False
+    window_limited_sessions = 0
 
     def flush() -> None:
+        nonlocal window_limited_sessions
         if counter is not None and current_session is not None:
             replayed, runs = counter.finish()
             if replayed:
                 sessions[current_session] = {"replayed_rows": replayed, "runs": runs}
+            window_limited_sessions += int(counter.base > 0)
 
     columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")}
     # Assistant tool-call rows carry empty content; their calls are the row.
@@ -138,6 +144,8 @@ def scan_compaction_replay_duplicates(
         "window": window,
         "rows_scanned": rows_scanned,
         "scan_truncated": truncated,
+        "window_limited_sessions": window_limited_sessions,
+        "scan_complete": not truncated and not window_limited_sessions,
         "peak_tracked_rows": peak_tracked_rows,
         "sessions": [{"session_id": sid, **counts} for sid, counts in ranked[:sample_limit]],
     }
@@ -341,7 +349,15 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
             f"{COMPACTION_REPLAY_DUPLICATES_ACTION}; if a session's summaries stop publishing, "
             "continue the conversation in a new session"
         )
-        if status == "warn":
+        if status == "warn" and isinstance(detail, dict) and not detail.get("replayed_rows_total"):
+            command = (
+                "the bounded scan found no candidate replay runs within its coverage "
+                f"({detail.get('rows_scanned')} rows; window {detail.get('window')}); "
+                "runs outside that coverage are not reported"
+            )
+            warning_only = True
+            rationale = "an incomplete scan is not evidence that the store is free of replayed rows"
+        elif status == "warn":
             warning_only = True
             rationale = "duplicate rows are preserved history; no automatic cleanup exists for them"
         else:

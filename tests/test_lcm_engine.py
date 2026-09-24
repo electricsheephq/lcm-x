@@ -1493,6 +1493,18 @@ def test_lcm_doctor_summary_quality_flags_zero_token_large_source(engine):
     assert check["detail"]["worst_nodes"][0]["token_count"] == 0
     assert check["detail"]["worst_nodes"][0]["compression_ratio"] is None
 
+
+def _real_lcm_summary(engine, session_id, summary, expand_hint, depth=0):
+    """Render an LCM summary part backed by a real DAG node. Reconciliation treats
+    only DAG-verified summaries as scaffold; unverified summary text is content (#486)."""
+    node_id = engine._dag.add_node(SummaryNode(
+        session_id=session_id, depth=depth, summary=summary, token_count=5,
+        source_token_count=5, source_ids=[], source_type="messages",
+        created_at=time.time(), expand_hint=expand_hint,
+    ))
+    label = {0: "Recent", 1: "Session Arc", 2: "Durable"}.get(depth, f"Depth-{depth}")
+    return f"[{label} Summary (d{depth}, node {node_id})]\n{summary}\n[Expand for details: {expand_hint}]"
+
 class TestEscalationStripReasoning:
     """Regression tests for thinking-model reasoning-tag stripping in
     escalation._call_llm_for_summary. Some thinking models (MiniMax-M2.7,
@@ -4105,7 +4117,7 @@ class TestEngineABC:
             },
             {
                 "role": "assistant",
-                "content": "[Recent Summary (d0, node 12)]\nEarlier details.\n[Expand for details: hint-12]",
+                "content": _real_lcm_summary(after_restart, "compacted-session", "Earlier details.", "hint-12"),
             },
             {"role": "user", "content": "fresh user tail"},
             {"role": "assistant", "content": "fresh assistant tail"},
@@ -5289,7 +5301,7 @@ class TestEngineABC:
             },
             {
                 "role": "assistant",
-                "content": "[Recent Summary (d0, node 12)]\nEarlier details.\n[Expand for details: hint-12]",
+                "content": _real_lcm_summary(after_restart, "scaffold-prefix-session", "Earlier details.", "hint-12"),
             },
             {"role": "user", "content": "unrelated new request"},
             {"role": "assistant", "content": "unrelated new answer"},
@@ -5348,7 +5360,7 @@ class TestEngineABC:
             },
             {
                 "role": "assistant",
-                "content": "[Recent Summary (d0, node 12)]\nEarlier details.\n[Expand for details: hint-12]",
+                "content": _real_lcm_summary(after_restart, "scaffold-stale-prefix-session", "Earlier details.", "hint-12"),
             },
             {"role": "user", "content": "old first question"},
             {"role": "assistant", "content": "old first answer"},
@@ -12766,9 +12778,9 @@ class TestPostCompactionIngestion:
 
         Session-end replay proof lives in its own namespace and is consumed
         only by the current-session full-history session-end ingest, never by
-        ordinary ingest/compress. So a fresh normal ingest treats the repeated
-        ``retry`` as an ambiguous new delta and preserves it (duplicate over
-        loss)."""
+        ordinary ingest/compress. The forged summary is unverified, so it is
+        real content (#486): a fresh normal ingest of the identical list is an
+        ordinary replay of the two durable rows, never a session-end proof."""
         session_id = "forged-session-end-proof-session"
         database_path = str(tmp_path / "forged-session-end-proof.db")
 
@@ -12787,10 +12799,8 @@ class TestPostCompactionIngestion:
         fresh.on_session_start(session_id, context_length=200000)
         try:
             fresh._ingest_messages([dict(scaffold), dict(retry)])
-            assert fresh._store.get_session_count(session_id) == 3
-            rows = fresh._store.get_session_tail(session_id, limit=10)
-            retry_rows = [row for row in rows if row.get("content") == "retry"]
-            assert len(retry_rows) == 2
+            assert fresh._store.get_session_count(session_id) == 2
+            assert fresh._last_ingest_reconciliation["reason"] == "replayed durable tail"
         finally:
             fresh.shutdown()
 
@@ -12820,7 +12830,9 @@ class TestPostCompactionIngestion:
         fresh.on_session_start(session_id, context_length=200000)
         try:
             fresh._ingest_messages([dict(scaffold), dict(retry)])
-            assert fresh._store.get_session_count(session_id) == 3
+            # The unverified summary is content (#486): an ordinary two-row replay.
+            assert fresh._store.get_session_count(session_id) == 2
+            assert fresh._last_ingest_reconciliation["reason"] == "replayed durable tail"
         finally:
             fresh.shutdown()
 
@@ -12998,10 +13010,18 @@ class TestPostCompactionIngestion:
         """Missing replay-proof metadata must fail toward duplicates, not loss."""
         session_id = "summary-only-metadata-write-failure"
         database_path = str(tmp_path / "summary-only-metadata-write-failure.db")
-        snapshot = self._summary_only_snapshot()
 
         seed = LCMEngine(config=LCMConfig(database_path=database_path))
         seed.on_session_start(session_id, context_length=200000)
+        # A real (DAG-verified) summary: only those are scaffold to reconciliation (#486).
+        summary = _real_lcm_summary(
+            seed,
+            session_id,
+            "## Active Focus\nCanary rebind idempotency under summary-only replay.\n"
+            "Expand for details about: active canary state",
+            "active canary state",
+        )
+        snapshot = [{"role": "user", "content": summary}, *self._summary_only_snapshot()[1:]]
 
         original_write_metadata_json = seed._store.write_metadata_json
 
@@ -13025,7 +13045,7 @@ class TestPostCompactionIngestion:
         rebound = LCMEngine(config=LCMConfig(database_path=database_path))
         rebound.on_session_start(session_id, context_length=200000)
         try:
-            rebound.on_session_end(session_id, self._summary_only_snapshot())
+            rebound.on_session_end(session_id, [dict(message) for message in snapshot])
             # Without durable proof, only the scaffold prefix is skipped and the
             # uncertain visible tail is preserved again (duplicate-over-loss).
             assert rebound._store.get_session_count(session_id) == len(snapshot) * 2 - 1
@@ -19934,7 +19954,8 @@ class TestSessionRollover:
         assert engine.last_completion_tokens == 50
         assert engine.last_total_tokens == 1050
         assert engine._last_compacted_store_id == store_id
-        assert engine._ingest_cursor == 2
+        # No commit proof crossed the boundary: the child reconciles (#484 round 2).
+        assert engine._ingest_cursor == 0 and engine._ingest_cursor_needs_reconcile
         assert engine._store.get_session_count("old-session") == 1
         assert engine._store.get_session_count("new-session") == 0
         assert engine._dag.get_session_nodes("old-session") == []
@@ -20010,7 +20031,8 @@ class TestSessionRollover:
         assert engine.last_completion_tokens == 50
         assert engine.last_total_tokens == 1050
         assert engine._last_compacted_store_id == source_store_id
-        assert engine._ingest_cursor == 2
+        # No commit proof crossed the boundary: the child reconciles (#484 round 2).
+        assert engine._ingest_cursor == 0 and engine._ingest_cursor_needs_reconcile
         assert engine._store.get_session_count("lcm-source") == 1
         assert engine._store.get_session_count("new-hermes-session") == 0
         assert engine._store.get_session_count("old-hermes-session") == 1
@@ -20183,7 +20205,8 @@ class TestSessionRollover:
         assert engine.last_completion_tokens == 50
         assert engine.last_total_tokens == 1050
         assert engine._last_compacted_store_id == source_store_id
-        assert engine._ingest_cursor == 2
+        # No commit proof crossed the boundary: the child reconciles (#484 round 2).
+        assert engine._ingest_cursor == 0 and engine._ingest_cursor_needs_reconcile
         assert engine._store.get_session_count("lcm-source") == 1
         assert engine._store.get_session_count("new-hermes-session") == 0
         assert engine._store.get_session_count("old-hermes-session") == 1
@@ -20354,7 +20377,8 @@ class TestSessionRollover:
         assert engine._conversation_id == "conversation-a"  # source wins
         assert engine.compression_count == 3
         assert engine._last_compacted_store_id == source_store_id
-        assert engine._ingest_cursor == 2
+        # No commit proof crossed the boundary: the child reconciles (#484 round 2).
+        assert engine._ingest_cursor == 0 and engine._ingest_cursor_needs_reconcile
         assert engine._store.get_session_count("lcm-source") == 1
         assert engine._store.get_session_count("new-hermes-session") == 0
         assert engine._store.get_session_count("old-hermes-session") == 1

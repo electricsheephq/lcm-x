@@ -595,9 +595,13 @@ class ReconcileMixin:
         """
         if not messages:
             return ""
-        identities = [list(self._message_replay_identity(message)) for message in messages]
+        identities = [self._message_replay_identity(message) for message in messages]
+        if any(_has_lossy_redacted_identity(identity) for identity in identities):
+            # A digest-less placeholder makes different rows hash alike; such a
+            # snapshot is never replay proof (#484 round 2).
+            return ""
         payload = json.dumps(
-            {"version": 1, "messages": identities},
+            {"version": 1, "messages": [list(identity) for identity in identities]},
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,
@@ -1044,7 +1048,7 @@ class ReconcileMixin:
             candidate_visible_messages = [
                 msg
                 for msg in candidate_messages
-                if not self._is_replayed_context_scaffold_message(msg)
+                if not self._is_verified_replay_scaffold_message(msg)
                 and not self._matches_ignore_message_patterns(msg)
             ]
             candidate_non_placeholder_messages = [
@@ -1068,7 +1072,7 @@ class ReconcileMixin:
             ]
             filtered_candidate_placeholders = len(candidate_non_placeholder_messages) < len(candidate_visible_messages)
             candidate_has_scaffold_evidence = any(
-                self._is_replayed_context_scaffold_message(msg) for msg in candidate_messages
+                self._is_verified_replay_scaffold_message(msg) for msg in candidate_messages
             )
             candidate_has_quarantined_replay_evidence = any(
                 self._is_quarantined_assistant_replay_identity(active_identity(msg))
@@ -1451,7 +1455,7 @@ class ReconcileMixin:
             )
 
             has_scaffold_evidence = any(
-                self._is_replayed_context_scaffold_message(msg) for msg in candidate_messages
+                self._is_verified_replay_scaffold_message(msg) for msg in candidate_messages
             )
             has_raw_full_replay = (
                 has_persisted_marker_specific_replay_evidence
@@ -1534,7 +1538,7 @@ class ReconcileMixin:
                 self._message_replay_identity(msg),
             )
             for msg in messages
-            if not self._is_replayed_context_scaffold_message(msg)
+            if not self._is_verified_replay_scaffold_message(msg)
             and not self._matches_ignore_message_patterns(msg)
         ]
 
@@ -1606,7 +1610,7 @@ class ReconcileMixin:
             while index < n and matched < len(target):
                 message = messages[index]
                 index += 1
-                if self._is_commit_proof_scaffold_message(message):
+                if self._is_verified_replay_scaffold_message(message):
                     continue
                 identity = self._message_replay_identity(message)
                 # A digest-less redaction (password_assignment) is not identity:

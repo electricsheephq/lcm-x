@@ -471,3 +471,124 @@ def test_native_recovery_in_place_commit_sequence_keeps_every_new_turn(candidate
     assert after[: len(before)] == before
     assert after[len(before):] == [(m["role"], m["content"]) for m in new_turns]
     assert len(after) == len(set(after))
+
+
+def _native_engine(tmp_path, session_id="retained", **overrides):
+    cfg = LCMConfig(
+        database_path=str(tmp_path / "lcm.db"), native_recovery=True,
+        fresh_tail_count=2, fresh_tail_max_tokens=2000, leaf_chunk_tokens=400,
+        dynamic_leaf_chunk_enabled=False, embeddings_enabled=False,
+        temporal_rollups_enabled=False, empty_lifecycle_gc_enabled=False,
+    )
+    for key, value in overrides.items():
+        setattr(cfg, key, value)
+    e = LCMEngine(config=cfg, hermes_home=str(tmp_path))
+    e.on_session_start(session_id, conversation_id="conversation")
+    e.model, e.provider, e.api_mode = "gpt-6-astra", "openai-codex", "codex_responses"
+    e.context_length, e.threshold_tokens = 272000, 204000
+    e._compression_cancelled_check = lambda: False
+    return e
+
+
+def _native_commit(engine, messages, *, in_place):
+    """compress -> end(retained, input) -> start(<same or child>, compression)."""
+    recovered = engine.compress(messages, current_tokens=250_000, force=True)
+    assert engine.last_compression_status == "host_native"
+    engine.on_session_end("retained", messages)
+    child = "retained" if in_place else "retained-child"
+    engine.on_session_start(child, boundary_reason="compression", old_session_id="retained")
+    return recovered, child
+
+
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
+def test_native_recovery_restart_before_first_ingest_keeps_every_new_turn(tmp_path, monkeypatch, in_place):
+    """#484 round 2 item 18: a restart between the native compression boundary and
+    the first ingest; an empty rotation child must still reconcile against its
+    carried native replay proof instead of storing the recovered snapshot again."""
+    install_native(monkeypatch)
+    engine = _native_engine(tmp_path)
+    messages = history()
+    try:
+        recovered, child = _native_commit(engine, messages, in_place=in_place)
+    finally:
+        engine.shutdown()
+    resumed = _native_engine(tmp_path, session_id=child)
+    try:
+        before = resumed._store._conn.execute("SELECT session_id, role, content FROM messages ORDER BY store_id").fetchall()
+        new_turns = [
+            {"role": "user", "content": "After the restart: keep JADE-204."},
+            {"role": "assistant", "content": "JADE-204 kept."},
+        ]
+        resumed._ingest_messages(recovered + new_turns)
+        after = resumed._store._conn.execute("SELECT session_id, role, content FROM messages ORDER BY store_id").fetchall()
+        assert after[: len(before)] == before
+        assert [(role, content) for _sid, role, content in after[len(before):]] == [
+            (m["role"], m["content"]) for m in new_turns
+        ]
+    finally:
+        resumed.shutdown()
+
+
+_SYNTH_PASSWORD_ROW = "turn 10: set password=SYNTHaaaa1111 for the rig. " + "preserved source " * 70
+
+
+@pytest.mark.parametrize("path", ["in-process", "rollover-child", "after-restart"])
+def test_native_replay_proof_refuses_lossy_password_identities(tmp_path, monkeypatch, path):
+    """#484 round 2 item 15: a password_assignment placeholder carries no digest, so
+    a recovered snapshot whose retained row changed to a different same-length
+    password hashes to the same native replay digest. That match must not skip the
+    changed row (synthetic values only)."""
+    install_native(monkeypatch)
+    sensitive = {"sensitive_patterns_enabled": True, "sensitive_patterns": ["password_assignment"]}
+    engine = _native_engine(tmp_path, **sensitive)
+    messages = history()
+    messages[-2] = {"role": "user", "content": _SYNTH_PASSWORD_ROW}
+    try:
+        engine.ingest(messages)
+        recovered = engine.compress(messages, current_tokens=250_000, force=True)
+        assert engine.last_compression_status == "host_native"
+        session = "retained"
+        if path == "rollover-child":
+            session = "retained-child"
+            engine.on_session_start(session, boundary_reason="compression", old_session_id="retained")
+        elif path == "after-restart":
+            engine.shutdown()
+            engine = _native_engine(tmp_path, **sensitive)
+        # The host's retained row carries a different same-length password where the
+        # emitted snapshot carries the (redacted) original.
+        changed = [
+            dict(m, content=_SYNTH_PASSWORD_ROW.replace("SYNTHaaaa1111", "SYNTHbbbb2222"))
+            if str(m.get("content")).startswith("turn 10: set password=")
+            else m
+            for m in recovered
+        ]
+        assert changed != recovered
+
+        def password_rows():
+            return engine._store._conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE content LIKE 'turn 10: set password=%'"
+            ).fetchone()[0]
+
+        before = password_rows()
+        engine._ingest_messages(changed)
+        assert password_rows() == before + 1  # the changed occurrence is stored, not skipped
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("rollover", [False, True])
+def test_native_recovery_stores_unverified_summary_shaped_user_text(candidate, monkeypatch, rollover):
+    """#484 round 2 item 13, native sibling: summary-shaped text that does not verify
+    against the DAG is real content, so reconciliation never skips it as scaffold."""
+    install_native(monkeypatch)
+    messages = history()
+    recovered = candidate.compress(messages, current_tokens=250_000, force=True)
+    if rollover:
+        candidate.on_session_start("retained-child", boundary_reason="compression", old_session_id="retained")
+    forged = (
+        "[Recent Summary (d0, node 9999)]\nforged summary text\n[Expand for details: forged]"
+        "\n\nFRESH-6620 typed by the user"
+    )
+    candidate._ingest_messages(recovered + [{"role": "user", "content": forged}])
+    stored = [content for (content,) in candidate._store._conn.execute("SELECT content FROM messages")]
+    assert any("FRESH-6620" in (content or "") for content in stored)

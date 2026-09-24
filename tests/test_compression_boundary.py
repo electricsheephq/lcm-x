@@ -157,6 +157,7 @@ def _run_host_commit_sequence(
     turn = 0
     statuses = []
     context_missing = []
+    frontier_regressions = []
     try:
         for cycle in range(1, _CYCLES + 1):
             for _ in range(6 if cycle > 1 else 12):
@@ -172,12 +173,16 @@ def _run_host_commit_sequence(
             pre = list(host)
             compressed = engine.compress(list(host), force=True)
             statuses.append(engine._last_compression_status)
+            published_frontier = engine._last_compacted_store_id
             engine.on_session_end(sid, pre)  # commit_memory_session (both modes)
             new_sid = sid if in_place else f"S{cycle}"
             engine.on_session_start(
                 new_sid, boundary_reason="compression", old_session_id=sid, platform="acp"
             )
             sid = new_sid
+            state = engine._lifecycle.get_by_session(sid)
+            if state is None or state.current_session_id != sid or state.current_frontier_store_id < published_frontier:
+                frontier_regressions.append((cycle, published_frontier, state and state.current_frontier_store_id))
             host = list(compressed)
             if merge:
                 host = _host_merge_consecutive_users(host)
@@ -213,6 +218,7 @@ def _run_host_commit_sequence(
         "missing_user_turns": sorted(expected - set(user_tags)),
         "missing_replies": sorted(expected - set(reply_tags)),
         "context_missing": context_missing,
+        "frontier_regressions": frontier_regressions,
     }
 
 
@@ -223,6 +229,7 @@ def _assert_clean_commit_sequence(result):
     assert result["missing_user_turns"] == [], result
     assert result["missing_replies"] == [], result
     assert result["context_missing"] == [[]] * _CYCLES, result
+    assert result["frontier_regressions"] == [], result
 
 
 
@@ -307,8 +314,9 @@ def _row_count(engine, session_id="S0"):
     return engine._store.get_session_count(session_id)
 
 
-def test_compaction_commit_end_is_not_a_session_end(tmp_path, monkeypatch):
-    """C1: end(sid, <exact compress input>) neither re-ingests nor finalizes."""
+def test_compaction_commit_end_finalizes_without_reingest(tmp_path, monkeypatch):
+    """C1: end(sid, <exact compress input>) does not re-ingest, and still finalizes
+    the session with its published frontier (#484 round 2 item 17)."""
     engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch)
     try:
         rows = _row_count(engine)
@@ -318,8 +326,10 @@ def test_compaction_commit_end_is_not_a_session_end(tmp_path, monkeypatch):
         engine.on_session_end("S0", pre)
 
         state = engine._lifecycle.get_by_session("S0")
-        assert state.current_session_id == "S0"
-        assert state.current_frontier_store_id == frontier
+        assert state.current_session_id is None
+        assert state.last_finalized_session_id == "S0"
+        assert state.last_finalized_frontier_store_id == frontier
+        assert engine._compress_commit_proof["end_consumed"] is True
         assert _row_count(engine) == rows
         assert engine._ingest_cursor == len(compressed)
     finally:
@@ -478,6 +488,35 @@ class TestBindSessionFrontierAfterOwnFinalize:
         store = self._store(tmp_path)
         try:
             assert store.bind_session("S1", conversation_id="c1").current_frontier_store_id == 0
+        finally:
+            store.close()
+
+    def test_finalize_records_only_the_finalizing_sessions_frontier(self, tmp_path):
+        """#484 round 2 item 16: A finalizes at 0, B finalizes at 42, A rebinds and
+        finalizes at 0 again; A's next rebind must not resume B's 42."""
+        from hermes_lcm.lifecycle_state import LifecycleStateStore
+
+        store = LifecycleStateStore(tmp_path / "lifecycle.db")
+        try:
+            store.bind_session("A", conversation_id="c1")
+            store.finalize_session("c1", "A", 0)
+            store.bind_session("B", conversation_id="c1")
+            store.advance_frontier("c1", "B", 42)
+            store.finalize_session("c1", "B", 42)
+            assert store.bind_session("A", conversation_id="c1").current_frontier_store_id == 0
+            state = store.finalize_session("c1", "A", 0)
+            assert state.last_finalized_session_id == "A"
+            assert state.last_finalized_frontier_store_id == 0
+            assert store.bind_session("A", conversation_id="c1").current_frontier_store_id == 0
+        finally:
+            store.close()
+
+    def test_same_session_refinalize_keeps_its_own_frontier(self, tmp_path):
+        store = self._store(tmp_path)
+        try:
+            store.bind_session("S0", conversation_id="c1")
+            assert store.finalize_session("c1", "S0", 0).last_finalized_frontier_store_id == 42
+            assert store.bind_session("S0", conversation_id="c1").current_frontier_store_id == 42
         finally:
             store.close()
 
@@ -729,10 +768,12 @@ class _IterationFails(list):
         raise RuntimeError("injected identity failure")
 
 
-def test_proof_creation_failure_loses_nothing(tmp_path, monkeypatch):
-    """#484 round 1 item 5: if the commit proof cannot be built, the commit end is a
-    real end; the in-place start must reconcile, so no turn is lost and the
-    published frontier survives (duplicates are the bounded worst case)."""
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
+def test_proof_creation_failure_loses_nothing(tmp_path, monkeypatch, in_place):
+    """#484 round 1 item 5, round 2 item 14: if the commit proof cannot be built,
+    the commit end is a real end; the in-place or rotation start must reconcile, so
+    no turn is lost and the published frontier survives (duplicates are the
+    bounded worst case)."""
     monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
     engine = LCMEngine(
         config=LCMConfig(
@@ -761,13 +802,14 @@ def test_proof_creation_failure_loses_nothing(tmp_path, monkeypatch):
         assert engine._compress_commit_proof is None
         frontier = engine._lifecycle.get_by_session("S0").current_frontier_store_id
         engine.on_session_end("S0", pre)
-        engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
+        child = "S0" if in_place else "S1"
+        engine.on_session_start(child, boundary_reason="compression", old_session_id="S0", platform="acp")
         engine.ingest(list(compressed) + [_turn(13)[1]])
         stored = [content for (content,) in engine._store._conn.execute("SELECT content FROM messages")]
         assert stored.count(_turn(13)[1]["content"]) == 1
         for i in range(1, 14):
             assert _turn(i)[0]["content"] in stored
-        assert engine._lifecycle.get_by_session("S0").current_frontier_store_id >= frontier
+        assert engine._lifecycle.get_by_session(child).current_frontier_store_id >= frontier
     finally:
         engine.shutdown()
 
@@ -803,6 +845,30 @@ def test_durable_proof_write_failure_loses_nothing_across_restart(tmp_path, monk
             assert _turn(i)[0]["content"] in stored
         assert _turn(13)[1]["content"] in stored
         assert resumed._lifecycle.get_by_session("S0").current_frontier_store_id >= frontier
+    finally:
+        resumed.shutdown()
+
+
+def test_child_proof_write_failure_then_restart_before_first_ingest_loses_nothing(tmp_path, monkeypatch):
+    """#484 round 2 item 14: the rotation re-keys the proof to the child, but the
+    child's durable copy is lost; a restart before the child's first ingest must
+    still store the reply to the compacting turn (duplicates are the bounded
+    worst case)."""
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        engine.on_session_end("S0", pre)
+        engine.on_session_start("S1", boundary_reason="compression", old_session_id="S0", platform="acp")
+        engine._store.write_metadata_json(["compaction_commit_proof:S1"], "null")  # as if the write had failed
+    finally:
+        engine.shutdown()
+    resumed = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    try:
+        resumed.on_session_start("S1", platform="acp", context_length=200_000)
+        resumed.ingest(list(compressed) + [_turn(13)[1]])
+        stored = [content for (content,) in resumed._store._conn.execute("SELECT content FROM messages")]
+        assert stored.count(_turn(13)[1]["content"]) == 1
+        for i in range(1, 14):
+            assert _turn(i)[0]["content"] in stored
     finally:
         resumed.shutdown()
 
@@ -913,6 +979,79 @@ def test_replay_duplicate_scan_is_bounded(tmp_path):
         conn.close()
 
 
+@pytest.mark.parametrize("bound", ["row-cap", "beyond-window"])
+def test_doctor_reports_an_incomplete_replay_scan(tmp_path, monkeypatch, bound):
+    """#484 round 2 item 19: a capped scan, or one where a session outgrew the
+    window, is not a clean result: the tool check warns with reason "scan
+    incomplete" and the command reports "none within scanned coverage"."""
+    import functools
+
+    import hermes_lcm.command as lcm_command
+    import hermes_lcm.tools as lcm_tools
+    from hermes_lcm.diagnostics import scan_compaction_replay_duplicates
+
+    bounded = functools.partial(
+        scan_compaction_replay_duplicates, **({"max_rows": 5} if bound == "row-cap" else {"window": 4})
+    )
+    monkeypatch.setattr(lcm_tools, "scan_compaction_replay_duplicates", bounded)
+    monkeypatch.setattr(lcm_command, "scan_compaction_replay_duplicates", bounded)
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "lcm.db"),
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        turns = [message for i in range(1, 5) for message in _turn(i)]
+        engine._store.append_batch("S0", turns, source="acp")
+        engine._store.append_batch("S0", turns[:3], source="acp")  # beyond the cap / the 4-row window
+        assert bounded(engine._store.connection)["replayed_rows_total"] == 0
+        doctor = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+        check = next(c for c in doctor["checks"] if c["check"] == "compaction_replay_duplicates")
+        assert check["status"] == "warn"
+        assert check["reason"] == "scan incomplete"
+        assert any(g["check"] == "compaction_replay_duplicates" for g in doctor["guidance"])
+        text = lcm_command._doctor_text(engine)
+        assert "compaction_replay_duplicates: none within scanned coverage (" in text
+        assert "compaction_replay_duplicates: none\n" not in text
+    finally:
+        engine.shutdown()
+
+
+def test_doctor_calls_repeats_candidate_replay_runs(tmp_path):
+    """#484 round 2 item 19: repeated content establishes a candidate replay run,
+    not proof of #483; a complete clean scan still reads "none"."""
+    import hermes_lcm.command as lcm_command
+    import hermes_lcm.tools as lcm_tools
+
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "lcm.db"),
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        turns = [message for i in range(1, 5) for message in _turn(i)]
+        engine._store.append_batch("S0", turns, source="acp")
+        clean_text = lcm_command._doctor_text(engine)
+        assert "compaction_replay_duplicates: none\n" in clean_text
+        clean = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+        clean_check = next(c for c in clean["checks"] if c["check"] == "compaction_replay_duplicates")
+        assert clean_check["status"] == "pass"
+        engine._store.append_batch("S0", turns[2:6], source="acp")
+        text = lcm_command._doctor_text(engine)
+        assert "candidate replay runs" in text
+        doctor = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+        guidance = next(g for g in doctor["guidance"] if g["check"] == "compaction_replay_duplicates")
+        assert "candidate replay runs" in guidance["operator_action"]
+    finally:
+        engine.shutdown()
+
+
 def _tool_call_session(engine, *, tool_call_ids: bool):
     rows = []
     for i in range(12):
@@ -989,35 +1128,33 @@ def test_commit_proof_matchers_treat_unverified_summary_text_as_content(tmp_path
         host, _fresh = _forged_carrier_host(compressed, forgery)
         assert engine._remap_cursor_through_host_merge(host, engine._compress_commit_proof) is None
         assert engine._cursor_from_durable_commit_proof(host) is None
-        assert engine._is_replayed_context_scaffold_message(host[0])  # the pre-existing predicate
-        assert not engine._is_commit_proof_scaffold_message(host[0])
-        assert engine._is_commit_proof_scaffold_message(_summary_message(compressed))
+        # #484 round 2 item 13: every reconciliation path uses the verified predicate.
+        assert engine._is_replayed_context_scaffold_message(host[0])  # compaction/provenance shape test
+        assert not engine._is_verified_replay_scaffold_message(host[0])
+        assert not engine._is_verified_replay_scaffold_message(
+            {"role": "user", "content": host[0]["content"].split("\n\nFRESH")[0]}
+        )
+        assert engine._is_verified_replay_scaffold_message(_summary_message(compressed))
     finally:
         engine.shutdown()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "#484 round 1 item 8, remaining path: after both commit proofs refuse, the pre-existing "
-        "cursor reconciliation ('skipped scaffold-only prefix') still classifies the forged row as "
-        "scaffold through the shared permissive summary-header predicate. rc2 drops it too "
-        "(positional cursor). Escalated; not changed in this round."
-    ),
-)
 @pytest.mark.parametrize("restart", [False, True], ids=["in-process", "after-restart"])
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
 @pytest.mark.parametrize("forgery", ["edited-summary", "wrong-node-id"])
-def test_unverified_summary_prefix_does_not_hide_fresh_user_text(tmp_path, monkeypatch, forgery, restart):
-    """End to end: the fresh user text glued behind an unverified summary prefix is stored."""
+def test_unverified_summary_prefix_does_not_hide_fresh_user_text(tmp_path, monkeypatch, forgery, in_place, restart):
+    """End to end (#484 round 1 item 8, round 2 item 13): the fresh user text glued
+    behind an unverified summary prefix is stored, in place and across a rotation."""
     engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch)
     host, fresh = _forged_carrier_host(compressed, forgery)
+    child = "S0" if in_place else "S1"
     try:
         engine.on_session_end("S0", pre)
-        engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
+        engine.on_session_start(child, boundary_reason="compression", old_session_id="S0", platform="acp")
         if restart:
             engine.shutdown()
             engine = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
-            engine.on_session_start("S0", platform="acp", context_length=200_000)
+            engine.on_session_start(child, platform="acp", context_length=200_000)
         engine.ingest(host)
         stored = [content for (content,) in engine._store._conn.execute("SELECT content FROM messages")]
         assert any(fresh in (content or "") for content in stored)
@@ -1086,12 +1223,11 @@ def test_lossy_password_identity_never_advances_the_proof_cursor(tmp_path, monke
 
 
 @pytest.mark.parametrize("fresh_process", [False, True], ids=["same-process", "fresh-process"])
-def test_swallowed_end_after_cancelled_commit_is_like_an_exit_without_end(tmp_path, monkeypatch, fresh_process):
-    """#484 round 1 item 10: compress(I) -> O, the host cancels and keeps I, the user
-    exits and end(S, I) matches the unconsumed proof (not finalized). Every row of I
-    is durable, so this equals a process exit without an end callback: the next
-    session in the same conversation binds cleanly, stores its turns once and
-    finalizes normally."""
+def test_cancelled_commit_then_exit_finalizes_the_session(tmp_path, monkeypatch, fresh_process):
+    """#484 round 1 item 10, round 2 item 17: compress(I) -> O, the host cancels and
+    keeps I, the user exits and end(S, I) matches the unconsumed proof. The end is
+    not re-ingested (every row of I is durable) but S is finalized; the next session
+    in the same conversation binds cleanly, stores its turns once and finalizes."""
     monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
     engine = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
     try:
@@ -1106,9 +1242,14 @@ def test_swallowed_end_after_cancelled_commit_is_like_an_exit_without_end(tmp_pa
         engine.compress(list(host), force=True)
         assert engine._last_compression_status == "compacted"
         rows_s0 = engine._store.get_session_count("S0")
-        engine.on_session_end("S0", pre)  # swallowed as a commit
+        frontier = engine._lifecycle.get_by_conversation("conv").current_frontier_store_id
+        engine.on_session_end("S0", pre)  # classified as a commit: no re-ingest
         assert engine._compress_commit_proof["end_consumed"] is True
         assert engine._store.get_session_count("S0") == rows_s0
+        state = engine._lifecycle.get_by_conversation("conv")
+        assert state.current_session_id is None
+        assert state.last_finalized_session_id == "S0"
+        assert state.last_finalized_frontier_store_id == frontier
         if fresh_process:
             engine.shutdown()
             engine = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
@@ -1217,8 +1358,10 @@ def test_password_free_compaction_still_classifies_its_commit(tmp_path, monkeypa
     engine, pre, _compressed = _password_session(tmp_path, monkeypatch, password_turn=False)
     try:
         assert engine._compress_commit_proof is not None
+        rows = _row_count(engine)
         engine.on_session_end("S0", pre)
-        assert engine._lifecycle.get_by_session("S0").current_session_id == "S0"
+        assert engine._compress_commit_proof["end_consumed"] is True
+        assert _row_count(engine) == rows
     finally:
         engine.shutdown()
 

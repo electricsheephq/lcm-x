@@ -28,6 +28,7 @@ from .embedding_provider import VoyageError, default_chunk_model, resolve_provid
 from .diagnostics import (
     _has_lifecycle_fragmentation,
     _state_db_path_for_engine,
+    COMPACTION_REPLAY_SCAN_INCOMPLETE,
     doctor_guidance_for_checks,
     scan_compaction_replay_duplicates,
 )
@@ -8481,11 +8482,16 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     # 6b. #483-class duplicate rows (detect only)
     try:
         replay_duplicates = scan_compaction_replay_duplicates(engine._store.connection)
-        checks.append({
+        replay_check = {
             "check": "compaction_replay_duplicates",
-            "status": "warn" if replay_duplicates["replayed_rows_total"] else "pass",
+            "status": "warn"
+            if replay_duplicates["replayed_rows_total"] or not replay_duplicates["scan_complete"]
+            else "pass",
             "detail": replay_duplicates,
-        })
+        }
+        if not replay_duplicates["scan_complete"]:
+            replay_check["reason"] = COMPACTION_REPLAY_SCAN_INCOMPLETE
+        checks.append(replay_check)
     except Exception as e:
         checks.append({
             "check": "compaction_replay_duplicates",

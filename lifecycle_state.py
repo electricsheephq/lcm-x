@@ -294,10 +294,14 @@ class LifecycleStateStore:
         if current_session_id == session_id:
             current_session_id = None
             current_frontier = 0
-        finalized_frontier = max(
-            int(frontier_store_id or 0),
-            state.last_finalized_frontier_store_id,
-        )
+        # Record only the finalizing session's own frontier: another session's
+        # finalized frontier must never become this session's resumable one
+        # (bind_session restores it by owner, #484 round 2).
+        finalized_frontier = int(frontier_store_id or 0)
+        if state.last_finalized_session_id == session_id and (
+            state.last_reset_at is None or (state.last_finalized_at or 0) >= state.last_reset_at
+        ):
+            finalized_frontier = max(finalized_frontier, state.last_finalized_frontier_store_id)
         self._conn.execute(
             """
             UPDATE lcm_lifecycle_state
