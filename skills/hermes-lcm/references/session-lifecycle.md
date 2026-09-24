@@ -8,6 +8,8 @@ Do not promise that `/new` deletes historical LCM data. Earlier rows remain in `
 
 Hermes commits a compaction by calling the session-end hook with the list it compressed, then the compression-start hook. LCM-X treats that call as a commit, not a session end. It does not re-store those rows. The session keeps its identity, published frontier and ingest position across the boundary, both when Hermes keeps the session id (in place) and when it rotates to a new one. A genuine session end (exit, `/new`, or an end after a cancelled compaction) still finalizes the session. A session that resumes later continues from the frontier it finalized itself, never another session's.
 
+Native recovery carries exact adoption proof across in-place and rotating compactions; only proven orphan tool results may be omitted, while lossy redacted identities fall back to conservative reconciliation.
+
 ## `/lcm rotate`
 
 `/lcm rotate` is different from `/new`:
