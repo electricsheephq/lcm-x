@@ -301,11 +301,16 @@ cd ~/.hermes/plugins/hermes-lcm && git pull --ff-only
 cd ~/.hermes/profiles/myprofile/plugins/hermes-lcm && git pull --ff-only
 ```
 
-If you installed a symlink from a separate checkout:
+If you installed a symlink from a separate checkout, update that checkout and
+rerun the installer (it is idempotent):
 
 ```bash
-./scripts/update.sh
+git -C /path/to/lcm-x pull --ff-only && /path/to/lcm-x/scripts/install.sh
 ```
+
+A catalog install (`hermes plugins install hermes-lcm-x`) updates only through
+the reviewed catalog pin: `hermes plugins update hermes-lcm-x`. LCM-X ships no
+self-updater.
 
 Restart Hermes after updating.
 
@@ -384,6 +389,41 @@ restarting Hermes after the update.
 **Managed fleets** (PCS / managed-plugin payloads) stay pinned to v0.23.x until
 their config stages `hermes-lcm-x` in `plugins.enabled`. That staging is a
 separate fleet-migration change owned outside this repository.
+
+### Hermes plugin catalog and install-scanner notes
+
+The catalog build follows the plugin-catalog admission rules: no self-updater
+(`scripts/update.sh` was removed; catalog installs update only through
+`hermes plugins update hermes-lcm-x`), `provides_hooks` matches what
+`register()` registers (`pre_llm_call`, `post_llm_call`, `subagent_start`,
+`subagent_stop`, all through `ctx.register_hook`), and `hermes plugins validate`
+reports the install scanner verdict `safe`: zero `dangerous` and zero `caution`
+(high-severity) findings. Planted-secret fixtures build their PEM markers by
+string concatenation and the bench env captures avoid piping the `env` listing, so test
+data is not read as a real key or an environment dump.
+
+The scanner still lists informational (medium/low) findings; none affects the
+verdict:
+
+- `embedded_private_key`, `hardcoded_secret`, `openai_key_leaked` — planted,
+  non-functional fixtures in `tests/` that prove redaction and privacy controls.
+- `python_subprocess`, `hex_encoded_string`, `uv_run`, `path_traversal` —
+  benchmark and release-gauntlet harnesses under `bench/` and `benchmarks/`
+  that drive local Hermes runs; not loaded by the plugin.
+- `git_clone`, `unpinned_pip_install`, `dump_all_env` — install/contributor
+  docs and CI (`pip install pytest numpy`), plus one doc describing an env
+  dump; documentation only.
+- `eval_string`, `proc_access`, `system_passwd_access` — test assertions that
+  such strings are rejected or handled.
+- `oversized_file`, `oversized_bundle`, `too_many_files` — the repository
+  ships docs images, large test modules, and benchmark tooling with the plugin.
+- `agent_config_ref`, `hermes_config_ref`, `hardcoded_ip_port` (low) —
+  maintainer skills and config examples that reference `AGENTS.md`,
+  `config.yaml`, or loopback endpoints.
+
+`hermes plugins validate` also warns that the 15 `provides_tools` are not
+registered by `register()`: LCM-X serves its tools through the context-engine
+tool schemas (`ContextEngine.get_tool_schemas`), which is the intended path.
 
 ## Commands and tools
 

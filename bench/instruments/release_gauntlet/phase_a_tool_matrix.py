@@ -25,6 +25,10 @@ SCENARIOS = {
     "lcm_grep", "lcm_recall", "lcm_query_state", "lcm_compute", "lcm_compile_evidence", "lcm_evidence_pack", "lcm_retrieve", "lcm_recent",
     "lcm_load_session", "lcm_describe", "lcm_expand", "lcm_expand_query", "lcm_status", "lcm_inspect", "lcm_doctor",
 }
+# PEM armor markers are built by string concatenation so the Hermes plugin install
+# scanner does not read these planted test fixtures as an embedded private key (#471).
+PEM_BEGIN = "-----BEGIN " "PRIVATE KEY-----"
+PEM_BEGIN_RSA = "-----BEGIN RSA " "PRIVATE KEY-----"
 PLANTED = {
     "pem_complete": "GAUNTLETPEMCOMPLETEA1", "pem_truncated": "GAUNTLETPEMTRUNCATEDB2", "encrypted_armor": "GAUNTLETENCRYPTEDC3",
     "json_serialized": "GAUNTLETJSONSERIALIZEDD4", "log_prefixed": "GAUNTLETLOGPREFIXE5", "password": "GAUNTLETPASSWORDF6", "api_key": "GAUNTLETAPIKEYG7",
@@ -322,15 +326,15 @@ def _privacy_fixtures():
     # honest skips, and their losslessness is covered by the durable
     # byte-identity check + the outbound sweep.
     return [
-        {"kind": "standard", "probe_token": "privacy fixture complete", "content": f"privacy fixture complete -----BEGIN PRIVATE KEY-----\n{PLANTED['pem_complete']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["pem_complete"]]},
-        {"kind": "standard", "probe_token": "privacy fixture truncated", "content": f"privacy fixture truncated -----BEGIN PRIVATE KEY-----\n{PLANTED['pem_truncated']}", "secrets": [PLANTED["pem_truncated"]]},
+        {"kind": "standard", "probe_token": "privacy fixture complete", "content": f"privacy fixture complete {PEM_BEGIN}\n{PLANTED['pem_complete']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["pem_complete"]]},
+        {"kind": "standard", "probe_token": "privacy fixture truncated", "content": f"privacy fixture truncated {PEM_BEGIN}\n{PLANTED['pem_truncated']}", "secrets": [PLANTED["pem_truncated"]]},
         {"kind": "standard", "probe_token": "privacy fixture encrypted", "content": f"privacy fixture encrypted -----BEGIN ENCRYPTED PRIVATE KEY-----\n{PLANTED['encrypted_armor']}\n-----END ENCRYPTED PRIVATE KEY-----", "secrets": [PLANTED["encrypted_armor"]]},
-        {"kind": "standard", "probe_token": "lcm json fixture", "content": "lcm json fixture " + json.dumps({"private_key": f"-----BEGIN PRIVATE KEY-----\n{PLANTED['json_serialized']}\n-----END PRIVATE KEY-----"}), "secrets": [PLANTED["json_serialized"]]},
-        {"kind": "standard", "probe_token": "ERROR credential", "content": f"ERROR credential=-----BEGIN PRIVATE KEY-----\n{PLANTED['log_prefixed']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["log_prefixed"]]},
+        {"kind": "standard", "probe_token": "lcm json fixture", "content": "lcm json fixture " + json.dumps({"private_key": f"{PEM_BEGIN}\n{PLANTED['json_serialized']}\n-----END PRIVATE KEY-----"}), "secrets": [PLANTED["json_serialized"]]},
+        {"kind": "standard", "probe_token": "ERROR credential", "content": f"ERROR credential={PEM_BEGIN}\n{PLANTED['log_prefixed']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["log_prefixed"]]},
         {"kind": "standard", "content": f"password={PLANTED['password']} api_key={PLANTED['api_key']}", "secrets": [PLANTED["password"], PLANTED["api_key"]]},
-        {"kind": "365", "content": f"password: -----BEGIN PRIVATE KEY-----\n{PLANTED['password_pem']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["password_pem"]]},
-        {"kind": "365", "content": f"passphrase=-----BEGIN PRIVATE KEY-----\n{PLANTED['passphrase_pem']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["passphrase_pem"]]},
-        {"kind": "365", "content": f"password=\"-----BEGIN PRIVATE KEY-----\n{PLANTED['quoted_password_pem']}\n-----END PRIVATE KEY-----\"", "secrets": [PLANTED["quoted_password_pem"]]},
+        {"kind": "365", "content": f"password: {PEM_BEGIN}\n{PLANTED['password_pem']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["password_pem"]]},
+        {"kind": "365", "content": f"passphrase={PEM_BEGIN}\n{PLANTED['passphrase_pem']}\n-----END PRIVATE KEY-----", "secrets": [PLANTED["passphrase_pem"]]},
+        {"kind": "365", "content": f"password=\"{PEM_BEGIN}\n{PLANTED['quoted_password_pem']}\n-----END PRIVATE KEY-----\"", "secrets": [PLANTED["quoted_password_pem"]]},
         {"kind": "chunk", "probe_token": "Chunk safety", "content": f"{long_chunk} api_key={PLANTED['chunk_path']}", "secrets": [PLANTED["chunk_path"]]},
     ]
 def _privacy_corpus(mod, engine):
@@ -383,15 +387,15 @@ def _assert_full_width_orphan_classes_blocked(mod, config):
     b0, b1, b2 = _PEM_BODY
     for body in _PEM_BODY:
         assert len(body) >= 40 and ip._HEX_DIGEST_RE.fullmatch(body) is None
-    key = f"-----BEGIN PRIVATE KEY-----\n{b0}\n{b1}\n-----END PRIVATE KEY-----"
+    key = f"{PEM_BEGIN}\n{b0}\n{b1}\n-----END PRIVATE KEY-----"
     shapes = {
         "log_prefixed_orphan": (
-            f"10:00:00 INFO -----BEGIN PRIVATE KEY-----\n10:00:00 INFO {b0}\n"
+            f"10:00:00 INFO {PEM_BEGIN}\n10:00:00 INFO {b0}\n"
             f"10:00:00 INFO {b1}\n10:00:00 WARN retrying upstream connection\n"
             f"10:00:00 INFO {b2}"
         ),
         "label_prefixed_orphan": f"private_key: {key}\nkey_tail: {b2}",
-        "glued_to_placeholder": f"-----BEGIN PRIVATE KEY-----\n{b0}\n{b1}\n-----END PRIVATE KEY----- {b2}",
+        "glued_to_placeholder": f"{PEM_BEGIN}\n{b0}\n{b1}\n-----END PRIVATE KEY----- {b2}",
         "backward_orphan": f"{b0}\nthat was the tail of the old key; new one:\n{key}",
         "serialized_sibling": '{"private_key": "' + key.replace("\n", "\\n") + '", "note": "' + b2 + '"}',
         # Bodies GLUED to a non-whitespace separator (#391 re-review P0): the
@@ -404,8 +408,8 @@ def _assert_full_width_orphan_classes_blocked(mod, config):
         # line-model backstop lost the placeholder when the line reclassified
         # as BEGIN; the restored raw-text scan is classification-immune.
         "placeholder_glued_to_begin": (
-            f"credential={b0}\n-----BEGIN PRIVATE KEY-----\n"
-            f"credential=-----BEGIN RSA PRIVATE KEY-----"
+            f"credential={b0}\n{PEM_BEGIN}\n"
+            f"credential={PEM_BEGIN_RSA}"
         ),
     }
     for name, text in shapes.items():

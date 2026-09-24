@@ -53,7 +53,7 @@
   - [ ] `bash -lc 'ulimit -n 1024 && python -m pytest tests/ -q'`
   - [ ] `python -m compileall -q .`
   - [ ] `python -m py_compile scripts/import_lossless_claw.py`
-  - [ ] `bash -n scripts/install.sh scripts/update.sh`
+  - [ ] `bash -n scripts/install.sh`
   - [ ] `git diff --check`
 - [ ] Workflow validation, if workflows changed: `actionlint`
 

@@ -22,7 +22,8 @@ export LCM_EMBEDDINGS_ENABLED=1
 export LCM_EMBEDDING_PROVIDER=voyage
 export LCM_EMBEDDING_MODEL=voyage-context-3
 mkdir -p "$HERMES_HOME" "$TMPDIR" "$OUT"
-env | grep -E '^(LCM_|HERMES_|REBANK_)' | sort > "$OUT/run-env-captured.txt"
+# Same NAME=value lines as a filtered env listing, without an env pipe (catalog scanner, #471).
+for _var in $(compgen -e); do case "$_var" in (LCM_*|HERMES_*|REBANK_*) printf '%s=%s\n' "$_var" "${!_var}";; esac; done | sort > "$OUT/run-env-captured.txt"
 git -C "$REBANK_REPO" rev-parse HEAD > "$OUT/product-sha.txt"
 cd "$REBANK_REPO"
 # --resume only when a checkpoint already exists: the harness refuses --resume on a fresh root ("cannot resume

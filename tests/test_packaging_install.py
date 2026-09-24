@@ -150,14 +150,13 @@ def test_standalone_install_scripts_exist_and_are_shell_scripts():
     repo_root = Path(__file__).resolve().parent.parent
 
     install_script = repo_root / "scripts" / "install.sh"
-    update_script = repo_root / "scripts" / "update.sh"
     validate_script = repo_root / "scripts" / "validate_release.sh"
 
     assert install_script.exists(), "scripts/install.sh should exist"
-    assert update_script.exists(), "scripts/update.sh should exist"
+    # Catalog rule: no self-updater; updates go through `hermes plugins update` (#471).
+    assert not (repo_root / "scripts" / "update.sh").exists()
     assert validate_script.exists(), "scripts/validate_release.sh should exist"
     assert install_script.read_text(encoding="utf-8").startswith("#!/usr/bin/env bash\n")
-    assert update_script.read_text(encoding="utf-8").startswith("#!/usr/bin/env bash\n")
     assert validate_script.read_text(encoding="utf-8").startswith("#!/usr/bin/env bash\n")
 
 
@@ -201,7 +200,7 @@ def test_validate_release_rejects_inherited_pytest_basetemp_escape(tmp_path):
     scripts_dir = repo / "scripts"
     scripts_dir.mkdir(parents=True)
     shutil.copy2(source_script, scripts_dir / "validate_release.sh")
-    for script_name in ("install.sh", "update.sh"):
+    for script_name in ("install.sh",):
         script_path = scripts_dir / script_name
         script_path.write_text("#!/usr/bin/env bash\nset -euo pipefail\n", encoding="utf-8")
 
@@ -1956,6 +1955,43 @@ def test_post_llm_hook_does_not_rebind_live_singleton_on_exact_alias_miss(monkey
     assert ctx.engine.current_session_id == "discord-topic-a"
     assert ctx.engine.current_conversation_id == "agent:main:discord:thread:a:a"
     ctx.engine.shutdown()
+
+
+def test_post_llm_hook_registers_through_ctx_register_hook(monkeypatch, tmp_path):
+    """Catalog admission (#471): hooks go through the plugin API, not PluginManager._hooks,
+    and plugin.yaml provides_hooks matches exactly what registers."""
+    module = _load_plugin_entrypoint_module("hermes_lcm_post_hook_register_hook")
+    manager = types.SimpleNamespace(_hooks={})
+    fake_plugins = types.SimpleNamespace(get_plugin_manager=lambda: manager)
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.SimpleNamespace(plugins=fake_plugins))
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", fake_plugins)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
+
+    class _CtxWithHooks:
+        def __init__(self):
+            self.engine = None
+            self.hooks = {}
+
+        def register_context_engine(self, engine):
+            self.engine = engine
+
+        def register_hook(self, name, callback):
+            self.hooks.setdefault(name, []).append(callback)
+
+    ctx = _CtxWithHooks()
+    module.register(ctx)
+    try:
+        assert len(ctx.hooks.get("post_llm_call", [])) == 1
+        assert manager._hooks == {}
+        manifest = (Path(__file__).resolve().parent.parent / "plugin.yaml").read_text(encoding="utf-8")
+        declared = set(
+            line.strip()[2:]
+            for line in manifest.split("provides_hooks:", 1)[1].splitlines()
+            if line.strip().startswith("- ")
+        )
+        assert declared == set(ctx.hooks)
+    finally:
+        ctx.engine.shutdown()
 
 
 @pytest.mark.parametrize("plugin_dir", ["hermes-lcm", "hermes-lcm-x"])

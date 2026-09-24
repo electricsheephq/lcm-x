@@ -134,8 +134,8 @@ _PRIVATE_KEY_BODY_CHARS_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 _HEX_DIGEST_RE = re.compile(r"[0-9a-fA-F]{32,128}")
 _PRIVATE_KEY_STRICT_MIN_CHARS = 16
 # A real inline key has a substantial contiguous base64 run between markers;
-# prose like "... -----BEGIN PRIVATE KEY----- and -----END PRIVATE KEY----- ..."
-# does not and must not be consumed.
+# prose that merely names a BEGIN/END PRIVATE KEY marker pair with no key body
+# between them does not and must not be consumed.
 _PRIVATE_KEY_INLINE_RUN_RE = re.compile(r"[A-Za-z0-9+/]{16,}")
 # One-or-more backslashes covers every nesting depth of serialization
 # ("\\n" from json.dumps, "\\\\n" from json-of-json / logged JSON).

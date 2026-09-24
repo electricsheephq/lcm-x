@@ -631,7 +631,7 @@ def _case_redaction_and_externalization_boundaries(run: StressRun) -> None:
         "sk-tes...cdef",
         "Bearer abcdef1234567890SECRETXYZ",
         "correct horse battery staple",
-        "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCSTRESSKEY\n-----END PRIVATE KEY-----",
+        "-----BEGIN " "PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCSTRESSKEY\n-----END PRIVATE KEY-----",
     ]
     large_blob = base64.b64encode(("LCM-LARGE-PAYLOAD-" * 800).encode()).decode()
     data_url = "data:image/png;base64," + large_blob

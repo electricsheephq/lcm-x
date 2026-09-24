@@ -18,3 +18,8 @@ provides_tools:
   - lcm_status
   - lcm_inspect
   - lcm_doctor
+provides_hooks:
+  - pre_llm_call
+  - post_llm_call
+  - subagent_start
+  - subagent_stop
