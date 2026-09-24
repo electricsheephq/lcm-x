@@ -7,16 +7,14 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 ## Unreleased
 
 - Fix: Hermes ACP turns no longer store duplicate rows or hit `publication_invariant_conflict`
-  when the host trims the prompt at turn end (#498). ACP persists `prompt.strip()` and rewrites
-  the user dict in place after LCM stored the raw prompt (preflight ingest on most turns, or a
-  same-turn compaction). LCM now watches the user rows it stored; when the host rewrites that
-  same object by edge whitespace only, it records an identity override for the row under
-  `host_rewrite_identity:<store_id>` (redacted/externalized like ingest, bound to a digest of
-  the stored content, refused for lossy redactions). Stored content is never modified; the
-  override is keyed by store_id, so it survives restart and rotation. Replay identity stays
-  exact everywhere else; commit-proof positions also compare user rows without edge whitespace.
-  The durable commit proof moves to version 3; version-2 (rc3) proofs are still honoured with
-  exact identities.
+  when the host trims the prompt at turn end (#498). LCM watches the user rows it stored; when
+  the host rewrites that same object by edge whitespace only, it records an identity override
+  under `host_rewrite_identity:<store_id>` (protected like ingest, bound to a digest of the
+  stored content, refused for lossy redactions). Stored content is never modified. Only
+  position-bound matchers read an override (head-anchored restart replay, the durable proof
+  walk, and the store-id mapper, which binds either form one-to-one); full-replay and tail
+  classification stay exact. Commit-proof positions compare user rows without edge whitespace.
+  The durable commit proof moves to version 3; version-2 (rc3) proofs are still honoured.
 
 ## v0.24.0 - BREAKING: plugin renamed to hermes-lcm-x, engine to lcm-x (unreleased)
 

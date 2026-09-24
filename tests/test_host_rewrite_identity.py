@@ -57,16 +57,15 @@ class _AcpHost:
         self.history.append(_reply(i))
         self.engine.ingest(self.history)
 
-    def restart(self, raw_turns=()):
-        """The host resends its transcript. Hermes' state.db keeps a same-turn
+    def restart(self, raw_indexes=()):
+        """A new process. The host resumes its transcript: the next turn's preflight
+        ingest resends it plus the new prompt. Hermes' state.db keeps a same-turn
         compaction's prompt in the RAW form (the commit persisted it before the
-        persist override), so ``raw_turns`` are resent untrimmed."""
+        persist override), so ``raw_indexes`` of the history are resent untrimmed."""
         self.engine.shutdown()
         self.engine = self._start()
-        for message in self.history:
-            if message["role"] == "user" and any(message["content"].startswith(f"[T{t:02d}]") for t in raw_turns):
-                message["content"] = message["content"].strip() + "\n"
-        self.engine.ingest(list(self.history))
+        for index in raw_indexes:
+            self.history[index] = dict(self.history[index], content=self.history[index]["content"].strip() + "\n")
 
     def rows(self):
         return self.engine._store._conn.execute("SELECT store_id, role, content FROM messages ORDER BY store_id").fetchall()
@@ -110,8 +109,9 @@ def test_restart_before_the_first_compaction_stores_no_duplicates(tmp_path, monk
         for i in range(1, 13):
             host.turn(i)
         host.restart()
-        assert len(host.rows()) == 24
-        assert host.compact(13) == ("compacted", "")
+        host.turn(13)
+        assert len(host.rows()) == 26
+        assert host.compact(14) == ("compacted", "")
         assert _no_duplicates(host.rows())
     finally:
         host.engine.shutdown()
@@ -133,10 +133,10 @@ def test_restart_after_a_same_turn_compaction_commit_stores_no_duplicates(
             host.turn(20, compact=True)
         rows = len(host.rows())
         last = 20 if commits == 2 else 13
-        host.restart(raw_turns=(last,) if state_db_form else ())
-        assert len(host.rows()) == rows
+        host.restart(raw_indexes=(len(host.history) - 2,) if state_db_form else ())
         for i in range(last + 1, last + 7):
             host.turn(i)
+        assert len(host.rows()) == rows + 12
         assert host.compact(last + 7) == ("compacted", "")
         assert _no_duplicates(host.rows())
     finally:
@@ -152,12 +152,13 @@ def test_repeated_identical_prompts_each_keep_their_row(tmp_path, monkeypatch):
             host.turn(i, text="continue")
         host.turn(13, text="continue", compact=True)
         rows = len(host.rows())
-        host.restart()
-        assert len(host.rows()) == rows
-        roles = [role for _sid, role, content in host.rows() if (content or "").strip() == "continue"]
-        assert roles == ["user"] * 4
+        # state.db resends the compaction turn's "continue\n" raw, the others trimmed
+        host.restart(raw_indexes=(len(host.history) - 2,))
         for i in range(14, 20):
             host.turn(i)
+        assert len(host.rows()) == rows + 12
+        roles = [role for _sid, role, content in host.rows() if (content or "").strip() == "continue"]
+        assert roles == ["user"] * 4
         assert host.compact(20) == ("compacted", "")
         assert _no_duplicates([row for row in host.rows() if (row[2] or "").strip() != "continue"])
     finally:
@@ -178,14 +179,15 @@ def test_override_leaves_stored_content_and_fts_unchanged_and_is_idempotent(tmp_
         payload = json.loads(next(iter(overrides.values())))
         assert payload["stripped"] == ["", "\n"] and not payload["content"].endswith("\n")
         host.restart()
-        host.engine.ingest(list(host.history))
+        host.engine.ingest(list(host.history) + [_user(7)])
+        host.engine.ingest(list(host.history) + [_user(7)])
         assert host.overrides() == overrides
-        assert [(sid, content) for sid, role, content in host.rows() if role == "user"] == users
+        assert [(sid, content) for sid, role, content in host.rows() if role == "user"][:-1] == users
         assert conn is not host.engine._store._conn
         fts_after = host.engine._store._conn.execute(
             "SELECT rowid FROM messages_fts WHERE messages_fts MATCH 'alpha' ORDER BY rowid"
         ).fetchall()
-        assert fts_after == fts
+        assert fts_after[: len(fts)] == fts  # only the new prompt's row was added
     finally:
         host.engine.shutdown()
 
@@ -197,8 +199,9 @@ def test_host_that_keeps_the_raw_form_gets_no_override(tmp_path, monkeypatch):
             host.turn(i, rewrite=False)
         assert host.overrides() == {}
         host.restart()
-        assert len(host.rows()) == 24
-        assert host.compact(13) == ("compacted", "")
+        host.turn(13, rewrite=False)
+        assert len(host.rows()) == 26
+        assert host.compact(14) == ("compacted", "")
     finally:
         host.engine.shutdown()
 
@@ -216,8 +219,71 @@ def test_externalized_large_user_row_keeps_its_identity(tmp_path, monkeypatch):
         users = [content for _sid, role, content in host.rows() if role == "user"]
         assert all(not content.startswith("[T") for content in users)  # stored as externalized refs
         host.restart()
-        assert len(host.rows()) == 24
-        assert host.compact(13) == ("compacted", "")
+        host.turn(13)
+        assert len(host.rows()) == 26
+        assert host.compact(14) == ("compacted", "")
         assert _no_duplicates(host.rows())
+    finally:
+        host.engine.shutdown()
+
+
+@pytest.mark.parametrize(("raw", "trimmed"), [(" retry\n", "retry"), ("  \n", "")], ids=["retry", "whitespace-only"])
+def test_override_never_turns_a_new_identical_exchange_into_replay(tmp_path, raw, trimmed):
+    """#498 r2 P0: the override proves the old row's rewrite, not that a later
+    identical exchange is replay. A restarted host that sends just
+    [user, assistant] again gets a full, unanchored replay decision: exact."""
+    engine = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        user = {"role": "user", "content": raw}
+        engine.ingest([user])
+        user["content"] = trimmed  # in-place host rewrite
+        engine.ingest([user, {"role": "assistant", "content": "OK"}])
+        assert len(engine._store._conn.execute("SELECT key FROM metadata WHERE key LIKE 'host_rewrite%'").fetchall()) == 1
+    finally:
+        engine.shutdown()
+    resumed = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    try:
+        resumed.on_session_start("S0", platform="acp", context_length=200_000)
+        resumed.ingest([{"role": "user", "content": trimmed}, {"role": "assistant", "content": "OK"}])
+        assert resumed._store.get_session_count("S0") == 4
+    finally:
+        resumed.shutdown()
+
+
+def test_mapper_binds_each_occurrence_to_either_form_of_its_row(tmp_path, monkeypatch):
+    """#498 r2 P1: two overridden "continue\n" rows, resent as [raw, trimmed]
+    (state.db raw for one, live trimmed for the other): both map, in order."""
+    host = _AcpHost(tmp_path, monkeypatch)
+    try:
+        host.turn(1)
+        host.turn(2, text="continue")
+        host.turn(3, text="continue")
+        assert len(host.overrides()) == 3
+        stored = [sid for sid, role, content in host.rows() if content == "continue\n"]
+        active = [dict(m) for m in host.history]
+        active[2]["content"] = "continue\n"
+        mapped = host.engine._get_store_id_map_for_messages(active)
+        assert [mapped.get(id(active[i])) for i in (2, 4)] == stored
+    finally:
+        host.engine.shutdown()
+
+
+def test_rekey_declines_an_ambiguous_input_occurrence(tmp_path, monkeypatch):
+    """#498 r2 P2: two watched "continue\n" inputs, one output copy. The copy's
+    row is ambiguous, so no watch acquires it: only a row whose own object was
+    rewritten may get an override."""
+    host = _AcpHost(tmp_path, monkeypatch, fresh_tail_count=4)
+    try:
+        for i in range(1, 5):
+            host.turn(i)
+        host.turn(5, text="continue", rewrite=False)
+        for i in range(6, 9):
+            host.turn(i, rewrite=False)
+        before = set(host.overrides())
+        host.turn(9, text="continue", compact=True)
+        continue_rows = [sid for sid, role, content in host.rows() if content == "continue\n"]
+        assert len(continue_rows) == 2
+        assert f"host_rewrite_identity:{continue_rows[0]}" not in set(host.overrides()) - before
     finally:
         host.engine.shutdown()

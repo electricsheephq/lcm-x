@@ -120,7 +120,7 @@ _PROBE = textwrap.dedent(
     identity_mismatches = [
         store_id for store_id, sid, r, c in stored if r == "user" and not any(
             engine._message_replay_identity({"store_id": key, "session_id": sid, "role": r, "content": c},
-                                            stored_row=True)[1] in host_user_texts
+                                            stored_row=True, with_host_rewrite=True)[1] in host_user_texts
             for key in (store_id, 0))
     ]
     log = buf.getvalue()

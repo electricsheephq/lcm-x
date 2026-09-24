@@ -5602,9 +5602,8 @@ class LCMEngine(
                 msg for _idx, msg in messages_to_store_with_index
             ],
         )
-        self._watch_stored_user_rows(
-            zip([messages[idx] for idx, _msg in messages_to_store_with_index], protected_messages, store_ids)
-        )
+        originals = [messages[idx] for idx, _msg in messages_to_store_with_index]
+        self._watch_stored_user_rows(zip(originals, protected_messages, store_ids))
         # Rollup staleness is driven by summary-node PUBLICATION
         # (_invalidate_rollups_for_published_node at every add_node site), not by
         # raw ingest: marking a period stale before its covering summary exists
