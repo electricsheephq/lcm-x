@@ -1608,12 +1608,17 @@ class ReconcileMixin:
             index = 0
             n = len(messages)
             if not target:
-                # A scaffold-only output (fresh_tail_count=0): the proof covers only
-                # the leading verified scaffold rows, and at least one (#484 item 11k).
-                while index < n and self._is_verified_replay_scaffold_message(messages[index]):
-                    index += 1
-                if not index:
+                # A scaffold-only output (fresh_tail_count=0): the proof covers exactly
+                # the emitted scaffold rows, in order (#484 items 11k, 11l).
+                scaffold = list(payload.get("scaffold_sha256") or [])
+                if not scaffold or n < len(scaffold):
                     return None
+                for message, digest in zip(messages, scaffold):
+                    if not self._is_verified_replay_scaffold_message(message) or (
+                        _commit_proof_identity_digest(self._message_replay_identity(message)) != digest
+                    ):
+                        return None
+                index = len(scaffold)
             while index < n and matched < len(target):
                 message = messages[index]
                 index += 1

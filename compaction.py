@@ -597,6 +597,9 @@ class CompactionMixin:
                 ],
                 "last_store_id": int(tail[-1]["store_id"]) if tail else 0,
             }
+            if not proof["output_effective"]:
+                # Scaffold-only output: bind the proof to the emitted rows (#484 item 11l).
+                payload["scaffold_sha256"] = [_commit_proof_identity_digest(i) for i in proof["output"]]
             self._store.write_metadata_json(
                 [self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)],
                 json.dumps(payload, sort_keys=True),

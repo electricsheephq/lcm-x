@@ -655,6 +655,92 @@ def test_scaffold_only_compaction_restart_before_first_ingest_stores_no_scaffold
         resumed.shutdown()
 
 
+def _scaffold_only_compaction(tmp_path, monkeypatch, *, in_place):
+    """fresh_tail_count=0 compaction, commit, boundary start, then a restart before
+    the first ingest. Returns (resumed engine, compressed output)."""
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
+    engine = LCMEngine(config=_config(tmp_path, fresh_tail_count=0), hermes_home=str(tmp_path / "home"))
+    child = "S0" if in_place else "S1"
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        host: list = [{"role": "system", "content": "You are concise."}]
+        for i in range(1, 13):
+            host.extend(_turn(i))
+            engine.ingest(host)
+        pre = list(host)
+        compressed = engine.compress(list(host), force=True)
+        assert engine._last_compression_status == "compacted"
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(child, boundary_reason="compression", old_session_id="S0", platform="acp")
+    finally:
+        engine.shutdown()
+    resumed = LCMEngine(config=_config(tmp_path, fresh_tail_count=0), hermes_home=str(tmp_path / "home"))
+    resumed.on_session_start(child, platform="acp", context_length=200_000)
+    return resumed, compressed
+
+
+def _raw_scaffold_rows(engine):
+    rows = engine._store._conn.execute("SELECT content FROM messages").fetchall()
+    return sum(
+        1
+        for (c,) in rows
+        if "Lossless Context Management" in (c or "")
+        or (c or "").startswith(("[Current user objective", "[Recent Summary", "[Session Arc Summary", "[Durable Summary"))
+    )
+
+
+@pytest.mark.parametrize(
+    "in_place",
+    [
+        pytest.param(
+            True,
+            id="inplace",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason=(
+                    "#484 item 11l, pre-existing: in place the proof stops at the emitted rows (cursor 2), "
+                    "but the store matcher ('skipped scaffold-only prefix') skips a trailing row that is a "
+                    "verified own summary by shape; the same on 9a7dbf46 before 11k. Escalated."
+                ),
+            ),
+        ),
+        pytest.param(False, id="rotation"),
+    ],
+)
+def test_scaffold_only_proof_does_not_skip_a_new_row_quoting_the_summary(tmp_path, monkeypatch, in_place):
+    """#484 item 11l: the scaffold-only durable proof is bound to the emitted rows,
+    not to their shape. A new user row whose whole content is the session's own
+    rendered summary block is stored once; no generated scaffold is stored raw."""
+    resumed, compressed = _scaffold_only_compaction(tmp_path, monkeypatch, in_place=in_place)
+    try:
+        block = compressed[-1]["content"]
+        block = block[block.index("[Recent Summary"):] if "[Recent Summary" in block else block
+        quoted = {"role": "user", "content": block}
+        assert resumed._is_verified_replay_scaffold_message(quoted)
+        scaffold_before = _raw_scaffold_rows(resumed)
+        resumed.ingest(list(compressed) + [quoted])
+        stored = [c for (c,) in resumed._store._conn.execute("SELECT content FROM messages")]
+        assert stored.count(block) == 1
+        assert _raw_scaffold_rows(resumed) == scaffold_before + 1  # only the quoted row
+    finally:
+        resumed.shutdown()
+
+
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
+def test_scaffold_only_proof_refuses_a_host_list_without_the_note(tmp_path, monkeypatch, in_place):
+    """#484 item 11l negative: the host dropped the generated note row, so the list
+    is not the emitted sequence: the proof returns None and nothing is lost."""
+    resumed, compressed = _scaffold_only_compaction(tmp_path, monkeypatch, in_place=in_place)
+    try:
+        host = list(compressed[1:]) + [{"role": "user", "content": "NEW-2210 after the compaction"}]
+        assert resumed._cursor_from_durable_commit_proof(host) is None
+        resumed.ingest(host)
+        stored = [c for (c,) in resumed._store._conn.execute("SELECT content FROM messages")]
+        assert stored.count("NEW-2210 after the compaction") == 1
+    finally:
+        resumed.shutdown()
+
+
 def test_list_content_row_is_not_a_carrier(tmp_path, monkeypatch):
     engine, _pre, compressed = _compacted_engine(tmp_path, monkeypatch)
     try:
