@@ -568,3 +568,75 @@ def test_retained_anchor_trimmed_before_capture_survives_a_crash(tmp_path, monke
         assert users == [("the only real user prompt\n",)]  # stored once, never modified
     finally:
         engine.shutdown()
+
+
+def _stored_user_rows(host):
+    return [{"store_id": sid, "session_id": "S0", "role": role, "content": content}
+            for sid, role, content in host.rows() if role == "user"]
+
+
+def test_override_cache_stays_bounded_across_reads(tmp_path, monkeypatch):
+    """#498 r6 (ltrlc): the read-through cache is FIFO-capped, whatever a long-lived
+    process reads: at most the cap plus the batch being loaded."""
+    monkeypatch.setattr(lcm_reconcile_module, "_HOST_REWRITE_OVERRIDE_CACHE_CAP", 4, raising=False)
+    host = _AcpHost(tmp_path, monkeypatch)
+    try:
+        for i in range(1, 13):
+            host.turn(i)
+        assert len(host.overrides()) == 12
+        cache = host.engine._host_rewrite_state()[1]
+        assert len(cache) <= 4 + 1
+        rows = _stored_user_rows(host)
+        for start in range(0, len(rows), 2):
+            host.engine._load_host_rewrite_overrides(rows[start:start + 2])
+            assert len(cache) <= 4 + 2
+    finally:
+        host.engine.shutdown()
+
+
+def test_evicted_override_reloads_and_matches_as_before(tmp_path, monkeypatch):
+    """#498 r6: eviction is safe. An evicted override reloads from metadata: the same
+    identities, and a restart's head replay stores only the new turn."""
+    host = _AcpHost(tmp_path, monkeypatch)
+    try:
+        for i in range(1, 13):
+            host.turn(i)
+        rows = _stored_user_rows(host)
+
+        def identities():
+            return [host.engine._message_replay_identity(row, stored_row=True, with_host_rewrite=True) for row in rows]
+
+        uncapped = identities()
+        assert [identity[1] for identity in uncapped] == [row["content"].strip() for row in rows]
+        monkeypatch.setattr(lcm_reconcile_module, "_HOST_REWRITE_OVERRIDE_CACHE_CAP", 2, raising=False)
+        host.engine._load_host_rewrite_overrides(rows[-2:])  # evicts the older entries
+        assert identities() == uncapped
+        host.restart()
+        host.turn(13)
+        assert len(host.rows()) == 26
+        assert _no_duplicates(host.rows())
+        assert len(host.engine._host_rewrite_state()[1]) <= 2 + len(rows) + 1
+        assert host.compact(14) == ("compacted", "")
+    finally:
+        host.engine.shutdown()
+
+
+def test_override_batch_larger_than_the_cap_serves_every_row(tmp_path, monkeypatch):
+    """#498 r6: a batch larger than the cap is kept whole for the matcher that asked;
+    only older entries are evicted."""
+    host = _AcpHost(tmp_path, monkeypatch)
+    try:
+        for i in range(1, 13):
+            host.turn(i)
+        rows = _stored_user_rows(host)
+        host.restart()
+        monkeypatch.setattr(lcm_reconcile_module, "_HOST_REWRITE_OVERRIDE_CACHE_CAP", 3, raising=False)
+        cache = host.engine._host_rewrite_state()[1]
+        host.engine._load_host_rewrite_overrides(rows[:1])
+        host.engine._load_host_rewrite_overrides(rows[1:])
+        assert set(cache) == {row["store_id"] for row in rows[1:]}  # the batch whole, the older entry gone
+        for row in rows[1:]:
+            assert host.engine._host_rewrite_override_content(row) == row["content"].strip()
+        assert set(cache) == {row["store_id"] for row in rows[1:]}  # served without a reload
+    finally:
+        host.engine.shutdown()

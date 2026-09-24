@@ -128,6 +128,8 @@ def _proof_user_identity(identity):
 # Per stored user row, keyed by store_id (survives rotation and restart): the
 # identity content of the form a host rewrote that row to in place (#498).
 _HOST_REWRITE_IDENTITY_METADATA_PREFIX = "host_rewrite_identity"
+# The in-process override cache is read-through (a miss reloads from metadata): FIFO-bounded.
+_HOST_REWRITE_OVERRIDE_CACHE_CAP = 1024
 
 
 def _commit_proof_identity_digest(identity) -> str:
@@ -396,6 +398,14 @@ class ReconcileMixin:
             keys = {f"{_HOST_REWRITE_IDENTITY_METADATA_PREFIX}:{store_id}": store_id for store_id in wanted}
             found = self._store.read_metadata_json_many(list(keys))
             overrides.update({store_id: found.get(key) for key, store_id in keys.items()})
+            self._bound_host_rewrite_overrides(wanted)
+
+    def _bound_host_rewrite_overrides(self, keep) -> None:
+        """Evict the oldest cached overrides past the cap, never those this call loaded or set."""
+        overrides = self._host_rewrite_state()[1]
+        excess = len(overrides) - _HOST_REWRITE_OVERRIDE_CACHE_CAP
+        for store_id in [key for key in overrides if key not in keep][: max(0, excess)]:
+            del overrides[store_id]
 
     def _host_rewrite_override_content(self, row: Dict[str, Any]) -> Optional[str]:
         """The host form's protected content, while the stored content is unchanged."""
@@ -470,6 +480,7 @@ class ReconcileMixin:
         self._store.write_metadata_json([key], json.dumps(payload, sort_keys=True), skip_unchanged=True)
         del watch[store_id]  # only once the override is durable: a failed write retries next ingest
         overrides[store_id] = payload
+        self._bound_host_rewrite_overrides({store_id})
 
     def _message_replay_identity(
         self, msg: Dict[str, Any], *, stored_row: bool = False, with_host_rewrite: bool = False
