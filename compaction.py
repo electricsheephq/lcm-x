@@ -700,16 +700,45 @@ class CompactionMixin:
         self._last_compression_status = "error"
         self._last_compression_noop_reason = "native recovery did not produce a usable summary"
         self._last_summary_error = self._last_compression_noop_reason
+        self._last_native_recovery_rejection = ""
+
+        def _reject(reason: str, **details: Any) -> List[Dict[str, Any]]:
+            self._last_native_recovery_rejection = reason
+            self._last_compression_noop_reason = reason
+            logger.warning(
+                "Native recovery rejected; retaining context "
+                "(reason=%s, input_rows=%d, recovered_rows=%d, "
+                "protected_rows=%d, details=%s)",
+                reason,
+                len(messages),
+                int(details.pop("recovered_rows", 0)),
+                int(details.pop("protected_rows", 0)),
+                details or None,
+            )
+            return messages
+
         cancelled = getattr(self, "_compression_cancelled_check", None)
         if not callable(cancelled):
-            return messages
+            return _reject("binding_changed")
         if cancelled():
-            return messages
+            return _reject("cancelled")
         try:
-            from agent.context_compressor import ContextCompressor
+            import agent.context_compressor as context_compressor
+
+            ContextCompressor = context_compressor.ContextCompressor
 
             fresh_tail = self._fresh_tail_boundary(messages)
             protected_tail = messages[fresh_tail.start:]
+            prefix = messages[:fresh_tail.start]
+            tail_key = getattr(context_compressor, "_COMPACTION_TAIL_MARKER", None)
+            persisted_key = getattr(context_compressor, "_DB_PERSISTED_MARKER", None)
+            split = bool(tail_key and persisted_key and protected_tail)
+            if split and len(prefix) <= self.protect_first_n + 4:
+                return _reject(
+                    "prefix_too_short",
+                    protected_rows=len(protected_tail),
+                    prefix_rows=len(prefix),
+                )
 
             # Fresh per attempt: a timed-out predecessor must never share its
             # native compressor's mutable summary/cooldown state with a retry.
@@ -722,24 +751,54 @@ class CompactionMixin:
                 config_context_length=self.context_length,
                 threshold_percent=self.threshold_percent,
                 protect_first_n=self.protect_first_n,
-                protect_last_n=fresh_tail.count,
+                protect_last_n=3 if split else fresh_tail.count,
                 summary_model_override=self._config.summary_model or None,
                 abort_on_summary_failure=True,
                 quiet_mode=True,
             )
-            if fresh_tail.tokens > 0:
-                native.tail_token_budget = fresh_tail.tokens
+            if split or fresh_tail.tokens > 0:
+                native.tail_token_budget = 1 if split else fresh_tail.tokens
             native.on_session_start(self._session_id)
             native._compression_cancelled_check = cancelled
-            recovered = native.compress(
-                copy.deepcopy(messages),
-                current_tokens=(
+            derive_focus = getattr(ContextCompressor, "_derive_auto_focus_topic", None)
+            focus_topic = derive_focus(messages) if callable(derive_focus) else None
+            synthetic_user = getattr(
+                ContextCompressor, "_is_synthetic_compression_user_turn", None
+            )
+            suffix_has_real_user = any(
+                message.get("role") == "user"
+                and isinstance(message.get("content"), str)
+                and bool(message["content"].strip())
+                and not (callable(synthetic_user) and synthetic_user(message))
+                for message in protected_tail
+            )
+            if split and suffix_has_real_user and hasattr(native, "_find_inflight_user_task"):
+                native._find_inflight_user_task = lambda _messages: None
+            native_kwargs = {
+                "current_tokens": (
                     current_tokens
                     if current_tokens is not None and current_tokens > 0
                     else count_messages_tokens(messages)
                 ),
-                force=True,
+                "force": True,
+            }
+            if split:
+                native_kwargs["focus_topic"] = focus_topic
+            recovered_head = native.compress(
+                copy.deepcopy(prefix if split else messages),
+                **native_kwargs,
             )
+            if split:
+                carried_tail = []
+                for message in protected_tail:
+                    carried = copy.deepcopy(message)
+                    carried.pop(persisted_key, None)
+                    carried[tail_key] = True
+                    carried_tail.append(carried)
+                recovered = recovered_head + carried_tail
+            else:
+                recovered = recovered_head
+
             def _native_source_rows(
                 rows: List[Dict[str, Any]],
             ) -> List[Dict[str, Any]]:
@@ -757,29 +816,74 @@ class CompactionMixin:
                 if protected_source_rows
                 else []
             )
-            if (
-                cancelled()
-                or getattr(self, "_compression_cancelled_check", None) is not cancelled
-                or native._last_compress_aborted
-                or not getattr(native, "_last_compression_made_progress", False)
-                or any(
-                    "[digest unavailable for segment " in str(m.get("content", ""))
-                    for m in recovered
+            guard_counts = {
+                "recovered_rows": len(recovered),
+                "protected_rows": len(protected_source_rows),
+            }
+            if cancelled():
+                return _reject("cancelled", **guard_counts)
+            if getattr(self, "_compression_cancelled_check", None) is not cancelled:
+                return _reject("binding_changed", **guard_counts)
+            if native._last_compress_aborted:
+                telemetry = getattr(native, "_last_compression_telemetry", {})
+                return _reject(
+                    "native_aborted",
+                    failure_class=(telemetry or {}).get("failure_class"),
+                    **guard_counts,
                 )
-                or getattr(native, "_last_summary_fallback_used", False)
-                or not recovered
-                or count_messages_tokens(recovered) >= count_messages_tokens(messages)
-                or [
-                    self._message_replay_identity(message)
-                    for message in recovered_tail
-                ] != [
-                    self._message_replay_identity(message)
-                    for message in protected_source_rows
-                ]
+            if not getattr(native, "_last_compression_made_progress", False):
+                return _reject("no_progress", **guard_counts)
+            if any(
+                "[digest unavailable for segment " in str(message.get("content", ""))
+                for message in recovered
             ):
-                return messages
-        except Exception:
-            logger.warning("Native recovery failed; retaining context")
+                return _reject("digest_unavailable", **guard_counts)
+            if getattr(native, "_last_summary_fallback_used", False):
+                return _reject("fallback_used", **guard_counts)
+            if not recovered_head:
+                return _reject("empty", **guard_counts)
+            recovered_tokens = count_messages_tokens(recovered)
+            input_tokens = count_messages_tokens(messages)
+            if recovered_tokens >= input_tokens:
+                return _reject(
+                    "not_smaller",
+                    input_tokens=input_tokens,
+                    recovered_tokens=recovered_tokens,
+                    **guard_counts,
+                )
+            recovered_identities = [
+                self._message_replay_identity(message) for message in recovered_tail
+            ]
+            protected_identities = [
+                self._message_replay_identity(message) for message in protected_source_rows
+            ]
+            if recovered_identities != protected_identities:
+                changed_offsets = [
+                    index
+                    for index, pair in enumerate(zip(recovered_identities, protected_identities))
+                    if pair[0] != pair[1]
+                ]
+                changed_rows = len(changed_offsets) + abs(
+                    len(recovered_identities) - len(protected_identities)
+                )
+                first_changed_offset = (
+                    changed_offsets[0]
+                    if changed_offsets
+                    else min(len(recovered_identities), len(protected_identities))
+                )
+                return _reject(
+                    "suffix_changed",
+                    changed_rows=changed_rows,
+                    first_changed_offset=first_changed_offset,
+                    **guard_counts,
+                )
+        except Exception as exc:
+            self._last_native_recovery_rejection = "exception"
+            self._last_compression_noop_reason = "exception"
+            logger.warning(
+                "Native recovery failed; retaining context (exception_type=%s)",
+                type(exc).__name__,
+            )
             return messages
         self._last_compression_status = "host_native"
         self._last_summary_error = None

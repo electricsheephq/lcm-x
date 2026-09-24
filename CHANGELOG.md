@@ -6,6 +6,11 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Native recovery now runs Hermes compression only on history before LCM-X's
+  protected fresh tail, then carries that tail forward verbatim with Hermes's
+  compaction markers. This prevents host pruning, deduplication, and media
+  cleanup from rewriting protected replay rows. (#482)
+
 ## v0.24.0 - BREAKING: plugin renamed to hermes-lcm-x, engine to lcm-x (unreleased)
 
 **BREAKING.** The plugin manifest is renamed `hermes-lcm` → `hermes-lcm-x` and the context engine

@@ -32,6 +32,8 @@ def candidate(tmp_path, monkeypatch):
 def install_native(monkeypatch, behavior=None):
     calls = []
     class Native:
+        _COMPACTION_TAIL_MARKER = "_compaction_tail"
+        _DB_PERSISTED_MARKER = "_db_persisted"
         _last_compress_aborted = False
         _last_summary_fallback_used = False
         _last_compression_made_progress = True
@@ -56,16 +58,39 @@ def install_native(monkeypatch, behavior=None):
                 return projected
             return copy.deepcopy(message)
 
+        @classmethod
+        def _derive_auto_focus_topic(cls, messages):
+            return next(
+                (m["content"] for m in reversed(messages) if m.get("role") == "user"),
+                None,
+            )
+
+        @classmethod
+        def _is_synthetic_compression_user_turn(cls, message):
+            return False
+
+        def _find_inflight_user_task(self, messages):
+            return "stale task"
+
         def compress(self, messages, **kwargs):
             assert callable(self._compression_cancelled_check)
             self.compress_kwargs = kwargs
+            self.incoming = copy.deepcopy(messages)
             if behavior:
                 return behavior(self, messages)
-            return [{"role": "assistant", "content": "native summary"}] + messages[-2:]
+            return [{"role": "assistant", "content": "native summary"}] + messages[-3:]
 
     # Tests run with the repository's minimal Hermes dependency stub.
     import sys
-    monkeypatch.setitem(sys.modules, "agent.context_compressor", SimpleNamespace(ContextCompressor=Native))
+    monkeypatch.setitem(
+        sys.modules,
+        "agent.context_compressor",
+        SimpleNamespace(
+            ContextCompressor=Native,
+            _COMPACTION_TAIL_MARKER=Native._COMPACTION_TAIL_MARKER,
+            _DB_PERSISTED_MARKER=Native._DB_PERSISTED_MARKER,
+        ),
+    )
     return calls
 
 
@@ -89,7 +114,10 @@ def test_native_recovery_preserves_sources_and_tools(candidate, monkeypatch):
     result = candidate.compress(messages, current_tokens=250000, force=True)
     assert len(calls) == 1
     assert len(result) < len(messages)
-    assert result[-2:] == messages[-2:]
+    assert [candidate._message_replay_identity(m) for m in result[-2:]] == [
+        candidate._message_replay_identity(m) for m in messages[-2:]
+    ]
+    assert all(m["_compaction_tail"] is True for m in result[-2:])
     assert candidate.last_compression_status == "host_native"
     assert candidate._lifecycle.get_by_conversation("conversation").current_frontier_store_id == frontier
     assert candidate._store._conn.execute("SELECT * FROM messages ORDER BY store_id").fetchall() == before
@@ -190,16 +218,18 @@ def test_native_recovery_honors_resolved_tail_and_host_token_observation(candida
     expected_tail = candidate._fresh_tail_boundary(messages)
 
     def preserve_resolved_tail(native, incoming):
-        return [{"role": "assistant", "content": "native summary"}] + incoming[-expected_tail.count:]
+        return [{"role": "assistant", "content": "native summary"}] + incoming[-3:]
 
     calls = install_native(monkeypatch, preserve_resolved_tail)
     observed_tokens = 231_337
     recovered = candidate.compress(messages, current_tokens=observed_tokens, force=True)
 
     assert candidate.last_compression_status == "host_native"
-    assert calls[0].init_kwargs["protect_last_n"] == expected_tail.count
-    assert calls[0].tail_token_budget == expected_tail.tokens
+    assert calls[0].init_kwargs["protect_last_n"] == 3
+    assert calls[0].tail_token_budget == 1
+    assert calls[0].incoming == messages[:expected_tail.start]
     assert calls[0].compress_kwargs["current_tokens"] == observed_tokens
+    assert calls[0].compress_kwargs["focus_topic"] == messages[-2]["content"]
     assert [candidate._message_replay_identity(message) for message in recovered[-expected_tail.count:]] == [
         candidate._message_replay_identity(message) for message in messages[expected_tail.start:]
     ]
@@ -219,6 +249,48 @@ def test_native_recovery_accepts_summary_merged_into_protected_tail(candidate, m
 
     assert recovered != messages
     assert candidate.last_compression_status == "host_native"
+
+
+def test_native_recovery_disables_stale_inflight_task_when_suffix_has_user(
+    candidate, monkeypatch
+):
+    calls = install_native(monkeypatch)
+
+    candidate.compress(history(), current_tokens=250_000, force=True)
+
+    assert calls[0]._find_inflight_user_task([]) is None
+
+
+def test_native_recovery_short_prefix_rejects_without_dispatch(candidate, monkeypatch):
+    candidate._config.fresh_tail_count = 8
+    calls = install_native(monkeypatch)
+    messages = history()
+
+    assert candidate._compress_native_recovery(messages) is messages
+    assert calls == []
+    assert candidate._last_native_recovery_rejection == "prefix_too_short"
+    assert candidate.last_compression_noop_reason == "prefix_too_short"
+
+
+@pytest.mark.parametrize("missing", ["_COMPACTION_TAIL_MARKER", "_DB_PERSISTED_MARKER"])
+def test_native_recovery_missing_marker_uses_legacy_full_transcript(
+    candidate, monkeypatch, missing
+):
+    calls = install_native(monkeypatch)
+    module = __import__("agent.context_compressor", fromlist=["ContextCompressor"])
+    delattr(module, missing)
+    messages = history()
+    expected_tail = candidate._fresh_tail_boundary(messages)
+
+    recovered = candidate._compress_native_recovery(messages)
+
+    assert calls[0].incoming == messages
+    assert calls[0].init_kwargs["protect_last_n"] == expected_tail.count
+    assert calls[0].tail_token_budget == expected_tail.tokens
+    assert "focus_topic" not in calls[0].compress_kwargs
+    assert [candidate._message_replay_identity(m) for m in recovered[-2:]] == [
+        candidate._message_replay_identity(m) for m in messages[-2:]
+    ]
 
 
 def test_cleanup_only_handoff_precedes_native_summary_and_is_consumed(candidate, monkeypatch):
@@ -355,8 +427,23 @@ def test_pressure_overflow_and_force_still_dispatch_native_summary(
     assert len(result) < len(history())
 
 
-@pytest.mark.parametrize("kind", ["exception", "aborted", "placeholder", "empty", "grows", "cancelled", "superseded", "prune_only", "digest_failure"])
-def test_failed_recovery_preserves_exact_input(candidate, monkeypatch, kind):
+@pytest.mark.parametrize(
+    ("kind", "reason"),
+    [
+        ("exception", "exception"),
+        ("aborted", "native_aborted"),
+        ("placeholder", "fallback_used"),
+        ("empty", "empty"),
+        ("grows", "not_smaller"),
+        ("cancelled", "cancelled"),
+        ("superseded", "binding_changed"),
+        ("prune_only", "no_progress"),
+        ("digest_failure", "digest_unavailable"),
+    ],
+)
+def test_failed_recovery_preserves_exact_input(
+    candidate, monkeypatch, caplog, kind, reason
+):
     original = history()
     def behavior(native, messages):
         if kind == "exception":
@@ -391,6 +478,17 @@ def test_failed_recovery_preserves_exact_input(candidate, monkeypatch, kind):
     assert candidate._last_compress_aborted is True
     assert candidate._ingest_cursor == len(original)
     assert candidate._ingest_cursor_needs_reconcile is True
+    assert candidate._last_native_recovery_rejection == reason
+    assert candidate.last_compression_noop_reason == reason
+    assert candidate._last_summary_error == "native recovery did not produce a usable summary"
+    warning = next(record.message for record in caplog.records if "Native recovery" in record.message)
+    if kind == "exception":
+        assert "exception_type=RuntimeError" in warning
+    else:
+        assert f"reason={reason}" in warning
+        assert "input_rows=" in warning
+        assert "recovered_rows=" in warning
+        assert "protected_rows=" in warning
 
 
 @pytest.mark.parametrize("failure", ["exception", "aborted", "cancelled", "placeholder"])
