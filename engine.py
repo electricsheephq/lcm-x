@@ -4821,12 +4821,13 @@ class LCMEngine(
         if not target:
             return None
         effective: list = []
+        mask, identities = self._replay_scaffold_layout(messages)
         for index, message in enumerate(messages):
             if len(effective) == len(target):
                 return index if effective == target else None
-            if self._is_verified_replay_scaffold_message(message):
+            if mask[index]:
                 continue
-            effective.append(self._message_replay_identity(message))
+            effective.append(identities[index])
             if effective != target[: len(effective)]:
                 return None
         return len(messages) if effective == target else None
@@ -4836,10 +4837,11 @@ class LCMEngine(
         if summary_index is None or len(droppable) != len(target) or any(_has_lossy_redacted_identity(i) for i in target):
             return None
         matched = 0
+        mask, identities = self._replay_scaffold_layout(messages)
         for index, message in enumerate(messages):
-            if self._is_verified_replay_scaffold_message(message):
+            if mask[index]:
                 continue
-            identity = self._message_replay_identity(message)
+            identity = identities[index]
             if _has_lossy_redacted_identity(identity):
                 return None
             try:
@@ -4866,6 +4868,18 @@ class LCMEngine(
             return None
         pos = 0
         saw_part = False
+        if content.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX + "\n"):
+            # compress() puts the preserved objective first and joins summary
+            # parts behind it with "\n\n---\n\n" (_assemble_context).
+            search = len(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) + 1
+            while True:
+                sep = content.find("\n\n---\n\n", search)
+                if sep < 0:
+                    return None
+                if self._LCM_SUMMARY_PART_HEADER_RE.match(content, sep + 7):
+                    pos = sep + 7
+                    break
+                search = sep + 1
         while True:
             header = self._LCM_SUMMARY_PART_HEADER_RE.match(content, pos)
             if header is None:
@@ -4913,6 +4927,10 @@ class LCMEngine(
         for separator in ("\n\n---\n\n", "\n\n"):
             if content.startswith(separator, pos):
                 rest = content[pos + len(separator):]
+                if self._verified_lcm_summary_prefix_end(rest) is not None:
+                    # A summary glued to another summary is copied content, not
+                    # a host-merged carrier of a real row (#488).
+                    return None
                 return rest if rest.strip() else None
         return None
 
@@ -4930,10 +4948,55 @@ class LCMEngine(
         if str(msg.get("role") or "") == "system":
             return True
         stripped = content.lstrip()
-        if stripped.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) or stripped.startswith(_PRESERVED_TODO_CONTEXT_PREFIX):
+        if stripped.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
+            end = self._verified_lcm_summary_prefix_end(content)
+            return end is None or not content[end:].strip()
+        if stripped.startswith(_PRESERVED_TODO_CONTEXT_PREFIX):
             return True
         end = self._verified_lcm_summary_prefix_end(content)
         return end is not None and not content[end:].strip()
+
+    def _generated_head_index(self, messages: List[Dict[str, Any]]) -> Optional[int]:
+        """Return the one generated summary-head index, or None (#488)."""
+        count = len(messages)
+        index = 0
+        if count and str(messages[0].get("role") or "") == "system":
+            index = 1
+            if (
+                index + 1 < count
+                and str(messages[index].get("role") or "") == "user"
+                and str(messages[index + 1].get("role") or "") == "assistant"
+                and not self._is_replayed_context_scaffold_message(messages[index])
+                and self._is_verified_replay_scaffold_message(messages[index + 1])
+            ):
+                index += 1
+        if index >= count or str(messages[index].get("role") or "") == "system":
+            return None
+        head = messages[index]
+        if (
+            self._is_verified_replay_scaffold_message(head)
+            or self._generated_context_carrier_remainder(head) is not None
+        ):
+            return index
+        return None
+
+    def _replay_scaffold_layout(
+        self, messages: List[Dict[str, Any]]
+    ) -> tuple[list[bool], list[tuple[str, str, str, str, str]]]:
+        """Return positional scaffold flags and replay identities (#488)."""
+        head = self._generated_head_index(messages)
+        mask: list[bool] = []
+        identities: list[tuple[str, str, str, str, str]] = []
+        for index, message in enumerate(messages):
+            is_head = index == head
+            mask.append(
+                (is_head or str(message.get("role") or "") == "system")
+                and self._is_verified_replay_scaffold_message(message)
+            )
+            identities.append(
+                self._message_replay_identity(message, carrier=is_head)
+            )
+        return mask, identities
 
     def _is_replayed_context_scaffold_message(self, msg: Dict[str, Any]) -> bool:
         """Return true for active-context scaffolding that should not be re-ingested."""

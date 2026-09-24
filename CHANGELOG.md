@@ -9,6 +9,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Native recovery now compresses only history before LCM-X's protected fresh
   tail, carries that tail forward verbatim, and records adopted-output proof so
   host commits do not duplicate durable rows. (#482, #487)
+- Replay reconciliation now treats a verified summary as generated context only
+  at the generated head, so copied or host-merged summary-shaped user rows later
+  in the list remain durable content instead of being skipped. (#488)
 
 ## v0.24.0 - BREAKING: plugin renamed to hermes-lcm-x, engine to lcm-x (unreleased)
 

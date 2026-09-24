@@ -565,13 +565,25 @@ class CompactionMixin:
                 # No-progress compress: Hermes has nothing to commit, and an
                 # end call with this list must stay a real session end.
                 return
-            effective_rows = [m for m in result if not self._is_replayed_context_scaffold_message(m)]
-            proof["output_effective"] = [self._message_replay_identity(m) for m in effective_rows]
+            output_mask, output_identities = self._replay_scaffold_layout(result)
+            effective_positions = [
+                position
+                for position, is_scaffold in enumerate(output_mask)
+                if not is_scaffold
+            ]
+            proof["output_effective"] = [
+                output_identities[position] for position in effective_positions
+            ]
             proof["native"] = self._last_compression_status == "host_native"
             if proof["native"]:
                 matched_tool_ids = _matched_tool_call_ids(result)
                 proof["droppable"] = [i[0] == "tool" and bool(i[2]) and i[2] not in matched_tool_ids and not _has_lossy_redacted_identity(i) for i in proof["output_effective"]]
-                proof["native_summary_index"] = getattr(self, "_last_native_summary_index", None)
+                raw_summary_index = getattr(self, "_last_native_summary_index", None)
+                proof["native_summary_index"] = (
+                    effective_positions.index(raw_summary_index)
+                    if raw_summary_index in effective_positions
+                    else None
+                )
             proof["published"] = self._last_compression_status == "compacted"
             self._compress_commit_proof = proof
             if proof["published"] or proof["native"]:

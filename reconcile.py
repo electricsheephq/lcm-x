@@ -347,13 +347,21 @@ class ReconcileMixin:
                 return False
         return True
 
-    def _message_replay_identity(self, msg: Dict[str, Any], *, stored_row: bool = False) -> tuple[str, str, str, str, str]:
+    def _message_replay_identity(
+        self,
+        msg: Dict[str, Any],
+        *,
+        stored_row: bool = False,
+        carrier: bool = True,
+    ) -> tuple[str, str, str, str, str]:
         role = str(msg.get("role") or "unknown")
         content = normalize_content_value(msg.get("content")) or ""
         # A host-merged LCM summary carrier (#483) is identified by the real row
-        # glued behind its DAG-verified summary prefix.
+        # glued behind its DAG-verified summary prefix. Host callers pass
+        # carrier=False away from the generated head, where the same bytes are
+        # copied content and must keep their full identity (#488).
         carrier_rest = getattr(self, "_generated_context_carrier_remainder", None)
-        if role == "user" and callable(carrier_rest):
+        if role == "user" and (carrier or stored_row) and callable(carrier_rest):
             glued_row = carrier_rest({"role": "user", "content": content})
             if glued_row is not None:
                 content = glued_row
@@ -942,13 +950,24 @@ class ReconcileMixin:
         active_lineage_identities = self._active_folded_tail_identity_overrides(
             messages
         )
+        scaffold_mask, host_identities = self._replay_scaffold_layout(messages)
+        host_identity_by_id = {
+            id(message): identity
+            for message, identity in zip(messages, host_identities)
+        }
+        scaffold_ids = {
+            id(message)
+            for message, is_scaffold in zip(messages, scaffold_mask)
+            if is_scaffold
+        }
 
         def active_identity(
             message: Dict[str, Any],
         ) -> tuple[str, str, str, str, str]:
             return active_lineage_identities.get(
                 id(message),
-                self._message_replay_identity(message),
+                host_identity_by_id.get(id(message))
+                or self._message_replay_identity(message),
             )
 
         sanitized_replay_tail = self._stored_tail_for_sanitized_active_replay(stored_tail)
@@ -1048,7 +1067,7 @@ class ReconcileMixin:
             candidate_visible_messages = [
                 msg
                 for msg in candidate_messages
-                if not self._is_verified_replay_scaffold_message(msg)
+                if id(msg) not in scaffold_ids
                 and not self._matches_ignore_message_patterns(msg)
             ]
             candidate_non_placeholder_messages = [
@@ -1072,7 +1091,7 @@ class ReconcileMixin:
             ]
             filtered_candidate_placeholders = len(candidate_non_placeholder_messages) < len(candidate_visible_messages)
             candidate_has_scaffold_evidence = any(
-                self._is_verified_replay_scaffold_message(msg) for msg in candidate_messages
+                id(msg) in scaffold_ids for msg in candidate_messages
             )
             candidate_has_quarantined_replay_evidence = any(
                 self._is_quarantined_assistant_replay_identity(active_identity(msg))
@@ -1455,7 +1474,7 @@ class ReconcileMixin:
             )
 
             has_scaffold_evidence = any(
-                self._is_verified_replay_scaffold_message(msg) for msg in candidate_messages
+                id(msg) in scaffold_ids for msg in candidate_messages
             )
             has_raw_full_replay = (
                 has_persisted_marker_specific_replay_evidence
@@ -1465,7 +1484,8 @@ class ReconcileMixin:
                 and raw_session_count > 1
             )
             has_preserved_objective_scaffold = any(
-                str(msg.get("role") or "") != "system"
+                id(msg) in scaffold_ids
+                and str(msg.get("role") or "") != "system"
                 and (normalize_content_value(msg.get("content")) or "").lstrip().startswith(
                     _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
                 )
@@ -1532,13 +1552,14 @@ class ReconcileMixin:
         active_lineage_identities = self._active_folded_tail_identity_overrides(
             messages
         )
+        mask, identities = self._replay_scaffold_layout(messages)
         return [
             active_lineage_identities.get(
                 id(msg),
-                self._message_replay_identity(msg),
+                identities[index],
             )
-            for msg in messages
-            if not self._is_verified_replay_scaffold_message(msg)
+            for index, msg in enumerate(messages)
+            if not mask[index]
             and not self._matches_ignore_message_patterns(msg)
         ]
 
@@ -1609,24 +1630,27 @@ class ReconcileMixin:
             matched = 0
             index = 0
             n = len(messages)
+            mask, identities = self._replay_scaffold_layout(messages)
             if not target:
                 # A scaffold-only output (fresh_tail_count=0): the proof covers exactly
                 # the emitted scaffold rows, in order (#484 items 11k, 11l).
                 scaffold = list(payload.get("scaffold_sha256") or [])
                 if not scaffold or n < len(scaffold):
                     return None
-                for message, digest in zip(messages, scaffold):
-                    if not self._is_verified_replay_scaffold_message(message) or (
-                        _commit_proof_identity_digest(self._message_replay_identity(message)) != digest
+                for position, digest in enumerate(scaffold):
+                    if (
+                        not mask[position]
+                        or _commit_proof_identity_digest(identities[position])
+                        != digest
                     ):
                         return None
                 index = len(scaffold)
             while index < n and matched < len(target):
-                message = messages[index]
+                position = index
                 index += 1
-                if self._is_verified_replay_scaffold_message(message):
+                if mask[position]:
                     continue
-                identity = self._message_replay_identity(message)
+                identity = identities[position]
                 # A digest-less redaction (password_assignment) is not identity:
                 # different same-length secrets share it, so it proves nothing.
                 if _has_lossy_redacted_identity(identity):
@@ -1661,7 +1685,7 @@ class ReconcileMixin:
                 for row in page:
                     if index >= n:
                         return None
-                    identity = self._message_replay_identity(messages[index])
+                    identity = identities[index]
                     if _has_lossy_redacted_identity(identity) or identity != self._message_replay_identity(
                         row, stored_row=True
                     ):

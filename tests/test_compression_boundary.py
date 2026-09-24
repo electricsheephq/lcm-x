@@ -689,24 +689,7 @@ def _raw_scaffold_rows(engine):
     )
 
 
-@pytest.mark.parametrize(
-    "in_place",
-    [
-        pytest.param(
-            True,
-            id="inplace",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason=(
-                    "#484 item 11l, pre-existing: in place the proof stops at the emitted rows (cursor 2), "
-                    "but the store matcher ('skipped scaffold-only prefix') skips a trailing row that is a "
-                    "verified own summary by shape; the same on 9a7dbf46 before 11k. Escalated."
-                ),
-            ),
-        ),
-        pytest.param(False, id="rotation"),
-    ],
-)
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
 def test_scaffold_only_proof_does_not_skip_a_new_row_quoting_the_summary(tmp_path, monkeypatch, in_place):
     """#484 item 11l: the scaffold-only durable proof is bound to the emitted rows,
     not to their shape. A new user row whose whole content is the session's own
@@ -724,6 +707,166 @@ def test_scaffold_only_proof_does_not_skip_a_new_row_quoting_the_summary(tmp_pat
         assert _raw_scaffold_rows(resumed) == scaffold_before + 1  # only the quoted row
     finally:
         resumed.shutdown()
+
+
+def _summary_block(compressed):
+    content = str(_summary_message(compressed)["content"])
+    match = re.search(r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d\d+, node \d+\)\]\n", content)
+    assert match is not None
+    return content[match.start():]
+
+
+def _restart_compacted_engine(engine, tmp_path, child, *, tail):
+    engine.shutdown()
+    resumed = LCMEngine(config=_config(tmp_path, fresh_tail_count=tail), hermes_home=str(tmp_path / "home"))
+    resumed.on_session_start(child, platform="acp", context_length=200_000)
+    return resumed
+
+
+def _stored_content(engine):
+    return [content for (content,) in engine._store._conn.execute("SELECT content FROM messages")]
+
+
+def _stored_occurrences(engine, text):
+    return sum(
+        1
+        for content in _stored_content(engine)
+        if content == text or (content or "").endswith("\n\n" + text)
+    )
+
+
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
+@pytest.mark.parametrize("restart_timing", ["before", "after"], ids=["restart-before", "restart-after"])
+def test_summary_copy_after_the_handoff_is_stored_after_restart(
+    tmp_path, monkeypatch, in_place, restart_timing
+):
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch, tail=0)
+    child = "S0" if in_place else "S1"
+    block = _summary_block(compressed)
+    host = list(compressed)
+    try:
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(child, boundary_reason="compression", old_session_id="S0", platform="acp")
+        if restart_timing == "before":
+            engine = _restart_compacted_engine(engine, tmp_path, child, tail=0)
+        host.append(_turn(13)[1])
+        engine.ingest(host)
+        quoted = {"role": "user", "content": block}
+        host.append(quoted)
+        engine = _restart_compacted_engine(engine, tmp_path, child, tail=0)
+        engine.ingest(host)
+        assert _stored_occurrences(engine, block) == 1
+    finally:
+        engine.shutdown()
+
+
+def _rollback_replay_result(tmp_path, monkeypatch, *, in_place, tail, prefixed):
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch, tail=tail)
+    child = "S0" if in_place else "S1"
+    rollback = "ROLLBACK-X the same words again"
+    new_text = _summary_block(compressed) + "\n\n" + rollback if prefixed else "PLAIN-Y a different new row"
+    host = list(compressed)
+    try:
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(child, boundary_reason="compression", old_session_id="S0", platform="acp")
+        host.append(_turn(13)[1])
+        engine.ingest(host)
+        host.append({"role": "user", "content": rollback})
+        engine.ingest(host)
+        host.pop()
+        host.append({"role": "user", "content": new_text})
+        engine = _restart_compacted_engine(engine, tmp_path, child, tail=tail)
+        engine.ingest(host)
+        rows = [(role, content) for role, content in engine._store._conn.execute(
+            "SELECT role, content FROM messages ORDER BY store_id"
+        )]
+        return sum(1 for _role, content in rows if content == new_text), len(rows) - len(set(rows))
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
+@pytest.mark.parametrize("tail", [0, 6], ids=["tail0", "tail6"])
+def test_summary_prefixed_new_row_is_stored_after_restart(tmp_path, monkeypatch, in_place, tail):
+    prefixed_count, prefixed_duplicates = _rollback_replay_result(
+        tmp_path / "prefixed", monkeypatch, in_place=in_place, tail=tail, prefixed=True
+    )
+    _plain_count, plain_duplicates = _rollback_replay_result(
+        tmp_path / "plain", monkeypatch, in_place=in_place, tail=tail, prefixed=False
+    )
+    assert prefixed_count == 1
+    assert prefixed_duplicates <= plain_duplicates
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["in-process", "after-restart"])
+def test_new_row_merged_into_the_objective_head_is_stored(tmp_path, monkeypatch, restart):
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch, tail=0)
+    fresh = "V3-NEW the user typed this after the compaction"
+    assert str(compressed[0].get("content") or "").startswith("[Current user objective preserved")
+    host = _host_merge_consecutive_users(list(compressed) + [{"role": "user", "content": fresh}])
+    try:
+        engine.on_session_end("S0", pre)
+        engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
+        if restart:
+            engine = _restart_compacted_engine(engine, tmp_path, "S0", tail=0)
+        engine.ingest(host)
+        assert _stored_occurrences(engine, fresh) == 1
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["in-process", "after-restart"])
+def test_summary_copy_merged_into_the_head_is_stored(tmp_path, monkeypatch, restart):
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch, tail=0)
+    block = _summary_block(compressed)
+    assert str(compressed[0].get("content") or "").startswith("[Current user objective preserved")
+    host = _host_merge_consecutive_users(list(compressed) + [{"role": "user", "content": block}])
+    try:
+        engine.on_session_end("S0", pre)
+        engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
+        if restart:
+            engine = _restart_compacted_engine(engine, tmp_path, "S0", tail=0)
+        engine.ingest(host)
+        assert _stored_occurrences(engine, block) == 1
+    finally:
+        engine.shutdown()
+
+
+def test_replay_scaffold_layout_marks_only_the_generated_head(tmp_path, monkeypatch):
+    engine, compressed = _scaffold_only_compaction(tmp_path, monkeypatch, in_place=False)
+    try:
+        block = _summary_block(compressed)
+        system = next(
+            message
+            for message in compressed
+            if message.get("role") == "system" and engine._is_verified_replay_scaffold_message(message)
+        )
+        summary = {"role": "user", "content": block}
+        assistant_summary = {"role": "assistant", "content": block}
+        retained = {"role": "user", "content": "retained user anchor"}
+        copy = {"role": "user", "content": block}
+        real = {"role": "assistant", "content": "a real row"}
+        carrier = {"role": "user", "content": block + "\n\nnew user row"}
+
+        assert engine._replay_scaffold_layout([system, retained, assistant_summary])[0] == [True, False, True]
+        assert engine._replay_scaffold_layout([system, summary, copy])[0] == [True, True, False]
+        assert engine._replay_scaffold_layout([summary, real, copy])[0] == [True, False, False]
+
+        head_mask, head_identities = engine._replay_scaffold_layout([carrier])
+        assert head_mask == [False]
+        assert head_identities[0] == engine._message_replay_identity(
+            {"role": "user", "content": "new user row"}
+        )
+
+        mid_mask, mid_identities = engine._replay_scaffold_layout([summary, real, carrier])
+        assert mid_mask == [True, False, False]
+        assert mid_identities[2] == engine._message_replay_identity(carrier, carrier=False)
+
+        double_summary = {"role": "user", "content": block + "\n\n" + block}
+        assert engine._generated_context_carrier_remainder(double_summary) is None
+        assert engine._replay_scaffold_layout([double_summary])[0] == [False]
+    finally:
+        engine.shutdown()
 
 
 @pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
