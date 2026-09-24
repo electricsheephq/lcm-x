@@ -282,7 +282,7 @@ def test_restart_before_first_post_compaction_ingest(tmp_path, monkeypatch, in_p
     )
     _assert_clean_commit_sequence(result)
 
-def _compacted_engine(tmp_path, monkeypatch, *, turns=12, tail=6):
+def _compacted_engine(tmp_path, monkeypatch, *, turns=12, tail=6, system=False):
     """An engine bound to S0 that just ran compress() over `turns` turns plus the
     compacting turn's user row. Returns (engine, pre, compressed)."""
     monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
@@ -296,7 +296,7 @@ def _compacted_engine(tmp_path, monkeypatch, *, turns=12, tail=6):
         hermes_home=str(tmp_path / "home"),
     )
     engine.on_session_start("S0", platform="acp", context_length=200_000)
-    host: list = []
+    host: list = [{"role": "system", "content": "You are concise."}] if system else []
     for i in range(1, turns + 1):
         host.extend(_turn(i))
         engine.ingest(host)
@@ -838,6 +838,56 @@ def test_stored_non_head_carrier_does_not_hide_later_standalone_row(
     assert standalone_count == 1
 
 
+def _first_continuation_paste_then_standalone_result(
+    tmp_path, monkeypatch, *, in_place, tail, system
+):
+    engine, pre, compressed = _compacted_engine(
+        tmp_path, monkeypatch, tail=tail, system=system
+    )
+    child = "S0" if in_place else "S1"
+    block = _summary_block(compressed)
+    standalone = "FIRST-X genuinely new standalone row"
+    pasted = block + "\n\n" + standalone
+    host = list(compressed)
+    try:
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(
+            child,
+            boundary_reason="compression",
+            old_session_id="S0",
+            platform="acp",
+        )
+        host.append({"role": "user", "content": pasted})
+        engine.ingest(host)
+
+        host.pop()
+        host.append({"role": "user", "content": standalone})
+        engine = _restart_compacted_engine(engine, tmp_path, child, tail=tail)
+        engine.ingest(host)
+
+        stored = _stored_content(engine)
+        return stored.count(pasted), stored.count(standalone)
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
+@pytest.mark.parametrize("tail", [0, 6], ids=["tail0", "tail6"])
+@pytest.mark.parametrize("system", [False, True], ids=["no-system", "system"])
+def test_first_stored_continuation_keeps_full_identity(
+    tmp_path, monkeypatch, in_place, tail, system
+):
+    pasted_count, standalone_count = _first_continuation_paste_then_standalone_result(
+        tmp_path,
+        monkeypatch,
+        in_place=in_place,
+        tail=tail,
+        system=system,
+    )
+    assert pasted_count == 1
+    assert standalone_count == 1
+
+
 def _mid_list_paste_duplicates(tmp_path, monkeypatch, *, in_place, restarts, prefixed):
     engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch, tail=6)
     child = "S0" if in_place else "S1"
@@ -906,6 +956,62 @@ def test_new_row_merged_into_the_objective_head_is_stored(tmp_path, monkeypatch,
         engine.shutdown()
 
 
+def _new_head_row_restart_result(
+    tmp_path, monkeypatch, *, in_place, restarts, merged
+):
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch, tail=0)
+    child = "S0" if in_place else "S1"
+    fresh = "HEAD-NEW the user typed this with the compaction turn"
+    host = list(compressed) + [{"role": "user", "content": fresh}]
+    if merged:
+        host = _host_merge_consecutive_users(host)
+    try:
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(
+            child,
+            boundary_reason="compression",
+            old_session_id="S0",
+            platform="acp",
+        )
+        engine.ingest(host)
+        for _ in range(restarts):
+            engine = _restart_compacted_engine(engine, tmp_path, child, tail=0)
+            engine.ingest(host)
+
+        rows = engine._store._conn.execute(
+            "SELECT role, content FROM messages ORDER BY store_id"
+        ).fetchall()
+        return _stored_occurrences(engine, fresh), len(rows) - len(set(rows))
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
+@pytest.mark.parametrize("restarts", [1, 2], ids=["restart1", "restart2"])
+def test_new_head_carrier_restart_duplicate_tradeoff_is_pinned(
+    tmp_path, monkeypatch, in_place, restarts
+):
+    """#501: a merged new-content carrier adds one duplicate per restart."""
+    merged_count, merged_duplicates = _new_head_row_restart_result(
+        tmp_path / "merged",
+        monkeypatch,
+        in_place=in_place,
+        restarts=restarts,
+        merged=True,
+    )
+    plain_count, plain_duplicates = _new_head_row_restart_result(
+        tmp_path / "plain",
+        monkeypatch,
+        in_place=in_place,
+        restarts=restarts,
+        merged=False,
+    )
+    assert merged_count == restarts + 1
+    assert merged_duplicates == restarts
+    assert plain_count == 1
+    assert plain_duplicates == 0
+
+
 @pytest.mark.parametrize("restart", [False, True], ids=["in-process", "after-restart"])
 def test_summary_copy_merged_into_the_head_is_stored(tmp_path, monkeypatch, restart):
     engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch, tail=0)
@@ -952,12 +1058,9 @@ def test_replay_scaffold_layout_marks_only_the_generated_head(tmp_path, monkeypa
         mid_mask, mid_identities = engine._replay_scaffold_layout([summary, real, carrier])
         assert mid_mask == [True, False, False]
         assert mid_identities[2] == engine._message_replay_identity(carrier, carrier=False)
-        _stored_mask, stored_mid_identities = engine._replay_scaffold_layout(
-            [summary, real, carrier], stored_rows=True
-        )
-        assert stored_mid_identities[2] == engine._message_replay_identity(
-            carrier, stored_row=True, carrier=False
-        )
+        assert engine._message_replay_identity(
+            carrier, stored_row=True
+        ) == engine._message_replay_identity(carrier, stored_row=True, carrier=False)
 
         double_summary = {"role": "user", "content": block + "\n\n" + block}
         assert engine._generated_context_carrier_remainder(double_summary) is None

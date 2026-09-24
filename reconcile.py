@@ -356,12 +356,12 @@ class ReconcileMixin:
     ) -> tuple[str, str, str, str, str]:
         role = str(msg.get("role") or "unknown")
         content = normalize_content_value(msg.get("content")) or ""
-        # A host-merged LCM summary carrier (#483) is identified by the real row
-        # glued behind its DAG-verified summary prefix. Host callers pass
-        # carrier=False away from the generated head, where the same bytes are
-        # copied content and must keep their full identity (#488).
+        # A live host-merged LCM summary carrier (#483) is identified by the real
+        # row glued behind its DAG-verified summary prefix. Stored rows always
+        # keep their full identity: position in a stored slice is not provenance
+        # that the row was the live generated head (#488).
         carrier_rest = getattr(self, "_generated_context_carrier_remainder", None)
-        if role == "user" and carrier and callable(carrier_rest):
+        if not stored_row and role == "user" and carrier and callable(carrier_rest):
             glued_row = carrier_rest({"role": "user", "content": content})
             if glued_row is not None:
                 content = glued_row
@@ -1786,10 +1786,7 @@ class ReconcileMixin:
             for row in stored_rows
             if not self._matches_ignore_message_patterns(row, stored_row=True)
         ]
-        stored_tail = self._stored_replay_identities(
-            stored_tail_rows,
-            after_store_id=int(self._last_compacted_store_id or 0),
-        )
+        stored_tail = self._stored_replay_identities(stored_tail_rows)
         cursor = self._find_reconciled_cursor_for_store_tail(
             messages,
             stored_tail,
