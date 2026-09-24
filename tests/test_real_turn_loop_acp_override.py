@@ -305,23 +305,6 @@ def test_acp_persist_override_long_session_default_tuning_keeps_every_turn(
         assert result["session_count"] <= result["commit_logged"] + 1, result
 
 
-@pytest.mark.parametrize("in_place", [True, False], ids=["in-place", "rotation"])
-@pytest.mark.parametrize("trailing", [False, True], ids=["no-trailing", "trailing"])
-def test_default_config_turn_loop_does_not_multiply_sessions_or_rows(
-    tmp_path, in_place, trailing
-):
-    result = _run_turn_loop(
-        tmp_path,
-        in_place=in_place,
-        trailing=trailing,
-        turns=80,
-        long_defaults=True,
-    )
-    _assert_each_turn_stored_once(result, unseen_rewrites=trailing)
-    if not in_place:
-        assert result["session_count"] <= result["commit_logged"] + 1, result
-
-
 def test_rotation_child_publication_error_keeps_the_host_rotation_heal(tmp_path):
     result = _run_turn_loop(
         tmp_path,

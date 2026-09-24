@@ -591,11 +591,11 @@ class CompactionMixin:
                 "input": [self._proof_replay_identity(m) for m in messages],
                 "output": [self._proof_replay_identity(m) for m in result],
                 "end_consumed": False,
-                "carry_ranges": [
+                "carry_ranges": self._coalesce_compression_carry_ranges(
                     (str(row["session_id"]), store_id - 1, store_id)
                     for store_id, row in sorted(carried_rows.items())
                     if row.get("session_id")
-                ],
+                ),
             }
             if proof["output"] == proof["input"]:
                 # No-progress compress: Hermes has nothing to commit, and an
@@ -655,7 +655,12 @@ class CompactionMixin:
                 "droppable": list(proof.get("droppable") or []),
                 "skip_landing": list(proof.get("skip_landing") or []),
                 "native_summary_index": proof.get("native_summary_index"),
-                "carry_ranges": [list(item) for item in proof.get("carry_ranges") or []],
+                "carry_ranges": [
+                    list(item)
+                    for item in self._coalesce_compression_carry_ranges(
+                        proof.get("carry_ranges") or []
+                    )
+                ],
             }
             if not proof["output_effective"]:
                 # Scaffold-only output: bind the proof to the emitted rows (#484 item 11l).

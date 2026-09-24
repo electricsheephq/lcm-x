@@ -3301,12 +3301,12 @@ class LCMEngine(
             and not self._ingest_cursor_needs_reconcile
             and self._ingest_cursor == len(commit_proof.get("output") or ())
         ):
-            inherited_ranges = [
+            inherited_ranges = self._coalesce_compression_carry_ranges(
                 (carried_session_id, max(range_start, frontier), range_end)
                 for carried_session_id, range_start, range_end
                 in self._load_compression_carry_ranges(source_session_id)
                 if range_end > frontier
-            ]
+            )
             commit_proof["carry_ranges"] = inherited_ranges
             # The child segment starts from compress()'s output: re-key the proof
             # so its first ingest re-indexes a host-merged prefix instead of

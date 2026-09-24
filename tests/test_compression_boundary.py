@@ -661,8 +661,91 @@ def test_summary_carrier_maps_to_original_store_id_and_carry_range(tmp_path):
         engine._ingest_cursor_needs_reconcile = False
         engine._record_compress_commit_proof([compacted, *tail], assembled)
         assert engine._compress_commit_proof is not None
-        assert ("S0", tail_ids[0] - 1, tail_ids[0]) in engine._compress_commit_proof["carry_ranges"]
+        assert engine._compress_commit_proof["carry_ranges"] == [
+            ("S0", tail_ids[0] - 1, tail_ids[-1])
+        ]
         assert engine._generated_context_carrier_remainder(carrier) == tail[0]["content"]
+    finally:
+        engine.shutdown()
+
+
+def test_compress_commit_proof_coalesces_contiguous_carry_rows(tmp_path):
+    engine = LCMEngine(
+        config=_config(tmp_path),
+        hermes_home=str(tmp_path / "home"),
+    )
+    messages = [
+        {"role": "user", "content": f"message {index}"}
+        for index in range(4)
+    ]
+    try:
+        engine.on_session_start(
+            "S0",
+            platform="acp",
+            conversation_id="carry-coalescing",
+            context_length=200_000,
+        )
+        engine.ingest(messages)
+        result = messages[1:]
+        engine._ingest_cursor = len(result)
+        engine._ingest_cursor_needs_reconcile = False
+        engine._record_compress_commit_proof(messages, result)
+        assert engine._compress_commit_proof["carry_ranges"] == [("S0", 1, 4)]
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("restart", ["none", "before-adoption", "after-adoption"])
+def test_native_adoption_with_summary_carrier_survives_restart_without_loss(
+    tmp_path, restart
+):
+    engine, compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    adopted = [
+        {"role": "user", "content": "Synthetic native summary."},
+        *engine._assemble_context(None, tail),
+    ]
+    engine._last_compression_status = "host_native"
+    engine._last_native_summary_index = 0
+    engine._ingest_cursor = len(adopted)
+    engine._ingest_cursor_needs_reconcile = False
+    engine._record_compress_commit_proof([compacted, *tail], adopted)
+    assert engine._compress_commit_proof is not None
+    assert engine._compress_commit_proof["native"] is True
+    assert engine._generated_context_carrier_remainder(adopted[1]) == tail[0]["content"]
+    assert engine._durable_commit_proof_payload() is not None
+
+    def resumed_engine():
+        return LCMEngine(
+            config=LCMConfig(
+                database_path=str(tmp_path / "carrier.db"),
+                fresh_tail_count=3,
+                large_output_externalization_path=str(tmp_path / "externalized"),
+            ),
+            hermes_home=str(tmp_path / "home"),
+        )
+
+    if restart == "before-adoption":
+        engine.shutdown()
+        engine = resumed_engine()
+        engine.on_session_start("S0", platform="acp")
+        assert engine._durable_commit_proof_payload() is not None
+    elif restart == "after-adoption":
+        engine.ingest(adopted)
+        engine.shutdown()
+        engine = resumed_engine()
+        engine.on_session_start("S0", platform="acp")
+        assert engine._durable_commit_proof_payload() is not None
+
+    appended = {"role": "assistant", "content": "post-adoption reply"}
+    try:
+        engine.ingest([*adopted, appended])
+        stored = engine._store.get_session_messages("S0")
+        assert len(stored) == 5
+        assert [row["content"] for row in stored] == [
+            compacted["content"],
+            *(row["content"] for row in tail),
+            appended["content"],
+        ]
     finally:
         engine.shutdown()
 
@@ -962,7 +1045,8 @@ def test_rotation_inherits_only_open_grandparent_carry_and_reset_clears_it(
         proof = engine._compress_commit_proof
         proof["carry_ranges"] = [
             ("closed-grandparent", 0, frontier),
-            ("open-grandparent", frontier - 1, frontier + 5),
+            ("open-grandparent", frontier - 1, frontier + 2),
+            ("open-grandparent", frontier + 2, frontier + 5),
         ]
         engine._persist_compress_commit_proof(proof)
         engine.on_session_end("S0", pre)
@@ -970,8 +1054,7 @@ def test_rotation_inherits_only_open_grandparent_carry_and_reset_clears_it(
             "S1", boundary_reason="compression", old_session_id="S0", platform="acp"
         )
         inherited = engine._load_compression_carry_ranges()
-        assert ("open-grandparent", frontier, frontier + 5) in inherited
-        assert all(source != "closed-grandparent" for source, _start, _end in inherited)
+        assert inherited == [("open-grandparent", frontier, frontier + 5)]
 
         engine.on_session_reset()
         assert engine._compress_commit_proof is None

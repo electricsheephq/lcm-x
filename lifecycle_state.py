@@ -21,6 +21,9 @@ from typing import Any, Optional
 from .db_bootstrap import configure_connection, refuse_schema_version_too_new, run_versioned_migrations
 
 
+_OWNERSHIP_QUERY_MAX_RANGES = 200
+
+
 class LifecycleBindingChangedError(RuntimeError):
     """Raised when publication loses its active session binding."""
 
@@ -1039,17 +1042,21 @@ class LifecycleStateStore:
             for source, start, end in allowed_carry_ranges
             if max(expected_frontier, start) < min(covered_end, end)
         )
-        ownership_clause = " OR ".join(
-            "(session_id = ? AND store_id > ? AND store_id <= ?)"
-            for _item in owned_ranges
-        )
-        ownership_args = [value for item in owned_ranges for value in item]
-        rows = conn.execute(
-            "SELECT store_id, session_id FROM messages WHERE "
-            + ownership_clause
-            + " ORDER BY store_id",
-            ownership_args,
-        ).fetchall()
+        rows_by_store_id = {}
+        for offset in range(0, len(owned_ranges), _OWNERSHIP_QUERY_MAX_RANGES):
+            range_batch = owned_ranges[offset:offset + _OWNERSHIP_QUERY_MAX_RANGES]
+            ownership_clause = " OR ".join(
+                "(session_id = ? AND store_id > ? AND store_id <= ?)"
+                for _item in range_batch
+            )
+            ownership_args = [value for item in range_batch for value in item]
+            for row in conn.execute(
+                "SELECT store_id, session_id FROM messages WHERE "
+                + ownership_clause,
+                ownership_args,
+            ).fetchall():
+                rows_by_store_id[int(row[0])] = row
+        rows = [rows_by_store_id[store_id] for store_id in sorted(rows_by_store_id)]
         authoritative_ids = [int(row[0]) for row in rows]
         proven_ids = sorted(covered_ids + excluded_ids)
         if authoritative_ids != proven_ids:

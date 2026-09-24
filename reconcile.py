@@ -1747,12 +1747,35 @@ class ReconcileMixin:
         """Load proof-backed parent ranges still visible in this segment."""
         try:
             payload = self._durable_commit_proof_payload(session_id) or {}
-            ranges = [(str(source), int(start), int(end))
-                      for source, start, end in payload.get("carry_ranges") or []]
-            return [item for item in ranges if item[0] and 0 <= item[1] < item[2]]
+            return self._coalesce_compression_carry_ranges(
+                payload.get("carry_ranges") or []
+            )
         except Exception:
             logger.debug("LCM compression carry-range load failed", exc_info=True)
             return []
+
+    @staticmethod
+    def _coalesce_compression_carry_ranges(
+        ranges,
+    ) -> list[tuple[str, int, int]]:
+        """Normalize and merge overlapping or adjacent ranges per source session."""
+        normalized = sorted(
+            (str(source), int(start), int(end))
+            for source, start, end in ranges
+            if source and 0 <= int(start) < int(end)
+        )
+        coalesced: list[tuple[str, int, int]] = []
+        for source, start, end in normalized:
+            if coalesced and source == coalesced[-1][0] and start <= coalesced[-1][2]:
+                previous_source, previous_start, previous_end = coalesced[-1]
+                coalesced[-1] = (
+                    previous_source,
+                    previous_start,
+                    max(previous_end, end),
+                )
+            else:
+                coalesced.append((source, start, end))
+        return coalesced
 
     def _cursor_from_durable_commit_proof(self, messages) -> Optional[int]:
         """Cursor proven by the last compaction's durable output proof, else None.
