@@ -4846,11 +4846,6 @@ class LCMEngine(
             try:
                 next_match = target.index(identity, matched)
             except ValueError:
-                if (
-                    matched < len(target)
-                    and (not skip_metadata_valid or not skip_landing[matched])
-                ):
-                    return None
                 return index if matched > int(summary_index) else None
             gap_is_droppable = all(droppable[matched:next_match])
             if not gap_is_droppable:
@@ -4858,7 +4853,7 @@ class LCMEngine(
             if next_match > matched and (
                 not skip_metadata_valid or not skip_landing[next_match]
             ):
-                return None
+                return index if matched > int(summary_index) else None
             matched = next_match + 1
         exact = matched == len(target)
         safe_trailing_skip = (

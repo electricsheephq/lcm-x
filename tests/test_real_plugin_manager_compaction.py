@@ -211,6 +211,22 @@ _NATIVE_PROOF_PROBE = textwrap.dedent(
     from hermes_state import SessionDB
     from run_agent import AIAgent
     from agent.agent_runtime_helpers import repair_message_sequence
+    import agent.conversation_compression as host_compression
+
+    def supports_unclaimed_nested_compressor():
+        check = getattr(host_compression, "_caller_attempt_is_current", None)
+        generation = getattr(host_compression, "_COMPRESSOR_ATTEMPT_GENERATION", None)
+        if not callable(check) or generation is None:
+            return True
+        class UnclaimedCompressor:
+            _compression_attempt_generation = 0
+        token = generation.set(1)
+        try:
+            return bool(check(UnclaimedCompressor()))
+        finally:
+            generation.reset(token)
+
+    nested_compressor_supported = supports_unclaimed_nested_compressor()
     home = Path(os.environ["HERMES_HOME"])
     mode, scenario = os.environ["PROBE_NATIVE_MODE"], os.environ["PROBE_SCENARIO"]
     in_place = os.environ["PROBE_IN_PLACE"] == "1"
@@ -315,6 +331,7 @@ _NATIVE_PROOF_PROBE = textwrap.dedent(
     tool_ids = {tool_call_id for role, _content, tool_call_id, *_ in rows if role == "tool"}
     result = {
         "mode": mode, "scenario": scenario, "in_place": in_place,
+        "nested_compressor_supported": nested_compressor_supported,
         "statuses": statuses, "session_ids": session_ids, "repairs": repairs,
         "adopted": adopted, "duplicate_rows": len(rows) - len(set(rows)),
         "users": len(users), "replies": len(replies), "tool_ids": len(tool_ids),
@@ -359,6 +376,14 @@ def _run_native_proof_probe(tmp_path, *, mode, scenario, in_place):
 @pytest.mark.parametrize("in_place", [True, False], ids=["in-place", "rotation"])
 def test_native_commit_proof_prevents_duplicate_storage(tmp_path, mode, scenario, in_place):
     result = _run_native_proof_probe(tmp_path, mode=mode, scenario=scenario, in_place=in_place)
+    if (
+        mode == "real"
+        and scenario != "reject"
+        and not result["nested_compressor_supported"]
+    ):
+        pytest.xfail(
+            "#479: this Hermes host rejects an unclaimed nested ContextCompressor"
+        )
     assert result["statuses"] == ["host_native"] * 3, result
     assert result["adopted"] == ([False] * 3 if scenario == "reject" else [True] * 3), result
     assert result["duplicate_rows"] == 0, result

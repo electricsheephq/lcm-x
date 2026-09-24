@@ -1803,13 +1803,6 @@ class ReconcileMixin:
                     if safe_landing:
                         matched = next_match + 1
                         continue
-                    if gap_is_droppable:
-                        return None
-                    if (
-                        matched < len(target)
-                        and (not skip_metadata_valid or not skip_landing[matched])
-                    ):
-                        return None
                     if matched <= int(summary_index):
                         return None
                     index -= 1

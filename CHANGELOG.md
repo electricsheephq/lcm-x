@@ -23,8 +23,11 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Native rejection logs one secret-free warning with its reason class (such as
   `prefix_too_short`, `suffix_changed`, or `native_aborted`), adoption logs one
   info line, and `last_compression_noop_reason` carries the rejection class.
-- Native adoption proof now refuses id-bearing skip landings and records summary
-  positions in the same effective-row space used by replay reconciliation.
+- Native adoption proof records summary positions in the same effective-row
+  space used by replay reconciliation. The first mismatch after the summary
+  remains the delta start; unsafe skip landings are guarded by leaving the
+  landing unconsumed. Re-issued byte-identical call-only rows remain the known
+  pre-existing #500 case.
 
 ## v0.24.0 - BREAKING: plugin renamed to hermes-lcm-x, engine to lcm-x (unreleased)
 

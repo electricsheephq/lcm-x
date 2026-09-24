@@ -1,7 +1,9 @@
 """Native recovery must not convert a rejected LCM claim into committed coverage."""
 import copy
 import json
+import random
 import time
+from collections import Counter
 from types import SimpleNamespace
 
 import pytest
@@ -850,7 +852,7 @@ def test_native_host_repair_keeps_new_identity_duplicate_after_orphan_gap(candid
     assert candidate._remap_cursor_through_native_host_repair(host, proof) == 2
 
 
-def test_native_host_repair_refuses_id_bearing_skip_landing(candidate):
+def test_native_host_repair_keeps_id_bearing_skip_landing_as_delta(candidate):
     summary = {"role": "assistant", "content": "native summary"}
     orphan = {"role": "tool", "tool_call_id": "call9", "content": "dropped"}
     adopted_call = {
@@ -874,15 +876,15 @@ def test_native_host_repair_refuses_id_bearing_skip_landing(candidate):
         {"role": "tool", "tool_call_id": "call0", "content": "new result"},
     ]
 
-    assert candidate._remap_cursor_through_native_host_repair(host, proof) is None
+    assert candidate._remap_cursor_through_native_host_repair(host, proof) == 1
 
     _write_durable_native_proof(
         candidate, [summary, orphan, adopted_call], [False, True, False]
     )
-    assert candidate._cursor_from_durable_commit_proof(host) is None
+    assert candidate._cursor_from_durable_commit_proof(host) == 1
 
 
-def test_native_host_repair_refuses_missing_id_bearing_row_before_new_content(candidate):
+def test_native_host_repair_starts_delta_before_new_content_after_missing_id_row(candidate):
     summary = {"role": "assistant", "content": "native summary"}
     adopted_call = {
         "role": "assistant",
@@ -898,10 +900,10 @@ def test_native_host_repair_refuses_missing_id_bearing_row_before_new_content(ca
     proof = _native_proof(candidate, [summary, adopted_call], [False, False])
     host = [summary, {"role": "user", "content": "different new content"}]
 
-    assert candidate._remap_cursor_through_native_host_repair(host, proof) is None
+    assert candidate._remap_cursor_through_native_host_repair(host, proof) == 1
 
     _write_durable_native_proof(candidate, [summary, adopted_call], [False, False])
-    assert candidate._cursor_from_durable_commit_proof(host) is None
+    assert candidate._cursor_from_durable_commit_proof(host) == 1
 
 
 def _write_durable_native_proof(
@@ -941,7 +943,9 @@ def test_durable_native_proof_skips_only_orphan_tool_results(candidate):
         [False, True, False],
         include_skip_landing=False,
     )
-    assert candidate._cursor_from_durable_commit_proof([summary, kept]) is None
+    # Older payloads cannot prove a safe skip landing, so ``kept`` remains the
+    # delta start instead of being consumed as replay.
+    assert candidate._cursor_from_durable_commit_proof([summary, kept]) == 1
 
     _write_durable_native_proof(candidate, [summary, orphan, kept], [False, True, False], native=False)
     assert candidate._cursor_from_durable_commit_proof([summary, kept]) is None
@@ -997,3 +1001,282 @@ def test_unconsumed_native_proof_still_reconciles_on_rotation(candidate, monkeyp
     assert candidate._compress_commit_proof is None
     assert candidate._ingest_cursor == 0
     assert candidate._ingest_cursor_needs_reconcile is True
+
+
+def _host_repair_for_native_scenario(messages):
+    """The Hermes repair passes relevant to native adoption (#479/#500)."""
+    merged = []
+    for message in copy.deepcopy(messages):
+        previous = merged[-1] if merged else None
+        if previous and previous.get("role") == message.get("role") == "assistant":
+            left, right = previous.get("content") or "", message.get("content") or ""
+            previous["content"] = f"{left}\n\n{right}" if left and right else left or right
+            if message.get("tool_calls"):
+                previous["tool_calls"] = list(previous.get("tool_calls") or []) + list(
+                    message["tool_calls"]
+                )
+            continue
+        merged.append(message)
+
+    repaired, known, matched = [], set(), set()
+    for message in merged:
+        role = message.get("role")
+        if role in {"assistant", "user"}:
+            known = {
+                str(call.get("id") or call.get("call_id") or "").strip()
+                for call in (message.get("tool_calls") or [])
+            } - {""}
+            matched = set()
+        elif role == "tool":
+            call_id = str(message.get("tool_call_id") or "").strip()
+            if call_id and (call_id not in known or call_id in matched):
+                continue
+            matched.add(call_id)
+        repaired.append(message)
+
+    output = []
+    for index, message in enumerate(repaired):
+        calls = message.get("tool_calls") or []
+        if message.get("role") == "assistant" and calls:
+            answered = {
+                str(row.get("tool_call_id") or "").strip()
+                for row in repaired[index + 1 :]
+                if row.get("role") == "tool"
+            }
+            kept = [
+                call
+                for call in calls
+                if str(call.get("id") or call.get("call_id") or "").strip()
+                in answered
+            ]
+            if len(kept) != len(calls):
+                if not kept and not str(message.get("content") or "").strip():
+                    continue
+                message = dict(message)
+                if kept:
+                    message["tool_calls"] = kept
+                else:
+                    message.pop("tool_calls", None)
+        output.append(message)
+    return output
+
+
+def _native_scenario_metrics(engine, expected):
+    actual = Counter(
+        engine._store._conn.execute(
+            "SELECT role, COALESCE(content, '') FROM messages ORDER BY store_id"
+        ).fetchall()
+    )
+    wanted = Counter((row["role"], row.get("content") or "") for row in expected)
+    duplicates = sum(max(0, count - wanted[key]) for key, count in actual.items())
+    lost = sum(max(0, count - actual[key]) for key, count in wanted.items())
+    summaries = sum(
+        count for (role, content), count in actual.items() if content == "native summary"
+    )
+    return duplicates, lost, summaries
+
+
+def _run_native_repair_scenario(
+    tmp_path, monkeypatch, history_rows, first_new, second_new, in_place, restart
+):
+    def native_behavior(_native, messages):
+        return [{"role": "user", "content": "native summary"}] + copy.deepcopy(
+            messages[-3:]
+        )
+
+    install_native(monkeypatch, native_behavior)
+    engine = _native_engine(tmp_path)
+    try:
+        engine.ingest(history_rows)
+        recovered = engine.compress(
+            copy.deepcopy(history_rows), current_tokens=250_000, force=True
+        )
+        assert engine.last_compression_status == "host_native"
+        engine.on_session_end("retained", history_rows)
+        session_id = "retained" if in_place else "retained-child"
+        engine.on_session_start(
+            session_id,
+            boundary_reason="compression",
+            old_session_id="retained",
+            conversation_id="conversation",
+        )
+        host = _host_repair_for_native_scenario(recovered) + copy.deepcopy(first_new)
+        if restart == "before":
+            engine.shutdown()
+            engine = _native_engine(tmp_path, session_id=session_id)
+        engine.ingest(host)
+        first = _native_scenario_metrics(engine, history_rows + first_new)
+        if restart == "after":
+            engine.shutdown()
+            engine = _native_engine(tmp_path, session_id=session_id)
+        host += copy.deepcopy(second_new)
+        engine.ingest(host)
+        second = _native_scenario_metrics(
+            engine, history_rows + first_new + second_new
+        )
+        return first, second
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("shape", ["call-only", "orphan-tool"])
+@pytest.mark.parametrize("restart", ["none", "before", "after"])
+@pytest.mark.parametrize("in_place", [True, False], ids=["in-place", "rotation"])
+def test_s7_host_drops_trailing_identity_row_before_new_content(
+    tmp_path, monkeypatch, shape, restart, in_place
+):
+    history_rows = history()[:6] + [
+        {"role": "user", "content": "S7 setup user"},
+        {"role": "assistant", "content": "S7 setup reply"},
+        {"role": "user", "content": "S7 pending user"},
+    ]
+    if shape == "call-only":
+        history_rows.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "s7-call",
+                        "type": "function",
+                        "function": {"name": "list_files", "arguments": "{}"},
+                    }
+                ],
+            }
+        )
+    else:
+        history_rows.append(
+            {
+                "role": "tool",
+                "tool_call_id": "s7-orphan",
+                "tool_name": "list_files",
+                "content": "S7 orphan result",
+            }
+        )
+    first_new = [{"role": "assistant", "content": "S7 fresh reply"}]
+    second_new = [
+        {"role": "user", "content": "S7 next user"},
+        {"role": "assistant", "content": "S7 next reply"},
+    ]
+
+    first, second = _run_native_repair_scenario(
+        tmp_path,
+        monkeypatch,
+        history_rows,
+        first_new,
+        second_new,
+        in_place,
+        restart,
+    )
+
+    assert first == (0, 0, 0)
+    assert second == (0, 0, 0)
+
+
+@pytest.mark.parametrize("restart", ["none", "before", "after"])
+@pytest.mark.parametrize("in_place", [True, False], ids=["in-place", "rotation"])
+def test_s8_host_strips_unanswered_tool_calls_from_content_assistant(
+    tmp_path, monkeypatch, restart, in_place
+):
+    history_rows = history()[:6] + [
+        {"role": "user", "content": "S8 setup user"},
+        {"role": "assistant", "content": "S8 setup reply"},
+        {"role": "user", "content": "S8 pending user"},
+        {
+            "role": "assistant",
+            "content": "S8 checking files",
+            "tool_calls": [
+                {
+                    "id": "s8-call",
+                    "type": "function",
+                    "function": {"name": "list_files", "arguments": "{}"},
+                }
+            ],
+        },
+    ]
+    first_new = [{"role": "user", "content": "S8 fresh user"}]
+    second_new = [{"role": "assistant", "content": "S8 fresh reply"}]
+
+    first, second = _run_native_repair_scenario(
+        tmp_path,
+        monkeypatch,
+        history_rows,
+        first_new,
+        second_new,
+        in_place,
+        restart,
+    )
+
+    assert first[0] <= 1 and first[1:] == (0, 0)
+    assert second[0] <= 1 and second[1:] == (0, 0)
+
+
+def test_native_repair_walks_are_seeded_equivalent(candidate):
+    rng = random.Random(492_02)
+
+    def row(kind, token):
+        if kind == "user":
+            return {"role": "user", "content": f"user-{token % 7}"}
+        if kind == "assistant":
+            return {"role": "assistant", "content": f"assistant-{token % 7}"}
+        if kind == "call":
+            return {
+                "role": "assistant",
+                "content": "" if token % 2 else f"checking-{token % 5}",
+                "tool_calls": [
+                    {
+                        "id": f"call-{token % 5}",
+                        "type": "function",
+                        "function": {"name": "tool", "arguments": "{}"},
+                    }
+                ],
+            }
+        return {
+            "role": "tool",
+            "tool_call_id": f"call-{token % 5}",
+            "tool_name": "tool",
+            "content": f"result-{token % 3}",
+        }
+
+    kinds = ["user", "assistant", "call", "tool", "tool"]
+    for trial in range(2500):
+        adopted = [{"role": "assistant", "content": "native summary"}] + [
+            row(rng.choice(kinds), rng.randrange(20))
+            for _ in range(rng.randint(2, 8))
+        ]
+        called = {
+            str(call.get("id") or "").strip()
+            for message in adopted
+            for call in (message.get("tool_calls") or [])
+        }
+        returned = {
+            str(message.get("tool_call_id") or "").strip()
+            for message in adopted
+            if message.get("role") == "tool"
+        }
+        matched = called & returned
+        droppable = [
+            message.get("role") == "tool"
+            and str(message.get("tool_call_id") or "").strip() not in matched
+            for message in adopted
+        ]
+        proof = _native_proof(candidate, adopted, droppable)
+        host_base = [
+            copy.deepcopy(message)
+            for index, message in enumerate(adopted)
+            if not (droppable[index] and rng.random() < 0.7)
+        ]
+        if len(host_base) > 1 and rng.random() < 0.35:
+            del host_base[rng.randrange(1, len(host_base))]
+        fresh = [
+            {"role": "user", "content": f"fresh-{trial}-{index}"}
+            for index in range(1 + rng.randrange(3))
+        ]
+        host = host_base + fresh
+        _write_durable_native_proof(candidate, adopted, droppable)
+
+        in_memory = candidate._remap_cursor_through_native_host_repair(host, proof)
+        durable = candidate._cursor_from_durable_commit_proof(host)
+
+        assert in_memory == durable, (trial, in_memory, durable, adopted, host)
+        assert in_memory is None or in_memory <= len(host_base)
