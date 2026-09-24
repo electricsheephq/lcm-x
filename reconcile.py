@@ -110,6 +110,14 @@ _OOB_DURABILITY_SCAN_LIMIT = 512
 _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX = "compacted_active_replay_snapshot_digests"
 _SESSION_END_REPLAY_METADATA_PREFIX = "session_end_replay_snapshot_digests"
 _NATIVE_RECOVERY_REPLAY_METADATA_PREFIX = "native_recovery_replay_snapshot_digests"
+_COMPACTION_COMMIT_PROOF_METADATA_PREFIX = "compaction_commit_proof"
+
+
+def _commit_proof_identity_digest(identity) -> str:
+    """Digest of one replay identity in the durable compaction-commit proof (#483)."""
+    return hashlib.sha256(
+        json.dumps(list(identity), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _contains_identity_window(
@@ -342,6 +350,13 @@ class ReconcileMixin:
     def _message_replay_identity(self, msg: Dict[str, Any], *, stored_row: bool = False) -> tuple[str, str, str, str, str]:
         role = str(msg.get("role") or "unknown")
         content = normalize_content_value(msg.get("content")) or ""
+        # A host-merged LCM summary carrier (#483) is identified by the real row
+        # glued behind its DAG-verified summary prefix.
+        carrier_rest = getattr(self, "_generated_context_carrier_remainder", None)
+        if role == "user" and callable(carrier_rest):
+            glued_row = carrier_rest({"role": "user", "content": content})
+            if glued_row is not None:
+                content = glued_row
         # Strip volatile compaction scaffolding suffixes so identity matching
         # survives compression cycles.  The host appends a task-list annotation
         # to the last user message during context compression; the annotation
@@ -580,9 +595,13 @@ class ReconcileMixin:
         """
         if not messages:
             return ""
-        identities = [list(self._message_replay_identity(message)) for message in messages]
+        identities = [self._message_replay_identity(message) for message in messages]
+        if any(_has_lossy_redacted_identity(identity) for identity in identities):
+            # A digest-less placeholder makes different rows hash alike; such a
+            # snapshot is never replay proof (#484 round 2).
+            return ""
         payload = json.dumps(
-            {"version": 1, "messages": identities},
+            {"version": 1, "messages": [list(identity) for identity in identities]},
             ensure_ascii=False,
             separators=(",", ":"),
             sort_keys=True,
@@ -1029,7 +1048,7 @@ class ReconcileMixin:
             candidate_visible_messages = [
                 msg
                 for msg in candidate_messages
-                if not self._is_replayed_context_scaffold_message(msg)
+                if not self._is_verified_replay_scaffold_message(msg)
                 and not self._matches_ignore_message_patterns(msg)
             ]
             candidate_non_placeholder_messages = [
@@ -1053,7 +1072,7 @@ class ReconcileMixin:
             ]
             filtered_candidate_placeholders = len(candidate_non_placeholder_messages) < len(candidate_visible_messages)
             candidate_has_scaffold_evidence = any(
-                self._is_replayed_context_scaffold_message(msg) for msg in candidate_messages
+                self._is_verified_replay_scaffold_message(msg) for msg in candidate_messages
             )
             candidate_has_quarantined_replay_evidence = any(
                 self._is_quarantined_assistant_replay_identity(active_identity(msg))
@@ -1436,7 +1455,7 @@ class ReconcileMixin:
             )
 
             has_scaffold_evidence = any(
-                self._is_replayed_context_scaffold_message(msg) for msg in candidate_messages
+                self._is_verified_replay_scaffold_message(msg) for msg in candidate_messages
             )
             has_raw_full_replay = (
                 has_persisted_marker_specific_replay_evidence
@@ -1519,7 +1538,7 @@ class ReconcileMixin:
                 self._message_replay_identity(msg),
             )
             for msg in messages
-            if not self._is_replayed_context_scaffold_message(msg)
+            if not self._is_verified_replay_scaffold_message(msg)
             and not self._matches_ignore_message_patterns(msg)
         ]
 
@@ -1550,6 +1569,94 @@ class ReconcileMixin:
             return False
         return stored_head[: len(incoming_identities)] == incoming_identities
 
+    def _durable_commit_proof_payload(self) -> Optional[Dict[str, Any]]:
+        """The bound session's own durable compaction-commit proof, else None."""
+        payload = self._store.read_metadata_json(
+            self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)
+        )
+        if not isinstance(payload, dict) or payload.get("version") != 2:
+            return None
+        if payload.get("hermes_home") != str(getattr(self, "_hermes_home", "") or ""):
+            return None
+        conversation_id = getattr(self, "_conversation_id", "")
+        if payload.get("conversation_id") != (conversation_id or ""):
+            return None
+        state = (
+            self._lifecycle.get_by_conversation(conversation_id)
+            if conversation_id
+            else self._lifecycle.get_by_session(self._session_id)
+        )
+        # Same rule as bind_session's frontier resume: nothing from before a
+        # lifecycle reset of this conversation proves the current list.
+        if state is not None and state.last_reset_at is not None and float(payload.get("created_at") or 0) <= state.last_reset_at:
+            return None
+        return payload
+
+    def _cursor_from_durable_commit_proof(self, messages) -> Optional[int]:
+        """Cursor proven by the last compaction's durable output proof, else None.
+
+        The host prefix must carry exactly the compress() output's non-scaffold
+        identities in order (a merged carrier keeps its glued row's identity),
+        and every row stored after that compaction must follow in order.
+        """
+        try:
+            payload = self._durable_commit_proof_payload()
+            if payload is None:
+                return None
+            target = list(payload.get("effective_sha256") or [])
+            matched = 0
+            index = 0
+            n = len(messages)
+            if not target:
+                # A scaffold-only output (fresh_tail_count=0): the proof covers exactly
+                # the emitted scaffold rows, in order (#484 items 11k, 11l).
+                scaffold = list(payload.get("scaffold_sha256") or [])
+                if not scaffold or n < len(scaffold):
+                    return None
+                for message, digest in zip(messages, scaffold):
+                    if not self._is_verified_replay_scaffold_message(message) or (
+                        _commit_proof_identity_digest(self._message_replay_identity(message)) != digest
+                    ):
+                        return None
+                index = len(scaffold)
+            while index < n and matched < len(target):
+                message = messages[index]
+                index += 1
+                if self._is_verified_replay_scaffold_message(message):
+                    continue
+                identity = self._message_replay_identity(message)
+                # A digest-less redaction (password_assignment) is not identity:
+                # different same-length secrets share it, so it proves nothing.
+                if _has_lossy_redacted_identity(identity):
+                    return None
+                if _commit_proof_identity_digest(identity) != target[matched]:
+                    return None
+                matched += 1
+            if matched != len(target):
+                return None
+            after_store_id = int(payload.get("last_store_id") or 0)
+            while True:
+                page = self._store.get_session_messages_after(
+                    self._session_id,
+                    after_store_id=after_store_id,
+                )
+                if not page:
+                    break
+                for row in page:
+                    if index >= n:
+                        return None
+                    identity = self._message_replay_identity(messages[index])
+                    if _has_lossy_redacted_identity(identity) or identity != self._message_replay_identity(
+                        row, stored_row=True
+                    ):
+                        return None
+                    index += 1
+                after_store_id = int(page[-1]["store_id"])
+            return index
+        except Exception:
+            logger.debug("LCM durable compaction-commit proof load failed", exc_info=True)
+            return None
+
     def _reconcile_ingest_cursor_from_store(
         self,
         messages: List[Dict[str, Any]],
@@ -1566,6 +1673,20 @@ class ReconcileMixin:
             logger.debug("LCM ingest cursor reconciliation count failed: %s", exc)
             return 0
         if session_count <= 0:
+            # An empty rotation child resumed before its first ingest: its own
+            # durable proof re-indexes the host's post-compaction list (#483, C7).
+            proof_cursor = self._cursor_from_durable_commit_proof(messages)
+            if proof_cursor is not None:
+                self._record_ingest_reconciliation(
+                    action="advanced cursor",
+                    reason="replayed proven post-compaction continuation in empty session",
+                    cursor=proof_cursor,
+                    incoming=len(messages),
+                    session_count=session_count,
+                    stored_tail_count=0,
+                    effective_incoming=proof_cursor,
+                )
+                return proof_cursor
             native_recovery_snapshot_digests = set(
                 self._load_native_recovery_replay_snapshot_digests()
             )
@@ -1637,6 +1758,46 @@ class ReconcileMixin:
             raw_session_count=session_count,
             allow_session_end_replay_proof=allow_session_end_replay_proof,
         )
+        proof_cursor = self._cursor_from_durable_commit_proof(messages)
+        if proof_cursor is not None and proof_cursor > (cursor or 0):
+            # The last compaction's durable output proof covers more of this
+            # snapshot than content matching could (e.g. it stopped at the
+            # scaffold prefix): the proof may extend a cursor, never shrink it.
+            self._record_ingest_reconciliation(
+                action="advanced cursor",
+                reason="replayed proven post-compaction continuation",
+                cursor=proof_cursor,
+                incoming=len(messages),
+                session_count=session_count,
+                stored_tail_count=len(stored_tail),
+                effective_incoming=proof_cursor,
+            )
+            return proof_cursor
+        lossy_at = next(
+            (
+                index
+                for index, message in enumerate(messages[: cursor or 0])
+                if str(message.get("role") or "") != "tool"
+                and _has_lossy_redacted_identity(self._message_replay_identity(message))
+            ),
+            None,
+        )
+        if lossy_at is not None:
+            # A digest-less placeholder makes different rows compare equal, so
+            # content equality cannot prove it replayed. Stop the match before
+            # the first lossy row: it and the rows after it are stored again
+            # (duplicates at worst, never loss; #484 item 11b). Tool rows have
+            # their own lossy fence in the matcher (tool-anchored terms).
+            self._record_ingest_reconciliation(
+                action="advanced cursor",
+                reason="replayed durable tail up to a lossy redacted row",
+                cursor=lossy_at,
+                incoming=len(messages),
+                session_count=session_count,
+                stored_tail_count=len(stored_tail),
+                effective_incoming=len(self._effective_replay_identities(messages)),
+            )
+            return lossy_at
         if cursor is not None and cursor > 0:
             reason = (
                 "skipped scaffold-only prefix"
@@ -1707,6 +1868,19 @@ class ReconcileMixin:
                 session_count,
             )
             return len(messages)
+
+        proof_cursor = self._cursor_from_durable_commit_proof(messages)
+        if proof_cursor is not None:
+            self._record_ingest_reconciliation(
+                action="advanced cursor",
+                reason="replayed proven post-compaction continuation",
+                cursor=proof_cursor,
+                incoming=len(messages),
+                session_count=session_count,
+                stored_tail_count=len(stored_tail),
+                effective_incoming=proof_cursor,
+            )
+            return proof_cursor
 
         self._record_ingest_reconciliation(
             action="persisted batch",

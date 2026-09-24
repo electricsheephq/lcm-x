@@ -16,6 +16,7 @@ lifecycle) through normal attribute lookup. ``LCMEngine`` mixes this in ahead of
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -23,6 +24,7 @@ from typing import Any, Dict, List, Optional
 from .dag import SummaryNode
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
 from .message_content import text_content_for_pattern_matching
+from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, _commit_proof_identity_digest
 from .sanitize import _contains_sensitive_redaction
 from .sqlite_util import _is_sqlite_locked_error
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
@@ -519,16 +521,92 @@ class CompactionMixin:
         """Run compaction and leave a terminal public status on every failure."""
         try:
             with self._fresh_tail_pressure_yield_invocation():
-                return self._compress_impl(
+                result = self._compress_impl(
                     messages,
                     current_tokens=current_tokens,
                     focus_topic=focus_topic,
                     force=force,
                 )
+            self._record_compress_commit_proof(messages, result)
+            return result
         except BaseException:
             self._last_compression_status = "error"
             self._last_compression_noop_reason = ""
             raise
+
+    def _record_compress_commit_proof(self, messages, result) -> None:
+        """Remember the exact host input of this compress() call (process-local).
+
+        Hermes commits a compaction by calling ``on_session_end(sid, <this input>)``
+        before it adopts ``result``. Every row of that input was ingested here,
+        and ``_ingest_cursor`` now indexes ``result``, so the session-end hook skips
+        the re-ingest; it still finalizes the session with its own frontier (#483).
+        """
+        try:
+            self._compress_commit_proof = None
+            if (
+                not self._session_id
+                or not isinstance(result, list)
+                or self._bypasses_lcm_context_management()
+                or self._ingest_cursor_needs_reconcile
+                or self._ingest_cursor != len(result)
+            ):
+                return
+            proof = {
+                "session_id": self._session_id,
+                "conversation_id": self._conversation_id,
+                "input": [self._message_replay_identity(m) for m in messages],
+                "output": [self._message_replay_identity(m) for m in result],
+                "end_consumed": False,
+            }
+            if proof["output"] == proof["input"]:
+                # No-progress compress: Hermes has nothing to commit, and an
+                # end call with this list must stay a real session end.
+                return
+            proof["output_effective"] = [
+                self._message_replay_identity(m)
+                for m in result
+                if not self._is_replayed_context_scaffold_message(m)
+            ]
+            proof["published"] = self._last_compression_status == "compacted"
+            self._compress_commit_proof = proof
+            if proof["published"]:
+                self._persist_compress_commit_proof(proof)
+        except Exception:
+            self._compress_commit_proof = None
+
+    def _persist_compress_commit_proof(self, proof) -> None:
+        """Durable twin of the process-local proof: lets a restarted/resumed
+        process re-index the host's post-compaction list without guessing.
+
+        Written only for a published compaction; ``last_store_id`` marks where
+        the rows stored after the compaction begin.
+        """
+        try:
+            tail = self._store.get_session_tail(self._session_id, limit=1)
+            payload = {
+                "version": 2,
+                # Scope: the Hermes home that wrote it (a configured shared
+                # database_path serves several homes) and its creation time,
+                # so a proof older than a lifecycle reset is ignored.
+                "hermes_home": str(self._hermes_home or ""),
+                "conversation_id": proof.get("conversation_id") or "",
+                "created_at": time.time(),
+                "effective_sha256": [
+                    _commit_proof_identity_digest(identity) for identity in proof["output_effective"]
+                ],
+                "last_store_id": int(tail[-1]["store_id"]) if tail else 0,
+            }
+            if not proof["output_effective"]:
+                # Scaffold-only output: bind the proof to the emitted rows (#484 item 11l).
+                payload["scaffold_sha256"] = [_commit_proof_identity_digest(i) for i in proof["output"]]
+            self._store.write_metadata_json(
+                [self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)],
+                json.dumps(payload, sort_keys=True),
+                skip_unchanged=True,
+            )
+        except Exception:
+            logger.debug("LCM durable compaction-commit proof write failed", exc_info=True)
 
     def _fail_open_after_publication_failure(
         self,
