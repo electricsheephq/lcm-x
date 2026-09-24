@@ -1631,6 +1631,10 @@ def _doctor_text(engine) -> str:
                 "compaction_replay_duplicates: none within scanned coverage "
                 f"({replay_duplicates['rows_scanned']} rows; window {replay_duplicates['window']})"
             )
+            recommended_actions.append(
+                "replay scan incomplete: candidate replay runs outside the scanned coverage are not "
+                "reported; treat this as unknown, not clean"
+            )
         else:
             observations.append("compaction_replay_duplicates: none")
 

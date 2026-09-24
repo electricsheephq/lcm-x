@@ -539,8 +539,8 @@ class CompactionMixin:
 
         Hermes commits a compaction by calling ``on_session_end(sid, <this input>)``
         before it adopts ``result``. Every row of that input was ingested here,
-        and ``_ingest_cursor`` now indexes ``result``, so the session-end hook must
-        neither re-ingest the input nor finalize the session (#483).
+        and ``_ingest_cursor`` now indexes ``result``, so the session-end hook skips
+        the re-ingest; it still finalizes the session with its own frontier (#483).
         """
         try:
             self._compress_commit_proof = None
@@ -554,6 +554,7 @@ class CompactionMixin:
                 return
             proof = {
                 "session_id": self._session_id,
+                "conversation_id": self._conversation_id,
                 "input": [self._message_replay_identity(m) for m in messages],
                 "output": [self._message_replay_identity(m) for m in result],
                 "end_consumed": False,
@@ -589,6 +590,7 @@ class CompactionMixin:
                 # database_path serves several homes) and its creation time,
                 # so a proof older than a lifecycle reset is ignored.
                 "hermes_home": str(self._hermes_home or ""),
+                "conversation_id": proof.get("conversation_id") or "",
                 "created_at": time.time(),
                 "effective_sha256": [
                     _commit_proof_identity_digest(identity) for identity in proof["output_effective"]

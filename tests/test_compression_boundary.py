@@ -754,6 +754,42 @@ def test_profile_rebind_clears_the_commit_proof(tmp_path, monkeypatch):
         engine.shutdown()
 
 
+def test_conversation_change_clears_the_commit_proof(tmp_path, monkeypatch):
+    """#484 item 11c: a reused engine rebinding the same session id to another
+    conversation must not consume the old conversation's commit proof; the end is a
+    real end and finalizes in the new conversation."""
+    engine, pre, _compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        old_conversation = engine._conversation_id
+        assert engine._compress_commit_proof is not None
+        engine.on_session_start("S0", platform="acp", conversation_id="other-conversation", context_length=200_000)
+        assert engine._conversation_id == "other-conversation" != old_conversation
+        engine.on_session_end("S0", pre)
+        assert engine._compress_commit_proof is None or not engine._compress_commit_proof.get("end_consumed")
+        state = engine._lifecycle.get_by_conversation("other-conversation")
+        assert state.current_session_id is None
+        assert state.last_finalized_session_id == "S0"
+    finally:
+        engine.shutdown()
+
+
+def test_durable_commit_proof_is_bound_to_its_conversation(tmp_path, monkeypatch):
+    """#484 item 11c: the durable proof records its conversation and is not used
+    after a restart that binds the same session id to another conversation."""
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    host = list(compressed) + [_turn(13)[1]]
+    try:
+        assert _durable_commit_proof(engine, "S0")["conversation_id"] == engine._conversation_id
+    finally:
+        engine.shutdown()
+    resumed = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    try:
+        resumed.on_session_start("S0", platform="acp", conversation_id="other-conversation", context_length=200_000)
+        assert resumed._cursor_from_durable_commit_proof(host) is None
+    finally:
+        resumed.shutdown()
+
+
 def test_ordinary_session_reset_clears_the_commit_proof(tmp_path, monkeypatch):
     engine, _pre, _compressed = _compacted_engine(tmp_path, monkeypatch)
     try:
@@ -1013,9 +1049,11 @@ def test_doctor_reports_an_incomplete_replay_scan(tmp_path, monkeypatch, bound):
         assert check["status"] == "warn"
         assert check["reason"] == "scan incomplete"
         assert any(g["check"] == "compaction_replay_duplicates" for g in doctor["guidance"])
+        assert doctor["overall"] != "healthy"
         text = lcm_command._doctor_text(engine)
         assert "compaction_replay_duplicates: none within scanned coverage (" in text
         assert "compaction_replay_duplicates: none\n" not in text
+        assert "status: ok" not in text  # #484 item 11e
     finally:
         engine.shutdown()
 
@@ -1050,6 +1088,30 @@ def test_doctor_calls_repeats_candidate_replay_runs(tmp_path):
         assert "candidate replay runs" in guidance["operator_action"]
     finally:
         engine.shutdown()
+
+
+def test_replay_scan_reports_a_candidate_capped_origin_as_incomplete(tmp_path):
+    """#484 item 11g: the per-key origin cap (8) can drop the true origin of a
+    replay; the scan must then either detect the run or report itself incomplete."""
+    from hermes_lcm.diagnostics import scan_compaction_replay_duplicates
+
+    conn = sqlite3.connect(str(tmp_path / "scan.db"))
+    try:
+        conn.execute(
+            "CREATE TABLE messages (store_id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, tool_call_id TEXT)"
+        )
+        rows = ["A", "B", "C"]
+        for i in range(8):
+            rows += ["A", f"unique {i}"]
+        rows += ["A", "B", "C"]
+        assert len(rows) == 22
+        conn.executemany(
+            "INSERT INTO messages(session_id, role, content) VALUES ('S0', 'user', ?)", [(r,) for r in rows]
+        )
+        scan = scan_compaction_replay_duplicates(conn)
+        assert scan["replayed_rows_total"] == 3 or scan["scan_complete"] is False, scan
+    finally:
+        conn.close()
 
 
 def _tool_call_session(engine, *, tool_call_ids: bool):
@@ -1336,22 +1398,44 @@ def test_end_with_a_changed_same_length_password_is_a_real_end(tmp_path, monkeyp
         engine.shutdown()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "#484 round 2 item 11, remaining path: the real end reconciles its redacted list, and the "
-        "pre-existing cursor reconciliation ('replayed durable tail') accepts the digest-less "
-        "password placeholder as a match, so the changed row is not stored. rc2 stored it (with 18 "
-        "duplicate rows) via the stale positional end-ingest. Escalated; not changed in this round."
-    ),
-)
 def test_end_with_a_changed_same_length_password_stores_the_changed_row(tmp_path, monkeypatch):
+    """#484 item 11b: the real end reconciles its redacted list; the store matcher
+    ('replayed durable tail') must not skip past a digest-less placeholder, so the
+    changed occurrence is stored (duplicates at worst, never loss)."""
     engine, pre, _compressed = _password_session(tmp_path, monkeypatch)
     try:
         before, after = _changed_password_end(engine, pre)
         assert after == before + 1
     finally:
         engine.shutdown()
+
+
+def test_restart_with_a_changed_same_length_password_stores_the_changed_row(tmp_path, monkeypatch):
+    """#484 item 11b, restart sibling: a resumed process reconciles the host list
+    against the store; a changed same-length password row is stored, not skipped."""
+    engine, pre, _compressed = _password_session(tmp_path, monkeypatch)
+    sensitive = {"sensitive_patterns_enabled": True, "sensitive_patterns": ["password_assignment"]}
+    engine.shutdown()
+    resumed = LCMEngine(config=_config(tmp_path, **sensitive), hermes_home=str(tmp_path / "home"))
+    try:
+        resumed.on_session_start("S0", platform="acp", context_length=200_000)
+        changed = [
+            dict(m, content="[T12] set password=SYNTHbbbb2222 for the test rig")
+            if "[T12] set password" in str(m.get("content"))
+            else m
+            for m in pre
+        ]
+
+        def password_rows():
+            return resumed._store._conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE content LIKE '[T12] set password=%'"
+            ).fetchone()[0]
+
+        before = password_rows()
+        resumed.ingest(changed)
+        assert password_rows() == before + 1
+    finally:
+        resumed.shutdown()
 
 
 def test_password_free_compaction_still_classifies_its_commit(tmp_path, monkeypatch):

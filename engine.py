@@ -2975,6 +2975,7 @@ class LCMEngine(
         cursor_proven = bool(
             proof
             and proof.get("session_id") == session_id
+            and proof.get("conversation_id") == self._conversation_id
             and proof.get("end_consumed")
             and not self._ingest_cursor_needs_reconcile
             and self._ingest_cursor == len(proof.get("output") or ())
@@ -3299,6 +3300,7 @@ class LCMEngine(
             can_reassign
             and commit_proof
             and commit_proof.get("session_id") == source_session_id
+            and commit_proof.get("conversation_id") == self._conversation_id
             and commit_proof.get("end_consumed")
             and not self._ingest_cursor_needs_reconcile
             and self._ingest_cursor == len(commit_proof.get("output") or ())
@@ -3324,6 +3326,10 @@ class LCMEngine(
             if self._stable_use_closed:
                 raise RuntimeError("LCM engine is closed")
             self._on_session_start_unlocked(session_id, **kwargs)
+            proof = self._compress_commit_proof
+            if proof is not None and proof.get("conversation_id") != self._conversation_id:
+                # The proof is bound to the conversation it was made in (#484 11c).
+                self._compress_commit_proof = None
 
     def _on_session_start_unlocked(self, session_id: str, **kwargs) -> None:
         if "hermes_home" in kwargs:
@@ -3899,6 +3905,7 @@ class LCMEngine(
         if (
             proof
             and proof.get("session_id") == session_id
+            and proof.get("conversation_id") == self._conversation_id
             and not proof.get("end_consumed")
             and proof.get("input") is not None
             and len(messages) == len(proof["input"])
@@ -5137,6 +5144,7 @@ class LCMEngine(
             not self._ingest_cursor_needs_reconcile
             and proof
             and proof.get("session_id") == self._session_id
+            and proof.get("conversation_id") == self._conversation_id
             and self._ingest_cursor == len(proof.get("output") or ())
             and self._ingest_cursor > 0
         ):

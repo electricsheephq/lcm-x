@@ -4,6 +4,10 @@ Hermes `/new` starts a new host session. LCM-X binds that session to its own lif
 
 Do not promise that `/new` deletes historical LCM data. Earlier rows remain in `lcm.db` unless an explicitly authorized cleanup removes them, and they remain available through bounded cross-session recall.
 
+## Compaction commits
+
+Hermes commits a compaction by calling the session-end hook with the list it compressed, then the compression-start hook. LCM-X treats that call as a commit, not a session end. It does not re-store those rows. The session keeps its identity, published frontier and ingest position across the boundary, both when Hermes keeps the session id (in place) and when it rotates to a new one. A genuine session end (exit, `/new`, or an end after a cancelled compaction) still finalizes the session. A session that resumes later continues from the frontier it finalized itself, never another session's.
+
 ## `/lcm rotate`
 
 `/lcm rotate` is different from `/new`:

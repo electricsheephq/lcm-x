@@ -92,8 +92,9 @@ def scan_compaction_replay_duplicates(
     organic repeats ("ok", "continue") are not counted. Rows are streamed and at
     most ``window`` of them are tracked per session; the scan stops after
     ``max_rows`` rows and reports ``scan_truncated``. ``window_limited_sessions``
-    counts sessions longer than the window; with either bound hit, a zero count
-    covers only the scanned rows (``scan_complete`` is False).
+    counts sessions longer than the window and ``candidate_limited_sessions``
+    those where the per-key origin cap dropped an origin; with any bound hit, a
+    zero count covers only the scanned rows (``scan_complete`` is False).
     """
     sessions: dict[str, dict[str, int]] = {}
     counter: _ReplayRunCounter | None = None
@@ -102,14 +103,16 @@ def scan_compaction_replay_duplicates(
     peak_tracked_rows = 0
     truncated = False
     window_limited_sessions = 0
+    candidate_limited_sessions = 0
 
     def flush() -> None:
-        nonlocal window_limited_sessions
+        nonlocal window_limited_sessions, candidate_limited_sessions
         if counter is not None and current_session is not None:
             replayed, runs = counter.finish()
             if replayed:
                 sessions[current_session] = {"replayed_rows": replayed, "runs": runs}
             window_limited_sessions += int(counter.base > 0)
+            candidate_limited_sessions += int(counter.candidate_limited)
 
     columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")}
     # Assistant tool-call rows carry empty content; their calls are the row.
@@ -145,7 +148,8 @@ def scan_compaction_replay_duplicates(
         "rows_scanned": rows_scanned,
         "scan_truncated": truncated,
         "window_limited_sessions": window_limited_sessions,
-        "scan_complete": not truncated and not window_limited_sessions,
+        "candidate_limited_sessions": candidate_limited_sessions,
+        "scan_complete": not truncated and not window_limited_sessions and not candidate_limited_sessions,
         "peak_tracked_rows": peak_tracked_rows,
         "sessions": [{"session_id": sid, **counts} for sid, counts in ranked[:sample_limit]],
     }
@@ -172,6 +176,8 @@ class _ReplayRunCounter:
         self.start = 0
         self.replayed = 0
         self.runs = 0
+        self.candidate_limited = False
+        self.begin_dropped = False
 
     @property
     def tracked_rows(self) -> int:
@@ -223,14 +229,17 @@ class _ReplayRunCounter:
     def _begin(self, pos: int) -> None:
         key = self._key_at(pos)
         earlier: list[int] = []
+        begin_dropped = False
         for origin in reversed(self.positions.get(key, ()) if key is not None else ()):
             if origin < pos:
-                earlier.append(origin)
                 if len(earlier) == _COMPACTION_REPLAY_CANDIDATES_PER_KEY:
+                    begin_dropped = True  # an older origin is not tried
                     break
+                earlier.append(origin)
         self.candidates = {pos - origin for origin in earlier}
         self.run = 1 if self.candidates else 0
         self.start = pos
+        self.begin_dropped = begin_dropped
         self._register(pos)
 
     def _close(self, end: int) -> bool:
@@ -238,6 +247,10 @@ class _ReplayRunCounter:
         run, start = self.run, self.start
         self.candidates = set()
         self.run = 0
+        if run < COMPACTION_REPLAY_MIN_RUN and self.begin_dropped:
+            # A short run whose older origins were capped away could have been a
+            # replay of one of them: the session's result is incomplete.
+            self.candidate_limited = True
         if run >= COMPACTION_REPLAY_MIN_RUN:
             self.replayed += run
             self.runs += 1

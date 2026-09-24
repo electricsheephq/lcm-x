@@ -1579,6 +1579,8 @@ class ReconcileMixin:
         if payload.get("hermes_home") != str(getattr(self, "_hermes_home", "") or ""):
             return None
         conversation_id = getattr(self, "_conversation_id", "")
+        if payload.get("conversation_id") != (conversation_id or ""):
+            return None
         state = (
             self._lifecycle.get_by_conversation(conversation_id)
             if conversation_id
@@ -1761,6 +1763,31 @@ class ReconcileMixin:
                 effective_incoming=proof_cursor,
             )
             return proof_cursor
+        lossy_at = next(
+            (
+                index
+                for index, message in enumerate(messages[: cursor or 0])
+                if str(message.get("role") or "") != "tool"
+                and _has_lossy_redacted_identity(self._message_replay_identity(message))
+            ),
+            None,
+        )
+        if lossy_at is not None:
+            # A digest-less placeholder makes different rows compare equal, so
+            # content equality cannot prove it replayed. Stop the match before
+            # the first lossy row: it and the rows after it are stored again
+            # (duplicates at worst, never loss; #484 item 11b). Tool rows have
+            # their own lossy fence in the matcher (tool-anchored terms).
+            self._record_ingest_reconciliation(
+                action="advanced cursor",
+                reason="replayed durable tail up to a lossy redacted row",
+                cursor=lossy_at,
+                incoming=len(messages),
+                session_count=session_count,
+                stored_tail_count=len(stored_tail),
+                effective_incoming=len(self._effective_replay_identities(messages)),
+            )
+            return lossy_at
         if cursor is not None and cursor > 0:
             reason = (
                 "skipped scaffold-only prefix"

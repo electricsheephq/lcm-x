@@ -83,8 +83,10 @@ Hermes plugin-catalog admission (#471):
   real end), the in-place or rotation start reconciles the cursor instead of keeping it. A
   host-merged summary carrier is identified by its glued row (each summary part is verified
   against its DAG node). Cursor reconciliation treats unverified summary-shaped text as content
-  (#486), and digest-less redactions never count as proof, including native recovery replay. A
-  durable proof carries the cursor across restart/resume, including an empty rotation child
+  (#486), and digest-less redactions never count as proof, including native recovery replay and
+  the store matcher (it stops before such a row). The proof is bound to its session, conversation
+  and Hermes home. A durable proof carries the cursor across restart/resume, including an empty
+  rotation child
   (commit or native recovery proof), and moves to the child on rotation. `lcm_doctor` and
   `/lcm doctor` add a detect-only `compaction_replay_duplicates` check: candidate replay runs per
   session over a bounded window, warn plus a recommended action, no mutation, and a warn with
