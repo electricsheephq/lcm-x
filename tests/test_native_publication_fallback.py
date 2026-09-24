@@ -907,16 +907,27 @@ def test_native_host_repair_starts_delta_before_new_content_after_missing_id_row
 
 
 def _write_durable_native_proof(
-    engine, rows, droppable, *, native=True, include_skip_landing=True
+    engine,
+    rows,
+    droppable,
+    *,
+    version=2,
+    native=True,
+    include_skip_landing=True,
 ):
-    identities = [engine._message_replay_identity(row) for row in rows]
+    identity_for_proof = (
+        engine._message_replay_identity
+        if version == 2
+        else engine._proof_replay_identity
+    )
+    identities = [identity_for_proof(row) for row in rows]
     payload = {
-        "version": 2,
+        "version": version,
         "hermes_home": str(engine._hermes_home or ""),
         "conversation_id": engine._conversation_id,
         "created_at": time.time(),
         "effective_sha256": [
-            _commit_proof_identity_digest(engine._message_replay_identity(row)) for row in rows
+            _commit_proof_identity_digest(identity) for identity in identities
         ],
         "last_store_id": 0,
         "native": native,
@@ -1282,12 +1293,17 @@ def test_s8_host_strips_unanswered_tool_calls_from_content_assistant(
     assert second[0] <= 1 and second[1:] == (0, 0)
 
 
-def test_native_repair_walks_are_seeded_equivalent(candidate):
-    rng = random.Random(492_02)
+@pytest.mark.parametrize("proof_version", [2, 3], ids=["v2-exact", "v3-replay"])
+def test_native_repair_walks_are_seeded_equivalent(candidate, proof_version):
+    rng = random.Random(492_00 + proof_version)
 
     def row(kind, token):
         if kind == "user":
-            return {"role": "user", "content": f"user-{token % 7}"}
+            content = f"user-{token % 7}"
+            if proof_version == 3:
+                content = rng.choice(["", " ", "  ", "\n", " \n"]) + content
+                content += rng.choice(["", " ", "\n"])
+            return {"role": "user", "content": content}
         if kind == "assistant":
             return {"role": "assistant", "content": f"assistant-{token % 7}"}
         if kind == "call":
@@ -1337,6 +1353,10 @@ def test_native_repair_walks_are_seeded_equivalent(candidate):
             for index, message in enumerate(adopted)
             if not (droppable[index] and rng.random() < 0.7)
         ]
+        if proof_version == 3:
+            for message in host_base:
+                if message.get("role") == "user" and rng.random() < 0.5:
+                    message["content"] = message["content"].strip()
         if len(host_base) > 1 and rng.random() < 0.35:
             del host_base[rng.randrange(1, len(host_base))]
         fresh = [
@@ -1344,7 +1364,9 @@ def test_native_repair_walks_are_seeded_equivalent(candidate):
             for index in range(1 + rng.randrange(3))
         ]
         host = host_base + fresh
-        _write_durable_native_proof(candidate, adopted, droppable)
+        _write_durable_native_proof(
+            candidate, adopted, droppable, version=proof_version
+        )
 
         in_memory = candidate._remap_cursor_through_native_host_repair(host, proof)
         durable = candidate._cursor_from_durable_commit_proof(host)
