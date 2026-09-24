@@ -1,5 +1,11 @@
 # Review evidence provenance
 
+> **RETIRED 2026-09-24 (#474).** The `AI review exact-head` check, its workflow and its
+> validator were removed. It produced 0 v2 passes; #466, which introduced v2, and the 3 merges
+> after it (#462, #469, #470) landed through ruleset transitions; and no publisher ever emitted
+> the `lcm-x-ai-review:v2` marker. AI review is now recorded evidence under the `land-pr` review obligation, not
+> enforcement. The text below is kept as history and describes no current rule.
+
 The `AI review exact-head` check treats a repository dispatch as a request to
 inspect existing GitHub pull-request reviews. A dispatch names review objects by
 `lane` and numeric `review_id`; it cannot submit a verdict, findings, reviewer

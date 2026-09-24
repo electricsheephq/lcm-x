@@ -95,16 +95,19 @@ why in the PR.
 
 Maintainers use the protected-main `.agents/skills/land-pr/SKILL.md`:
 
-- required checks must pass on the pinned `headRefOid` with trusted workflow identities;
-- the protected `AI review exact-head` check must pass on the current head;
-- every PR requires one exact-head `acceptance` assessment with an explicit original `PASS` and
-  no unresolved findings;
-- protected changed-path mappings additionally require targeted `adversarial` review for
-  review-provenance policy and LCM memory-preservation risk; labels cannot change the lanes;
-- every actionable review thread needs a terminal disposition and resolution;
+- enforcement is strict exact-head CI: the six required checks must pass on the pinned
+  `headRefOid` with trusted workflow identities;
+- AI review is recorded evidence, not enforcement: every PR needs at least one independent
+  review of the exact head, and review-provenance-policy or LCM memory-preservation risk (the
+  `scripts/maintainer_gate.py` hint) adds a distinct adversarial review from a different model
+  than the author; at landing, after merge authority is established, a merge receipt comment
+  lists pointers only and names the author and reviewer models, or `REVIEW_SKIPPED: <lane> —
+  <reason>` for the owner to decide;
+- every review thread is resolved before merge; a bot thread is resolved only after a reply
+  that records its disposition;
 - accepted issues, exact-head state, and product/security decisions are re-fetched before merge;
-- merges use merge commits only—never squash, rebase, direct-main push, auto-merge, or bypass.
-  The recorded #218 bootstrap transition is the sole non-repeatable exception.
+- merges use merge commits only (`gh pr merge --merge --match-head-commit <head>`)—never squash,
+  rebase, direct-main push, auto-merge, or bypass outside a recorded owner emergency.
 
 After merging, maintainers verify the merge commit is current `main`, linked issue disposition,
 and the required checks on the exact merge commit. Maintainers curate user-facing release notes;
@@ -120,9 +123,8 @@ commit may differ from the passing rc tree by exactly the added release-notes fi
 AI and bot output is proposal and evidence by default. Models may triage, reproduce, implement,
 test, and review, but deterministic tooling must re-fetch live state before any authorized write.
 Model output alone cannot close, label, assign, push, approve, or merge. Automated repair is
-opt-in and limited to the exact accepted issue and current gate. Exact-head original AI review
-assessments are evidence consumed by the protected deterministic gate; they do not create
-write or merge authority. Public sensitive disclosure remains an explicit maintainer decision.
+opt-in and limited to the exact accepted issue and current gate. AI reviews are recorded
+evidence; they do not create write or merge authority. Public sensitive disclosure remains an explicit maintainer decision.
 
 Use the read-only `.agents/skills/triage-backlog/SKILL.md` for one issue, pull request, or duplicate
 cluster at a time. Invoking it does not authorize backlog sweeps or GitHub writes. Routine labels,

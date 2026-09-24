@@ -6,6 +6,11 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Governance: the required `AI review exact-head` check, its workflow and its validator are
+  retired (#474). Enforcement is strict exact-head CI (the six checks), required review-thread
+  resolution and merge commits; AI review is recorded evidence under the `land-pr` review
+  obligation, and `scripts/maintainer_gate.py` reports the required review lanes as a hint.
+
 ## v0.23.3 - maintenance point release
 
 - Session-end prefix matching extracted from `engine.py` into `prefix_matching.py` as a mixin;
