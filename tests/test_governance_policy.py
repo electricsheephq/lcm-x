@@ -186,10 +186,11 @@ def test_codeowners_and_landing_policy_use_exact_head_ci_and_review_obligation()
     assert "check the head it names equals `$head`" in " ".join(landing.split())
     assert "A readiness-only invocation stays read-only." in " ".join(landing.split())
     assert "`REVIEWED_LANE_ONLY`" in review
-    assert "latest: comments(last: 1) { nodes { author { login __typename } } }" in landing
-    assert "whose latest comment is by that same bot has no disposition reply" in " ".join(
+    assert "comments(first: 100) { nodes { url body author { login __typename } } }" in landing
+    assert "needs a comment by a `User` author that records one of those dispositions" in " ".join(
         landing.split()
     )
+    assert "gh pr checks <PR> --repo electricsheephq/lcm-x --required" in landing
     assert '"changed_files": "unknown", "named_risks": null, "required_review_lanes": ' in landing
     assert "--argjson n \"$expected\" 'add | length == $n'" in landing
     merge_section = landing.split("## 7. Merge Deterministically", maxsplit=1)[1]

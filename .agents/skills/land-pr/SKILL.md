@@ -94,8 +94,7 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
       reviewThreads(first: 100, after: $endCursor) {
         nodes {
           isResolved
-          opening: comments(first: 1) { nodes { url author { login __typename } } }
-          latest: comments(last: 1) { nodes { author { login __typename } } }
+          comments(first: 100) { nodes { url body author { login __typename } } }
         }
         pageInfo { hasNextPage endCursor }
       }
@@ -118,9 +117,11 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
   established. A readiness-only invocation stays read-only.
 - Every review thread must be resolved before merge; list and stop on any thread without
   `isResolved: true`. A bot thread is resolved only after a reply that records its disposition:
-  fixed in `<sha>`, false with evidence, accepted tradeoff, or follow-up `<issue>`. A resolved
-  thread whose opening comment author is a `Bot` and whose latest comment is by that same bot has
-  no disposition reply; list and stop on it.
+  fixed in `<sha>`, false with evidence, accepted tradeoff, or follow-up `<issue>`. For a resolved
+  thread whose opening comment author is a `Bot`, read the comment bodies: the thread needs a
+  comment by a `User` author that records one of those dispositions. A bot comment after it does
+  not undo it, and a reply that records none of them does not count; list and stop on a resolved
+  bot thread without one.
 - After a review-driven head change, require new reviews for the changed risk surface and
   re-read the head SHA and checks.
 - Give every verified finding one terminal disposition. Do not turn unverified possibilities
@@ -158,7 +159,7 @@ Only after a maintainer authorizes landing this PR at `$head`, in this order:
    test "$current_head" = "$head"
    gh pr view <PR> --repo electricsheephq/lcm-x \
      --json state,isDraft,headRefOid,mergeable,mergeStateStatus,reviewDecision
-   gh pr checks <PR> --repo electricsheephq/lcm-x
+   gh pr checks <PR> --repo electricsheephq/lcm-x --required
    ```
 
 2. Repeat the paginated thread query from Section 4 and reapply every Section 4 gate. Validate
