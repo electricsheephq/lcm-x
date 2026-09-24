@@ -3304,7 +3304,7 @@ class LCMEngine(
             inherited_ranges = self._coalesce_compression_carry_ranges(
                 (carried_session_id, max(range_start, frontier), range_end)
                 for carried_session_id, range_start, range_end
-                in self._load_compression_carry_ranges(source_session_id)
+                in (commit_proof.get("carry_ranges") or ())
                 if range_end > frontier
             )
             commit_proof["carry_ranges"] = inherited_ranges
@@ -7078,6 +7078,8 @@ class LCMEngine(
             and isinstance(tail_selected[0].get("content"), str)
             and any(message.get("role") == "user" for message in tail_selected[1:])
         ):
+            # This shape deliberately matches Hermes _merge_consecutive_users;
+            # copying api_content or row fields would replay the sidecar instead of the summary.
             carrier = {
                 "role": "user",
                 "content": f"{summary_message['content']}\n\n{tail_selected[0]['content']}",

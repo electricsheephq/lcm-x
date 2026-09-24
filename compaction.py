@@ -1445,9 +1445,17 @@ class CompactionMixin:
                 break
 
             selected_raw_chunk = to_compact
-            summary_input_chunk = [
-                message for message in selected_raw_chunk if id(message) not in dependent_reply_message_ids
-            ]
+            sources = {}
+            summary_input_chunk = []
+            for message in selected_raw_chunk:
+                if id(message) in dependent_reply_message_ids:
+                    continue
+                remainder = self._generated_context_carrier_remainder(message)
+                if remainder is not None:
+                    original = message
+                    message = {**message, "content": remainder}
+                    sources[id(message)] = original
+                summary_input_chunk.append(message)
             if not summary_input_chunk:
                 compacted_chunk = selected_raw_chunk
                 source_tokens = count_messages_tokens(selected_raw_chunk)
@@ -1502,6 +1510,7 @@ class CompactionMixin:
                         )
                         break
                     raise
+            compacted_chunk = [sources.get(id(message), message) for message in compacted_chunk]
             compacted_summary_ids = {id(message) for message in compacted_chunk}
             compacted_positions = [
                 idx for idx, message in enumerate(selected_raw_chunk) if id(message) in compacted_summary_ids
