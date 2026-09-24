@@ -29,6 +29,12 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   landing unconsumed. Re-issued byte-identical call-only rows remain the known
   pre-existing #500 case.
 
+- Fix: proof-backed Hermes rotation children now retain durable permission to map and publish
+  the parent's still-open raw-message ranges without moving raw-row ownership. Compression
+  results that differ only by host-private metadata are returned as the original input object,
+  so Hermes treats publication fail-open and sanitized no-change results as no progress instead
+  of rotating and re-storing the context. (#495)
+
 ## v0.24.0 - BREAKING: plugin renamed to hermes-lcm-x, engine to lcm-x (unreleased)
 
 **BREAKING.** The plugin manifest is renamed `hermes-lcm` → `hermes-lcm-x` and the context engine

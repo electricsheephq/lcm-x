@@ -51,6 +51,8 @@ _PROBE = textwrap.dedent(
     home = Path(os.environ["HERMES_HOME"])
     trailing = os.environ["PROBE_TRAILING"] == "1"
     turns = int(os.environ["PROBE_TURNS"])
+    repeat = int(os.environ.get("PROBE_REPEAT", "400"))
+    real_usage = os.environ.get("PROBE_REAL_USAGE") == "1"
     def aux_llm(**kwargs):
         text = "## Goal\\nstub\\n## Progress\\nstub" if kwargs.get("task") == "compression" else "Title"
         msg = SimpleNamespace(content=text, tool_calls=None)
@@ -119,6 +121,7 @@ _PROBE = textwrap.dedent(
     rows = [(r, c) for _s, _sid, r, c in stored]
     normalized = [(r, (c or "").rstrip()) for r, c in rows if (c or "").strip() != "continue"]
     state = sqlite3.connect(str(home / "state.db"))
+    session_count = state.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
     host_user_texts = {c for (c,) in state.execute("SELECT content FROM messages WHERE role = 'user'")}
     state.close()
     host_user_texts |= {m.get("content") for m in history if m.get("role") == "user"}
@@ -143,6 +146,7 @@ _PROBE = textwrap.dedent(
         "continue_rows": sum(1 for r, c in rows if r == "user" and (c or "").strip() == "continue"),
         "identity_mismatches": identity_mismatches,
         "identity_mismatches_after_trim": [i for i in identity_mismatches if by_id[i].strip() not in host_trimmed],
+        "session_count": session_count,
         "override_rewrites": rewrites["n"],
         "user_rows_by_turn": {
             f"{i:02d}": sum(1 for r, c in rows if r == "user" and (c or "").startswith(f"[T{i:02d}]"))
@@ -237,21 +241,7 @@ def _assert_each_turn_stored_once(result, continue_turns=(), *, unseen_rewrites=
 
 @pytest.mark.parametrize(
     "in_place",
-    [
-        True,
-        pytest.param(
-            False,
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason=(
-                    "separate rotation defect, not the persist rewrite: a 2nd compaction inside a "
-                    "rotation child hits publication_invariant_conflict, the host still rotates the "
-                    "no-progress result into a proof-less child, and that child re-stores its "
-                    "context (reproduces with no whitespace; rotation-child conflict, #495)"
-                ),
-            ),
-        ),
-    ],
+    [True, False],
     ids=["in-place", "rotation"],
 )
 def test_acp_persist_override_after_same_turn_compaction_stores_no_duplicates(tmp_path, in_place):
@@ -280,3 +270,20 @@ def test_acp_persist_override_long_session_default_tuning_keeps_every_turn(tmp_p
     result = _run_turn_loop(tmp_path, in_place=True, trailing=True, turns=80, long_defaults=True)
     _assert_each_turn_stored_once(result, unseen_rewrites=True)
     assert result["commit_logged"] >= 2, result  # several same-turn compactions committed
+
+
+@pytest.mark.parametrize("in_place", [True, False], ids=["in-place", "rotation"])
+@pytest.mark.parametrize("trailing", [False, True], ids=["no-trailing", "trailing"])
+def test_default_config_turn_loop_does_not_multiply_sessions_or_rows(
+    tmp_path, in_place, trailing
+):
+    result = _run_turn_loop(
+        tmp_path,
+        in_place=in_place,
+        trailing=trailing,
+        turns=80,
+        long_defaults=True,
+    )
+    _assert_each_turn_stored_once(result, unseen_rewrites=trailing)
+    if not in_place:
+        assert result["session_count"] <= result["commit_logged"] + 1, result

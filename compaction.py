@@ -533,6 +533,17 @@ class CompactionMixin:
                     focus_topic=focus_topic,
                     force=force,
                 )
+            if (
+                isinstance(result, list)
+                and result is not messages
+                and len(result) == len(messages)
+                and all(
+                    self._public_compression_row(left)
+                    == self._public_compression_row(right)
+                    for left, right in zip(result, messages)
+                )
+            ):
+                result = messages
             self._record_compress_commit_proof(messages, result)
             proof_missing = self._last_compression_status == "host_native" and self._compress_commit_proof is None
             if proof_missing:
@@ -544,6 +555,13 @@ class CompactionMixin:
             self._last_compression_status = "error"
             self._last_compression_noop_reason = ""
             raise
+
+    @staticmethod
+    def _public_compression_row(message: Any) -> Any:
+        if not isinstance(message, dict):
+            return message
+        return {key: value for key, value in message.items()
+                if key != "timestamp" and not str(key).startswith("_")}
 
     def _record_compress_commit_proof(self, messages, result) -> None:
         """Remember the exact host input of this compress() call (process-local).
@@ -569,6 +587,7 @@ class CompactionMixin:
                 "input": [self._proof_replay_identity(m) for m in messages],
                 "output": [self._proof_replay_identity(m) for m in result],
                 "end_consumed": False,
+                "carry_ranges": self._load_compression_carry_ranges(),
             }
             if proof["output"] == proof["input"]:
                 # No-progress compress: Hermes has nothing to commit, and an
@@ -628,6 +647,7 @@ class CompactionMixin:
                 "droppable": list(proof.get("droppable") or []),
                 "skip_landing": list(proof.get("skip_landing") or []),
                 "native_summary_index": proof.get("native_summary_index"),
+                "carry_ranges": [list(item) for item in proof.get("carry_ranges") or []],
             }
             if not proof["output_effective"]:
                 # Scaffold-only output: bind the proof to the emitted rows (#484 item 11l).
@@ -1535,6 +1555,7 @@ class CompactionMixin:
                             consumed_store_ids,
                             publication_excluded_store_ids,
                             filter_exclusion_proofs,
+                            self._load_compression_carry_ranges(),
                         )
                     before_commit = stage_frontier
                 self._dag.add_node(node, before_commit=before_commit)

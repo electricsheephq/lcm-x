@@ -9,6 +9,7 @@ import hermes_lcm.engine as lcm_engine_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.lifecycle_state import LifecyclePublicationConflictError
 from hermes_lcm.reconcile import _commit_proof_identity_digest
 
 
@@ -819,6 +820,112 @@ def test_rotation_moves_the_commit_proof_to_the_child(tmp_path, monkeypatch):
         child = _durable_commit_proof(engine, "S1")
         assert child["last_store_id"] == 0
         assert child["effective_sha256"] == _durable_commit_proof(engine, "S0")["effective_sha256"]
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("restart_child", [False, True], ids=["live", "restart"])
+def test_rotation_child_can_compact_only_parent_carried_rows(
+    tmp_path, monkeypatch, restart_child
+):
+    """#495: a proof-backed child may publish the parent's still-open rows."""
+    engine, pre, compressed = _compacted_engine(
+        tmp_path, monkeypatch, turns=12, tail=6
+    )
+    try:
+        frontier = engine._last_compacted_store_id
+        carried_ids = {
+            int(row[0])
+            for row in engine._store._conn.execute(
+                "SELECT store_id FROM messages "
+                "WHERE session_id = 'S0' AND store_id > ? ORDER BY store_id",
+                (frontier,),
+            )
+        }
+        assert carried_ids
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(
+            "S1", boundary_reason="compression", old_session_id="S0", platform="acp"
+        )
+        engine._config.fresh_tail_count = 2
+        engine.protect_last_n = 2
+        if restart_child:
+            engine.shutdown()
+            engine = LCMEngine(
+                config=LCMConfig(
+                    database_path=str(tmp_path / "lcm.db"),
+                    fresh_tail_count=2,
+                    leaf_chunk_tokens=400,
+                    large_output_externalization_path=str(tmp_path / "externalized"),
+                ),
+                hermes_home=str(tmp_path / "home"),
+            )
+            engine.on_session_start("S1", platform="acp", context_length=200_000)
+
+        host = list(compressed)
+        host.extend(_turn(14))
+        engine.ingest(host)
+        existing_node_ids = {
+            node.node_id for node in engine._dag.get_session_nodes("S1")
+        }
+
+        engine.compress(list(host), force=True)
+
+        assert engine._last_compression_status == "compacted"
+        new_nodes = [
+            node
+            for node in engine._dag.get_session_nodes("S1")
+            if node.node_id not in existing_node_ids
+        ]
+        assert len(new_nodes) == 1
+        assert new_nodes[0].source_ids
+        assert set(new_nodes[0].source_ids) <= carried_ids
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("path", ["fail-open", "sanitized"])
+def test_compress_returns_input_object_when_only_host_metadata_differs(
+    tmp_path, monkeypatch, path
+):
+    """#495: metadata-only rewrites are no progress to the Hermes host."""
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "lcm.db"),
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": "unchanged payload",
+            "_row_id": 7,
+            "_db_persisted": True,
+            "timestamp": 123.0,
+        }
+    ]
+    public_rows = [{"role": "user", "content": "unchanged payload"}]
+
+    def compress_impl(*_args, **_kwargs):
+        if path == "fail-open":
+            return engine._fail_open_after_publication_failure(
+                public_rows,
+                LifecyclePublicationConflictError("injected conflict"),
+                compress_started=time.perf_counter(),
+                threshold_full_sweep_active=False,
+                recovery_assembly_cap=None,
+                leaf_passes=0,
+            )
+        engine._last_compression_status = "sanitized"
+        return engine._sanitize_active_context_messages(
+            public_rows,
+            insert_missing_tool_stubs=False,
+        )
+
+    monkeypatch.setattr(engine, "_compress_impl", compress_impl)
+    try:
+        assert engine.compress(messages) is messages
     finally:
         engine.shutdown()
 

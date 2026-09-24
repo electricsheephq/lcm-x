@@ -1713,10 +1713,15 @@ class ReconcileMixin:
             return False
         return stored_head[: len(incoming_identities)] == incoming_identities
 
-    def _durable_commit_proof_payload(self) -> Optional[Dict[str, Any]]:
+    def _durable_commit_proof_payload(
+        self, session_id: str | None = None
+    ) -> Optional[Dict[str, Any]]:
         """The bound session's own durable compaction-commit proof, else None."""
+        effective_session_id = session_id or self._session_id
         payload = self._store.read_metadata_json(
-            self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)
+            self._replay_snapshot_metadata_key(
+                _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, effective_session_id
+            )
         )
         if not isinstance(payload, dict) or payload.get("version") not in (2, _COMPACTION_COMMIT_PROOF_VERSION):
             return None
@@ -1728,13 +1733,26 @@ class ReconcileMixin:
         state = (
             self._lifecycle.get_by_conversation(conversation_id)
             if conversation_id
-            else self._lifecycle.get_by_session(self._session_id)
+            else self._lifecycle.get_by_session(effective_session_id)
         )
         # Same rule as bind_session's frontier resume: nothing from before a
         # lifecycle reset of this conversation proves the current list.
         if state is not None and state.last_reset_at is not None and float(payload.get("created_at") or 0) <= state.last_reset_at:
             return None
         return payload
+
+    def _load_compression_carry_ranges(
+        self, session_id: str | None = None
+    ) -> list[tuple[str, int, int]]:
+        """Load proof-backed parent ranges still visible in this segment."""
+        try:
+            payload = self._durable_commit_proof_payload(session_id) or {}
+            ranges = [(str(source), int(start), int(end))
+                      for source, start, end in payload.get("carry_ranges") or []]
+            return [item for item in ranges if item[0] and 0 <= item[1] < item[2]]
+        except Exception:
+            logger.debug("LCM compression carry-range load failed", exc_info=True)
+            return []
 
     def _cursor_from_durable_commit_proof(self, messages) -> Optional[int]:
         """Cursor proven by the last compaction's durable output proof, else None.
@@ -2431,6 +2449,26 @@ class ReconcileMixin:
                 break
             candidates.extend(page)
             next_candidate_after = page[-1]["store_id"]
+        for source_session_id, range_start, range_end in self._load_compression_carry_ranges():
+            next_candidate_id = max(
+                int(self._last_compacted_store_id or 0),
+                range_start,
+            ) + 1
+            while next_candidate_id <= range_end:
+                page = self._store.get_range(
+                    source_session_id,
+                    start_id=next_candidate_id,
+                    end_id=range_end,
+                )
+                if not page:
+                    break
+                candidates.extend(page)
+                next_candidate_id = int(page[-1]["store_id"]) + 1
+        candidates = list({
+            int(candidate["store_id"]): candidate for candidate in candidates
+            if int(candidate.get("store_id") or 0) > 0
+        }.values())
+        candidates.sort(key=lambda candidate: int(candidate["store_id"]))
         self._load_host_rewrite_overrides(candidates)
 
         def active_lineage_identity(

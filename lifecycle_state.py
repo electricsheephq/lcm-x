@@ -954,6 +954,7 @@ class LifecycleStateStore:
         covered_store_ids: list[int],
         excluded_store_ids: list[int] | None = None,
         filter_exclusion_proofs: dict[int, Any] | None = None,
+        carried_ranges: list[tuple[str, int, int]] | None = None,
     ) -> int:
         """Validate and stage one contiguous compaction-frontier advance.
 
@@ -986,30 +987,47 @@ class LifecycleStateStore:
                 "Compaction publication coverage overlaps an explicit exclusion"
             )
         exclusion_proofs = filter_exclusion_proofs or {}
+        allowed_carry_ranges = [
+            (str(source_session_id), int(start), int(end))
+            for source_session_id, start, end in (carried_ranges or [])
+            if source_session_id and 0 <= int(start) < int(end)
+        ]
+
+        def row_is_owned(row: Any) -> bool:
+            store_id, owner_session_id = int(row[0]), str(row[1] or "")
+            return owner_session_id == session_id or any(
+                owner_session_id == source_session_id
+                and start < store_id <= end
+                for source_session_id, start, end in allowed_carry_ranges
+            )
+
         snapshot_ids = sorted(
             set(all_covered_ids + excluded_ids + list(exclusion_proofs))
         )
         snapshot_rows = conn.execute(
             """
-            SELECT m.store_id, m.conversation_id, m.content
+            SELECT m.store_id, m.session_id, m.conversation_id, m.content
             FROM json_each(?) AS source
             CROSS JOIN messages AS m
-            WHERE m.store_id = source.value AND m.session_id = ?
+            WHERE m.store_id = source.value
             ORDER BY m.store_id
             """,
-            (str(snapshot_ids), session_id),
+            (str(snapshot_ids),),
         ).fetchall()
-        if [int(row[0]) for row in snapshot_rows] != snapshot_ids:
+        if (
+            [int(row[0]) for row in snapshot_rows] != snapshot_ids
+            or not all(row_is_owned(row) for row in snapshot_rows)
+        ):
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )
-        if any(str(row[1] or "").strip() not in {"", conversation_id} for row in snapshot_rows):
+        if any(str(row[2] or "").strip() not in {"", conversation_id} for row in snapshot_rows):
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )
         snapshot_by_id = {int(row[0]): row for row in snapshot_rows}
         if any(
-            snapshot_by_id[store_id][2] != proof
+            snapshot_by_id[store_id][3] != proof
             for store_id, proof in exclusion_proofs.items()
         ):
             raise LifecyclePublicationConflictError(
@@ -1017,14 +1035,14 @@ class LifecycleStateStore:
             )
         rows = conn.execute(
             """
-            SELECT store_id, conversation_id, content
+            SELECT store_id, session_id, conversation_id, content
             FROM messages
-            WHERE session_id = ? AND store_id > ? AND store_id <= ?
+            WHERE store_id > ? AND store_id <= ?
             ORDER BY store_id
             """,
-            (session_id, expected_frontier, covered_end),
+            (expected_frontier, covered_end),
         ).fetchall()
-        authoritative_ids = [int(row[0]) for row in rows]
+        authoritative_ids = [int(row[0]) for row in rows if row_is_owned(row)]
         proven_ids = sorted(covered_ids + excluded_ids)
         if authoritative_ids != proven_ids:
             raise LifecyclePublicationConflictError(
