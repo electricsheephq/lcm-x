@@ -127,8 +127,9 @@ change the config while Hermes is stopped:
      logs a once-per-process `DEPRECATED LCM-X config` warning; `lcm_status`
      reports `identity_migration` and `lcm_doctor` reports an
      `identity_migration` `warn` check naming the exact change.
-4. Start Hermes and verify: `hermes plugins` lists `hermes-lcm-x` (and no
-   separate `hermes-lcm`), and the log shows
+4. Start Hermes and verify: `hermes plugins` lists `hermes-lcm-x` as enabled
+   and `hermes-lcm` as not enabled (an old directory kept for rollback may
+   still be listed), and the log shows
    `LCM plugin loaded — lossless context management active`.
 5. Later, by hand: after verifying, remove a separate old directory and its
    `skills/hermes-lcm` link; keep it until then for rollback.

@@ -74,6 +74,9 @@ def identity_migration_notice(hermes_config: Any) -> dict[str, Any] | None:
             f"remove `{LEGACY_PLUGIN_NAME}` from `plugins.enabled` once "
             f"`{PLUGIN_NAME}` is enabled"
         )
+    # The alias is fixed when register() runs (#477): a config edited while
+    # Hermes runs is not picked up, so the steps lead with the stop/restart.
+    steps = ["stop Hermes", *changes, "start Hermes again"]
     return {
         "status": "deprecated_config",
         "plugin_name": PLUGIN_NAME,
@@ -81,11 +84,13 @@ def identity_migration_notice(hermes_config: Any) -> dict[str, Any] | None:
         "configured_engine": configured_engine,
         "legacy_engine_alias_active": legacy_engine,
         "legacy_plugin_enabled": legacy_enabled,
-        "change": changes,
+        "change": steps,
         "message": (
-            f"LCM-X was renamed: plugin `{LEGACY_PLUGIN_NAME}` -> `{PLUGIN_NAME}`, "
-            f"context engine `{LEGACY_ENGINE_NAME}` -> `{ENGINE_NAME}`. "
-            "Update config.yaml: " + "; ".join(changes) + ". "
+            "Stop Hermes, then edit config.yaml: " + "; ".join(changes) + "; "
+            "then start Hermes again. Editing config.yaml while Hermes runs makes "
+            "new sessions fall back to the built-in compressor until Hermes "
+            f"restarts. LCM-X was renamed: plugin `{LEGACY_PLUGIN_NAME}` -> "
+            f"`{PLUGIN_NAME}`, context engine `{LEGACY_ENGINE_NAME}` -> `{ENGINE_NAME}`. "
             f"A config that enables only `{LEGACY_PLUGIN_NAME}` stops loading LCM-X "
             "and Hermes falls back to its built-in compressor (lcm.db is untouched)."
         ),

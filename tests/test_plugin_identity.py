@@ -85,6 +85,11 @@ def test_notice_names_every_change_for_the_old_config():
     assert "add `hermes-lcm-x` to `plugins.enabled`" in message
     assert "remove `hermes-lcm` from `plugins.enabled`" in message
     assert "lcm.db is untouched" in message
+    # #477: the alias is fixed at register(), so the notice leads with stop/restart.
+    assert message.startswith("Stop Hermes, then edit config.yaml: ")
+    assert "then start Hermes again" in message
+    assert "while Hermes runs makes new sessions fall back to the built-in compressor" in message
+    assert notice["change"][0] == "stop Hermes" and notice["change"][-1] == "start Hermes again"
 
 
 def test_notice_for_stale_enabled_entry_only_keeps_engine_name():
@@ -92,7 +97,11 @@ def test_notice_for_stale_enabled_entry_only_keeps_engine_name():
         {"context": {"engine": "lcm-x"}, "plugins": {"enabled": ["hermes-lcm", "hermes-lcm-x"]}}
     )
     assert notice["legacy_engine_alias_active"] is False
-    assert notice["change"] == ["remove `hermes-lcm` from `plugins.enabled` once `hermes-lcm-x` is enabled"]
+    assert notice["change"] == [
+        "stop Hermes",
+        "remove `hermes-lcm` from `plugins.enabled` once `hermes-lcm-x` is enabled",
+        "start Hermes again",
+    ]
 
 
 def test_registry_accepts_current_and_legacy_engine_names():

@@ -55,6 +55,14 @@ Hermes plugin-catalog admission (#471):
   the remaining informational findings.
 - `FINDINGS-VERDICTS-*.md` moved from the repository root to `docs/history/`.
 
+- The `DEPRECATED LCM-X config` notice (log warning, `lcm_status.identity_migration`,
+  `lcm_doctor`) now leads with the precondition: stop Hermes, edit `config.yaml`, start Hermes
+  again. The engine alias is fixed when the plugin registers, so editing the config while
+  Hermes runs makes new sessions fall back to the built-in compressor until restart. The
+  README and operator-guide step-4 check now reads "`hermes-lcm-x` enabled, `hermes-lcm` not
+  enabled" instead of "no separate `hermes-lcm`", matching the kept-for-rollback directory.
+  (#477)
+
 - Governance: the required `AI review exact-head` check, its workflow and its validator are
   retired (#474). Enforcement is strict exact-head CI (the six checks), required review-thread
   resolution and merge commits; AI review is recorded evidence under the `land-pr` review
