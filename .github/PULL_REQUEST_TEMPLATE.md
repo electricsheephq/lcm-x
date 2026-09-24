@@ -66,9 +66,8 @@
 
 - [ ] Current `headRefOid` is recorded.
 - [ ] Required exact-head CI is green.
-- [ ] `AI review exact-head` passed on the current head.
-- [ ] One exact-head `acceptance` assessment explicitly reports original `PASS` with no unresolved findings; protected changed-path mappings add targeted `adversarial` review for a named risk. No numeric scores or inferred verdicts.
-- [ ] All actionable review threads have terminal dispositions and are resolved.
+- [ ] At least one independent review covers the current head; when the `scripts/maintainer_gate.py` risk hint names a risk, an acceptance review and a distinct adversarial review from a different model than the author. Record pointers or `REVIEW_SKIPPED: <lane> — <reason>`.
+- [ ] All actionable review threads have terminal dispositions recorded in a reply and are resolved.
 - [ ] The accepted issue, PR head, checks, reviews, threads, and authorization were deterministically re-fetched immediately before any authorized GitHub write.
 - [ ] Merge method is merge commit; do not squash or rebase.
 

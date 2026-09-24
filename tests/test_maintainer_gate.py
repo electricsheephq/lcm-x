@@ -6,7 +6,9 @@ import sys
 from copy import deepcopy
 from pathlib import Path
 
-from scripts.maintainer_gate import evaluate
+import pytest
+
+from scripts.maintainer_gate import evaluate, review_lanes_hint
 
 
 HEAD = "1" * 40
@@ -20,8 +22,8 @@ REQUIRED = [
     {"context": "test (3.12)", "integration_id": 15368},
     {"context": "test (3.13)", "integration_id": 15368},
     {"context": "test (3.14)", "integration_id": 15368},
-    {"context": "AI review exact-head", "integration_id": 15368},
 ]
+BOTH_LANES = ["acceptance", "adversarial"]
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "maintainer_gate.py"
 
 
@@ -148,7 +150,7 @@ def test_pr_authored_policy_cannot_weaken_protected_main_policy():
     receipt = evaluate(payload)
 
     assert receipt["decision"] == "NOT_READY"
-    assert "TRUSTED_CHECK_UNSATISFIED:AI review exact-head:15368" in receipt[
+    assert "TRUSTED_CHECK_UNSATISFIED:test (3.14):15368" in receipt[
         "blocker_codes"
     ]
 
@@ -178,7 +180,7 @@ def test_non_main_base_is_not_directly_landable():
     assert evaluate(payload)["decision"] == "NOT_DIRECTLY_LANDABLE"
 
 
-def test_human_approval_cannot_substitute_for_the_ai_check():
+def test_human_approval_cannot_substitute_for_a_required_check():
     payload = ready_payload()
     payload["latest_reviews"] = [
         {
@@ -194,7 +196,7 @@ def test_human_approval_cannot_substitute_for_the_ai_check():
     receipt = evaluate(payload)
 
     assert receipt["decision"] == "NOT_READY"
-    assert "TRUSTED_CHECK_UNSATISFIED:AI review exact-head:15368" in receipt[
+    assert "TRUSTED_CHECK_UNSATISFIED:test (3.14):15368" in receipt[
         "blocker_codes"
     ]
 
@@ -211,16 +213,48 @@ def test_same_named_wrong_app_check_is_rejected():
     ]
 
 
-def test_ai_check_bound_to_a_prior_base_is_rejected():
+def test_retired_ai_review_check_is_not_required():
     payload = ready_payload()
-    payload["checks"][-1]["base_sha"] = "9" * 40
 
     receipt = evaluate(payload)
 
-    assert receipt["decision"] == "NOT_READY"
-    assert "TRUSTED_CHECK_UNSATISFIED:AI review exact-head:15368" in receipt[
-        "blocker_codes"
-    ]
+    assert receipt["decision"] == "READY_FOR_AUTHORIZED_LANDING"
+    assert "PROTECTED_POLICY_UNTRUSTED" not in receipt["blocker_codes"]
+    assert [item["context"] for item in receipt["matched_trusted_checks"]] == sorted(
+        item["context"] for item in REQUIRED
+    )
+
+
+def test_review_lanes_hint_never_blocks_readiness():
+    payload = ready_payload()
+    missing = evaluate(payload)
+    payload["changed_files"] = [{"filename": "engine.py"}]
+    supplied = evaluate(payload)
+
+    assert missing["decision"] == supplied["decision"] == "READY_FOR_AUTHORIZED_LANDING"
+    assert missing["review_lanes_hint"]["changed_files"] == "missing_or_invalid"
+    assert missing["review_lanes_hint"]["required_review_lanes"] == BOTH_LANES
+    assert supplied["review_lanes_hint"]["required_review_lanes"] == BOTH_LANES
+
+
+@pytest.mark.parametrize(
+    ("changed_files", "risks", "lanes"),
+    [
+        ([{"filename": "engine.py"}], ["lcm-memory-preservation"], BOTH_LANES),
+        ([{"filename": "docs/operator-guide.md"}, "README.md"], [], ["acceptance"]),
+        (
+            [{"filename": "docs/moved.md", "previous_filename": "AGENTS.md"}],
+            ["review-provenance-policy"],
+            BOTH_LANES,
+        ),
+    ],
+    ids=["top-level-python", "docs-only", "rename-across-boundary"],
+)
+def test_review_lanes_hint_maps_changed_paths(changed_files, risks, lanes):
+    hint = review_lanes_hint(changed_files)
+
+    assert hint["named_risks"] == risks
+    assert hint["required_review_lanes"] == lanes
 
 
 def test_duplicate_trusted_check_is_rejected_even_when_one_passes():
@@ -339,7 +373,7 @@ def test_post_merge_verifies_exact_merge_commit():
     receipt = evaluate(post_merge_payload())
 
     assert receipt["decision"] == "POST_MERGE_VERIFIED"
-    assert len(receipt["matched_trusted_checks"]) == len(REQUIRED) - 1
+    assert len(receipt["matched_trusted_checks"]) == len(REQUIRED)
 
 
 def test_post_merge_rejects_an_open_pr():

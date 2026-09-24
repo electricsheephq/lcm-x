@@ -19,7 +19,18 @@ REQUIRED_CI_CHECK_PAIRS = (
     ("test (3.13)", 15368),
     ("test (3.14)", 15368),
 )
-REQUIRED_CHECK_PAIRS = REQUIRED_CI_CHECK_PAIRS + (("AI review exact-head", 15368),)
+REQUIRED_CHECK_PAIRS = REQUIRED_CI_CHECK_PAIRS
+# Changed-path risk map for the land-pr review obligation. It is a readiness hint
+# only: it names the review lanes land-pr requires and never fails readiness.
+REVIEW_POLICY_FILES = {
+    ".agents/skills/review-pr/SKILL.md", ".github/PULL_REQUEST_TEMPLATE.md",
+    "AGENTS.md", "CONTRIBUTING.md", "docs/review-evidence-provenance.md",
+    "scripts/maintainer_gate.py",
+}
+MEMORY_MIGRATION_FILES = {
+    "scripts/backfill_externalized_tool_outputs.py",
+    "scripts/import_lossless_claw.py",
+}
 FINDING_GATE_CLASSES = {"MERGE_BLOCKING", "RELEASE_BLOCKING", "NON_BLOCKING"}
 TERMINAL_FINDING_DISPOSITIONS = {
     "FIXED_NOW",
@@ -53,7 +64,6 @@ def _pair(value: dict[str, Any]) -> tuple[str, int]:
 def _trusted_checks(
     checks: list[dict[str, Any]],
     target_sha: str,
-    base_sha: str,
     required_pairs: tuple[tuple[str, int], ...] = REQUIRED_CHECK_PAIRS,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     matched: list[dict[str, Any]] = []
@@ -65,10 +75,6 @@ def _trusted_checks(
             for check in checks
             if _pair(check) == (context, integration_id)
             and check.get("head_sha") == target_sha
-            and (
-                context != "AI review exact-head"
-                or check.get("base_sha") == base_sha
-            )
         ]
         passing = [
             check
@@ -114,9 +120,7 @@ def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str,
     if pr.get("base_sha") != policy.get("base_sha"):
         blockers.append("BASE_POLICY_SHA_MISMATCH")
 
-    matched, check_blockers = _trusted_checks(
-        data.get("checks", []), head_sha, str(policy.get("base_sha", ""))
-    )
+    matched, check_blockers = _trusted_checks(data.get("checks", []), head_sha)
     blockers.extend(check_blockers)
 
     if any(thread.get("is_resolved") is not True for thread in data.get("threads", [])):
@@ -139,6 +143,59 @@ def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str,
     if issue.get("accepted") is not True or not issue.get("number"):
         blockers.append("ACCEPTED_ISSUE_MISSING")
     return blockers, head_sha, matched
+
+
+def _changed_paths(changed_files: Any) -> list[str] | None:
+    if not isinstance(changed_files, list):
+        return None
+    paths: list[str] = []
+    for item in changed_files:
+        if isinstance(item, str):
+            paths.append(item)
+        elif isinstance(item, dict) and isinstance(item.get("filename"), str):
+            paths.append(item["filename"])
+            # A rename counts both its old and its new path.
+            if isinstance(item.get("previous_filename"), str):
+                paths.append(item["previous_filename"])
+        else:
+            return None
+    return paths
+
+
+def _named_risks(paths: list[str]) -> list[str]:
+    risks: list[str] = []
+    if any(
+        path in REVIEW_POLICY_FILES or path.startswith(".agents/skills/land-pr/")
+        for path in paths
+    ):
+        risks.append("review-provenance-policy")
+    if any(
+        ("/" not in path and path.endswith(".py"))
+        or path in MEMORY_MIGRATION_FILES
+        or path.startswith(("access_context/", "access_policy/", "teams/"))
+        for path in paths
+    ):
+        risks.append("lcm-memory-preservation")
+    return risks
+
+
+def review_lanes_hint(changed_files: Any) -> dict[str, Any]:
+    """Name the review lanes land-pr requires; advisory, never a blocker."""
+    paths = _changed_paths(changed_files)
+    if paths is None:
+        return {
+            "changed_files": "missing_or_invalid",
+            "named_risks": None,
+            "required_review_lanes": ["acceptance", "adversarial"],
+        }
+    risks = _named_risks(paths)
+    return {
+        "changed_files": "supplied",
+        "named_risks": risks,
+        "required_review_lanes": (
+            ["acceptance", "adversarial"] if risks else ["acceptance"]
+        ),
+    }
 
 
 def _landing_authorization_gate(data: dict[str, Any], head_sha: str) -> list[str]:
@@ -229,7 +286,9 @@ def _evaluate(data: dict[str, Any]) -> dict[str, Any]:
         blockers.append("ADMIN_BYPASS_FORBIDDEN")
 
     decision = _decision_for(blockers, mode)
-    return _receipt(data, decision, blockers, matched, "protected-normal")
+    receipt = _receipt(data, decision, blockers, matched, "protected-normal")
+    receipt["review_lanes_hint"] = review_lanes_hint(data.get("changed_files"))
+    return receipt
 
 
 def _evaluate_post_merge(data: dict[str, Any]) -> dict[str, Any]:
@@ -296,10 +355,7 @@ def _evaluate_post_merge(data: dict[str, Any]) -> dict[str, Any]:
         blockers.append("ISSUE_DISPOSITION_UNVERIFIED")
 
     matched, check_blockers = _trusted_checks(
-        data.get("checks", []),
-        merge_commit,
-        str(policy.get("base_sha", "")),
-        REQUIRED_CI_CHECK_PAIRS,
+        data.get("checks", []), merge_commit, REQUIRED_CI_CHECK_PAIRS
     )
     blockers.extend(check_blockers)
     decision = _decision_for(blockers, "post_merge")

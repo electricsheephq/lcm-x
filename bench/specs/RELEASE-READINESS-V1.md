@@ -8,7 +8,8 @@ needs a live soak. Docs/bench-only releases may skip to GA with a note in the re
 
 ## Pipeline
 
-1. **Merge** the release PRs through the two-lane exact-head receipt gate (unchanged).
+1. **Merge** the release PRs through `land-pr` (exact-head CI, resolved threads, recorded
+   review evidence).
 2. **Tag `vX.Y.Z-rc1`** (hyphen ⇒ release.yml publishes it as a PRERELEASE) with curated notes
    at `.github/release-notes/vX.Y.Z-rc1.md`.
 3. **Run the gauntlet** (phases A-C below) against the rc tag. Every phase produces a receipt
