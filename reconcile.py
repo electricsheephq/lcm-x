@@ -2272,22 +2272,32 @@ class ReconcileMixin:
             self._message_replay_identity(candidate, stored_row=True)
             for candidate in candidates
         }
+        generated_head_resolver = getattr(self, "_generated_head_index", None)
+        use_positional_head_rule = callable(generated_head_resolver)
+        generated_head_index = (
+            generated_head_resolver(messages)
+            if use_positional_head_rule
+            else None
+        )
 
         def active_lineage_identity(
             message: Dict[str, Any],
+            message_index: int,
         ) -> tuple[str, str, str, str, str]:
             override = active_lineage_identities.get(id(message))
             if override is not None:
                 return override
-            stripped = self._message_replay_identity(message)
             full = self._message_replay_identity(message, carrier=False)
+            if use_positional_head_rule and message_index != generated_head_index:
+                return full
+            stripped = self._message_replay_identity(message)
             if full != stripped and full in stored_full_ids and stripped not in stored_full_ids:
                 return full
             return stripped
 
         active_identity_counts: dict[tuple[Any, ...], int] = {}
-        for msg in messages:
-            identity = active_lineage_identity(msg)
+        for msg_idx, msg in enumerate(messages):
+            identity = active_lineage_identity(msg, msg_idx)
             active_identity_counts[identity] = active_identity_counts.get(identity, 0) + 1
         stored_identity_counts: dict[tuple[Any, ...], int] = {}
         stored_cleanup_identity_counts: dict[tuple[Any, ...], int] = {}
@@ -2340,12 +2350,12 @@ class ReconcileMixin:
             stored_available = max(stored_exact, stored_cleanup)
             if active_count > stored_available:
                 surplus_count = active_count - stored_available
-                for msg in messages:
+                for msg_idx, msg in enumerate(messages):
                     if surplus_count <= 0:
                         break
                     if id(msg) not in generated_placeholder_message_ids:
                         continue
-                    if active_lineage_identity(msg) != identity:
+                    if active_lineage_identity(msg, msg_idx) != identity:
                         continue
                     generated_surplus_skip_message_ids.add(id(msg))
                     surplus_count -= 1
@@ -2371,7 +2381,11 @@ class ReconcileMixin:
                 probe_idx += 1
             return None
 
-        def find_message_match_index(msg: Dict[str, Any], start_idx: int) -> int | None:
+        def find_message_match_index(
+            msg: Dict[str, Any],
+            msg_idx: int,
+            start_idx: int,
+        ) -> int | None:
             msg_content = normalize_content_value(msg.get("content")) or ""
             if msg.get("store_id") is None and self._content_has_externalized_placeholder_ref(msg_content):
                 raw_identity = self._raw_externalized_placeholder_replay_identity(msg)
@@ -2379,7 +2393,7 @@ class ReconcileMixin:
                 if raw_match_idx is not None:
                     return raw_match_idx
 
-            message_identity = active_lineage_identity(msg)
+            message_identity = active_lineage_identity(msg, msg_idx)
             wanted_cleanup_identity = self._active_cleanup_replay_identity(message_identity)
             probe_idx = start_idx
             while probe_idx < len(candidates):
@@ -2402,7 +2416,8 @@ class ReconcileMixin:
             matched_message_ids: set[int] = set()
             local_surplus_skips = dict(surplus_skips)
             probe_idx = start_store_idx
-            for remaining_msg in messages[message_start_idx:]:
+            for remaining_idx in range(message_start_idx, len(messages)):
+                remaining_msg = messages[remaining_idx]
                 msg_content = normalize_content_value(remaining_msg.get("content")) or ""
                 if (
                     remaining_msg.get("store_id") is None
@@ -2414,14 +2429,21 @@ class ReconcileMixin:
                         matched_message_ids.add(id(remaining_msg))
                         probe_idx = raw_match_idx + 1
                         continue
-                message_identity = active_lineage_identity(remaining_msg)
+                message_identity = active_lineage_identity(
+                    remaining_msg,
+                    remaining_idx,
+                )
                 if id(remaining_msg) in generated_surplus_skip_message_ids:
                     continue
                 surplus = local_surplus_skips.get(message_identity, 0)
                 if surplus > 0:
                     local_surplus_skips[message_identity] = surplus - 1
                     continue
-                match_idx = find_message_match_index(remaining_msg, probe_idx)
+                match_idx = find_message_match_index(
+                    remaining_msg,
+                    remaining_idx,
+                    probe_idx,
+                )
                 if match_idx is None:
                     continue
                 matched_message_ids.add(id(remaining_msg))
@@ -2469,14 +2491,14 @@ class ReconcileMixin:
                         probe_idx -= 1
                 if id(msg) in ids_by_message_id:
                     continue
-            message_identity = active_lineage_identity(msg)
+            message_identity = active_lineage_identity(msg, msg_idx)
             if id(msg) in generated_surplus_skip_message_ids:
                 continue
             surplus = active_surplus_skips.get(message_identity, 0)
             if surplus > 0:
                 active_surplus_skips[message_identity] = surplus - 1
                 continue
-            match_idx = find_message_match_index(msg, store_idx)
+            match_idx = find_message_match_index(msg, msg_idx, store_idx)
             if match_idx is not None:
                 ids_by_message_id[id(msg)] = candidates[match_idx]["store_id"]
                 store_idx = match_idx + 1

@@ -4974,9 +4974,12 @@ class LCMEngine(
         if str(msg.get("role") or "") == "system":
             return True
         stripped = content.lstrip()
-        if stripped.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
+        if content.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX + "\n"):
             end = self._verified_lcm_summary_prefix_end(content)
-            return end is None or not content[end:].strip()
+            if end is not None:
+                return not content[end:].strip()
+            objective = content[len(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) + 1:]
+            return self._stored_user_objective_matches(objective)
         if stripped.startswith(_PRESERVED_TODO_CONTEXT_PREFIX):
             return True
         end = self._verified_lcm_summary_prefix_end(content)

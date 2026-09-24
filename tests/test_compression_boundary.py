@@ -899,8 +899,9 @@ def test_first_stored_continuation_keeps_full_identity(
 
 @pytest.mark.parametrize("tail", [1, 7], ids=["tail1", "tail7"])
 @pytest.mark.parametrize("system", [False, True], ids=["head0", "after-system"])
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
 def test_authored_objective_head_requires_stored_evidence(
-    tmp_path, monkeypatch, tail, system
+    tmp_path, monkeypatch, tail, system, in_place
 ):
     engine, pre, compressed = _compacted_engine(
         tmp_path, monkeypatch, tail=tail, system=system
@@ -913,6 +914,7 @@ def test_authored_objective_head_requires_stored_evidence(
             "[Current user objective preserved from compacted history]\n"
             "USER-AUTHORED-NEW-TEXT\n\n---\n\n"
             + _summary_block(compressed)
+            + "\n\nBRAND-NEW-REMAINDER"
         ),
     }
     host = _host_merge_consecutive_users(host)
@@ -920,13 +922,15 @@ def test_authored_objective_head_requires_stored_evidence(
     try:
         engine.on_session_end("S0", pre)
         engine.on_session_start(
-            "S1",
+            "S0" if in_place else "S1",
             boundary_reason="compression",
             old_session_id="S0",
             platform="acp",
         )
-        assert engine._store.get_session_count("S1") == 0
-        engine = _restart_compacted_engine(engine, tmp_path, "S1", tail=tail)
+        child = "S0" if in_place else "S1"
+        if not in_place:
+            assert engine._store.get_session_count(child) == 0
+        engine = _restart_compacted_engine(engine, tmp_path, child, tail=tail)
         engine.ingest(host)
         assert _stored_content(engine).count(pasted) == 1
     finally:
@@ -1017,6 +1021,61 @@ def test_summary_prefixed_paste_keeps_publishing_across_three_cycles(
             host = list(host)
             host.append(_turn(20 + cycle * 10 + 4)[1])
             engine.ingest(host)
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("paste_first", [True, False], ids=["paste-first", "plain-first"])
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
+@pytest.mark.parametrize("tail", [1, 7], ids=["tail1", "tail7"])
+@pytest.mark.parametrize("system", [False, True], ids=["no-system", "system"])
+def test_mid_list_carrier_collision_keeps_publishing_across_three_cycles(
+    tmp_path, monkeypatch, paste_first, in_place, tail, system
+):
+    engine, pre, compressed = _compacted_engine(
+        tmp_path, monkeypatch, tail=tail, system=system
+    )
+    sid = "S0"
+    host = list(compressed)
+    standalone = "COLLISION-X separate plain user row"
+    pasted = _summary_block(compressed) + "\n\n" + standalone
+    ordered = [pasted, standalone] if paste_first else [standalone, pasted]
+    try:
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(
+            sid,
+            boundary_reason="compression",
+            old_session_id="S0",
+            platform="acp",
+        )
+        host.append(_turn(13)[1])
+        engine.ingest(host)
+        for index, content in enumerate(ordered):
+            host.append({"role": "user", "content": content})
+            engine.ingest(host)
+            host.append({"role": "assistant", "content": f"reply to collision row {index}"})
+            engine.ingest(host)
+
+        for cycle in range(1, 4):
+            for turn in range(4):
+                user, reply = _turn(100 + cycle * 10 + turn)
+                host.append(user)
+                engine.ingest(host)
+                host.append(reply)
+                engine.ingest(host)
+            host.append(_turn(100 + cycle * 10 + 4)[0])
+            engine.ingest(host)
+            host, sid, status = _commit_test_compaction(
+                engine, host, sid, in_place=in_place, cycle=cycle
+            )
+            assert status == "compacted"
+            host = list(host)
+            host.append(_turn(100 + cycle * 10 + 4)[1])
+            engine.ingest(host)
+
+        stored = _stored_content(engine)
+        assert stored.count(pasted) == 1
+        assert stored.count(standalone) == 1
     finally:
         engine.shutdown()
 
