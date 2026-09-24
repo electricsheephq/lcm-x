@@ -11,9 +11,10 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   the host rewrites that same object by edge whitespace only, it records an identity override
   under `host_rewrite_identity:<store_id>` (protected like ingest, bound to a digest of the
   stored content, refused for lossy redactions). Stored content is never modified. Only
-  position-bound matchers read an override (head-anchored restart replay, the durable proof
-  walk, and the store-id mapper, which binds either form one-to-one); full-replay and tail
-  classification stay exact. Commit-proof positions compare user rows without edge whitespace.
+  position-bound matchers read an override or tolerate edge whitespace: head-anchored restart
+  replay (row i vs incoming i, only for a list extending past the stored session, so a rewrite
+  LCM never saw before a crash is covered too), the durable proof walk, and the in-order store-id
+  mapper (either form, one-to-one). Full-replay and tail classification stay exact.
   The durable commit proof moves to version 3; version-2 (rc3) proofs are still honoured.
 
 ## v0.24.0 - BREAKING: plugin renamed to hermes-lcm-x, engine to lcm-x (unreleased)

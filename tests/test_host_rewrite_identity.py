@@ -10,12 +10,14 @@ The driver mirrors the host sequence with the real engine and a stub summarizer.
 """
 
 import json
+import sqlite3
 
 import pytest
 
 import hermes_lcm.engine as lcm_engine_module
 from hermes_lcm.engine import LCMEngine
 
+from hermes_lcm.ingest_protection import scan_externalized_payload_integrity
 from tests.test_compression_boundary import _config, _stub_summarizer
 
 
@@ -43,7 +45,7 @@ class _AcpHost:
         engine.on_session_start("S0", platform="acp", context_length=200_000)
         return engine
 
-    def turn(self, i, *, trail=True, compact=False, rewrite=True, text=None):
+    def turn(self, i, *, trail=True, compact=False, rewrite=True, text=None, crash=False):
         self.history.append(_user(i, trail, text))
         self.engine.should_compress_preflight(self.history)  # ingests the RAW row
         if compact:
@@ -55,15 +57,35 @@ class _AcpHost:
         if rewrite:
             self.history[-1]["content"] = self.history[-1]["content"].strip()  # finalize_turn, in place
         self.history.append(_reply(i))
-        self.engine.ingest(self.history)
+        if not crash:  # a crash dies before the post_llm_call ingest
+            self.engine.ingest(self.history)
 
-    def restart(self, raw_indexes=()):
+    def compact_turn(self, i):
+        """A turn whose compaction the host adopts only when it published."""
+        self.history.append(_user(i))
+        self.engine.should_compress_preflight(self.history)
+        compressed = self.engine.compress(list(self.history), force=True)
+        status = self.engine._last_compression_status
+        if status == "compacted":
+            self.engine.on_session_end("S0", self.history)
+            self.engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
+            self.history = compressed
+        self.history[-1]["content"] = self.history[-1]["content"].strip()
+        self.history.append(_reply(i))
+        self.engine.ingest(self.history)
+        return status
+
+    def restart(self, raw_indexes=(), *, graceful=True, drop_last_reply=False):
         """A new process. The host resumes its transcript: the next turn's preflight
         ingest resends it plus the new prompt. Hermes' state.db keeps a same-turn
         compaction's prompt in the RAW form (the commit persisted it before the
         persist override), so ``raw_indexes`` of the history are resent untrimmed."""
-        self.engine.shutdown()
+        if graceful:
+            self.engine.shutdown()
         self.engine = self._start()
+        self.history = [dict(m) for m in self.history]  # rebuilt from state.db
+        if drop_last_reply:  # interrupted turn: no reply, post_llm_call never fired
+            self.history.pop()
         for index in raw_indexes:
             self.history[index] = dict(self.history[index], content=self.history[index]["content"].strip() + "\n")
 
@@ -218,6 +240,14 @@ def test_externalized_large_user_row_keeps_its_identity(tmp_path, monkeypatch):
             host.turn(i)
         users = [content for _sid, role, content in host.rows() if role == "user"]
         assert all(not content.startswith("[T") for content in users)  # stored as externalized refs
+        conn, engine = host.engine._store._conn, host.engine
+        stored = [dict(zip(("store_id", "role", "content"), row)) for row in host.rows() if row[1] == "user"]
+        live = [m for m in host.history if m["role"] == "user"]
+        assert [engine._message_replay_identity(dict(r, session_id="S0"), stored_row=True, with_host_rewrite=True)
+                for r in stored] == [engine._message_replay_identity(m) for m in live]
+        # The override reuses the stored payload: no second payload file per prompt (#498 lri7i).
+        scan = scan_externalized_payload_integrity(conn, engine._config, hermes_home=str(tmp_path / "home"))
+        assert scan["externalized_payload_files_unreferenced"] == 0, scan
         host.restart()
         host.turn(13)
         assert len(host.rows()) == 26
@@ -285,5 +315,85 @@ def test_rekey_declines_an_ambiguous_input_occurrence(tmp_path, monkeypatch):
         continue_rows = [sid for sid, role, content in host.rows() if content == "continue\n"]
         assert len(continue_rows) == 2
         assert f"host_rewrite_identity:{continue_rows[0]}" not in set(host.overrides()) - before
+    finally:
+        host.engine.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("prior_commit", "same_turn", "graceful", "interrupted"),
+    [
+        (False, False, False, False),
+        (True, False, False, False),
+        (True, True, False, False),
+        (False, True, False, False),
+        (False, False, True, True),
+    ],
+    ids=[
+        "a-crash-no-compaction",
+        "b1-crash-after-earlier-commit",
+        "b2-crash-same-turn-commit-live-form",
+        "b3-crash-first-commit-same-turn",
+        "a-interrupted-then-restart",
+    ],
+)
+def test_restart_after_a_rewrite_lcm_never_saw(tmp_path, monkeypatch, prior_commit, same_turn, graceful, interrupted):
+    """#498 lrfow: the process dies (or the turn is interrupted, so post_llm_call
+    never fires) after the persist rewrite: that row has no override. The resumed
+    session loses nothing, stores no duplicate and every compaction publishes."""
+    host = _AcpHost(tmp_path, monkeypatch)
+    try:
+        turn = 12
+        for i in range(1, turn + 1):
+            host.turn(i)
+        if prior_commit:
+            host.turn(turn + 1, compact=True)
+            for i in range(turn + 2, turn + 5):
+                host.turn(i)
+            turn += 4
+        turn += 1
+        host.turn(turn, compact=same_turn, crash=True)
+        host.restart(graceful=graceful, drop_last_reply=interrupted)
+        statuses = []
+        for block in range(3):
+            for i in range(turn + 1, turn + 7):
+                host.turn(i)
+            statuses.append(host.compact_turn(turn + 7))
+            turn += 7
+        assert statuses == ["compacted"] * 3
+        rows = [(role, (content or "").strip()) for _sid, role, content in host.rows()]
+        assert len(rows) == len(set(rows))
+        wanted = {("user", _user(i)["content"].strip()) for i in range(1, turn + 1)}
+        wanted |= {("assistant", _reply(i)["content"]) for i in range(1, turn + 1)}
+        wanted -= {("assistant", _reply(13 if not prior_commit else 17)["content"])} if interrupted else set()
+        assert wanted <= set(rows)
+    finally:
+        host.engine.shutdown()
+
+
+@pytest.mark.parametrize("fails", [0, 1], ids=["no-failure", "one-transient-failure"])
+def test_override_write_failure_retries_on_the_next_ingest(tmp_path, monkeypatch, fails):
+    """#498 lri7e: a transient "database is locked" on the override write keeps the
+    watch, so the next ingest records the override and a restart stays exact."""
+    host = _AcpHost(tmp_path, monkeypatch)
+    try:
+        for i in range(1, 5):
+            host.turn(i)
+        real, left = host.engine._store.write_metadata_json, [fails]
+
+        def flaky(keys, serialized, **kwargs):
+            if left[0] and any(key.startswith("host_rewrite_identity:") for key in keys):
+                left[0] -= 1
+                raise sqlite3.OperationalError("database is locked")
+            return real(keys, serialized, **kwargs)
+
+        monkeypatch.setattr(host.engine._store, "write_metadata_json", flaky)
+        for i in range(5, 13):
+            host.turn(i)
+        assert len(host.overrides()) == 12
+        host.restart()
+        host.turn(13)
+        assert len(host.rows()) == 26
+        assert _no_duplicates(host.rows())
+        assert host.compact(14) == ("compacted", "")
     finally:
         host.engine.shutdown()

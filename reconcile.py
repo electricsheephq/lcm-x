@@ -427,21 +427,25 @@ class ReconcileMixin:
             live = self._message_replay_identity(message) if message is not None else identity
             if live == identity:
                 continue
-            del watch[store_id]
             if _proof_user_identity(live) != _proof_user_identity(identity):
+                del watch[store_id]
                 continue
-            protected = protect_messages_for_ingest(
+            reuse = bool(extract_externalized_ref(stored))  # reuse the raw payload: no second file
+            protected = {"content": stored} if reuse else protect_messages_for_ingest(
                 [message], config=self._config, hermes_home=self._hermes_home, session_id=self._session_id
             )[0]
             content = normalize_content_value(protected.get("content")) or ""
             if _has_lossy_sensitive_redaction(content) or _has_lossy_sensitive_redaction(stored):
+                del watch[store_id]
                 continue  # a digest-less redaction is not identity
             raw = identity[1]  # the stripped edges keep the stored form's audit trail
             edges = [raw[: len(raw) - len(raw.lstrip())], raw[len(raw.rstrip()):]]
             digest = hashlib.sha256(stored.encode()).hexdigest()
             payload = {"version": 1, "content": content, "stripped": edges, "stored_sha256": digest}
+            payload.update({"strip_payload": True} if reuse else {})
             key = f"{_HOST_REWRITE_IDENTITY_METADATA_PREFIX}:{store_id}"
             self._store.write_metadata_json([key], json.dumps(payload, sort_keys=True), skip_unchanged=True)
+            del watch[store_id]  # only once the override is durable: a failed write retries next ingest
             overrides[store_id] = payload
 
     def _message_replay_identity(
@@ -449,10 +453,13 @@ class ReconcileMixin:
     ) -> tuple[str, str, str, str, str]:
         role = str(msg.get("role") or "unknown")
         content = normalize_content_value(msg.get("content")) or ""
+        strip_payload = False
         # Opt-in: only occurrence/position-bound consumers read the override (#498).
         if stored_row and with_host_rewrite and role == "user":
             override_content = self._host_rewrite_override_content(msg)
             content = content if override_content is None else override_content
+            override = self._host_rewrite_state()[1].get(int(msg.get("store_id") or 0))
+            strip_payload = override_content is not None and bool(override.get("strip_payload"))
         # A host-merged LCM summary carrier (#483) is identified by the real row
         # glued behind its DAG-verified summary prefix.
         carrier_rest = getattr(self, "_generated_context_carrier_remainder", None)
@@ -597,7 +604,7 @@ class ReconcileMixin:
                 hermes_home=self._hermes_home,
             )
             if payload is not None and isinstance(payload.get("content"), str):
-                content = payload["content"]
+                content = payload["content"].strip() if strip_payload else payload["content"]
         tool_calls_identity = self._stable_tool_calls_identity(tool_calls)
         # WHICH TOOL RAN is part of a tool row's identity. A tool result
         # carries no ``tool_calls``, so without the name the only distinguishing
@@ -1774,14 +1781,16 @@ class ReconcileMixin:
             return None
         rows = self._store.get_session_messages(self._session_id, limit=session_count)
         self._load_host_rewrite_overrides(rows)
-        if len(rows) != session_count or all(self._host_rewrite_override_content(r) is None for r in rows):
+        if len(rows) != session_count:
             return None
+        rewritten = any(self._host_rewrite_override_content(r) is not None for r in rows)
         for row, message in zip(rows, messages):
             identity = self._message_replay_identity(message)
             stored = self._message_replay_identity(row, stored_row=True, with_host_rewrite=True)
-            if _has_lossy_redacted_identity(identity) or identity != stored:
+            if _has_lossy_redacted_identity(identity) or _proof_user_identity(identity) != _proof_user_identity(stored):
                 return None
-        return session_count
+            rewritten = rewritten or identity != stored
+        return session_count if rewritten else None
 
     def _reconcile_ingest_cursor_from_store(
         self,
@@ -2390,9 +2399,11 @@ class ReconcileMixin:
             raw_identity = identity
             if self._host_rewrite_override_content(stored) is not None:
                 identity = self._message_replay_identity(stored, stored_row=True, with_host_rewrite=True)
-            stored_alt_identities.append(raw_identity if raw_identity != identity else None)
-            if raw_identity != identity:
-                stored_identity_counts[raw_identity] = stored_identity_counts.get(raw_identity, 0) + 1
+            alt = raw_identity if raw_identity != identity else _proof_user_identity(raw_identity)
+            # No override (a restart hid the rewrite): the in-order mapper admits the trimmed form.
+            stored_alt_identities.append(alt if alt != identity else None)
+            if alt != identity:
+                stored_identity_counts[alt] = stored_identity_counts.get(alt, 0) + 1
             stored_identities.append(identity)
             cleanup_identity = self._active_cleanup_replay_identity(identity)
             stored_cleanup_identities.append(cleanup_identity)
