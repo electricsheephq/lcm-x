@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,75 @@ def has_lifecycle_fragmentation(stats: dict[str, Any]) -> bool:
     return empty_lifecycle_rows > 0 or (
         bool(stats.get("state_db_checked")) and bool(stats.get("state_db_error"))
     )
+
+
+COMPACTION_REPLAY_MIN_RUN = 3
+_COMPACTION_REPLAY_CANDIDATES_PER_KEY = 8
+
+
+def scan_compaction_replay_duplicates(conn: Any, *, sample_limit: int = 10) -> dict[str, Any]:
+    """Count #483-class duplicate rows per session. Read-only; never mutates.
+
+    A stale compaction-commit ingest re-stores an already durable run of rows:
+    a contiguous run of at least ``COMPACTION_REPLAY_MIN_RUN`` rows that repeats,
+    in order, an earlier run of the same session. Lone organic repeats ("ok",
+    "continue") are not counted.
+    """
+    sessions: dict[str, dict[str, int]] = {}
+    current_session: str | None = None
+    keys: list[bytes] = []
+
+    def flush() -> None:
+        if current_session is None:
+            return
+        replayed, runs = _count_replayed_runs(keys)
+        if replayed:
+            sessions[current_session] = {"replayed_rows": replayed, "runs": runs}
+
+    for session_id, role, content, tool_call_id in conn.execute(
+        "SELECT session_id, role, content, tool_call_id FROM messages ORDER BY session_id, store_id"
+    ):
+        if session_id != current_session:
+            flush()
+            current_session = session_id
+            keys = []
+        keys.append(
+            hashlib.sha1(
+                f"{role}\0{content or ''}\0{tool_call_id or ''}".encode("utf-8", "surrogatepass")
+            ).digest()
+        )
+    flush()
+    ranked = sorted(sessions.items(), key=lambda item: item[1]["replayed_rows"], reverse=True)
+    return {
+        "sessions_with_replayed_runs": len(sessions),
+        "replayed_rows_total": sum(item["replayed_rows"] for item in sessions.values()),
+        "min_run": COMPACTION_REPLAY_MIN_RUN,
+        "sessions": [{"session_id": sid, **counts} for sid, counts in ranked[:sample_limit]],
+    }
+
+
+def _count_replayed_runs(keys: list[bytes]) -> tuple[int, int]:
+    earlier: dict[bytes, list[int]] = {}
+    replayed = runs = 0
+    j = 0
+    n = len(keys)
+    while j < n:
+        best = 0
+        for i in earlier.get(keys[j], ()):
+            k = 0
+            while j + k < n and i + k < j and keys[i + k] == keys[j + k]:
+                k += 1
+            best = max(best, k)
+        step = best if best >= COMPACTION_REPLAY_MIN_RUN else 1
+        if best >= COMPACTION_REPLAY_MIN_RUN:
+            replayed += best
+            runs += 1
+        for index in range(j, j + step):
+            positions = earlier.setdefault(keys[index], [])
+            positions.append(index)
+            del positions[:-_COMPACTION_REPLAY_CANDIDATES_PER_KEY]
+        j += step
+    return replayed, runs
 
 
 def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
@@ -151,6 +221,17 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
             rationale = "not every lifecycle/state mismatch is harmful or safe to mutate"
         else:
             rationale = "lifecycle diagnostic failures mean doctor could not read session lifecycle state reliably"
+    elif name == "compaction_replay_duplicates":
+        command = (
+            "inspect the listed sessions; these rows repeat an earlier run of the same session "
+            "(#483 compaction-commit replay). Doctor does not repair them; if a session's summaries stop "
+            "publishing, continue the conversation in a new session"
+        )
+        if status == "warn":
+            warning_only = True
+            rationale = "duplicate rows are preserved history; no automatic cleanup exists for them"
+        else:
+            rationale = "the duplicate scan could not read the message store"
     elif name == "context_pressure":
         action = DOCTOR_ACTION_SAFE_IGNORE
         command = "safe to ignore if compaction proceeds normally; inspect lcm_status only if pressure stays high or compaction loops"

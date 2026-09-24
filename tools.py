@@ -29,6 +29,7 @@ from .diagnostics import (
     _has_lifecycle_fragmentation,
     _state_db_path_for_engine,
     doctor_guidance_for_checks,
+    scan_compaction_replay_duplicates,
 )
 from .dag import build_nodes_fts_spec
 from .db_bootstrap import (
@@ -8473,6 +8474,21 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     except Exception as e:
         checks.append({
             "check": "lifecycle_fragmentation",
+            "status": "fail",
+            "detail": str(e),
+        })
+
+    # 6b. #483-class duplicate rows (detect only)
+    try:
+        replay_duplicates = scan_compaction_replay_duplicates(engine._store.connection)
+        checks.append({
+            "check": "compaction_replay_duplicates",
+            "status": "warn" if replay_duplicates["replayed_rows_total"] else "pass",
+            "detail": replay_duplicates,
+        })
+    except Exception as e:
+        checks.append({
+            "check": "compaction_replay_duplicates",
             "status": "fail",
             "detail": str(e),
         })

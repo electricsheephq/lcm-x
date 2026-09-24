@@ -3279,6 +3279,15 @@ class LCMEngine(
         self._compression_boundary_ingest_pending = can_reassign
         self._compression_boundary_active_placeholder_digest_budget = boundary_placeholder_budget
         self._compression_boundary_active_placeholder_digest_ordinals = boundary_placeholder_ordinals
+        commit_proof = getattr(self, "_compress_commit_proof", None)
+        if can_reassign and commit_proof and commit_proof.get("session_id") == source_session_id:
+            # The child segment starts from compress()'s output: re-key the proof
+            # so its first ingest re-indexes a host-merged prefix instead of
+            # trusting a positional cursor, and persist it for a resumed child.
+            commit_proof["session_id"] = session_id
+            commit_proof["input"] = None
+            if commit_proof.get("published"):
+                self._persist_compress_commit_proof(commit_proof)
         self._log_session_filter_diagnostics()
 
     def on_session_start(self, session_id: str, **kwargs) -> None:

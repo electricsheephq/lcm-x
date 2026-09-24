@@ -220,11 +220,10 @@ def _assert_clean_commit_sequence(result):
 
 
 
-# tail=7 leaves a user-leading fresh tail, so a merging host glues LCM's
-# user-role summary to it. Rotation with that seam and restart/resume need the
-# durable proof; those cases join the matrix with the commit that fixes them.
+# tail=6 leaves an assistant-leading fresh tail; tail=7 a user-leading one, so
+# a merging host glues LCM's user-role summary to the first tail user row.
 _IN_PLACE_SEAMS = [(False, 6), (False, 7), (True, 6), (True, 7)]
-_ROTATION_SEAMS = [(False, 6), (False, 7), (True, 6)]
+_ROTATION_SEAMS = _IN_PLACE_SEAMS
 
 
 @pytest.mark.parametrize("merge, tail", _IN_PLACE_SEAMS)
@@ -242,6 +241,21 @@ def test_hermes_rotation_commit_sequence_stores_every_turn(tmp_path, monkeypatch
     result = _run_host_commit_sequence(tmp_path, monkeypatch, in_place=False, merge=merge, tail=tail)
     _assert_clean_commit_sequence(result)
 
+
+
+@pytest.mark.parametrize("restart_after", [1, 2])
+@pytest.mark.parametrize("merge, tail", _IN_PLACE_SEAMS)
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
+def test_resume_after_compaction_does_not_restore_tail(
+    tmp_path, monkeypatch, in_place, merge, tail, restart_after
+):
+    """A fresh process resuming the session after compaction 1 or 2 re-indexes
+    the host list through the durable commit proof instead of re-storing the
+    fresh tail (C6), in place and across a rotation (C7)."""
+    result = _run_host_commit_sequence(
+        tmp_path, monkeypatch, in_place=in_place, merge=merge, tail=tail, restart_after=restart_after
+    )
+    _assert_clean_commit_sequence(result)
 
 def _compacted_engine(tmp_path, monkeypatch, *, turns=12, tail=6):
     """An engine bound to S0 that just ran compress() over `turns` turns plus the
@@ -505,5 +519,117 @@ def test_list_content_row_is_not_a_carrier(tmp_path, monkeypatch):
         summary = _summary_message(compressed)["content"]
         row = {"role": "user", "content": [{"type": "text", "text": summary + "\n\nreal row"}]}
         assert engine._generated_context_carrier_remainder(row) is None
+    finally:
+        engine.shutdown()
+
+
+def _durable_commit_proof(engine, session_id):
+    return engine._store.read_metadata_json(f"compaction_commit_proof:{session_id}")
+
+
+def test_durable_commit_proof_is_written_only_for_a_published_compaction(tmp_path, monkeypatch):
+    """C6: a published compaction persists its output proof; a compress() that
+    did not publish leaves no durable proof behind."""
+    engine, _pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        payload = _durable_commit_proof(engine, "S0")
+        assert payload["version"] == 1
+        assert len(payload["effective_sha256"]) == len(engine._compress_commit_proof["output_effective"])
+        assert payload["last_store_id"] > 0
+
+        engine._store.write_metadata_json(["compaction_commit_proof:S0"], "null")
+        engine._last_compression_status = "noop"
+        extended = list(compressed) + [_turn(13)[1]]
+        engine._ingest_cursor = len(extended)
+        engine._record_compress_commit_proof(compressed, extended)
+        assert engine._compress_commit_proof["published"] is False
+        assert _durable_commit_proof(engine, "S0") is None
+    finally:
+        engine.shutdown()
+
+
+def test_durable_commit_proof_only_extends_the_reconciled_cursor(tmp_path, monkeypatch):
+    """C6: the durable proof may extend the matcher's cursor, never shrink it: a
+    matcher that already proved the whole snapshot keeps its result and label."""
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "lcm.db"),
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        host: list = []
+        for i in range(1, 4):
+            host.extend(_turn(i))
+            engine.ingest(host)
+        rows = _row_count(engine)
+        monkeypatch.setattr(engine, "_cursor_from_durable_commit_proof", lambda messages: 1)
+        engine._ingest_cursor = 0
+        engine._ingest_cursor_needs_reconcile = True
+        engine.ingest(host)
+        assert _row_count(engine) == rows
+        assert engine._ingest_cursor == len(host)
+        assert engine._last_ingest_reconciliation["reason"] == "replayed durable tail"
+    finally:
+        engine.shutdown()
+
+
+def test_rotation_moves_the_commit_proof_to_the_child(tmp_path, monkeypatch):
+    """C7: after a commit-classified end, start(S1, compression, old=S0) re-keys
+    the proof to the child and persists it with no child rows yet."""
+    engine, pre, _compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        engine.on_session_end("S0", pre)
+        engine.on_session_start("S1", boundary_reason="compression", old_session_id="S0", platform="acp")
+        assert engine._compress_commit_proof["session_id"] == "S1"
+        assert engine._compress_commit_proof["input"] is None
+        child = _durable_commit_proof(engine, "S1")
+        assert child["last_store_id"] == 0
+        assert child["effective_sha256"] == _durable_commit_proof(engine, "S0")["effective_sha256"]
+    finally:
+        engine.shutdown()
+
+
+def test_doctor_detects_compaction_replay_duplicates_without_mutating(tmp_path):
+    """Detect-only doctor check for #483-class rows: a replayed run of >= 3 rows
+    in the same session is counted per session; lone organic repeats are not."""
+    import hermes_lcm.tools as lcm_tools
+    from hermes_lcm.diagnostics import scan_compaction_replay_duplicates
+
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "lcm.db"),
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        turns = [message for i in range(1, 5) for message in _turn(i)]
+        engine._store.append_batch("S0", turns, source="acp")
+        engine._store.append_batch("S0", turns[2:6], source="acp")  # stale replay of T02-T03
+        engine._store.append_batch(
+            "S1",
+            [{"role": "user", "content": "ok"}, {"role": "assistant", "content": "done"},
+             {"role": "user", "content": "ok"}],
+            source="acp",
+        )
+        conn = engine._store.connection
+        changes_before = conn.total_changes
+
+        scan = scan_compaction_replay_duplicates(conn)
+        assert scan["replayed_rows_total"] == 4
+        assert scan["sessions"] == [{"session_id": "S0", "replayed_rows": 4, "runs": 1}]
+        assert conn.total_changes == changes_before  # the scan itself never writes
+
+        doctor = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+        check = next(c for c in doctor["checks"] if c["check"] == "compaction_replay_duplicates")
+        assert check["status"] == "warn"
+        assert check["detail"]["sessions_with_replayed_runs"] == 1
+        assert any(g["check"] == "compaction_replay_duplicates" and g["warning_only"] for g in doctor["guidance"])
+        assert engine._store.get_session_count("S0") == 12
     finally:
         engine.shutdown()

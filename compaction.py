@@ -16,6 +16,7 @@ lifecycle) through normal attribute lookup. ``LCMEngine`` mixes this in ahead of
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -23,6 +24,7 @@ from typing import Any, Dict, List, Optional
 from .dag import SummaryNode
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
 from .message_content import text_content_for_pattern_matching
+from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, _commit_proof_identity_digest
 from .sanitize import _contains_sensitive_redaction
 from .sqlite_util import _is_sqlite_locked_error
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
@@ -567,8 +569,34 @@ class CompactionMixin:
             ]
             proof["published"] = self._last_compression_status == "compacted"
             self._compress_commit_proof = proof
+            if proof["published"]:
+                self._persist_compress_commit_proof(proof)
         except Exception:
             self._compress_commit_proof = None
+
+    def _persist_compress_commit_proof(self, proof) -> None:
+        """Durable twin of the process-local proof: lets a restarted/resumed
+        process re-index the host's post-compaction list without guessing.
+
+        Written only for a published compaction; ``last_store_id`` marks where
+        the rows stored after the compaction begin.
+        """
+        try:
+            tail = self._store.get_session_tail(self._session_id, limit=1)
+            payload = {
+                "version": 1,
+                "effective_sha256": [
+                    _commit_proof_identity_digest(identity) for identity in proof["output_effective"]
+                ],
+                "last_store_id": int(tail[-1]["store_id"]) if tail else 0,
+            }
+            self._store.write_metadata_json(
+                [self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)],
+                json.dumps(payload, sort_keys=True),
+                skip_unchanged=True,
+            )
+        except Exception:
+            logger.debug("LCM durable compaction-commit proof write failed", exc_info=True)
 
     def _fail_open_after_publication_failure(
         self,

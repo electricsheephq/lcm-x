@@ -69,6 +69,21 @@ Hermes plugin-catalog admission (#471):
   resolution and merge commits; AI review is recorded evidence under the `land-pr` review
   obligation, and `scripts/maintainer_gate.py` reports the required review lanes as a hint.
 
+- Fix: Hermes compaction boundaries no longer reset the frontier or store duplicate rows (#483).
+  Hermes commits a compaction by calling `on_session_end(sid, <compress input>)` before
+  `on_session_start(..., boundary_reason="compression")`. LCM-X handled that call as a real
+  session end: it re-stored the fresh tail and finalized the session, so the next summary
+  publication failed contiguity (in-place compaction) or the rotation child skipped its first
+  turns. compress() now records a commit proof. An end call with exactly that input is a commit
+  (no re-ingest, no finalize). An in-place compression start keeps the binding, frontier and
+  cursor. A session rebinding after its own finalize resumes its own frontier. The first
+  post-compaction ingest trusts the cursor only when the host list matches the proof, and
+  otherwise remaps or reconciles. A host-merged summary carrier is identified by its glued row
+  (each summary part is verified against its DAG node). A durable proof carries the cursor across
+  restart/resume and moves to the child on rotation. `lcm_doctor` and `/lcm doctor` add a
+  detect-only `compaction_replay_duplicates` check (per-session count, warn, no mutation). Stores
+  that already hold #483 duplicates are not repaired by this release.
+
 Unchanged: `lcm.db` (name and location), the `lcm:` config block, `LCM_*` environment
 variables, all `lcm_*` tool names, `/lcm`, the bundled skill name `hermes-lcm`, and the log line
 `LCM plugin loaded — lossless context management active`.
