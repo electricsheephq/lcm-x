@@ -78,10 +78,13 @@ Hermes plugin-catalog admission (#471):
   (no re-ingest, no finalize). An in-place compression start keeps the binding, frontier and
   cursor. A session rebinding after its own finalize resumes its own frontier. The first
   post-compaction ingest trusts the cursor only when the host list matches the proof, and
-  otherwise remaps or reconciles. A host-merged summary carrier is identified by its glued row
-  (each summary part is verified against its DAG node). A durable proof carries the cursor across
-  restart/resume and moves to the child on rotation. `lcm_doctor` and `/lcm doctor` add a
-  detect-only `compaction_replay_duplicates` check (per-session count, warn, no mutation). Stores
+  otherwise remaps or reconciles. Without a consumed proof (native recovery, a real end), the
+  in-place start reconciles the cursor instead of keeping it. A host-merged summary carrier is
+  identified by its glued row (each summary part is verified against its DAG node); unverified
+  summary-shaped text and digest-less redactions never count as proof. A durable proof carries
+  the cursor across restart/resume, including an empty rotation child, and moves to the child on
+  rotation. `lcm_doctor` and `/lcm doctor` add a detect-only `compaction_replay_duplicates` check
+  (per-session count over a bounded window, warn plus a recommended action, no mutation). Stores
   that already hold #483 duplicates are not repaired by this release.
 
 Unchanged: `lcm.db` (name and location), the `lcm:` config block, `LCM_*` environment

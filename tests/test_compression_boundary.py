@@ -136,7 +136,9 @@ def _stub_summarizer():
     return summarize
 
 
-def _run_host_commit_sequence(tmp_path, monkeypatch, *, in_place, merge, tail, restart_after=-1):
+def _run_host_commit_sequence(
+    tmp_path, monkeypatch, *, in_place, merge, tail, restart_after=-1, restart_before_first_ingest=-1
+):
     monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
     db_path = tmp_path / "lcm.db"
 
@@ -179,6 +181,10 @@ def _run_host_commit_sequence(tmp_path, monkeypatch, *, in_place, merge, tail, r
             host = list(compressed)
             if merge:
                 host = _host_merge_consecutive_users(host)
+            if cycle == restart_before_first_ingest:  # restart right after the boundary
+                engine.shutdown()
+                engine = LCMEngine(config=config(), hermes_home=str(tmp_path / "home"))
+                engine.on_session_start(sid, platform="acp", context_length=200_000)
             host.append(_turn(turn)[1])  # reply to the compacting turn
             engine.ingest(host)
             if cycle == restart_after:  # process restart; the host resumes the same session
@@ -254,6 +260,20 @@ def test_resume_after_compaction_does_not_restore_tail(
     fresh tail (C6), in place and across a rotation (C7)."""
     result = _run_host_commit_sequence(
         tmp_path, monkeypatch, in_place=in_place, merge=merge, tail=tail, restart_after=restart_after
+    )
+    _assert_clean_commit_sequence(result)
+
+
+@pytest.mark.parametrize("restart_cycle", [1, 2])
+@pytest.mark.parametrize("merge, tail", _IN_PLACE_SEAMS)
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
+def test_restart_before_first_post_compaction_ingest(tmp_path, monkeypatch, in_place, merge, tail, restart_cycle):
+    """#484 round 1 item 2: a process restart between the boundary start and the
+    first ingest. A rotation child is still empty then, so its durable proof must be
+    consulted before the empty-session path stores the resumed snapshot from 0."""
+    result = _run_host_commit_sequence(
+        tmp_path, monkeypatch, in_place=in_place, merge=merge, tail=tail,
+        restart_before_first_ingest=restart_cycle,
     )
     _assert_clean_commit_sequence(result)
 
@@ -631,5 +651,484 @@ def test_doctor_detects_compaction_replay_duplicates_without_mutating(tmp_path):
         assert check["detail"]["sessions_with_replayed_runs"] == 1
         assert any(g["check"] == "compaction_replay_duplicates" and g["warning_only"] for g in doctor["guidance"])
         assert engine._store.get_session_count("S0") == 12
+    finally:
+        engine.shutdown()
+
+
+def test_durable_commit_proof_checks_every_row_after_the_proof_across_pages(tmp_path, monkeypatch):
+    """#484 round 1 item 3: the post-proof row check must page through every row,
+    not stop at the store's default page (simulated with a 3-row page)."""
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        engine.on_session_end("S0", pre)
+        engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
+        host = list(compressed) + [_turn(13)[1]]
+        engine.ingest(host)
+        for i in range(14, 18):
+            host.extend(_turn(i))
+            engine.ingest(host)
+    finally:
+        engine.shutdown()
+
+    resumed = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "lcm.db"),
+            fresh_tail_count=6,
+            leaf_chunk_tokens=400,
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    try:
+        store = resumed._store
+        paged = store.get_session_messages_after
+
+        def small_pages(session_id, after_store_id=0, limit=3):
+            return paged(session_id, after_store_id=after_store_id, limit=min(limit, 3))
+
+        monkeypatch.setattr(store, "get_session_messages_after", small_pages)
+        resumed.on_session_start("S0", platform="acp", context_length=200_000)
+        rows = _row_count(resumed)
+        host.append(_turn(18)[0])
+        resumed.ingest(host)
+        assert _row_count(resumed) == rows + 1
+        stored = resumed._store._conn.execute("SELECT role, content FROM messages").fetchall()
+        assert len(stored) == len(set(stored))
+    finally:
+        resumed.shutdown()
+
+
+def test_profile_rebind_clears_the_commit_proof(tmp_path, monkeypatch):
+    """#484 round 1 item 4: a same-id session under another Hermes home is a new
+    profile; its end with the same list is a real end and must finalize."""
+    engine, pre, _compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        assert engine._compress_commit_proof is not None
+        engine.on_session_start("S0", platform="acp", context_length=200_000, hermes_home=str(tmp_path / "other-home"))
+        assert engine._compress_commit_proof is None
+        engine.on_session_end("S0", pre)
+        state = engine._lifecycle.get_by_session("S0")
+        assert state.current_session_id is None
+        assert state.last_finalized_session_id == "S0"
+    finally:
+        engine.shutdown()
+
+
+def test_ordinary_session_reset_clears_the_commit_proof(tmp_path, monkeypatch):
+    engine, _pre, _compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        engine.on_session_reset()
+        assert engine._compress_commit_proof is None
+    finally:
+        engine.shutdown()
+
+
+class _IterationFails(list):
+    def __iter__(self):
+        raise RuntimeError("injected identity failure")
+
+
+def test_proof_creation_failure_loses_nothing(tmp_path, monkeypatch):
+    """#484 round 1 item 5: if the commit proof cannot be built, the commit end is a
+    real end; the in-place start must reconcile, so no turn is lost and the
+    published frontier survives (duplicates are the bounded worst case)."""
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "lcm.db"),
+            fresh_tail_count=6,
+            leaf_chunk_tokens=400,
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    original = engine._record_compress_commit_proof
+    monkeypatch.setattr(
+        engine, "_record_compress_commit_proof", lambda messages, result: original(_IterationFails(messages), result)
+    )
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        host: list = []
+        for i in range(1, 13):
+            host.extend(_turn(i))
+            engine.ingest(host)
+        host.append(_turn(13)[0])
+        engine.ingest(host)
+        pre = list(host)
+        compressed = engine.compress(list(host), force=True)
+        assert engine._last_compression_status == "compacted"
+        assert engine._compress_commit_proof is None
+        frontier = engine._lifecycle.get_by_session("S0").current_frontier_store_id
+        engine.on_session_end("S0", pre)
+        engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
+        engine.ingest(list(compressed) + [_turn(13)[1]])
+        stored = [content for (content,) in engine._store._conn.execute("SELECT content FROM messages")]
+        assert stored.count(_turn(13)[1]["content"]) == 1
+        for i in range(1, 14):
+            assert _turn(i)[0]["content"] in stored
+        assert engine._lifecycle.get_by_session("S0").current_frontier_store_id >= frontier
+    finally:
+        engine.shutdown()
+
+
+def test_durable_proof_write_failure_loses_nothing_across_restart(tmp_path, monkeypatch):
+    """#484 round 1 item 5: without the durable proof a resumed process falls back to
+    content reconciliation: no turn is lost and the frontier survives."""
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        engine.on_session_end("S0", pre)
+        engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
+        engine._store.write_metadata_json(["compaction_commit_proof:S0"], "null")  # as if the write had failed
+        host = list(compressed) + [_turn(13)[1]]
+        engine.ingest(host)
+        frontier = engine._lifecycle.get_by_session("S0").current_frontier_store_id
+    finally:
+        engine.shutdown()
+    resumed = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "lcm.db"),
+            fresh_tail_count=6,
+            leaf_chunk_tokens=400,
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    try:
+        resumed.on_session_start("S0", platform="acp", context_length=200_000)
+        host.append(_turn(14)[0])
+        resumed.ingest(host)
+        stored = [content for (content,) in resumed._store._conn.execute("SELECT content FROM messages")]
+        for i in range(1, 15):
+            assert _turn(i)[0]["content"] in stored
+        assert _turn(13)[1]["content"] in stored
+        assert resumed._lifecycle.get_by_session("S0").current_frontier_store_id >= frontier
+    finally:
+        resumed.shutdown()
+
+
+def test_metadata_write_exception_is_contained(tmp_path, monkeypatch):
+    """#484 round 1 item 5: a raising write_metadata_json does not fail compress()
+    and keeps the process-local proof, so the in-process commit still classifies."""
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "lcm.db"),
+            fresh_tail_count=6,
+            leaf_chunk_tokens=400,
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        host: list = []
+        for i in range(1, 13):
+            host.extend(_turn(i))
+            engine.ingest(host)
+        host.append(_turn(13)[0])
+        engine.ingest(host)
+        pre = list(host)
+        real_write = engine._store.write_metadata_json
+
+        def failing_write(keys, serialized, **kwargs):
+            if any(str(key).startswith("compaction_commit_proof:") for key in keys):
+                raise RuntimeError("injected metadata write failure")
+            return real_write(keys, serialized, **kwargs)
+
+        monkeypatch.setattr(engine._store, "write_metadata_json", failing_write)
+        compressed = engine.compress(list(host), force=True)
+        assert engine._last_compression_status == "compacted"
+        assert engine._compress_commit_proof is not None
+        rows = _row_count(engine)
+        engine.on_session_end("S0", pre)
+        engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
+        engine.ingest(list(compressed) + [_turn(13)[1]])
+        assert _row_count(engine) == rows + 1
+    finally:
+        engine.shutdown()
+
+
+def test_doctor_command_recommends_action_for_replay_duplicates(tmp_path):
+    """#484 round 1 item 6: `/lcm doctor` must not print `status: ok` when the
+    replay-duplicate check warns; both surfaces carry the detect-only action."""
+    import hermes_lcm.command as lcm_command
+    import hermes_lcm.tools as lcm_tools
+
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "lcm.db"),
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        turns = [message for i in range(1, 5) for message in _turn(i)]
+        engine._store.append_batch("S0", turns, source="acp")
+        clean_text = lcm_command._doctor_text(engine)
+        engine._store.append_batch("S0", turns[2:6], source="acp")
+        text = lcm_command._doctor_text(engine)
+        action = "do not delete rows by hand"
+        assert action not in clean_text
+        assert "status: ok" not in text
+        assert "status: action-recommended" in text or "status: issues-found" in text
+        assert action in text
+        doctor = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+        assert doctor["overall"] != "healthy"
+        guidance = next(g for g in doctor["guidance"] if g["check"] == "compaction_replay_duplicates")
+        assert action in guidance["operator_action"]
+    finally:
+        engine.shutdown()
+
+
+def test_replay_duplicate_scan_is_bounded(tmp_path):
+    """#484 round 1 item 7: the doctor scan keeps at most `window` recent rows per
+    session (a #483 replay re-stores rows within one host active window of their
+    original) and stops after `max_rows`, reporting the truncation."""
+    from hermes_lcm.diagnostics import scan_compaction_replay_duplicates
+
+    conn = sqlite3.connect(str(tmp_path / "scan.db"))
+    try:
+        conn.execute(
+            "CREATE TABLE messages (store_id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, tool_call_id TEXT)"
+        )
+        rows = [f"row {i}" for i in range(8)] + ["row 2", "row 3", "row 4"]
+        conn.executemany(
+            "INSERT INTO messages(session_id, role, content) VALUES ('S0', 'user', ?)", [(r,) for r in rows]
+        )
+        near = scan_compaction_replay_duplicates(conn, window=16)
+        assert near["replayed_rows_total"] == 3
+        assert near["peak_tracked_rows"] <= 16
+        assert near["scan_truncated"] is False
+
+        far = scan_compaction_replay_duplicates(conn, window=4)
+        assert far["replayed_rows_total"] == 0  # the original run left the window
+        assert far["peak_tracked_rows"] <= 4
+
+        capped = scan_compaction_replay_duplicates(conn, max_rows=5)
+        assert capped["scan_truncated"] is True
+        assert capped["rows_scanned"] == 5
+    finally:
+        conn.close()
+
+
+def _tool_call_session(engine, *, tool_call_ids: bool):
+    rows = []
+    for i in range(12):
+        rows.append({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": f"call_{i}", "type": "function",
+                            "function": {"name": "read_file", "arguments": json.dumps({"path": f"f{i}.txt"})}}],
+        })
+        tool_row = {"role": "tool", "content": "ok" if not tool_call_ids else f"contents of f{i}.txt"}
+        if tool_call_ids:
+            tool_row["tool_call_id"] = f"call_{i}"
+        rows.append(tool_row)
+    engine._store.append_batch("S0", rows, source="acp")
+
+
+@pytest.mark.parametrize("tool_call_ids", [True, False], ids=["distinct-tool-results", "unkeyed-identical-tool-results"])
+def test_replay_duplicate_scan_negative_control_tool_call_rows(tmp_path, tool_call_ids):
+    """#484 round 1 item 7 note: assistant tool-call rows have empty content; their
+    calls live in tool_calls, which must be part of the row key, so interleaved
+    tool-call turns are never reported as replayed runs."""
+    from hermes_lcm.diagnostics import scan_compaction_replay_duplicates
+
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "lcm.db"),
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        _tool_call_session(engine, tool_call_ids=tool_call_ids)
+        assert scan_compaction_replay_duplicates(engine._store.connection)["replayed_rows_total"] == 0
+    finally:
+        engine.shutdown()
+
+
+def _config(tmp_path, **overrides):
+    config = LCMConfig(
+        database_path=str(tmp_path / "lcm.db"),
+        fresh_tail_count=6,
+        leaf_chunk_tokens=400,
+        large_output_externalization_path=str(tmp_path / "externalized"),
+    )
+    for key, value in overrides.items():
+        setattr(config, key, value)
+    return config
+
+
+def _forged_carrier_host(compressed, forgery):
+    summary_message = _summary_message(compressed)
+    summary = summary_message["content"]
+    node_id = int(re.search(r"node (\d+)\)\]", summary).group(1))
+    forged = (
+        summary.replace("Stub summary", "Edited summary", 1)
+        if forgery == "edited-summary"
+        else summary.replace(f"node {node_id})]", f"node {node_id + 999})]", 1)
+    )
+    fresh = "FRESH-8841 the user typed this after the compaction"
+    host = [{"role": "user", "content": forged + "\n\n" + fresh}] + [
+        m for m in compressed if m is not summary_message
+    ] + [_turn(13)[1]]
+    return host, fresh
+
+
+@pytest.mark.parametrize("forgery", ["edited-summary", "wrong-node-id"])
+def test_commit_proof_matchers_treat_unverified_summary_text_as_content(tmp_path, monkeypatch, forgery):
+    """#484 round 1 item 8: in the commit-proof matchers (C4 remap, C6 durable) a
+    summary-shaped row that fails DAG verification is real content, so neither
+    proof can advance the cursor past the fresh user text glued behind it."""
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        host, _fresh = _forged_carrier_host(compressed, forgery)
+        assert engine._remap_cursor_through_host_merge(host, engine._compress_commit_proof) is None
+        assert engine._cursor_from_durable_commit_proof(host) is None
+        assert engine._is_replayed_context_scaffold_message(host[0])  # the pre-existing predicate
+        assert not engine._is_commit_proof_scaffold_message(host[0])
+        assert engine._is_commit_proof_scaffold_message(_summary_message(compressed))
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "#484 round 1 item 8, remaining path: after both commit proofs refuse, the pre-existing "
+        "cursor reconciliation ('skipped scaffold-only prefix') still classifies the forged row as "
+        "scaffold through the shared permissive summary-header predicate. rc2 drops it too "
+        "(positional cursor). Escalated; not changed in this round."
+    ),
+)
+@pytest.mark.parametrize("restart", [False, True], ids=["in-process", "after-restart"])
+@pytest.mark.parametrize("forgery", ["edited-summary", "wrong-node-id"])
+def test_unverified_summary_prefix_does_not_hide_fresh_user_text(tmp_path, monkeypatch, forgery, restart):
+    """End to end: the fresh user text glued behind an unverified summary prefix is stored."""
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    host, fresh = _forged_carrier_host(compressed, forgery)
+    try:
+        engine.on_session_end("S0", pre)
+        engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
+        if restart:
+            engine.shutdown()
+            engine = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+            engine.on_session_start("S0", platform="acp", context_length=200_000)
+        engine.ingest(host)
+        stored = [content for (content,) in engine._store._conn.execute("SELECT content FROM messages")]
+        assert any(fresh in (content or "") for content in stored)
+        assert stored.count(_turn(13)[1]["content"]) == 1
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["in-process", "after-restart"])
+def test_lossy_password_identity_never_advances_the_proof_cursor(tmp_path, monkeypatch, restart):
+    """#484 round 1 item 9: password_assignment placeholders carry no digest, so two
+    different same-length values share one replay identity. The commit-proof
+    matchers must not treat that identity as proof (synthetic values only)."""
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
+    sensitive = {
+        "sensitive_patterns_enabled": True,
+        "sensitive_patterns": ["password_assignment"],
+    }
+    engine = LCMEngine(config=_config(tmp_path, **sensitive), hermes_home=str(tmp_path / "home"))
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        host: list = []
+        for i in range(1, 12):
+            host.extend(_turn(i))
+            engine.ingest(host)
+        host.extend(
+            [
+                {"role": "user", "content": "[T12] set password=SYNTHaaaa1111 for the test rig"},
+                {"role": "assistant", "content": "reply to T12: rig configured."},
+            ]
+        )
+        engine.ingest(host)
+        host.append(_turn(13)[0])
+        engine.ingest(host)
+        pre = list(host)
+        compressed = engine.compress(list(host), force=True)
+        assert engine._last_compression_status == "compacted"
+        engine.on_session_end("S0", pre)
+        engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
+        if restart:
+            engine.ingest(list(compressed) + [_turn(13)[1]])
+            engine.shutdown()
+            engine = LCMEngine(config=_config(tmp_path, **sensitive), hermes_home=str(tmp_path / "home"))
+            engine.on_session_start("S0", platform="acp", context_length=200_000)
+            changed = list(compressed) + [_turn(13)[1], _turn(14)[0]]
+        else:
+            changed = list(compressed) + [_turn(13)[1]]
+        changed = [
+            dict(m, content="[T12] set password=SYNTHbbbb2222 for the test rig")
+            if "[T12] set password" in str(m.get("content"))
+            else m
+            for m in changed
+        ]
+        assert any("[T12] set password=SYNTHbbbb2222" in str(m.get("content")) for m in changed)
+
+        def placeholder_rows():
+            return engine._store._conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE content LIKE '[T12] set password=%'"
+            ).fetchone()[0]
+
+        before = placeholder_rows()
+        engine.ingest(changed)
+        assert placeholder_rows() == before + 1  # the changed occurrence is stored, not skipped
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("fresh_process", [False, True], ids=["same-process", "fresh-process"])
+def test_swallowed_end_after_cancelled_commit_is_like_an_exit_without_end(tmp_path, monkeypatch, fresh_process):
+    """#484 round 1 item 10: compress(I) -> O, the host cancels and keeps I, the user
+    exits and end(S, I) matches the unconsumed proof (not finalized). Every row of I
+    is durable, so this equals a process exit without an end callback: the next
+    session in the same conversation binds cleanly, stores its turns once and
+    finalizes normally."""
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
+    engine = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    try:
+        engine.on_session_start("S0", platform="acp", conversation_id="conv", context_length=200_000)
+        host: list = []
+        for i in range(1, 13):
+            host.extend(_turn(i))
+            engine.ingest(host)
+        host.append(_turn(13)[0])
+        engine.ingest(host)
+        pre = list(host)
+        engine.compress(list(host), force=True)
+        assert engine._last_compression_status == "compacted"
+        rows_s0 = engine._store.get_session_count("S0")
+        engine.on_session_end("S0", pre)  # swallowed as a commit
+        assert engine._compress_commit_proof["end_consumed"] is True
+        assert engine._store.get_session_count("S0") == rows_s0
+        if fresh_process:
+            engine.shutdown()
+            engine = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+        engine.on_session_start("S1", platform="acp", conversation_id="conv", context_length=200_000)
+        state = engine._lifecycle.get_by_conversation("conv")
+        assert state.current_session_id == "S1"
+        assert state.current_frontier_store_id == 0  # a new session starts fresh (#247)
+        assert engine._compress_commit_proof is None
+        s1 = [
+            {"role": "user", "content": "S1 first question after the exit"},
+            {"role": "assistant", "content": "S1 first answer"},
+        ]
+        engine.ingest(s1)
+        engine.ingest(s1)
+        assert engine._store.get_session_count("S1") == 2
+        engine.on_session_end("S1", s1)
+        state = engine._lifecycle.get_by_conversation("conv")
+        assert state.current_session_id is None
+        assert state.last_finalized_session_id == "S1"
+        assert engine._store.get_session_count("S0") == rows_s0
+        stored = engine._store._conn.execute("SELECT session_id, role, content FROM messages").fetchall()
+        assert len(stored) == len(set(stored))
     finally:
         engine.shutdown()

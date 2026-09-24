@@ -446,3 +446,28 @@ def test_config_opt_in(monkeypatch):
     assert LCMConfig.from_env().native_recovery is False
     monkeypatch.setenv("LCM_NATIVE_RECOVERY", "true")
     assert LCMConfig.from_env().native_recovery is True
+
+
+def test_native_recovery_in_place_commit_sequence_keeps_every_new_turn(candidate, monkeypatch):
+    """#484 round 1 item 1: with native recovery the compress() records no commit
+    proof, so the host's commit end is a real end (ingest + finalize). The in-place
+    compression start must then reconcile the recovered list instead of keeping the
+    end's len(input) cursor, or the first new turn is treated as already stored."""
+    install_native(monkeypatch)
+    messages = history()
+    compressed = candidate.compress(messages, current_tokens=250_000, force=True)
+    assert candidate.last_compression_status == "host_native"
+    candidate.on_session_end("retained", messages)
+    candidate.on_session_start(
+        "retained", boundary_reason="compression", old_session_id="retained",
+    )
+    before = candidate._store._conn.execute("SELECT role, content FROM messages ORDER BY store_id").fetchall()
+    new_turns = [
+        {"role": "user", "content": "After the in-place native commit: keep AMBER-551."},
+        {"role": "assistant", "content": "AMBER-551 kept."},
+    ]
+    candidate._ingest_messages(compressed + new_turns)
+    after = candidate._store._conn.execute("SELECT role, content FROM messages ORDER BY store_id").fetchall()
+    assert after[: len(before)] == before
+    assert after[len(before):] == [(m["role"], m["content"]) for m in new_turns]
+    assert len(after) == len(set(after))

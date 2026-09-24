@@ -2971,13 +2971,28 @@ class LCMEngine(
             state = self._lifecycle.advance_frontier(self._conversation_id, session_id, frontier) or state
         self._apply_session_start_metadata(session_id, kwargs)
         self._last_compacted_store_id = int(state.current_frontier_store_id or 0)
+        proof = self._compress_commit_proof
+        cursor_proven = bool(
+            proof
+            and proof.get("session_id") == session_id
+            and proof.get("end_consumed")
+            and not self._ingest_cursor_needs_reconcile
+            and self._ingest_cursor == len(proof.get("output") or ())
+        )
+        if not cursor_proven:
+            # No consumed commit proof (native recovery, proof failure, an end
+            # that ingested and finalized): the cursor does not index the list
+            # the host adopts. Reconcile it against the store (#259).
+            self._compress_commit_proof = None
+            self._ingest_cursor = 0
+            self._ingest_cursor_needs_reconcile = True
         self._clear_pending_reset_boundary()
         self._log_session_filter_diagnostics()
         logger.info(
-            "LCM in-place compression boundary kept %s bound (frontier=%d, cursor=%d)",
+            "LCM in-place compression boundary kept %s bound (frontier=%d, cursor=%s)",
             session_id,
             self._last_compacted_store_id,
-            self._ingest_cursor,
+            self._ingest_cursor if cursor_proven else "reconcile",
         )
         return True
 
@@ -4579,7 +4594,12 @@ class LCMEngine(
         if not self._session_id or self._session_ignored or self._session_stateless:
             return
         try:
-            self._ingest_cursor_needs_reconcile = self._store.get_session_count(self._session_id) > 0
+            self._ingest_cursor_needs_reconcile = (
+                self._store.get_session_count(self._session_id) > 0
+                # An empty rotation child resumed after a restart still has to
+                # re-index the host's post-compaction list (#483, C7).
+                or self._durable_commit_proof_payload() is not None
+            )
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
             self._ingest_cursor_needs_reconcile = False
@@ -4755,7 +4775,7 @@ class LCMEngine(
         for index, message in enumerate(messages):
             if len(effective) == len(target):
                 return index if effective == target else None
-            if self._is_replayed_context_scaffold_message(message):
+            if self._is_commit_proof_scaffold_message(message):
                 continue
             effective.append(self._message_replay_identity(message))
             if effective != target[: len(effective)]:
@@ -4766,18 +4786,10 @@ class LCMEngine(
         r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d(\d+), node (\d+)\)\]\n"
     )
 
-    def _generated_context_carrier_remainder(self, msg: Dict[str, Any]) -> Optional[str]:
-        """Return the real row glued behind a verified LCM summary prefix, else None.
-
-        Hosts that repair role alternation merge LCM's user-role summary with the
-        next user row (Hermes: ``prev + "\\n\\n" + next``). The prefix is verified
-        part-by-part against the DAG node text, so only LCM-rendered summaries
-        are ever stripped; a pure summary (no remainder) stays scaffold.
-        """
-        if not isinstance(msg, dict) or msg.get("role") != "user":
-            return None
-        content = msg.get("content")
-        if not isinstance(content, str) or not content.startswith("[") or "[Expand for details:" not in content:
+    def _verified_lcm_summary_prefix_end(self, content: str) -> Optional[int]:
+        """End offset of the leading LCM summary parts, each verified byte for byte
+        against its DAG node; None when the content does not start with one."""
+        if not content.startswith("[") or "[Expand for details:" not in content:
             return None
         dag = getattr(self, "_dag", None)
         if dag is None:
@@ -4807,13 +4819,48 @@ class LCMEngine(
                 pos += 7
                 continue
             break
-        if not saw_part:
+        return pos if saw_part else None
+
+    def _generated_context_carrier_remainder(self, msg: Dict[str, Any]) -> Optional[str]:
+        """Return the real row glued behind a verified LCM summary prefix, else None.
+
+        Hosts that repair role alternation merge LCM's user-role summary with the
+        next user row (Hermes: ``prev + "\\n\\n" + next``). The prefix is verified
+        part-by-part against the DAG node text, so only LCM-rendered summaries
+        are ever stripped; a pure summary (no remainder) stays scaffold.
+        """
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            return None
+        content = msg.get("content")
+        if not isinstance(content, str):
+            return None
+        pos = self._verified_lcm_summary_prefix_end(content)
+        if pos is None:
             return None
         for separator in ("\n\n---\n\n", "\n\n"):
             if content.startswith(separator, pos):
                 rest = content[pos + len(separator):]
                 return rest if rest.strip() else None
         return None
+
+    def _is_commit_proof_scaffold_message(self, msg: Dict[str, Any]) -> bool:
+        """Scaffold test for the commit-proof matchers (C4 remap, C6).
+
+        Stricter than ``_is_replayed_context_scaffold_message``: summary-shaped
+        content counts as scaffold only when it is a pure LCM summary verified
+        against the DAG. Unverified summary-shaped text (edited, forged, wrong
+        node id) is real content there, so a proof never skips it (#484 round 1).
+        """
+        if not self._is_replayed_context_scaffold_message(msg):
+            return False
+        content = normalize_content_value(msg.get("content")) or ""
+        if str(msg.get("role") or "") == "system":
+            return True
+        stripped = content.lstrip()
+        if stripped.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) or stripped.startswith(_PRESERVED_TODO_CONTEXT_PREFIX):
+            return True
+        end = self._verified_lcm_summary_prefix_end(content)
+        return end is not None and not content[end:].strip()
 
     def _is_replayed_context_scaffold_message(self, msg: Dict[str, Any]) -> bool:
         """Return true for active-context scaffolding that should not be re-ingested."""

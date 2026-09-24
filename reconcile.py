@@ -1565,6 +1565,15 @@ class ReconcileMixin:
             return False
         return stored_head[: len(incoming_identities)] == incoming_identities
 
+    def _durable_commit_proof_payload(self) -> Optional[Dict[str, Any]]:
+        """The bound session's own durable compaction-commit proof, else None."""
+        payload = self._store.read_metadata_json(
+            self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)
+        )
+        if not isinstance(payload, dict) or payload.get("version") != 1:
+            return None
+        return payload
+
     def _cursor_from_durable_commit_proof(self, messages) -> Optional[int]:
         """Cursor proven by the last compaction's durable output proof, else None.
 
@@ -1573,10 +1582,8 @@ class ReconcileMixin:
         and every row stored after that compaction must follow in order.
         """
         try:
-            payload = self._store.read_metadata_json(
-                self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)
-            )
-            if not isinstance(payload, dict) or payload.get("version") != 1:
+            payload = self._durable_commit_proof_payload()
+            if payload is None:
                 return None
             target = list(payload.get("effective_sha256") or [])
             if not target:
@@ -1587,21 +1594,36 @@ class ReconcileMixin:
             while index < n and matched < len(target):
                 message = messages[index]
                 index += 1
-                if self._is_replayed_context_scaffold_message(message):
+                if self._is_commit_proof_scaffold_message(message):
                     continue
-                if _commit_proof_identity_digest(self._message_replay_identity(message)) != target[matched]:
+                identity = self._message_replay_identity(message)
+                # A digest-less redaction (password_assignment) is not identity:
+                # different same-length secrets share it, so it proves nothing.
+                if _has_lossy_redacted_identity(identity):
+                    return None
+                if _commit_proof_identity_digest(identity) != target[matched]:
                     return None
                 matched += 1
             if matched != len(target):
                 return None
-            later_rows = self._store.get_session_messages_after(
-                self._session_id,
-                after_store_id=int(payload.get("last_store_id") or 0),
-            )
-            for row in later_rows:
-                if index >= n or self._message_replay_identity(messages[index]) != self._message_replay_identity(row, stored_row=True):
-                    return None
-                index += 1
+            after_store_id = int(payload.get("last_store_id") or 0)
+            while True:
+                page = self._store.get_session_messages_after(
+                    self._session_id,
+                    after_store_id=after_store_id,
+                )
+                if not page:
+                    break
+                for row in page:
+                    if index >= n:
+                        return None
+                    identity = self._message_replay_identity(messages[index])
+                    if _has_lossy_redacted_identity(identity) or identity != self._message_replay_identity(
+                        row, stored_row=True
+                    ):
+                        return None
+                    index += 1
+                after_store_id = int(page[-1]["store_id"])
             return index
         except Exception:
             logger.debug("LCM durable compaction-commit proof load failed", exc_info=True)
@@ -1623,6 +1645,20 @@ class ReconcileMixin:
             logger.debug("LCM ingest cursor reconciliation count failed: %s", exc)
             return 0
         if session_count <= 0:
+            # An empty rotation child resumed before its first ingest: its own
+            # durable proof re-indexes the host's post-compaction list (#483, C7).
+            proof_cursor = self._cursor_from_durable_commit_proof(messages)
+            if proof_cursor is not None:
+                self._record_ingest_reconciliation(
+                    action="advanced cursor",
+                    reason="replayed proven post-compaction continuation in empty session",
+                    cursor=proof_cursor,
+                    incoming=len(messages),
+                    session_count=session_count,
+                    stored_tail_count=0,
+                    effective_incoming=proof_cursor,
+                )
+                return proof_cursor
             native_recovery_snapshot_digests = set(
                 self._load_native_recovery_replay_snapshot_digests()
             )

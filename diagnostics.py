@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -62,72 +63,186 @@ def has_lifecycle_fragmentation(stats: dict[str, Any]) -> bool:
 
 
 COMPACTION_REPLAY_MIN_RUN = 3
+# A #483 replay re-stores rows that were already in the host's active list when
+# it compacted, so the original lies at most one active window (fresh tail plus
+# the turns since the last compaction) behind the replay. 2,000 rows is far
+# above any active window a model context holds, and bounds the scan's memory.
+COMPACTION_REPLAY_WINDOW = 2000
+COMPACTION_REPLAY_MAX_ROWS = 1_000_000
+COMPACTION_REPLAY_DUPLICATES_ACTION = (
+    "duplicate rows from a pre-fix compaction replay (#483) are present; recall may show repeats; "
+    "a repair tool is tracked in a follow-up; do not delete rows by hand"
+)
 _COMPACTION_REPLAY_CANDIDATES_PER_KEY = 8
 
 
-def scan_compaction_replay_duplicates(conn: Any, *, sample_limit: int = 10) -> dict[str, Any]:
+def scan_compaction_replay_duplicates(
+    conn: Any,
+    *,
+    sample_limit: int = 10,
+    window: int = COMPACTION_REPLAY_WINDOW,
+    max_rows: int = COMPACTION_REPLAY_MAX_ROWS,
+) -> dict[str, Any]:
     """Count #483-class duplicate rows per session. Read-only; never mutates.
 
     A stale compaction-commit ingest re-stores an already durable run of rows:
     a contiguous run of at least ``COMPACTION_REPLAY_MIN_RUN`` rows that repeats,
-    in order, an earlier run of the same session. Lone organic repeats ("ok",
-    "continue") are not counted.
+    in order, an earlier run of the same session within ``window`` rows. Lone
+    organic repeats ("ok", "continue") are not counted. Rows are streamed and at
+    most ``window`` of them are tracked per session; the scan stops after
+    ``max_rows`` rows and reports ``scan_truncated``.
     """
     sessions: dict[str, dict[str, int]] = {}
+    counter: _ReplayRunCounter | None = None
     current_session: str | None = None
-    keys: list[bytes] = []
+    rows_scanned = 0
+    peak_tracked_rows = 0
+    truncated = False
 
     def flush() -> None:
-        if current_session is None:
-            return
-        replayed, runs = _count_replayed_runs(keys)
-        if replayed:
-            sessions[current_session] = {"replayed_rows": replayed, "runs": runs}
+        if counter is not None and current_session is not None:
+            replayed, runs = counter.finish()
+            if replayed:
+                sessions[current_session] = {"replayed_rows": replayed, "runs": runs}
 
-    for session_id, role, content, tool_call_id in conn.execute(
-        "SELECT session_id, role, content, tool_call_id FROM messages ORDER BY session_id, store_id"
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")}
+    # Assistant tool-call rows carry empty content; their calls are the row.
+    tool_calls_column = "tool_calls" if "tool_calls" in columns else "''"
+    for session_id, role, content, tool_call_id, tool_calls in conn.execute(
+        "SELECT session_id, role, content, tool_call_id, "
+        f"{tool_calls_column} FROM messages ORDER BY session_id, store_id"
     ):
+        if rows_scanned >= max_rows:
+            truncated = True
+            break
+        rows_scanned += 1
         if session_id != current_session:
             flush()
             current_session = session_id
-            keys = []
-        keys.append(
+            counter = _ReplayRunCounter(window)
+        assert counter is not None
+        counter.push(
             hashlib.sha1(
-                f"{role}\0{content or ''}\0{tool_call_id or ''}".encode("utf-8", "surrogatepass")
+                f"{role}\0{content or ''}\0{tool_call_id or ''}\0{tool_calls or ''}".encode(
+                    "utf-8", "surrogatepass"
+                )
             ).digest()
         )
+        peak_tracked_rows = max(peak_tracked_rows, counter.tracked_rows)
     flush()
     ranked = sorted(sessions.items(), key=lambda item: item[1]["replayed_rows"], reverse=True)
     return {
         "sessions_with_replayed_runs": len(sessions),
         "replayed_rows_total": sum(item["replayed_rows"] for item in sessions.values()),
         "min_run": COMPACTION_REPLAY_MIN_RUN,
+        "window": window,
+        "rows_scanned": rows_scanned,
+        "scan_truncated": truncated,
+        "peak_tracked_rows": peak_tracked_rows,
         "sessions": [{"session_id": sid, **counts} for sid, counts in ranked[:sample_limit]],
     }
 
 
-def _count_replayed_runs(keys: list[bytes]) -> tuple[int, int]:
-    earlier: dict[bytes, list[int]] = {}
-    replayed = runs = 0
-    j = 0
-    n = len(keys)
-    while j < n:
-        best = 0
-        for i in earlier.get(keys[j], ()):
-            k = 0
-            while j + k < n and i + k < j and keys[i + k] == keys[j + k]:
-                k += 1
-            best = max(best, k)
-        step = best if best >= COMPACTION_REPLAY_MIN_RUN else 1
-        if best >= COMPACTION_REPLAY_MIN_RUN:
-            replayed += best
-            runs += 1
-        for index in range(j, j + step):
-            positions = earlier.setdefault(keys[index], [])
-            positions.append(index)
-            del positions[:-_COMPACTION_REPLAY_CANDIDATES_PER_KEY]
-        j += step
-    return replayed, runs
+class _ReplayRunCounter:
+    """Streaming count of replayed runs in one session, over a bounded window.
+
+    Greedy, left to right: a replay starts at a row whose key appeared earlier in
+    the window, and extends while the rows keep matching the earlier run in order
+    (the earlier run must end before the replay starts). A run of at least
+    ``COMPACTION_REPLAY_MIN_RUN`` rows counts; a shorter one is re-scanned from its
+    second row.
+    """
+
+    def __init__(self, window: int) -> None:
+        self.window = max(1, int(window))
+        self.keys: deque[bytes] = deque()
+        self.base = 0
+        self.positions: dict[bytes, deque[int]] = {}
+        self.registered = -1
+        self.candidates: set[int] = set()
+        self.run = 0
+        self.start = 0
+        self.replayed = 0
+        self.runs = 0
+
+    @property
+    def tracked_rows(self) -> int:
+        return len(self.keys)
+
+    def _key_at(self, pos: int) -> bytes | None:
+        if pos < self.base or pos >= self.base + len(self.keys):
+            return None
+        return self.keys[pos - self.base]
+
+    def push(self, key: bytes) -> None:
+        self.keys.append(key)
+        pos = self.base + len(self.keys) - 1
+        self._step(pos)
+        while len(self.keys) > self.window:
+            old = self.keys.popleft()
+            recent = self.positions[old]
+            recent.popleft()
+            if not recent:
+                del self.positions[old]
+            self.base += 1
+
+    def _register(self, pos: int) -> None:
+        if pos <= self.registered:
+            return
+        self.registered = pos
+        # Every tracked row sits in exactly one deque, so these hold <= window rows.
+        self.positions.setdefault(self.keys[pos - self.base], deque()).append(pos)
+
+    def _step(self, pos: int) -> None:
+        key = self._key_at(pos)
+        if self.candidates:
+            continued = {
+                offset
+                for offset in self.candidates
+                if pos - offset < self.start and self._key_at(pos - offset) == key
+            }
+            if continued:
+                self.candidates = continued
+                self.run += 1
+                self._register(pos)
+                return
+            if self._close(pos):
+                # Rows before pos were re-scanned; pos itself is still pending.
+                self._step(pos)
+                return
+        self._begin(pos)
+
+    def _begin(self, pos: int) -> None:
+        key = self._key_at(pos)
+        earlier: list[int] = []
+        for origin in reversed(self.positions.get(key, ()) if key is not None else ()):
+            if origin < pos:
+                earlier.append(origin)
+                if len(earlier) == _COMPACTION_REPLAY_CANDIDATES_PER_KEY:
+                    break
+        self.candidates = {pos - origin for origin in earlier}
+        self.run = 1 if self.candidates else 0
+        self.start = pos
+        self._register(pos)
+
+    def _close(self, end: int) -> bool:
+        """End the current run before ``end``; True when rows were re-scanned."""
+        run, start = self.run, self.start
+        self.candidates = set()
+        self.run = 0
+        if run >= COMPACTION_REPLAY_MIN_RUN:
+            self.replayed += run
+            self.runs += 1
+            return False
+        for rescan in range(start + 1, end):
+            self._step(rescan)
+        return True
+
+    def finish(self) -> tuple[int, int]:
+        end = self.base + len(self.keys)
+        while self.candidates:
+            self._close(end)
+        return self.replayed, self.runs
 
 
 def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
@@ -223,9 +338,8 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
             rationale = "lifecycle diagnostic failures mean doctor could not read session lifecycle state reliably"
     elif name == "compaction_replay_duplicates":
         command = (
-            "inspect the listed sessions; these rows repeat an earlier run of the same session "
-            "(#483 compaction-commit replay). Doctor does not repair them; if a session's summaries stop "
-            "publishing, continue the conversation in a new session"
+            f"{COMPACTION_REPLAY_DUPLICATES_ACTION}; if a session's summaries stop publishing, "
+            "continue the conversation in a new session"
         )
         if status == "warn":
             warning_only = True

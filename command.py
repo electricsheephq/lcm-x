@@ -26,6 +26,7 @@ from .db_bootstrap import (
     repair_external_content_fts,
 )
 from .diagnostics import (
+    COMPACTION_REPLAY_DUPLICATES_ACTION,
     _has_lifecycle_fragmentation,
     _state_db_path_for_engine,
     doctor_guidance_for_checks,
@@ -1623,6 +1624,7 @@ def _doctor_text(engine) -> str:
                 f"{replay_duplicates['sessions_with_replayed_runs']} session(s) repeat an earlier run "
                 f"(#483 class, detect-only); sample={sample}"
             )
+            recommended_actions.append(COMPACTION_REPLAY_DUPLICATES_ACTION)
         else:
             observations.append("compaction_replay_duplicates: none")
 
