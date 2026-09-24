@@ -372,6 +372,15 @@ class ReconcileMixin:
         forms = (self._message_replay_identity(row, stored_row=True, with_host_rewrite=h) for h in (False, True))
         return set(forms)
 
+    def _anchor_row_admits(self, live_identity, row: Dict[str, Any]) -> bool:
+        """messages[1] is bound by position to the retained row: its stored or override
+        form, or either up to edge whitespace -- never across a lossy redaction (#498)."""
+        forms = self._stored_row_forms(row)
+        return live_identity in forms or not _has_lossy_redacted_identity(live_identity) and any(
+            not _has_lossy_redacted_identity(form) and _proof_user_identity(form) == _proof_user_identity(live_identity)
+            for form in forms
+        )
+
     def _host_rewrite_state(self):
         """Per bound store: watch {store_id: (identity, stored content, [objects])},
         overrides {store_id: payload or None}."""
@@ -425,7 +434,7 @@ class ReconcileMixin:
     def _capture_host_rewrites(self, messages) -> None:
         """A host rewrote a user row LCM stored, in place, by edge whitespace only:
         record a store_id-keyed identity override. The stored row is never modified."""
-        watch, overrides = self._host_rewrite_state()
+        watch = self._host_rewrite_state()[0]
         present = {id(message): message for message in messages} if watch else {}
         for store_id, (identity, stored, objects) in list(watch.items()):
             message = next((o for o in objects if present.get(id(o)) is o), None)
@@ -435,23 +444,32 @@ class ReconcileMixin:
             if _proof_user_identity(live) != _proof_user_identity(identity):
                 del watch[store_id]
                 continue
-            reuse = bool(extract_externalized_ref(stored))  # reuse the raw payload: no second file
-            protected = {"content": stored} if reuse else protect_messages_for_ingest(
-                [message], config=self._config, hermes_home=self._hermes_home, session_id=self._session_id
-            )[0]
-            content = normalize_content_value(protected.get("content")) or ""
-            if _has_lossy_sensitive_redaction(content) or _has_lossy_sensitive_redaction(stored):
-                del watch[store_id]
-                continue  # a digest-less redaction is not identity
-            raw = identity[1]  # the stripped edges keep the stored form's audit trail
-            edges = [raw[: len(raw) - len(raw.lstrip())], raw[len(raw.rstrip()):]]
-            digest = hashlib.sha256(stored.encode()).hexdigest()
-            payload = {"version": 1, "content": content, "stripped": edges, "stored_sha256": digest}
-            payload.update({"strip_payload": True} if reuse else {})
-            key = f"{_HOST_REWRITE_IDENTITY_METADATA_PREFIX}:{store_id}"
-            self._store.write_metadata_json([key], json.dumps(payload, sort_keys=True), skip_unchanged=True)
-            del watch[store_id]  # only once the override is durable: a failed write retries next ingest
-            overrides[store_id] = payload
+            try:  # best-effort: a failure keeps the watch for the next ingest, never blocks this one
+                self._capture_host_rewrite(store_id, identity, stored, message)
+            except Exception as exc:
+                logger.warning("LCM host-rewrite capture for store_id %s failed (%s); retrying next ingest",
+                               store_id, type(exc).__name__)
+
+    def _capture_host_rewrite(self, store_id, identity, stored, message) -> None:
+        """Record one override; drop the watch only once it is durable or refused."""
+        watch, overrides = self._host_rewrite_state()
+        reuse = bool(extract_externalized_ref(stored))  # reuse the raw payload: no second file
+        protected = {"content": stored} if reuse else protect_messages_for_ingest(
+            [message], config=self._config, hermes_home=self._hermes_home, session_id=self._session_id
+        )[0]
+        content = normalize_content_value(protected.get("content")) or ""
+        if _has_lossy_sensitive_redaction(content) or _has_lossy_sensitive_redaction(stored):
+            del watch[store_id]
+            return  # a digest-less redaction is not identity
+        raw = identity[1]  # the stripped edges keep the stored form's audit trail
+        edges = [raw[: len(raw) - len(raw.lstrip())], raw[len(raw.rstrip()):]]
+        digest = hashlib.sha256(stored.encode()).hexdigest()
+        payload = {"version": 1, "content": content, "stripped": edges, "stored_sha256": digest}
+        payload.update({"strip_payload": True} if reuse else {})
+        key = f"{_HOST_REWRITE_IDENTITY_METADATA_PREFIX}:{store_id}"
+        self._store.write_metadata_json([key], json.dumps(payload, sort_keys=True), skip_unchanged=True)
+        del watch[store_id]  # only once the override is durable: a failed write retries next ingest
+        overrides[store_id] = payload
 
     def _message_replay_identity(
         self, msg: Dict[str, Any], *, stored_row: bool = False, with_host_rewrite: bool = False

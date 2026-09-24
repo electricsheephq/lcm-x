@@ -10,8 +10,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   when the host trims the prompt at turn end (#498). LCM watches the user rows it stored; when
   the host rewrites that same object by edge whitespace only, it records an identity override
   under `host_rewrite_identity:<store_id>` (protected like ingest, bound to a digest of the
-  stored content, refused for lossy redactions). Stored content is never modified. Only
-  position-bound matchers read an override or tolerate edge whitespace: head-anchored restart
+  stored content, refused for lossy redactions; a failed capture retries and never blocks the
+  ingest). Stored content is never modified. Only position-bound matchers read an override or
+  tolerate edge whitespace: the retained user anchor, head-anchored restart
   replay (row i vs incoming i, only for a list extending past the stored session, so a rewrite
   LCM never saw before a crash is covered too), the durable proof walk, and the in-order store-id
   mapper (either form, one-to-one). Full-replay and tail classification stay exact.

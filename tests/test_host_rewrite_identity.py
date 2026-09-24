@@ -15,6 +15,7 @@ import sqlite3
 import pytest
 
 import hermes_lcm.engine as lcm_engine_module
+import hermes_lcm.reconcile as lcm_reconcile_module
 from hermes_lcm.engine import LCMEngine
 
 from hermes_lcm.ingest_protection import scan_externalized_payload_integrity
@@ -488,3 +489,82 @@ def test_restart_with_mixed_raw_and_trimmed_forms_stores_only_the_new_prompt(tmp
         assert len(host.rows()) == 5
     finally:
         host.engine.shutdown()
+
+
+@pytest.mark.parametrize("path", ["per-turn-ingest", "session-end"])
+@pytest.mark.parametrize("fault", ["protect", "write"])
+def test_capture_failure_never_blocks_the_ingest(tmp_path, monkeypatch, fault, path):
+    """#498 r5 (ls6kv): capture is best-effort. A raise while protecting or writing
+    an override must not stop the ingest; the watch stays and the next ingest retries."""
+    host = _AcpHost(tmp_path, monkeypatch)
+    try:
+        host.turn(1)
+        failing = [True]
+        if fault == "protect":
+            real_protect = lcm_reconcile_module.protect_messages_for_ingest
+
+            def broken(*args, **kwargs):
+                if failing[0]:
+                    raise RuntimeError("protect failed")
+                return real_protect(*args, **kwargs)
+
+            monkeypatch.setattr(lcm_reconcile_module, "protect_messages_for_ingest", broken)
+        else:
+            real_write = host.engine._store.write_metadata_json
+
+            def broken(keys, serialized, **kwargs):
+                if failing[0] and any(key.startswith("host_rewrite_identity:") for key in keys):
+                    raise sqlite3.OperationalError("database is locked")
+                return real_write(keys, serialized, **kwargs)
+
+            monkeypatch.setattr(host.engine._store, "write_metadata_json", broken)
+        host.history.append(_user(2))
+        host.engine.should_compress_preflight(host.history)
+        host.history[-1]["content"] = host.history[-1]["content"].strip()
+        host.history.append(_reply(2))
+        if path == "session-end":
+            host.engine.on_session_end("S0", host.history)
+        else:
+            host.engine.ingest(host.history)
+        assert len(host.rows()) == 4  # the final reply is stored despite the failed capture
+        assert len(host.overrides()) == 1
+        failing[0] = False
+        if path == "session-end":
+            host.engine.on_session_start("S0", platform="acp", context_length=200_000)
+        host.turn(3)
+        assert len(host.overrides()) == 3  # the kept watch recorded T2's override on retry
+        assert len(host.rows()) == 6
+        assert _no_duplicates(host.rows())
+    finally:
+        host.engine.shutdown()
+
+
+def test_retained_anchor_trimmed_before_capture_survives_a_crash(tmp_path, monkeypatch):
+    """#498 r5 (lszgN): the host trims the sole user prompt, then the process dies
+    before any override. After restart the head replay binds the trimmed resend to the
+    raw row; the retained anchor must accept that proof-normalized form too."""
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
+    config = _config(tmp_path, fresh_tail_count=0, leaf_chunk_tokens=1)
+    engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
+    engine.on_session_start("S0", platform="acp", context_length=200_000)
+    messages = [{"role": "system", "content": "stable system prompt"},
+                {"role": "user", "content": "the only real user prompt\n"}]
+    for k in range(4):
+        messages += _tool_pair(f"a{k}")
+    engine.should_compress_preflight(messages)  # stores the RAW prompt, then the crash
+    messages[1]["content"] = messages[1]["content"].strip()
+    engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        messages = [dict(m) for m in messages] + [m for k in range(4) for m in _tool_pair(f"b{k}")]
+        engine.ingest(messages)
+        assert not engine._store._conn.execute(
+            "SELECT 1 FROM metadata WHERE key LIKE 'host_rewrite_identity:%'").fetchall()
+        out = engine.compress(list(messages), force=True)
+        assert engine._last_compression_status == "compacted", engine._last_compression_noop_reason
+        assert engine._leading_anchor_count(messages) == 2
+        assert out[1] == {"role": "user", "content": "the only real user prompt"}
+        users = engine._store._conn.execute("SELECT content FROM messages WHERE role = 'user'").fetchall()
+        assert users == [("the only real user prompt\n",)]  # stored once, never modified
+    finally:
+        engine.shutdown()

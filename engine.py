@@ -2641,9 +2641,9 @@ class LCMEngine(
             self._write_retained_user_anchor(None)
             return None
         registered_row = self._load_retained_user_anchor_row()
-        # A host may have trimmed the retained prompt in place (#498): raw or override form.
+        # A host may have trimmed the retained prompt in place (#498), even before an override.
         live_identity = self._message_replay_identity(messages[1])
-        if registered_row is not None and live_identity in self._stored_row_forms(registered_row):
+        if registered_row is not None and self._anchor_row_admits(live_identity, registered_row):
             later_real_users = self._durable_real_user_messages(
                 stop_after=1,
                 after_store_id=int(registered_row.get("store_id") or 0),
@@ -2662,7 +2662,7 @@ class LCMEngine(
             self._write_retained_user_anchor(None)
             return None
         row = durable_users[0]
-        if live_identity not in self._stored_row_forms(row):
+        if not self._anchor_row_admits(live_identity, row):
             self._write_retained_user_anchor(None)
             return None
         if not self._write_retained_user_anchor(row):
