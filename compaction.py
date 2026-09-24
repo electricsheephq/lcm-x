@@ -584,7 +584,12 @@ class CompactionMixin:
         try:
             tail = self._store.get_session_tail(self._session_id, limit=1)
             payload = {
-                "version": 1,
+                "version": 2,
+                # Scope: the Hermes home that wrote it (a configured shared
+                # database_path serves several homes) and its creation time,
+                # so a proof older than a lifecycle reset is ignored.
+                "hermes_home": str(self._hermes_home or ""),
+                "created_at": time.time(),
                 "effective_sha256": [
                     _commit_proof_identity_digest(identity) for identity in proof["output_effective"]
                 ],

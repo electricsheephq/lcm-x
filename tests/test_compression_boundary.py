@@ -553,7 +553,8 @@ def test_durable_commit_proof_is_written_only_for_a_published_compaction(tmp_pat
     engine, _pre, compressed = _compacted_engine(tmp_path, monkeypatch)
     try:
         payload = _durable_commit_proof(engine, "S0")
-        assert payload["version"] == 1
+        assert payload["version"] == 2
+        assert payload["hermes_home"] == str(tmp_path / "home")
         assert len(payload["effective_sha256"]) == len(engine._compress_commit_proof["output_effective"])
         assert payload["last_store_id"] > 0
 
@@ -1130,5 +1131,131 @@ def test_swallowed_end_after_cancelled_commit_is_like_an_exit_without_end(tmp_pa
         assert engine._store.get_session_count("S0") == rows_s0
         stored = engine._store._conn.execute("SELECT session_id, role, content FROM messages").fetchall()
         assert len(stored) == len(set(stored))
+    finally:
+        engine.shutdown()
+
+
+def _password_session(tmp_path, monkeypatch, *, password_turn=True):
+    """S0 compacted with a synthetic password in the fresh tail; returns (engine, pre, compressed)."""
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
+    sensitive = {"sensitive_patterns_enabled": True, "sensitive_patterns": ["password_assignment"]}
+    engine = LCMEngine(config=_config(tmp_path, **sensitive), hermes_home=str(tmp_path / "home"))
+    engine.on_session_start("S0", platform="acp", context_length=200_000)
+    host: list = []
+    for i in range(1, 12):
+        host.extend(_turn(i))
+        engine.ingest(host)
+    host.extend(
+        [
+            {"role": "user", "content": "[T12] set password=SYNTHaaaa1111 for the test rig"}
+            if password_turn
+            else _turn(12)[0],
+            {"role": "assistant", "content": "reply to T12: rig configured."},
+        ]
+    )
+    engine.ingest(host)
+    host.append(_turn(13)[0])
+    engine.ingest(host)
+    pre = list(host)
+    compressed = engine.compress(list(host), force=True)
+    assert engine._last_compression_status == "compacted"
+    return engine, pre, compressed
+
+
+def _changed_password_end(engine, pre):
+    changed = [
+        dict(m, content="[T12] set password=SYNTHbbbb2222 for the test rig")
+        if "[T12] set password" in str(m.get("content"))
+        else m
+        for m in pre
+    ]
+    rows = engine._store._conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE content LIKE '[T12] set password=%'"
+    ).fetchone()[0]
+    engine.on_session_end("S0", changed)
+    return rows, engine._store._conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE content LIKE '[T12] set password=%'"
+    ).fetchone()[0]
+
+
+def test_end_with_a_changed_same_length_password_is_a_real_end(tmp_path, monkeypatch):
+    """#484 round 2 item 11: C1 compares the RAW end list with the RAW compress()
+    input, so a same-length password change is a different identity: the end is a
+    real end and the lifecycle finalizes (synthetic values only)."""
+    engine, pre, _compressed = _password_session(tmp_path, monkeypatch)
+    try:
+        assert not any(
+            "[LCM sensitive redaction" in identity[1] for identity in engine._compress_commit_proof["input"]
+        )
+        _changed_password_end(engine, pre)
+        state = engine._lifecycle.get_by_session("S0")
+        assert state.current_session_id is None
+        assert state.last_finalized_session_id == "S0"
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "#484 round 2 item 11, remaining path: the real end reconciles its redacted list, and the "
+        "pre-existing cursor reconciliation ('replayed durable tail') accepts the digest-less "
+        "password placeholder as a match, so the changed row is not stored. rc2 stored it (with 18 "
+        "duplicate rows) via the stale positional end-ingest. Escalated; not changed in this round."
+    ),
+)
+def test_end_with_a_changed_same_length_password_stores_the_changed_row(tmp_path, monkeypatch):
+    engine, pre, _compressed = _password_session(tmp_path, monkeypatch)
+    try:
+        before, after = _changed_password_end(engine, pre)
+        assert after == before + 1
+    finally:
+        engine.shutdown()
+
+
+def test_password_free_compaction_still_classifies_its_commit(tmp_path, monkeypatch):
+    engine, pre, _compressed = _password_session(tmp_path, monkeypatch, password_turn=False)
+    try:
+        assert engine._compress_commit_proof is not None
+        engine.on_session_end("S0", pre)
+        assert engine._lifecycle.get_by_session("S0").current_session_id == "S0"
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("retain_depth", [None, -1], ids=["default-retention", "keep-all-nodes"])
+def test_durable_proof_from_before_a_reset_is_ignored(tmp_path, monkeypatch, retain_depth):
+    """#484 round 2 item 12: a durable proof written before a lifecycle reset of the
+    same session id must not advance the cursor after a restart."""
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    if retain_depth is not None:
+        engine._config.new_session_retain_depth = retain_depth
+    host = list(compressed) + [_turn(13)[1]]
+    try:
+        assert engine._store.read_metadata_json("compaction_commit_proof:S0") is not None
+        engine.on_session_reset()
+    finally:
+        engine.shutdown()
+    overrides = {} if retain_depth is None else {"new_session_retain_depth": retain_depth}
+    resumed = LCMEngine(config=_config(tmp_path, **overrides), hermes_home=str(tmp_path / "home"))
+    try:
+        resumed.on_session_start("S0", platform="acp", context_length=200_000)
+        assert resumed._cursor_from_durable_commit_proof(host) is None
+        resumed.ingest(host)
+        assert resumed._last_ingest_reconciliation["reason"] != "replayed proven post-compaction continuation"
+    finally:
+        resumed.shutdown()
+
+
+def test_durable_proof_does_not_cross_hermes_homes_on_a_shared_database(tmp_path, monkeypatch):
+    """#484 round 2 item 12, profile part: with an explicitly configured shared
+    database_path, a rebind to another Hermes home keeps the same store, so the
+    durable proof of a same-id session from the other home must not be used."""
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    host = list(compressed) + [_turn(13)[1]]
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000, hermes_home=str(tmp_path / "other-home"))
+        assert engine._store.db_path == tmp_path / "lcm.db" or str(engine._store.db_path) == str(tmp_path / "lcm.db")
+        assert engine._cursor_from_durable_commit_proof(host) is None
     finally:
         engine.shutdown()

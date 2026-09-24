@@ -132,7 +132,7 @@ from .fresh_tail import FreshTailBoundary, resolve_fresh_tail_boundary
 from .message_patterns import compile_message_patterns, matches_message_pattern
 from .aux_session import AuxiliarySessionMixin
 from .placeholder_ledger import PlaceholderLedgerMixin
-from .reconcile import ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from .compaction import CompactionMixin
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
@@ -4003,6 +4003,13 @@ class LCMEngine(
         self._pending_reset_frontier_store_id = self._last_compacted_store_id
         super().on_session_reset()
         self._lifecycle.record_reset(self._conversation_id)
+        if self._session_id:
+            try:
+                self._store.write_metadata_json(
+                    [self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)], "null"
+                )
+            except Exception:
+                logger.debug("LCM durable compaction-commit proof reset failed", exc_info=True)
         self._reset_session_scoped_runtime_state()
 
         # Retain DAG nodes across sessions based on config.

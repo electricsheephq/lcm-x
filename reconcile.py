@@ -1570,7 +1570,19 @@ class ReconcileMixin:
         payload = self._store.read_metadata_json(
             self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)
         )
-        if not isinstance(payload, dict) or payload.get("version") != 1:
+        if not isinstance(payload, dict) or payload.get("version") != 2:
+            return None
+        if payload.get("hermes_home") != str(getattr(self, "_hermes_home", "") or ""):
+            return None
+        conversation_id = getattr(self, "_conversation_id", "")
+        state = (
+            self._lifecycle.get_by_conversation(conversation_id)
+            if conversation_id
+            else self._lifecycle.get_by_session(self._session_id)
+        )
+        # Same rule as bind_session's frontier resume: nothing from before a
+        # lifecycle reset of this conversation proves the current list.
+        if state is not None and state.last_reset_at is not None and float(payload.get("created_at") or 0) <= state.last_reset_at:
             return None
         return payload
 
