@@ -220,20 +220,21 @@ def _assert_clean_commit_sequence(result):
 
 
 
-# A host that glues LCM's user-role summary to a user-leading fresh tail
-# (tail=7) needs verified-carrier recognition; restart/resume needs the
-# durable proof. Those cases join the matrix with the commits that fix them.
-_HOST_MERGE_SEAMS = [(False, 6), (False, 7), (True, 6)]
+# tail=7 leaves a user-leading fresh tail, so a merging host glues LCM's
+# user-role summary to it. Rotation with that seam and restart/resume need the
+# durable proof; those cases join the matrix with the commit that fixes them.
+_IN_PLACE_SEAMS = [(False, 6), (False, 7), (True, 6), (True, 7)]
+_ROTATION_SEAMS = [(False, 6), (False, 7), (True, 6)]
 
 
-@pytest.mark.parametrize("merge, tail", _HOST_MERGE_SEAMS)
+@pytest.mark.parametrize("merge, tail", _IN_PLACE_SEAMS)
 def test_hermes_in_place_commit_sequence_publishes_repeatedly(tmp_path, monkeypatch, merge, tail):
     """compress -> end(sid, pre) -> start(sid, compression, old=sid), x3 (#483)."""
     result = _run_host_commit_sequence(tmp_path, monkeypatch, in_place=True, merge=merge, tail=tail)
     _assert_clean_commit_sequence(result)
 
 
-@pytest.mark.parametrize("merge, tail", _HOST_MERGE_SEAMS)
+@pytest.mark.parametrize("merge, tail", _ROTATION_SEAMS)
 def test_hermes_rotation_commit_sequence_stores_every_turn(tmp_path, monkeypatch, merge, tail):
     """compress -> end(S0, pre) -> start(S1, compression, old=S0): the stale
     end-ingest must not re-store the tail in the parent, and the child must not
@@ -445,3 +446,64 @@ class TestBindSessionFrontierAfterOwnFinalize:
             assert store.bind_session("S1", conversation_id="c1").current_frontier_store_id == 0
         finally:
             store.close()
+
+
+def _summary_message(compressed):
+    for message in compressed:
+        if re.search(r"Summary \(d\d+, node \d+\)\]", str(message.get("content"))):
+            return message
+    raise AssertionError("compress() output carries no LCM summary")
+
+
+@pytest.mark.parametrize("separator", ["\n\n", "\n\n---\n\n"])
+def test_host_merged_summary_carrier_is_identified_by_its_glued_row(tmp_path, monkeypatch, separator):
+    """C5: summary + separator + real user row is a carrier, not scaffold, and
+    its replay identity is the glued row's identity."""
+    engine, _pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        summary = _summary_message(compressed)["content"]
+        glued = {"role": "user", "content": "the real next user row"}
+        carrier = {"role": "user", "content": summary + separator + glued["content"]}
+        assert engine._generated_context_carrier_remainder(carrier) == glued["content"]
+        assert not engine._is_replayed_context_scaffold_message(carrier)
+        assert engine._message_replay_identity(carrier) == engine._message_replay_identity(glued)
+    finally:
+        engine.shutdown()
+
+
+def test_pure_lcm_summary_stays_scaffold(tmp_path, monkeypatch):
+    engine, _pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        summary = {"role": "user", "content": _summary_message(compressed)["content"]}
+        assert engine._generated_context_carrier_remainder(summary) is None
+        assert engine._is_replayed_context_scaffold_message(summary)
+    finally:
+        engine.shutdown()
+
+
+def test_unverified_summary_prefix_is_never_stripped(tmp_path, monkeypatch):
+    """C5: an edited summary text or a wrong node id does not verify against the
+    DAG, so the row keeps its full identity (only LCM-rendered text is stripped)."""
+    engine, _pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        summary = _summary_message(compressed)["content"]
+        node_id = int(re.search(r"node (\d+)\)\]", summary).group(1))
+        edited = summary.replace("Stub summary", "Edited summary", 1)
+        wrong_node = summary.replace(f"node {node_id})]", f"node {node_id + 999})]", 1)
+        for forged in (edited, wrong_node):
+            carrier = {"role": "user", "content": forged + "\n\nthe real next user row"}
+            assert engine._generated_context_carrier_remainder(carrier) is None
+            identity = engine._message_replay_identity(carrier)
+            assert identity != engine._message_replay_identity({"role": "user", "content": "the real next user row"})
+    finally:
+        engine.shutdown()
+
+
+def test_list_content_row_is_not_a_carrier(tmp_path, monkeypatch):
+    engine, _pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        summary = _summary_message(compressed)["content"]
+        row = {"role": "user", "content": [{"type": "text", "text": summary + "\n\nreal row"}]}
+        assert engine._generated_context_carrier_remainder(row) is None
+    finally:
+        engine.shutdown()

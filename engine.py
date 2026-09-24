@@ -4753,9 +4753,64 @@ class LCMEngine(
                 return None
         return len(messages) if effective == target else None
 
+    _LCM_SUMMARY_PART_HEADER_RE = re.compile(
+        r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d(\d+), node (\d+)\)\]\n"
+    )
+
+    def _generated_context_carrier_remainder(self, msg: Dict[str, Any]) -> Optional[str]:
+        """Return the real row glued behind a verified LCM summary prefix, else None.
+
+        Hosts that repair role alternation merge LCM's user-role summary with the
+        next user row (Hermes: ``prev + "\\n\\n" + next``). The prefix is verified
+        part-by-part against the DAG node text, so only LCM-rendered summaries
+        are ever stripped; a pure summary (no remainder) stays scaffold.
+        """
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            return None
+        content = msg.get("content")
+        if not isinstance(content, str) or not content.startswith("[") or "[Expand for details:" not in content:
+            return None
+        dag = getattr(self, "_dag", None)
+        if dag is None:
+            return None
+        pos = 0
+        saw_part = False
+        while True:
+            header = self._LCM_SUMMARY_PART_HEADER_RE.match(content, pos)
+            if header is None:
+                break
+            try:
+                node = dag.get_node(int(header.group(2)))
+            except Exception:
+                return None
+            if node is None or int(node.depth) != int(header.group(1)):
+                return None
+            label = {0: "Recent", 1: "Session Arc", 2: "Durable"}.get(node.depth, f"Depth-{node.depth}")
+            part = (
+                f"[{label} Summary (d{node.depth}, node {node.node_id})]\n"
+                f"{node.summary}\n[Expand for details: {node.expand_hint}]"
+            )
+            if not content.startswith(part, pos):
+                return None
+            pos += len(part)
+            saw_part = True
+            if content.startswith("\n\n---\n\n", pos) and self._LCM_SUMMARY_PART_HEADER_RE.match(content, pos + 7):
+                pos += 7
+                continue
+            break
+        if not saw_part:
+            return None
+        for separator in ("\n\n---\n\n", "\n\n"):
+            if content.startswith(separator, pos):
+                rest = content[pos + len(separator):]
+                return rest if rest.strip() else None
+        return None
+
     def _is_replayed_context_scaffold_message(self, msg: Dict[str, Any]) -> bool:
         """Return true for active-context scaffolding that should not be re-ingested."""
         if self._is_registered_folded_tail_message(msg):
+            return False
+        if self._generated_context_carrier_remainder(msg) is not None:
             return False
         role = str(msg.get("role") or "")
         content = normalize_content_value(msg.get("content")) or ""

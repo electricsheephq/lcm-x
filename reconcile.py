@@ -342,6 +342,13 @@ class ReconcileMixin:
     def _message_replay_identity(self, msg: Dict[str, Any], *, stored_row: bool = False) -> tuple[str, str, str, str, str]:
         role = str(msg.get("role") or "unknown")
         content = normalize_content_value(msg.get("content")) or ""
+        # A host-merged LCM summary carrier (#483) is identified by the real row
+        # glued behind its DAG-verified summary prefix.
+        carrier_rest = getattr(self, "_generated_context_carrier_remainder", None)
+        if role == "user" and callable(carrier_rest):
+            glued_row = carrier_rest({"role": "user", "content": content})
+            if glued_row is not None:
+                content = glued_row
         # Strip volatile compaction scaffolding suffixes so identity matching
         # survives compression cycles.  The host appends a task-list annotation
         # to the last user message during context compression; the annotation
