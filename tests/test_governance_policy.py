@@ -71,18 +71,19 @@ def test_pull_request_template_separates_behavior_and_release_evidence():
     assert "immediately before any authorized GitHub write" in template
 
 
-def test_review_policy_requires_acceptance_and_named_risk_without_scores():
+def test_review_policy_is_a_recorded_obligation_without_scores():
     paths = ["AGENTS.md", "CONTRIBUTING.md", ".github/PULL_REQUEST_TEMPLATE.md",
              ".agents/skills/land-pr/SKILL.md", ".agents/skills/review-pr/SKILL.md"]
     for path in paths:
         text = " ".join((REPO_ROOT / path).read_text(encoding="utf-8").split())
-        assert "exact-head `acceptance` assessment" in text
-        assert "`adversarial`" in text
-        assert "risk" in text
-        assert "`PASS`" in text
-        assert "unresolved findings" in text
+        assert "adversarial" in text
+        assert "AI review exact-head" not in text
         assert "95" not in text
         assert "PASS >=" not in text
+        if path != ".agents/skills/review-pr/SKILL.md":
+            assert "independent review" in text
+            assert "risk" in text
+            assert "REVIEW_SKIPPED: <lane> — <reason>" in text
 
 
 def test_triage_skill_is_bounded_and_read_only_by_default():
@@ -158,12 +159,13 @@ def test_repository_policy_states_the_automation_boundary():
     assert "## Automation Boundary" in policy
     assert "Model output alone cannot close, label, assign, push, approve, or merge." in policy
     assert "Automated repair is opt-in" in policy
-    assert "one exact-head acceptance assessment with an explicit original `PASS`" in normalized_policy
-    assert "distinct targeted adversarial assessment" in normalized_policy
+    assert "AI review is recorded evidence, not enforcement." in normalized_policy
+    assert "distinct adversarial review from a different model than the author" in normalized_policy
+    assert "#218, #462, #466, #469, and #470 are closed history" in normalized_policy
     assert "Classification alone does not elevate routine reversible issue metadata" in policy
 
 
-def test_codeowners_and_landing_policy_use_the_exact_head_ai_gate():
+def test_codeowners_and_landing_policy_use_exact_head_ci_and_review_obligation():
     owners = (REPO_ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
     landing = (
         REPO_ROOT / ".agents" / "skills" / "land-pr" / "SKILL.md"
@@ -174,16 +176,41 @@ def test_codeowners_and_landing_policy_use_the_exact_head_ai_gate():
 
     assert "* @100yenadmin" in owners
     assert "Tosko4" not in owners
-    assert "AI review exact-head" in landing
-    assert "AI review exact-head" in review
+    assert "AI review exact-head" not in owners
+    assert "AI review exact-head" not in landing
+    assert "AI review exact-head" not in review
     assert "Analyze (actions)" not in landing
     assert "non-author code owner" not in landing.lower()
-    assert "review_artifact_refs[].review_id" in landing
-    assert "publisher ID/login/type, state, commit, submitted time, body" in landing
-    assert "paginate all reviews for the PR" in landing
-    assert "newer non-dismissed v2 assessment" in landing
-    assert "or superseded review blocks" in landing.lower()
-    assert "review receipts" not in review.lower()
+    assert "review_lanes_hint" in landing
+    assert "`commit_id` equals `$head`" in landing
+    assert "check the head it names equals `$head`" in " ".join(landing.split())
+    assert "A readiness-only invocation stays read-only." in " ".join(landing.split())
+    assert "`REVIEWED_LANE_ONLY`" in review
+    assert "comments(first: 100) { totalCount nodes { url body author { login __typename } } }" in landing
+    assert "when a thread's `totalCount` exceeds 100, open its `url` and read every comment" in " ".join(
+        landing.split()
+    )
+    assert "query($owner: String!, $name: String!, $number: Int!) {" in landing
+    assert "needs a comment by a `User` author that records one of those dispositions" in " ".join(
+        landing.split()
+    )
+    assert "gh pr checks <PR> --repo electricsheephq/lcm-x --required" in landing
+    assert '"changed_files": "unknown", "named_risks": null, "required_review_lanes": ' in landing
+    assert "--argjson n \"$expected\" 'add | length == $n'" in landing
+    merge_section = landing.split("## 7. Merge Deterministically", maxsplit=1)[1]
+    step_positions = [
+        merge_section.index(step)
+        for step in ('test "$current_head" = "$head"', "Repeat the paginated thread query",
+                     "Post one merge receipt comment", "--match-head-commit")
+    ]
+    assert step_positions == sorted(step_positions)
+    assert "its `state` is not `DISMISSED` or `PENDING`, and its `user.login` is not the PR author" in (
+        " ".join(landing.split())
+    )
+    assert "lists only pointers" in landing
+    assert "Never restate verdicts" in landing
+    assert "--merge --match-head-commit" in landing
+    assert "The output is a review, not a receipt" in " ".join(review.split())
 
 
 def test_triage_prompt_and_contributor_automation_scope_are_bounded():
