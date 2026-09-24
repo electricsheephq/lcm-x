@@ -141,7 +141,7 @@ EOF
     echo "     plugins/hermes-lcm is this checkout, so also keeping hermes-lcm listed is harmless."
   fi
   cat <<EOF
-  3. Start Hermes; confirm hermes plugins lists hermes-lcm-x and the log shows
+  3. Start Hermes; confirm 'hermes plugins list' shows hermes-lcm-x enabled and the log shows
      "LCM plugin loaded — lossless context management active".
 EOF
   if [[ ${#LEGACY_LEFTOVERS[@]} -gt 0 ]]; then

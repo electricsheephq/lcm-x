@@ -41,6 +41,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   rows and system-message contexts are unchanged. Before this carrier fix, #498 alone produced
   640 stored rows, 468 duplicates, 7 publication conflicts and 19 sessions in the affected
   80-turn default rotation-plus-trailing cell. (#495)
+- Docs: the migration verify step names `hermes plugins list` (bare `hermes plugins` opens the interactive
+  toggle); `scripts/install.sh` prints the same command. (#481)
 
 ## v0.24.0 - BREAKING: plugin renamed to hermes-lcm-x, engine to lcm-x (unreleased)
 
