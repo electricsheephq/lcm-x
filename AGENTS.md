@@ -99,7 +99,8 @@ Run `actionlint` when workflows change. Record exact commands and results in the
 - Model output alone cannot close, label, assign, push, approve, or merge.
 - Automated repair is opt-in and limited to the exact accepted issue and current gate.
 - AI review is recorded evidence, not enforcement. The `land-pr` review obligation is a
-  maintainer discipline, not a protected check. Public disclosure still requires an explicit
+  maintainer discipline, not a protected check: it does not authenticate review artifacts, and a
+  maintainer who records a false pointer can pass it (#474, #369). Public disclosure still requires an explicit
   maintainer decision. Classification alone does not elevate routine reversible issue metadata.
 - Use `.agents/skills/triage-backlog/SKILL.md` read-only unless a maintainer explicitly
   authorizes one exact mutation; never use it for an automatic backlog sweep.

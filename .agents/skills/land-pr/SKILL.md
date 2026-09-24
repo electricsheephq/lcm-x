@@ -68,7 +68,9 @@ files="$(gh api --paginate "repos/electricsheephq/lcm-x/pulls/<PR>/files?per_pag
 test -n "$files" && printf '%s\n' "$files" \
   | jq -s '{schema_version: "1", mode: "readiness", changed_files: [.[][] | {filename, previous_filename}]}' \
   | python3 scripts/maintainer_gate.py | jq -e .review_lanes_hint || \
-  { echo "HINT UNAVAILABLE: require both lanes" >&2; false; }
+  { echo "HINT UNAVAILABLE: require both lanes" >&2
+    printf '%s\n' '{"changed_files": "unknown", "named_risks": null, "required_review_lanes": ["acceptance", "adversarial"]}'
+    false; }
 
 gh api graphql --paginate \
   -F owner=electricsheephq -F name=lcm-x -F number=<PR> \
@@ -88,7 +90,11 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $endCursor) {
-        nodes { isResolved comments(first: 1) { nodes { url } } }
+        nodes {
+          isResolved
+          opening: comments(first: 1) { nodes { url author { login __typename } } }
+          latest: comments(last: 1) { nodes { author { login __typename } } }
+        }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -97,7 +103,8 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
 ```
 
 - Every PR needs at least one independent review of `$head`: a NeonDiff review whose
-  `commit_id` equals `$head`, or a cross-model review whose log or comment names `$head`. A
+  `commit_id` equals `$head`, whose `state` is not `DISMISSED` or `PENDING`, and whose
+  `user.login` is not the PR author; or a cross-model review whose log or comment names `$head`. A
   review log or comment this obligation relies on must name the exact head, its lane, the
   author model, and the reviewer model.
 - When the hint reports `review-provenance-policy` or `lcm-memory-preservation` risk, require an
@@ -109,14 +116,18 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
   established. A readiness-only invocation stays read-only.
 - Every review thread must be resolved before merge; list and stop on any thread without
   `isResolved: true`. A bot thread is resolved only after a reply that records its disposition:
-  fixed in `<sha>`, false with evidence, accepted tradeoff, or follow-up `<issue>`.
+  fixed in `<sha>`, false with evidence, accepted tradeoff, or follow-up `<issue>`. A resolved
+  thread whose opening comment author is a `Bot` and whose latest comment is by that same bot has
+  no disposition reply; list and stop on it.
 - After a review-driven head change, require new reviews for the changed risk surface and
   re-read the head SHA and checks.
 - Give every verified finding one terminal disposition. Do not turn unverified possibilities
   or nits into merge blockers.
 
 Do not count ordinary CI, author self-review, a flat bot status comment, or this skill as an
-independent review. Readiness is evidence only and never grants merge authority.
+independent review. Readiness is evidence only and never grants merge authority. These checks
+are maintainer discipline: they do not authenticate review artifacts, and a maintainer who
+records a false pointer can pass them (#474, #369).
 
 ## 5. Check Hermes And Lossless Boundaries
 
@@ -138,7 +149,8 @@ uncertain, comment or report the relationship; do not close the issue.
 
 Only after a maintainer authorizes landing this PR at `$head`: repeat the paginated thread
 query from Section 4 and reapply every Section 4 gate. Validate each review pointer by its
-evidence type: re-fetch a GitHub review id and check its `commit_id` equals `$head`; re-read a
+evidence type: re-fetch a GitHub review id and check its `commit_id` equals `$head`, its `state`
+is not `DISMISSED` or `PENDING`, and its `user.login` is not the PR author; re-read a
 review-log path or comment link and check the head it names equals `$head`. Then post one merge
 receipt comment that lists only pointers: GitHub review ids with `user.id`, `commit_id`, and
 `state`; review-log paths or comment links; the author model and each reviewer model; any

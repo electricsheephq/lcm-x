@@ -186,6 +186,14 @@ def test_codeowners_and_landing_policy_use_exact_head_ci_and_review_obligation()
     assert "check the head it names equals `$head`" in " ".join(landing.split())
     assert "A readiness-only invocation stays read-only." in " ".join(landing.split())
     assert "`REVIEWED_LANE_ONLY`" in review
+    assert "latest: comments(last: 1) { nodes { author { login __typename } } }" in landing
+    assert "whose latest comment is by that same bot has no disposition reply" in " ".join(
+        landing.split()
+    )
+    assert '"changed_files": "unknown", "named_risks": null, "required_review_lanes": ' in landing
+    assert "its `state` is not `DISMISSED` or `PENDING`, and its `user.login` is not the PR author" in (
+        " ".join(landing.split())
+    )
     assert "lists only pointers" in landing
     assert "Never restate verdicts" in landing
     assert "--merge --match-head-commit" in landing
