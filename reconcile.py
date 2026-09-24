@@ -1754,6 +1754,11 @@ class ReconcileMixin:
                 return _proof_user_identity(identity) if payload.get("version") != 2 else identity
 
             target = list(payload.get("effective_sha256") or [])
+            droppable = list(payload.get("droppable") or [])
+            skip_landing = list(payload.get("skip_landing") or [])
+            summary_index = payload.get("native_summary_index")
+            native = bool(payload.get("native") and summary_index is not None and len(droppable) == len(target))
+            skip_metadata_valid = len(skip_landing) == len(target)
             matched = 0
             index = 0
             n = len(messages)
@@ -1779,10 +1784,38 @@ class ReconcileMixin:
                 # different same-length secrets share it, so it proves nothing.
                 if _has_lossy_redacted_identity(identity):
                     return None
-                if _commit_proof_identity_digest(identity) != target[matched]:
-                    return None
+                digest = _commit_proof_identity_digest(identity)
+                if digest != target[matched]:
+                    if not native:
+                        return None
+                    try:
+                        next_match = target.index(digest, matched + 1)
+                    except ValueError:
+                        next_match = None
+                    gap_is_droppable = next_match is not None and all(
+                        droppable[matched:next_match]
+                    )
+                    safe_landing = (
+                        gap_is_droppable
+                        and skip_metadata_valid
+                        and skip_landing[next_match]
+                    )
+                    if safe_landing:
+                        matched = next_match + 1
+                        continue
+                    if matched <= int(summary_index):
+                        return None
+                    index -= 1
+                    matched = len(target)
+                    break
                 matched += 1
-            if matched != len(target):
+            safe_trailing_skip = (
+                native
+                and skip_metadata_valid
+                and matched > int(summary_index)
+                and all(droppable[matched:])
+            )
+            if matched != len(target) and not safe_trailing_skip:
                 return None
             after_store_id = int(payload.get("last_store_id") or 0)
             while True:

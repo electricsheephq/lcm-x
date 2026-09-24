@@ -23,8 +23,14 @@ from typing import Any, Dict, List, Optional
 
 from .dag import SummaryNode
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
+from .message_analysis import _matched_tool_call_ids
 from .message_content import text_content_for_pattern_matching
-from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, _COMPACTION_COMMIT_PROOF_VERSION, _commit_proof_identity_digest
+from .reconcile import (
+    _COMPACTION_COMMIT_PROOF_METADATA_PREFIX,
+    _COMPACTION_COMMIT_PROOF_VERSION,
+    _commit_proof_identity_digest,
+    _has_lossy_redacted_identity,
+)
 from .sanitize import _contains_sensitive_redaction
 from .sqlite_util import _is_sqlite_locked_error
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
@@ -528,6 +534,10 @@ class CompactionMixin:
                     force=force,
                 )
             self._record_compress_commit_proof(messages, result)
+            proof_missing = self._last_compression_status == "host_native" and self._compress_commit_proof is None
+            if proof_missing:
+                self._ingest_cursor = 0
+                self._ingest_cursor_needs_reconcile = True
             self._rekey_host_rewrite_watch(messages, result)
             return result
         except BaseException:
@@ -564,14 +574,31 @@ class CompactionMixin:
                 # No-progress compress: Hermes has nothing to commit, and an
                 # end call with this list must stay a real session end.
                 return
-            proof["output_effective"] = [
-                self._proof_replay_identity(m)
-                for m in result
-                if not self._is_replayed_context_scaffold_message(m)
-            ]
+            effective_rows = [m for m in result if not self._is_replayed_context_scaffold_message(m)]
+            proof["output_effective"] = [self._proof_replay_identity(m) for m in effective_rows]
+            proof["native"] = self._last_compression_status == "host_native"
+            if proof["native"]:
+                matched_tool_ids = _matched_tool_call_ids(result)
+                proof["droppable"] = []
+                proof["skip_landing"] = []
+                for identity in proof["output_effective"]:
+                    is_tool_result = identity[0] == "tool"
+                    has_tool_id = bool(identity[2])
+                    is_orphan = identity[2] not in matched_tool_ids
+                    is_lossless = not _has_lossy_redacted_identity(identity)
+                    proof["droppable"].append(
+                        is_tool_result and has_tool_id and is_orphan and is_lossless
+                    )
+                    proof["skip_landing"].append(not identity[2] and not identity[3])
+                summary_index = getattr(self, "_last_native_summary_index", None)
+                rows_before_summary = result[:summary_index] if summary_index is not None else ()
+                proof["native_summary_index"] = sum(
+                    not self._is_replayed_context_scaffold_message(row)
+                    for row in rows_before_summary
+                ) if summary_index is not None else None
             proof["published"] = self._last_compression_status == "compacted"
             self._compress_commit_proof = proof
-            if proof["published"]:
+            if proof["published"] or proof["native"]:
                 self._persist_compress_commit_proof(proof)
         except Exception:
             self._compress_commit_proof = None
@@ -580,8 +607,8 @@ class CompactionMixin:
         """Durable twin of the process-local proof: lets a restarted/resumed
         process re-index the host's post-compaction list without guessing.
 
-        Written only for a published compaction; ``last_store_id`` marks where
-        the rows stored after the compaction begin.
+        Written for a published LCM compaction or adopted native recovery;
+        ``last_store_id`` marks where later rows begin.
         """
         try:
             tail = self._store.get_session_tail(self._session_id, limit=1)
@@ -597,6 +624,10 @@ class CompactionMixin:
                     _commit_proof_identity_digest(identity) for identity in proof["output_effective"]
                 ],
                 "last_store_id": int(tail[-1]["store_id"]) if tail else 0,
+                "native": bool(proof.get("native")),
+                "droppable": list(proof.get("droppable") or []),
+                "skip_landing": list(proof.get("skip_landing") or []),
+                "native_summary_index": proof.get("native_summary_index"),
             }
             if not proof["output_effective"]:
                 # Scaffold-only output: bind the proof to the emitted rows (#484 item 11l).
@@ -701,16 +732,37 @@ class CompactionMixin:
         self._last_compression_status = "error"
         self._last_compression_noop_reason = "native recovery did not produce a usable summary"
         self._last_summary_error = self._last_compression_noop_reason
+        self._last_native_recovery_rejection = ""
+
+        def _reject(reason: str, **details: Any) -> List[Dict[str, Any]]:
+            self._last_native_recovery_rejection = reason
+            self._last_compression_noop_reason = reason
+            logger.warning(
+                "Native recovery rejected; retaining context "
+                "(reason=%s, input_rows=%d, recovered_rows=%d, protected_rows=%d, details=%s)",
+                reason, len(messages), int(details.pop("recovered_rows", 0)),
+                int(details.pop("protected_rows", 0)), details or None,
+            )
+            return messages
+
         cancelled = getattr(self, "_compression_cancelled_check", None)
         if not callable(cancelled):
-            return messages
+            return _reject("binding_changed")
         if cancelled():
-            return messages
+            return _reject("cancelled")
         try:
-            from agent.context_compressor import ContextCompressor
+            import agent.context_compressor as context_compressor
+
+            ContextCompressor = context_compressor.ContextCompressor
 
             fresh_tail = self._fresh_tail_boundary(messages)
             protected_tail = messages[fresh_tail.start:]
+            prefix = messages[:fresh_tail.start]
+            tail_key = getattr(context_compressor, "_COMPACTION_TAIL_MARKER", None)
+            persisted_key = getattr(context_compressor, "_DB_PERSISTED_MARKER", None)
+            split = bool(tail_key and persisted_key and protected_tail)
+            if split and len(prefix) <= self.protect_first_n + 4:
+                return _reject("prefix_too_short", protected_rows=len(protected_tail), prefix_rows=len(prefix))
 
             # Fresh per attempt: a timed-out predecessor must never share its
             # native compressor's mutable summary/cooldown state with a retry.
@@ -723,33 +775,61 @@ class CompactionMixin:
                 config_context_length=self.context_length,
                 threshold_percent=self.threshold_percent,
                 protect_first_n=self.protect_first_n,
-                protect_last_n=fresh_tail.count,
+                protect_last_n=3 if split else fresh_tail.count,
                 summary_model_override=self._config.summary_model or None,
                 abort_on_summary_failure=True,
                 quiet_mode=True,
             )
-            if fresh_tail.tokens > 0:
-                native.tail_token_budget = fresh_tail.tokens
+            if split or fresh_tail.tokens > 0:
+                native.tail_token_budget = 1 if split else fresh_tail.tokens
             native.on_session_start(self._session_id)
             native._compression_cancelled_check = cancelled
-            recovered = native.compress(
-                copy.deepcopy(messages),
-                current_tokens=(
+            derive_focus = getattr(ContextCompressor, "_derive_auto_focus_topic", None)
+            focus_topic = derive_focus(messages) if callable(derive_focus) else None
+            synthetic_user = getattr(
+                ContextCompressor, "_is_synthetic_compression_user_turn", None
+            )
+            suffix_has_real_user = False
+            for message in protected_tail:
+                is_user = message.get("role") == "user"
+                has_text = bool(
+                    (text_content_for_pattern_matching(message.get("content")) or "").strip()
+                )
+                is_synthetic = callable(synthetic_user) and synthetic_user(message)
+                if is_user and has_text and not is_synthetic:
+                    suffix_has_real_user = True
+                    break
+            if split and suffix_has_real_user and hasattr(native, "_find_inflight_user_task"):
+                native._find_inflight_user_task = lambda _messages: None
+            native_kwargs = {
+                "current_tokens": (
                     current_tokens
                     if current_tokens is not None and current_tokens > 0
                     else count_messages_tokens(messages)
                 ),
-                force=True,
+                "force": True,
+            }
+            if split:
+                native_kwargs["focus_topic"] = focus_topic
+            recovered_head = native.compress(
+                copy.deepcopy(prefix if split else messages),
+                **native_kwargs,
             )
-            def _native_source_rows(
-                rows: List[Dict[str, Any]],
-            ) -> List[Dict[str, Any]]:
-                source_rows: List[Dict[str, Any]] = []
-                for row in rows:
-                    projected = ContextCompressor._strip_context_summary_handoff_message(row)
-                    if projected is not None:
-                        source_rows.append(projected)
-                return source_rows
+            if split:
+                def _carry(message):
+                    carried = copy.deepcopy(message)
+                    carried.pop(persisted_key, None)
+                    carried[tail_key] = True
+                    return carried
+                recovered = recovered_head + [_carry(message) for message in protected_tail]
+            else:
+                recovered = recovered_head
+
+            def _native_source_rows(rows):
+                return [
+                    projected for row in rows
+                    if (projected := ContextCompressor._strip_context_summary_handoff_message(row)) is not None
+                ]
 
             recovered_source_rows = _native_source_rows(recovered)
             protected_source_rows = _native_source_rows(protected_tail)
@@ -758,29 +838,43 @@ class CompactionMixin:
                 if protected_source_rows
                 else []
             )
-            if (
-                cancelled()
-                or getattr(self, "_compression_cancelled_check", None) is not cancelled
-                or native._last_compress_aborted
-                or not getattr(native, "_last_compression_made_progress", False)
-                or any(
-                    "[digest unavailable for segment " in str(m.get("content", ""))
-                    for m in recovered
-                )
-                or getattr(native, "_last_summary_fallback_used", False)
-                or not recovered
-                or count_messages_tokens(recovered) >= count_messages_tokens(messages)
-                or [
-                    self._message_replay_identity(message)
-                    for message in recovered_tail
-                ] != [
-                    self._message_replay_identity(message)
-                    for message in protected_source_rows
-                ]
-            ):
-                return messages
-        except Exception:
-            logger.warning("Native recovery failed; retaining context")
+            recovered_tokens = count_messages_tokens(recovered)
+            input_tokens = count_messages_tokens(messages)
+            recovered_identities = [
+                self._message_replay_identity(message) for message in recovered_tail
+            ]
+            protected_identities = [
+                self._message_replay_identity(message) for message in protected_source_rows
+            ]
+            reason = next((name for name, failed in (
+                ("cancelled", cancelled()),
+                ("binding_changed", getattr(self, "_compression_cancelled_check", None) is not cancelled),
+                ("native_aborted", native._last_compress_aborted),
+                ("no_progress", not getattr(native, "_last_compression_made_progress", False)),
+                ("digest_unavailable", any("[digest unavailable for segment " in str(m.get("content", "")) for m in recovered)),
+                ("fallback_used", getattr(native, "_last_summary_fallback_used", False)),
+                ("empty", not recovered_head),
+                ("not_smaller", recovered_tokens >= input_tokens),
+                ("suffix_changed", recovered_identities != protected_identities),
+            ) if failed), "")
+            if reason:
+                details = {"recovered_rows": len(recovered), "protected_rows": len(protected_source_rows)}
+                if reason == "native_aborted":
+                    details["failure_class"] = (getattr(native, "_last_compression_telemetry", {}) or {}).get("failure_class")
+                elif reason == "not_smaller":
+                    details.update(input_tokens=input_tokens, recovered_tokens=recovered_tokens)
+                elif reason == "suffix_changed":
+                    changed_offsets = [index for index, pair in enumerate(zip(recovered_identities, protected_identities)) if pair[0] != pair[1]]
+                    details["changed_rows"] = len(changed_offsets) + abs(len(recovered_identities) - len(protected_identities))
+                    details["first_changed_offset"] = changed_offsets[0] if changed_offsets else min(len(recovered_identities), len(protected_identities))
+                return _reject(reason, **details)
+        except Exception as exc:
+            self._last_native_recovery_rejection = "exception"
+            self._last_compression_noop_reason = "exception"
+            logger.warning(
+                "Native recovery failed; retaining context (exception_type=%s)",
+                type(exc).__name__,
+            )
             return messages
         self._last_compression_status = "host_native"
         self._last_summary_error = None
@@ -788,14 +882,14 @@ class CompactionMixin:
         self.compression_count += 1
         self._last_compress_aborted = False
         # The helper returns before the host's archive transaction commits.
-        # Persist exact replay proof, then reconcile the next host snapshot so
-        # both adoption and rejection retain every subsequent turn.
         self._remember_native_recovery_replay_snapshot(recovered)
-        self._ingest_cursor = 0
-        self._ingest_cursor_needs_reconcile = True
+        self._ingest_cursor = len(recovered)
+        self._ingest_cursor_needs_reconcile = False
+        self._last_native_summary_index = next((i for i, row in enumerate(recovered) if ContextCompressor._strip_context_summary_handoff_message(row) != row), None)
         logger.info(
-            "Native recovery returned a summary for the host's "
-            "archive transaction. LCM source history and frontier are unchanged."
+            "Native recovery returned a summary for the host archive transaction "
+            "(input_rows=%d, recovered_rows=%d, cursor=%d); LCM source history and frontier are unchanged.",
+            len(messages), len(recovered), self._ingest_cursor,
         )
         return recovered
 
