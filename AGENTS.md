@@ -98,10 +98,10 @@ Run `actionlint` when workflows change. Record exact commands and results in the
   authorization immediately before an authorized write.
 - Model output alone cannot close, label, assign, push, approve, or merge.
 - Automated repair is opt-in and limited to the exact accepted issue and current gate.
-- Every change requires one exact-head acceptance assessment with an explicit original `PASS`
-  and no unresolved findings. Changes mapped by protected source to review-provenance policy or
-  LCM memory-preservation risk also require a distinct targeted adversarial assessment. Public
-  disclosure still requires an explicit maintainer decision. Classification alone does not elevate routine reversible issue metadata.
+- AI review is recorded evidence, not enforcement. The `land-pr` review obligation is a
+  maintainer discipline, not a protected check: it does not authenticate review artifacts, and a
+  maintainer who records a false pointer can pass it (#474, #369). Public disclosure still requires an explicit
+  maintainer decision. Classification alone does not elevate routine reversible issue metadata.
 - Use `.agents/skills/triage-backlog/SKILL.md` read-only unless a maintainer explicitly
   authorizes one exact mutation; never use it for an automatic backlog sweep.
 - Invoking a skill never creates write authority. Routine reversible issue metadata needs one
@@ -113,20 +113,26 @@ Run `actionlint` when workflows change. Record exact commands and results in the
 ## Review And Merge
 
 - Use `.agents/skills/land-pr/SKILL.md` when deciding readiness or landing a PR.
-- Pin the PR base SHA and `headRefOid`; checks and semantic review must cover that exact pair or
-  an explicitly bounded delta. A protected-base change invalidates prior AI assessments.
-- Keep strict required-status enforcement enabled. If a base-push reset API call fails, GitHub's
-  up-to-date requirement must still block merging until a head synchronization resets the AI
-  check and fresh exact-base/head assessments pass.
-- Require the protected `AI review exact-head` check. Every PR, including routine, docs, and
-  benchmark changes, requires one exact-head `acceptance` assessment. Protected changed-path
-  mappings add `adversarial` only for review-provenance policy and LCM memory-preservation risk.
-  Each required original review must bind the exact repository, PR, base and head, explicitly
-  report `PASS`, and contain no unresolved findings; labels cannot change the required lanes.
-- Do not merge with failing/pending required checks, unresolved actionable threads, a changed
+- Pin the PR base SHA and `headRefOid`; CI and review must cover that exact head or an
+  explicitly bounded delta.
+- Enforcement is strict exact-head CI (`workflow-lint`, `lint`, `test (3.11)` through
+  `test (3.14)`), required review-thread resolution, and merge commits only. Keep strict
+  required-status enforcement enabled so a protected-base change blocks merging until CI passes
+  on an up-to-date head.
+- Review obligation (`land-pr`): every PR needs at least one independent review of the exact
+  head. When the `scripts/maintainer_gate.py` risk hint reports review-provenance-policy or LCM
+  memory-preservation risk, it needs an acceptance review and a distinct adversarial review from
+  a different model than the author. At landing, after merge authority is established, post a
+  merge receipt comment that lists only pointers and names the author and reviewer models; if a
+  lane is unavailable, record `REVIEW_SKIPPED: <lane> — <reason>` and let the owner decide.
+- Every review thread is resolved before merge. A bot thread is resolved only after a reply that
+  records its disposition: fixed in `<sha>`, false with evidence, accepted tradeoff, or
+  follow-up `<issue>`.
+- Do not merge with failing/pending required checks, unresolved review threads, a changed
   head, missing issue acceptance, or unowned product/security decisions.
 - Never push directly to `main`, bypass the ruleset, use auto-merge, or force-push/delete
-  `main`. The one recorded #218 bootstrap merge is the only exception and cannot be reused.
+  `main`. The ruleset transitions for #218, #462, #466, #469, and #470 are closed history. The
+  owner's `pull_request` bypass is for a recorded emergency only, noted on the PR.
 - Use merge commits for PRs so contributor and upstream commits remain intact. Do not squash
   or rebase-merge into `main`.
 - Merge deterministically with the pinned head:
@@ -142,10 +148,10 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
 ## Maintainer And Bot Roles
 
 - `@100yenadmin` is the code owner. CODEOWNERS does not satisfy review readiness by itself;
-  protected exact-head CI, AI review, and thread gates do.
+  protected exact-head CI and thread gates do, with the `land-pr` review obligation.
 - Bots and agents may triage, reproduce, implement, test, review, and prepare merge evidence.
-- Bots and agents may not bypass checks, exact-head AI review, review-thread resolution, issue
-  acceptance, or a product/security owner decision.
+- Bots and agents may not bypass checks, review-thread resolution, the `land-pr` review
+  obligation, issue acceptance, or a product/security owner decision.
 - Maintainers own feature acceptance, priority, compatibility decisions, terminal dispositions,
   and releases.
 

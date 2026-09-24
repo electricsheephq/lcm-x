@@ -50,25 +50,34 @@ Require success on the pinned head for:
 - `test (3.12)`
 - `test (3.13)`
 - `test (3.14)`
-- `AI review exact-head`
 
 Treat pending, skipped, missing, stale-head, or failing required checks as blocking. Require one
 result per required name; resolve each Actions run and bind its `head_sha` to `$head` and its
-`workflow_id` to protected `CI` or the protected AI-review issuer. Reject name-only, duplicate,
-or mixed identities. Require strict up-to-date status enforcement so a protected-base change
-blocks merging even if an API fault prevents one reset write. A mapped review-provenance-policy
-change needs both exact-head AI lanes.
+`workflow_id` to protected `CI`. Reject name-only, duplicate, or mixed identities. Require strict
+up-to-date status enforcement so a protected-base change blocks merging until CI passes again.
 
 ## 4. Verify Exact-Head Review Coverage
 
-Read review threads and the required AI check directly; aggregate `reviewDecision` is not
-exact-head proof:
+AI review is recorded evidence, not enforcement; this section is a maintainer obligation. Read
+the review-lanes hint and review threads directly; aggregate `reviewDecision` is not exact-head
+proof:
 
 ```bash
-gh api graphql --paginate \
+set -o pipefail
+files="$(gh api --paginate "repos/electricsheephq/lcm-x/pulls/<PR>/files?per_page=100")" && \
+expected="$(gh api "repos/electricsheephq/lcm-x/pulls/<PR>" --jq .changed_files)" && \
+test -n "$files" && printf '%s\n' "$files" | jq -s -e --argjson n "$expected" 'add | length == $n' >/dev/null && \
+printf '%s\n' "$files" \
+  | jq -s '{schema_version: "1", mode: "readiness", changed_files: [.[][] | {filename, previous_filename}]}' \
+  | python3 scripts/maintainer_gate.py | jq -e .review_lanes_hint || \
+  { echo "HINT UNAVAILABLE: require both lanes" >&2
+    printf '%s\n' '{"changed_files": "unknown", "named_risks": null, "required_review_lanes": ["acceptance", "adversarial"]}'
+    false; }
+
+gh api graphql \
   -F owner=electricsheephq -F name=lcm-x -F number=<PR> \
   -f query='
-query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       headRefOid reviewDecision
@@ -83,7 +92,10 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $endCursor) {
-        nodes { isResolved comments(first: 1) { nodes { url } } }
+        nodes {
+          isResolved
+          comments(first: 100) { totalCount nodes { url body author { login __typename } } }
+        }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -91,23 +103,35 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
 }'
 ```
 
-- Require one successful `AI review exact-head` check-run from GitHub Actions app `15368` on
-  `$head`. Read its packet and bind the original review IDs, authors, bodies, lanes, policy
-  version, exact base/head tuple, explicit verdicts, and findings. Every PR requires one
-  exact-head `acceptance` assessment. The protected changed-path map additionally requires a
-  distinct targeted `adversarial` assessment for review-provenance-policy or
-  LCM-memory-preservation risk. Each required original review must report `PASS` with no
-  unresolved findings; labels and producer claims cannot waive a mapped lane. A maintainer may
-  also record a distinct targeted risk review as PR acceptance when an unmapped change needs it.
-- Require every returned review thread to have `isResolved: true`; list and stop on any
-  unresolved thread.
-- After a review-driven head change, require new assessments for the changed risk surface and
-  re-read the head SHA and checks. A lifecycle reset makes the required check fail until then.
+- Every PR needs at least one independent review of `$head`: a NeonDiff review whose
+  `commit_id` equals `$head`, whose `state` is not `DISMISSED` or `PENDING`, and whose
+  `user.login` is not the PR author; or a cross-model review whose log or comment names `$head`. A
+  review log or comment this obligation relies on must name the exact head, its lane, the
+  author model, and the reviewer model.
+- When the hint reports `review-provenance-policy` or `lcm-memory-preservation` risk, require an
+  acceptance review and a distinct adversarial review whose reviewer model differs from the
+  author model. A failed hint command, `HINT UNAVAILABLE`, or `"changed_files": "unknown"` also
+  means both lanes.
+- Report each lane's pointer, or `REVIEW_SKIPPED: <lane> — <reason>` for the owner to decide.
+  The merge receipt comment is a write: it is posted only in Section 7, after merge authority is
+  established. A readiness-only invocation stays read-only.
+- Every review thread must be resolved before merge; list and stop on any thread without
+  `isResolved: true`. A bot thread is resolved only after a reply that records its disposition:
+  fixed in `<sha>`, false with evidence, accepted tradeoff, or follow-up `<issue>`. For a resolved
+  thread whose opening comment author is a `Bot`, read the comment bodies: the thread needs a
+  comment by a `User` author that records one of those dispositions. A bot comment after it does
+  not undo it, and a reply that records none of them does not count; list and stop on a resolved
+  bot thread without one. The query returns at most 100 comments per thread: when a thread's
+  `totalCount` exceeds 100, open its `url` and read every comment before deciding.
+- After a review-driven head change, require new reviews for the changed risk surface and
+  re-read the head SHA and checks.
 - Give every verified finding one terminal disposition. Do not turn unverified possibilities
   or nits into merge blockers.
 
-Do not count ordinary CI, author self-review, a flat bot status comment, or this skill as an AI
-review assessment. Readiness is evidence only and never grants merge authority.
+Do not count ordinary CI, author self-review, a flat bot status comment, or this skill as an
+independent review. Readiness is evidence only and never grants merge authority. These checks
+are maintainer discipline: they do not authenticate review artifacts, and a maintainer who
+records a false pointer can pass them (#474, #369).
 
 ## 5. Check Hermes And Lossless Boundaries
 
@@ -127,25 +151,33 @@ uncertain, comment or report the relationship; do not close the issue.
 
 ## 7. Merge Deterministically
 
-Immediately before merging, repeat the paginated thread query from Section 4, reapply every
-Section 4 gate, and require the exact-head AI check to remain successful. Re-fetch every
-`review_artifact_refs[].review_id` from GitHub's pull-request reviews API and compare its live
-publisher ID/login/type, state, commit, submitted time, body, and assessment binding with the
-packet used by the successful check. Also paginate all reviews for the PR and reject a referenced
-assessment when a newer non-dismissed v2 assessment from the same protected publisher exists on
-the same exact head, regardless of the newer verdict. A missing, dismissed, edited, mismatched,
-or superseded review blocks landing. Only after those checks pass, run:
+Only after a maintainer authorizes landing this PR at `$head`, in this order:
 
-```bash
-current_head="$(gh pr view <PR> --repo electricsheephq/lcm-x --json headRefOid --jq .headRefOid)"
-test "$current_head" = "$head"
-gh pr view <PR> --repo electricsheephq/lcm-x \
-  --json state,isDraft,headRefOid,mergeable,mergeStateStatus,reviewDecision
-gh pr checks <PR> --repo electricsheephq/lcm-x && \
-gh pr merge <PR> --repo electricsheephq/lcm-x --merge --match-head-commit "$head"
-```
+1. Re-read the live head and the exact-head checks; stop on any mismatch or failure:
 
-Treat `gh pr merge` as the last command; do not run it before the repeated review queries and assertions.
+   ```bash
+   current_head="$(gh pr view <PR> --repo electricsheephq/lcm-x --json headRefOid --jq .headRefOid)"
+   test "$current_head" = "$head"
+   gh pr view <PR> --repo electricsheephq/lcm-x \
+     --json state,isDraft,headRefOid,mergeable,mergeStateStatus,reviewDecision
+   gh pr checks <PR> --repo electricsheephq/lcm-x --required
+   ```
+
+2. Repeat the paginated thread query from Section 4 and reapply every Section 4 gate. Validate
+   each review pointer by its evidence type: re-fetch a GitHub review id and check its
+   `commit_id` equals `$head`, its `state` is not `DISMISSED` or `PENDING`, and its
+   `user.login` is not the PR author; re-read a review-log path or comment link and check the
+   head it names equals `$head`.
+3. Post one merge receipt comment that lists only pointers: GitHub review ids with `user.id`,
+   `commit_id`, and `state`; review-log paths or comment links; the author model and each
+   reviewer model; any `REVIEW_SKIPPED` line. Never restate verdicts or scores.
+4. Merge with the pinned head:
+
+   ```bash
+   gh pr merge <PR> --repo electricsheephq/lcm-x --merge --match-head-commit "$head"
+   ```
+
+Treat `gh pr merge` as the last command; do not run it before steps 1-3 pass.
 
 Never use auto-merge, squash, rebase merge, direct `main` pushes, force pushes, branch deletion,
 or a ruleset bypass.
@@ -158,10 +190,9 @@ Verify the result:
 merge_commit="$(gh pr view <PR> --repo electricsheephq/lcm-x \
   --json state,mergeCommit --jq 'select(.state == "MERGED") | .mergeCommit.oid')"; test -n "$merge_commit" && \
 test "$(gh api repos/electricsheephq/lcm-x/commits/main --jq .sha)" = "$merge_commit" && \
-required="$(gh api repos/electricsheephq/lcm-x/rulesets/20888757 --jq '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[] | {name: .context, app_id: .integration_id}]')" && gh api "repos/electricsheephq/lcm-x/commits/$merge_commit/check-runs?per_page=100" | jq -e --argjson required "$required" --argjson expected '["workflow-lint","lint","test (3.11)","test (3.12)","test (3.13)","test (3.14)","AI review exact-head"]' --argjson merge_expected '[{"name":"workflow-lint","app_id":15368},{"name":"lint","app_id":15368},{"name":"test (3.11)","app_id":15368},{"name":"test (3.12)","app_id":15368},{"name":"test (3.13)","app_id":15368},{"name":"test (3.14)","app_id":15368}]' '(($required | map(.name) | sort) == ($expected | sort)) and ([.check_runs[] | select(.status == "completed" and .conclusion == "success") | {name, app_id: .app.id}]) as $passed | ($merge_expected - $passed | length == 0)'
+required="$(gh api repos/electricsheephq/lcm-x/rulesets/20888757 --jq '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[] | {name: .context, app_id: .integration_id}]')" && gh api "repos/electricsheephq/lcm-x/commits/$merge_commit/check-runs?per_page=100" | jq -e --argjson required "$required" --argjson expected '["workflow-lint","lint","test (3.11)","test (3.12)","test (3.13)","test (3.14)"]' --argjson merge_expected '[{"name":"workflow-lint","app_id":15368},{"name":"lint","app_id":15368},{"name":"test (3.11)","app_id":15368},{"name":"test (3.12)","app_id":15368},{"name":"test (3.13)","app_id":15368},{"name":"test (3.14)","app_id":15368}]' '(($required | map(.name) | sort) == ($expected | sort)) and ([.check_runs[] | select(.status == "completed" and .conclusion == "success") | {name, app_id: .app.id}]) as $passed | ($merge_expected - $passed | length == 0)'
 ```
-- Confirm the PR is merged, the six CI checks pass on the merge commit, and the exact-head AI
-  check remains bound to the reviewed PR base/head assessment recorded before merge.
+- Confirm the PR is merged and the six CI checks pass on the merge commit.
 - Confirm verified closing issues are closed as completed.
 - Thank external contributors and link the landed PR.
 - Leave ambiguous issues open with a precise relationship note.
