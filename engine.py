@@ -5145,13 +5145,16 @@ class LCMEngine(
             and proof
             and proof.get("session_id") == self._session_id
             and proof.get("conversation_id") == self._conversation_id
+            and not proof.get("consulted")
             and self._ingest_cursor == len(proof.get("output") or ())
             and self._ingest_cursor > 0
         ):
             # First ingest after a compaction: the cursor indexes compress()'s
             # output. If the host rewrote that prefix (role repair, reply
             # re-insertion), position no longer proves replay -> reconcile
-            # (#259: visible duplication beats silent loss).
+            # (#259: visible duplication beats silent loss). One-shot: a later
+            # reconciled cursor that equals len(output) must not re-arm it.
+            proof["consulted"] = True
             host_input = proof.get("input")
             if n >= self._ingest_cursor and [
                 self._message_replay_identity(m) for m in messages[: self._ingest_cursor]

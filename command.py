@@ -26,12 +26,9 @@ from .db_bootstrap import (
     repair_external_content_fts,
 )
 from .diagnostics import (
-    COMPACTION_REPLAY_DUPLICATES_ACTION,
-    COMPACTION_REPLAY_SCAN_INCOMPLETE,
     _has_lifecycle_fragmentation,
     _state_db_path_for_engine,
     doctor_guidance_for_checks,
-    scan_compaction_replay_duplicates,
 )
 from .ingest_protection import (
     EmbeddingPrivacyPolicyError,
@@ -1610,34 +1607,6 @@ def _doctor_text(engine) -> str:
                 "treat this as read-only evidence; do not infer every mismatch is harmful"
             )
 
-    try:
-        replay_duplicates = scan_compaction_replay_duplicates(store_conn)
-    except Exception as exc:  # pragma: no cover - defensive
-        issues.append("compaction_replay_duplicates")
-        replay_duplicates = {"error": str(exc)}
-        observations.append(f"compaction_replay_duplicates: scan error: {exc}")
-    else:
-        if replay_duplicates["replayed_rows_total"]:
-            sample = ",".join(item["session_id"] for item in replay_duplicates["sessions"][:5])
-            observations.append(
-                "compaction_replay_duplicates: "
-                f"{replay_duplicates['replayed_rows_total']} row(s) in "
-                f"{replay_duplicates['sessions_with_replayed_runs']} session(s) form candidate replay runs "
-                f"(#483 class, detect-only); sample={sample}"
-            )
-            recommended_actions.append(COMPACTION_REPLAY_DUPLICATES_ACTION)
-        elif not replay_duplicates["scan_complete"]:
-            observations.append(
-                "compaction_replay_duplicates: none within scanned coverage "
-                f"({replay_duplicates['rows_scanned']} rows; window {replay_duplicates['window']})"
-            )
-            recommended_actions.append(
-                "replay scan incomplete: candidate replay runs outside the scanned coverage are not "
-                "reported; treat this as unknown, not clean"
-            )
-        else:
-            observations.append("compaction_replay_duplicates: none")
-
     if clean_scan.get("protected_count"):
         observations.append(
             f"protected_sessions: skipped {clean_scan['protected_count']} currently bound session(s) from cleanup candidates"
@@ -1729,19 +1698,6 @@ def _doctor_text(engine) -> str:
     if lifecycle_stats.get("error") or _has_lifecycle_fragmentation(lifecycle_stats):
         lifecycle_status = "fail" if lifecycle_stats.get("error") else "warn"
         triage_checks.append({"check": "lifecycle_fragmentation", "status": lifecycle_status, "detail": lifecycle_stats})
-    if (
-        replay_duplicates.get("error")
-        or replay_duplicates.get("replayed_rows_total")
-        or replay_duplicates.get("scan_complete") is False
-    ):
-        replay_check = {
-            "check": "compaction_replay_duplicates",
-            "status": "fail" if replay_duplicates.get("error") else "warn",
-            "detail": replay_duplicates,
-        }
-        if replay_duplicates.get("scan_complete") is False:
-            replay_check["reason"] = COMPACTION_REPLAY_SCAN_INCOMPLETE
-        triage_checks.append(replay_check)
     triage_guidance = doctor_guidance_for_checks(triage_checks)
 
     doctor_status = "issues-found" if integrity != "ok" or issues else (

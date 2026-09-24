@@ -232,7 +232,6 @@ def _assert_clean_commit_sequence(result):
     assert result["frontier_regressions"] == [], result
 
 
-
 # tail=6 leaves an assistant-leading fresh tail; tail=7 a user-leading one, so
 # a merging host glues LCM's user-role summary to the first tail user row.
 _IN_PLACE_SEAMS = [(False, 6), (False, 7), (True, 6), (True, 7)]
@@ -253,7 +252,6 @@ def test_hermes_rotation_commit_sequence_stores_every_turn(tmp_path, monkeypatch
     skip its first turns (#483 rotation variant)."""
     result = _run_host_commit_sequence(tmp_path, monkeypatch, in_place=False, merge=merge, tail=tail)
     _assert_clean_commit_sequence(result)
-
 
 
 @pytest.mark.parametrize("restart_after", [1, 2])
@@ -419,6 +417,29 @@ def test_first_ingest_after_compaction_reconciles_a_rewritten_prefix(tmp_path, m
         assert _turn(13)[1]["content"] in stored  # never a silent skip
         assert _row_count(engine) > rows
         assert engine._compress_commit_proof is not None  # kept until a prefix is proven
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
+def test_commit_proof_is_consulted_once_after_a_reconcile(tmp_path, monkeypatch, in_place):
+    """#484 item 11i (#487 note): after the first post-compaction ingest sends a
+    rewritten prefix to reconcile, a reconciled cursor that happens to equal
+    len(output) must not re-arm the kept proof on the next ingest."""
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    child = "S0" if in_place else "S1"
+    try:
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(child, boundary_reason="compression", old_session_id="S0", platform="acp")
+        host = [{"role": "user", "content": "host-rewritten head"}] + list(compressed[1:])
+        engine.ingest(host)  # proof consulted: prefix rewritten -> reconcile
+        assert engine._ingest_cursor == len(compressed)
+        rows = engine._store._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        for i in range(13, 16):
+            host.append(_turn(i)[1] if i == 13 else _turn(i)[0])
+            engine.ingest(host)
+        # The first reconcile's bounded duplicates (#259) are already counted in rows.
+        assert engine._store._conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == rows + 3
     finally:
         engine.shutdown()
 
@@ -649,48 +670,6 @@ def test_rotation_moves_the_commit_proof_to_the_child(tmp_path, monkeypatch):
         child = _durable_commit_proof(engine, "S1")
         assert child["last_store_id"] == 0
         assert child["effective_sha256"] == _durable_commit_proof(engine, "S0")["effective_sha256"]
-    finally:
-        engine.shutdown()
-
-
-def test_doctor_detects_compaction_replay_duplicates_without_mutating(tmp_path):
-    """Detect-only doctor check for #483-class rows: a replayed run of >= 3 rows
-    in the same session is counted per session; lone organic repeats are not."""
-    import hermes_lcm.tools as lcm_tools
-    from hermes_lcm.diagnostics import scan_compaction_replay_duplicates
-
-    engine = LCMEngine(
-        config=LCMConfig(
-            database_path=str(tmp_path / "lcm.db"),
-            large_output_externalization_path=str(tmp_path / "externalized"),
-        ),
-        hermes_home=str(tmp_path / "home"),
-    )
-    try:
-        engine.on_session_start("S0", platform="acp", context_length=200_000)
-        turns = [message for i in range(1, 5) for message in _turn(i)]
-        engine._store.append_batch("S0", turns, source="acp")
-        engine._store.append_batch("S0", turns[2:6], source="acp")  # stale replay of T02-T03
-        engine._store.append_batch(
-            "S1",
-            [{"role": "user", "content": "ok"}, {"role": "assistant", "content": "done"},
-             {"role": "user", "content": "ok"}],
-            source="acp",
-        )
-        conn = engine._store.connection
-        changes_before = conn.total_changes
-
-        scan = scan_compaction_replay_duplicates(conn)
-        assert scan["replayed_rows_total"] == 4
-        assert scan["sessions"] == [{"session_id": "S0", "replayed_rows": 4, "runs": 1}]
-        assert conn.total_changes == changes_before  # the scan itself never writes
-
-        doctor = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
-        check = next(c for c in doctor["checks"] if c["check"] == "compaction_replay_duplicates")
-        assert check["status"] == "warn"
-        assert check["detail"]["sessions_with_replayed_runs"] == 1
-        assert any(g["check"] == "compaction_replay_duplicates" and g["warning_only"] for g in doctor["guidance"])
-        assert engine._store.get_session_count("S0") == 12
     finally:
         engine.shutdown()
 
@@ -947,207 +926,6 @@ def test_metadata_write_exception_is_contained(tmp_path, monkeypatch):
         engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
         engine.ingest(list(compressed) + [_turn(13)[1]])
         assert _row_count(engine) == rows + 1
-    finally:
-        engine.shutdown()
-
-
-def test_doctor_command_recommends_action_for_replay_duplicates(tmp_path):
-    """#484 round 1 item 6: `/lcm doctor` must not print `status: ok` when the
-    replay-duplicate check warns; both surfaces carry the detect-only action."""
-    import hermes_lcm.command as lcm_command
-    import hermes_lcm.tools as lcm_tools
-
-    engine = LCMEngine(
-        config=LCMConfig(
-            database_path=str(tmp_path / "lcm.db"),
-            large_output_externalization_path=str(tmp_path / "externalized"),
-        ),
-        hermes_home=str(tmp_path / "home"),
-    )
-    try:
-        engine.on_session_start("S0", platform="acp", context_length=200_000)
-        turns = [message for i in range(1, 5) for message in _turn(i)]
-        engine._store.append_batch("S0", turns, source="acp")
-        clean_text = lcm_command._doctor_text(engine)
-        engine._store.append_batch("S0", turns[2:6], source="acp")
-        text = lcm_command._doctor_text(engine)
-        action = "do not delete rows by hand"
-        assert action not in clean_text
-        assert "status: ok" not in text
-        assert "status: action-recommended" in text or "status: issues-found" in text
-        assert action in text
-        doctor = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
-        assert doctor["overall"] != "healthy"
-        guidance = next(g for g in doctor["guidance"] if g["check"] == "compaction_replay_duplicates")
-        assert action in guidance["operator_action"]
-    finally:
-        engine.shutdown()
-
-
-def test_replay_duplicate_scan_is_bounded(tmp_path):
-    """#484 round 1 item 7: the doctor scan keeps at most `window` recent rows per
-    session (a #483 replay re-stores rows within one host active window of their
-    original) and stops after `max_rows`, reporting the truncation."""
-    from hermes_lcm.diagnostics import scan_compaction_replay_duplicates
-
-    conn = sqlite3.connect(str(tmp_path / "scan.db"))
-    try:
-        conn.execute(
-            "CREATE TABLE messages (store_id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, tool_call_id TEXT)"
-        )
-        rows = [f"row {i}" for i in range(8)] + ["row 2", "row 3", "row 4"]
-        conn.executemany(
-            "INSERT INTO messages(session_id, role, content) VALUES ('S0', 'user', ?)", [(r,) for r in rows]
-        )
-        near = scan_compaction_replay_duplicates(conn, window=16)
-        assert near["replayed_rows_total"] == 3
-        assert near["peak_tracked_rows"] <= 16
-        assert near["scan_truncated"] is False
-
-        far = scan_compaction_replay_duplicates(conn, window=4)
-        assert far["replayed_rows_total"] == 0  # the original run left the window
-        assert far["peak_tracked_rows"] <= 4
-
-        capped = scan_compaction_replay_duplicates(conn, max_rows=5)
-        assert capped["scan_truncated"] is True
-        assert capped["rows_scanned"] == 5
-    finally:
-        conn.close()
-
-
-@pytest.mark.parametrize("bound", ["row-cap", "beyond-window"])
-def test_doctor_reports_an_incomplete_replay_scan(tmp_path, monkeypatch, bound):
-    """#484 round 2 item 19: a capped scan, or one where a session outgrew the
-    window, is not a clean result: the tool check warns with reason "scan
-    incomplete" and the command reports "none within scanned coverage"."""
-    import functools
-
-    import hermes_lcm.command as lcm_command
-    import hermes_lcm.tools as lcm_tools
-    from hermes_lcm.diagnostics import scan_compaction_replay_duplicates
-
-    bounded = functools.partial(
-        scan_compaction_replay_duplicates, **({"max_rows": 5} if bound == "row-cap" else {"window": 4})
-    )
-    monkeypatch.setattr(lcm_tools, "scan_compaction_replay_duplicates", bounded)
-    monkeypatch.setattr(lcm_command, "scan_compaction_replay_duplicates", bounded)
-    engine = LCMEngine(
-        config=LCMConfig(
-            database_path=str(tmp_path / "lcm.db"),
-            large_output_externalization_path=str(tmp_path / "externalized"),
-        ),
-        hermes_home=str(tmp_path / "home"),
-    )
-    try:
-        engine.on_session_start("S0", platform="acp", context_length=200_000)
-        turns = [message for i in range(1, 5) for message in _turn(i)]
-        engine._store.append_batch("S0", turns, source="acp")
-        engine._store.append_batch("S0", turns[:3], source="acp")  # beyond the cap / the 4-row window
-        assert bounded(engine._store.connection)["replayed_rows_total"] == 0
-        doctor = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
-        check = next(c for c in doctor["checks"] if c["check"] == "compaction_replay_duplicates")
-        assert check["status"] == "warn"
-        assert check["reason"] == "scan incomplete"
-        assert any(g["check"] == "compaction_replay_duplicates" for g in doctor["guidance"])
-        assert doctor["overall"] != "healthy"
-        text = lcm_command._doctor_text(engine)
-        assert "compaction_replay_duplicates: none within scanned coverage (" in text
-        assert "compaction_replay_duplicates: none\n" not in text
-        assert "status: ok" not in text  # #484 item 11e
-    finally:
-        engine.shutdown()
-
-
-def test_doctor_calls_repeats_candidate_replay_runs(tmp_path):
-    """#484 round 2 item 19: repeated content establishes a candidate replay run,
-    not proof of #483; a complete clean scan still reads "none"."""
-    import hermes_lcm.command as lcm_command
-    import hermes_lcm.tools as lcm_tools
-
-    engine = LCMEngine(
-        config=LCMConfig(
-            database_path=str(tmp_path / "lcm.db"),
-            large_output_externalization_path=str(tmp_path / "externalized"),
-        ),
-        hermes_home=str(tmp_path / "home"),
-    )
-    try:
-        engine.on_session_start("S0", platform="acp", context_length=200_000)
-        turns = [message for i in range(1, 5) for message in _turn(i)]
-        engine._store.append_batch("S0", turns, source="acp")
-        clean_text = lcm_command._doctor_text(engine)
-        assert "compaction_replay_duplicates: none\n" in clean_text
-        clean = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
-        clean_check = next(c for c in clean["checks"] if c["check"] == "compaction_replay_duplicates")
-        assert clean_check["status"] == "pass"
-        engine._store.append_batch("S0", turns[2:6], source="acp")
-        text = lcm_command._doctor_text(engine)
-        assert "candidate replay runs" in text
-        doctor = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
-        guidance = next(g for g in doctor["guidance"] if g["check"] == "compaction_replay_duplicates")
-        assert "candidate replay runs" in guidance["operator_action"]
-    finally:
-        engine.shutdown()
-
-
-def test_replay_scan_reports_a_candidate_capped_origin_as_incomplete(tmp_path):
-    """#484 item 11g: the per-key origin cap (8) can drop the true origin of a
-    replay; the scan must then either detect the run or report itself incomplete."""
-    from hermes_lcm.diagnostics import scan_compaction_replay_duplicates
-
-    conn = sqlite3.connect(str(tmp_path / "scan.db"))
-    try:
-        conn.execute(
-            "CREATE TABLE messages (store_id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, tool_call_id TEXT)"
-        )
-        rows = ["A", "B", "C"]
-        for i in range(8):
-            rows += ["A", f"unique {i}"]
-        rows += ["A", "B", "C"]
-        assert len(rows) == 22
-        conn.executemany(
-            "INSERT INTO messages(session_id, role, content) VALUES ('S0', 'user', ?)", [(r,) for r in rows]
-        )
-        scan = scan_compaction_replay_duplicates(conn)
-        assert scan["replayed_rows_total"] == 3 or scan["scan_complete"] is False, scan
-    finally:
-        conn.close()
-
-
-def _tool_call_session(engine, *, tool_call_ids: bool):
-    rows = []
-    for i in range(12):
-        rows.append({
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [{"id": f"call_{i}", "type": "function",
-                            "function": {"name": "read_file", "arguments": json.dumps({"path": f"f{i}.txt"})}}],
-        })
-        tool_row = {"role": "tool", "content": "ok" if not tool_call_ids else f"contents of f{i}.txt"}
-        if tool_call_ids:
-            tool_row["tool_call_id"] = f"call_{i}"
-        rows.append(tool_row)
-    engine._store.append_batch("S0", rows, source="acp")
-
-
-@pytest.mark.parametrize("tool_call_ids", [True, False], ids=["distinct-tool-results", "unkeyed-identical-tool-results"])
-def test_replay_duplicate_scan_negative_control_tool_call_rows(tmp_path, tool_call_ids):
-    """#484 round 1 item 7 note: assistant tool-call rows have empty content; their
-    calls live in tool_calls, which must be part of the row key, so interleaved
-    tool-call turns are never reported as replayed runs."""
-    from hermes_lcm.diagnostics import scan_compaction_replay_duplicates
-
-    engine = LCMEngine(
-        config=LCMConfig(
-            database_path=str(tmp_path / "lcm.db"),
-            large_output_externalization_path=str(tmp_path / "externalized"),
-        ),
-        hermes_home=str(tmp_path / "home"),
-    )
-    try:
-        engine.on_session_start("S0", platform="acp", context_length=200_000)
-        _tool_call_session(engine, tool_call_ids=tool_call_ids)
-        assert scan_compaction_replay_duplicates(engine._store.connection)["replayed_rows_total"] == 0
     finally:
         engine.shutdown()
 

@@ -86,12 +86,8 @@ Hermes plugin-catalog admission (#471):
   (#486), and digest-less redactions never count as proof, including native recovery replay and
   the store matcher (it stops before such a row). The proof is bound to its session, conversation
   and Hermes home. A durable proof carries the cursor across restart/resume, including an empty
-  rotation child
-  (commit or native recovery proof), and moves to the child on rotation. `lcm_doctor` and
-  `/lcm doctor` add a detect-only `compaction_replay_duplicates` check: candidate replay runs per
-  session over a bounded window, warn plus a recommended action, no mutation, and a warn with
-  reason `scan incomplete` when the row cap or window bounded the scan. Stores that already hold
-  #483 duplicates are not repaired by this release.
+  rotation child (commit or native recovery proof), and moves to the child on rotation. Stores
+  that already hold #483 duplicates are not detected or repaired by this release (#485).
 
 Unchanged: `lcm.db` (name and location), the `lcm:` config block, `LCM_*` environment
 variables, all `lcm_*` tool names, `/lcm`, the bundled skill name `hermes-lcm`, and the log line

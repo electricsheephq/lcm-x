@@ -8,7 +8,7 @@ Use read-only product tools before changing configuration or running an apply pa
 2. Send one normal message if the session has not been bound since restart.
 3. `lcm_status`: inspect runtime identity, database path, context pressure, summary/store counts, filters, and lifecycle state.
 4. `lcm_inspect`: inspect current-session lineage, frontiers, fresh tail, externalized-ref readability, and skip/no-op reasons without retrieving content.
-5. `lcm_doctor`: run database, FTS, lifecycle, configuration, replay-duplicate, and context-pressure diagnostics.
+5. `lcm_doctor`: run database, FTS, lifecycle, configuration, and context-pressure diagnostics.
 
 If optional slash commands are enabled, `/lcm status` and `/lcm doctor` expose the corresponding operator views.
 
@@ -23,12 +23,6 @@ For cleanup, repair, source normalization, or rotate:
 5. run one bounded apply and verify integrity afterward.
 
 Cleanup apply is separately feature-gated. Never infer permission to enable it from a diagnosis request.
-
-## `compaction_replay_duplicates`
-
-A detect-only `lcm_doctor` check (also in `/lcm doctor`). It counts **candidate replay runs**: runs of at least 3 rows in one session that repeat an earlier run of that session in order. It never writes. A warn means rows written by a pre-fix compaction replay (#483) are likely present, and recall may show repeats. Do not delete rows by hand: repair is tracked in #485.
-
-The scan is bounded to a 2,000-row window per session and 1,000,000 rows in total. If either bound was hit, the check warns with reason `scan incomplete`, and `/lcm doctor` prints `none within scanned coverage (N rows; window W)`. That result is not proof the store is clean.
 
 ## Common states
 
