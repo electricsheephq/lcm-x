@@ -1604,11 +1604,16 @@ class ReconcileMixin:
             if payload is None:
                 return None
             target = list(payload.get("effective_sha256") or [])
-            if not target:
-                return None
             matched = 0
             index = 0
             n = len(messages)
+            if not target:
+                # A scaffold-only output (fresh_tail_count=0): the proof covers only
+                # the leading verified scaffold rows, and at least one (#484 item 11k).
+                while index < n and self._is_verified_replay_scaffold_message(messages[index]):
+                    index += 1
+                if not index:
+                    return None
             while index < n and matched < len(target):
                 message = messages[index]
                 index += 1

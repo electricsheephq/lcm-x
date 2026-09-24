@@ -593,6 +593,68 @@ def test_unverified_summary_prefix_is_never_stripped(tmp_path, monkeypatch):
         engine.shutdown()
 
 
+def test_another_sessions_summary_part_is_not_a_carrier(tmp_path, monkeypatch):
+    """#484 item 11j: a summary part verifies only against a node of the bound
+    session. A row in session B quoting session A's exact rendered part plus text
+    is real content, so a restart reconcile stores it (duplicates at worst)."""
+    engine, _pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    part = _summary_message(compressed)["content"]
+    system = {"role": "system", "content": "You are concise."}
+    try:
+        engine.on_session_start("SB", platform="acp", conversation_id="conv-b", context_length=200_000)
+        engine.ingest([system, {"role": "user", "content": "same"}])
+        assert engine._store.get_session_count("SB") == 2
+    finally:
+        engine.shutdown()
+    resumed = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    try:
+        resumed.on_session_start("SB", platform="acp", conversation_id="conv-b", context_length=200_000)
+        quoted = {"role": "user", "content": part + "\n\nsame"}
+        resumed.ingest([system, quoted])
+        stored = [c for (c,) in resumed._store._conn.execute("SELECT content FROM messages WHERE session_id = 'SB'")]
+        assert stored.count(quoted["content"]) == 1  # stored, not skipped (a re-stored system row is #259)
+        assert resumed._generated_context_carrier_remainder(quoted) is None
+    finally:
+        resumed.shutdown()
+
+
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
+def test_scaffold_only_compaction_restart_before_first_ingest_stores_no_scaffold(tmp_path, monkeypatch, in_place):
+    """#484 item 11k: with fresh_tail_count=0 the compress() output can be scaffold
+    only (empty effective proof). A restart before the first ingest must not store
+    the generated scaffolds as raw rows, and the new user row is stored once."""
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
+    engine = LCMEngine(config=_config(tmp_path, fresh_tail_count=0), hermes_home=str(tmp_path / "home"))
+    child = "S0" if in_place else "S1"
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        host: list = [{"role": "system", "content": "You are concise."}]
+        for i in range(1, 13):
+            host.extend(_turn(i))
+            engine.ingest(host)
+        pre = list(host)
+        compressed = engine.compress(list(host), force=True)
+        assert engine._last_compression_status == "compacted"
+        assert all(engine._is_verified_replay_scaffold_message(m) for m in compressed), [
+            (m.get("role"), str(m.get("content"))[:60]) for m in compressed
+        ]
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(child, boundary_reason="compression", old_session_id="S0", platform="acp")
+    finally:
+        engine.shutdown()
+    resumed = LCMEngine(config=_config(tmp_path, fresh_tail_count=0), hermes_home=str(tmp_path / "home"))
+    try:
+        resumed.on_session_start(child, platform="acp", context_length=200_000)
+        new_user = {"role": "user", "content": "NEW-1147 first turn after the compaction"}
+        resumed.ingest(list(compressed) + [new_user])
+        rows = resumed._store._conn.execute("SELECT content FROM messages").fetchall()
+        assert sum(1 for (c,) in rows if re.search(r"Summary \(d\d+, node \d+\)", c or "")) == 0
+        assert sum(1 for (c,) in rows if "Lossless Context Management" in (c or "")) == 0
+        assert sum(1 for (c,) in rows if c == new_user["content"]) == 1
+    finally:
+        resumed.shutdown()
+
+
 def test_list_content_row_is_not_a_carrier(tmp_path, monkeypatch):
     engine, _pre, compressed = _compacted_engine(tmp_path, monkeypatch)
     try:

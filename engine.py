@@ -4834,7 +4834,8 @@ class LCMEngine(
         if not content.startswith("[") or "[Expand for details:" not in content:
             return None
         dag = getattr(self, "_dag", None)
-        if dag is None:
+        session_id = getattr(self, "_session_id", "")
+        if dag is None or not session_id:
             return None
         pos = 0
         saw_part = False
@@ -4846,7 +4847,10 @@ class LCMEngine(
                 node = dag.get_node(int(header.group(2)))
             except Exception:
                 return None
-            if node is None or int(node.depth) != int(header.group(1)):
+            # Only the bound session's own nodes: compress() renders them, and a
+            # rotation carries them to the child. A quoted part of another
+            # session's summary is content (#484 item 11j).
+            if node is None or node.session_id != session_id or int(node.depth) != int(header.group(1)):
                 return None
             label = {0: "Recent", 1: "Session Arc", 2: "Durable"}.get(node.depth, f"Depth-{node.depth}")
             part = (
