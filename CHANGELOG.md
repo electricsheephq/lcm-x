@@ -6,11 +6,6 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
-- Governance: the required `AI review exact-head` check, its workflow and its validator are
-  retired (#474). Enforcement is strict exact-head CI (the six checks), required review-thread
-  resolution and merge commits; AI review is recorded evidence under the `land-pr` review
-  obligation, and `scripts/maintainer_gate.py` reports the required review lanes as a hint.
-
 ## v0.24.0 - BREAKING: plugin renamed to hermes-lcm-x, engine to lcm-x (unreleased)
 
 **BREAKING.** The plugin manifest is renamed `hermes-lcm` → `hermes-lcm-x` and the context engine
@@ -59,6 +54,11 @@ Hermes plugin-catalog admission (#471):
   comment reworded); `hermes plugins validate` reports `security scan — safe`. The README lists
   the remaining informational findings.
 - `FINDINGS-VERDICTS-*.md` moved from the repository root to `docs/history/`.
+
+- Governance: the required `AI review exact-head` check, its workflow and its validator are
+  retired (#474). Enforcement is strict exact-head CI (the six checks), required review-thread
+  resolution and merge commits; AI review is recorded evidence under the `land-pr` review
+  obligation, and `scripts/maintainer_gate.py` reports the required review lanes as a hint.
 
 Unchanged: `lcm.db` (name and location), the `lcm:` config block, `LCM_*` environment
 variables, all `lcm_*` tool names, `/lcm`, the bundled skill name `hermes-lcm`, and the log line
