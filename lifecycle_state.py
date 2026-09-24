@@ -186,8 +186,18 @@ class LifecycleStateStore:
         if existing is not None:
             if existing.current_session_id == session_id:
                 return existing
+            # A session rebinding after its OWN finalize (same id; Hermes in-place
+            # compaction, restart/resume) resumes its published frontier: its DAG
+            # still claims every source row up to it (#483, #247 class).
             current_frontier = (
-                existing.current_frontier_store_id if existing.current_session_id == session_id else 0
+                existing.last_finalized_frontier_store_id
+                if existing.current_session_id is None
+                and existing.last_finalized_session_id == session_id
+                and (
+                    existing.last_reset_at is None
+                    or (existing.last_finalized_at or 0) >= existing.last_reset_at
+                )
+                else 0
             )
             current_bound_at = (
                 existing.current_bound_at if existing.current_session_id == session_id else now

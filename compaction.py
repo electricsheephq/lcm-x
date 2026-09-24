@@ -519,16 +519,56 @@ class CompactionMixin:
         """Run compaction and leave a terminal public status on every failure."""
         try:
             with self._fresh_tail_pressure_yield_invocation():
-                return self._compress_impl(
+                result = self._compress_impl(
                     messages,
                     current_tokens=current_tokens,
                     focus_topic=focus_topic,
                     force=force,
                 )
+            self._record_compress_commit_proof(messages, result)
+            return result
         except BaseException:
             self._last_compression_status = "error"
             self._last_compression_noop_reason = ""
             raise
+
+    def _record_compress_commit_proof(self, messages, result) -> None:
+        """Remember the exact host input of this compress() call (process-local).
+
+        Hermes commits a compaction by calling ``on_session_end(sid, <this input>)``
+        before it adopts ``result``. Every row of that input was ingested here,
+        and ``_ingest_cursor`` now indexes ``result``, so the session-end hook must
+        neither re-ingest the input nor finalize the session (#483).
+        """
+        try:
+            self._compress_commit_proof = None
+            if (
+                not self._session_id
+                or not isinstance(result, list)
+                or self._bypasses_lcm_context_management()
+                or self._ingest_cursor_needs_reconcile
+                or self._ingest_cursor != len(result)
+            ):
+                return
+            proof = {
+                "session_id": self._session_id,
+                "input": [self._message_replay_identity(m) for m in messages],
+                "output": [self._message_replay_identity(m) for m in result],
+                "end_consumed": False,
+            }
+            if proof["output"] == proof["input"]:
+                # No-progress compress: Hermes has nothing to commit, and an
+                # end call with this list must stay a real session end.
+                return
+            proof["output_effective"] = [
+                self._message_replay_identity(m)
+                for m in result
+                if not self._is_replayed_context_scaffold_message(m)
+            ]
+            proof["published"] = self._last_compression_status == "compacted"
+            self._compress_commit_proof = proof
+        except Exception:
+            self._compress_commit_proof = None
 
     def _fail_open_after_publication_failure(
         self,

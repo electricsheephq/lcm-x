@@ -483,6 +483,10 @@ class LCMEngine(
         # next ingest.
         self._ingest_cursor: int = 0
         self._ingest_cursor_needs_reconcile = False
+        # Compaction-commit proof of the last compress() (#483): its exact input
+        # and output identities, so the host's commit end call and the first
+        # post-compaction ingest can be verified instead of trusted by position.
+        self._compress_commit_proof: Optional[Dict[str, Any]] = None
         self._last_ingest_reconciliation: Dict[str, Any] = {
             "action": "none",
             "reason": "not run",
@@ -2932,6 +2936,51 @@ class LCMEngine(
             )
         self._update_model_pending_session_start = False
 
+    def _continue_in_place_compression_boundary(
+        self,
+        session_id: str,
+        kwargs: Dict[str, Any],
+    ) -> bool:
+        """Hermes in-place compaction: same id, same conversation, same LCM segment.
+
+        Keep the lifecycle binding, the published frontier and the ingest cursor
+        (it indexes compress()'s output). Returns False to fall back to the
+        generic rebind when the lifecycle row does not prove continuity.
+        """
+        if self._bypasses_lcm_context_management() or not self._conversation_id:
+            return False
+        state = self._lifecycle.get_by_conversation(self._conversation_id)
+        if state is None or state.current_session_id not in (None, session_id):
+            return False
+        if state.current_session_id is None:
+            if state.last_finalized_session_id != session_id:
+                return False
+            state = self._lifecycle.bind_session(session_id, conversation_id=state.conversation_id)
+        resumable_finalized = (
+            state.last_finalized_frontier_store_id
+            if state.last_finalized_session_id == session_id
+            and (state.last_reset_at is None or (state.last_finalized_at or 0) >= state.last_reset_at)
+            else 0
+        )
+        frontier = max(
+            int(self._last_compacted_store_id or 0),
+            int(state.current_frontier_store_id or 0),
+            int(resumable_finalized or 0),
+        )
+        if frontier > int(state.current_frontier_store_id or 0):
+            state = self._lifecycle.advance_frontier(self._conversation_id, session_id, frontier) or state
+        self._apply_session_start_metadata(session_id, kwargs)
+        self._last_compacted_store_id = int(state.current_frontier_store_id or 0)
+        self._clear_pending_reset_boundary()
+        self._log_session_filter_diagnostics()
+        logger.info(
+            "LCM in-place compression boundary kept %s bound (frontier=%d, cursor=%d)",
+            session_id,
+            self._last_compacted_store_id,
+            self._ingest_cursor,
+        )
+        return True
+
     def _continue_compression_boundary(
         self,
         session_id: str,
@@ -3329,6 +3378,13 @@ class LCMEngine(
                     logger.debug("LCM host fallback compressor reset failed", exc_info=True)
             self._host_fallback_compressor = None
             self._host_fallback_session_id = ""
+        if (
+            boundary_reason == "compression"
+            and old_session_id
+            and old_session_id == session_id == previous_session_id
+            and self._continue_in_place_compression_boundary(session_id, kwargs)
+        ):
+            return
         if boundary_reason == "compression" and old_session_id and old_session_id != session_id:
             old_session_is_suppressed_foreground = self._auxiliary_lineage_suppressed_as_foreground(
                 old_session_id
@@ -3799,6 +3855,24 @@ class LCMEngine(
                 "LCM ignored unverified stale session-end callback for %s while bound to %s",
                 session_id,
                 self._session_id,
+            )
+            return
+        proof = getattr(self, "_compress_commit_proof", None)
+        if (
+            proof
+            and proof.get("session_id") == session_id
+            and not proof.get("end_consumed")
+            and proof.get("input") is not None
+            and len(messages) == len(proof["input"])
+            and [self._message_replay_identity(m) for m in messages] == proof["input"]
+        ):
+            # Compaction commit, not a real session end (#483): every input row
+            # is already durable and the cursor indexes compress()'s output.
+            proof["end_consumed"] = True  # one-shot; a second identical end finalizes
+            logger.info(
+                "LCM treated session-end for %s as a compaction commit; "
+                "no re-ingest, lifecycle left bound",
+                session_id,
             )
             return
         try:
@@ -4658,6 +4732,27 @@ class LCMEngine(
                 return self._copy_active_replay_messages_preserving_generated_ids(cached)
         return None
 
+    def _remap_cursor_through_host_merge(self, messages, proof) -> Optional[int]:
+        """Re-index the post-compress cursor after the host merged scaffold rows.
+
+        The proof is our own compress() output: if the host's prefix carries the
+        same non-scaffold identities in the same order (a merged carrier keeps the
+        glued row's identity), the cursor moves to the end of that prefix.
+        """
+        target = proof.get("output_effective")
+        if not target:
+            return None
+        effective: list = []
+        for index, message in enumerate(messages):
+            if len(effective) == len(target):
+                return index if effective == target else None
+            if self._is_replayed_context_scaffold_message(message):
+                continue
+            effective.append(self._message_replay_identity(message))
+            if effective != target[: len(effective)]:
+                return None
+        return len(messages) if effective == target else None
+
     def _is_replayed_context_scaffold_message(self, msg: Dict[str, Any]) -> bool:
         """Return true for active-context scaffolding that should not be re-ingested."""
         if self._is_registered_folded_tail_message(msg):
@@ -4891,6 +4986,39 @@ class LCMEngine(
 
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
+        proof = getattr(self, "_compress_commit_proof", None)
+        if (
+            not self._ingest_cursor_needs_reconcile
+            and proof
+            and proof.get("session_id") == self._session_id
+            and self._ingest_cursor == len(proof.get("output") or ())
+            and self._ingest_cursor > 0
+        ):
+            # First ingest after a compaction: the cursor indexes compress()'s
+            # output. If the host rewrote that prefix (role repair, reply
+            # re-insertion), position no longer proves replay -> reconcile
+            # (#259: visible duplication beats silent loss).
+            host_input = proof.get("input")
+            if n >= self._ingest_cursor and [
+                self._message_replay_identity(m) for m in messages[: self._ingest_cursor]
+            ] == proof["output"]:
+                self._compress_commit_proof = None
+            elif proof.get("end_consumed") and host_input is not None and n >= len(host_input) and [
+                self._message_replay_identity(m) for m in messages[: len(host_input)]
+            ] == host_input:
+                # The host committed, then kept the compress() input (anti-growth
+                # refusal or rollback): every row of it is durable, resume after it.
+                self._ingest_cursor = len(host_input)
+                cursor = self._ingest_cursor
+                self._compress_commit_proof = None
+            else:
+                remapped = self._remap_cursor_through_host_merge(messages, proof)
+                if remapped is not None:
+                    self._ingest_cursor = remapped
+                    cursor = remapped
+                    self._compress_commit_proof = None
+                else:
+                    self._ingest_cursor_needs_reconcile = True
         scan_start = 0 if self._ingest_cursor_needs_reconcile else cursor
         ignored_original_messages = [False] * n
         if self._compiled_ignore_message_patterns:
