@@ -1,10 +1,11 @@
+import re
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 IDENTITY_VERSION = "0.24.0"
-RC_TAG = "0.24.0-rc2"
+RC_TAG = "0.24.0-rc3"
 RELEASE_NOTES = REPO_ROOT / ".github" / "release-notes" / f"v{RC_TAG}.md"
 
 
@@ -108,4 +109,9 @@ def test_release_candidate_notes_cover_only_the_merged_release_scope():
     assert "## Benchmark boundary" in section_headers
     assert "## Upgrade" in section_headers
     assert "**BREAKING.**" in notes
-    assert 45 <= len(lines) <= 100
+    # rc3 adds the #483 compaction-fix section and its known issues (148 lines).
+    assert 45 <= len(lines) <= 150
+    # Curated notes, never a pasted commit log: no one-line log entries or full `git log` blocks.
+    one_line_log = re.compile(r"^\s*(?:[-*]\s+)?`?[0-9a-f]{7,40}`?\s")
+    full_log = re.compile(r"^(?:commit [0-9a-f]{40}\b|Author: |Date: )")
+    assert not [line for line in lines if one_line_log.match(line) or full_log.match(line)]
