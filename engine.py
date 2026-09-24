@@ -4857,6 +4857,29 @@ class LCMEngine(
         r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d(\d+), node (\d+)\)\]\n"
     )
 
+    def _stored_user_objective_matches(self, content: str) -> bool:
+        """Return whether the bound conversation already stores this objective."""
+        session_id = str(getattr(self, "_session_id", "") or "")
+        conversation_id = str(getattr(self, "_conversation_id", "") or "")
+        if not session_id and not conversation_id:
+            return False
+        clauses, args = [], []
+        if session_id:
+            clauses.append("session_id = ?")
+            args.append(session_id)
+        if conversation_id:
+            clauses.append("conversation_id = ?")
+            args.append(conversation_id)
+        try:
+            rows = self._store._conn.execute(
+                "SELECT content FROM messages WHERE role = 'user' AND ("
+                + " OR ".join(clauses) + ")",
+                args,
+            )
+            return any(str(row[0] or "").strip() == content.strip() for row in rows)
+        except Exception:
+            return False
+
     def _verified_lcm_summary_prefix_end(self, content: str) -> Optional[int]:
         """End offset of the leading LCM summary parts, each verified byte for byte
         against its DAG node; None when the content does not start with one."""
@@ -4871,12 +4894,15 @@ class LCMEngine(
         if content.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX + "\n"):
             # compress() puts the preserved objective first and joins summary
             # parts behind it with "\n\n---\n\n" (_assemble_context).
-            search = len(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) + 1
+            objective_start = len(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) + 1
+            search = objective_start
             while True:
                 sep = content.find("\n\n---\n\n", search)
                 if sep < 0:
                     return None
                 if self._LCM_SUMMARY_PART_HEADER_RE.match(content, sep + 7):
+                    if not self._stored_user_objective_matches(content[objective_start:sep]):
+                        return None
                     pos = sep + 7
                     break
                 search = sep + 1

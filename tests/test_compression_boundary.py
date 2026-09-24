@@ -839,7 +839,7 @@ def test_stored_non_head_carrier_does_not_hide_later_standalone_row(
 
 
 def _first_continuation_paste_then_standalone_result(
-    tmp_path, monkeypatch, *, in_place, tail, system
+    tmp_path, monkeypatch, *, in_place, tail, system, shape
 ):
     engine, pre, compressed = _compacted_engine(
         tmp_path, monkeypatch, tail=tail, system=system
@@ -847,7 +847,14 @@ def _first_continuation_paste_then_standalone_result(
     child = "S0" if in_place else "S1"
     block = _summary_block(compressed)
     standalone = "FIRST-X genuinely new standalone row"
-    pasted = block + "\n\n" + standalone
+    preface = block
+    if shape == "objective":
+        preface = (
+            "[Current user objective preserved from compacted history]\n"
+            "THIS IS USER-AUTHORED CONTENT\n\n---\n\n"
+            + block
+        )
+    pasted = preface + "\n\n" + standalone
     host = list(compressed)
     try:
         engine.on_session_end("S0", pre)
@@ -874,8 +881,9 @@ def _first_continuation_paste_then_standalone_result(
 @pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
 @pytest.mark.parametrize("tail", [0, 6], ids=["tail0", "tail6"])
 @pytest.mark.parametrize("system", [False, True], ids=["no-system", "system"])
+@pytest.mark.parametrize("shape", ["summary", "objective"])
 def test_first_stored_continuation_keeps_full_identity(
-    tmp_path, monkeypatch, in_place, tail, system
+    tmp_path, monkeypatch, in_place, tail, system, shape
 ):
     pasted_count, standalone_count = _first_continuation_paste_then_standalone_result(
         tmp_path,
@@ -883,9 +891,182 @@ def test_first_stored_continuation_keeps_full_identity(
         in_place=in_place,
         tail=tail,
         system=system,
+        shape=shape,
     )
     assert pasted_count == 1
     assert standalone_count == 1
+
+
+@pytest.mark.parametrize("tail", [1, 7], ids=["tail1", "tail7"])
+@pytest.mark.parametrize("system", [False, True], ids=["head0", "after-system"])
+def test_authored_objective_head_requires_stored_evidence(
+    tmp_path, monkeypatch, tail, system
+):
+    engine, pre, compressed = _compacted_engine(
+        tmp_path, monkeypatch, tail=tail, system=system
+    )
+    host = [dict(message) for message in compressed]
+    head = next(index for index, message in enumerate(host) if message["role"] != "system")
+    host[head] = {
+        "role": "user",
+        "content": (
+            "[Current user objective preserved from compacted history]\n"
+            "USER-AUTHORED-NEW-TEXT\n\n---\n\n"
+            + _summary_block(compressed)
+        ),
+    }
+    host = _host_merge_consecutive_users(host)
+    pasted = host[head]["content"]
+    try:
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(
+            "S1",
+            boundary_reason="compression",
+            old_session_id="S0",
+            platform="acp",
+        )
+        assert engine._store.get_session_count("S1") == 0
+        engine = _restart_compacted_engine(engine, tmp_path, "S1", tail=tail)
+        engine.ingest(host)
+        assert _stored_content(engine).count(pasted) == 1
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
+def test_generated_objective_head_still_replays_without_storage(
+    tmp_path, monkeypatch, in_place
+):
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch, tail=0)
+    child = "S0" if in_place else "S1"
+    host = _host_merge_consecutive_users(list(compressed))
+    assert str(host[0].get("content") or "").startswith(
+        "[Current user objective preserved from compacted history]"
+    )
+    try:
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(
+            child,
+            boundary_reason="compression",
+            old_session_id="S0",
+            platform="acp",
+        )
+        engine = _restart_compacted_engine(engine, tmp_path, child, tail=0)
+        before = engine._store.get_session_count(child)
+        engine.ingest(host)
+        assert engine._store.get_session_count(child) == before
+    finally:
+        engine.shutdown()
+
+
+def _commit_test_compaction(engine, host, sid, *, in_place, cycle):
+    pre = list(host)
+    compressed = engine.compress(list(host), force=True)
+    status = engine._last_compression_status
+    engine.on_session_end(sid, pre)
+    child = sid if in_place else f"S{cycle}"
+    engine.on_session_start(
+        child,
+        boundary_reason="compression",
+        old_session_id=sid,
+        platform="acp",
+    )
+    return compressed, child, status
+
+
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
+def test_summary_prefixed_paste_keeps_publishing_across_three_cycles(
+    tmp_path, monkeypatch, in_place
+):
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch, tail=6)
+    sid = "S0"
+    host = list(compressed)
+    try:
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(
+            sid,
+            boundary_reason="compression",
+            old_session_id="S0",
+            platform="acp",
+        )
+        host.append(_turn(13)[1])
+        engine.ingest(host)
+        host.append(
+            {
+                "role": "user",
+                "content": _summary_block(compressed)
+                + "\n\nPASTE-X my question after the pasted block",
+            }
+        )
+        engine.ingest(host)
+        host.append({"role": "assistant", "content": "reply to the pasted row"})
+        engine.ingest(host)
+        for cycle in range(1, 4):
+            for turn in range(4):
+                user, reply = _turn(20 + cycle * 10 + turn)
+                host.append(user)
+                engine.ingest(host)
+                host.append(reply)
+                engine.ingest(host)
+            host.append(_turn(20 + cycle * 10 + 4)[0])
+            engine.ingest(host)
+            host, sid, status = _commit_test_compaction(
+                engine, host, sid, in_place=in_place, cycle=cycle
+            )
+            assert status == "compacted"
+            host = list(host)
+            host.append(_turn(20 + cycle * 10 + 4)[1])
+            engine.ingest(host)
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
+@pytest.mark.parametrize("system", [False, True], ids=["no-system", "system"])
+def test_merged_objective_head_keeps_publishing_across_three_cycles(
+    tmp_path, monkeypatch, in_place, system
+):
+    engine, pre, compressed = _compacted_engine(
+        tmp_path, monkeypatch, tail=0, system=system
+    )
+    sid = "S0"
+    host = list(compressed)
+    try:
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(
+            sid,
+            boundary_reason="compression",
+            old_session_id="S0",
+            platform="acp",
+        )
+        for cycle in range(1, 4):
+            host.append(
+                {
+                    "role": "user",
+                    "content": f"NEW-{cycle} typed after compaction {cycle}",
+                }
+            )
+            host = _host_merge_consecutive_users(host)
+            engine.ingest(host)
+            host.append({"role": "assistant", "content": f"reply to NEW-{cycle}"})
+            engine.ingest(host)
+            for turn in range(4):
+                user, reply = _turn(60 + cycle * 10 + turn)
+                host.append(user)
+                host = _host_merge_consecutive_users(host)
+                engine.ingest(host)
+                host.append(reply)
+                engine.ingest(host)
+            host.append(_turn(60 + cycle * 10 + 4)[0])
+            host = _host_merge_consecutive_users(host)
+            engine.ingest(host)
+            host, sid, status = _commit_test_compaction(
+                engine, host, sid, in_place=in_place, cycle=cycle
+            )
+            assert status == "compacted"
+            host = _host_merge_consecutive_users(list(host))
+    finally:
+        engine.shutdown()
 
 
 def _mid_list_paste_duplicates(tmp_path, monkeypatch, *, in_place, restarts, prefixed):

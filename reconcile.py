@@ -2268,13 +2268,22 @@ class ReconcileMixin:
             candidates.extend(page)
             next_candidate_after = page[-1]["store_id"]
 
+        stored_full_ids = {
+            self._message_replay_identity(candidate, stored_row=True)
+            for candidate in candidates
+        }
+
         def active_lineage_identity(
             message: Dict[str, Any],
         ) -> tuple[str, str, str, str, str]:
-            return active_lineage_identities.get(
-                id(message),
-                self._message_replay_identity(message),
-            )
+            override = active_lineage_identities.get(id(message))
+            if override is not None:
+                return override
+            stripped = self._message_replay_identity(message)
+            full = self._message_replay_identity(message, carrier=False)
+            if full != stripped and full in stored_full_ids and stripped not in stored_full_ids:
+                return full
+            return stripped
 
         active_identity_counts: dict[tuple[Any, ...], int] = {}
         for msg in messages:
