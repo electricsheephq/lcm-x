@@ -208,7 +208,7 @@ def _assert_each_turn_stored_once(result) -> None:
                     "separate rotation defect, not the persist rewrite: a 2nd compaction inside a "
                     "rotation child hits publication_invariant_conflict, the host still rotates the "
                     "no-progress result into a proof-less child, and that child re-stores its "
-                    "context (reproduces with no whitespace; rotation-child conflict issue)"
+                    "context (reproduces with no whitespace; rotation-child conflict, #495)"
                 ),
             ),
         ),
