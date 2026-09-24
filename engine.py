@@ -3301,6 +3301,13 @@ class LCMEngine(
             and not self._ingest_cursor_needs_reconcile
             and self._ingest_cursor == len(commit_proof.get("output") or ())
         ):
+            inherited_ranges = self._coalesce_compression_carry_ranges(
+                (carried_session_id, max(range_start, frontier), range_end)
+                for carried_session_id, range_start, range_end
+                in (commit_proof.get("carry_ranges") or ())
+                if range_end > frontier
+            )
+            commit_proof["carry_ranges"] = inherited_ranges
             # The child segment starts from compress()'s output: re-key the proof
             # so its first ingest re-indexes a host-merged prefix instead of
             # trusting a positional cursor, and persist it for a resumed child.
@@ -6976,6 +6983,7 @@ class LCMEngine(
                     )
 
         retained_generated_context_parts: list[str] = []
+        summary_message: Optional[Dict[str, Any]] = None
         if summary_parts:
             selected_parts = summary_parts
             if summary_budget is not None:
@@ -6993,7 +7001,8 @@ class LCMEngine(
                 if retained_user_msg is not None:
                     retained_generated_context_parts.append(combined)
                 else:
-                    result.append({"role": summary_role, "content": combined})
+                    summary_message = {"role": summary_role, "content": combined}
+                    result.append(summary_message)
 
         # Proactive memory injection (SPEC F, default-off). One bounded block is
         # placed adjacent to the summary prefix — a stable position below the
@@ -7053,7 +7062,31 @@ class LCMEngine(
                     {"role": summary_role, "content": generated_context}
                 )
 
-        # Fresh tail
+        # Fresh tail. A user-role summary directly ahead of a historical user
+        # row is emitted as the carrier a host's alternation repair would build
+        # ("summary\n\nrow", identified by _generated_context_carrier_remainder).
+        # A rotating host (Hermes) otherwise publishes both rows, merges them in
+        # memory, and re-flushes the merge as a new row; the durable child then
+        # outgrows the live list and is adopted into the next compress().
+        if (
+            summary_message is not None
+            and leading_msg is None
+            and result
+            and result[-1] is summary_message
+            and tail_selected
+            and tail_selected[0].get("role") == "user"
+            and isinstance(tail_selected[0].get("content"), str)
+            and any(message.get("role") == "user" for message in tail_selected[1:])
+        ):
+            # This shape deliberately matches Hermes _merge_consecutive_users;
+            # copying api_content or row fields would replay the sidecar instead of the summary.
+            carrier = {
+                "role": "user",
+                "content": f"{summary_message['content']}\n\n{tail_selected[0]['content']}",
+            }
+            if self._generated_context_carrier_remainder(carrier) == tail_selected[0]["content"]:
+                result[-1] = carrier
+                tail_selected = tail_selected[1:]
         result.extend(tail_selected)
 
         # ── Active-context cleanup / tool-pair guardrail ──

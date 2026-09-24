@@ -533,6 +533,18 @@ class CompactionMixin:
                     focus_topic=focus_topic,
                     force=force,
                 )
+            if (
+                isinstance(result, list)
+                and result is not messages
+                and self._last_compression_status != "error"
+                and len(result) == len(messages)
+                and all(
+                    self._public_compression_row(left)
+                    == self._public_compression_row(right)
+                    for left, right in zip(result, messages)
+                )
+            ):
+                result = messages
             self._record_compress_commit_proof(messages, result)
             proof_missing = self._last_compression_status == "host_native" and self._compress_commit_proof is None
             if proof_missing:
@@ -544,6 +556,13 @@ class CompactionMixin:
             self._last_compression_status = "error"
             self._last_compression_noop_reason = ""
             raise
+
+    @staticmethod
+    def _public_compression_row(message: Any) -> Any:
+        if not isinstance(message, dict):
+            return message
+        return {key: value for key, value in message.items()
+                if key != "timestamp" and not str(key).startswith("_")}
 
     def _record_compress_commit_proof(self, messages, result) -> None:
         """Remember the exact host input of this compress() call (process-local).
@@ -563,12 +582,20 @@ class CompactionMixin:
                 or self._ingest_cursor != len(result)
             ):
                 return
+            carried_rows = self._store.get_batch(
+                sorted(set(self._get_store_ids_for_messages(result)))
+            )
             proof = {
                 "session_id": self._session_id,
                 "conversation_id": self._conversation_id,
                 "input": [self._proof_replay_identity(m) for m in messages],
                 "output": [self._proof_replay_identity(m) for m in result],
                 "end_consumed": False,
+                "carry_ranges": self._coalesce_compression_carry_ranges(
+                    (str(row["session_id"]), store_id - 1, store_id)
+                    for store_id, row in sorted(carried_rows.items())
+                    if row.get("session_id")
+                ),
             }
             if proof["output"] == proof["input"]:
                 # No-progress compress: Hermes has nothing to commit, and an
@@ -628,6 +655,12 @@ class CompactionMixin:
                 "droppable": list(proof.get("droppable") or []),
                 "skip_landing": list(proof.get("skip_landing") or []),
                 "native_summary_index": proof.get("native_summary_index"),
+                "carry_ranges": [
+                    list(item)
+                    for item in self._coalesce_compression_carry_ranges(
+                        proof.get("carry_ranges") or []
+                    )
+                ],
             }
             if not proof["output_effective"]:
                 # Scaffold-only output: bind the proof to the emitted rows (#484 item 11l).
@@ -923,28 +956,35 @@ class CompactionMixin:
         covered_end: int,
         already_proven_store_ids: List[int],
         initial_proofs: Dict[int, Any],
+        carried_ranges: List[tuple[str, int, int]] | None = None,
     ) -> Dict[int, Any]:
         proven = {int(store_id) for store_id in already_proven_store_ids}
         proofs = dict(initial_proofs)
-        after_store_id = expected_frontier
-        while after_store_id < covered_end:
-            rows = self._store.get_session_messages_after(
-                self._session_id,
-                after_store_id=after_store_id,
-            )
-            if not rows:
-                break
-            for row in rows:
-                store_id = int(row.get("store_id") or 0)
-                if store_id > covered_end:
+        scan_ranges = [(self._session_id, expected_frontier, covered_end)]
+        scan_ranges.extend(
+            (source, max(expected_frontier, start), min(covered_end, end))
+            for source, start, end in (carried_ranges or [])
+        )
+        for source_session_id, range_start, range_end in scan_ranges:
+            after_store_id = range_start
+            while after_store_id < range_end:
+                rows = self._store.get_session_messages_after(
+                    source_session_id,
+                    after_store_id=after_store_id,
+                )
+                if not rows:
                     break
-                if (
-                    store_id not in proven
-                    and store_id not in proofs
-                    and self._matches_ignore_message_patterns(row, stored_row=True)
-                ):
-                    proofs[store_id] = row.get("content")
-            after_store_id = int(rows[-1].get("store_id") or after_store_id)
+                for row in rows:
+                    store_id = int(row.get("store_id") or 0)
+                    if store_id > range_end:
+                        break
+                    if (
+                        store_id not in proven
+                        and store_id not in proofs
+                        and self._matches_ignore_message_patterns(row, stored_row=True)
+                    ):
+                        proofs[store_id] = row.get("content")
+                after_store_id = int(rows[-1].get("store_id") or after_store_id)
         return proofs
 
     def _compress_impl(self, messages: List[Dict[str, Any]],
@@ -1405,9 +1445,17 @@ class CompactionMixin:
                 break
 
             selected_raw_chunk = to_compact
-            summary_input_chunk = [
-                message for message in selected_raw_chunk if id(message) not in dependent_reply_message_ids
-            ]
+            sources = {}
+            summary_input_chunk = []
+            for message in selected_raw_chunk:
+                if id(message) in dependent_reply_message_ids:
+                    continue
+                remainder = self._generated_context_carrier_remainder(message)
+                if remainder is not None:
+                    original = message
+                    message = {**message, "content": remainder}
+                    sources[id(message)] = original
+                summary_input_chunk.append(message)
             if not summary_input_chunk:
                 compacted_chunk = selected_raw_chunk
                 source_tokens = count_messages_tokens(selected_raw_chunk)
@@ -1462,6 +1510,7 @@ class CompactionMixin:
                         )
                         break
                     raise
+            compacted_chunk = [sources.get(id(message), message) for message in compacted_chunk]
             compacted_summary_ids = {id(message) for message in compacted_chunk}
             compacted_positions = [
                 idx for idx, message in enumerate(selected_raw_chunk) if id(message) in compacted_summary_ids
@@ -1510,11 +1559,13 @@ class CompactionMixin:
             expected_frontier = int(
                 getattr(publication_state, "current_frontier_store_id", 0)
             )
+            carried_ranges = self._load_compression_carry_ranges()
             filter_exclusion_proofs = self._stored_publication_filter_exclusions(
                 expected_frontier,
                 published_frontier,
                 consumed_store_ids,
                 filter_exclusion_proofs,
+                carried_ranges,
             )
             publication_excluded_store_ids.extend(filter_exclusion_proofs)
             # The frontier consumes every durable row removed from the active
@@ -1535,6 +1586,7 @@ class CompactionMixin:
                             consumed_store_ids,
                             publication_excluded_store_ids,
                             filter_exclusion_proofs,
+                            carried_ranges,
                         )
                     before_commit = stage_frontier
                 self._dag.add_node(node, before_commit=before_commit)

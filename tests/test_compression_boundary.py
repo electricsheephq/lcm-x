@@ -9,6 +9,7 @@ import hermes_lcm.engine as lcm_engine_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.lifecycle_state import LifecyclePublicationConflictError
 from hermes_lcm.reconcile import _commit_proof_identity_digest
 
 
@@ -550,6 +551,205 @@ def _summary_message(compressed):
     raise AssertionError("compress() output carries no LCM summary")
 
 
+def _summary_carrier_fixture(tmp_path):
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "carrier.db"),
+            fresh_tail_count=3,
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    engine.on_session_start("S0", platform="acp", context_length=200_000)
+    compacted = {"role": "assistant", "content": "older compacted answer"}
+    compacted_id = engine._store.append("S0", compacted)
+    engine._last_compacted_store_id = compacted_id
+    engine._dag.add_node(
+        SummaryNode(
+            session_id="S0",
+            depth=0,
+            summary="Carrier summary.",
+            token_count=3,
+            source_token_count=5,
+            source_ids=[compacted_id],
+            source_type="messages",
+            created_at=time.time(),
+            earliest_at=time.time(),
+            latest_at=time.time(),
+            expand_hint="carrier summary",
+        )
+    )
+    tail = [
+        {"role": "user", "content": "historical user row"},
+        {"role": "assistant", "content": "historical assistant row"},
+        {"role": "user", "content": "current prompt"},
+    ]
+    tail_ids = engine._store.append_batch("S0", tail)
+    return engine, compacted, tail, tail_ids
+
+
+def test_assembly_emits_verified_summary_carrier_with_original_row_identity(tmp_path):
+    engine, compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        assembled = engine._assemble_context(None, tail)
+        carrier = assembled[0]
+
+        assert engine._generated_context_carrier_remainder(carrier) == tail[0]["content"]
+        assert engine._proof_replay_identity(carrier) == engine._proof_replay_identity(tail[0])
+        assert assembled[1:] == tail[1:]
+
+        engine._ingest_cursor = len(assembled)
+        engine._ingest_cursor_needs_reconcile = False
+        engine._record_compress_commit_proof([compacted, *tail], assembled)
+        proof = engine._compress_commit_proof
+        assert proof is not None
+        assert proof["output"][0] == engine._proof_replay_identity(tail[0])
+        assert proof["output_effective"][0] == engine._proof_replay_identity(tail[0])
+    finally:
+        engine.shutdown()
+
+
+def test_assembly_never_folds_the_only_tail_user_current_prompt(tmp_path):
+    engine, _compacted, _tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    current = {"role": "user", "content": "current prompt"}
+    try:
+        assembled = engine._assemble_context(None, [current])
+        assert len(assembled) == 2
+        assert engine._generated_context_carrier_remainder(assembled[0]) is None
+        assert assembled[1] == current
+    finally:
+        engine.shutdown()
+
+
+def test_assembly_does_not_fold_list_content_user_row(tmp_path):
+    engine, _compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    multimodal = {
+        "role": "user",
+        "content": [{"type": "text", "text": "historical multimodal row"}],
+    }
+    try:
+        assembled = engine._assemble_context(None, [multimodal, *tail[1:]])
+        assert engine._generated_context_carrier_remainder(assembled[0]) is None
+        assert assembled[1] == multimodal
+    finally:
+        engine.shutdown()
+
+
+def test_assembly_with_system_message_keeps_summary_and_tail_separate(tmp_path):
+    engine, _compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        assembled = engine._assemble_context(
+            {"role": "system", "content": "system prompt"},
+            tail,
+            include_lcm_note=False,
+        )
+        assert assembled[0] == {"role": "system", "content": "system prompt"}
+        assert engine._generated_context_carrier_remainder(assembled[1]) is None
+        assert assembled[2:] == tail
+    finally:
+        engine.shutdown()
+
+
+def test_summary_carrier_maps_to_original_store_id_and_carry_range(tmp_path):
+    engine, compacted, tail, tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        assembled = engine._assemble_context(None, tail)
+        carrier = assembled[0]
+        assert engine._get_store_ids_for_messages(assembled)[0] == tail_ids[0]
+
+        engine._ingest_cursor = len(assembled)
+        engine._ingest_cursor_needs_reconcile = False
+        engine._record_compress_commit_proof([compacted, *tail], assembled)
+        assert engine._compress_commit_proof is not None
+        assert engine._compress_commit_proof["carry_ranges"] == [
+            ("S0", tail_ids[0] - 1, tail_ids[-1])
+        ]
+        assert engine._generated_context_carrier_remainder(carrier) == tail[0]["content"]
+    finally:
+        engine.shutdown()
+
+
+def test_compress_commit_proof_coalesces_contiguous_carry_rows(tmp_path):
+    engine = LCMEngine(
+        config=_config(tmp_path),
+        hermes_home=str(tmp_path / "home"),
+    )
+    messages = [
+        {"role": "user", "content": f"message {index}"}
+        for index in range(4)
+    ]
+    try:
+        engine.on_session_start(
+            "S0",
+            platform="acp",
+            conversation_id="carry-coalescing",
+            context_length=200_000,
+        )
+        engine.ingest(messages)
+        result = messages[1:]
+        engine._ingest_cursor = len(result)
+        engine._ingest_cursor_needs_reconcile = False
+        engine._record_compress_commit_proof(messages, result)
+        assert engine._compress_commit_proof["carry_ranges"] == [("S0", 1, 4)]
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("restart", ["none", "before-adoption", "after-adoption"])
+def test_native_adoption_with_summary_carrier_survives_restart_without_loss(
+    tmp_path, restart
+):
+    engine, compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    adopted = [
+        {"role": "user", "content": "Synthetic native summary."},
+        *engine._assemble_context(None, tail),
+    ]
+    engine._last_compression_status = "host_native"
+    engine._last_native_summary_index = 0
+    engine._ingest_cursor = len(adopted)
+    engine._ingest_cursor_needs_reconcile = False
+    engine._record_compress_commit_proof([compacted, *tail], adopted)
+    assert engine._compress_commit_proof is not None
+    assert engine._compress_commit_proof["native"] is True
+    assert engine._generated_context_carrier_remainder(adopted[1]) == tail[0]["content"]
+    assert engine._durable_commit_proof_payload() is not None
+
+    def resumed_engine():
+        return LCMEngine(
+            config=LCMConfig(
+                database_path=str(tmp_path / "carrier.db"),
+                fresh_tail_count=3,
+                large_output_externalization_path=str(tmp_path / "externalized"),
+            ),
+            hermes_home=str(tmp_path / "home"),
+        )
+
+    if restart == "before-adoption":
+        engine.shutdown()
+        engine = resumed_engine()
+        engine.on_session_start("S0", platform="acp")
+        assert engine._durable_commit_proof_payload() is not None
+    elif restart == "after-adoption":
+        engine.ingest(adopted)
+        engine.shutdown()
+        engine = resumed_engine()
+        engine.on_session_start("S0", platform="acp")
+        assert engine._durable_commit_proof_payload() is not None
+
+    appended = {"role": "assistant", "content": "post-adoption reply"}
+    try:
+        engine.ingest([*adopted, appended])
+        stored = engine._store.get_session_messages("S0")
+        assert len(stored) == 5
+        assert [row["content"] for row in stored] == [
+            compacted["content"],
+            *(row["content"] for row in tail),
+            appended["content"],
+        ]
+    finally:
+        engine.shutdown()
+
+
 @pytest.mark.parametrize("separator", ["\n\n", "\n\n---\n\n"])
 def test_host_merged_summary_carrier_is_identified_by_its_glued_row(tmp_path, monkeypatch, separator):
     """C5: summary + separator + real user row is a carrier, not scaffold, and
@@ -819,6 +1019,220 @@ def test_rotation_moves_the_commit_proof_to_the_child(tmp_path, monkeypatch):
         child = _durable_commit_proof(engine, "S1")
         assert child["last_store_id"] == 0
         assert child["effective_sha256"] == _durable_commit_proof(engine, "S0")["effective_sha256"]
+    finally:
+        engine.shutdown()
+
+
+def test_proofless_rotation_child_gets_no_carry_authority(tmp_path, monkeypatch):
+    engine, pre, _compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        engine._compress_commit_proof = None
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(
+            "S1", boundary_reason="compression", old_session_id="S0", platform="acp"
+        )
+        assert engine._load_compression_carry_ranges() == []
+    finally:
+        engine.shutdown()
+
+
+def test_rotation_inherits_only_open_grandparent_carry_and_reset_clears_it(
+    tmp_path, monkeypatch
+):
+    engine, pre, _compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        frontier = engine._last_compacted_store_id
+        proof = engine._compress_commit_proof
+        proof["carry_ranges"] = [
+            ("closed-grandparent", 0, frontier),
+            ("open-grandparent", frontier - 1, frontier + 2),
+            ("open-grandparent", frontier + 2, frontier + 5),
+        ]
+        engine._persist_compress_commit_proof(proof)
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(
+            "S1", boundary_reason="compression", old_session_id="S0", platform="acp"
+        )
+        inherited = engine._load_compression_carry_ranges()
+        assert inherited == [("open-grandparent", frontier, frontier + 5)]
+
+        engine.on_session_reset()
+        assert engine._compress_commit_proof is None
+        assert engine._load_compression_carry_ranges() == []
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("restart_child", [False, True], ids=["live", "restart"])
+def test_rotation_child_can_compact_only_parent_carried_rows(
+    tmp_path, monkeypatch, restart_child
+):
+    """#495: a proof-backed child may publish the parent's still-open rows."""
+    engine, pre, compressed = _compacted_engine(
+        tmp_path, monkeypatch, turns=12, tail=6
+    )
+    try:
+        frontier = engine._last_compacted_store_id
+        carried_ids = {
+            int(row[0])
+            for row in engine._store._conn.execute(
+                "SELECT store_id FROM messages "
+                "WHERE session_id = 'S0' AND store_id > ? ORDER BY store_id",
+                (frontier,),
+            )
+        }
+        assert carried_ids
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(
+            "S1", boundary_reason="compression", old_session_id="S0", platform="acp"
+        )
+        engine._config.fresh_tail_count = 2
+        engine.protect_last_n = 2
+        if restart_child:
+            engine.shutdown()
+            engine = LCMEngine(
+                config=LCMConfig(
+                    database_path=str(tmp_path / "lcm.db"),
+                    fresh_tail_count=2,
+                    leaf_chunk_tokens=400,
+                    large_output_externalization_path=str(tmp_path / "externalized"),
+                ),
+                hermes_home=str(tmp_path / "home"),
+            )
+            engine.on_session_start("S1", platform="acp", context_length=200_000)
+
+        host = list(compressed)
+        host.extend(_turn(14))
+        engine.ingest(host)
+        existing_node_ids = {
+            node.node_id for node in engine._dag.get_session_nodes("S1")
+        }
+
+        engine.compress(list(host), force=True)
+
+        assert engine._last_compression_status == "compacted"
+        new_nodes = [
+            node
+            for node in engine._dag.get_session_nodes("S1")
+            if node.node_id not in existing_node_ids
+        ]
+        assert len(new_nodes) == 1
+        assert new_nodes[0].source_ids
+        assert set(new_nodes[0].source_ids) <= carried_ids
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("dropped", ["empty-parent-row", "ignored-carried-row"])
+def test_rotation_child_publication_uses_only_rows_the_proof_carried(
+    tmp_path, monkeypatch, dropped
+):
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "lcm.db"),
+            fresh_tail_count=8,
+            leaf_chunk_tokens=400,
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        host = []
+        marker = "DROP_ME carried parent row"
+        for i in range(1, 13):
+            user, assistant = _turn(i)
+            if i == 10:
+                assistant = {
+                    "role": "assistant",
+                    "content": "" if dropped == "empty-parent-row" else marker,
+                }
+            host.extend([user, assistant])
+            engine.ingest(host)
+        host.append(_turn(13)[0])
+        engine.ingest(host)
+        pre = list(host)
+        compressed = engine.compress(list(host), force=True)
+        assert engine._last_compression_status == "compacted"
+
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(
+            "S1", boundary_reason="compression", old_session_id="S0", platform="acp"
+        )
+        if dropped == "ignored-carried-row":
+            class DropPattern:
+                def search(self, text, timeout=None):
+                    del timeout
+                    return object() if marker in str(text) else None
+
+            engine._compiled_ignore_message_patterns = [DropPattern()]
+        engine._config.fresh_tail_count = 2
+        engine.protect_last_n = 2
+        child = list(compressed)
+        if dropped == "ignored-carried-row":
+            child = [
+                message
+                for message in child
+                if marker not in str(message.get("content") or "")
+            ]
+        child.extend(_turn(14))
+        engine.ingest(child)
+        result = engine.compress(list(child), force=True)
+
+        assert engine._last_compression_status == "compacted"
+        assert len(result) < len(child)
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("path", ["fail-open", "sanitized"])
+def test_compress_returns_input_object_when_only_host_metadata_differs(
+    tmp_path, monkeypatch, path
+):
+    """#495: metadata-only rewrites are no progress to the Hermes host."""
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "lcm.db"),
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": "unchanged payload",
+            "_row_id": 7,
+            "_db_persisted": True,
+            "timestamp": 123.0,
+        }
+    ]
+    public_rows = [{"role": "user", "content": "unchanged payload"}]
+
+    def compress_impl(*_args, **_kwargs):
+        if path == "fail-open":
+            return engine._fail_open_after_publication_failure(
+                public_rows,
+                LifecyclePublicationConflictError("injected conflict"),
+                compress_started=time.perf_counter(),
+                threshold_full_sweep_active=False,
+                recovery_assembly_cap=None,
+                leaf_passes=0,
+            )
+        engine._last_compression_status = "sanitized"
+        return engine._sanitize_active_context_messages(
+            public_rows,
+            insert_missing_tool_stubs=False,
+        )
+
+    monkeypatch.setattr(engine, "_compress_impl", compress_impl)
+    try:
+        result = engine.compress(messages)
+        if path == "fail-open":
+            assert engine._last_compression_status == "error"
+            assert result is public_rows
+        else:
+            assert result is messages
     finally:
         engine.shutdown()
 

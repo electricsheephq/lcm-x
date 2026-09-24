@@ -21,6 +21,9 @@ from typing import Any, Optional
 from .db_bootstrap import configure_connection, refuse_schema_version_too_new, run_versioned_migrations
 
 
+_OWNERSHIP_QUERY_MAX_RANGES = 200
+
+
 class LifecycleBindingChangedError(RuntimeError):
     """Raised when publication loses its active session binding."""
 
@@ -954,6 +957,7 @@ class LifecycleStateStore:
         covered_store_ids: list[int],
         excluded_store_ids: list[int] | None = None,
         filter_exclusion_proofs: dict[int, Any] | None = None,
+        carried_ranges: list[tuple[str, int, int]] | None = None,
     ) -> int:
         """Validate and stage one contiguous compaction-frontier advance.
 
@@ -986,44 +990,73 @@ class LifecycleStateStore:
                 "Compaction publication coverage overlaps an explicit exclusion"
             )
         exclusion_proofs = filter_exclusion_proofs or {}
+        allowed_carry_ranges = [
+            (str(source_session_id), int(start), int(end))
+            for source_session_id, start, end in (carried_ranges or [])
+            if source_session_id and 0 <= int(start) < int(end)
+        ]
+
+        def row_is_owned(row: Any) -> bool:
+            store_id, owner_session_id = int(row[0]), str(row[1] or "")
+            return owner_session_id == session_id or any(
+                owner_session_id == source_session_id
+                and start < store_id <= end
+                for source_session_id, start, end in allowed_carry_ranges
+            )
+
         snapshot_ids = sorted(
             set(all_covered_ids + excluded_ids + list(exclusion_proofs))
         )
         snapshot_rows = conn.execute(
             """
-            SELECT m.store_id, m.conversation_id, m.content
+            SELECT m.store_id, m.session_id, m.conversation_id, m.content
             FROM json_each(?) AS source
             CROSS JOIN messages AS m
-            WHERE m.store_id = source.value AND m.session_id = ?
+            WHERE m.store_id = source.value
             ORDER BY m.store_id
             """,
-            (str(snapshot_ids), session_id),
+            (str(snapshot_ids),),
         ).fetchall()
-        if [int(row[0]) for row in snapshot_rows] != snapshot_ids:
+        if (
+            [int(row[0]) for row in snapshot_rows] != snapshot_ids
+            or not all(row_is_owned(row) for row in snapshot_rows)
+        ):
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )
-        if any(str(row[1] or "").strip() not in {"", conversation_id} for row in snapshot_rows):
+        if any(str(row[2] or "").strip() not in {"", conversation_id} for row in snapshot_rows):
             raise LifecyclePublicationConflictError(
                 "Compaction publication source ownership changed"
             )
         snapshot_by_id = {int(row[0]): row for row in snapshot_rows}
         if any(
-            snapshot_by_id[store_id][2] != proof
+            snapshot_by_id[store_id][3] != proof
             for store_id, proof in exclusion_proofs.items()
         ):
             raise LifecyclePublicationConflictError(
                 "Compaction publication filter exclusion changed"
             )
-        rows = conn.execute(
-            """
-            SELECT store_id, conversation_id, content
-            FROM messages
-            WHERE session_id = ? AND store_id > ? AND store_id <= ?
-            ORDER BY store_id
-            """,
-            (session_id, expected_frontier, covered_end),
-        ).fetchall()
+        owned_ranges = [(session_id, expected_frontier, covered_end)]
+        owned_ranges.extend(
+            (source, max(expected_frontier, start), min(covered_end, end))
+            for source, start, end in allowed_carry_ranges
+            if max(expected_frontier, start) < min(covered_end, end)
+        )
+        rows_by_store_id = {}
+        for offset in range(0, len(owned_ranges), _OWNERSHIP_QUERY_MAX_RANGES):
+            range_batch = owned_ranges[offset:offset + _OWNERSHIP_QUERY_MAX_RANGES]
+            ownership_clause = " OR ".join(
+                "(session_id = ? AND store_id > ? AND store_id <= ?)"
+                for _item in range_batch
+            )
+            ownership_args = [value for item in range_batch for value in item]
+            for row in conn.execute(
+                "SELECT store_id, session_id FROM messages WHERE "
+                + ownership_clause,
+                ownership_args,
+            ).fetchall():
+                rows_by_store_id[int(row[0])] = row
+        rows = [rows_by_store_id[store_id] for store_id in sorted(rows_by_store_id)]
         authoritative_ids = [int(row[0]) for row in rows]
         proven_ids = sorted(covered_ids + excluded_ids)
         if authoritative_ids != proven_ids:
