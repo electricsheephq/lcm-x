@@ -20,6 +20,11 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Native recovery now compresses only history before LCM-X's protected fresh
   tail, carries that tail forward verbatim, and records adopted-output proof so
   host commits do not duplicate durable rows. (#482, #487)
+- Native rejection logs one secret-free warning with its reason class (such as
+  `prefix_too_short`, `suffix_changed`, or `native_aborted`), adoption logs one
+  info line, and `last_compression_noop_reason` carries the rejection class.
+- Native adoption proof now refuses id-bearing skip landings and records summary
+  positions in the same effective-row space used by replay reconciliation.
 
 ## v0.24.0 - BREAKING: plugin renamed to hermes-lcm-x, engine to lcm-x (unreleased)
 

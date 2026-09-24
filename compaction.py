@@ -534,6 +534,10 @@ class CompactionMixin:
                     force=force,
                 )
             self._record_compress_commit_proof(messages, result)
+            proof_missing = self._last_compression_status == "host_native" and self._compress_commit_proof is None
+            if proof_missing:
+                self._ingest_cursor = 0
+                self._ingest_cursor_needs_reconcile = True
             self._rekey_host_rewrite_watch(messages, result)
             return result
         except BaseException:
@@ -575,14 +579,23 @@ class CompactionMixin:
             proof["native"] = self._last_compression_status == "host_native"
             if proof["native"]:
                 matched_tool_ids = _matched_tool_call_ids(result)
-                proof["droppable"] = [
-                    identity[0] == "tool"
-                    and bool(identity[2])
-                    and identity[2] not in matched_tool_ids
-                    and not _has_lossy_redacted_identity(identity)
-                    for identity in proof["output_effective"]
-                ]
-                proof["native_summary_index"] = getattr(self, "_last_native_summary_index", None)
+                proof["droppable"] = []
+                proof["skip_landing"] = []
+                for identity in proof["output_effective"]:
+                    is_tool_result = identity[0] == "tool"
+                    has_tool_id = bool(identity[2])
+                    is_orphan = identity[2] not in matched_tool_ids
+                    is_lossless = not _has_lossy_redacted_identity(identity)
+                    proof["droppable"].append(
+                        is_tool_result and has_tool_id and is_orphan and is_lossless
+                    )
+                    proof["skip_landing"].append(not identity[2] and not identity[3])
+                summary_index = getattr(self, "_last_native_summary_index", None)
+                rows_before_summary = result[:summary_index] if summary_index is not None else ()
+                proof["native_summary_index"] = sum(
+                    not self._is_replayed_context_scaffold_message(row)
+                    for row in rows_before_summary
+                ) if summary_index is not None else None
             proof["published"] = self._last_compression_status == "compacted"
             self._compress_commit_proof = proof
             if proof["published"] or proof["native"]:
@@ -613,6 +626,7 @@ class CompactionMixin:
                 "last_store_id": int(tail[-1]["store_id"]) if tail else 0,
                 "native": bool(proof.get("native")),
                 "droppable": list(proof.get("droppable") or []),
+                "skip_landing": list(proof.get("skip_landing") or []),
                 "native_summary_index": proof.get("native_summary_index"),
             }
             if not proof["output_effective"]:
@@ -775,12 +789,16 @@ class CompactionMixin:
             synthetic_user = getattr(
                 ContextCompressor, "_is_synthetic_compression_user_turn", None
             )
-            suffix_has_real_user = any(
-                message.get("role") == "user"
-                and isinstance(message.get("content"), str) and bool(message["content"].strip())
-                and not (callable(synthetic_user) and synthetic_user(message))
-                for message in protected_tail
-            )
+            suffix_has_real_user = False
+            for message in protected_tail:
+                is_user = message.get("role") == "user"
+                has_text = bool(
+                    (text_content_for_pattern_matching(message.get("content")) or "").strip()
+                )
+                is_synthetic = callable(synthetic_user) and synthetic_user(message)
+                if is_user and has_text and not is_synthetic:
+                    suffix_has_real_user = True
+                    break
             if split and suffix_has_real_user and hasattr(native, "_find_inflight_user_task"):
                 native._find_inflight_user_task = lambda _messages: None
             native_kwargs = {

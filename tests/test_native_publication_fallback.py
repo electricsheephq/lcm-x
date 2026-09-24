@@ -10,7 +10,10 @@ import hermes_lcm.engine as engine_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.externalize import extract_externalized_ref, load_externalized_payload
-from hermes_lcm.reconcile import _commit_proof_identity_digest
+from hermes_lcm.reconcile import (
+    _PRESERVED_OBJECTIVE_CONTEXT_PREFIX,
+    _commit_proof_identity_digest,
+)
 
 
 @pytest.fixture
@@ -178,6 +181,32 @@ def test_native_recovery_host_rejection_reconciles_original_snapshot(candidate, 
     ).fetchall() == [(m["role"], m["content"]) for m in reversed(new_turns)]
 
 
+def test_native_recovery_missing_commit_proof_reconciles_host_rejection(
+    candidate, monkeypatch
+):
+    install_native(monkeypatch)
+
+    def fail_persist(_proof):
+        raise RuntimeError("synthetic proof persistence failure")
+
+    monkeypatch.setattr(candidate, "_persist_compress_commit_proof", fail_persist)
+    messages = history()
+    candidate.compress(messages, current_tokens=250_000, force=True)
+
+    assert candidate._compress_commit_proof is None
+    assert candidate._ingest_cursor == 0
+    assert candidate._ingest_cursor_needs_reconcile is True
+
+    before = candidate._store.get_session_count("retained")
+    new_turns = [
+        {"role": "user", "content": "Rejected recovery constraint: keep JADE-419."},
+        {"role": "assistant", "content": "JADE-419 retained."},
+    ]
+    candidate._ingest_messages(messages + new_turns)
+
+    assert candidate._store.get_session_count("retained") == before + len(new_turns)
+
+
 def test_native_recovery_replay_proof_survives_cold_restart(tmp_path, monkeypatch):
     cfg = LCMConfig(
         database_path=str(tmp_path / "restart-lcm.db"), native_recovery=True,
@@ -253,12 +282,24 @@ def test_native_recovery_accepts_summary_merged_into_protected_tail(candidate, m
     assert candidate.last_compression_status == "host_native"
 
 
+@pytest.mark.parametrize(
+    "suffix_content",
+    [
+        "latest text request",
+        [
+            {"type": "text", "text": "latest image request"},
+            {"type": "image_url", "image_url": {"url": "https://example.invalid/image.png"}},
+        ],
+    ],
+)
 def test_native_recovery_disables_stale_inflight_task_when_suffix_has_user(
-    candidate, monkeypatch
+    candidate, monkeypatch, suffix_content
 ):
     calls = install_native(monkeypatch)
+    messages = history()
+    messages[-2]["content"] = suffix_content
 
-    candidate.compress(history(), current_tokens=250_000, force=True)
+    candidate.compress(messages, current_tokens=250_000, force=True)
 
     assert calls[0]._find_inflight_user_task([]) is None
 
@@ -695,11 +736,91 @@ def test_native_recovery_stores_unverified_summary_shaped_user_text(candidate, m
 
 
 def _native_proof(engine, rows, droppable, summary_index=0):
+    identities = [engine._message_replay_identity(row) for row in rows]
     return {
-        "output_effective": [engine._message_replay_identity(row) for row in rows],
+        "output_effective": identities,
         "droppable": droppable,
+        "skip_landing": [not identity[2] and not identity[3] for identity in identities],
         "native_summary_index": summary_index,
     }
+
+
+def test_native_commit_proof_classifies_only_lossless_orphan_tool_results(candidate):
+    summary = {"role": "assistant", "content": "native summary"}
+    paired_call = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{}"},
+            }
+        ],
+    }
+    paired_result = {"role": "tool", "tool_call_id": "call1", "content": "paired"}
+    orphan_result = {"role": "tool", "tool_call_id": "call9", "content": "orphan"}
+    lossy_result = {
+        "role": "tool",
+        "tool_call_id": "call8",
+        "content": "[LCM sensitive redaction: name=password_assignment; chars=12]",
+    }
+    result = [summary, paired_call, paired_result, orphan_result, lossy_result]
+    candidate._last_compression_status = "host_native"
+    candidate._last_native_summary_index = 0
+    candidate._ingest_cursor = len(result)
+    candidate._ingest_cursor_needs_reconcile = False
+
+    candidate._record_compress_commit_proof(
+        [{"role": "user", "content": "original transcript"}], result
+    )
+
+    proof = candidate._compress_commit_proof
+    assert proof["droppable"] == [False, False, False, True, False]
+    assert proof["published"] is False
+    assert candidate._store.read_metadata_json(
+        "compaction_commit_proof:retained"
+    )["native"] is True
+
+
+def test_native_commit_proof_persists_before_host_publication(candidate, monkeypatch):
+    install_native(monkeypatch)
+
+    candidate.compress(history(), current_tokens=250_000, force=True)
+
+    assert candidate._compress_commit_proof["published"] is False
+    assert candidate._store.read_metadata_json(
+        "compaction_commit_proof:retained"
+    )["native"] is True
+
+
+def test_native_summary_index_uses_effective_output_space(candidate):
+    scaffold = {
+        "role": "user",
+        "content": _PRESERVED_OBJECTIVE_CONTEXT_PREFIX + " keep going",
+    }
+    summary = {"role": "assistant", "content": "native summary"}
+    adopted_tail = {"role": "assistant", "content": "adopted tail"}
+    result = [scaffold, summary, adopted_tail]
+    candidate._last_compression_status = "host_native"
+    candidate._last_native_summary_index = 1
+    candidate._ingest_cursor = len(result)
+    candidate._ingest_cursor_needs_reconcile = False
+
+    candidate._record_compress_commit_proof(
+        [{"role": "user", "content": "original transcript"}], result
+    )
+
+    assert candidate._compress_commit_proof["native_summary_index"] == 0
+    host = [
+        scaffold,
+        summary,
+        {"role": "assistant", "content": "host-rewritten tail"},
+        {"role": "user", "content": "fresh delta"},
+    ]
+    assert candidate._remap_cursor_through_native_host_repair(
+        host, candidate._compress_commit_proof
+    ) == 2
 
 
 def test_native_host_repair_remap_is_orphan_tool_only(candidate):
@@ -729,7 +850,64 @@ def test_native_host_repair_keeps_new_identity_duplicate_after_orphan_gap(candid
     assert candidate._remap_cursor_through_native_host_repair(host, proof) == 2
 
 
-def _write_durable_native_proof(engine, rows, droppable, *, native=True):
+def test_native_host_repair_refuses_id_bearing_skip_landing(candidate):
+    summary = {"role": "assistant", "content": "native summary"}
+    orphan = {"role": "tool", "tool_call_id": "call9", "content": "dropped"}
+    adopted_call = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call0",
+                "type": "function",
+                "function": {"name": "list_files", "arguments": "{}"},
+            }
+        ],
+    }
+    proof = _native_proof(
+        candidate, [summary, orphan, adopted_call], [False, True, False]
+    )
+    new_call = copy.deepcopy(adopted_call)
+    host = [
+        summary,
+        new_call,
+        {"role": "tool", "tool_call_id": "call0", "content": "new result"},
+    ]
+
+    assert candidate._remap_cursor_through_native_host_repair(host, proof) is None
+
+    _write_durable_native_proof(
+        candidate, [summary, orphan, adopted_call], [False, True, False]
+    )
+    assert candidate._cursor_from_durable_commit_proof(host) is None
+
+
+def test_native_host_repair_refuses_missing_id_bearing_row_before_new_content(candidate):
+    summary = {"role": "assistant", "content": "native summary"}
+    adopted_call = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call0",
+                "type": "function",
+                "function": {"name": "list_files", "arguments": "{}"},
+            }
+        ],
+    }
+    proof = _native_proof(candidate, [summary, adopted_call], [False, False])
+    host = [summary, {"role": "user", "content": "different new content"}]
+
+    assert candidate._remap_cursor_through_native_host_repair(host, proof) is None
+
+    _write_durable_native_proof(candidate, [summary, adopted_call], [False, False])
+    assert candidate._cursor_from_durable_commit_proof(host) is None
+
+
+def _write_durable_native_proof(
+    engine, rows, droppable, *, native=True, include_skip_landing=True
+):
+    identities = [engine._message_replay_identity(row) for row in rows]
     payload = {
         "version": 2,
         "hermes_home": str(engine._hermes_home or ""),
@@ -743,6 +921,10 @@ def _write_durable_native_proof(engine, rows, droppable, *, native=True):
         "droppable": droppable,
         "native_summary_index": 0,
     }
+    if include_skip_landing:
+        payload["skip_landing"] = [
+            not identity[2] and not identity[3] for identity in identities
+        ]
     engine._store.write_metadata_json(["compaction_commit_proof:retained"], json.dumps(payload))
 
 
@@ -752,6 +934,14 @@ def test_durable_native_proof_skips_only_orphan_tool_results(candidate):
     kept = {"role": "user", "content": "kept source"}
     _write_durable_native_proof(candidate, [summary, orphan, kept], [False, True, False])
     assert candidate._cursor_from_durable_commit_proof([summary, kept]) == 2
+
+    _write_durable_native_proof(
+        candidate,
+        [summary, orphan, kept],
+        [False, True, False],
+        include_skip_landing=False,
+    )
+    assert candidate._cursor_from_durable_commit_proof([summary, kept]) is None
 
     _write_durable_native_proof(candidate, [summary, orphan, kept], [False, True, False], native=False)
     assert candidate._cursor_from_durable_commit_proof([summary, kept]) is None

@@ -4821,9 +4821,21 @@ class LCMEngine(
         return len(messages) if effective == target else None
 
     def _remap_cursor_through_native_host_repair(self, messages, proof) -> Optional[int]:
-        target, droppable, summary_index = list(proof.get("output_effective") or []), list(proof.get("droppable") or []), proof.get("native_summary_index")
-        if summary_index is None or len(droppable) != len(target) or any(_has_lossy_redacted_identity(i) for i in target):
+        """Re-index native output after only proven-safe Hermes repair omissions."""
+        target = list(proof.get("output_effective") or [])
+        droppable = list(proof.get("droppable") or [])
+        skip_landing = list(proof.get("skip_landing") or [])
+        summary_index = proof.get("native_summary_index")
+        target_has_lossy_identity = any(
+            _has_lossy_redacted_identity(identity) for identity in target
+        )
+        if (
+            summary_index is None
+            or len(droppable) != len(target)
+            or target_has_lossy_identity
+        ):
             return None
+        skip_metadata_valid = len(skip_landing) == len(target)
         matched = 0
         for index, message in enumerate(messages):
             if self._is_verified_replay_scaffold_message(message):
@@ -4834,11 +4846,27 @@ class LCMEngine(
             try:
                 next_match = target.index(identity, matched)
             except ValueError:
+                if (
+                    matched < len(target)
+                    and (not skip_metadata_valid or not skip_landing[matched])
+                ):
+                    return None
                 return index if matched > int(summary_index) else None
-            if not all(droppable[matched:next_match]):
+            gap_is_droppable = all(droppable[matched:next_match])
+            if not gap_is_droppable:
                 return index if matched > int(summary_index) else None
+            if next_match > matched and (
+                not skip_metadata_valid or not skip_landing[next_match]
+            ):
+                return None
             matched = next_match + 1
-        return len(messages) if matched > int(summary_index) and all(droppable[matched:]) else None
+        exact = matched == len(target)
+        safe_trailing_skip = (
+            skip_metadata_valid
+            and matched > int(summary_index)
+            and all(droppable[matched:])
+        )
+        return len(messages) if exact or safe_trailing_skip else None
 
     _LCM_SUMMARY_PART_HEADER_RE = re.compile(
         r"\[(?:Recent|Session Arc|Durable|Depth-\d+) Summary \(d(\d+), node (\d+)\)\]\n"
@@ -5177,9 +5205,11 @@ class LCMEngine(
             # reconciled cursor that equals len(output) must not re-arm it.
             proof["consulted"] = True
             host_input = proof.get("input")
-            native_lossy = proof.get("native") and any(
+            is_native_proof = bool(proof.get("native"))
+            proof_identity_groups = (proof.get("output"), host_input)
+            native_lossy = is_native_proof and any(
                 _has_lossy_redacted_identity(identity)
-                for identities in (proof.get("output"), host_input)
+                for identities in proof_identity_groups
                 for identity in identities or ()
             )
             if native_lossy:

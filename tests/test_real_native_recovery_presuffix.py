@@ -187,7 +187,11 @@ def _hermes_python() -> tuple[str, str] | None:
     src = os.environ.get("LCM_REAL_HERMES_SRC", "")
     if python:
         return python, src
-    if importlib.util.find_spec("agent.context_compressor") is not None:
+    try:
+        context_compressor = importlib.util.find_spec("agent.context_compressor")
+    except (ImportError, ValueError):
+        return None
+    if context_compressor is not None:
         return sys.executable, src
     return None
 
