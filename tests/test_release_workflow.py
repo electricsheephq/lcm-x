@@ -108,4 +108,5 @@ def test_release_candidate_notes_cover_only_the_merged_release_scope():
     assert "## Benchmark boundary" in section_headers
     assert "## Upgrade" in section_headers
     assert "**BREAKING.**" in notes
-    assert 45 <= len(lines) <= 100
+    # rc3 adds the #483 compaction-fix section and its known issues; the cap still rules out a pasted git log.
+    assert 45 <= len(lines) <= 150
