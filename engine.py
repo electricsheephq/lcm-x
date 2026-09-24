@@ -610,6 +610,7 @@ class LCMEngine(
         }
         self._last_compression_status = "idle"
         self._last_compression_noop_reason = ""
+        self._last_native_recovery_rejection = ""
         # Ingest-failure tracking. The core promise is that nothing is ever
         # lost, but a swallowed persistence error (disk full, DB locked,
         # corruption) silently breaks it: the turn continues while messages
