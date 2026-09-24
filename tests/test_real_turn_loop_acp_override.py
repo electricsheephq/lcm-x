@@ -95,12 +95,19 @@ _PROBE = textwrap.dedent(
         response.usage = SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=20, total_tokens=prompt_tokens + 20)
         return response
     continue_turns = {int(t) for t in os.environ.get("PROBE_CONTINUE_TURNS", "").split(",") if t}
+    repeat, real_usage = int(os.environ.get("PROBE_REPEAT", "400")), os.environ.get("PROBE_REAL_USAGE") == "1"
     history = []
     for t in range(1, turns + 1):
-        text = "continue" if t in continue_turns else f"[T{t:02d}] user turn {t}: " + ("alpha beta gamma delta " * 400) + "end."
+        text = "continue" if t in continue_turns else f"[T{t:02d}] user turn {t}: " + ("alpha beta gamma delta " * repeat) + "end."
         raw = text + ("\\n" if trailing else "")
         est = sum(len(str(m.get("content") or "")) for m in history) // 4 + len(raw) // 4 + 800
-        agent.client.chat.completions.create.side_effect = [reply(f"reply to T{t:02d}: noted item {t}.", est)]
+        if real_usage:  # report usage from the request actually sent (post-compaction), like a provider
+            def _usage(*a, _t=t, **kw):
+                sent = sum(len(str(m.get("content") or "")) for m in kw.get("messages") or []) // 4 + 800
+                return reply(f"reply to T{_t:02d}: noted item {_t}.", sent)
+            agent.client.chat.completions.create.side_effect = _usage
+        else:
+            agent.client.chat.completions.create.side_effect = [reply(f"reply to T{t:02d}: noted item {t}.", est)]
         # ACP shape (acp_adapter/server.py): raw prompt in, stripped prompt persisted.
         result = agent.run_conversation(user_message=raw, conversation_history=history, task_id="S0",
                                         persist_user_message=raw.strip())
@@ -123,6 +130,7 @@ _PROBE = textwrap.dedent(
                                             stored_row=True, with_host_rewrite=True)[1] in host_user_texts
             for key in (store_id, 0))
     ]
+    by_id, host_trimmed = {row[0]: row[3] or "" for row in stored}, {(t or "").strip() for t in host_user_texts}
     log = buf.getvalue()
     print(json.dumps({
         "engine": getattr(engine, "name", None),
@@ -134,6 +142,7 @@ _PROBE = textwrap.dedent(
         "raw_user_rows": sum(1 for r, c in rows if r == "user" and (c or "").endswith("\\n")),
         "continue_rows": sum(1 for r, c in rows if r == "user" and (c or "").strip() == "continue"),
         "identity_mismatches": identity_mismatches,
+        "identity_mismatches_after_trim": [i for i in identity_mismatches if by_id[i].strip() not in host_trimmed],
         "override_rewrites": rewrites["n"],
         "user_rows_by_turn": {
             f"{i:02d}": sum(1 for r, c in rows if r == "user" and (c or "").startswith(f"[T{i:02d}]"))
@@ -162,7 +171,7 @@ HERMES = _hermes_python()
 pytestmark = pytest.mark.skipif(HERMES is None, reason="no real Hermes runtime available")
 
 
-def _run_turn_loop(tmp_path, *, in_place, trailing, fresh_tail=24, continue_turns=()) -> dict:
+def _run_turn_loop(tmp_path, *, in_place, trailing, fresh_tail=24, continue_turns=(), turns=26, long_defaults=False) -> dict:
     home = tmp_path / "hermes-home"
     (home / "plugins").mkdir(parents=True)
     (home / "plugins" / "hermes-lcm-x").symlink_to(REPO_ROOT)
@@ -186,14 +195,17 @@ def _run_turn_loop(tmp_path, *, in_place, trailing, fresh_tail=24, continue_turn
             "OPENROUTER_API_KEY": "test-key",
             "PROBE_IN_PLACE": "1" if in_place else "0",
             "PROBE_TRAILING": "1" if trailing else "0",
-            "PROBE_TURNS": "26",
+            "PROBE_TURNS": str(turns),
             "PROBE_CONTINUE_TURNS": ",".join(str(t) for t in continue_turns),
-            "LCM_CONTEXT_THRESHOLD": "0.5",
-            "LCM_FRESH_TAIL_COUNT": str(fresh_tail),
-            "LCM_FRESH_TAIL_MAX_TOKENS": "12000",
-            "LCM_LEAF_CHUNK_TOKENS": "4000",
-            "LCM_THRESHOLD_FULL_SWEEP_ENABLED": "true",
             "LCM_NATIVE_RECOVERY": "false",
+            # Default LCM tuning with provider-reported usage, or the tight tuning below.
+            **({"PROBE_REAL_USAGE": "1", "PROBE_REPEAT": "250"} if long_defaults else {
+                "LCM_CONTEXT_THRESHOLD": "0.5",
+                "LCM_FRESH_TAIL_COUNT": str(fresh_tail),
+                "LCM_FRESH_TAIL_MAX_TOKENS": "12000",
+                "LCM_LEAF_CHUNK_TOKENS": "4000",
+                "LCM_THRESHOLD_FULL_SWEEP_ENABLED": "true",
+            }),
         },
         capture_output=True,
         text=True,
@@ -209,7 +221,7 @@ def _run_turn_loop(tmp_path, *, in_place, trailing, fresh_tail=24, continue_turn
     return result
 
 
-def _assert_each_turn_stored_once(result, continue_turns=()) -> None:
+def _assert_each_turn_stored_once(result, continue_turns=(), *, unseen_rewrites=False) -> None:
     not_once = {
         turn: count
         for turn, count in result["user_rows_by_turn"].items()
@@ -219,7 +231,8 @@ def _assert_each_turn_stored_once(result, continue_turns=()) -> None:
     assert result["continue_rows"] == len(continue_turns), result
     assert result["duplicate_rows"] == 0, result
     assert result["conflicts"] == 0, result
-    assert result["identity_mismatches"] == [], result
+    # A rewrite LCM never saw leaves a raw row with no override; head replay trims its edges.
+    assert result["identity_mismatches_after_trim" if unseen_rewrites else "identity_mismatches"] == [], result
 
 
 @pytest.mark.parametrize(
@@ -258,3 +271,12 @@ def test_acp_persist_override_after_preflight_ingest_stores_no_duplicates(tmp_pa
 
 def test_turn_loop_without_host_rewrite_is_clean(tmp_path):
     _assert_each_turn_stored_once(_run_turn_loop(tmp_path, in_place=True, trailing=False))
+
+
+@pytest.mark.skipif(os.environ.get("LCM_REAL_HERMES_LONG") != "1", reason="opt-in: set LCM_REAL_HERMES_LONG=1")
+def test_acp_persist_override_long_session_default_tuning_keeps_every_turn(tmp_path):
+    """80 ACP turns on default LCM tuning with provider-reported usage: the head
+    matcher must keep resolving past the stored session (94042ecf lost T55-T80)."""
+    result = _run_turn_loop(tmp_path, in_place=True, trailing=True, turns=80, long_defaults=True)
+    _assert_each_turn_stored_once(result, unseen_rewrites=True)
+    assert result["commit_logged"] >= 2, result  # several same-turn compactions committed
