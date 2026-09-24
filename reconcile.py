@@ -361,7 +361,7 @@ class ReconcileMixin:
         # carrier=False away from the generated head, where the same bytes are
         # copied content and must keep their full identity (#488).
         carrier_rest = getattr(self, "_generated_context_carrier_remainder", None)
-        if role == "user" and (carrier or stored_row) and callable(carrier_rest):
+        if role == "user" and carrier and callable(carrier_rest):
             glued_row = carrier_rest({"role": "user", "content": content})
             if glued_row is not None:
                 content = glued_row
@@ -1675,6 +1675,7 @@ class ReconcileMixin:
             if matched != len(target) and not (native and matched > int(summary_index) and all(droppable[matched:])):
                 return None
             after_store_id = int(payload.get("last_store_id") or 0)
+            stored_after: list[Dict[str, Any]] = []
             while True:
                 page = self._store.get_session_messages_after(
                     self._session_id,
@@ -1682,16 +1683,16 @@ class ReconcileMixin:
                 )
                 if not page:
                     break
-                for row in page:
-                    if index >= n:
-                        return None
-                    identity = identities[index]
-                    if _has_lossy_redacted_identity(identity) or identity != self._message_replay_identity(
-                        row, stored_row=True
-                    ):
-                        return None
-                    index += 1
+                stored_after.extend(page)
                 after_store_id = int(page[-1]["store_id"])
+            stored_after_identities = self._stored_replay_identities(stored_after)
+            for stored_identity in stored_after_identities:
+                if index >= n:
+                    return None
+                identity = identities[index]
+                if _has_lossy_redacted_identity(identity) or identity != stored_identity:
+                    return None
+                index += 1
             return index
         except Exception:
             logger.debug("LCM durable compaction-commit proof load failed", exc_info=True)
@@ -1785,10 +1786,10 @@ class ReconcileMixin:
             for row in stored_rows
             if not self._matches_ignore_message_patterns(row, stored_row=True)
         ]
-        stored_tail = [
-            self._message_replay_identity(row, stored_row=True)
-            for row in stored_tail_rows
-        ]
+        stored_tail = self._stored_replay_identities(
+            stored_tail_rows,
+            after_store_id=int(self._last_compacted_store_id or 0),
+        )
         cursor = self._find_reconciled_cursor_for_store_tail(
             messages,
             stored_tail,

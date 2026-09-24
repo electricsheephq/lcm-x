@@ -4981,7 +4981,10 @@ class LCMEngine(
         return None
 
     def _replay_scaffold_layout(
-        self, messages: List[Dict[str, Any]]
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        stored_rows: bool = False,
     ) -> tuple[list[bool], list[tuple[str, str, str, str, str]]]:
         """Return positional scaffold flags and replay identities (#488)."""
         head = self._generated_head_index(messages)
@@ -4994,9 +4997,47 @@ class LCMEngine(
                 and self._is_verified_replay_scaffold_message(message)
             )
             identities.append(
-                self._message_replay_identity(message, carrier=is_head)
+                self._message_replay_identity(
+                    message,
+                    stored_row=stored_rows,
+                    carrier=is_head,
+                )
             )
         return mask, identities
+
+    def _stored_replay_identities(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        after_store_id: Optional[int] = None,
+    ) -> list[tuple[str, str, str, str, str]]:
+        """Return stored identities with carrier stripping only at a proven head.
+
+        Rows at or before ``after_store_id`` predate the current compaction
+        layout and therefore keep their full identity. The remaining ordered
+        suffix is evaluated with the same generated-head rule as host replay.
+        """
+        start = 0
+        if after_store_id is not None:
+            start = len(messages)
+            for index, message in enumerate(messages):
+                if int(message.get("store_id") or 0) > after_store_id:
+                    start = index
+                    break
+        identities = [
+            self._message_replay_identity(
+                message,
+                stored_row=True,
+                carrier=False,
+            )
+            for message in messages[:start]
+        ]
+        _mask, suffix_identities = self._replay_scaffold_layout(
+            messages[start:],
+            stored_rows=True,
+        )
+        identities.extend(suffix_identities)
+        return identities
 
     def _is_replayed_context_scaffold_message(self, msg: Dict[str, Any]) -> bool:
         """Return true for active-context scaffolding that should not be re-ingested."""

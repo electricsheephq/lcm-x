@@ -798,6 +798,97 @@ def test_summary_prefixed_new_row_is_stored_after_restart(tmp_path, monkeypatch,
     assert prefixed_duplicates <= plain_duplicates
 
 
+def _pasted_carrier_then_standalone_result(tmp_path, monkeypatch, *, in_place, tail):
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch, tail=tail)
+    child = "S0" if in_place else "S1"
+    block = _summary_block(compressed)
+    standalone = "PASTE-X genuinely new standalone row"
+    pasted = block + "\n\n" + standalone
+    host = list(compressed)
+    try:
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(child, boundary_reason="compression", old_session_id="S0", platform="acp")
+        host.append(_turn(13)[1])
+        engine.ingest(host)
+        host.append({"role": "user", "content": pasted})
+        engine.ingest(host)
+
+        # Roll back the authored paste from the host list, then add a genuinely
+        # new row whose bytes equal only the paste's carrier remainder.
+        host.pop()
+        host.append({"role": "user", "content": standalone})
+        engine = _restart_compacted_engine(engine, tmp_path, child, tail=tail)
+        engine.ingest(host)
+
+        stored = _stored_content(engine)
+        return stored.count(pasted), stored.count(standalone)
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
+@pytest.mark.parametrize("tail", [0, 6], ids=["tail0", "tail6"])
+def test_stored_non_head_carrier_does_not_hide_later_standalone_row(
+    tmp_path, monkeypatch, in_place, tail
+):
+    pasted_count, standalone_count = _pasted_carrier_then_standalone_result(
+        tmp_path, monkeypatch, in_place=in_place, tail=tail
+    )
+    assert pasted_count == 1
+    assert standalone_count == 1
+
+
+def _mid_list_paste_duplicates(tmp_path, monkeypatch, *, in_place, restarts, prefixed):
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch, tail=6)
+    child = "S0" if in_place else "S1"
+    block = _summary_block(compressed)
+    suffix = "PASTE-X my question after the pasted block"
+    preface = block if prefixed else "PLAINHEAD a pasted plain preface\nsecond line"
+    pasted = preface + "\n\n" + suffix
+    host = list(compressed)
+    try:
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(child, boundary_reason="compression", old_session_id="S0", platform="acp")
+        host.append(_turn(13)[1])
+        engine.ingest(host)
+        host.append({"role": "user", "content": pasted})
+        engine.ingest(host)
+
+        for _ in range(restarts):
+            engine = _restart_compacted_engine(engine, tmp_path, child, tail=6)
+            engine.ingest(host)
+
+        rows = engine._store._conn.execute(
+            "SELECT role, content FROM messages ORDER BY store_id"
+        ).fetchall()
+        return rows.count(("user", pasted)), len(rows) - len(set(rows))
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
+@pytest.mark.parametrize("restarts", [1, 2], ids=["restart1", "restart2"])
+def test_stored_non_head_carrier_does_not_duplicate_on_restart(
+    tmp_path, monkeypatch, in_place, restarts
+):
+    prefixed_count, prefixed_duplicates = _mid_list_paste_duplicates(
+        tmp_path / "prefixed",
+        monkeypatch,
+        in_place=in_place,
+        restarts=restarts,
+        prefixed=True,
+    )
+    plain_count, plain_duplicates = _mid_list_paste_duplicates(
+        tmp_path / "plain",
+        monkeypatch,
+        in_place=in_place,
+        restarts=restarts,
+        prefixed=False,
+    )
+    assert prefixed_count == plain_count == 1
+    assert prefixed_duplicates <= plain_duplicates == 0
+
+
 @pytest.mark.parametrize("restart", [False, True], ids=["in-process", "after-restart"])
 def test_new_row_merged_into_the_objective_head_is_stored(tmp_path, monkeypatch, restart):
     engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch, tail=0)
@@ -861,6 +952,12 @@ def test_replay_scaffold_layout_marks_only_the_generated_head(tmp_path, monkeypa
         mid_mask, mid_identities = engine._replay_scaffold_layout([summary, real, carrier])
         assert mid_mask == [True, False, False]
         assert mid_identities[2] == engine._message_replay_identity(carrier, carrier=False)
+        _stored_mask, stored_mid_identities = engine._replay_scaffold_layout(
+            [summary, real, carrier], stored_rows=True
+        )
+        assert stored_mid_identities[2] == engine._message_replay_identity(
+            carrier, stored_row=True, carrier=False
+        )
 
         double_summary = {"role": "user", "content": block + "\n\n" + block}
         assert engine._generated_context_carrier_remainder(double_summary) is None
