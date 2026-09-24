@@ -65,7 +65,9 @@ proof:
 ```bash
 set -o pipefail
 files="$(gh api --paginate "repos/electricsheephq/lcm-x/pulls/<PR>/files?per_page=100")" && \
-test -n "$files" && printf '%s\n' "$files" \
+expected="$(gh api "repos/electricsheephq/lcm-x/pulls/<PR>" --jq .changed_files)" && \
+test -n "$files" && printf '%s\n' "$files" | jq -s -e --argjson n "$expected" 'add | length == $n' >/dev/null && \
+printf '%s\n' "$files" \
   | jq -s '{schema_version: "1", mode: "readiness", changed_files: [.[][] | {filename, previous_filename}]}' \
   | python3 scripts/maintainer_gate.py | jq -e .review_lanes_hint || \
   { echo "HINT UNAVAILABLE: require both lanes" >&2
@@ -147,25 +149,33 @@ uncertain, comment or report the relationship; do not close the issue.
 
 ## 7. Merge Deterministically
 
-Only after a maintainer authorizes landing this PR at `$head`: repeat the paginated thread
-query from Section 4 and reapply every Section 4 gate. Validate each review pointer by its
-evidence type: re-fetch a GitHub review id and check its `commit_id` equals `$head`, its `state`
-is not `DISMISSED` or `PENDING`, and its `user.login` is not the PR author; re-read a
-review-log path or comment link and check the head it names equals `$head`. Then post one merge
-receipt comment that lists only pointers: GitHub review ids with `user.id`, `commit_id`, and
-`state`; review-log paths or comment links; the author model and each reviewer model; any
-`REVIEW_SKIPPED` line. Never restate verdicts or scores. Only after those checks pass, run:
+Only after a maintainer authorizes landing this PR at `$head`, in this order:
 
-```bash
-current_head="$(gh pr view <PR> --repo electricsheephq/lcm-x --json headRefOid --jq .headRefOid)"
-test "$current_head" = "$head"
-gh pr view <PR> --repo electricsheephq/lcm-x \
-  --json state,isDraft,headRefOid,mergeable,mergeStateStatus,reviewDecision
-gh pr checks <PR> --repo electricsheephq/lcm-x && \
-gh pr merge <PR> --repo electricsheephq/lcm-x --merge --match-head-commit "$head"
-```
+1. Re-read the live head and the exact-head checks; stop on any mismatch or failure:
 
-Treat `gh pr merge` as the last command; do not run it before the repeated review queries and assertions.
+   ```bash
+   current_head="$(gh pr view <PR> --repo electricsheephq/lcm-x --json headRefOid --jq .headRefOid)"
+   test "$current_head" = "$head"
+   gh pr view <PR> --repo electricsheephq/lcm-x \
+     --json state,isDraft,headRefOid,mergeable,mergeStateStatus,reviewDecision
+   gh pr checks <PR> --repo electricsheephq/lcm-x
+   ```
+
+2. Repeat the paginated thread query from Section 4 and reapply every Section 4 gate. Validate
+   each review pointer by its evidence type: re-fetch a GitHub review id and check its
+   `commit_id` equals `$head`, its `state` is not `DISMISSED` or `PENDING`, and its
+   `user.login` is not the PR author; re-read a review-log path or comment link and check the
+   head it names equals `$head`.
+3. Post one merge receipt comment that lists only pointers: GitHub review ids with `user.id`,
+   `commit_id`, and `state`; review-log paths or comment links; the author model and each
+   reviewer model; any `REVIEW_SKIPPED` line. Never restate verdicts or scores.
+4. Merge with the pinned head:
+
+   ```bash
+   gh pr merge <PR> --repo electricsheephq/lcm-x --merge --match-head-commit "$head"
+   ```
+
+Treat `gh pr merge` as the last command; do not run it before steps 1-3 pass.
 
 Never use auto-merge, squash, rebase merge, direct `main` pushes, force pushes, branch deletion,
 or a ruleset bypass.

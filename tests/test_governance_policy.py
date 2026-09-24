@@ -191,6 +191,14 @@ def test_codeowners_and_landing_policy_use_exact_head_ci_and_review_obligation()
         landing.split()
     )
     assert '"changed_files": "unknown", "named_risks": null, "required_review_lanes": ' in landing
+    assert "--argjson n \"$expected\" 'add | length == $n'" in landing
+    merge_section = landing.split("## 7. Merge Deterministically", maxsplit=1)[1]
+    step_positions = [
+        merge_section.index(step)
+        for step in ('test "$current_head" = "$head"', "Repeat the paginated thread query",
+                     "Post one merge receipt comment", "--match-head-commit")
+    ]
+    assert step_positions == sorted(step_positions)
     assert "its `state` is not `DISMISSED` or `PENDING`, and its `user.login` is not the PR author" in (
         " ".join(landing.split())
     )
