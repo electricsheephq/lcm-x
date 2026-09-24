@@ -14,11 +14,13 @@ LCM-X replaces one-shot active-context compression with a SQLite-backed,
 DAG-based context engine. It keeps the live prompt bounded, preserves raw
 messages, and gives the agent tools to recover exact detail after compaction.
 
-The project name is **LCM-X**. Compatibility identifiers intentionally remain
-unchanged: the install directory, plugin manifest, and bundled skill are named
-`hermes-lcm`, while the runtime context engine is named `lcm`. Renaming those
-identifiers would be a separate compatibility migration; this documentation
-update does not do that.
+The project name is **LCM-X**. From v0.24.0 the plugin is named
+`hermes-lcm-x` and the runtime context engine `lcm-x`
+([#471](https://github.com/electricsheephq/lcm-x/issues/471)); this is a
+**breaking change** for existing installs — see
+[Migrating from hermes-lcm](#migrating-from-hermes-lcm-v023x-and-earlier).
+Unchanged: `lcm.db`, the `lcm:` config block, `LCM_*` environment variables,
+the `lcm_*` tools, `/lcm`, and the bundled skill name `hermes-lcm`.
 
 Based on the [LCM paper](https://papers.voltropy.com/LCM) by Ehrlich & Blackman
 (Voltropy PBC, Feb 2026). Inspired by
@@ -114,7 +116,9 @@ copy-paste setups per agent type.
 ## Project status
 
 The latest stable release is
-`v0.23.2@676bb48dde29f06899ff829a7cb8b1d9d2e262f6`. It ships the lossless
+`v0.23.3@523161769329174514a0b995025201e3dc316df2` (plugin `hermes-lcm`, engine
+`lcm`; the `hermes-lcm-x` / `lcm-x` rename is unreleased on `main`). It carries
+the v0.23.2 lossless
 default (durable sensitive-pattern redaction is opt-in; cloud-embedding privacy
 is an independent flag that transforms only the provider-bound copy — see
 "Sensitive-pattern redaction" below), the PEM private-key redaction hardening,
@@ -126,11 +130,11 @@ Stable release identity and the continuing `main` development line are
 separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
-The reconciled `main` line now identifies itself as
-`hermes-lcm v0.23.3 (15 tools)` — aligned forward from the `v0.23.2` stable
-tag, which identifies itself as `hermes-lcm v0.23.2 (15 tools)`. This is the
-forward bump for the next point release (rc-first), never a restamp of any past
-commit's own recorded identity (#385 fixed the earlier drift).
+The `main` line now identifies itself as
+`hermes-lcm-x v0.24.0 (15 tools)` — the plugin rename (#471) on top of the
+`v0.23.3` stable tag, which identifies itself as `hermes-lcm v0.23.3 (15 tools)`.
+This is the forward bump for the next minor release (rc-first), never a restamp
+of any past commit's own recorded identity (#385 fixed the earlier drift).
 
 Eva has accepted exact stable v0.23.1 with hosted `voyage-4-large`,
 1024-dimensional float32 summary vectors under one privacy-bound identity.
@@ -176,19 +180,19 @@ rather than running unbounded stdlib `re` matches.
 
 ### Install the plugin
 
-Canonical install path: clone LCM-X as a general user plugin into the
-compatibility directory `hermes-lcm`.
+Canonical install path: clone LCM-X as a general user plugin into
+`plugins/hermes-lcm-x`.
 
 ```bash
 git clone https://github.com/electricsheephq/lcm-x \
-  ~/.hermes/plugins/hermes-lcm
+  ~/.hermes/plugins/hermes-lcm-x
 ```
 
 For a profile-specific install:
 
 ```bash
 git clone https://github.com/electricsheephq/lcm-x \
-  ~/.hermes/profiles/myprofile/plugins/hermes-lcm
+  ~/.hermes/profiles/myprofile/plugins/hermes-lcm-x
 ```
 
 From an existing checkout, install a symlink:
@@ -204,23 +208,26 @@ Run `scripts/install.sh` even when the checkout already lives at the canonical
 plugin path. It leaves that checkout in place and exposes the bundled
 `hermes-lcm` skill in the matching global/profile `skills/` directory. The
 installer preflights both paths and refuses conflicts before creating links.
+When it finds a pre-0.24 install (`plugins/hermes-lcm`, or a `config.yaml` that
+enables `hermes-lcm` / selects `context.engine: lcm`), it prints the migration
+steps below. It never edits `config.yaml` and never deletes the old directory.
 
 ### Activate it
 
 The plugin has two names:
 
-- plugin manifest name: `hermes-lcm`
-- runtime context engine name: `lcm`
+- plugin manifest name: `hermes-lcm-x`
+- runtime context engine name: `lcm-x`
 
 Both must be configured:
 
 ```yaml
 plugins:
   enabled:
-    - hermes-lcm
+    - hermes-lcm-x
 
 context:
-  engine: lcm
+  engine: lcm-x
 ```
 
 Restart Hermes after changing plugin or context-engine config.
@@ -235,27 +242,27 @@ hermes plugins
 
 Expected signals:
 
-- plugin list includes `hermes-lcm`
-- selected context engine is `lcm`
+- plugin list includes `hermes-lcm-x`
+- selected context engine is `lcm-x`
 - tool list includes `lcm_grep`, `lcm_recall`, `lcm_recent`,
   `lcm_load_session`, `lcm_describe`, `lcm_expand`, `lcm_expand_query`,
   `lcm_status`, `lcm_inspect`, and `lcm_doctor`
 - the normal available-skills index includes `hermes-lcm`; current hosts can
-  also resolve the explicit plugin-qualified skill `hermes-lcm:hermes-lcm`
+  also resolve the explicit plugin-qualified skill `hermes-lcm-x:hermes-lcm`
 
-After checking out the exact stable tag, typical output is:
+On the `main` line, typical output is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm v0.23.2 (15 tools)
+  ✓ hermes-lcm-x v0.24.0 (15 tools)
 
 Provider Plugins:
-  Context Engine: lcm
+  Context Engine: lcm-x
 ```
 
-An untagged checkout of the reconciled `main` baseline instead reports
-`hermes-lcm v0.23.3 (15 tools)`; verify the loaded commit before treating
-either string as release proof.
+The exact `v0.23.3` stable tag instead reports `hermes-lcm v0.23.3 (15 tools)`
+and engine `lcm`; verify the loaded commit before treating either string as
+release proof.
 
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
 `lcm_doctor`, and `/lcm doctor` also report the loaded plugin path and
@@ -273,12 +280,24 @@ there.
 If you cloned directly into the plugin directory:
 
 ```bash
-cd ~/.hermes/plugins/hermes-lcm && git pull --ff-only
+cd ~/.hermes/plugins/hermes-lcm-x && git pull --ff-only
 ```
 
 For a profile-specific install:
 
 ```bash
+cd ~/.hermes/profiles/myprofile/plugins/hermes-lcm-x && git pull --ff-only
+```
+
+A clone from v0.23.x or earlier still lives at `plugins/hermes-lcm`. Stop
+Hermes, update that clone in place (Hermes matches the manifest name, not the
+directory), then make the config change in
+[Migrating from hermes-lcm](#migrating-from-hermes-lcm-v023x-and-earlier)
+before you start Hermes again:
+
+```bash
+cd ~/.hermes/plugins/hermes-lcm && git pull --ff-only
+# profile-specific:
 cd ~/.hermes/profiles/myprofile/plugins/hermes-lcm && git pull --ff-only
 ```
 
@@ -312,6 +331,60 @@ raw-chunk cloud backfill also requires explicit raw-text consent.
 See [the operator upgrade and privacy notes](docs/operator-guide.md#upgrade-to-v0231)
 before enabling embeddings.
 
+
+### Migrating from hermes-lcm (v0.23.x and earlier)
+
+**BREAKING in v0.24.0.** The plugin manifest is now `hermes-lcm-x` and the
+context engine `lcm-x` (#471). Hermes matches `plugins.enabled` against the
+manifest name, not the install directory, so a config that enables only
+`hermes-lcm` stops loading LCM-X after an update. Run exactly one LCM copy, and
+change the config while Hermes is stopped:
+
+1. **Stop Hermes** (every process that uses this profile).
+2. **Update the code:** `git pull --ff-only` in the existing clone (it may stay
+   at `plugins/hermes-lcm`; see [Update it](#update-it)), or install a new
+   checkout with `scripts/install.sh`.
+3. **Config:** in `plugins.enabled`, replace `hermes-lcm` with `hermes-lcm-x`,
+   and set `context.engine: lcm-x`:
+
+   ```yaml
+   plugins:
+     enabled:
+       - hermes-lcm-x
+   context:
+     engine: lcm-x
+   ```
+
+   - If a separate older copy is still installed (for example v0.23.x left at
+     `plugins/hermes-lcm` next to a new `plugins/hermes-lcm-x`), do **not** keep
+     both names enabled: both copies would load. LCM-X detects that state, logs
+     `Another LCM generation is already loaded`, and stays inert so only one
+     copy writes `lcm.db`, but LCM-X itself is then not running.
+   - Keeping `hermes-lcm` listed next to `hermes-lcm-x` is harmless only when
+     `plugins/hermes-lcm` is this same checkout (an in-place clone, or the
+     link `scripts/install.sh` reuses): there is one physical copy.
+   - The legacy `context.engine: lcm` still selects LCM-X through an alias, but
+     logs a once-per-process `DEPRECATED LCM-X config` warning and reports an
+     `identity_migration` field in `lcm_status` and a `warn` check in
+     `lcm_doctor` naming the exact change.
+4. **Start Hermes and verify:** `hermes plugins` lists `hermes-lcm-x` (and no
+   separate `hermes-lcm`), and the log shows
+   `LCM plugin loaded — lossless context management active`.
+5. **Later, by hand:** after verifying, remove a separate old directory (and
+   its `skills/hermes-lcm` link). Keep it until then for rollback. The
+   installer never edits `config.yaml` or deletes anything.
+
+**If the config is not updated:** Hermes logs
+`Context engine 'lcm' not found — falling back to built-in compressor` and runs
+without LCM-X. The existing `lcm.db` is untouched, but turns handled while
+Hermes runs without LCM-X (built-in compressor) are not in `lcm.db` and their
+compacted content may not be recoverable. Therefore update the config before
+restarting Hermes after the update.
+
+**Managed fleets** (PCS / managed-plugin payloads) stay pinned to v0.23.x until
+their config stages `hermes-lcm-x` in `plugins.enabled`. That staging is a
+separate fleet-migration change owned outside this repository.
+
 ## Commands and tools
 
 ### Agent tools
@@ -344,7 +417,7 @@ LCM-X ships `skills/hermes-lcm/SKILL.md` plus progressive-disclosure
 references for configuration, architecture, diagnostics, recall routing, and
 session lifecycle. The installer links that directory into the active Hermes
 profile so it appears in ordinary skill discovery. On hosts with plugin skill
-registration, it is also available explicitly as `hermes-lcm:hermes-lcm`.
+registration, it is also available explicitly as `hermes-lcm-x:hermes-lcm`.
 
 The canonical policy is distributed through that bundled skill. It is not
 injected through `pre_llm_call`: current Hermes persists hook context in the
@@ -429,7 +502,7 @@ known-good rolling backup.
 
 ## Configuration
 
-Most installs only need `plugins.enabled` and `context.engine: lcm`.
+Most installs only need `plugins.enabled` and `context.engine: lcm-x`.
 
 ### Common settings
 
@@ -551,7 +624,7 @@ endpoint-aware locality for remote Ollama configurations.
 
 ### Threshold ownership
 
-When `context.engine: lcm` is active, `LCM_CONTEXT_THRESHOLD` is the compaction
+When `context.engine: lcm-x` is active, `LCM_CONTEXT_THRESHOLD` is the compaction
 threshold LCM uses. Hermes core `compression.threshold` belongs to the built-in
 compressor. Hermes core `compression.enabled` is still the global gate that
 allows compaction, so leave it enabled when using LCM.
@@ -867,10 +940,10 @@ manifest-based rollback. See the [operator guide](docs/operator-guide.md#histori
 
 ## Troubleshooting
 
-### `hermes plugins` shows `lcm (not found)` but LCM tools exist
+### `hermes plugins` shows `lcm-x (not found)` but LCM tools exist
 
-If `plugins.enabled` contains `hermes-lcm`, `context.engine: lcm` is set, and
-the runtime exposes LCM tools, LCM is loaded. The `lcm (not found)` line is a
+If `plugins.enabled` contains `hermes-lcm-x`, `context.engine: lcm-x` is set, and
+the runtime exposes LCM tools, LCM is loaded. The `lcm-x (not found)` line is a
 Hermes host discovery/status mismatch, not an LCM storage or compaction failure.
 
 ### `/lcm status` looks unbound after restart
@@ -965,7 +1038,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
 [tags page](https://github.com/electricsheephq/lcm-x/tags), and
-[CHANGELOG](CHANGELOG.md) for version history. `v0.23.2` is the latest stable
+[CHANGELOG](CHANGELOG.md) for version history. `v0.23.3` is the latest stable
 GitHub Release; verify its exact SHA before installation.
 
 ## License

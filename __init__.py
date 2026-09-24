@@ -401,6 +401,30 @@ def register(ctx):
         LCM_DOCTOR,
     )
 
+    # A separate pre-rename copy (plugin ``hermes-lcm``) that loaded first owns
+    # the context-engine slot. Registering our hooks too would make two
+    # engines ingest every turn into the same lcm.db (#471), so stay inert.
+    from . import plugin_identity as _identity
+
+    existing = getattr(getattr(ctx, "_manager", None), "_context_engine", None)
+    if (
+        existing is not None
+        and _identity.is_lcm_engine_name(getattr(existing, "name", None))
+        and type(existing).__module__ != LCMEngine.__module__
+    ):
+        logger.error(
+            "Another LCM generation is already loaded in this Hermes process "
+            "(context engine %r from %s). %s will not register its engine, tools "
+            "or turn-ingestion hooks, so only one copy writes lcm.db. Stop Hermes, "
+            "replace `%s` with `%s` in plugins.enabled, then start Hermes again.",
+            existing.name,
+            type(existing).__module__,
+            _identity.PLUGIN_NAME,
+            _identity.LEGACY_PLUGIN_NAME,
+            _identity.PLUGIN_NAME,
+        )
+        return
+
     config = LCMConfig.from_env()
 
     # Resolve hermes_home for profile-scoped storage
@@ -409,10 +433,16 @@ def register(ctx):
         from hermes_cli.config import get_hermes_home
         hermes_home = str(get_hermes_home())
     except Exception as exc:
-        logger.warning("hermes-lcm: could not import get_hermes_home (%s); falling back to env", exc)
+        logger.warning("hermes-lcm-x: could not import get_hermes_home (%s); falling back to env", exc)
         hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
 
     engine = LCMEngine(config=config, hermes_home=hermes_home)
+
+    # Hermes selects the engine whose ``name`` equals ``context.engine``; keep a
+    # legacy ``context.engine: lcm`` config working, loudly (#471).
+    identity_notice = _identity.identity_migration_notice(_identity.load_hermes_config())
+    engine.apply_identity_migration(identity_notice)
+    _identity.warn_identity_migration_once(identity_notice)
 
     # Register as the context engine (replaces ContextCompressor)
     ctx.register_context_engine(engine)
@@ -592,7 +622,7 @@ def register(ctx):
             if not history:
                 return
             host_engine = kwargs.get("context_compressor")
-            if getattr(host_engine, "name", None) != "lcm":
+            if not _identity.is_lcm_engine_name(getattr(host_engine, "name", None)):
                 host_engine = None
 
             session_id = str(kwargs.get("session_id") or "")

@@ -138,7 +138,7 @@ if [[ -z "$DIFF_CHECK_RANGE" ]] && git rev-parse --is-inside-work-tree >/dev/nul
 fi
 
 cat > "$CHECKLIST" <<EOF
-# hermes-lcm release validation
+# LCM-X (hermes-lcm-x) release validation
 
 - generated_at_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 - mode: $MODE

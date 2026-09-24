@@ -14,6 +14,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from .plugin_identity import PLUGIN_NAME
+
 logger = logging.getLogger(__name__)
 
 _PLUGIN_ROOT = Path(__file__).resolve().parent
@@ -32,7 +34,7 @@ def _plugin_metadata() -> dict[str, str]:
     """
     global _PLUGIN_METADATA
 
-    metadata = {"name": "hermes-lcm", "version": "unknown"}
+    metadata = {"name": PLUGIN_NAME, "version": "unknown"}
     manifest = _PLUGIN_ROOT / "plugin.yaml"
     try:
         for line in manifest.read_text(encoding="utf-8").splitlines():

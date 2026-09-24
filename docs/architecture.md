@@ -2,8 +2,9 @@
 
 This page keeps the LCM-X implementation model and product-positioning nuance
 outside the quickstart README while preserving the details new operators and
-reviewers need. Runtime compatibility identifiers remain `hermes-lcm` for the
-plugin and `lcm` for the context engine.
+reviewers need. From v0.24.0 (#471) the runtime identifiers are `hermes-lcm-x`
+for the plugin and `lcm-x` for the context engine (legacy v0.23.x: `hermes-lcm`
+/ `lcm`).
 
 The released product baseline for this note is
 `v0.23.1@81d8d41197dddc4c09b57097f4955ebae32366a9`. The source snapshot

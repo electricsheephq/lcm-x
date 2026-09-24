@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run deterministic hermes-lcm stress release checks."""
+"""Run deterministic LCM-X stress release checks."""
 
 from __future__ import annotations
 

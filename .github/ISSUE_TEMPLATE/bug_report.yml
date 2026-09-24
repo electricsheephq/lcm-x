@@ -32,7 +32,7 @@ body:
       label: Minimal reproduction
       description: List exact steps, commands, config, or a small scenario that reproduces the issue.
       placeholder: |
-        1. Enable hermes-lcm with context.engine: lcm
+        1. Enable hermes-lcm-x with context.engine: lcm-x
         2. Run ...
         3. Call ...
         4. Observe ...
@@ -44,7 +44,7 @@ body:
     attributes:
       label: Affected commit SHA
       description: Exact LCM-X commit that exhibits the bug. Add a branch or release tag only as context.
-      placeholder: Exact commit SHA for v0.23.3 or main, for example 0123456789abcdef...
+      placeholder: Exact commit SHA for v0.24.0 or main, for example 0123456789abcdef...
     validations:
       required: true
 
@@ -80,7 +80,7 @@ body:
       render: yaml
       placeholder: |
         context:
-          engine: lcm
+          engine: lcm-x
         lcm:
           ...
     validations:

@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from .plugin_identity import is_lcm_engine_name
+
 _ACTIVE_ENGINE_REGISTRY_LOCK = threading.RLock()
 _ACTIVE_ENGINE_COLD_START_LOCK = threading.RLock()
 _ACTIVE_ENGINES_BY_SESSION_ID = weakref.WeakValueDictionary()
@@ -49,7 +51,7 @@ class ActiveEngineUseResult:
 def _is_usable_lcm_engine(engine: Any) -> bool:
     return bool(
         engine is not None
-        and getattr(engine, "name", None) == "lcm"
+        and is_lcm_engine_name(getattr(engine, "name", None))
         and hasattr(engine, "ingest")
     )
 

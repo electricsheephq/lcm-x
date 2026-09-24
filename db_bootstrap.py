@@ -246,14 +246,14 @@ def refuse_schema_version_too_new(conn: sqlite3.Connection) -> None:
             f"actual schema is the v{SCHEMA_VERSION} shape plus named feature "
             f"markers — the signature of an interim development build that "
             f"recorded a numeric version it never migrated to. There is no newer "
-            f"hermes-lcm to upgrade to; do NOT upgrade the plugin. Run "
+            f"LCM-X to upgrade to; do NOT upgrade the plugin. Run "
             f"`/lcm doctor repair schema-stamp` to preview a backup-first reset "
             f"of the stamp to v{SCHEMA_VERSION} (add `apply` to execute)."
         )
     raise SchemaVersionTooNewError(
         f"LCM database schema version {current_version} is newer than this "
         f"build supports (v{SCHEMA_VERSION}). Refusing to open to avoid "
-        f"corrupting data written by a newer hermes-lcm. Upgrade the plugin "
+        f"corrupting data written by a newer LCM-X. Upgrade the plugin "
         f"or restore a pre-upgrade backup (.db/-wal/-shm)."
     )
 
@@ -2342,7 +2342,7 @@ def inspect_lcm_schema_health(
     database_path: str = "",
     required_tables: Iterable[str] = REQUIRED_CORE_TABLES,
 ) -> dict[str, object]:
-    """Return read-only health metadata for the core hermes-lcm SQLite schema."""
+    """Return read-only health metadata for the core LCM-X SQLite schema."""
     required = tuple(required_tables)
     resolved_path = _database_path_for_connection(conn, database_path)
     detail: dict[str, object] = {

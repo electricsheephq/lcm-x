@@ -43,6 +43,8 @@ ACCESSORS = {
     # Pure path computation -- returns where a rotate backup WOULD go. It writes
     # nothing; command.py is what writes there.
     "rotate_backup_path",
+    # Legacy-name migration notice derived from the host config (#471).
+    "identity_migration",
 }
 
 # Model-reachable, but only from a slash command that gates before reaching
@@ -73,6 +75,9 @@ WRITES_AS_SELF = {
 HOST_ONLY = {
     "enable_teams", "setup_teams", "disable_teams", "preflight_teams",
     "update_model", "shutdown", "clone_for_agent", "drain_rollup_maintenance",
+    # Sets the host-facing engine name from the Hermes config at register /
+    # clone time (#471); it reads no store and grants nothing.
+    "apply_identity_migration",
 }
 
 
