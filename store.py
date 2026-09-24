@@ -1068,6 +1068,19 @@ class MessageStore:
             return None
         return json.loads(str(row[0]))
 
+    def read_metadata_json_many(self, keys: list[str]) -> Dict[str, Any]:
+        """Batch ``read_metadata_json``: {key: value}; malformed values are skipped."""
+        conn, found = self._conn, {}
+        for start in range(0, len(keys) if conn is not None else 0, 500):
+            chunk = keys[start:start + 500]
+            query = f"SELECT key, value FROM metadata WHERE key IN ({','.join('?' * len(chunk))})"
+            for key, value in conn.execute(query, chunk):
+                try:
+                    found[key] = json.loads(str(value)) if value else None
+                except ValueError:
+                    continue
+        return found
+
     def write_metadata_json(
         self,
         keys: list[str],

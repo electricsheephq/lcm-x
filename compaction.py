@@ -532,6 +532,7 @@ class CompactionMixin:
                     force=force,
                 )
             self._record_compress_commit_proof(messages, result)
+            self._rekey_host_rewrite_watch(messages, result)
             return result
         except BaseException:
             self._last_compression_status = "error"

@@ -94,9 +94,11 @@ _PROBE = textwrap.dedent(
         response = SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason="stop")], model="test/model")
         response.usage = SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=20, total_tokens=prompt_tokens + 20)
         return response
+    continue_turns = {int(t) for t in os.environ.get("PROBE_CONTINUE_TURNS", "").split(",") if t}
     history = []
     for t in range(1, turns + 1):
-        raw = f"[T{t:02d}] user turn {t}: " + ("alpha beta gamma delta " * 400) + "end." + ("\\n" if trailing else "")
+        text = "continue" if t in continue_turns else f"[T{t:02d}] user turn {t}: " + ("alpha beta gamma delta " * 400) + "end."
+        raw = text + ("\\n" if trailing else "")
         est = sum(len(str(m.get("content") or "")) for m in history) // 4 + len(raw) // 4 + 800
         agent.client.chat.completions.create.side_effect = [reply(f"reply to T{t:02d}: noted item {t}.", est)]
         # ACP shape (acp_adapter/server.py): raw prompt in, stripped prompt persisted.
@@ -105,9 +107,22 @@ _PROBE = textwrap.dedent(
         if isinstance(result.get("messages"), list):
             history = result["messages"]
     db = sqlite3.connect(str(home / "lcm.db"))
-    rows = db.execute("SELECT role, content FROM messages ORDER BY store_id").fetchall()
+    stored = db.execute("SELECT store_id, session_id, role, content FROM messages ORDER BY store_id").fetchall()
     db.close()
-    normalized = [(r, (c or "").rstrip()) for r, c in rows]
+    rows = [(r, c) for _s, _sid, r, c in stored]
+    normalized = [(r, (c or "").rstrip()) for r, c in rows if (c or "").strip() != "continue"]
+    state = sqlite3.connect(str(home / "state.db"))
+    host_user_texts = {c for (c,) in state.execute("SELECT content FROM messages WHERE role = 'user'")}
+    state.close()
+    host_user_texts |= {m.get("content") for m in history if m.get("role") == "user"}
+    # Every stored user row's replay identity is a form the host holds (state.db or live history):
+    # the host-rewrite override form, or the stored form Hermes' state.db keeps for a commit turn.
+    identity_mismatches = [
+        store_id for store_id, sid, r, c in stored if r == "user" and not any(
+            engine._message_replay_identity({"store_id": key, "session_id": sid, "role": r, "content": c},
+                                            stored_row=True)[1] in host_user_texts
+            for key in (store_id, 0))
+    ]
     log = buf.getvalue()
     print(json.dumps({
         "engine": getattr(engine, "name", None),
@@ -115,6 +130,10 @@ _PROBE = textwrap.dedent(
         "duplicate_rows": len(normalized) - len(set(normalized)),
         "commit_logged": log.count("as a compaction commit"),
         "conflicts": log.count("publication_invariant_conflict"),
+        "compactions_published": len(re.findall(r"LCM compaction #\\d+", log)),
+        "raw_user_rows": sum(1 for r, c in rows if r == "user" and (c or "").endswith("\\n")),
+        "continue_rows": sum(1 for r, c in rows if r == "user" and (c or "").strip() == "continue"),
+        "identity_mismatches": identity_mismatches,
         "override_rewrites": rewrites["n"],
         "user_rows_by_turn": {
             f"{i:02d}": sum(1 for r, c in rows if r == "user" and (c or "").startswith(f"[T{i:02d}]"))
@@ -143,7 +162,7 @@ HERMES = _hermes_python()
 pytestmark = pytest.mark.skipif(HERMES is None, reason="no real Hermes runtime available")
 
 
-def _run_turn_loop(tmp_path, *, in_place, trailing) -> dict:
+def _run_turn_loop(tmp_path, *, in_place, trailing, fresh_tail=24, continue_turns=()) -> dict:
     home = tmp_path / "hermes-home"
     (home / "plugins").mkdir(parents=True)
     (home / "plugins" / "hermes-lcm-x").symlink_to(REPO_ROOT)
@@ -168,8 +187,9 @@ def _run_turn_loop(tmp_path, *, in_place, trailing) -> dict:
             "PROBE_IN_PLACE": "1" if in_place else "0",
             "PROBE_TRAILING": "1" if trailing else "0",
             "PROBE_TURNS": "26",
+            "PROBE_CONTINUE_TURNS": ",".join(str(t) for t in continue_turns),
             "LCM_CONTEXT_THRESHOLD": "0.5",
-            "LCM_FRESH_TAIL_COUNT": "24",
+            "LCM_FRESH_TAIL_COUNT": str(fresh_tail),
             "LCM_FRESH_TAIL_MAX_TOKENS": "12000",
             "LCM_LEAF_CHUNK_TOKENS": "4000",
             "LCM_THRESHOLD_FULL_SWEEP_ENABLED": "true",
@@ -189,11 +209,17 @@ def _run_turn_loop(tmp_path, *, in_place, trailing) -> dict:
     return result
 
 
-def _assert_each_turn_stored_once(result) -> None:
-    not_once = {turn: count for turn, count in result["user_rows_by_turn"].items() if count != 1}
+def _assert_each_turn_stored_once(result, continue_turns=()) -> None:
+    not_once = {
+        turn: count
+        for turn, count in result["user_rows_by_turn"].items()
+        if count != (0 if int(turn) in continue_turns else 1)
+    }
     assert not_once == {}, result
+    assert result["continue_rows"] == len(continue_turns), result
     assert result["duplicate_rows"] == 0, result
     assert result["conflicts"] == 0, result
+    assert result["identity_mismatches"] == [], result
 
 
 @pytest.mark.parametrize(
@@ -217,6 +243,17 @@ def _assert_each_turn_stored_once(result) -> None:
 )
 def test_acp_persist_override_after_same_turn_compaction_stores_no_duplicates(tmp_path, in_place):
     _assert_each_turn_stored_once(_run_turn_loop(tmp_path, in_place=in_place, trailing=True))
+
+
+@pytest.mark.parametrize("continue_turns", [(), (17, 18, 19)], ids=["distinct-prompts", "repeated-continue"])
+def test_acp_persist_override_after_preflight_ingest_stores_no_duplicates(tmp_path, continue_turns):
+    """Hermes' sub-threshold preflight maintenance (len(messages) > 3 + fresh tail + 1)
+    ingests the RAW prompt on most turns, with no compaction and no commit proof;
+    the persist override then rewrites it in place."""
+    result = _run_turn_loop(tmp_path, in_place=True, trailing=True, fresh_tail=8, continue_turns=continue_turns)
+    assert result["raw_user_rows"] >= 10, result  # the preflight path really stored raw prompts
+    assert result["compactions_published"] >= 2, result
+    _assert_each_turn_stored_once(result, continue_turns)
 
 
 def test_turn_loop_without_host_rewrite_is_clean(tmp_path):

@@ -5141,6 +5141,7 @@ class LCMEngine(
             )
             return self._redact_active_replay_messages(messages)
 
+        self._capture_host_rewrites(messages)
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
         proof = getattr(self, "_compress_commit_proof", None)
@@ -5590,7 +5591,7 @@ class LCMEngine(
                 active_replay_messages[absolute_idx] = stubbed_message
 
         estimates = [count_message_tokens(m) for m in protected_messages]
-        self._store._append_protected_batch(
+        store_ids = self._store._append_protected_batch(
             self._session_id,
             protected_messages,
             estimates,
@@ -5600,6 +5601,9 @@ class LCMEngine(
             metadata_messages=[
                 msg for _idx, msg in messages_to_store_with_index
             ],
+        )
+        self._watch_stored_user_rows(
+            zip([messages[idx] for idx, _msg in messages_to_store_with_index], protected_messages, store_ids)
         )
         # Rollup staleness is driven by summary-node PUBLICATION
         # (_invalidate_rollups_for_published_node at every add_node site), not by
