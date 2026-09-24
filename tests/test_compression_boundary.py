@@ -9,6 +9,7 @@ import hermes_lcm.engine as lcm_engine_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.reconcile import _commit_proof_identity_digest
 
 
 def test_compression_boundary_carries_summaries_without_moving_raw_messages(tmp_path):
@@ -761,7 +762,7 @@ def test_durable_commit_proof_is_written_only_for_a_published_compaction(tmp_pat
     engine, _pre, compressed = _compacted_engine(tmp_path, monkeypatch)
     try:
         payload = _durable_commit_proof(engine, "S0")
-        assert payload["version"] == 2
+        assert payload["version"] == 3
         assert payload["hermes_home"] == str(tmp_path / "home")
         assert len(payload["effective_sha256"]) == len(engine._compress_commit_proof["output_effective"])
         assert payload["last_store_id"] > 0
@@ -915,6 +916,120 @@ def test_durable_commit_proof_is_bound_to_its_conversation(tmp_path, monkeypatch
         assert resumed._cursor_from_durable_commit_proof(host) is None
     finally:
         resumed.shutdown()
+
+
+def _as_rc3_durable_proof(engine, compressed):
+    """Rewrite the durable proof the way rc3 wrote it: version 2, exact identities."""
+    payload = _durable_commit_proof(engine, "S0")
+    payload["version"] = 2
+    payload["effective_sha256"] = [
+        _commit_proof_identity_digest(engine._message_replay_identity(m))
+        for m in compressed
+        if not engine._is_replayed_context_scaffold_message(m)
+    ]
+    engine._store.write_metadata_json(["compaction_commit_proof:S0"], json.dumps(payload, sort_keys=True))
+    return payload
+
+
+def test_rc3_durable_commit_proof_is_still_honoured_after_upgrade(tmp_path, monkeypatch):
+    """#498 P1: an rc3 (version-2) durable proof, verified with the exact identity
+    it was hashed with, still re-indexes an in-place commit after a restart: the
+    reply is the only new row, and the next compaction publishes (no conflict)."""
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        _as_rc3_durable_proof(engine, compressed)
+        engine.on_session_end("S0", pre)
+        engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
+    finally:
+        engine.shutdown()
+    resumed = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    try:
+        resumed.on_session_start("S0", platform="acp", context_length=200_000)
+        rows = _row_count(resumed)
+        host = list(compressed) + [_turn(13)[1]]
+        resumed.ingest(host)
+        assert _row_count(resumed) == rows + 1
+        for i in range(14, 20):
+            host.extend(_turn(i))
+            resumed.ingest(host)
+        host.append(_turn(20)[0])
+        resumed.ingest(host)
+        resumed.compress(list(host), force=True)
+        assert resumed._last_compression_status == "compacted", resumed._last_compression_noop_reason
+        stored = resumed._store._conn.execute("SELECT role, content FROM messages").fetchall()
+        assert len(stored) == len(set(stored))
+    finally:
+        resumed.shutdown()
+
+
+def test_rc3_durable_commit_proof_stays_exact_for_user_whitespace(tmp_path, monkeypatch):
+    """A version-2 proof hashed exact identities, so it never proves a user row
+    that differs only by whitespace (the cursor reconciles instead)."""
+    engine, _pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    padded = [dict(m) for m in compressed]
+    padded[-1]["content"] += "\n"
+    try:
+        assert engine._cursor_from_durable_commit_proof(padded) is not None  # version 3: proof-bound tolerance
+        _as_rc3_durable_proof(engine, compressed)
+    finally:
+        engine.shutdown()
+    resumed = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    try:
+        resumed.on_session_start("S0", platform="acp", context_length=200_000)
+        assert resumed._cursor_from_durable_commit_proof(list(compressed)) is not None
+        assert resumed._cursor_from_durable_commit_proof(padded) is None
+    finally:
+        resumed.shutdown()
+
+
+@pytest.mark.parametrize(("stored", "replayed"), [("retry", " retry\n"), ("", "  ")], ids=["retry", "empty"])
+def test_unbound_store_reconciliation_keeps_exact_user_identity(tmp_path, stored, replayed):
+    """#498 P0: with no commit proof binding the position, a user row that differs
+    from the stored one only by whitespace is a new exchange, not replay."""
+    engine = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        engine.ingest([{"role": "user", "content": stored}, {"role": "assistant", "content": "OK"}])
+        assert _row_count(engine) == 2
+    finally:
+        engine.shutdown()
+    resumed = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    try:
+        resumed.on_session_start("S0", platform="acp", context_length=200_000)
+        resumed.ingest([{"role": "user", "content": replayed}, {"role": "assistant", "content": "OK"}])
+        assert _row_count(resumed) == 4
+    finally:
+        resumed.shutdown()
+
+
+def test_host_trim_of_the_compacted_user_row_after_commit_stores_no_duplicates(tmp_path, monkeypatch):
+    """Hermes ACP persists prompt.strip(): at turn end it rewrites the adopted user
+    dict in place, after the same-turn compaction stored and proved the raw row.
+    The next ingest keeps the proof and stores only the reply."""
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
+    engine = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        host: list = []
+        for i in range(1, 13):
+            host.extend(_turn(i))
+            engine.ingest(host)
+        host.append({"role": "user", "content": _turn(13)[0]["content"] + "\n"})
+        engine.ingest(host)
+        compressed = engine.compress(list(host), force=True)
+        assert engine._last_compression_status == "compacted"
+        engine.on_session_end("S0", host)
+        engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
+        rows = _row_count(engine)
+        assert compressed[-1]["content"].endswith("\n")
+        compressed[-1]["content"] = compressed[-1]["content"].strip()  # finalize_turn's rewrite
+        engine.ingest(list(compressed) + [_turn(13)[1]])
+        assert _row_count(engine) == rows + 1
+        stored = engine._store._conn.execute("SELECT role, content FROM messages").fetchall()
+        normalized = [(role, (content or "").rstrip()) for role, content in stored]
+        assert len(normalized) == len(set(normalized))
+    finally:
+        engine.shutdown()
 
 
 def test_ordinary_session_reset_clears_the_commit_proof(tmp_path, monkeypatch):

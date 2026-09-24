@@ -6,6 +6,18 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: Hermes ACP turns no longer store duplicate rows or hit `publication_invariant_conflict`
+  when the host trims the prompt at turn end (#498). LCM watches the user rows it stored; when
+  the host rewrites that same object by edge whitespace only, it records an identity override
+  under `host_rewrite_identity:<store_id>` (protected like ingest, bound to a digest of the
+  stored content, refused for lossy redactions; a failed capture retries and never blocks the
+  ingest; the in-process override cache is FIFO-bounded and reloads on a miss). Stored content is never modified. Only position-bound matchers read an override or
+  tolerate edge whitespace: the retained user anchor, head-anchored restart
+  replay (row i vs incoming i, only for a list extending past the stored session, so a rewrite
+  LCM never saw before a crash is covered too), the durable proof walk, and the in-order store-id
+  mapper (either form, one-to-one). Full-replay and tail classification stay exact.
+  The durable commit proof moves to version 3; version-2 (rc3) proofs are still honoured.
+
 ## v0.24.0 - BREAKING: plugin renamed to hermes-lcm-x, engine to lcm-x (unreleased)
 
 **BREAKING.** The plugin manifest is renamed `hermes-lcm` → `hermes-lcm-x` and the context engine

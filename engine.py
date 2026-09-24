@@ -2641,14 +2641,9 @@ class LCMEngine(
             self._write_retained_user_anchor(None)
             return None
         registered_row = self._load_retained_user_anchor_row()
-        if (
-            registered_row is not None
-            and self._message_replay_identity(messages[1])
-            == self._message_replay_identity(
-                registered_row,
-                stored_row=True,
-            )
-        ):
+        # A host may have trimmed the retained prompt in place (#498), even before an override.
+        live_identity = self._message_replay_identity(messages[1])
+        if registered_row is not None and self._anchor_row_admits(live_identity, registered_row):
             later_real_users = self._durable_real_user_messages(
                 stop_after=1,
                 after_store_id=int(registered_row.get("store_id") or 0),
@@ -2657,10 +2652,7 @@ class LCMEngine(
                 self._prepared_retained_user_anchor = (
                     self._session_id,
                     int(registered_row.get("store_id") or 0),
-                    self._replay_identity_sha256(
-                        registered_row,
-                        stored_row=True,
-                    ),
+                    self._replay_identity_sha256(messages[1]),
                 )
                 return registered_row
             self._write_retained_user_anchor(None)
@@ -2670,10 +2662,7 @@ class LCMEngine(
             self._write_retained_user_anchor(None)
             return None
         row = durable_users[0]
-        if self._message_replay_identity(messages[1]) != self._message_replay_identity(
-            row,
-            stored_row=True,
-        ):
+        if not self._anchor_row_admits(live_identity, row):
             self._write_retained_user_anchor(None)
             return None
         if not self._write_retained_user_anchor(row):
@@ -2681,7 +2670,7 @@ class LCMEngine(
         self._prepared_retained_user_anchor = (
             self._session_id,
             int(row.get("store_id") or 0),
-            self._replay_identity_sha256(row, stored_row=True),
+            self._replay_identity_sha256(messages[1]),
         )
         return row
 
@@ -3909,7 +3898,7 @@ class LCMEngine(
             and not proof.get("end_consumed")
             and proof.get("input") is not None
             and len(messages) == len(proof["input"])
-            and [self._message_replay_identity(m) for m in messages] == proof["input"]
+            and [self._proof_replay_identity(m) for m in messages] == proof["input"]
         ):
             # Compaction commit (#483): every input row is already durable and the
             # cursor indexes compress()'s output, so skip the re-ingest. Still
@@ -4819,7 +4808,7 @@ class LCMEngine(
                 return index if effective == target else None
             if self._is_verified_replay_scaffold_message(message):
                 continue
-            effective.append(self._message_replay_identity(message))
+            effective.append(self._proof_replay_identity(message))
             if effective != target[: len(effective)]:
                 return None
         return len(messages) if effective == target else None
@@ -5141,6 +5130,7 @@ class LCMEngine(
             )
             return self._redact_active_replay_messages(messages)
 
+        self._capture_host_rewrites(messages)
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
         proof = getattr(self, "_compress_commit_proof", None)
@@ -5161,11 +5151,11 @@ class LCMEngine(
             proof["consulted"] = True
             host_input = proof.get("input")
             if n >= self._ingest_cursor and [
-                self._message_replay_identity(m) for m in messages[: self._ingest_cursor]
+                self._proof_replay_identity(m) for m in messages[: self._ingest_cursor]
             ] == proof["output"]:
                 self._compress_commit_proof = None
             elif proof.get("end_consumed") and host_input is not None and n >= len(host_input) and [
-                self._message_replay_identity(m) for m in messages[: len(host_input)]
+                self._proof_replay_identity(m) for m in messages[: len(host_input)]
             ] == host_input:
                 # The host committed, then kept the compress() input (anti-growth
                 # refusal or rollback): every row of it is durable, resume after it.
@@ -5590,7 +5580,7 @@ class LCMEngine(
                 active_replay_messages[absolute_idx] = stubbed_message
 
         estimates = [count_message_tokens(m) for m in protected_messages]
-        self._store._append_protected_batch(
+        store_ids = self._store._append_protected_batch(
             self._session_id,
             protected_messages,
             estimates,
@@ -5601,6 +5591,8 @@ class LCMEngine(
                 msg for _idx, msg in messages_to_store_with_index
             ],
         )
+        originals = [messages[idx] for idx, _msg in messages_to_store_with_index]
+        self._watch_stored_user_rows(zip(originals, protected_messages, store_ids))
         # Rollup staleness is driven by summary-node PUBLICATION
         # (_invalidate_rollups_for_published_node at every add_node site), not by
         # raw ingest: marking a period stale before its covering summary exists

@@ -41,6 +41,7 @@ from .ingest_protection import (
     _json_has_duplicate_object_keys,
     _persisted_output_marker_identity_digest,
     _persisted_output_saved_path,
+    protect_messages_for_ingest,
     recover_hermes_persisted_output_with_file_stat,
     redact_sensitive_value,
 )
@@ -111,6 +112,24 @@ _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX = "compacted_active_replay_snapshot_dig
 _SESSION_END_REPLAY_METADATA_PREFIX = "session_end_replay_snapshot_digests"
 _NATIVE_RECOVERY_REPLAY_METADATA_PREFIX = "native_recovery_replay_snapshot_digests"
 _COMPACTION_COMMIT_PROOF_METADATA_PREFIX = "compaction_commit_proof"
+# Version 3 hashes proof identities (_proof_user_identity). A version-2 (rc3)
+# proof hashed exact identities and is still verified with them.
+_COMPACTION_COMMIT_PROOF_VERSION = 3
+
+
+def _proof_user_identity(identity):
+    """Identity compared against a commit proof: user content without edge whitespace
+    (Hermes ACP persists ``prompt.strip()``). Proof-bound positions only (#498)."""
+    if identity[0] != "user":
+        return tuple(identity)
+    return (identity[0], identity[1].strip(), *identity[2:])
+
+
+# Per stored user row, keyed by store_id (survives rotation and restart): the
+# identity content of the form a host rewrote that row to in place (#498).
+_HOST_REWRITE_IDENTITY_METADATA_PREFIX = "host_rewrite_identity"
+# The in-process override cache is read-through (a miss reloads from metadata): FIFO-bounded.
+_HOST_REWRITE_OVERRIDE_CACHE_CAP = 1024
 
 
 def _commit_proof_identity_digest(identity) -> str:
@@ -347,9 +366,134 @@ class ReconcileMixin:
                 return False
         return True
 
-    def _message_replay_identity(self, msg: Dict[str, Any], *, stored_row: bool = False) -> tuple[str, str, str, str, str]:
+    def _proof_replay_identity(self, msg: Dict[str, Any]) -> tuple[str, str, str, str, str]:
+        return _proof_user_identity(self._message_replay_identity(msg))
+
+    def _stored_row_forms(self, row: Dict[str, Any]) -> set:
+        """A stored row's admissible identities: exact and its host-rewrite override form."""
+        forms = (self._message_replay_identity(row, stored_row=True, with_host_rewrite=h) for h in (False, True))
+        return set(forms)
+
+    def _anchor_row_admits(self, live_identity, row: Dict[str, Any]) -> bool:
+        """messages[1] is bound by position to the retained row: its stored or override
+        form, or either up to edge whitespace -- never across a lossy redaction (#498)."""
+        forms = self._stored_row_forms(row)
+        return live_identity in forms or not _has_lossy_redacted_identity(live_identity) and any(
+            not _has_lossy_redacted_identity(form) and _proof_user_identity(form) == _proof_user_identity(live_identity)
+            for form in forms
+        )
+
+    def _host_rewrite_state(self):
+        """Per bound store: watch {store_id: (identity, stored content, [objects])},
+        overrides {store_id: payload or None}."""
+        if getattr(self, "_host_rewrite_store", None) is not self._store:
+            self._host_rewrite_store, self._host_rewrite_watch, self._host_rewrite_overrides = self._store, {}, {}
+        return self._host_rewrite_watch, self._host_rewrite_overrides
+
+    def _load_host_rewrite_overrides(self, rows) -> None:
+        """Batch-load the overrides of the stored user rows a matcher is about to read."""
+        overrides = self._host_rewrite_state()[1]
+        wanted = {int(row.get("store_id") or 0) for row in rows if row.get("role") == "user"} - set(overrides) - {0}
+        if wanted:
+            keys = {f"{_HOST_REWRITE_IDENTITY_METADATA_PREFIX}:{store_id}": store_id for store_id in wanted}
+            found = self._store.read_metadata_json_many(list(keys))
+            overrides.update({store_id: found.get(key) for key, store_id in keys.items()})
+            self._bound_host_rewrite_overrides(wanted)
+
+    def _bound_host_rewrite_overrides(self, keep) -> None:
+        """Evict the oldest cached overrides past the cap, never those this call loaded or set."""
+        overrides = self._host_rewrite_state()[1]
+        excess = len(overrides) - _HOST_REWRITE_OVERRIDE_CACHE_CAP
+        for store_id in [key for key in overrides if key not in keep][: max(0, excess)]:
+            del overrides[store_id]
+
+    def _host_rewrite_override_content(self, row: Dict[str, Any]) -> Optional[str]:
+        """The host form's protected content, while the stored content is unchanged."""
+        self._load_host_rewrite_overrides([row])
+        override = self._host_rewrite_state()[1].get(int(row.get("store_id") or 0))
+        stored = normalize_content_value(row.get("content")) or ""
+        if isinstance(override, dict) and override.get("stored_sha256") == hashlib.sha256(stored.encode()).hexdigest():
+            return override.get("content") if isinstance(override.get("content"), str) else None
+        return None
+
+    def _watch_stored_user_rows(self, stored) -> None:
+        """Remember the user rows this process just stored: (object, store_id, identity, content)."""
+        watch = self._host_rewrite_state()[0]
+        for message, protected, store_id in stored:
+            if message.get("role") == "user":
+                content = normalize_content_value(protected.get("content")) or ""
+                watch[int(store_id)] = (self._message_replay_identity(message), content, [message])
+        for store_id in sorted(watch)[:-8]:  # bounded: a rewrite follows its store within the turn
+            del watch[store_id]
+
+    def _rekey_host_rewrite_watch(self, messages, result) -> None:
+        """compress() returns copies: also watch the unique output copy of a watched row."""
+        watch = self._host_rewrite_state()[0]
+        present = {id(message) for message in messages}
+        if not isinstance(result, list) or not any(id(o) in present for _i, _c, objs in watch.values() for o in objs):
+            return
+        identities = [self._message_replay_identity(message) for message in result]
+        inputs = Counter(self._message_replay_identity(message) for message in messages)
+        for identity, _content, objects in watch.values():
+            # Only an unambiguous input occurrence transfers to its unique output copy.
+            copies = [message for message, other in zip(result, identities) if other == identity]
+            unambiguous = inputs[identity] == 1 and any(id(o) in present for o in objects) and len(copies) == 1
+            if unambiguous and all(copies[0] is not o for o in objects):
+                objects.append(copies[0])
+
+    def _capture_host_rewrites(self, messages) -> None:
+        """A host rewrote a user row LCM stored, in place, by edge whitespace only:
+        record a store_id-keyed identity override. The stored row is never modified."""
+        watch = self._host_rewrite_state()[0]
+        present = {id(message): message for message in messages} if watch else {}
+        for store_id, (identity, stored, objects) in list(watch.items()):
+            message = next((o for o in objects if present.get(id(o)) is o), None)
+            live = self._message_replay_identity(message) if message is not None else identity
+            if live == identity:
+                continue
+            if _proof_user_identity(live) != _proof_user_identity(identity):
+                del watch[store_id]
+                continue
+            try:  # best-effort: a failure keeps the watch for the next ingest, never blocks this one
+                self._capture_host_rewrite(store_id, identity, stored, message)
+            except Exception as exc:
+                logger.warning("LCM host-rewrite capture for store_id %s failed (%s); retrying next ingest",
+                               store_id, type(exc).__name__)
+
+    def _capture_host_rewrite(self, store_id, identity, stored, message) -> None:
+        """Record one override; drop the watch only once it is durable or refused."""
+        watch, overrides = self._host_rewrite_state()
+        reuse = bool(extract_externalized_ref(stored))  # reuse the raw payload: no second file
+        protected = {"content": stored} if reuse else protect_messages_for_ingest(
+            [message], config=self._config, hermes_home=self._hermes_home, session_id=self._session_id
+        )[0]
+        content = normalize_content_value(protected.get("content")) or ""
+        if _has_lossy_sensitive_redaction(content) or _has_lossy_sensitive_redaction(stored):
+            del watch[store_id]
+            return  # a digest-less redaction is not identity
+        raw = identity[1]  # the stripped edges keep the stored form's audit trail
+        edges = [raw[: len(raw) - len(raw.lstrip())], raw[len(raw.rstrip()):]]
+        digest = hashlib.sha256(stored.encode()).hexdigest()
+        payload = {"version": 1, "content": content, "stripped": edges, "stored_sha256": digest}
+        payload.update({"strip_payload": True} if reuse else {})
+        key = f"{_HOST_REWRITE_IDENTITY_METADATA_PREFIX}:{store_id}"
+        self._store.write_metadata_json([key], json.dumps(payload, sort_keys=True), skip_unchanged=True)
+        del watch[store_id]  # only once the override is durable: a failed write retries next ingest
+        overrides[store_id] = payload
+        self._bound_host_rewrite_overrides({store_id})
+
+    def _message_replay_identity(
+        self, msg: Dict[str, Any], *, stored_row: bool = False, with_host_rewrite: bool = False
+    ) -> tuple[str, str, str, str, str]:
         role = str(msg.get("role") or "unknown")
         content = normalize_content_value(msg.get("content")) or ""
+        strip_payload = False
+        # Opt-in: only occurrence/position-bound consumers read the override (#498).
+        if stored_row and with_host_rewrite and role == "user":
+            override_content = self._host_rewrite_override_content(msg)
+            content = content if override_content is None else override_content
+            override = self._host_rewrite_state()[1].get(int(msg.get("store_id") or 0))
+            strip_payload = override_content is not None and bool(override.get("strip_payload"))
         # A host-merged LCM summary carrier (#483) is identified by the real row
         # glued behind its DAG-verified summary prefix.
         carrier_rest = getattr(self, "_generated_context_carrier_remainder", None)
@@ -494,7 +638,7 @@ class ReconcileMixin:
                 hermes_home=self._hermes_home,
             )
             if payload is not None and isinstance(payload.get("content"), str):
-                content = payload["content"]
+                content = payload["content"].strip() if strip_payload else payload["content"]
         tool_calls_identity = self._stable_tool_calls_identity(tool_calls)
         # WHICH TOOL RAN is part of a tool row's identity. A tool result
         # carries no ``tool_calls``, so without the name the only distinguishing
@@ -1574,7 +1718,7 @@ class ReconcileMixin:
         payload = self._store.read_metadata_json(
             self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)
         )
-        if not isinstance(payload, dict) or payload.get("version") != 2:
+        if not isinstance(payload, dict) or payload.get("version") not in (2, _COMPACTION_COMMIT_PROOF_VERSION):
             return None
         if payload.get("hermes_home") != str(getattr(self, "_hermes_home", "") or ""):
             return None
@@ -1603,6 +1747,12 @@ class ReconcileMixin:
             payload = self._durable_commit_proof_payload()
             if payload is None:
                 return None
+
+            def proof_identity(message, **kwargs):
+                identity = self._message_replay_identity(message, **kwargs)
+                # rc3 (version 2) hashed exact identities.
+                return _proof_user_identity(identity) if payload.get("version") != 2 else identity
+
             target = list(payload.get("effective_sha256") or [])
             matched = 0
             index = 0
@@ -1615,7 +1765,7 @@ class ReconcileMixin:
                     return None
                 for message, digest in zip(messages, scaffold):
                     if not self._is_verified_replay_scaffold_message(message) or (
-                        _commit_proof_identity_digest(self._message_replay_identity(message)) != digest
+                        _commit_proof_identity_digest(proof_identity(message)) != digest
                     ):
                         return None
                 index = len(scaffold)
@@ -1624,7 +1774,7 @@ class ReconcileMixin:
                 index += 1
                 if self._is_verified_replay_scaffold_message(message):
                     continue
-                identity = self._message_replay_identity(message)
+                identity = proof_identity(message)
                 # A digest-less redaction (password_assignment) is not identity:
                 # different same-length secrets share it, so it proves nothing.
                 if _has_lossy_redacted_identity(identity):
@@ -1642,12 +1792,13 @@ class ReconcileMixin:
                 )
                 if not page:
                     break
+                self._load_host_rewrite_overrides(page)
                 for row in page:
                     if index >= n:
                         return None
-                    identity = self._message_replay_identity(messages[index])
-                    if _has_lossy_redacted_identity(identity) or identity != self._message_replay_identity(
-                        row, stored_row=True
+                    identity = proof_identity(messages[index])
+                    if _has_lossy_redacted_identity(identity) or identity != proof_identity(
+                        row, stored_row=True, with_host_rewrite=True
                     ):
                         return None
                     index += 1
@@ -1656,6 +1807,24 @@ class ReconcileMixin:
         except Exception:
             logger.debug("LCM durable compaction-commit proof load failed", exc_info=True)
             return None
+
+    def _cursor_from_host_rewrite_head(self, messages, session_count: int) -> Optional[int]:
+        """Head-anchored replay (#498): stored row i vs incoming i from the session start,
+        with overrides, for a list extending past the session (transcript + new turn)."""
+        if not 0 < session_count < len(messages):
+            return None
+        rows = self._store.get_session_messages(self._session_id, limit=session_count)
+        self._load_host_rewrite_overrides(rows)
+        if len(rows) != session_count:
+            return None
+        rewritten = any(self._host_rewrite_override_content(r) is not None for r in rows)
+        for row, message in zip(rows, messages):
+            identity = self._message_replay_identity(message)
+            stored = self._message_replay_identity(row, stored_row=True, with_host_rewrite=True)
+            if _has_lossy_redacted_identity(identity) or _proof_user_identity(identity) != _proof_user_identity(stored):
+                return None
+            rewritten = rewritten or identity != stored
+        return session_count if rewritten else None
 
     def _reconcile_ingest_cursor_from_store(
         self,
@@ -1758,6 +1927,9 @@ class ReconcileMixin:
             raw_session_count=session_count,
             allow_session_end_replay_proof=allow_session_end_replay_proof,
         )
+        head_cursor = self._cursor_from_host_rewrite_head(messages, session_count)
+        if head_cursor is not None and head_cursor > (cursor or 0):
+            cursor = head_cursor  # the greatest independently proven cursor wins
         proof_cursor = self._cursor_from_durable_commit_proof(messages)
         if proof_cursor is not None and proof_cursor > (cursor or 0):
             # The last compaction's durable output proof covers more of this
@@ -2199,14 +2371,11 @@ class ReconcileMixin:
                 retained_anchor.get("store_id") or 0
             ) if retained_anchor else 0
             if 0 < retained_store_id <= int(self._last_compacted_store_id or 0):
-                retained_identity = self._message_replay_identity(
-                    retained_anchor,
-                    stored_row=True,
-                )
+                retained_forms = self._stored_row_forms(retained_anchor)
                 active_matches = sum(
                     1
                     for message in messages
-                    if self._message_replay_identity(message) == retained_identity
+                    if self._message_replay_identity(message) in retained_forms
                 )
                 if active_matches == 1:
                     candidates.append(retained_anchor)
@@ -2229,6 +2398,7 @@ class ReconcileMixin:
                 break
             candidates.extend(page)
             next_candidate_after = page[-1]["store_id"]
+        self._load_host_rewrite_overrides(candidates)
 
         def active_lineage_identity(
             message: Dict[str, Any],
@@ -2255,8 +2425,18 @@ class ReconcileMixin:
         # the memo below) since most rows never need them.
         stored_identities: list[tuple[Any, ...]] = []
         stored_cleanup_identities: list[Optional[tuple[Any, ...]]] = []
+        # A rewritten row admits its override and stored forms (state.db resends the latter).
+        stored_alt_identities: list[Optional[tuple[Any, ...]]] = []
         for stored in candidates:
             identity = self._message_replay_identity(stored, stored_row=True)
+            raw_identity = identity
+            if self._host_rewrite_override_content(stored) is not None:
+                identity = self._message_replay_identity(stored, stored_row=True, with_host_rewrite=True)
+            alt = raw_identity if raw_identity != identity else _proof_user_identity(raw_identity)
+            # No override (a restart hid the rewrite): the in-order mapper admits the trimmed form.
+            stored_alt_identities.append(alt if alt != identity else None)
+            if alt != identity:
+                stored_identity_counts[alt] = stored_identity_counts.get(alt, 0) + 1
             stored_identities.append(identity)
             cleanup_identity = self._active_cleanup_replay_identity(identity)
             stored_cleanup_identities.append(cleanup_identity)
@@ -2304,6 +2484,21 @@ class ReconcileMixin:
                     surplus_count -= 1
                 if surplus_count > 0:
                     active_surplus_skips[identity] = surplus_count
+        # A row's forms share ONE occurrence (#498): per group of forms that trim alike,
+        # the earliest active occurrences beyond the group's row count are surplus.
+        group_rows: Counter = Counter()
+        group_forms: dict[tuple[Any, ...], set] = {}
+        for primary, alt in zip(stored_identities, stored_alt_identities):
+            group_rows[_proof_user_identity(primary)] += 1
+            group_forms.setdefault(_proof_user_identity(primary), set()).update({primary, alt} - {None})
+        for group, forms in group_forms.items():
+            surplus_count = sum(active_identity_counts.get(f, 0) - active_surplus_skips.get(f, 0) for f in forms)
+            surplus_count, seen = surplus_count - group_rows[group], Counter()
+            for msg in messages if surplus_count > 0 and len(forms) > 1 else ():
+                identity = active_lineage_identity(msg)
+                seen[identity] += 1
+                if identity in forms and surplus_count > 0 and seen[identity] > active_surplus_skips.get(identity, 0):
+                    active_surplus_skips[identity], surplus_count = seen[identity], surplus_count - 1
 
         placeholder_identity_counts: dict[tuple[str, str, str, str], int] = {}
         for msg in messages:
@@ -2337,7 +2532,7 @@ class ReconcileMixin:
             probe_idx = start_idx
             while probe_idx < len(candidates):
                 stored_identity = stored_identities[probe_idx]
-                if stored_identity == message_identity:
+                if message_identity in (stored_identity, stored_alt_identities[probe_idx]):
                     return probe_idx
                 if (
                     wanted_cleanup_identity is not None

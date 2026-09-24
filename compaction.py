@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 from .dag import SummaryNode
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
 from .message_content import text_content_for_pattern_matching
-from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, _commit_proof_identity_digest
+from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, _COMPACTION_COMMIT_PROOF_VERSION, _commit_proof_identity_digest
 from .sanitize import _contains_sensitive_redaction
 from .sqlite_util import _is_sqlite_locked_error
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
@@ -528,6 +528,7 @@ class CompactionMixin:
                     force=force,
                 )
             self._record_compress_commit_proof(messages, result)
+            self._rekey_host_rewrite_watch(messages, result)
             return result
         except BaseException:
             self._last_compression_status = "error"
@@ -555,8 +556,8 @@ class CompactionMixin:
             proof = {
                 "session_id": self._session_id,
                 "conversation_id": self._conversation_id,
-                "input": [self._message_replay_identity(m) for m in messages],
-                "output": [self._message_replay_identity(m) for m in result],
+                "input": [self._proof_replay_identity(m) for m in messages],
+                "output": [self._proof_replay_identity(m) for m in result],
                 "end_consumed": False,
             }
             if proof["output"] == proof["input"]:
@@ -564,7 +565,7 @@ class CompactionMixin:
                 # end call with this list must stay a real session end.
                 return
             proof["output_effective"] = [
-                self._message_replay_identity(m)
+                self._proof_replay_identity(m)
                 for m in result
                 if not self._is_replayed_context_scaffold_message(m)
             ]
@@ -585,7 +586,7 @@ class CompactionMixin:
         try:
             tail = self._store.get_session_tail(self._session_id, limit=1)
             payload = {
-                "version": 2,
+                "version": _COMPACTION_COMMIT_PROOF_VERSION,
                 # Scope: the Hermes home that wrote it (a configured shared
                 # database_path serves several homes) and its creation time,
                 # so a proof older than a lifecycle reset is ignored.
