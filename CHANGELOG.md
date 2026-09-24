@@ -6,6 +6,15 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: a Hermes ACP turn that compacts no longer re-stores its batch when the host trims the
+  prompt at turn end. ACP persists `prompt.strip()` and rewrites the adopted user row in place
+  after the same-turn compaction stored the raw prompt and recorded it in the commit proof, so
+  the next ingest missed the proof and reconciliation could not align the raw and trimmed rows
+  (duplicate rows, then `publication_invariant_conflict`). The replay identity of a user row now
+  ignores leading and trailing whitespace (interior whitespace, assistant and tool rows are
+  unchanged). The durable commit proof moves to version 3; a version-2 proof is ignored and the
+  cursor reconciles.
+
 ## v0.24.0 - BREAKING: plugin renamed to hermes-lcm-x, engine to lcm-x (unreleased)
 
 **BREAKING.** The plugin manifest is renamed `hermes-lcm` → `hermes-lcm-x` and the context engine

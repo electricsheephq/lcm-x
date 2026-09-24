@@ -24,7 +24,11 @@ from typing import Any, Dict, List, Optional
 from .dag import SummaryNode
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
 from .message_content import text_content_for_pattern_matching
-from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, _commit_proof_identity_digest
+from .reconcile import (
+    _COMPACTION_COMMIT_PROOF_METADATA_PREFIX,
+    _COMPACTION_COMMIT_PROOF_VERSION,
+    _commit_proof_identity_digest,
+)
 from .sanitize import _contains_sensitive_redaction
 from .sqlite_util import _is_sqlite_locked_error
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
@@ -585,7 +589,7 @@ class CompactionMixin:
         try:
             tail = self._store.get_session_tail(self._session_id, limit=1)
             payload = {
-                "version": 2,
+                "version": _COMPACTION_COMMIT_PROOF_VERSION,
                 # Scope: the Hermes home that wrote it (a configured shared
                 # database_path serves several homes) and its creation time,
                 # so a proof older than a lifecycle reset is ignored.

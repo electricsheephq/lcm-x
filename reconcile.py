@@ -111,6 +111,9 @@ _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX = "compacted_active_replay_snapshot_dig
 _SESSION_END_REPLAY_METADATA_PREFIX = "session_end_replay_snapshot_digests"
 _NATIVE_RECOVERY_REPLAY_METADATA_PREFIX = "native_recovery_replay_snapshot_digests"
 _COMPACTION_COMMIT_PROOF_METADATA_PREFIX = "compaction_commit_proof"
+# Version 3: user-row identities ignore leading/trailing whitespace. A version-2
+# proof hashed the untrimmed form, so it is ignored (the cursor reconciles).
+_COMPACTION_COMMIT_PROOF_VERSION = 3
 
 
 def _commit_proof_identity_digest(identity) -> str:
@@ -495,6 +498,13 @@ class ReconcileMixin:
             )
             if payload is not None and isinstance(payload.get("content"), str):
                 content = payload["content"]
+        # A host may persist a trimmed copy of the prompt it sent and rewrite the
+        # live user dict to it at turn end, after a same-turn compaction stored
+        # the raw row (Hermes ACP: persist_user_message = prompt.strip()). So
+        # leading/trailing whitespace of a user row is not identity; interior
+        # whitespace still is. Commit proofs carry _COMPACTION_COMMIT_PROOF_VERSION.
+        if role == "user":
+            content = content.strip()
         tool_calls_identity = self._stable_tool_calls_identity(tool_calls)
         # WHICH TOOL RAN is part of a tool row's identity. A tool result
         # carries no ``tool_calls``, so without the name the only distinguishing
@@ -1574,7 +1584,7 @@ class ReconcileMixin:
         payload = self._store.read_metadata_json(
             self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)
         )
-        if not isinstance(payload, dict) or payload.get("version") != 2:
+        if not isinstance(payload, dict) or payload.get("version") != _COMPACTION_COMMIT_PROOF_VERSION:
             return None
         if payload.get("hermes_home") != str(getattr(self, "_hermes_home", "") or ""):
             return None

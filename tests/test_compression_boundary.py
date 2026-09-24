@@ -761,7 +761,7 @@ def test_durable_commit_proof_is_written_only_for_a_published_compaction(tmp_pat
     engine, _pre, compressed = _compacted_engine(tmp_path, monkeypatch)
     try:
         payload = _durable_commit_proof(engine, "S0")
-        assert payload["version"] == 2
+        assert payload["version"] == 3
         assert payload["hermes_home"] == str(tmp_path / "home")
         assert len(payload["effective_sha256"]) == len(engine._compress_commit_proof["output_effective"])
         assert payload["last_store_id"] > 0
@@ -915,6 +915,58 @@ def test_durable_commit_proof_is_bound_to_its_conversation(tmp_path, monkeypatch
         assert resumed._cursor_from_durable_commit_proof(host) is None
     finally:
         resumed.shutdown()
+
+
+def test_durable_commit_proof_from_before_whitespace_identity_is_ignored(tmp_path, monkeypatch):
+    """A version-2 durable proof hashed untrimmed user rows. After the upgrade it
+    proves nothing: the cursor reconciles instead of matching the new identity."""
+    engine, _pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    host = list(compressed) + [_turn(13)[1]]
+    try:
+        payload = _durable_commit_proof(engine, "S0")
+    finally:
+        engine.shutdown()
+    resumed = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    try:
+        resumed.on_session_start("S0", platform="acp", context_length=200_000)
+        assert resumed._cursor_from_durable_commit_proof(host) is not None
+        resumed._store.write_metadata_json(
+            ["compaction_commit_proof:S0"], json.dumps({**payload, "version": 2}, sort_keys=True)
+        )
+        assert resumed._durable_commit_proof_payload() is None
+        assert resumed._cursor_from_durable_commit_proof(host) is None
+    finally:
+        resumed.shutdown()
+
+
+def test_host_trim_of_the_compacted_user_row_after_commit_stores_no_duplicates(tmp_path, monkeypatch):
+    """Hermes ACP persists prompt.strip(): at turn end it rewrites the adopted user
+    dict in place, after the same-turn compaction stored and proved the raw row.
+    The next ingest keeps the proof and stores only the reply."""
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
+    engine = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        host: list = []
+        for i in range(1, 13):
+            host.extend(_turn(i))
+            engine.ingest(host)
+        host.append({"role": "user", "content": _turn(13)[0]["content"] + "\n"})
+        engine.ingest(host)
+        compressed = engine.compress(list(host), force=True)
+        assert engine._last_compression_status == "compacted"
+        engine.on_session_end("S0", host)
+        engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
+        rows = _row_count(engine)
+        assert compressed[-1]["content"].endswith("\n")
+        compressed[-1]["content"] = compressed[-1]["content"].strip()  # finalize_turn's rewrite
+        engine.ingest(list(compressed) + [_turn(13)[1]])
+        assert _row_count(engine) == rows + 1
+        stored = engine._store._conn.execute("SELECT role, content FROM messages").fetchall()
+        normalized = [(role, (content or "").rstrip()) for role, content in stored]
+        assert len(normalized) == len(set(normalized))
+    finally:
+        engine.shutdown()
 
 
 def test_ordinary_session_reset_clears_the_commit_proof(tmp_path, monkeypatch):
