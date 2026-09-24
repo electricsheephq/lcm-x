@@ -159,6 +159,10 @@ def _changed_paths(changed_files: Any) -> list[str] | None:
                 paths.append(item["previous_filename"])
         else:
             return None
+    # A real PR changes at least one file; an empty list or a blank path means
+    # the retrieval failed, so the risk is unknown.
+    if not paths or any(not path.strip() for path in paths):
+        return None
     return paths
 
 
@@ -184,7 +188,7 @@ def review_lanes_hint(changed_files: Any) -> dict[str, Any]:
     paths = _changed_paths(changed_files)
     if paths is None:
         return {
-            "changed_files": "missing_or_invalid",
+            "changed_files": "unknown",
             "named_risks": None,
             "required_review_lanes": ["acceptance", "adversarial"],
         }

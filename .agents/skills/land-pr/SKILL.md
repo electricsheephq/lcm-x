@@ -63,9 +63,12 @@ the review-lanes hint and review threads directly; aggregate `reviewDecision` is
 proof:
 
 ```bash
-gh api --paginate "repos/electricsheephq/lcm-x/pulls/<PR>/files?per_page=100" \
+set -o pipefail
+files="$(gh api --paginate "repos/electricsheephq/lcm-x/pulls/<PR>/files?per_page=100")" && \
+test -n "$files" && printf '%s\n' "$files" \
   | jq -s '{schema_version: "1", mode: "readiness", changed_files: [.[][] | {filename, previous_filename}]}' \
-  | python3 scripts/maintainer_gate.py | jq .review_lanes_hint
+  | python3 scripts/maintainer_gate.py | jq -e .review_lanes_hint || \
+  { echo "HINT UNAVAILABLE: require both lanes" >&2; false; }
 
 gh api graphql --paginate \
   -F owner=electricsheephq -F name=lcm-x -F number=<PR> \
@@ -97,6 +100,8 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
   `commit_id` equals `$head`, or a cross-model review whose log names `$head`.
 - When the hint reports `review-provenance-policy` or `lcm-memory-preservation` risk, require an
   acceptance review and a distinct adversarial review from a different model than the author.
+  A failed hint command, `HINT UNAVAILABLE`, or `"changed_files": "unknown"` also means both
+  lanes.
 - Before merging, post one merge receipt comment that lists only pointers: GitHub review ids with
   `user.id`, `commit_id`, and `state`; review-log paths or comment links. Never restate verdicts
   or scores. If a lane is unavailable, write `REVIEW_SKIPPED: <lane> — <reason>` and let the

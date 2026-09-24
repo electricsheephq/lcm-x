@@ -232,7 +232,7 @@ def test_review_lanes_hint_never_blocks_readiness():
     supplied = evaluate(payload)
 
     assert missing["decision"] == supplied["decision"] == "READY_FOR_AUTHORIZED_LANDING"
-    assert missing["review_lanes_hint"]["changed_files"] == "missing_or_invalid"
+    assert missing["review_lanes_hint"]["changed_files"] == "unknown"
     assert missing["review_lanes_hint"]["required_review_lanes"] == BOTH_LANES
     assert supplied["review_lanes_hint"]["required_review_lanes"] == BOTH_LANES
 
@@ -255,6 +255,19 @@ def test_review_lanes_hint_maps_changed_paths(changed_files, risks, lanes):
 
     assert hint["named_risks"] == risks
     assert hint["required_review_lanes"] == lanes
+
+
+@pytest.mark.parametrize(
+    "changed_files",
+    [[], [""], [{"filename": "  "}], [{"filename": "docs/a.md", "previous_filename": ""}]],
+    ids=["empty-list", "blank-string", "blank-filename", "blank-previous-filename"],
+)
+def test_unretrieved_changed_files_keep_both_review_lanes(changed_files):
+    hint = review_lanes_hint(changed_files)
+
+    assert hint["changed_files"] == "unknown"
+    assert hint["named_risks"] is None
+    assert hint["required_review_lanes"] == BOTH_LANES
 
 
 def test_duplicate_trusted_check_is_rejected_even_when_one_passes():
