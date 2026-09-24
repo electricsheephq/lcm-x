@@ -74,6 +74,12 @@ def test_no_notice_for_current_or_unrelated_config(config):
     assert plugin_identity.identity_migration_notice(config) is None
 
 
+_LIVE_EDIT_FALLBACK = (
+    "Editing `context.engine` while Hermes runs makes new sessions fall back "
+    "to the built-in compressor until Hermes restarts."
+)
+
+
 def test_notice_names_every_change_for_the_old_config():
     notice = plugin_identity.identity_migration_notice(
         {"context": {"engine": "lcm"}, "plugins": {"enabled": ["hermes-lcm"]}}
@@ -88,8 +94,13 @@ def test_notice_names_every_change_for_the_old_config():
     # #477: the alias is fixed at register(), so the notice leads with stop/restart.
     assert message.startswith("Stop Hermes, then edit config.yaml: ")
     assert "then start Hermes again" in message
-    assert "while Hermes runs makes new sessions fall back to the built-in compressor" in message
-    assert notice["change"][0] == "stop Hermes" and notice["change"][-1] == "start Hermes again"
+    assert _LIVE_EDIT_FALLBACK in message
+    assert notice["change"] == [
+        "set `context.engine: lcm-x` (currently `lcm`, accepted as a deprecated alias)",
+        "add `hermes-lcm-x` to `plugins.enabled`",
+        "remove `hermes-lcm` from `plugins.enabled` once `hermes-lcm-x` is enabled",
+    ]
+    assert notice["steps"] == ["stop Hermes", *notice["change"], "start Hermes again"]
 
 
 def test_notice_for_stale_enabled_entry_only_keeps_engine_name():
@@ -97,11 +108,12 @@ def test_notice_for_stale_enabled_entry_only_keeps_engine_name():
         {"context": {"engine": "lcm-x"}, "plugins": {"enabled": ["hermes-lcm", "hermes-lcm-x"]}}
     )
     assert notice["legacy_engine_alias_active"] is False
-    assert notice["change"] == [
-        "stop Hermes",
-        "remove `hermes-lcm` from `plugins.enabled` once `hermes-lcm-x` is enabled",
-        "start Hermes again",
-    ]
+    assert notice["change"] == ["remove `hermes-lcm` from `plugins.enabled` once `hermes-lcm-x` is enabled"]
+    assert notice["steps"] == ["stop Hermes", *notice["change"], "start Hermes again"]
+    # The engine already registered as `lcm-x`, so a live edit causes no fallback.
+    assert notice["message"].startswith("Stop Hermes, then edit config.yaml: ")
+    assert "then start Hermes again" in notice["message"]
+    assert _LIVE_EDIT_FALLBACK not in notice["message"]
 
 
 def test_registry_accepts_current_and_legacy_engine_names():
