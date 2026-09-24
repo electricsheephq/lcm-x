@@ -824,6 +824,46 @@ def test_rotation_moves_the_commit_proof_to_the_child(tmp_path, monkeypatch):
         engine.shutdown()
 
 
+def test_proofless_rotation_child_gets_no_carry_authority(tmp_path, monkeypatch):
+    engine, pre, _compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        engine._compress_commit_proof = None
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(
+            "S1", boundary_reason="compression", old_session_id="S0", platform="acp"
+        )
+        assert engine._load_compression_carry_ranges() == []
+    finally:
+        engine.shutdown()
+
+
+def test_rotation_inherits_only_open_grandparent_carry_and_reset_clears_it(
+    tmp_path, monkeypatch
+):
+    engine, pre, _compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        frontier = engine._last_compacted_store_id
+        proof = engine._compress_commit_proof
+        proof["carry_ranges"] = [
+            ("closed-grandparent", 0, frontier),
+            ("open-grandparent", frontier - 1, frontier + 5),
+        ]
+        engine._persist_compress_commit_proof(proof)
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(
+            "S1", boundary_reason="compression", old_session_id="S0", platform="acp"
+        )
+        inherited = engine._load_compression_carry_ranges()
+        assert ("open-grandparent", frontier, frontier + 5) in inherited
+        assert all(source != "closed-grandparent" for source, _start, _end in inherited)
+
+        engine.on_session_reset()
+        assert engine._compress_commit_proof is None
+        assert engine._load_compression_carry_ranges() == []
+    finally:
+        engine.shutdown()
+
+
 @pytest.mark.parametrize("restart_child", [False, True], ids=["live", "restart"])
 def test_rotation_child_can_compact_only_parent_carried_rows(
     tmp_path, monkeypatch, restart_child
@@ -884,6 +924,69 @@ def test_rotation_child_can_compact_only_parent_carried_rows(
         engine.shutdown()
 
 
+@pytest.mark.parametrize("dropped", ["empty-parent-row", "ignored-carried-row"])
+def test_rotation_child_publication_uses_only_rows_the_proof_carried(
+    tmp_path, monkeypatch, dropped
+):
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "lcm.db"),
+            fresh_tail_count=8,
+            leaf_chunk_tokens=400,
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        host = []
+        marker = "DROP_ME carried parent row"
+        for i in range(1, 13):
+            user, assistant = _turn(i)
+            if i == 10:
+                assistant = {
+                    "role": "assistant",
+                    "content": "" if dropped == "empty-parent-row" else marker,
+                }
+            host.extend([user, assistant])
+            engine.ingest(host)
+        host.append(_turn(13)[0])
+        engine.ingest(host)
+        pre = list(host)
+        compressed = engine.compress(list(host), force=True)
+        assert engine._last_compression_status == "compacted"
+
+        engine.on_session_end("S0", pre)
+        engine.on_session_start(
+            "S1", boundary_reason="compression", old_session_id="S0", platform="acp"
+        )
+        if dropped == "ignored-carried-row":
+            class DropPattern:
+                def search(self, text, timeout=None):
+                    del timeout
+                    return object() if marker in str(text) else None
+
+            engine._compiled_ignore_message_patterns = [DropPattern()]
+        engine._config.fresh_tail_count = 2
+        engine.protect_last_n = 2
+        child = list(compressed)
+        if dropped == "ignored-carried-row":
+            child = [
+                message
+                for message in child
+                if marker not in str(message.get("content") or "")
+            ]
+        child.extend(_turn(14))
+        engine.ingest(child)
+        result = engine.compress(list(child), force=True)
+
+        assert engine._last_compression_status == "compacted"
+        assert len(result) < len(child)
+    finally:
+        engine.shutdown()
+
+
 @pytest.mark.parametrize("path", ["fail-open", "sanitized"])
 def test_compress_returns_input_object_when_only_host_metadata_differs(
     tmp_path, monkeypatch, path
@@ -925,7 +1028,12 @@ def test_compress_returns_input_object_when_only_host_metadata_differs(
 
     monkeypatch.setattr(engine, "_compress_impl", compress_impl)
     try:
-        assert engine.compress(messages) is messages
+        result = engine.compress(messages)
+        if path == "fail-open":
+            assert engine._last_compression_status == "error"
+            assert result is public_rows
+        else:
+            assert result is messages
     finally:
         engine.shutdown()
 

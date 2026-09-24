@@ -51,8 +51,6 @@ _PROBE = textwrap.dedent(
     home = Path(os.environ["HERMES_HOME"])
     trailing = os.environ["PROBE_TRAILING"] == "1"
     turns = int(os.environ["PROBE_TURNS"])
-    repeat = int(os.environ.get("PROBE_REPEAT", "400"))
-    real_usage = os.environ.get("PROBE_REAL_USAGE") == "1"
     def aux_llm(**kwargs):
         text = "## Goal\\nstub\\n## Progress\\nstub" if kwargs.get("task") == "compression" else "Title"
         msg = SimpleNamespace(content=text, tool_calls=None)
@@ -72,6 +70,22 @@ _PROBE = textwrap.dedent(
     agent._compression_feasibility_checked = True
     engine = agent.context_compressor
     engine.update_model("test/model", 64000, base_url="https://openrouter.ai/api/v1", api_key="k", provider="openrouter")
+    compression_errors = {"input": 0, "other": 0}
+    original_compress = type(engine).compress
+    def traced_compress(self, messages, *args, **kwargs):
+        result = original_compress(self, messages, *args, **kwargs)
+        if self._last_compression_status == "error":
+            compression_errors["input" if result is messages else "other"] += 1
+        return result
+    type(engine).compress = traced_compress
+    if os.environ.get("PROBE_CHILD_CONFLICT") == "1":
+        from hermes_plugins.hermes_lcm_x.lifecycle_state import LifecyclePublicationConflictError
+        original_stage = engine._lifecycle.stage_compaction_publication
+        def conflict_in_rotation_child(conn, conversation_id, session_id, *args, **kwargs):
+            if session_id != "S0":
+                raise LifecyclePublicationConflictError("injected persistent child conflict")
+            return original_stage(conn, conversation_id, session_id, *args, **kwargs)
+        engine._lifecycle.stage_compaction_publication = conflict_in_rotation_child
     n = {"c": 0}
     def stub(*a, **kw):
         n["c"] += 1
@@ -147,6 +161,8 @@ _PROBE = textwrap.dedent(
         "identity_mismatches": identity_mismatches,
         "identity_mismatches_after_trim": [i for i in identity_mismatches if by_id[i].strip() not in host_trimmed],
         "session_count": session_count,
+        "error_returned_input": compression_errors["input"],
+        "error_returned_other": compression_errors["other"],
         "override_rewrites": rewrites["n"],
         "user_rows_by_turn": {
             f"{i:02d}": sum(1 for r, c in rows if r == "user" and (c or "").startswith(f"[T{i:02d}]"))
@@ -175,7 +191,10 @@ HERMES = _hermes_python()
 pytestmark = pytest.mark.skipif(HERMES is None, reason="no real Hermes runtime available")
 
 
-def _run_turn_loop(tmp_path, *, in_place, trailing, fresh_tail=24, continue_turns=(), turns=26, long_defaults=False) -> dict:
+def _run_turn_loop(
+    tmp_path, *, in_place, trailing, fresh_tail=24, continue_turns=(), turns=26,
+    long_defaults=False, force_child_conflict=False
+) -> dict:
     home = tmp_path / "hermes-home"
     (home / "plugins").mkdir(parents=True)
     (home / "plugins" / "hermes-lcm-x").symlink_to(REPO_ROOT)
@@ -201,6 +220,7 @@ def _run_turn_loop(tmp_path, *, in_place, trailing, fresh_tail=24, continue_turn
             "PROBE_TRAILING": "1" if trailing else "0",
             "PROBE_TURNS": str(turns),
             "PROBE_CONTINUE_TURNS": ",".join(str(t) for t in continue_turns),
+            "PROBE_CHILD_CONFLICT": "1" if force_child_conflict else "0",
             "LCM_NATIVE_RECOVERY": "false",
             # Default LCM tuning with provider-reported usage, or the tight tuning below.
             **({"PROBE_REAL_USAGE": "1", "PROBE_REPEAT": "250"} if long_defaults else {
@@ -287,3 +307,18 @@ def test_default_config_turn_loop_does_not_multiply_sessions_or_rows(
     _assert_each_turn_stored_once(result, unseen_rewrites=trailing)
     if not in_place:
         assert result["session_count"] <= result["commit_logged"] + 1, result
+
+
+def test_rotation_child_publication_error_keeps_the_host_rotation_heal(tmp_path):
+    result = _run_turn_loop(
+        tmp_path,
+        in_place=False,
+        trailing=False,
+        turns=80,
+        long_defaults=True,
+        force_child_conflict=True,
+    )
+    assert result["error_returned_other"] > 0, result
+    assert result["error_returned_input"] == 0, result
+    assert result["session_count"] > 2, result
+    assert all(count >= 1 for count in result["user_rows_by_turn"].values()), result

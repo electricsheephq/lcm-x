@@ -3307,10 +3307,6 @@ class LCMEngine(
                 in self._load_compression_carry_ranges(source_session_id)
                 if range_end > frontier
             ]
-            source_tail = self._store.get_session_tail(source_session_id, limit=1)
-            source_max_store_id = int(source_tail[-1]["store_id"] if source_tail else 0)
-            if source_max_store_id > frontier:
-                inherited_ranges.append((source_session_id, frontier, source_max_store_id))
             commit_proof["carry_ranges"] = inherited_ranges
             # The child segment starts from compress()'s output: re-key the proof
             # so its first ingest re-indexes a host-merged prefix instead of

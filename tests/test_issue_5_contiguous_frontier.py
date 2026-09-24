@@ -446,6 +446,60 @@ def test_below_frontier_source_lineage_is_claimed_once(tmp_path) -> None:
     assert len(nodes) == 1
 
 
+def test_publication_ownership_query_does_not_read_foreign_window_rows(tmp_path) -> None:
+    identity = "issue-5-owned-window-query"
+    engine = _engine(tmp_path / "issue-5-owned-window-query.db", identity)
+    covered_start = engine._store.append(
+        identity,
+        {"role": "assistant", "content": "covered start"},
+        conversation_id=identity,
+    )
+    engine._store.append(
+        "foreign-session",
+        {"role": "assistant", "content": "must not be read"},
+        conversation_id="foreign-conversation",
+    )
+    covered_end = engine._store.append(
+        identity,
+        {"role": "assistant", "content": "covered end"},
+        conversation_id=identity,
+    )
+    statements = []
+    engine._dag.connection.set_trace_callback(statements.append)
+    node = SummaryNode(
+        session_id=identity,
+        summary="owned rows only",
+        token_count=1,
+        source_token_count=1,
+        source_ids=[covered_start, covered_end],
+    )
+
+    def stage(conn, node_id) -> None:
+        engine._lifecycle.stage_compaction_publication(
+            conn,
+            identity,
+            identity,
+            node_id,
+            0,
+            [covered_start, covered_end],
+        )
+
+    try:
+        engine._dag.add_node(node, before_commit=stage)
+    finally:
+        engine._dag.connection.set_trace_callback(None)
+        engine.shutdown()
+
+    normalized = [" ".join(statement.split()) for statement in statements]
+    ownership_queries = [
+        statement
+        for statement in normalized
+        if statement.startswith("SELECT store_id, session_id FROM messages WHERE (")
+    ]
+    assert len(ownership_queries) == 1
+    assert "session_id =" in ownership_queries[0]
+
+
 def test_excluded_rows_must_share_conversation_ownership(tmp_path) -> None:
     identity = "issue-5-excluded-ownership"
     engine = _engine(tmp_path / "issue-5-excluded-ownership.db", identity)

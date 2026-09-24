@@ -1033,16 +1033,24 @@ class LifecycleStateStore:
             raise LifecyclePublicationConflictError(
                 "Compaction publication filter exclusion changed"
             )
+        owned_ranges = [(session_id, expected_frontier, covered_end)]
+        owned_ranges.extend(
+            (source, max(expected_frontier, start), min(covered_end, end))
+            for source, start, end in allowed_carry_ranges
+            if max(expected_frontier, start) < min(covered_end, end)
+        )
+        ownership_clause = " OR ".join(
+            "(session_id = ? AND store_id > ? AND store_id <= ?)"
+            for _item in owned_ranges
+        )
+        ownership_args = [value for item in owned_ranges for value in item]
         rows = conn.execute(
-            """
-            SELECT store_id, session_id, conversation_id, content
-            FROM messages
-            WHERE store_id > ? AND store_id <= ?
-            ORDER BY store_id
-            """,
-            (expected_frontier, covered_end),
+            "SELECT store_id, session_id FROM messages WHERE "
+            + ownership_clause
+            + " ORDER BY store_id",
+            ownership_args,
         ).fetchall()
-        authoritative_ids = [int(row[0]) for row in rows if row_is_owned(row)]
+        authoritative_ids = [int(row[0]) for row in rows]
         proven_ids = sorted(covered_ids + excluded_ids)
         if authoritative_ids != proven_ids:
             raise LifecyclePublicationConflictError(
