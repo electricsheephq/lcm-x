@@ -183,6 +183,9 @@ def test_codeowners_and_landing_policy_use_exact_head_ci_and_review_obligation()
     assert "non-author code owner" not in landing.lower()
     assert "review_lanes_hint" in landing
     assert "`commit_id` equals `$head`" in landing
+    assert "check the head it names equals `$head`" in " ".join(landing.split())
+    assert "A readiness-only invocation stays read-only." in " ".join(landing.split())
+    assert "`REVIEWED_LANE_ONLY`" in review
     assert "lists only pointers" in landing
     assert "Never restate verdicts" in landing
     assert "--merge --match-head-commit" in landing

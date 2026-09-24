@@ -28,6 +28,7 @@ Build JSON for `scripts/maintainer_gate.py` from live reads:
 - PR number, base/head identity, state, draft flag, and accepted issue;
 - exact-head check-runs with name, app id, status, and conclusion;
 - changed files (`filename` and `previous_filename`) for the review-lanes hint;
+- exact-head review evidence for each lane: pointer, head, lane, author model, reviewer model;
 - every review thread and every verified finding with its terminal disposition.
 
 Do not include merge authorization in readiness mode. Run the standard-library evaluator with
@@ -38,8 +39,9 @@ requires; it never fails readiness.
 ## 3. Review The Exact Head
 
 Review the diff at the pinned head as one independent lane, from a model other than the author.
-State the head SHA, the lane (acceptance or adversarial), scope, findings, and limitations. The
-output is a review, not a receipt: it does not satisfy a check or grant authority, and a
+State the head SHA, the lane (acceptance or adversarial), the author model, the reviewer model,
+scope, findings, and limitations. An adversarial review names a reviewer model different from
+the author model. The output is a review, not a receipt: it does not satisfy a check or grant authority, and a
 maintainer records it as a pointer in the `land-pr` merge receipt.
 
 ## 4. Verify Accepted Work And Boundaries
@@ -54,7 +56,10 @@ gate class and terminal disposition.
 Return exactly one:
 
 - `READY_FOR_AUTHORIZED_LANDING`: accepted scope, exact-head protected checks, dispositions,
-  and threads pass;
+  and threads pass, and the envelope lists exact-head review evidence for every lane
+  `review_lanes_hint` requires (the evaluator does not check lanes);
+- `REVIEWED_LANE_ONLY`: everything else passes, but a required lane lacks exact-head review
+  evidence; name the missing lane;
 - `NOT_READY`: a concrete readiness gate is unsatisfied;
 - `NOT_DIRECTLY_LANDABLE`: the PR does not target protected `main`;
 - `OWNER_GATE`: accepted work, product/security ownership, or trusted policy is unavailable;

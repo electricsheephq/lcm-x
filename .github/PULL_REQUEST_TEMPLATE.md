@@ -66,8 +66,8 @@
 
 - [ ] Current `headRefOid` is recorded.
 - [ ] Required exact-head CI is green.
-- [ ] At least one independent review covers the current head; when the `scripts/maintainer_gate.py` risk hint names a risk, an acceptance review and a distinct adversarial review from a different model than the author. Record pointers or `REVIEW_SKIPPED: <lane> — <reason>`.
-- [ ] All actionable review threads have terminal dispositions recorded in a reply and are resolved.
+- [ ] At least one independent review covers the current head; when the `scripts/maintainer_gate.py` risk hint names a risk, an acceptance review and a distinct adversarial review from a different model than the author. Record pointers with the author and reviewer models, or `REVIEW_SKIPPED: <lane> — <reason>`.
+- [ ] Every review thread is resolved; each bot thread got a disposition reply before it was resolved.
 - [ ] The accepted issue, PR head, checks, reviews, threads, and authorization were deterministically re-fetched immediately before any authorized GitHub write.
 - [ ] Merge method is merge commit; do not squash or rebase.
 

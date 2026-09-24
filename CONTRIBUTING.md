@@ -100,10 +100,11 @@ Maintainers use the protected-main `.agents/skills/land-pr/SKILL.md`:
 - AI review is recorded evidence, not enforcement: every PR needs at least one independent
   review of the exact head, and review-provenance-policy or LCM memory-preservation risk (the
   `scripts/maintainer_gate.py` hint) adds a distinct adversarial review from a different model
-  than the author; a merge receipt comment lists pointers only, or `REVIEW_SKIPPED: <lane> —
+  than the author; at landing, after merge authority is established, a merge receipt comment
+  lists pointers only and names the author and reviewer models, or `REVIEW_SKIPPED: <lane> —
   <reason>` for the owner to decide;
-- every actionable review thread needs a terminal disposition and resolution; a bot thread is
-  resolved only after a reply that records that disposition;
+- every review thread is resolved before merge; a bot thread is resolved only after a reply
+  that records its disposition;
 - accepted issues, exact-head state, and product/security decisions are re-fetched before merge;
 - merges use merge commits only (`gh pr merge --merge --match-head-commit <head>`)—never squash,
   rebase, direct-main push, auto-merge, or bypass outside a recorded owner emergency.

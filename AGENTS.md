@@ -121,12 +121,13 @@ Run `actionlint` when workflows change. Record exact commands and results in the
 - Review obligation (`land-pr`): every PR needs at least one independent review of the exact
   head. When the `scripts/maintainer_gate.py` risk hint reports review-provenance-policy or LCM
   memory-preservation risk, it needs an acceptance review and a distinct adversarial review from
-  a different model than the author. Before merging, post a merge receipt comment that lists only
-  pointers; if a lane is unavailable, record `REVIEW_SKIPPED: <lane> — <reason>` and let the
-  owner decide.
-- Resolve a bot review thread only after a reply that records its disposition: fixed in `<sha>`,
-  false with evidence, accepted tradeoff, or follow-up `<issue>`.
-- Do not merge with failing/pending required checks, unresolved actionable threads, a changed
+  a different model than the author. At landing, after merge authority is established, post a
+  merge receipt comment that lists only pointers and names the author and reviewer models; if a
+  lane is unavailable, record `REVIEW_SKIPPED: <lane> — <reason>` and let the owner decide.
+- Every review thread is resolved before merge. A bot thread is resolved only after a reply that
+  records its disposition: fixed in `<sha>`, false with evidence, accepted tradeoff, or
+  follow-up `<issue>`.
+- Do not merge with failing/pending required checks, unresolved review threads, a changed
   head, missing issue acceptance, or unowned product/security decisions.
 - Never push directly to `main`, bypass the ruleset, use auto-merge, or force-push/delete
   `main`. The ruleset transitions for #218, #462, #466, #469, and #470 are closed history. The

@@ -97,17 +97,18 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
 ```
 
 - Every PR needs at least one independent review of `$head`: a NeonDiff review whose
-  `commit_id` equals `$head`, or a cross-model review whose log names `$head`.
+  `commit_id` equals `$head`, or a cross-model review whose log or comment names `$head`. A
+  review log or comment this obligation relies on must name the exact head, its lane, the
+  author model, and the reviewer model.
 - When the hint reports `review-provenance-policy` or `lcm-memory-preservation` risk, require an
-  acceptance review and a distinct adversarial review from a different model than the author.
-  A failed hint command, `HINT UNAVAILABLE`, or `"changed_files": "unknown"` also means both
-  lanes.
-- Before merging, post one merge receipt comment that lists only pointers: GitHub review ids with
-  `user.id`, `commit_id`, and `state`; review-log paths or comment links. Never restate verdicts
-  or scores. If a lane is unavailable, write `REVIEW_SKIPPED: <lane> — <reason>` and let the
-  owner decide.
-- Require every returned review thread to have `isResolved: true`; list and stop on any
-  unresolved thread. Resolve a bot thread only after a reply that records its disposition:
+  acceptance review and a distinct adversarial review whose reviewer model differs from the
+  author model. A failed hint command, `HINT UNAVAILABLE`, or `"changed_files": "unknown"` also
+  means both lanes.
+- Report each lane's pointer, or `REVIEW_SKIPPED: <lane> — <reason>` for the owner to decide.
+  The merge receipt comment is a write: it is posted only in Section 7, after merge authority is
+  established. A readiness-only invocation stays read-only.
+- Every review thread must be resolved before merge; list and stop on any thread without
+  `isResolved: true`. A bot thread is resolved only after a reply that records its disposition:
   fixed in `<sha>`, false with evidence, accepted tradeoff, or follow-up `<issue>`.
 - After a review-driven head change, require new reviews for the changed risk surface and
   re-read the head SHA and checks.
@@ -135,9 +136,13 @@ uncertain, comment or report the relationship; do not close the issue.
 
 ## 7. Merge Deterministically
 
-Immediately before merging, repeat the paginated thread query from Section 4, reapply every
-Section 4 gate, and re-fetch each review named in the merge receipt to confirm its `commit_id`
-still equals `$head`. Only after those checks pass, run:
+Only after a maintainer authorizes landing this PR at `$head`: repeat the paginated thread
+query from Section 4 and reapply every Section 4 gate. Validate each review pointer by its
+evidence type: re-fetch a GitHub review id and check its `commit_id` equals `$head`; re-read a
+review-log path or comment link and check the head it names equals `$head`. Then post one merge
+receipt comment that lists only pointers: GitHub review ids with `user.id`, `commit_id`, and
+`state`; review-log paths or comment links; the author model and each reviewer model; any
+`REVIEW_SKIPPED` line. Never restate verdicts or scores. Only after those checks pass, run:
 
 ```bash
 current_head="$(gh pr view <PR> --repo electricsheephq/lcm-x --json headRefOid --jq .headRefOid)"
