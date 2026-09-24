@@ -33,7 +33,14 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   mapped from the adopted compaction output, without moving raw-row ownership. Publication SQL
   reads only the current session and those carried ranges, while ignored carried rows receive
   explicit exclusion proofs. Metadata-only sanitized results remain host no-ops, but a failed
-  publication keeps its distinct replay-safe result so Hermes can perform its rotation heal. (#495)
+  publication keeps its distinct replay-safe result so Hermes can perform its rotation heal. When
+  there is no system message, LCM now emits a verified user-role summary plus the following
+  historical string user row as the same `summary\n\nrow` carrier Hermes would build, preserving
+  that row's proof, store-id and carry identity before rotation. The tail's only user row is the
+  current prompt and is deliberately not folded, so that residual adjacency remains; list-content
+  rows and system-message contexts are unchanged. Before this carrier fix, #498 alone produced
+  640 stored rows, 468 duplicates, 7 publication conflicts and 19 sessions in the affected
+  80-turn default rotation-plus-trailing cell. (#495)
 
 ## v0.24.0 - BREAKING: plugin renamed to hermes-lcm-x, engine to lcm-x (unreleased)
 

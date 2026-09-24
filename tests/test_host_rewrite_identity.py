@@ -20,7 +20,11 @@ import hermes_lcm.reconcile as lcm_reconcile_module
 from hermes_lcm.engine import LCMEngine
 
 from hermes_lcm.ingest_protection import scan_externalized_payload_integrity
-from tests.test_compression_boundary import _config, _stub_summarizer
+from tests.test_compression_boundary import (
+    _config,
+    _stub_summarizer,
+    _summary_carrier_fixture,
+)
 
 
 def _user(i, trail=True, text=None):
@@ -319,6 +323,25 @@ def test_rekey_declines_an_ambiguous_input_occurrence(tmp_path, monkeypatch):
         assert f"host_rewrite_identity:{continue_rows[0]}" not in set(host.overrides()) - before
     finally:
         host.engine.shutdown()
+
+
+def test_rekey_host_rewrite_watch_tracks_emitted_summary_carrier(tmp_path):
+    """The carrier has the historical row's replay identity, so #498's watch
+    transfers that exact store occurrence to the carrier object."""
+    engine, _compacted, tail, tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        engine._watch_stored_user_rows([(tail[0], tail[0], tail_ids[0])])
+        assembled = engine._assemble_context(None, tail)
+        carrier = assembled[0]
+
+        engine._rekey_host_rewrite_watch(tail, assembled)
+
+        _identity, _stored, objects = engine._host_rewrite_state()[0][tail_ids[0]]
+        assert objects[0] is tail[0]
+        assert objects[-1] is carrier
+        assert engine._generated_context_carrier_remainder(carrier) == tail[0]["content"]
+    finally:
+        engine.shutdown()
 
 
 @pytest.mark.parametrize(

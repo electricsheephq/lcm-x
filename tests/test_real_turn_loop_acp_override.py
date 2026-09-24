@@ -284,12 +284,25 @@ def test_turn_loop_without_host_rewrite_is_clean(tmp_path):
 
 
 @pytest.mark.skipif(os.environ.get("LCM_REAL_HERMES_LONG") != "1", reason="opt-in: set LCM_REAL_HERMES_LONG=1")
-def test_acp_persist_override_long_session_default_tuning_keeps_every_turn(tmp_path):
-    """80 ACP turns on default LCM tuning with provider-reported usage: the head
-    matcher must keep resolving past the stored session (94042ecf lost T55-T80)."""
-    result = _run_turn_loop(tmp_path, in_place=True, trailing=True, turns=80, long_defaults=True)
-    _assert_each_turn_stored_once(result, unseen_rewrites=True)
+@pytest.mark.parametrize("in_place", [True, False], ids=["in-place", "rotation"])
+@pytest.mark.parametrize("trailing", [False, True], ids=["no-trailing", "trailing"])
+def test_acp_persist_override_long_session_default_tuning_keeps_every_turn(
+    tmp_path, in_place, trailing
+):
+    """80 ACP turns on default LCM tuning across every host seam: the head
+    matcher and summary carrier must keep resolving past the stored session."""
+    result = _run_turn_loop(
+        tmp_path,
+        in_place=in_place,
+        trailing=trailing,
+        turns=80,
+        long_defaults=True,
+    )
+    _assert_each_turn_stored_once(result, unseen_rewrites=trailing)
+    assert result["stored_rows"] == 160, result
     assert result["commit_logged"] >= 2, result  # several same-turn compactions committed
+    if not in_place:
+        assert result["session_count"] <= result["commit_logged"] + 1, result
 
 
 @pytest.mark.parametrize("in_place", [True, False], ids=["in-place", "rotation"])

@@ -551,6 +551,122 @@ def _summary_message(compressed):
     raise AssertionError("compress() output carries no LCM summary")
 
 
+def _summary_carrier_fixture(tmp_path):
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "carrier.db"),
+            fresh_tail_count=3,
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    engine.on_session_start("S0", platform="acp", context_length=200_000)
+    compacted = {"role": "assistant", "content": "older compacted answer"}
+    compacted_id = engine._store.append("S0", compacted)
+    engine._last_compacted_store_id = compacted_id
+    engine._dag.add_node(
+        SummaryNode(
+            session_id="S0",
+            depth=0,
+            summary="Carrier summary.",
+            token_count=3,
+            source_token_count=5,
+            source_ids=[compacted_id],
+            source_type="messages",
+            created_at=time.time(),
+            earliest_at=time.time(),
+            latest_at=time.time(),
+            expand_hint="carrier summary",
+        )
+    )
+    tail = [
+        {"role": "user", "content": "historical user row"},
+        {"role": "assistant", "content": "historical assistant row"},
+        {"role": "user", "content": "current prompt"},
+    ]
+    tail_ids = engine._store.append_batch("S0", tail)
+    return engine, compacted, tail, tail_ids
+
+
+def test_assembly_emits_verified_summary_carrier_with_original_row_identity(tmp_path):
+    engine, compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        assembled = engine._assemble_context(None, tail)
+        carrier = assembled[0]
+
+        assert engine._generated_context_carrier_remainder(carrier) == tail[0]["content"]
+        assert engine._proof_replay_identity(carrier) == engine._proof_replay_identity(tail[0])
+        assert assembled[1:] == tail[1:]
+
+        engine._ingest_cursor = len(assembled)
+        engine._ingest_cursor_needs_reconcile = False
+        engine._record_compress_commit_proof([compacted, *tail], assembled)
+        proof = engine._compress_commit_proof
+        assert proof is not None
+        assert proof["output"][0] == engine._proof_replay_identity(tail[0])
+        assert proof["output_effective"][0] == engine._proof_replay_identity(tail[0])
+    finally:
+        engine.shutdown()
+
+
+def test_assembly_never_folds_the_only_tail_user_current_prompt(tmp_path):
+    engine, _compacted, _tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    current = {"role": "user", "content": "current prompt"}
+    try:
+        assembled = engine._assemble_context(None, [current])
+        assert len(assembled) == 2
+        assert engine._generated_context_carrier_remainder(assembled[0]) is None
+        assert assembled[1] == current
+    finally:
+        engine.shutdown()
+
+
+def test_assembly_does_not_fold_list_content_user_row(tmp_path):
+    engine, _compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    multimodal = {
+        "role": "user",
+        "content": [{"type": "text", "text": "historical multimodal row"}],
+    }
+    try:
+        assembled = engine._assemble_context(None, [multimodal, *tail[1:]])
+        assert engine._generated_context_carrier_remainder(assembled[0]) is None
+        assert assembled[1] == multimodal
+    finally:
+        engine.shutdown()
+
+
+def test_assembly_with_system_message_keeps_summary_and_tail_separate(tmp_path):
+    engine, _compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        assembled = engine._assemble_context(
+            {"role": "system", "content": "system prompt"},
+            tail,
+            include_lcm_note=False,
+        )
+        assert assembled[0] == {"role": "system", "content": "system prompt"}
+        assert engine._generated_context_carrier_remainder(assembled[1]) is None
+        assert assembled[2:] == tail
+    finally:
+        engine.shutdown()
+
+
+def test_summary_carrier_maps_to_original_store_id_and_carry_range(tmp_path):
+    engine, compacted, tail, tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        assembled = engine._assemble_context(None, tail)
+        carrier = assembled[0]
+        assert engine._get_store_ids_for_messages(assembled)[0] == tail_ids[0]
+
+        engine._ingest_cursor = len(assembled)
+        engine._ingest_cursor_needs_reconcile = False
+        engine._record_compress_commit_proof([compacted, *tail], assembled)
+        assert engine._compress_commit_proof is not None
+        assert ("S0", tail_ids[0] - 1, tail_ids[0]) in engine._compress_commit_proof["carry_ranges"]
+        assert engine._generated_context_carrier_remainder(carrier) == tail[0]["content"]
+    finally:
+        engine.shutdown()
+
+
 @pytest.mark.parametrize("separator", ["\n\n", "\n\n---\n\n"])
 def test_host_merged_summary_carrier_is_identified_by_its_glued_row(tmp_path, monkeypatch, separator):
     """C5: summary + separator + real user row is a carrier, not scaffold, and
