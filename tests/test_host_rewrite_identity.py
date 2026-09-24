@@ -397,3 +397,94 @@ def test_override_write_failure_retries_on_the_next_ingest(tmp_path, monkeypatch
         assert host.compact(14) == ("compacted", "")
     finally:
         host.engine.shutdown()
+
+
+def _tool_pair(tag):
+    return [
+        {"role": "assistant", "content": "step " + "c" * 160,
+         "tool_calls": [{"id": tag, "type": "function", "function": {"name": "terminal", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": tag, "content": f"result {tag} " + "d" * 160},
+    ]
+
+
+def test_trimmed_retained_anchor_stays_retained_through_later_compactions(tmp_path, monkeypatch):
+    """#498 r3 (Sol P1): the sole user prompt retained behind the system prompt is
+    trimmed in place by the host after a fresh_tail_count=0 compaction kept it. It
+    must stay the retained anchor (raw or override form, one occurrence)."""
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
+    engine = LCMEngine(config=_config(tmp_path, fresh_tail_count=0, leaf_chunk_tokens=1), hermes_home=str(tmp_path / "home"))
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        user = {"role": "user", "content": "the only real user prompt\n"}
+        messages = [{"role": "system", "content": "stable system prompt"}, user]
+        for k in range(4):
+            messages += _tool_pair(f"a{k}")
+        engine.should_compress_preflight(messages)
+        out = engine.compress(list(messages), force=True)
+        engine.on_session_end("S0", messages)
+        engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
+        assert out[1]["content"] == "the only real user prompt\n"
+        out[1]["content"] = out[1]["content"].strip()  # finalize_turn, in place
+        for round_ in ("b", "c"):
+            messages = list(out) + [m for k in range(4) for m in _tool_pair(f"{round_}{k}")]
+            engine.ingest(messages)
+            out = engine.compress(list(messages), force=True)
+            assert engine._last_compression_status == "compacted", engine._last_compression_noop_reason
+            assert engine._leading_anchor_count(messages) == 2
+            assert out[1]["content"] == "the only real user prompt"
+    finally:
+        engine.shutdown()
+
+
+def test_head_replay_wins_over_a_shorter_tool_anchored_cursor(tmp_path, monkeypatch):
+    """#498 r3 (Sol P2): the greatest independently proven cursor wins."""
+    host = _AcpHost(tmp_path, monkeypatch)
+    try:
+        host.history += _tool_pair("t1")  # a durable tool pair proves cursor 2 on its own
+        host.history.append({"role": "user", "content": " run the tool\n"})
+        host.engine.should_compress_preflight(host.history)
+        host.history[-1]["content"] = host.history[-1]["content"].strip()
+        host.history.append({"role": "assistant", "content": "done"})
+        host.engine.ingest(host.history)
+        assert len(host.rows()) == 4
+        host.restart()
+        host.history.append({"role": "user", "content": "next prompt"})
+        host.engine.should_compress_preflight(host.history)
+        assert len(host.rows()) == 5
+    finally:
+        host.engine.shutdown()
+
+
+def test_mapper_surplus_shares_one_capacity_across_a_rows_forms(tmp_path, monkeypatch):
+    """#498 r3 (Astra P2): [extra "continue", original "continue\\n", later "continue"]
+    against [1 "continue\\n" (override), 2, 3 "continue", 4]: the extra occurrence is
+    the surplus; the raw original keeps row 1."""
+    host = _AcpHost(tmp_path, monkeypatch)
+    try:
+        host.turn(1, text="continue")
+        host.turn(2, text="continue", trail=False, rewrite=False)
+        stored = [sid for sid, role, _content in host.rows() if role == "user"]
+        active = [
+            {"role": "user", "content": "continue"},
+            {"role": "user", "content": "continue\n"},
+            {"role": "user", "content": "continue"},
+        ]
+        mapped = host.engine._get_store_id_map_for_messages(active)
+        assert [mapped.get(id(m)) for m in active] == [None, stored[0], stored[1]]
+    finally:
+        host.engine.shutdown()
+
+
+def test_restart_with_mixed_raw_and_trimmed_forms_stores_only_the_new_prompt(tmp_path, monkeypatch):
+    """#498 r3 (Sol P2): no commit proof; the resumed transcript carries one raw
+    state.db row and trimmed rows elsewhere. Head replay compares both forms."""
+    host = _AcpHost(tmp_path, monkeypatch)
+    try:
+        host.turn(1)
+        host.turn(2)
+        host.restart(raw_indexes=(0,))
+        host.history.append(_user(3))
+        host.engine.should_compress_preflight(host.history)
+        assert len(host.rows()) == 5
+    finally:
+        host.engine.shutdown()

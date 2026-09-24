@@ -367,6 +367,11 @@ class ReconcileMixin:
     def _proof_replay_identity(self, msg: Dict[str, Any]) -> tuple[str, str, str, str, str]:
         return _proof_user_identity(self._message_replay_identity(msg))
 
+    def _stored_row_forms(self, row: Dict[str, Any]) -> set:
+        """A stored row's admissible identities: exact and its host-rewrite override form."""
+        forms = (self._message_replay_identity(row, stored_row=True, with_host_rewrite=h) for h in (False, True))
+        return set(forms)
+
     def _host_rewrite_state(self):
         """Per bound store: watch {store_id: (identity, stored content, [objects])},
         overrides {store_id: payload or None}."""
@@ -1893,7 +1898,9 @@ class ReconcileMixin:
             raw_session_count=session_count,
             allow_session_end_replay_proof=allow_session_end_replay_proof,
         )
-        cursor = cursor or self._cursor_from_host_rewrite_head(messages, session_count)
+        head_cursor = self._cursor_from_host_rewrite_head(messages, session_count)
+        if head_cursor is not None and head_cursor > (cursor or 0):
+            cursor = head_cursor  # the greatest independently proven cursor wins
         proof_cursor = self._cursor_from_durable_commit_proof(messages)
         if proof_cursor is not None and proof_cursor > (cursor or 0):
             # The last compaction's durable output proof covers more of this
@@ -2335,14 +2342,11 @@ class ReconcileMixin:
                 retained_anchor.get("store_id") or 0
             ) if retained_anchor else 0
             if 0 < retained_store_id <= int(self._last_compacted_store_id or 0):
-                retained_identity = self._message_replay_identity(
-                    retained_anchor,
-                    stored_row=True,
-                )
+                retained_forms = self._stored_row_forms(retained_anchor)
                 active_matches = sum(
                     1
                     for message in messages
-                    if self._message_replay_identity(message) == retained_identity
+                    if self._message_replay_identity(message) in retained_forms
                 )
                 if active_matches == 1:
                     candidates.append(retained_anchor)
@@ -2451,6 +2455,21 @@ class ReconcileMixin:
                     surplus_count -= 1
                 if surplus_count > 0:
                     active_surplus_skips[identity] = surplus_count
+        # A row's forms share ONE occurrence (#498): per group of forms that trim alike,
+        # the earliest active occurrences beyond the group's row count are surplus.
+        group_rows: Counter = Counter()
+        group_forms: dict[tuple[Any, ...], set] = {}
+        for primary, alt in zip(stored_identities, stored_alt_identities):
+            group_rows[_proof_user_identity(primary)] += 1
+            group_forms.setdefault(_proof_user_identity(primary), set()).update({primary, alt} - {None})
+        for group, forms in group_forms.items():
+            surplus_count = sum(active_identity_counts.get(f, 0) - active_surplus_skips.get(f, 0) for f in forms)
+            surplus_count, seen = surplus_count - group_rows[group], Counter()
+            for msg in messages if surplus_count > 0 and len(forms) > 1 else ():
+                identity = active_lineage_identity(msg)
+                seen[identity] += 1
+                if identity in forms and surplus_count > 0 and seen[identity] > active_surplus_skips.get(identity, 0):
+                    active_surplus_skips[identity], surplus_count = seen[identity], surplus_count - 1
 
         placeholder_identity_counts: dict[tuple[str, str, str, str], int] = {}
         for msg in messages:
