@@ -738,7 +738,7 @@ def test_native_recovery_stores_unverified_summary_shaped_user_text(candidate, m
 
 
 def _native_proof(engine, rows, droppable, summary_index=0):
-    identities = [engine._message_replay_identity(row) for row in rows]
+    identities = [engine._proof_replay_identity(row) for row in rows]
     return {
         "output_effective": identities,
         "droppable": droppable,
@@ -1117,6 +1117,77 @@ def _run_native_repair_scenario(
         return first, second
     finally:
         engine.shutdown()
+
+
+def _run_native_whitespace_adoption_scenario(tmp_path, monkeypatch, restart):
+    def native_behavior(_native, messages):
+        return [{"role": "assistant", "content": "native summary"}] + copy.deepcopy(
+            messages[-2:]
+        )
+
+    install_native(monkeypatch, native_behavior)
+    engine = _native_engine(tmp_path)
+    history_rows = history()
+    history_rows[-2]["content"] = "  ACP adopted user row keeps edge whitespace.  \n"
+    first_new = [{"role": "assistant", "content": "Whitespace adoption acknowledged."}]
+    second_new = [{"role": "user", "content": "Continue after whitespace adoption."}]
+    try:
+        engine.ingest(history_rows)
+        recovered = engine.compress(
+            copy.deepcopy(history_rows), current_tokens=250_000, force=True
+        )
+        assert engine.last_compression_status == "host_native"
+
+        adopted = copy.deepcopy(recovered)
+        adopted_user = next(
+            row
+            for row in adopted
+            if row.get("content") == "  ACP adopted user row keeps edge whitespace.  \n"
+        )
+        adopted_user["content"] = adopted_user["content"].strip()
+        proof = engine._compress_commit_proof
+        in_memory_cursor = engine._remap_cursor_through_native_host_repair(
+            adopted, proof
+        )
+        durable_cursor = engine._cursor_from_durable_commit_proof(adopted)
+        assert in_memory_cursor == durable_cursor == len(adopted)
+
+        engine.on_session_end("retained", history_rows)
+        engine.on_session_start(
+            "retained",
+            boundary_reason="compression",
+            old_session_id="retained",
+            conversation_id="conversation",
+        )
+        host = adopted + copy.deepcopy(first_new)
+        if restart == "before":
+            engine.shutdown()
+            engine = _native_engine(tmp_path)
+        engine.ingest(host)
+        first = _native_scenario_metrics(engine, history_rows + first_new)
+        if restart == "after":
+            engine.shutdown()
+            engine = _native_engine(tmp_path)
+        host += copy.deepcopy(second_new)
+        engine.ingest(host)
+        second = _native_scenario_metrics(
+            engine, history_rows + first_new + second_new
+        )
+        return first, second
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("restart", ["none", "before", "after"])
+def test_native_adoption_proof_tolerates_user_edge_whitespace(
+    tmp_path, monkeypatch, restart
+):
+    first, second = _run_native_whitespace_adoption_scenario(
+        tmp_path, monkeypatch, restart
+    )
+
+    assert first == (0, 0, 0)
+    assert second == (0, 0, 0)
 
 
 @pytest.mark.parametrize("shape", ["call-only", "orphan-tool"])
