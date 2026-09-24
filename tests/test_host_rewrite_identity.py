@@ -11,6 +11,7 @@ The driver mirrors the host sequence with the real engine and a stub summarizer.
 
 import json
 import sqlite3
+import sys
 
 import pytest
 
@@ -595,27 +596,44 @@ def test_override_cache_stays_bounded_across_reads(tmp_path, monkeypatch):
 
 
 def test_evicted_override_reloads_and_matches_as_before(tmp_path, monkeypatch):
-    """#498 r6: eviction is safe. An evicted override reloads from metadata: the same
-    identities, and a restart's head replay stores only the new turn."""
+    """#498 r6: eviction is safe. A positive override pushed out of the cache reloads
+    from metadata for its consumers: the replay identity and a restart's head replay."""
     host = _AcpHost(tmp_path, monkeypatch)
     try:
         for i in range(1, 13):
             host.turn(i)
         rows = _stored_user_rows(host)
-
-        def identities():
-            return [host.engine._message_replay_identity(row, stored_row=True, with_host_rewrite=True) for row in rows]
-
-        uncapped = identities()
-        assert [identity[1] for identity in uncapped] == [row["content"].strip() for row in rows]
-        monkeypatch.setattr(lcm_reconcile_module, "_HOST_REWRITE_OVERRIDE_CACHE_CAP", 2, raising=False)
-        host.engine._load_host_rewrite_overrides(rows[-2:])  # evicts the older entries
-        assert identities() == uncapped
+        target = rows[0]
+        key = f"host_rewrite_identity:{target['store_id']}"
+        override_form = json.loads(host.overrides()[key])["content"]
+        assert override_form == target["content"].strip() != target["content"]
         host.restart()
-        host.turn(13)
+        monkeypatch.setattr(lcm_reconcile_module, "_HOST_REWRITE_OVERRIDE_CACHE_CAP", 2, raising=False)
+        engine, reads = host.engine, []
+        cache, real_read = engine._host_rewrite_state()[1], engine._store.read_metadata_json_many
+
+        def spy(keys, *args, **kwargs):
+            reads.append((sys._getframe(2).f_code.co_name, list(keys)))  # (loader's caller, keys)
+            return real_read(keys, *args, **kwargs)
+
+        monkeypatch.setattr(engine._store, "read_metadata_json_many", spy)
+
+        def evict_target(others):
+            engine._load_host_rewrite_overrides([target])
+            assert isinstance(cache.get(target["store_id"]), dict)  # the positive override is cached
+            engine._load_host_rewrite_overrides(others)  # past the cap: the oldest entries go
+            assert target["store_id"] not in cache
+            reads.clear()
+
+        evict_target(rows[1:3])
+        identity = engine._message_replay_identity(target, stored_row=True, with_host_rewrite=True)
+        assert identity[1] == override_form
+        assert ("_host_rewrite_override_content", [key]) in reads  # reloaded from metadata
+        evict_target(rows[3:5])
+        host.turn(13)  # the restart's head replay reads the stored session's overrides
+        assert any(caller == "_cursor_from_host_rewrite_head" and key in batch for caller, batch in reads)
         assert len(host.rows()) == 26
         assert _no_duplicates(host.rows())
-        assert len(host.engine._host_rewrite_state()[1]) <= 2 + len(rows) + 1
         assert host.compact(14) == ("compacted", "")
     finally:
         host.engine.shutdown()
