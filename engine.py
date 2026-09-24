@@ -3909,7 +3909,7 @@ class LCMEngine(
             and not proof.get("end_consumed")
             and proof.get("input") is not None
             and len(messages) == len(proof["input"])
-            and [self._message_replay_identity(m) for m in messages] == proof["input"]
+            and [self._proof_replay_identity(m) for m in messages] == proof["input"]
         ):
             # Compaction commit (#483): every input row is already durable and the
             # cursor indexes compress()'s output, so skip the re-ingest. Still
@@ -4819,7 +4819,7 @@ class LCMEngine(
                 return index if effective == target else None
             if self._is_verified_replay_scaffold_message(message):
                 continue
-            effective.append(self._message_replay_identity(message))
+            effective.append(self._proof_replay_identity(message))
             if effective != target[: len(effective)]:
                 return None
         return len(messages) if effective == target else None
@@ -5161,11 +5161,11 @@ class LCMEngine(
             proof["consulted"] = True
             host_input = proof.get("input")
             if n >= self._ingest_cursor and [
-                self._message_replay_identity(m) for m in messages[: self._ingest_cursor]
+                self._proof_replay_identity(m) for m in messages[: self._ingest_cursor]
             ] == proof["output"]:
                 self._compress_commit_proof = None
             elif proof.get("end_consumed") and host_input is not None and n >= len(host_input) and [
-                self._message_replay_identity(m) for m in messages[: len(host_input)]
+                self._proof_replay_identity(m) for m in messages[: len(host_input)]
             ] == host_input:
                 # The host committed, then kept the compress() input (anti-growth
                 # refusal or rollback): every row of it is durable, resume after it.

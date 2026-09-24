@@ -9,6 +9,7 @@ import hermes_lcm.engine as lcm_engine_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.reconcile import _commit_proof_identity_digest
 
 
 def test_compression_boundary_carries_summaries_without_moving_raw_messages(tmp_path):
@@ -917,24 +918,86 @@ def test_durable_commit_proof_is_bound_to_its_conversation(tmp_path, monkeypatch
         resumed.shutdown()
 
 
-def test_durable_commit_proof_from_before_whitespace_identity_is_ignored(tmp_path, monkeypatch):
-    """A version-2 durable proof hashed untrimmed user rows. After the upgrade it
-    proves nothing: the cursor reconciles instead of matching the new identity."""
-    engine, _pre, compressed = _compacted_engine(tmp_path, monkeypatch)
-    host = list(compressed) + [_turn(13)[1]]
+def _as_rc3_durable_proof(engine, compressed):
+    """Rewrite the durable proof the way rc3 wrote it: version 2, exact identities."""
+    payload = _durable_commit_proof(engine, "S0")
+    payload["version"] = 2
+    payload["effective_sha256"] = [
+        _commit_proof_identity_digest(engine._message_replay_identity(m))
+        for m in compressed
+        if not engine._is_replayed_context_scaffold_message(m)
+    ]
+    engine._store.write_metadata_json(["compaction_commit_proof:S0"], json.dumps(payload, sort_keys=True))
+    return payload
+
+
+def test_rc3_durable_commit_proof_is_still_honoured_after_upgrade(tmp_path, monkeypatch):
+    """#498 P1: an rc3 (version-2) durable proof, verified with the exact identity
+    it was hashed with, still re-indexes an in-place commit after a restart: the
+    reply is the only new row, and the next compaction publishes (no conflict)."""
+    engine, pre, compressed = _compacted_engine(tmp_path, monkeypatch)
     try:
-        payload = _durable_commit_proof(engine, "S0")
+        _as_rc3_durable_proof(engine, compressed)
+        engine.on_session_end("S0", pre)
+        engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
     finally:
         engine.shutdown()
     resumed = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
     try:
         resumed.on_session_start("S0", platform="acp", context_length=200_000)
-        assert resumed._cursor_from_durable_commit_proof(host) is not None
-        resumed._store.write_metadata_json(
-            ["compaction_commit_proof:S0"], json.dumps({**payload, "version": 2}, sort_keys=True)
-        )
-        assert resumed._durable_commit_proof_payload() is None
-        assert resumed._cursor_from_durable_commit_proof(host) is None
+        rows = _row_count(resumed)
+        host = list(compressed) + [_turn(13)[1]]
+        resumed.ingest(host)
+        assert _row_count(resumed) == rows + 1
+        for i in range(14, 20):
+            host.extend(_turn(i))
+            resumed.ingest(host)
+        host.append(_turn(20)[0])
+        resumed.ingest(host)
+        resumed.compress(list(host), force=True)
+        assert resumed._last_compression_status == "compacted", resumed._last_compression_noop_reason
+        stored = resumed._store._conn.execute("SELECT role, content FROM messages").fetchall()
+        assert len(stored) == len(set(stored))
+    finally:
+        resumed.shutdown()
+
+
+def test_rc3_durable_commit_proof_stays_exact_for_user_whitespace(tmp_path, monkeypatch):
+    """A version-2 proof hashed exact identities, so it never proves a user row
+    that differs only by whitespace (the cursor reconciles instead)."""
+    engine, _pre, compressed = _compacted_engine(tmp_path, monkeypatch)
+    padded = [dict(m) for m in compressed]
+    padded[-1]["content"] += "\n"
+    try:
+        assert engine._cursor_from_durable_commit_proof(padded) is not None  # version 3: proof-bound tolerance
+        _as_rc3_durable_proof(engine, compressed)
+    finally:
+        engine.shutdown()
+    resumed = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    try:
+        resumed.on_session_start("S0", platform="acp", context_length=200_000)
+        assert resumed._cursor_from_durable_commit_proof(list(compressed)) is not None
+        assert resumed._cursor_from_durable_commit_proof(padded) is None
+    finally:
+        resumed.shutdown()
+
+
+@pytest.mark.parametrize(("stored", "replayed"), [("retry", " retry\n"), ("", "  ")], ids=["retry", "empty"])
+def test_unbound_store_reconciliation_keeps_exact_user_identity(tmp_path, stored, replayed):
+    """#498 P0: with no commit proof binding the position, a user row that differs
+    from the stored one only by whitespace is a new exchange, not replay."""
+    engine = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        engine.ingest([{"role": "user", "content": stored}, {"role": "assistant", "content": "OK"}])
+        assert _row_count(engine) == 2
+    finally:
+        engine.shutdown()
+    resumed = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    try:
+        resumed.on_session_start("S0", platform="acp", context_length=200_000)
+        resumed.ingest([{"role": "user", "content": replayed}, {"role": "assistant", "content": "OK"}])
+        assert _row_count(resumed) == 4
     finally:
         resumed.shutdown()
 

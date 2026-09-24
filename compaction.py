@@ -559,8 +559,8 @@ class CompactionMixin:
             proof = {
                 "session_id": self._session_id,
                 "conversation_id": self._conversation_id,
-                "input": [self._message_replay_identity(m) for m in messages],
-                "output": [self._message_replay_identity(m) for m in result],
+                "input": [self._proof_replay_identity(m) for m in messages],
+                "output": [self._proof_replay_identity(m) for m in result],
                 "end_consumed": False,
             }
             if proof["output"] == proof["input"]:
@@ -568,7 +568,7 @@ class CompactionMixin:
                 # end call with this list must stay a real session end.
                 return
             proof["output_effective"] = [
-                self._message_replay_identity(m)
+                self._proof_replay_identity(m)
                 for m in result
                 if not self._is_replayed_context_scaffold_message(m)
             ]

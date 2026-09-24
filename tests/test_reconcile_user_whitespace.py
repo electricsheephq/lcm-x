@@ -1,9 +1,11 @@
-"""Replay identity of a user row ignores leading/trailing whitespace only.
+"""Commit-proof identity of a user row ignores leading/trailing whitespace only.
 
-Hermes' ACP adapter persists ``prompt.strip()`` and rewrites the live user dict to
-it at turn end, after a same-turn compaction already stored the raw prompt. The
-stored and live forms must share one identity; interior whitespace, and every
-assistant/tool row, keep their exact identity.
+Hermes' ACP adapter persists ``prompt.strip()`` and rewrites the adopted user dict
+to it at turn end, after a same-turn compaction already stored and proved the raw
+prompt. Positions a commit proof binds compare ``_proof_replay_identity``: the
+stored and live forms of that row match. The replay identity itself stays exact,
+so unbound store reconciliation never collapses a new exchange onto an old one
+(#498). Interior whitespace and assistant/tool rows are never normalized.
 
 All tests use synthetic messages.  No real session data.
 """
@@ -33,17 +35,18 @@ def engine(tmp_path: Path):
 
 
 @pytest.mark.parametrize("raw", ["fix the build\n", "  fix the build", "\n\tfix the build \r\n"])
-def test_user_row_leading_or_trailing_whitespace_is_not_identity(engine, raw):
+def test_proof_identity_ignores_user_leading_or_trailing_whitespace(engine, raw):
     trimmed = {"role": "user", "content": "fix the build"}
     live = {"role": "user", "content": raw}
-    assert engine._message_replay_identity(live) == engine._message_replay_identity(trimmed)
-    assert engine._message_replay_identity(live, stored_row=True) == engine._message_replay_identity(trimmed)
+    assert engine._proof_replay_identity(live) == engine._proof_replay_identity(trimmed)
+    # The replay identity used by unbound store reconciliation stays exact.
+    assert engine._message_replay_identity(live) != engine._message_replay_identity(trimmed)
 
 
 @pytest.mark.parametrize("other", ["fix  the build", "fix the\nbuild", "fix the build."])
-def test_user_row_interior_difference_is_identity(engine, other):
+def test_proof_identity_keeps_user_interior_differences(engine, other):
     base = {"role": "user", "content": "fix the build"}
-    assert engine._message_replay_identity({"role": "user", "content": other}) != engine._message_replay_identity(base)
+    assert engine._proof_replay_identity({"role": "user", "content": other}) != engine._proof_replay_identity(base)
 
 
 @pytest.mark.parametrize(
@@ -54,8 +57,9 @@ def test_user_row_interior_difference_is_identity(engine, other):
         {"role": "tool", "content": "ok\n", "tool_call_id": "call-1", "tool_name": "terminal"},
     ],
 )
-def test_assistant_and_tool_rows_keep_exact_whitespace(engine, message):
+def test_proof_identity_keeps_assistant_and_tool_whitespace(engine, message):
     trimmed = dict(message, content=message["content"].strip())
-    identity = engine._message_replay_identity(message)
+    identity = engine._proof_replay_identity(message)
+    assert identity == engine._message_replay_identity(message)
     assert identity[1] == message["content"]
-    assert identity != engine._message_replay_identity(trimmed)
+    assert identity != engine._proof_replay_identity(trimmed)

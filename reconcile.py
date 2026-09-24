@@ -111,9 +111,20 @@ _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX = "compacted_active_replay_snapshot_dig
 _SESSION_END_REPLAY_METADATA_PREFIX = "session_end_replay_snapshot_digests"
 _NATIVE_RECOVERY_REPLAY_METADATA_PREFIX = "native_recovery_replay_snapshot_digests"
 _COMPACTION_COMMIT_PROOF_METADATA_PREFIX = "compaction_commit_proof"
-# Version 3: user-row identities ignore leading/trailing whitespace. A version-2
-# proof hashed the untrimmed form, so it is ignored (the cursor reconciles).
+# Version 3 hashes proof identities (_proof_user_identity). A version-2 (rc3)
+# proof hashed exact identities and is still verified with them.
 _COMPACTION_COMMIT_PROOF_VERSION = 3
+
+
+def _proof_user_identity(identity):
+    """A replay identity as compared against a commit proof: a user row's content
+    loses leading/trailing whitespace. Hermes ACP persists ``prompt.strip()`` and
+    rewrites the adopted user row to it after a same-turn compaction stored and
+    proved the raw prompt. Only for positions the proof binds; unbound store
+    reconciliation keeps exact identity (#498)."""
+    if identity[0] != "user":
+        return tuple(identity)
+    return (identity[0], identity[1].strip(), *identity[2:])
 
 
 def _commit_proof_identity_digest(identity) -> str:
@@ -350,6 +361,9 @@ class ReconcileMixin:
                 return False
         return True
 
+    def _proof_replay_identity(self, msg: Dict[str, Any]) -> tuple[str, str, str, str, str]:
+        return _proof_user_identity(self._message_replay_identity(msg))
+
     def _message_replay_identity(self, msg: Dict[str, Any], *, stored_row: bool = False) -> tuple[str, str, str, str, str]:
         role = str(msg.get("role") or "unknown")
         content = normalize_content_value(msg.get("content")) or ""
@@ -498,13 +512,6 @@ class ReconcileMixin:
             )
             if payload is not None and isinstance(payload.get("content"), str):
                 content = payload["content"]
-        # A host may persist a trimmed copy of the prompt it sent and rewrite the
-        # live user dict to it at turn end, after a same-turn compaction stored
-        # the raw row (Hermes ACP: persist_user_message = prompt.strip()). So
-        # leading/trailing whitespace of a user row is not identity; interior
-        # whitespace still is. Commit proofs carry _COMPACTION_COMMIT_PROOF_VERSION.
-        if role == "user":
-            content = content.strip()
         tool_calls_identity = self._stable_tool_calls_identity(tool_calls)
         # WHICH TOOL RAN is part of a tool row's identity. A tool result
         # carries no ``tool_calls``, so without the name the only distinguishing
@@ -1584,7 +1591,7 @@ class ReconcileMixin:
         payload = self._store.read_metadata_json(
             self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)
         )
-        if not isinstance(payload, dict) or payload.get("version") != _COMPACTION_COMMIT_PROOF_VERSION:
+        if not isinstance(payload, dict) or payload.get("version") not in (2, _COMPACTION_COMMIT_PROOF_VERSION):
             return None
         if payload.get("hermes_home") != str(getattr(self, "_hermes_home", "") or ""):
             return None
@@ -1613,6 +1620,12 @@ class ReconcileMixin:
             payload = self._durable_commit_proof_payload()
             if payload is None:
                 return None
+
+            def proof_identity(message, **kwargs):
+                identity = self._message_replay_identity(message, **kwargs)
+                # rc3 (version 2) hashed exact identities.
+                return _proof_user_identity(identity) if payload.get("version") != 2 else identity
+
             target = list(payload.get("effective_sha256") or [])
             matched = 0
             index = 0
@@ -1625,7 +1638,7 @@ class ReconcileMixin:
                     return None
                 for message, digest in zip(messages, scaffold):
                     if not self._is_verified_replay_scaffold_message(message) or (
-                        _commit_proof_identity_digest(self._message_replay_identity(message)) != digest
+                        _commit_proof_identity_digest(proof_identity(message)) != digest
                     ):
                         return None
                 index = len(scaffold)
@@ -1634,7 +1647,7 @@ class ReconcileMixin:
                 index += 1
                 if self._is_verified_replay_scaffold_message(message):
                     continue
-                identity = self._message_replay_identity(message)
+                identity = proof_identity(message)
                 # A digest-less redaction (password_assignment) is not identity:
                 # different same-length secrets share it, so it proves nothing.
                 if _has_lossy_redacted_identity(identity):
@@ -1655,10 +1668,8 @@ class ReconcileMixin:
                 for row in page:
                     if index >= n:
                         return None
-                    identity = self._message_replay_identity(messages[index])
-                    if _has_lossy_redacted_identity(identity) or identity != self._message_replay_identity(
-                        row, stored_row=True
-                    ):
+                    identity = proof_identity(messages[index])
+                    if _has_lossy_redacted_identity(identity) or identity != proof_identity(row, stored_row=True):
                         return None
                     index += 1
                 after_store_id = int(page[-1]["store_id"])
