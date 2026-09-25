@@ -246,9 +246,13 @@ def _project_emitted_occurrences(
         suffix_digest = descriptor.get("suffix_sha256")
         role = descriptor.get("role")
         ordinal = descriptor.get("same_prefix_ordinal")
+        occurrence = descriptor.get("output_occurrence")
+        output_index = occurrence.get("index") if isinstance(occurrence, Mapping) else None
         if not isinstance(length, int) or length <= 0 or not isinstance(digest, str) or (
             not isinstance(role, str) or not role or type(ordinal) is not int or ordinal < 0
-        ) or type(suffix_length) is not int or suffix_length < 0 or not isinstance(suffix_digest, str):
+        ) or type(suffix_length) is not int or suffix_length < 0 or not isinstance(suffix_digest, str) or (
+            type(output_index) is not int or output_index < 0  # malformed (F7): decline, never raise
+        ):
             continue
         candidate_ordinal = -1
         for index, message in _emission_candidate_rows(messages, role, length, digest):
@@ -274,12 +278,11 @@ def _project_emitted_occurrences(
                 normalized_suffix[:suffix_length]
             ).hexdigest() != suffix_digest:
                 continue
-            output_index = (descriptor.get("output_occurrence") or {}).get("index")
             if not suffix_length and not normalized_suffix:
                 output = proof.get("output") or ()
                 multiplicity = sum(
                     tuple(item) == tuple(output[output_index]) for item in output
-                ) if type(output_index) is int and 0 <= output_index < len(output) else descriptor.get("output_multiplicity")
+                ) if output_index < len(output) else descriptor.get("output_multiplicity")
                 if type(multiplicity) is not int or multiplicity > sum(message.get("content") == span for _, message in _emission_candidate_rows(messages, role, length, digest)):
                     continue
             retained_source = descriptor.get("retained_source")
@@ -293,7 +296,7 @@ def _project_emitted_occurrences(
                 str(descriptor["kind"]),
                 suffix_digest,
                 suffix_length,
-                output_index if type(output_index) is int else None,
+                output_index,
             )
             search_from = index + 1
             break

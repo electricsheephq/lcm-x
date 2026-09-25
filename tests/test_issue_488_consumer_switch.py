@@ -7,6 +7,7 @@ proven emitted occurrence keeps its projected remainder.
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -243,5 +244,29 @@ def test_host_merged_composite_is_not_stored_again_after_restart(tmp_path, monke
         engine.on_session_start(child, platform="acp", context_length=200_000)
         engine.ingest(host)
         assert _rows(engine) == before
+    finally:
+        engine.shutdown()
+
+# --- fix round 1 (gpt-6-astra review of 5e015fee): each test reproduces a reviewer counterexample.
+
+
+@pytest.mark.parametrize("bad", ["bad", {"index": "0"}], ids=["non-mapping", "non-int-index"])
+def test_malformed_output_occurrence_declines_the_descriptor(tmp_path, monkeypatch, bad):
+    """F7: a persisted v4 descriptor with a malformed output_occurrence is declined (full
+    identity for its row); reconciliation never raises on it."""
+    engine, _pre, compressed = _phase1_compacted_engine(tmp_path, monkeypatch, tail=1)
+    block = _summary_block(engine, compressed)
+    try:
+        key = "compaction_commit_proof:S0"
+        payload = engine._store.read_metadata_json(key)
+        assert payload["emissions"][0]["output_occurrence"]["index"] == 0
+        payload["emissions"][0]["output_occurrence"] = bad
+        engine._store.write_metadata_json([key], json.dumps(payload, sort_keys=True))
+        engine._last_emission_descriptors = None
+        host = [dict(m) for m in compressed]
+        projection, identities = engine._occurrence_replay_identities(host, engine._active_emission_proof())
+        assert projection.entries[0].generated_span is None
+        assert identities[0] is not None and identities[0][1] == block
+        engine.ingest(host + [_turn(13)[1]])
     finally:
         engine.shutdown()
