@@ -5,7 +5,7 @@ import hashlib
 import pytest
 
 from hermes_lcm.reconcile import _project_emitted_occurrences
-from tests.test_compression_boundary import _summary_carrier_fixture
+from tests.test_compression_boundary import _summary_carrier_fixture, _turn
 from tests.test_issue_488_emission_proof import (
     OBJECTIVE,
     _phase1_compacted_engine,
@@ -158,10 +158,90 @@ def test_emission_descriptor_carries_forward_to_the_next_proof(tmp_path):
         engine.shutdown()
 
 
+def test_compress_preserves_live_placeholder_provenance(tmp_path, monkeypatch):
+    engine, _compacted, _tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    generated = {"role": "assistant", "content": "ignored generated placeholder"}
+    try:
+        engine._last_active_replay_messages = [dict(generated)]
+        engine._generated_ignored_active_replay_placeholder_message_ids = {id(generated)}
+        before = set(engine._generated_ignored_active_replay_placeholder_message_ids)
+        monkeypatch.setattr(engine, "_compress_impl", lambda messages, **_kwargs: messages)
+
+        returned = engine.compress([generated], force=True)
+
+        assert returned[0] is generated
+        assert engine._generated_ignored_active_replay_placeholder_message_ids == before
+    finally:
+        engine.shutdown()
+
+
+def test_real_ingest_keeps_emission_descriptor_for_next_compress(tmp_path, monkeypatch):
+    engine, _pre, first = _phase1_compacted_engine(tmp_path, monkeypatch, tail=7)
+    try:
+        original = engine._compress_commit_proof["emissions"][0]
+        original_content = first[original["output_occurrence"]["index"]]["content"]
+        original_span = original_content.encode("utf-8")[: original["generated_span_bytes"]]
+        engine.ingest(first)
+        assert engine._compress_commit_proof is None
+
+        host = [dict(message) for message in first]
+        host.append(_turn(13)[1])
+        engine.ingest(host)
+        host.extend(_turn(14))
+        engine.ingest(host)
+        surviving = [first[0], *first[2:], *host[len(first):]]
+
+        def compact_again(_messages, **_kwargs):
+            engine._last_compression_status = "compacted"
+            engine._ingest_cursor = len(surviving)
+            engine._pending_emission_candidates = []
+            return surviving
+
+        monkeypatch.setattr(engine, "_compress_impl", compact_again)
+        second = engine.compress(host, force=True)
+        assert engine._last_compression_status == "compacted"
+        assert any(
+            isinstance(message.get("content"), str)
+            and message["content"].encode("utf-8").startswith(original_span)
+            for message in second
+        )
+        assert any(
+            descriptor["generated_span_sha256"] == original["generated_span_sha256"]
+            and descriptor["generated_span_bytes"] == original["generated_span_bytes"]
+            and descriptor["retained_source"] == original["retained_source"]
+            for descriptor in engine._compress_commit_proof["emissions"]
+        ), second
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("authored_first", [True, False])
+def test_finalizer_binds_identical_bytes_to_generated_role(tmp_path, authored_first):
+    engine, compacted, _tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        generated = engine._assemble_context(None, [])
+        assert len(generated) == 1 and generated[0]["role"] == "user"
+        content = generated[0]["content"]
+        authored = {"role": "system", "content": content}
+        if authored_first:
+            returned = engine._assemble_context(authored, [], include_lcm_note=False)
+        else:
+            returned = [*generated, authored]
+        proof = _record(engine, [compacted], returned)
+        generated_index = 1 if authored_first else 0
+
+        assert len(proof["emissions"]) == 1
+        assert proof["emissions"][0]["output_occurrence"]["index"] == generated_index
+        assert returned[generated_index]["role"] == "user"
+    finally:
+        engine.shutdown()
+
+
 def test_rotation_transfers_emissions_and_reset_clears_them(tmp_path, monkeypatch):
     engine, pre, compressed = _phase1_compacted_engine(tmp_path, monkeypatch, tail=7)
     try:
         assert engine._compress_commit_proof["emissions"]
+        assert engine._last_emission_descriptors["emissions"]
         engine.on_session_end("S0", pre)
         engine.on_session_start(
             "S1", boundary_reason="compression", old_session_id="S0", platform="acp"
@@ -169,10 +249,15 @@ def test_rotation_transfers_emissions_and_reset_clears_them(tmp_path, monkeypatc
         proof = engine._compress_commit_proof
         assert proof["emissions"]
         assert {item["scope"]["session_id"] for item in proof["emissions"]} == {"S1"}
+        assert {
+            item["scope"]["session_id"]
+            for item in engine._last_emission_descriptors["emissions"]
+        } == {"S1"}
         assert engine._durable_commit_proof_payload()["emissions"]
 
         engine.on_session_reset()
         assert engine._compress_commit_proof is None
+        assert engine._last_emission_descriptors is None
         assert engine._durable_commit_proof_payload() is None
     finally:
         engine.shutdown()

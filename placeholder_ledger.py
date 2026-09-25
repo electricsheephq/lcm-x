@@ -683,5 +683,6 @@ class PlaceholderLedgerMixin:
             digest = hashlib.sha256(original_text.encode("utf-8")).hexdigest()[:16]
             self._remember_generated_ignored_placeholder_hash(digest)
             self._generated_ignored_active_replay_placeholder_message_ids.add(id(active_message))
+            self._generated_ignored_active_replay_placeholder_messages[id(active_message)] = active_message
             active_replay_messages[idx] = active_message
         return active_replay_messages

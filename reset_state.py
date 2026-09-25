@@ -56,9 +56,11 @@ class ResetStateMixin:
         # A commit proof is valid only through the compression handoff of the
         # session that produced it (#483); any other reset drops it.
         self._compress_commit_proof = None
+        self._last_emission_descriptors = None
         self._clear_fresh_tail_pressure_yield_state()
         self._generated_ignored_active_replay_placeholder_hashes = set()
         self._generated_ignored_active_replay_placeholder_message_ids = set()
+        self._generated_ignored_active_replay_placeholder_messages = {}
         self._compression_boundary_ingest_pending = False
         self._compression_boundary_active_placeholder_digest_budget = {}
         self._compression_boundary_active_placeholder_digest_ordinals = {}

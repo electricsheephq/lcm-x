@@ -550,7 +550,6 @@ class CompactionMixin:
             ):
                 result = messages
             self._record_compress_commit_proof(messages, result)
-            self._generated_ignored_active_replay_placeholder_message_ids.intersection_update(map(id, getattr(self, "_last_active_replay_messages", ())))
             logger.debug("LCM compaction emission descriptor count=%d",
                          len((self._compress_commit_proof or {}).get("emissions") or ()))
             proof_missing = self._last_compression_status == "host_native" and self._compress_commit_proof is None
@@ -580,7 +579,11 @@ class CompactionMixin:
         the re-ingest; it still finalizes the session with its own frontier (#483).
         """
         try:
-            prior_proof = self._compress_commit_proof
+            prior_proof = getattr(self, "_last_emission_descriptors", None)
+            if not prior_proof:
+                durable_proof = self._durable_commit_proof_payload()
+                if durable_proof and durable_proof.get("emissions"):
+                    prior_proof = durable_proof
             self._compress_commit_proof = None
             if (
                 not self._session_id
@@ -667,6 +670,11 @@ class CompactionMixin:
                     for row in rows_before_summary
                 ) if summary_index is not None else None
             proof["published"] = self._last_compression_status == "compacted"
+            self._last_emission_descriptors = {
+                "version": _COMPACTION_COMMIT_PROOF_VERSION,
+                **emission_binding,
+                "emissions": copy.deepcopy(emissions),
+            }
             self._compress_commit_proof = proof
             if proof["published"] or proof["native"]:
                 self._persist_compress_commit_proof(proof)

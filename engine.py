@@ -133,6 +133,7 @@ from .message_patterns import compile_message_patterns, matches_message_pattern
 from .aux_session import AuxiliarySessionMixin
 from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+from .reconcile import _emission_identity
 from .reconcile import _has_lossy_redacted_identity
 from .compaction import CompactionMixin
 from .reset_state import ResetStateMixin
@@ -488,6 +489,7 @@ class LCMEngine(
         # and output identities, so the host's commit end call and the first
         # post-compaction ingest can be verified instead of trusted by position.
         self._compress_commit_proof: Optional[Dict[str, Any]] = None
+        self._last_emission_descriptors: Optional[Dict[str, Any]] = None
         self._last_ingest_reconciliation: Dict[str, Any] = {
             "action": "none",
             "reason": "not run",
@@ -650,6 +652,7 @@ class LCMEngine(
         self._last_active_replay_source_identities: list[tuple[Any, ...]] = []
         self._last_active_replay_messages: list[Dict[str, Any]] = []
         self._generated_ignored_active_replay_placeholder_message_ids: set[int] = set()
+        self._generated_ignored_active_replay_placeholder_messages: dict[int, Dict[str, Any]] = {}
         self._logged_filter_config = False
         self._pending_reset_session_id: str = ""
         self._pending_reset_conversation_id: str = ""
@@ -3311,9 +3314,12 @@ class LCMEngine(
             # The child segment starts from compress()'s output: re-key the proof
             # so its first ingest re-indexes a host-merged prefix instead of
             # trusting a positional cursor, and persist it for a resumed child.
-            commit_proof["session_id"] = session_id
-            for emission in commit_proof.get("emissions") or ():
-                emission["scope"] = {**(emission.get("scope") or {}), "session_id": session_id}
+            for scoped_proof in (commit_proof, self._last_emission_descriptors):
+                if scoped_proof is None:
+                    continue
+                scoped_proof["session_id"] = session_id
+                for emission in scoped_proof.get("emissions") or ():
+                    emission["scope"] = {**(emission.get("scope") or {}), "session_id": session_id}
             commit_proof["input"] = None
             if commit_proof.get("published") or commit_proof.get("native"):
                 self._persist_compress_commit_proof(commit_proof)
@@ -4775,6 +4781,7 @@ class LCMEngine(
             copied_message = dict(message)
             if id(message) in generated_message_ids:
                 self._generated_ignored_active_replay_placeholder_message_ids.add(id(copied_message))
+                self._generated_ignored_active_replay_placeholder_messages[id(copied_message)] = copied_message
             copied_replay_messages.append(copied_message)
         return copied_replay_messages
 
@@ -5156,6 +5163,7 @@ class LCMEngine(
                 )
             if id(message) in generated_message_ids:
                 self._generated_ignored_active_replay_placeholder_message_ids.add(id(redacted_message))
+                self._generated_ignored_active_replay_placeholder_messages[id(redacted_message)] = redacted_message
             redacted_replay_messages.append(redacted_message)
         return redacted_replay_messages
 
@@ -7010,6 +7018,7 @@ class LCMEngine(
                     summary_candidate = {
                         "kind": "objective" if combined.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else "summary",
                         "span": combined,
+                        "full_identity": _emission_identity(summary_message),
                     }
                     emission_candidates.append(summary_candidate)
 
@@ -7067,6 +7076,7 @@ class LCMEngine(
                             "kind": "objective" if generated_context.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else "summary",
                             "span": generated_context + ("\n\n---\n\n" if normalized_tail else ""),
                             "retained_source": {"store_id": folded_source_store_id},
+                            "full_identity": _emission_identity(tail_selected[0]),
                         })
                 else:
                     logger.warning(
@@ -7080,6 +7090,7 @@ class LCMEngine(
                 emission_candidates.append({
                     "kind": "objective" if generated_context.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else "summary",
                     "span": generated_context,
+                    "full_identity": _emission_identity(result[-1]),
                 })
 
         # Fresh tail. A user-role summary directly ahead of a historical user
@@ -7112,6 +7123,7 @@ class LCMEngine(
                         "kind": "carrier",
                         "span": f"{summary_message['content']}\n\n",
                         "retained_source": {"store_id": source_ids[0]} if source_ids else None,
+                        "full_identity": _emission_identity(carrier),
                     })
                 tail_selected = tail_selected[1:]
         result.extend(tail_selected)
