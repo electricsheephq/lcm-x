@@ -44,7 +44,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Docs: the migration verify step names `hermes plugins list` (bare `hermes plugins` opens the interactive
   toggle); `scripts/install.sh` prints the same command. (#481)
 
-## v0.24.0 - BREAKING: plugin renamed to hermes-lcm-x, engine to lcm-x (unreleased)
+## v0.24.0 - BREAKING: plugin renamed to hermes-lcm-x, engine to lcm-x (2026-09-25)
 
 **BREAKING.** The plugin manifest is renamed `hermes-lcm` → `hermes-lcm-x` and the context engine
 `lcm` → `lcm-x`, to give LCM-X a distinct identity for Hermes plugin-catalog admission. (#471)
