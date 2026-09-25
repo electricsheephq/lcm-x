@@ -129,6 +129,7 @@ class EmissionProjectionEntry:
     kind: Optional[str] = None
     suffix_sha256: Optional[str] = None
     suffix_length: Optional[int] = None
+    output_index: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -209,7 +210,7 @@ def _finalize_emission_descriptors(messages, candidates, scope):
                 "kind": kind,
                 "role": role,
                 "same_prefix_ordinal": same_prefix_ordinal,
-                "output_occurrence": {"index": index, "same_identity_ordinal": ordinal},
+                "output_occurrence": {"index": index, "same_identity_ordinal": ordinal, "of": len(messages)},
                 "generated_span_sha256": hashlib.sha256(span_bytes).hexdigest(),
                 "generated_span_bytes": len(span_bytes),
                 "suffix_sha256": suffix_sha256,
@@ -245,9 +246,20 @@ def _project_emitted_occurrences(
         suffix_digest = descriptor.get("suffix_sha256")
         role = descriptor.get("role")
         ordinal = descriptor.get("same_prefix_ordinal")
+        occurrence = descriptor.get("output_occurrence")
+        output_index = occurrence.get("index") if isinstance(occurrence, Mapping) else None
+        has_length = isinstance(occurrence, Mapping) and "of" in occurrence  # recorded by the finalizer
+        output_length = occurrence.get("of") if has_length else None
+        output = proof.get("output")
+        if not isinstance(output, (list, tuple)) or not all(isinstance(item, (list, tuple)) for item in output):
+            output = ()  # a malformed output carries no bound and no multiplicity witness
         if not isinstance(length, int) or length <= 0 or not isinstance(digest, str) or (
             not isinstance(role, str) or not role or type(ordinal) is not int or ordinal < 0
-        ) or type(suffix_length) is not int or suffix_length < 0 or not isinstance(suffix_digest, str):
+        ) or type(suffix_length) is not int or suffix_length < 0 or not isinstance(suffix_digest, str) or (
+            type(output_index) is not int or output_index < 0  # malformed (F7): decline, never raise
+        ) or (has_length and (type(output_length) is not int or output_index >= output_length)) or (
+            output and output_index >= len(output)  # a malformed or exceeded recorded length, or an index beyond the output
+        ):
             continue
         candidate_ordinal = -1
         for index, message in _emission_candidate_rows(messages, role, length, digest):
@@ -274,11 +286,9 @@ def _project_emitted_occurrences(
             ).hexdigest() != suffix_digest:
                 continue
             if not suffix_length and not normalized_suffix:
-                output = proof.get("output") or ()
-                output_index = (descriptor.get("output_occurrence") or {}).get("index")
                 multiplicity = sum(
                     tuple(item) == tuple(output[output_index]) for item in output
-                ) if type(output_index) is int and 0 <= output_index < len(output) else descriptor.get("output_multiplicity")
+                ) if output_index < len(output) else descriptor.get("output_multiplicity")
                 if type(multiplicity) is not int or multiplicity > sum(message.get("content") == span for _, message in _emission_candidate_rows(messages, role, length, digest)):
                     continue
             retained_source = descriptor.get("retained_source")
@@ -292,10 +302,19 @@ def _project_emitted_occurrences(
                 str(descriptor["kind"]),
                 suffix_digest,
                 suffix_length,
+                output_index,
             )
             search_from = index + 1
             break
     return EmissionProjection(tuple(entries), complete_length=len(entries))
+
+
+def _merged_composite(entry) -> bool:
+    """Bytes past a proven occurrence's recorded suffix: a row the host merged into it (#499).
+    That is new content, stored whole; its remainder alone never proves replay (F2)."""
+    return entry is not None and entry.generated_span is not None and len(
+        entry.effective_identity[1].strip().encode("utf-8")
+    ) > (entry.suffix_length or 0)
 
 
 def _proof_user_identity(identity):
@@ -547,8 +566,93 @@ class ReconcileMixin:
                 return False
         return True
 
-    def _proof_replay_identity(self, msg: Dict[str, Any]) -> tuple[str, str, str, str, str]:
-        return _proof_user_identity(self._message_replay_identity(msg))
+    def _proof_replay_identity(self, msg: Dict[str, Any], strip_carrier: bool = True) -> tuple[str, str, str, str, str]:
+        return _proof_user_identity(self._message_replay_identity(msg, strip_carrier=strip_carrier))
+
+    def _replay_occurrences(self, messages, proof=None):
+        """#488 (A2, F6): per POSITION of a COMPLETE list, (projection entry, replay identity) from
+        its one projection. Folded lineage overrides only an occurrence the projection bound, or a
+        row no descriptor can bind (a tool-call fold) (F1). The flag is False when no v4 proof is
+        in force: rc4's identities apply (A5)."""
+        proof = proof or self._active_emission_proof()
+        v4 = isinstance(proof, Mapping) and proof.get("version") == 4
+        projection, identities = self._occurrence_replay_identities(messages, proof if v4 else None)
+        lineage = self._active_folded_tail_identity_overrides(messages)
+        return [
+            (entry, lineage.get(id(m), identity) if entry.generated_span is not None or not v4 or (
+                m.get("tool_calls") or m.get("tool_call_id") or not isinstance(m.get("content"), str)
+            ) else identity)
+            for m, entry, identity in zip(messages, projection.entries, identities)
+        ], v4
+
+    def _proof_output_effective_digests(self) -> set:
+        """Digests of the active proof's own effective output rows (F2): a merged composite maps to
+        its remainder only when that remainder is one of them (a row Hermes merged behind the
+        emitted one), never to an older row with the same bytes."""
+        proof = getattr(self, "_compress_commit_proof", None) or {}
+        digests = {_commit_proof_identity_digest(i) for i in (proof.get("output_effective") or ()) if i is not None}
+        if not digests:
+            try:
+                digests = set((self._durable_commit_proof_payload() or {}).get("effective_sha256") or ())
+            except Exception:  # malformed durable history: no remainder authority
+                digests = set()
+        return digests
+
+    def _active_emission_proof(self):
+        """The scoped v4 emissions in force: this process's, else the durable proof's."""
+        try:
+            return getattr(self, "_last_emission_descriptors", None) or self._durable_commit_proof_payload()
+        except Exception:  # malformed durable history: no proof, full identity everywhere
+            return None
+
+    def _occurrence_replay_identities(self, messages, proof, projection=None):
+        """#488: per occurrence of the COMPLETE list, from its one projection: None for a proven
+        emitted scaffold, the remainder of a proven emitted prefix, else FULL identity. Legacy,
+        unmatched or ambiguous descriptors project nothing, so those rows keep full identity."""
+        projection = projection or _project_emitted_occurrences(messages, proof=proof)
+        if not isinstance(proof, Mapping) or proof.get("version") != 4:
+            # No v4 proof in force (never compacted, legacy v2/v3): the rc4 contract (A5), except that
+            # an objective scaffold is skipped only as the exact emitted head (F3').
+            return projection, [
+                None if self._is_verified_replay_scaffold_message(m) and self._legacy_objective_head(m) is None
+                else self._message_replay_identity(m)
+                for m in messages
+            ]
+        identities = []
+        for index, (message, entry) in enumerate(zip(messages, projection.entries)):
+            content = None if entry.generated_span is None else entry.effective_identity[1]
+            if content is not None and entry.retained_source is None and entry.kind != "carrier":
+                # A standalone summary/objective occurrence sits where it was returned or, merged by
+                # the host, further left; a matching row past that is authored (N6): full identity.
+                content = content[2:] if content.startswith("\n\n") else content
+                if entry.output_index is None or projection.offset + index > entry.output_index:
+                    content = None
+            if (content is not None and not content.strip()) or content is None and (  # descriptor-less
+                self._is_replayed_context_scaffold_message(message)  # host scaffold: LCM note, task list
+                and (message.get("role") == "system" or self._is_preserved_todo_context_message(message))
+            ):
+                identities.append(None)
+                continue
+            projected = message if content is None else {**message, "content": content}
+            identities.append(self._message_replay_identity(projected, strip_carrier=False))
+        return projection, identities
+
+    def _legacy_objective_head(self, message) -> Optional[str]:
+        """F3' (#488, legacy proof window): the emitted objective head (objective, then DAG-verified
+        summary parts; todo annotation cut) when ``message`` carries any other suffix after it (the
+        host merged a new row in): that row keeps full identity and is stored whole. Else None."""
+        content = (normalize_content_value(message.get("content")) or "").lstrip()
+        if not content.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
+            return None
+        todo = content.find(_PRESERVED_TODO_CONTEXT_PREFIX)
+        content = content[:todo] if todo > 0 else content
+        pos = content.find("\n\n---\n\n")
+        while pos != -1:
+            end = self._verified_lcm_summary_prefix_end(content[pos + 7:])
+            if end is not None:  # an objective-only head has nothing to verify: rc4's skip
+                return content[: pos + 7 + end] if content[pos + 7 + end:].strip() else None
+            pos = content.find("\n\n---\n\n", pos + 7)
+        return None
 
     def _stored_row_forms(self, row: Dict[str, Any]) -> set:
         """A stored row's admissible identities: exact and its host-rewrite override form."""
@@ -664,7 +768,8 @@ class ReconcileMixin:
         self._bound_host_rewrite_overrides({store_id})
 
     def _message_replay_identity(
-        self, msg: Dict[str, Any], *, stored_row: bool = False, with_host_rewrite: bool = False
+        self, msg: Dict[str, Any], *, stored_row: bool = False, with_host_rewrite: bool = False,
+        strip_carrier: bool = True,
     ) -> tuple[str, str, str, str, str]:
         role = str(msg.get("role") or "unknown")
         content = normalize_content_value(msg.get("content")) or ""
@@ -676,9 +781,10 @@ class ReconcileMixin:
             override = self._host_rewrite_state()[1].get(int(msg.get("store_id") or 0))
             strip_payload = override_content is not None and bool(override.get("strip_payload"))
         # A host-merged LCM summary carrier (#483) is identified by the real row
-        # glued behind its DAG-verified summary prefix.
+        # glued behind its DAG-verified summary prefix. Stored rows keep FULL
+        # identity (#488): a stored row is exactly what was durably written.
         carrier_rest = getattr(self, "_generated_context_carrier_remainder", None)
-        if role == "user" and callable(carrier_rest):
+        if role == "user" and strip_carrier and not stored_row and callable(carrier_rest):
             glued_row = carrier_rest({"role": "user", "content": content})
             if glued_row is not None:
                 content = glued_row
@@ -1264,17 +1370,27 @@ class ReconcileMixin:
         raw_session_count: int,
         allow_session_end_replay_proof: bool = False,
     ) -> int | None:
+        # One projection over the complete list (#488), by position: one object per position (F6).
+        seen: set = set()
+        messages = [dict(m) if id(m) in seen or seen.add(id(m)) else m for m in messages]
         active_lineage_identities = self._active_folded_tail_identity_overrides(
             messages
         )
+        occurrences, v4 = self._replay_occurrences(messages)
+        occurrence_by_id = {id(m): occurrence for m, occurrence in zip(messages, occurrences)}
+        occurrence_identities = {  # a #499 composite is new content, stored whole: never its remainder (F2)
+            id(m): self._message_replay_identity(m, stored_row=True) if _merged_composite(e) else i
+            for m, (e, i) in zip(messages, occurrences) if i is not None
+        }
+        scaffold_ids = {id(m) for m, (_e, i) in zip(messages, occurrences) if i is None}
+        objective_ids = {
+            id(m) for m, (e, _i) in zip(messages, occurrences) if e.kind == "objective" and e.generated_span is not None
+        }
 
         def active_identity(
             message: Dict[str, Any],
         ) -> tuple[str, str, str, str, str]:
-            return active_lineage_identities.get(
-                id(message),
-                self._message_replay_identity(message),
-            )
+            return occurrence_identities.get(id(message)) or self._message_replay_identity(message, strip_carrier=False)
 
         sanitized_replay_tail = self._stored_tail_for_sanitized_active_replay(stored_tail)
         effective_session_count = len(sanitized_replay_tail)
@@ -1373,7 +1489,7 @@ class ReconcileMixin:
             candidate_visible_messages = [
                 msg
                 for msg in candidate_messages
-                if not self._is_verified_replay_scaffold_message(msg)
+                if id(msg) not in scaffold_ids
                 and not self._matches_ignore_message_patterns(msg)
             ]
             candidate_non_placeholder_messages = [
@@ -1397,7 +1513,7 @@ class ReconcileMixin:
             ]
             filtered_candidate_placeholders = len(candidate_non_placeholder_messages) < len(candidate_visible_messages)
             candidate_has_scaffold_evidence = any(
-                self._is_verified_replay_scaffold_message(msg) for msg in candidate_messages
+                id(msg) in scaffold_ids for msg in candidate_messages
             )
             candidate_has_quarantined_replay_evidence = any(
                 self._is_quarantined_assistant_replay_identity(active_identity(msg))
@@ -1444,7 +1560,8 @@ class ReconcileMixin:
             has_ordered_folded_snapshot_mapping = False
             if has_registered_engine_snapshot and active_lineage_identities:
                 candidate_store_ids = self._get_store_id_map_for_messages(
-                    candidate_identity_messages
+                    candidate_identity_messages,
+                    [occurrence_by_id[id(m)] for m in candidate_identity_messages] if v4 else None,
                 )
                 ordered_store_ids = [
                     int(candidate_store_ids.get(id(message)) or 0)
@@ -1780,7 +1897,7 @@ class ReconcileMixin:
             )
 
             has_scaffold_evidence = any(
-                self._is_verified_replay_scaffold_message(msg) for msg in candidate_messages
+                id(msg) in scaffold_ids for msg in candidate_messages
             )
             has_raw_full_replay = (
                 has_persisted_marker_specific_replay_evidence
@@ -1789,13 +1906,7 @@ class ReconcileMixin:
                 and len(candidate_messages) >= raw_session_count
                 and raw_session_count > 1
             )
-            has_preserved_objective_scaffold = any(
-                str(msg.get("role") or "") != "system"
-                and (normalize_content_value(msg.get("content")) or "").lstrip().startswith(
-                    _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
-                )
-                for msg in candidate_messages
-            )
+            has_preserved_objective_scaffold = any(id(msg) in objective_ids for msg in candidate_messages)
             candidate_suffix_has_user_turn = any(identity[0] == "user" for identity in candidate_prefix)
             has_scaffold_suffix_replay = (
                 has_persisted_marker_specific_replay_evidence
@@ -1854,16 +1965,11 @@ class ReconcileMixin:
         self,
         messages: List[Dict[str, Any]],
     ) -> list[tuple[str, str, str, str, str]]:
-        active_lineage_identities = self._active_folded_tail_identity_overrides(
-            messages
-        )
+        occurrences, _v4 = self._replay_occurrences(messages)
         return [
-            active_lineage_identities.get(
-                id(msg),
-                self._message_replay_identity(msg),
-            )
-            for msg in messages
-            if not self._is_verified_replay_scaffold_message(msg)
+            identity
+            for msg, (_entry, identity) in zip(messages, occurrences)
+            if identity is not None
             and not self._matches_ignore_message_patterns(msg)
         ]
 
@@ -1977,9 +2083,13 @@ class ReconcileMixin:
                 return None
 
             def proof_identity(message, **kwargs):
-                identity = self._message_replay_identity(message, **kwargs)
+                identity = message if isinstance(message, tuple) else self._message_replay_identity(
+                    message, strip_carrier=False, **kwargs
+                )
                 # rc3 (version 2) hashed exact identities.
                 return _proof_user_identity(identity) if payload.get("version") != 2 else identity
+
+            projection, occurrences = self._occurrence_replay_identities(messages, payload)
 
             target = list(payload.get("effective_sha256") or [])
             droppable = list(payload.get("droppable") or [])
@@ -1988,7 +2098,7 @@ class ReconcileMixin:
             native = bool(payload.get("native") and summary_index is not None and len(droppable) == len(target))
             skip_metadata_valid = len(skip_landing) == len(target)
             matched = 0
-            index = 0
+            index = composite = 0
             n = len(messages)
             if not target:
                 # A scaffold-only output (fresh_tail_count=0): the proof covers exactly
@@ -1996,18 +2106,24 @@ class ReconcileMixin:
                 scaffold = list(payload.get("scaffold_sha256") or [])
                 if not scaffold or n < len(scaffold):
                     return None
-                for message, digest in zip(messages, scaffold):
-                    if not self._is_verified_replay_scaffold_message(message) or (
-                        _commit_proof_identity_digest(proof_identity(message)) != digest
+                for message, digest, entry in zip(messages, scaffold, projection.entries):
+                    span = entry.generated_span  # legacy proof: an objective head with a merged row (F3')
+                    span = self._legacy_objective_head(message) if span is None and payload.get("version") != 4 else span
+                    emitted = message if occurrences[index] is None else {**message, "content": span}
+                    if (occurrences[index] is not None and span is None) or (
+                        _commit_proof_identity_digest(proof_identity(emitted)) != digest
                     ):
                         return None
-                index = len(scaffold)
+                    if occurrences[index] is not None:
+                        composite = index + 1  # the host merged a new row into it (#499): stored whole, matched below
+                        break
+                    index += 1
             while index < n and matched < len(target):
-                message = messages[index]
+                identity = occurrences[index]
                 index += 1
-                if self._is_verified_replay_scaffold_message(message):
+                if identity is None:
                     continue
-                identity = proof_identity(message)
+                identity = proof_identity(identity)
                 # A digest-less redaction (password_assignment) is not identity:
                 # different same-length secrets share it, so it proves nothing.
                 if _has_lossy_redacted_identity(identity):
@@ -2057,7 +2173,7 @@ class ReconcileMixin:
                 for row in page:
                     if index >= n:
                         return None
-                    identity = proof_identity(messages[index])
+                    identity = proof_identity(messages[index], stored_row=index + 1 == composite)
                     if _has_lossy_redacted_identity(identity) or identity != proof_identity(
                         row, stored_row=True, with_host_rewrite=True
                     ):
@@ -2080,7 +2196,7 @@ class ReconcileMixin:
             return None
         rewritten = any(self._host_rewrite_override_content(r) is not None for r in rows)
         for row, message in zip(rows, messages):
-            identity = self._message_replay_identity(message)
+            identity = self._message_replay_identity(message, strip_carrier=False)
             stored = self._message_replay_identity(row, stored_row=True, with_host_rewrite=True)
             if _has_lossy_redacted_identity(identity) or _proof_user_identity(identity) != _proof_user_identity(stored):
                 return None
@@ -2594,7 +2710,7 @@ class ReconcileMixin:
         """Return whether ``message`` is the unique active durable fold."""
         return bool(self._active_folded_tail_identity_overrides([message]))
 
-    def _get_store_id_map_for_messages(self, messages: List[Dict[str, Any]]) -> dict[int, int]:
+    def _get_store_id_map_for_messages(self, messages: List[Dict[str, Any]], occurrences=None) -> dict[int, int]:
         """Map current raw message objects back to store_ids in stable order.
 
         Matching starts strictly after ``_last_compacted_store_id`` so repeated
@@ -2636,7 +2752,7 @@ class ReconcileMixin:
                 active_matches = sum(
                     1
                     for message in messages
-                    if self._message_replay_identity(message) in retained_forms
+                    if self._message_replay_identity(message, strip_carrier=False) in retained_forms
                 )
                 if active_matches == 1:
                     candidates.append(retained_anchor)
@@ -2681,18 +2797,13 @@ class ReconcileMixin:
         candidates.sort(key=lambda candidate: int(candidate["store_id"]))
         self._load_host_rewrite_overrides(candidates)
 
+        live_identities: dict[int, tuple[Any, ...]] = {}
+
         def active_lineage_identity(
             message: Dict[str, Any],
         ) -> tuple[str, str, str, str, str]:
-            return active_lineage_identities.get(
-                id(message),
-                self._message_replay_identity(message),
-            )
+            return live_identities[id(message)]
 
-        active_identity_counts: dict[tuple[Any, ...], int] = {}
-        for msg in messages:
-            identity = active_lineage_identity(msg)
-            active_identity_counts[identity] = active_identity_counts.get(identity, 0) + 1
         stored_identity_counts: dict[tuple[Any, ...], int] = {}
         stored_cleanup_identity_counts: dict[tuple[Any, ...], int] = {}
         # Capture each candidate's identity (and its cleanup variant) here - both
@@ -2726,6 +2837,41 @@ class ReconcileMixin:
                 stored_cleanup_identity_counts[cleanup_identity] = (
                     stored_cleanup_identity_counts.get(cleanup_identity, 0) + 1
                 )
+
+        # #488: map occurrences, never bytes alone. ``occurrences`` is the caller's slice of its
+        # COMPLETE list's projection (A2); compress() registers its admitted list once (F5).
+        if occurrences is None:
+            registry = getattr(self, "_compress_occurrences", None)
+            occurrences, v4 = ([registry.get(id(m), (None, None)) for m in messages], True) if (
+                registry is not None
+            ) else self._replay_occurrences(messages)  # a copy or an aliased row is unproven
+            occurrences = occurrences if v4 else None
+        stored_forms = {*stored_identities, *filter(None, stored_alt_identities)}
+        merge_append_digests = None  # computed once, only if a merged composite needs its remainder (F2)
+        for msg, (entry, identity) in zip(messages, occurrences or [(None, None)] * len(messages)):
+            if occurrences is None:  # no v4 proof in force (A5): lineage, full identity, else rc4's remainder
+                full = self._message_replay_identity(msg, strip_carrier=False)
+                identity = active_lineage_identities.get(id(msg)) or (
+                    full if full in stored_forms else self._message_replay_identity(msg)
+                )
+            elif identity is None:  # a proven scaffold, or unproven under v4: FULL identity, no DAG strip (F1)
+                identity = self._message_replay_identity(msg, strip_carrier=False)
+            elif _merged_composite(entry):  # #499 (F2): its own whole row when stored; else its
+                whole = self._message_replay_identity(msg, stored_row=True)  # remainder only when the
+                if whole not in stored_forms and identity in stored_forms:  # proof's own output holds
+                    if merge_append_digests is None:  # that row (a Hermes merge-append), never an older row
+                        merge_append_digests = self._proof_output_effective_digests()
+                    identity = identity if {
+                        _commit_proof_identity_digest(identity), _commit_proof_identity_digest(_proof_user_identity(identity))
+                    } & merge_append_digests else whole
+                else:
+                    identity = whole
+            if live_identities.setdefault(id(msg), identity) != identity:  # one object, two occurrences (F6)
+                live_identities[id(msg)] = self._message_replay_identity(msg, strip_carrier=False)
+        active_identity_counts: dict[tuple[Any, ...], int] = {}
+        for msg in messages:
+            identity = active_lineage_identity(msg)
+            active_identity_counts[identity] = active_identity_counts.get(identity, 0) + 1
 
         # Lazily memoize raw-placeholder identities: only the placeholder-ref
         # paths need them, and most histories have few (or none), so computing

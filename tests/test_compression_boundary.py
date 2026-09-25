@@ -603,7 +603,7 @@ def test_assembly_emits_verified_summary_carrier_with_original_row_identity(tmp_
         engine._record_compress_commit_proof([compacted, *tail], assembled)
         proof = engine._compress_commit_proof
         assert proof is not None
-        assert proof["output"][0] == engine._proof_replay_identity(tail[0])
+        assert proof["output"][0] == engine._proof_replay_identity(carrier, strip_carrier=False)  # #488 F4: full
         assert proof["output_effective"][0] == engine._proof_replay_identity(tail[0])
     finally:
         engine.shutdown()
@@ -890,24 +890,9 @@ def _raw_scaffold_rows(engine):
     )
 
 
-@pytest.mark.parametrize(
-    "in_place",
-    [
-        pytest.param(
-            True,
-            id="inplace",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason=(
-                    "#484 item 11l, pre-existing: in place the proof stops at the emitted rows (cursor 2), "
-                    "but the store matcher ('skipped scaffold-only prefix') skips a trailing row that is a "
-                    "verified own summary by shape; the same on 9a7dbf46 before 11k. Escalated."
-                ),
-            ),
-        ),
-        pytest.param(False, id="rotation"),
-    ],
-)
+# #484 item 11l (a strict xfail until #488): the store matcher no longer skips a
+# trailing row that is a verified own summary by shape; only a descriptor does.
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
 def test_scaffold_only_proof_does_not_skip_a_new_row_quoting_the_summary(tmp_path, monkeypatch, in_place):
     """#484 item 11l: the scaffold-only durable proof is bound to the emitted rows,
     not to their shape. A new user row whose whole content is the session's own

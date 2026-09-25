@@ -19,6 +19,7 @@ import copy
 import json
 import logging
 import time
+from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from .dag import SummaryNode
@@ -33,6 +34,7 @@ from .reconcile import (
     _finalize_emission_descriptors,
     _has_lossy_redacted_identity,
     _project_emitted_occurrences,
+    _proof_user_identity,
 )
 from .sanitize import _contains_sensitive_redaction
 from .sqlite_util import _is_sqlite_locked_error
@@ -342,8 +344,10 @@ class CompactionMixin:
         if fresh_tail_start <= leading_anchor_count:
             return False
         previous_store_id_map = self._current_compress_store_ids_by_message_id
+        occurrences, v4 = self._replay_occurrences(messages)  # the complete list, sliced (A2, F5)
         self._current_compress_store_ids_by_message_id = self._get_store_id_map_for_messages(
-            messages[leading_anchor_count:fresh_tail_start]
+            messages[leading_anchor_count:fresh_tail_start],
+            occurrences[leading_anchor_count:fresh_tail_start] if v4 else None,
         )
         try:
             return any(
@@ -429,7 +433,10 @@ class CompactionMixin:
         generated_placeholder_hashes = self._load_generated_ignored_placeholder_hashes()
         if self._compiled_ignore_message_patterns or generated_placeholder_hashes:
             previous_store_id_map = self._current_compress_store_ids_by_message_id
-            self._current_compress_store_ids_by_message_id = self._get_store_id_map_for_messages(candidate_raw)
+            occurrences, v4 = self._replay_occurrences(messages)  # the complete list, sliced (A2, F5)
+            self._current_compress_store_ids_by_message_id = self._get_store_id_map_for_messages(
+                candidate_raw, occurrences[leading_anchor_count:fresh_tail_start] if v4 else None
+            )
             try:
                 filtered_candidate_raw: list[Dict[str, Any]] = []
                 for msg in candidate_raw:
@@ -530,6 +537,7 @@ class CompactionMixin:
         """Run compaction and leave a terminal public status on every failure."""
         try:
             self._pending_emission_candidates = []
+            self._compress_occurrences = None
             with self._fresh_tail_pressure_yield_invocation():
                 result = self._compress_impl(
                     messages,
@@ -537,6 +545,7 @@ class CompactionMixin:
                     focus_topic=focus_topic,
                     force=force,
                 )
+            self._compress_occurrences = None
             if (
                 isinstance(result, list)
                 and result is not messages
@@ -559,6 +568,7 @@ class CompactionMixin:
             self._rekey_host_rewrite_watch(messages, result)
             return result
         except BaseException:
+            self._compress_occurrences = None
             self._last_compression_status = "error"
             self._last_compression_noop_reason = ""
             raise
@@ -588,9 +598,6 @@ class CompactionMixin:
                 or self._ingest_cursor != len(result)
             ):
                 return
-            carried_rows = self._store.get_batch(
-                sorted(set(self._get_store_ids_for_messages(result)))
-            )
             state = (
                 self._lifecycle.get_by_conversation(self._conversation_id)
                 if self._conversation_id
@@ -632,13 +639,18 @@ class CompactionMixin:
                     ):
                         emissions.extend(carried)
             emissions.sort(key=lambda item: item["output_occurrence"]["index"])
+            # The output's rows map through THIS proof's emissions (A3), never a DAG-shaped strip (F1).
+            occurrences, _v4 = self._replay_occurrences(result, {"version": 4, **emission_binding, "emissions": emissions})
+            store_ids = self._get_store_id_map_for_messages(result, occurrences)
+            carried_rows = self._store.get_batch(sorted({store_ids[id(m)] for m in result if id(m) in store_ids}))
             proof = {
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
                 **emission_binding,
                 "session_id": self._session_id,
                 "conversation_id": self._conversation_id,
-                "input": [self._proof_replay_identity(m) for m in messages],
-                "output": [self._proof_replay_identity(m) for m in result],
+                # Full identities: the multiplicity witness (F4); output_effective is the projection.
+                "input": [self._proof_replay_identity(m, strip_carrier=False) for m in messages],
+                "output": [self._proof_replay_identity(m, strip_carrier=False) for m in result],
                 "end_consumed": False,
                 "carry_ranges": self._coalesce_compression_carry_ranges(
                     (str(row["session_id"]), store_id - 1, store_id)
@@ -653,8 +665,12 @@ class CompactionMixin:
                 # No-progress compress: Hermes has nothing to commit, and an
                 # end call with this list must stay a real session end.
                 return
-            effective_rows = [m for m in result if not self._is_replayed_context_scaffold_message(m)]
-            proof["output_effective"] = [self._proof_replay_identity(m) for m in effective_rows]
+            _projection, output_identities = self._occurrence_replay_identities(
+                result, {**proof, **emission_binding}
+            )
+            proof["output_effective"] = [
+                _proof_user_identity(identity) for identity in output_identities if identity is not None
+            ]
             proof["native"] = self._last_compression_status == "host_native"
             if proof["native"]:
                 matched_tool_ids = _matched_tool_call_ids(result)
@@ -670,10 +686,8 @@ class CompactionMixin:
                     )
                     proof["skip_landing"].append(not identity[2] and not identity[3])
                 summary_index = getattr(self, "_last_native_summary_index", None)
-                rows_before_summary = result[:summary_index] if summary_index is not None else ()
                 proof["native_summary_index"] = sum(
-                    not self._is_replayed_context_scaffold_message(row)
-                    for row in rows_before_summary
+                    identity is not None for identity in output_identities[:summary_index]
                 ) if summary_index is not None else None
             proof["published"] = self._last_compression_status == "compacted"
             self._last_emission_descriptors = {
@@ -1133,6 +1147,14 @@ class CompactionMixin:
         # replay-safe view so quarantined assistant loops do not enter summaries
         # or provider context after the durable row has been written.
         working_messages = self._ingest_messages(messages)
+        # #488: project the complete admitted list ONCE; subset consumers read a row's occurrence
+        # here. Only a row at exactly one position is registered (F6): a copy or an aliased row
+        # is unproven (full identity).
+        occurrences, v4 = self._replay_occurrences(working_messages)
+        positions = Counter(id(m) for m in working_messages)
+        self._compress_occurrences = {
+            id(m): occurrence for m, occurrence in zip(working_messages, occurrences) if positions[id(m)] == 1
+        } if v4 else None
         self._prepare_retained_user_anchor(working_messages)
         native_cleanup_only = bool(
             self._config.native_recovery
@@ -1290,9 +1312,10 @@ class CompactionMixin:
                 break
 
             candidate_start = leading_anchor_count
-            while (
-                candidate_start < fresh_tail_start
-                and self._is_replayed_context_scaffold_message(working_messages[candidate_start])
+            while candidate_start < fresh_tail_start and (
+                self._is_replayed_context_scaffold_message(working_messages[candidate_start])
+                if self._compress_occurrences is None  # no v4 proof in force: the rc4 contract
+                else self._compress_occurrences.get(id(working_messages[candidate_start]), (None, ()))[1] is None
             ):
                 candidate_start += 1
             if candidate_start > leading_anchor_count:

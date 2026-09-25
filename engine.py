@@ -134,7 +134,7 @@ from .aux_session import AuxiliarySessionMixin
 from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from .reconcile import _emission_identity
-from .reconcile import _has_lossy_redacted_identity
+from .reconcile import _has_lossy_redacted_identity, _proof_user_identity
 from .compaction import CompactionMixin
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
@@ -2647,7 +2647,7 @@ class LCMEngine(
             return None
         registered_row = self._load_retained_user_anchor_row()
         # A host may have trimmed the retained prompt in place (#498), even before an override.
-        live_identity = self._message_replay_identity(messages[1])
+        live_identity = self._message_replay_identity(messages[1], strip_carrier=False)
         if registered_row is not None and self._anchor_row_admits(live_identity, registered_row):
             later_real_users = self._durable_real_user_messages(
                 stop_after=1,
@@ -3940,7 +3940,7 @@ class LCMEngine(
             and not proof.get("end_consumed")
             and proof.get("input") is not None
             and len(messages) == len(proof["input"])
-            and [self._proof_replay_identity(m) for m in messages] == proof["input"]
+            and [self._proof_replay_identity(m, strip_carrier=False) for m in messages] == proof["input"]
         ):
             # Compaction commit (#483): every input row is already durable and the
             # cursor indexes compress()'s output, so skip the re-ingest. Still
@@ -4717,8 +4717,8 @@ class LCMEngine(
     def _is_cached_active_replay_message_at_index(self, idx: int, msg: Dict[str, Any]) -> bool:
         if idx < 0 or idx >= len(self._last_active_replay_messages):
             return False
-        return self._message_replay_identity(msg) == self._message_replay_identity(
-            self._last_active_replay_messages[idx]
+        return self._message_replay_identity(msg, strip_carrier=False) == self._message_replay_identity(
+            self._last_active_replay_messages[idx], strip_carrier=False
         )
 
     def _matches_ignore_message_patterns(self, msg: Dict[str, Any], *, stored_row: bool = False) -> bool:
@@ -4824,8 +4824,8 @@ class LCMEngine(
         original_messages: List[Dict[str, Any]],
         active_replay_messages: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        self._last_active_replay_source_identities = [
-            self._message_replay_identity(message) for message in original_messages
+        self._last_active_replay_source_identities = [  # full identity (#488): no carrier aliasing
+            self._message_replay_identity(message, strip_carrier=False) for message in original_messages
         ]
         self._last_active_replay_messages = self._copy_active_replay_messages_preserving_generated_ids(
             active_replay_messages
@@ -4847,7 +4847,7 @@ class LCMEngine(
         self,
         original_messages: List[Dict[str, Any]],
     ) -> Optional[List[Dict[str, Any]]]:
-        identities = [self._message_replay_identity(message) for message in original_messages]
+        identities = [self._message_replay_identity(message, strip_carrier=False) for message in original_messages]
         if identities == getattr(self, "_last_active_replay_source_identities", None):
             cached = getattr(self, "_last_active_replay_messages", None)
             if cached is not None:
@@ -4871,12 +4871,12 @@ class LCMEngine(
         if not target:
             return None
         effective: list = []
-        for index, message in enumerate(messages):
+        for index, identity in enumerate(self._occurrence_replay_identities(messages, proof)[1]):
             if len(effective) == len(target):
                 return index if effective == target else None
-            if self._is_verified_replay_scaffold_message(message):
+            if identity is None:
                 continue
-            effective.append(self._proof_replay_identity(message))
+            effective.append(_proof_user_identity(identity))
             if effective != target[: len(effective)]:
                 return None
         return len(messages) if effective == target else None
@@ -4898,10 +4898,10 @@ class LCMEngine(
             return None
         skip_metadata_valid = len(skip_landing) == len(target)
         matched = 0
-        for index, message in enumerate(messages):
-            if self._is_verified_replay_scaffold_message(message):
+        for index, identity in enumerate(self._occurrence_replay_identities(messages, proof)[1]):
+            if identity is None:
                 continue
-            identity = self._proof_replay_identity(message)
+            identity = _proof_user_identity(identity)
             if _has_lossy_redacted_identity(identity):
                 return None
             try:
@@ -5272,11 +5272,11 @@ class LCMEngine(
             if native_lossy:
                 self._ingest_cursor_needs_reconcile = True
             elif n >= self._ingest_cursor and [
-                self._proof_replay_identity(m) for m in messages[: self._ingest_cursor]
+                self._proof_replay_identity(m, strip_carrier=False) for m in messages[: self._ingest_cursor]
             ] == proof["output"]:
                 self._compress_commit_proof = None
             elif (proof.get("end_consumed") or proof.get("native")) and host_input is not None and n >= len(host_input) and [
-                self._proof_replay_identity(m) for m in messages[: len(host_input)]
+                self._proof_replay_identity(m, strip_carrier=False) for m in messages[: len(host_input)]
             ] == host_input:
                 self._ingest_cursor = len(host_input)
                 cursor = self._ingest_cursor
@@ -5391,7 +5391,7 @@ class LCMEngine(
                 and len(cached_active_replay_messages) >= cursor
             ):
                 current_prefix_identities = [
-                    self._message_replay_identity(message) for message in messages[:cursor]
+                    self._message_replay_identity(message, strip_carrier=False) for message in messages[:cursor]
                 ]
                 if current_prefix_identities == cached_source_identities[:cursor]:
                     replay_messages = (

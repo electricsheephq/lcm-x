@@ -14,6 +14,7 @@ from hermes_lcm.engine import LCMEngine
 from hermes_lcm.externalize import extract_externalized_ref, load_externalized_payload
 from hermes_lcm.reconcile import (
     _PRESERVED_OBJECTIVE_CONTEXT_PREFIX,
+    _emission_identity,
     _commit_proof_identity_digest,
 )
 
@@ -796,7 +797,8 @@ def test_native_commit_proof_persists_before_host_publication(candidate, monkeyp
     )["native"] is True
 
 
-def test_native_summary_index_uses_effective_output_space(candidate):
+@pytest.mark.parametrize("proven", [True, False], ids=["emitted-objective", "unproven-objective-shape"])
+def test_native_summary_index_uses_effective_output_space(candidate, proven):
     scaffold = {
         "role": "user",
         "content": _PRESERVED_OBJECTIVE_CONTEXT_PREFIX + " keep going",
@@ -808,12 +810,17 @@ def test_native_summary_index_uses_effective_output_space(candidate):
     candidate._last_native_summary_index = 1
     candidate._ingest_cursor = len(result)
     candidate._ingest_cursor_needs_reconcile = False
+    # #488: only an emission descriptor makes the objective row scaffold; its shape alone is content.
+    candidate._pending_emission_candidates = [{
+        "kind": "objective", "span": scaffold["content"], "row": scaffold,
+        "full_identity": _emission_identity(scaffold),
+    }] if proven else []
 
     candidate._record_compress_commit_proof(
         [{"role": "user", "content": "original transcript"}], result
     )
 
-    assert candidate._compress_commit_proof["native_summary_index"] == 0
+    assert candidate._compress_commit_proof["native_summary_index"] == (0 if proven else 1)
     host = [
         scaffold,
         summary,
