@@ -41,8 +41,10 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   rows and system-message contexts are unchanged. Before this carrier fix, #498 alone produced
   640 stored rows, 468 duplicates, 7 publication conflicts and 19 sessions in the affected
   80-turn default rotation-plus-trailing cell. (#495)
+- Docs: the migration verify step names `hermes plugins list` (bare `hermes plugins` opens the interactive
+  toggle); `scripts/install.sh` prints the same command. (#481)
 
-## v0.24.0 - BREAKING: plugin renamed to hermes-lcm-x, engine to lcm-x (unreleased)
+## v0.24.0 - BREAKING: plugin renamed to hermes-lcm-x, engine to lcm-x (2026-09-25)
 
 **BREAKING.** The plugin manifest is renamed `hermes-lcm` → `hermes-lcm-x` and the context engine
 `lcm` → `lcm-x`, to give LCM-X a distinct identity for Hermes plugin-catalog admission. (#471)
@@ -61,7 +63,7 @@ Migration (run exactly one LCM copy; change the config while Hermes is stopped):
    `context.engine: lcm` still selects LCM-X through an alias, with a once-per-process
    `DEPRECATED LCM-X config` warning, an `identity_migration` field in `lcm_status`, and an
    `identity_migration` `warn` check in `lcm_doctor`.
-3. Start Hermes and verify `hermes plugins` lists `hermes-lcm-x` and the log shows
+3. Start Hermes and verify `hermes plugins list` lists `hermes-lcm-x` and the log shows
    `LCM plugin loaded — lossless context management active`. Remove a separate old directory by
    hand later; keep it until then for rollback.
 4. If the config is not updated, Hermes logs `Context engine 'lcm' not found — falling back to

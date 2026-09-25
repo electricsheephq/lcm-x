@@ -25,7 +25,7 @@ update the config before restarting Hermes after the update. Legacy
 `context.engine: lcm` still works through an alias with a warning and an
 `identity_migration` field in `lcm_status` / `lcm_doctor`.
 
-Restart Hermes after changing plugin or context-engine configuration. Verify with `hermes plugins`, then use `lcm_status` after a normal message has bound the session.
+Restart Hermes after changing plugin or context-engine configuration. Verify with `hermes plugins list`, then use `lcm_status` after a normal message has bound the session.
 
 ## Installation
 

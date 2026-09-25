@@ -190,7 +190,7 @@ even if the configured endpoint happens to be local.
 ## Verifying a profile
 
 ```bash
-hermes plugins        # plugin + engine loaded
+hermes plugins list   # plugin + engine loaded
 ```
 
 The `/lcm` operator commands below require the opt-in command surface:
