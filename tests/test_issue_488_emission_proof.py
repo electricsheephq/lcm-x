@@ -25,12 +25,18 @@ from tests.test_compression_boundary import (
 )
 
 
-HERMES_AGENT_ROOT = Path(os.environ.get("LCM_TEST_HERMES_AGENT_ROOT", "/Users/m1/.hermes/hermes-agent"))
+# The real Hermes checkout is OPT-IN: set LCM_TEST_HERMES_AGENT_ROOT to a hermes-agent checkout at
+# HERMES_AGENT_HEAD to exercise the host helper itself; unset, the suite uses the pinned copy below and
+# never inspects ambient machine state (a developer checkout at any other head cannot fail this suite).
+_HERMES_AGENT_ROOT_ENV = os.environ.get("LCM_TEST_HERMES_AGENT_ROOT")
+HERMES_AGENT_ROOT = Path(_HERMES_AGENT_ROOT_ENV) if _HERMES_AGENT_ROOT_ENV else None
 HERMES_AGENT_HEAD = "37aad38c62771d223cdce7e3d5e3157334f1ce82"
-if str(HERMES_AGENT_ROOT) not in sys.path:
+if HERMES_AGENT_ROOT is not None and str(HERMES_AGENT_ROOT) not in sys.path:
     sys.path.insert(0, str(HERMES_AGENT_ROOT))
 
-try:  # the real host helper when a Hermes checkout is importable (local runs)
+try:  # the real host helper only when a checkout was named explicitly (opt-in local runs)
+    if HERMES_AGENT_ROOT is None:
+        raise ImportError("LCM_TEST_HERMES_AGENT_ROOT unset: use the pinned host rule")
     from agent.agent_runtime_helpers import _merge_consecutive_users as _hermes_merge_users
 except ImportError:  # CI stubs only agent.context_engine: pin the host rule these tests rely on
     def _hermes_merge_users(messages):
@@ -204,8 +210,10 @@ def _run_layout(tmp_path, monkeypatch, *, mode, tail, system, merge, order):
 
 
 def test_real_hermes_merge_fixture_is_pinned():
+    if HERMES_AGENT_ROOT is None:
+        pytest.skip("LCM_TEST_HERMES_AGENT_ROOT unset: the real Hermes checkout is opt-in (pinned copy in use)")
     if not (HERMES_AGENT_ROOT / ".git").exists():
-        pytest.skip(f"pinned Hermes checkout not present at {HERMES_AGENT_ROOT} (CI stub layout)")
+        pytest.skip(f"no git checkout at LCM_TEST_HERMES_AGENT_ROOT={HERMES_AGENT_ROOT}")
     head = subprocess.check_output(
         ["git", "-C", str(HERMES_AGENT_ROOT), "rev-parse", "HEAD"],
         text=True,
