@@ -2647,7 +2647,7 @@ class LCMEngine(
             return None
         registered_row = self._load_retained_user_anchor_row()
         # A host may have trimmed the retained prompt in place (#498), even before an override.
-        live_identity = self._message_replay_identity(messages[1])
+        live_identity = self._message_replay_identity(messages[1], strip_carrier=False)
         if registered_row is not None and self._anchor_row_admits(live_identity, registered_row):
             later_real_users = self._durable_real_user_messages(
                 stop_after=1,

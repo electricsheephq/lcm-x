@@ -40,6 +40,23 @@ def _engine_with_verified_block(tmp_path):
     return engine, block
 
 
+def test_authored_summary_shaped_sole_prompt_keeps_its_retained_anchor(tmp_path):
+    engine, block = _engine_with_verified_block(tmp_path)
+    system = {"role": "system", "content": "You are concise."}
+    authored = {"role": "user", "content": block + "\n\n" + X}
+    try:
+        engine.ingest([system, authored])
+        stored = engine._store._conn.execute(
+            "SELECT store_id, content FROM messages WHERE role = 'user'"
+        ).fetchall()
+        assert [content for _store_id, content in stored] == [authored["content"]]
+        # The stored row keeps full identity, and the live anchor is compared in full.
+        row = engine._prepare_retained_user_anchor([system, dict(authored)])
+        assert row is not None and int(row["store_id"]) == stored[0][0]
+    finally:
+        engine.shutdown()
+
+
 def test_replay_cache_never_serves_a_carrier_view_for_its_remainder(tmp_path):
     engine, block = _engine_with_verified_block(tmp_path)
     head = {"role": "user", "content": "first"}

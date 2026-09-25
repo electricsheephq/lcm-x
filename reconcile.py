@@ -2697,7 +2697,7 @@ class ReconcileMixin:
                 active_matches = sum(
                     1
                     for message in messages
-                    if self._message_replay_identity(message) in retained_forms
+                    if self._message_replay_identity(message, strip_carrier=False) in retained_forms
                 )
                 if active_matches == 1:
                     candidates.append(retained_anchor)
