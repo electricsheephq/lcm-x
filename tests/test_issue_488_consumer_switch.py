@@ -346,6 +346,9 @@ def test_composite_is_not_skipped_by_an_older_remainder_row(tmp_path, monkeypatc
         live = [{"role": "user", "content": block + "\n\nY"}, {"role": "assistant", "content": "old reply"}]
         assert engine._cursor_from_durable_commit_proof(live) == 0
         assert engine._reconcile_ingest_cursor_from_store(live) == 0
+        # The mapper never attributes the composite to its older remainder row Y@1 (F2, round 3):
+        # unmapped until its own whole row is stored.
+        assert engine._get_store_id_map_for_messages(live).get(id(live[0])) is None
     finally:
         engine.shutdown()
 
@@ -480,10 +483,14 @@ def test_an_aliased_object_keeps_one_identity_per_position(tmp_path):
         engine.shutdown()
 
 
-@pytest.mark.parametrize("bad", ["bad", {"index": "0"}], ids=["non-mapping", "non-int-index"])
+@pytest.mark.parametrize(
+    "bad",
+    ["bad", {"index": "0", "of": 2}, {"index": 99, "of": 2}],
+    ids=["non-mapping", "non-int-index", "out-of-range"],
+)
 def test_malformed_output_occurrence_declines_the_descriptor(tmp_path, monkeypatch, bad):
-    """F7: a persisted v4 descriptor with a malformed output_occurrence is declined (full
-    identity for its row); reconciliation never raises on it."""
+    """F7: a persisted v4 descriptor with a malformed output_occurrence (non-mapping, non-int
+    index, or an index beyond the recorded length of the proof's own output) is declined (full identity for its row); reconciliation never raises on it."""
     engine, _pre, compressed = _phase1_compacted_engine(tmp_path, monkeypatch, tail=1)
     block = _summary_block(engine, compressed)
     try:

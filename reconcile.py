@@ -210,7 +210,7 @@ def _finalize_emission_descriptors(messages, candidates, scope):
                 "kind": kind,
                 "role": role,
                 "same_prefix_ordinal": same_prefix_ordinal,
-                "output_occurrence": {"index": index, "same_identity_ordinal": ordinal},
+                "output_occurrence": {"index": index, "same_identity_ordinal": ordinal, "of": len(messages)},
                 "generated_span_sha256": hashlib.sha256(span_bytes).hexdigest(),
                 "generated_span_bytes": len(span_bytes),
                 "suffix_sha256": suffix_sha256,
@@ -248,11 +248,12 @@ def _project_emitted_occurrences(
         ordinal = descriptor.get("same_prefix_ordinal")
         occurrence = descriptor.get("output_occurrence")
         output_index = occurrence.get("index") if isinstance(occurrence, Mapping) else None
+        output_length = occurrence.get("of") if isinstance(occurrence, Mapping) else None  # the output's recorded length
         if not isinstance(length, int) or length <= 0 or not isinstance(digest, str) or (
             not isinstance(role, str) or not role or type(ordinal) is not int or ordinal < 0
         ) or type(suffix_length) is not int or suffix_length < 0 or not isinstance(suffix_digest, str) or (
             type(output_index) is not int or output_index < 0  # malformed (F7): decline, never raise
-        ):
+        ) or (type(output_length) is int and output_index >= output_length):  # an index beyond its own output
             continue
         candidate_ordinal = -1
         for index, message in _emission_candidate_rows(messages, role, length, digest):
@@ -578,6 +579,19 @@ class ReconcileMixin:
             ) else identity)
             for m, entry, identity in zip(messages, projection.entries, identities)
         ], v4
+
+    def _proof_output_effective_digests(self) -> set:
+        """Digests of the active proof's own effective output rows (F2): a merged composite maps to
+        its remainder only when that remainder is one of them (a row Hermes merged behind the
+        emitted one), never to an older row with the same bytes."""
+        proof = getattr(self, "_compress_commit_proof", None) or {}
+        digests = {_commit_proof_identity_digest(i) for i in (proof.get("output_effective") or ()) if i is not None}
+        if not digests:
+            try:
+                digests = set((self._durable_commit_proof_payload() or {}).get("effective_sha256") or ())
+            except Exception:  # malformed durable history: no remainder authority
+                digests = set()
+        return digests
 
     def _active_emission_proof(self):
         """The scoped v4 emissions in force: this process's, else the durable proof's."""
@@ -2828,6 +2842,7 @@ class ReconcileMixin:
             ) else self._replay_occurrences(messages)  # a copy or an aliased row is unproven
             occurrences = occurrences if v4 else None
         stored_forms = {*stored_identities, *filter(None, stored_alt_identities)}
+        merge_append_digests = None  # computed once, only if a merged composite needs its remainder (F2)
         for msg, (entry, identity) in zip(messages, occurrences or [(None, None)] * len(messages)):
             if occurrences is None:  # no v4 proof in force (A5): lineage, full identity, else rc4's remainder
                 full = self._message_replay_identity(msg, strip_carrier=False)
@@ -2836,9 +2851,16 @@ class ReconcileMixin:
                 )
             elif identity is None:  # a proven scaffold, or unproven under v4: FULL identity, no DAG strip (F1)
                 identity = self._message_replay_identity(msg, strip_carrier=False)
-            elif _merged_composite(entry):  # #499: its own whole row whenever that is stored (F2)
-                whole = self._message_replay_identity(msg, stored_row=True)
-                identity = whole if whole in stored_forms or identity not in stored_forms else identity
+            elif _merged_composite(entry):  # #499 (F2): its own whole row when stored; else its
+                whole = self._message_replay_identity(msg, stored_row=True)  # remainder only when the
+                if whole not in stored_forms and identity in stored_forms:  # proof's own output holds
+                    if merge_append_digests is None:  # that row (a Hermes merge-append), never an older row
+                        merge_append_digests = self._proof_output_effective_digests()
+                    identity = identity if {
+                        _commit_proof_identity_digest(identity), _commit_proof_identity_digest(_proof_user_identity(identity))
+                    } & merge_append_digests else whole
+                else:
+                    identity = whole
             if live_identities.setdefault(id(msg), identity) != identity:  # one object, two occurrences (F6)
                 live_identities[id(msg)] = self._message_replay_identity(msg, strip_carrier=False)
         active_identity_counts: dict[tuple[Any, ...], int] = {}
