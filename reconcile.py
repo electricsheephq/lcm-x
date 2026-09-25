@@ -303,6 +303,14 @@ def _project_emitted_occurrences(
     return EmissionProjection(tuple(entries), complete_length=len(entries))
 
 
+def _merged_composite(entry) -> bool:
+    """Bytes past a proven occurrence's recorded suffix: a row the host merged into it (#499).
+    That is new content, stored whole; its remainder alone never proves replay (F2)."""
+    return entry is not None and entry.generated_span is not None and len(
+        entry.effective_identity[1].strip().encode("utf-8")
+    ) > (entry.suffix_length or 0)
+
+
 def _proof_user_identity(identity):
     """Identity compared against a commit proof: user content without edge whitespace
     (Hermes ACP persists ``prompt.strip()``). Proof-bound positions only (#498)."""
@@ -555,16 +563,21 @@ class ReconcileMixin:
     def _proof_replay_identity(self, msg: Dict[str, Any], strip_carrier: bool = True) -> tuple[str, str, str, str, str]:
         return _proof_user_identity(self._message_replay_identity(msg, strip_carrier=strip_carrier))
 
-    def _projected_occurrence_map(self, messages) -> Optional[dict[int, Optional[tuple[str, str, str, str, str]]]]:
-        """Proven occurrences of this complete list, by object: projected identity or None
-        (scaffold); None when no v4 proof is in force (the rc4 contract applies)."""
-        proof = self._active_emission_proof()
-        if not isinstance(proof, Mapping) or proof.get("version") != 4:
-            return None
-        projection, identities = self._occurrence_replay_identities(messages, proof)
-        return {
-            id(m): i for m, e, i in zip(messages, projection.entries, identities) if e.generated_span or i is None
-        }
+    def _replay_occurrences(self, messages, proof=None):
+        """#488 (A2, F6): per POSITION of a COMPLETE list, (projection entry, replay identity) from
+        its one projection. Folded lineage overrides only an occurrence the projection bound, or a
+        row no descriptor can bind (a tool-call fold) (F1). The flag is False when no v4 proof is
+        in force: rc4's identities apply (A5)."""
+        proof = proof or self._active_emission_proof()
+        v4 = isinstance(proof, Mapping) and proof.get("version") == 4
+        projection, identities = self._occurrence_replay_identities(messages, proof if v4 else None)
+        lineage = self._active_folded_tail_identity_overrides(messages)
+        return [
+            (entry, lineage.get(id(m), identity) if entry.generated_span is not None or not v4 or (
+                m.get("tool_calls") or m.get("tool_call_id") or not isinstance(m.get("content"), str)
+            ) else identity)
+            for m, entry, identity in zip(messages, projection.entries, identities)
+        ], v4
 
     def _active_emission_proof(self):
         """The scoped v4 emissions in force: this process's, else the durable proof's."""
@@ -1319,29 +1332,27 @@ class ReconcileMixin:
         raw_session_count: int,
         allow_session_end_replay_proof: bool = False,
     ) -> int | None:
+        # One projection over the complete list (#488), by position: one object per position (F6).
+        seen: set = set()
+        messages = [dict(m) if id(m) in seen or seen.add(id(m)) else m for m in messages]
         active_lineage_identities = self._active_folded_tail_identity_overrides(
             messages
         )
-        # One projection over the complete list (#488): skips are occurrence-bound.
-        projection, occurrences = self._occurrence_replay_identities(messages, self._active_emission_proof())
-        occurrence_identities = {id(m): i for m, i in zip(messages, occurrences) if i is not None}
-        stored_forms = set(stored_tail)
-        for m, e, i in zip(messages, projection.entries, occurrences):  # #499 composite: stored whole
-            if i is not None and e.generated_span and i not in stored_forms:
-                whole = self._message_replay_identity(m, stored_row=True)
-                occurrence_identities[id(m)] = whole if whole in stored_forms else i
-        scaffold_ids = {id(m) for m, i in zip(messages, occurrences) if i is None}
+        occurrences, v4 = self._replay_occurrences(messages)
+        occurrence_by_id = {id(m): occurrence for m, occurrence in zip(messages, occurrences)}
+        occurrence_identities = {  # a #499 composite is new content, stored whole: never its remainder (F2)
+            id(m): self._message_replay_identity(m, stored_row=True) if _merged_composite(e) else i
+            for m, (e, i) in zip(messages, occurrences) if i is not None
+        }
+        scaffold_ids = {id(m) for m, (_e, i) in zip(messages, occurrences) if i is None}
         objective_ids = {
-            id(m) for m, e in zip(messages, projection.entries) if e.kind == "objective" and e.generated_span is not None
+            id(m) for m, (e, _i) in zip(messages, occurrences) if e.kind == "objective" and e.generated_span is not None
         }
 
         def active_identity(
             message: Dict[str, Any],
         ) -> tuple[str, str, str, str, str]:
-            return active_lineage_identities.get(
-                id(message),
-                occurrence_identities.get(id(message)) or self._message_replay_identity(message, strip_carrier=False),
-            )
+            return occurrence_identities.get(id(message)) or self._message_replay_identity(message, strip_carrier=False)
 
         sanitized_replay_tail = self._stored_tail_for_sanitized_active_replay(stored_tail)
         effective_session_count = len(sanitized_replay_tail)
@@ -1511,7 +1522,8 @@ class ReconcileMixin:
             has_ordered_folded_snapshot_mapping = False
             if has_registered_engine_snapshot and active_lineage_identities:
                 candidate_store_ids = self._get_store_id_map_for_messages(
-                    candidate_identity_messages
+                    candidate_identity_messages,
+                    [occurrence_by_id[id(m)] for m in candidate_identity_messages] if v4 else None,
                 )
                 ordered_store_ids = [
                     int(candidate_store_ids.get(id(message)) or 0)
@@ -1915,16 +1927,10 @@ class ReconcileMixin:
         self,
         messages: List[Dict[str, Any]],
     ) -> list[tuple[str, str, str, str, str]]:
-        active_lineage_identities = self._active_folded_tail_identity_overrides(
-            messages
-        )
-        _projection, identities = self._occurrence_replay_identities(messages, self._active_emission_proof())
+        occurrences, _v4 = self._replay_occurrences(messages)
         return [
-            active_lineage_identities.get(
-                id(msg),
-                identity,
-            )
-            for msg, identity in zip(messages, identities)
+            identity
+            for msg, (_entry, identity) in zip(messages, occurrences)
             if identity is not None
             and not self._matches_ignore_message_patterns(msg)
         ]
@@ -2664,7 +2670,7 @@ class ReconcileMixin:
         """Return whether ``message`` is the unique active durable fold."""
         return bool(self._active_folded_tail_identity_overrides([message]))
 
-    def _get_store_id_map_for_messages(self, messages: List[Dict[str, Any]]) -> dict[int, int]:
+    def _get_store_id_map_for_messages(self, messages: List[Dict[str, Any]], occurrences=None) -> dict[int, int]:
         """Map current raw message objects back to store_ids in stable order.
 
         Matching starts strictly after ``_last_compacted_store_id`` so repeated
@@ -2756,9 +2762,7 @@ class ReconcileMixin:
         def active_lineage_identity(
             message: Dict[str, Any],
         ) -> tuple[str, str, str, str, str]:
-            return active_lineage_identities.get(id(message)) or live_identities.get(
-                id(message)
-            ) or self._message_replay_identity(message)
+            return live_identities[id(message)]
 
         stored_identity_counts: dict[tuple[Any, ...], int] = {}
         stored_cleanup_identity_counts: dict[tuple[Any, ...], int] = {}
@@ -2794,23 +2798,28 @@ class ReconcileMixin:
                     stored_cleanup_identity_counts.get(cleanup_identity, 0) + 1
                 )
 
-        # #488: map occurrences, never bytes alone. A proven emitted occurrence maps by its
-        # projected remainder (from the complete list: compress() projects its admitted list
-        # once); any other row by its full identity when that is durable, else by the
-        # verified-carrier remainder (a pre-descriptor carrier's retained source).
-        occurrences = getattr(self, "_compress_occurrences", None)
+        # #488: map occurrences, never bytes alone. ``occurrences`` is the caller's slice of its
+        # COMPLETE list's projection (A2); compress() registers its admitted list once (F5).
         if occurrences is None:
-            occurrences = self._projected_occurrence_map(messages) or {}
+            registry = getattr(self, "_compress_occurrences", None)
+            occurrences, v4 = ([registry.get(id(m), (None, None)) for m in messages], True) if (
+                registry is not None
+            ) else self._replay_occurrences(messages)  # a copy or an aliased row is unproven
+            occurrences = occurrences if v4 else None
         stored_forms = {*stored_identities, *filter(None, stored_alt_identities)}
-        for msg in messages:
-            identity = occurrences.get(id(msg))
-            if identity is not None and identity not in stored_forms:  # #499: a row the host merged
-                whole = self._message_replay_identity(msg, stored_row=True)  # into an emitted one is stored whole
-                identity = whole if whole in stored_forms else identity
-            if identity is None:
+        for msg, (entry, identity) in zip(messages, occurrences or [(None, None)] * len(messages)):
+            if occurrences is None:  # no v4 proof in force (A5): lineage, full identity, else rc4's remainder
+                full = self._message_replay_identity(msg, strip_carrier=False)
+                identity = active_lineage_identities.get(id(msg)) or (
+                    full if full in stored_forms else self._message_replay_identity(msg)
+                )
+            elif identity is None:  # a proven scaffold, or unproven under v4: FULL identity, no DAG strip (F1)
                 identity = self._message_replay_identity(msg, strip_carrier=False)
-                identity = identity if identity in stored_forms else self._message_replay_identity(msg)
-            live_identities[id(msg)] = identity
+            elif _merged_composite(entry):  # #499: its own whole row whenever that is stored (F2)
+                whole = self._message_replay_identity(msg, stored_row=True)
+                identity = whole if whole in stored_forms or identity not in stored_forms else identity
+            if live_identities.setdefault(id(msg), identity) != identity:  # one object, two occurrences (F6)
+                live_identities[id(msg)] = self._message_replay_identity(msg, strip_carrier=False)
         active_identity_counts: dict[tuple[Any, ...], int] = {}
         for msg in messages:
             identity = active_lineage_identity(msg)

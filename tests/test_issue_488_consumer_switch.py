@@ -8,13 +8,16 @@ proven emitted occurrence keeps its projected remainder.
 from __future__ import annotations
 
 import json
+import re
 import time
 
 import pytest
 
 import hermes_lcm.engine as lcm_engine_module
+import hermes_lcm.reconcile as reconcile_module
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.reconcile import _commit_proof_identity_digest
 from tests.test_compression_boundary import (
     _config,
     _host_merge_consecutive_users,
@@ -250,6 +253,88 @@ def test_host_merged_composite_is_not_stored_again_after_restart(tmp_path, monke
 # --- fix round 1 (gpt-6-astra review of 5e015fee): each test reproduces a reviewer counterexample.
 
 
+def _second_verified_block(engine, text="A different summary."):
+    node = engine._dag.add_node(
+        SummaryNode(
+            session_id="S0", depth=0, summary=text, token_count=3, source_token_count=5, source_ids=[],
+            source_type="messages", created_at=time.time(), earliest_at=time.time(), latest_at=time.time(),
+            expand_hint="verified",
+        )
+    )
+    block = f"[Recent Summary (d0, node {getattr(node, 'node_id', node)})]\n{text}\n[Expand for details: verified]"
+    assert engine._verified_lcm_summary_prefix_end(block) == len(block)
+    return block
+
+
+def test_declined_carrier_never_maps_by_its_dag_remainder(tmp_path):
+    """F1: the proof describes S+A; the projection declines S+B, so the mapper must not
+    map it onto the stored B by the DAG-verified prefix (full identity, store direction)."""
+    engine, block = _engine_with_verified_block(tmp_path)
+    try:
+        a_id = engine._store.append("S0", {"role": "user", "content": "A"})
+        engine._store.append("S0", {"role": "user", "content": "B"})
+        engine._last_emission_descriptors = _scoped_proof("carrier", block + "\n\n", "A", retained_source={"store_id": a_id})
+        live = {"role": "user", "content": block + "\n\nB"}
+        projection, identities = engine._occurrence_replay_identities([live], engine._active_emission_proof())
+        assert projection.entries[0].generated_span is None and identities[0][1] == live["content"]
+        assert engine._get_store_id_map_for_messages([live]).get(id(live)) is None
+    finally:
+        engine.shutdown()
+
+
+def test_folded_lineage_never_overrides_a_declined_occurrence(tmp_path):
+    """F1: lineage recorded for S1+Y must not bind an authored S2+Y the projection declined
+    (both strip to Y); the final reconciliation stores it instead of skipping it."""
+    engine, block = _engine_with_verified_block(tmp_path)
+    other = _second_verified_block(engine)
+    try:
+        y_id = engine._store.append("S0", {"role": "user", "content": "Y"})
+        engine._store.append("S0", {"role": "assistant", "content": "old reply"})
+        engine._last_emission_descriptors = _scoped_proof("carrier", block + "\n\n", "Y", retained_source={"store_id": y_id})
+        assert engine._write_folded_tail_lineage({"role": "user", "content": block + "\n\nY"}, y_id)
+        live = [{"role": "user", "content": other + "\n\nY"}, {"role": "assistant", "content": "old reply"}]
+        projection, _identities = engine._occurrence_replay_identities(live, engine._active_emission_proof())
+        assert projection.entries[0].generated_span is None
+        assert id(live[0]) not in engine._get_store_id_map_for_messages(live)
+        assert engine._reconcile_ingest_cursor_from_store(live) == 0
+    finally:
+        engine.shutdown()
+
+
+def _composite_engine(tmp_path, rows):
+    engine, block = _engine_with_verified_block(tmp_path)
+    engine._last_emission_descriptors = _scoped_proof("summary", block, "")
+    ids = [engine._store.append("S0", {"role": role, "content": content.format(S=block)}) for role, content in rows]
+    return engine, block, ids
+
+
+def test_composite_maps_to_its_own_whole_row_when_stored(tmp_path):
+    """F2: with Y@1 and S+Y@2 durable, the #499 composite maps to its own row, not the remainder's."""
+    engine, block, ids = _composite_engine(tmp_path, [("user", "Y"), ("user", "{S}\n\nY")])
+    try:
+        composite = {"role": "user", "content": block + "\n\nY"}
+        assert engine._get_store_id_map_for_messages([composite]).get(id(composite)) == ids[1]
+    finally:
+        engine.shutdown()
+
+
+def test_composite_is_not_skipped_by_an_older_remainder_row(tmp_path, monkeypatch):
+    """F2: durable [Y, old reply] are older than the proof's watermark; live [S+Y, old reply]
+    is a NEW composite occurrence. No reconciliation may skip it by remainder membership."""
+    engine, block, ids = _composite_engine(tmp_path, [("user", "Y"), ("assistant", "old reply")])
+    try:
+        payload = {
+            **engine._last_emission_descriptors, "effective_sha256": [], "last_store_id": ids[-1],
+            "scaffold_sha256": [_commit_proof_identity_digest(engine._proof_replay_identity({"role": "user", "content": block}))],
+        }
+        monkeypatch.setattr(engine, "_durable_commit_proof_payload", lambda session_id=None: payload)
+        live = [{"role": "user", "content": block + "\n\nY"}, {"role": "assistant", "content": "old reply"}]
+        assert engine._cursor_from_durable_commit_proof(live) == 0
+        assert engine._reconcile_ingest_cursor_from_store(live) == 0
+    finally:
+        engine.shutdown()
+
+
 def test_proof_input_and_output_keep_full_identity(tmp_path):
     """F4: the proof's input/output arrays are the full-identity multiplicity witness;
     only output_effective carries the projected remainder."""
@@ -262,6 +347,48 @@ def test_proof_input_and_output_keep_full_identity(tmp_path):
         assert proof["output"][0][1] == carrier["content"]
         assert proof["input"][1][1] == carrier["content"]
         assert proof["output_effective"][0][1] == tail[0]["content"]
+    finally:
+        engine.shutdown()
+
+
+def test_preflight_subset_callers_never_reproject_a_subset(tmp_path, monkeypatch):
+    """F5 (A2): preflight maps subsets through the complete list's one projection."""
+    engine, _pre, compressed = _phase1_compacted_engine(tmp_path, monkeypatch, tail=1)
+    host = [dict(m) for m in compressed]
+    for i in range(20, 32):
+        host.extend(_turn(i))
+    projected_lengths = []
+    real_projection = reconcile_module._project_emitted_occurrences
+
+    def spy(messages, *, proof):
+        projected_lengths.append(len(messages))
+        return real_projection(messages, proof=proof)
+
+    try:
+        engine.ingest(host)
+        assert engine._active_emission_proof()["emissions"]
+        monkeypatch.setattr(engine, "_compiled_ignore_message_patterns", [re.compile("never-matches-488")])
+        monkeypatch.setattr(reconcile_module, "_project_emitted_occurrences", spy)
+        engine._leaf_compaction_candidate_status_once(host)
+        engine._has_ignored_backlog_outside_fresh_tail(host)
+        assert projected_lengths and set(projected_lengths) == {len(host)}
+    finally:
+        engine.shutdown()
+
+
+def test_an_aliased_object_keeps_one_identity_per_position(tmp_path):
+    """F6: the same dict at two positions is two occurrences: only the emitted one is a
+    scaffold, the later one is content (stored, never skipped)."""
+    engine, block = _engine_with_verified_block(tmp_path)
+    try:
+        replayed = [m for i in (1, 2) for m in _turn(i)]
+        engine._store.append_batch("S0", replayed)
+        engine._last_emission_descriptors = _scoped_proof("summary", block, "")
+        summary = {"role": "user", "content": block}
+        live = [summary, *[dict(m) for m in replayed], summary]
+        _projection, identities = engine._occurrence_replay_identities(live, engine._active_emission_proof())
+        assert identities[0] is None and identities[-1][1] == block
+        assert engine._reconcile_ingest_cursor_from_store(live) == len(live) - 1  # the later occurrence is ingested
     finally:
         engine.shutdown()
 

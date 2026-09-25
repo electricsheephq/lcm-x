@@ -19,6 +19,7 @@ import copy
 import json
 import logging
 import time
+from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from .dag import SummaryNode
@@ -343,8 +344,10 @@ class CompactionMixin:
         if fresh_tail_start <= leading_anchor_count:
             return False
         previous_store_id_map = self._current_compress_store_ids_by_message_id
+        occurrences, v4 = self._replay_occurrences(messages)  # the complete list, sliced (A2, F5)
         self._current_compress_store_ids_by_message_id = self._get_store_id_map_for_messages(
-            messages[leading_anchor_count:fresh_tail_start]
+            messages[leading_anchor_count:fresh_tail_start],
+            occurrences[leading_anchor_count:fresh_tail_start] if v4 else None,
         )
         try:
             return any(
@@ -430,7 +433,10 @@ class CompactionMixin:
         generated_placeholder_hashes = self._load_generated_ignored_placeholder_hashes()
         if self._compiled_ignore_message_patterns or generated_placeholder_hashes:
             previous_store_id_map = self._current_compress_store_ids_by_message_id
-            self._current_compress_store_ids_by_message_id = self._get_store_id_map_for_messages(candidate_raw)
+            occurrences, v4 = self._replay_occurrences(messages)  # the complete list, sliced (A2, F5)
+            self._current_compress_store_ids_by_message_id = self._get_store_id_map_for_messages(
+                candidate_raw, occurrences[leading_anchor_count:fresh_tail_start] if v4 else None
+            )
             try:
                 filtered_candidate_raw: list[Dict[str, Any]] = []
                 for msg in candidate_raw:
@@ -592,9 +598,6 @@ class CompactionMixin:
                 or self._ingest_cursor != len(result)
             ):
                 return
-            carried_rows = self._store.get_batch(
-                sorted(set(self._get_store_ids_for_messages(result)))
-            )
             state = (
                 self._lifecycle.get_by_conversation(self._conversation_id)
                 if self._conversation_id
@@ -636,6 +639,10 @@ class CompactionMixin:
                     ):
                         emissions.extend(carried)
             emissions.sort(key=lambda item: item["output_occurrence"]["index"])
+            # The output's rows map through THIS proof's emissions (A3), never a DAG-shaped strip (F1).
+            occurrences, _v4 = self._replay_occurrences(result, {"version": 4, **emission_binding, "emissions": emissions})
+            store_ids = self._get_store_id_map_for_messages(result, occurrences)
+            carried_rows = self._store.get_batch(sorted({store_ids[id(m)] for m in result if id(m) in store_ids}))
             proof = {
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
                 **emission_binding,
@@ -1140,8 +1147,14 @@ class CompactionMixin:
         # replay-safe view so quarantined assistant loops do not enter summaries
         # or provider context after the durable row has been written.
         working_messages = self._ingest_messages(messages)
-        # #488: project the complete admitted list ONCE; subset consumers look rows up here.
-        self._compress_occurrences = self._projected_occurrence_map(working_messages)
+        # #488: project the complete admitted list ONCE; subset consumers read a row's occurrence
+        # here. Only a row at exactly one position is registered (F6): a copy or an aliased row
+        # is unproven (full identity).
+        occurrences, v4 = self._replay_occurrences(working_messages)
+        positions = Counter(id(m) for m in working_messages)
+        self._compress_occurrences = {
+            id(m): occurrence for m, occurrence in zip(working_messages, occurrences) if positions[id(m)] == 1
+        } if v4 else None
         self._prepare_retained_user_anchor(working_messages)
         native_cleanup_only = bool(
             self._config.native_recovery
@@ -1302,7 +1315,7 @@ class CompactionMixin:
             while candidate_start < fresh_tail_start and (
                 self._is_replayed_context_scaffold_message(working_messages[candidate_start])
                 if self._compress_occurrences is None  # no v4 proof in force: the rc4 contract
-                else self._compress_occurrences.get(id(working_messages[candidate_start]), ()) is None
+                else self._compress_occurrences.get(id(working_messages[candidate_start]), (None, ()))[1] is None
             ):
                 candidate_start += 1
             if candidate_start > leading_anchor_count:
