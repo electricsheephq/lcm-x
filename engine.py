@@ -4717,8 +4717,8 @@ class LCMEngine(
     def _is_cached_active_replay_message_at_index(self, idx: int, msg: Dict[str, Any]) -> bool:
         if idx < 0 or idx >= len(self._last_active_replay_messages):
             return False
-        return self._message_replay_identity(msg) == self._message_replay_identity(
-            self._last_active_replay_messages[idx]
+        return self._message_replay_identity(msg, strip_carrier=False) == self._message_replay_identity(
+            self._last_active_replay_messages[idx], strip_carrier=False
         )
 
     def _matches_ignore_message_patterns(self, msg: Dict[str, Any], *, stored_row: bool = False) -> bool:
@@ -4824,8 +4824,8 @@ class LCMEngine(
         original_messages: List[Dict[str, Any]],
         active_replay_messages: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        self._last_active_replay_source_identities = [
-            self._message_replay_identity(message) for message in original_messages
+        self._last_active_replay_source_identities = [  # full identity (#488): no carrier aliasing
+            self._message_replay_identity(message, strip_carrier=False) for message in original_messages
         ]
         self._last_active_replay_messages = self._copy_active_replay_messages_preserving_generated_ids(
             active_replay_messages
@@ -4847,7 +4847,7 @@ class LCMEngine(
         self,
         original_messages: List[Dict[str, Any]],
     ) -> Optional[List[Dict[str, Any]]]:
-        identities = [self._message_replay_identity(message) for message in original_messages]
+        identities = [self._message_replay_identity(message, strip_carrier=False) for message in original_messages]
         if identities == getattr(self, "_last_active_replay_source_identities", None):
             cached = getattr(self, "_last_active_replay_messages", None)
             if cached is not None:
@@ -5391,7 +5391,7 @@ class LCMEngine(
                 and len(cached_active_replay_messages) >= cursor
             ):
                 current_prefix_identities = [
-                    self._message_replay_identity(message) for message in messages[:cursor]
+                    self._message_replay_identity(message, strip_carrier=False) for message in messages[:cursor]
                 ]
                 if current_prefix_identities == cached_source_identities[:cursor]:
                     replay_messages = (
