@@ -4,7 +4,7 @@ This page separates released product identity, current development source, evalu
 
 ## Naming and compatibility
 
-The project is **LCM-X — Lossless Context Memory eXtension**. From v0.24.0 (unreleased, #471) the plugin and engine identifiers are:
+The project is **LCM-X — Lossless Context Memory eXtension**. From v0.24.0 (#471) the plugin and engine identifiers are:
 
 | Surface | Identifier |
 | --- | --- |
@@ -22,7 +22,7 @@ The latest stable release is `v0.23.3` at `523161769329174514a0b995025201e3dc316
 
 The source snapshot used for this reconciliation is `main@7b894b65d01c70046194c7b0fd10aae1448b2a07`. Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits.
 
-Main carries the forward identity `0.24.0` (`hermes-lcm-x`, #471) for the next minor release (rc-first under `bench/specs/RELEASE-READINESS-V1.md`); the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
+Main carries the forward identity `0.24.1` (`hermes-lcm-x`) for the next patch release (rc-first under `bench/specs/RELEASE-READINESS-V1.md`); the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
 
 v0.23.2 (2026-08-27) shipped those contracts: durable redaction and cloud-embedding privacy are
 independent flags (`LCM_SENSITIVE_PATTERNS_ENABLED` vs `LCM_EMBEDDING_PRIVACY_ENABLED`, #374),

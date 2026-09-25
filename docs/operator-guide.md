@@ -233,7 +233,7 @@ On the `main` line, typical output is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.24.0 (15 tools)
+  ✓ hermes-lcm-x v0.24.1 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -241,7 +241,7 @@ Provider Plugins:
 
 The exact `v0.23.3` stable tag reports `hermes-lcm v0.23.3 (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. `0.24.0` is the identity the next minor release carries; its release
+and tag. `0.24.1` is the identity the next patch release carries; its release
 candidate and GA cut share one tree and differ only by the added release-notes
 file.
 

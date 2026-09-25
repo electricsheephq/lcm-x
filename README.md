@@ -131,9 +131,9 @@ separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
 The `main` line now identifies itself as
-`hermes-lcm-x v0.24.0 (15 tools)` — the plugin rename (#471) on top of the
-`v0.23.3` stable tag, which identifies itself as `hermes-lcm v0.23.3 (15 tools)`.
-This is the forward bump for the next minor release (rc-first), never a restamp
+`hermes-lcm-x v0.24.1 (15 tools)` — the #488 replay-reconciliation patch (#510, #515) on top of the
+`v0.24.0` release tag, which identifies itself as `hermes-lcm-x v0.24.0 (15 tools)`.
+This is the forward bump for the next patch release, never a restamp
 of any past commit's own recorded identity (#385 fixed the earlier drift).
 
 Eva has accepted exact stable v0.23.1 with hosted `voyage-4-large`,
@@ -254,7 +254,7 @@ On the `main` line, typical output is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.24.0 (15 tools)
+  ✓ hermes-lcm-x v0.24.1 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm-x

@@ -4,8 +4,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
-IDENTITY_VERSION = "0.24.0"
-RC_TAG = "0.24.0"
+IDENTITY_VERSION = "0.24.1"
+RC_TAG = "0.24.1"
 RELEASE_NOTES = REPO_ROOT / ".github" / "release-notes" / f"v{RC_TAG}.md"
 
 
@@ -102,13 +102,12 @@ def test_release_candidate_notes_cover_only_the_merged_release_scope():
     section_headers = [line for line in lines if line.startswith("## ")]
 
     assert notes.startswith(f"# v{RC_TAG} — ")
-    assert any(header.startswith("## Rename with a migration path") for header in section_headers)
-    assert any(header.startswith("## Hermes plugin-catalog admission") for header in section_headers)
-    assert any(header.startswith("## Governance:") for header in section_headers)
+    assert any(header.startswith("## Changes since v0.24.0") for header in section_headers)
+    assert any(header.startswith("## Qualification") for header in section_headers)
     assert any(header.startswith("## Known follow-ups") for header in section_headers)
     assert "## Benchmark boundary" in section_headers
     assert "## Upgrade" in section_headers
-    assert "**BREAKING.**" in notes
+    assert "**BREAKING.**" not in notes  # a patch release; the v0.24.0 rename stays documented in README
     # rc4 adds the #494/#495/#482/#487 section and its known issues (165 lines).
     assert 45 <= len(lines) <= 170
     # Curated notes, never a pasted commit log: no one-line log entries or full `git log` blocks.
