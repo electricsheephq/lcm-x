@@ -87,8 +87,12 @@ def test_default_tuning_late_cancel_then_retry_resumes(tmp_path, monkeypatch, ca
     messages = _transcript()
     original = deepcopy(messages)
     engine = _engine(tmp_path)
-    leaves = lambda: [n for n in engine._dag.get_session_nodes(SID) if n.source_type == "messages"]
-    frontier = lambda: engine._lifecycle.get_by_conversation(CID).current_frontier_store_id
+
+    def leaves():
+        return [n for n in engine._dag.get_session_nodes(SID) if n.source_type == "messages"]
+
+    def frontier():
+        return engine._lifecycle.get_by_conversation(CID).current_frontier_store_id
 
     def dispatch(fn, fence, event, gen):
         return _host._run_summary_dispatch(

@@ -1080,15 +1080,10 @@ class CompactionMixin:
         working: List[Dict[str, Any]],
         start: int,
     ) -> tuple[int, Optional[dict[int, int]]]:
-        """Length of the replayed run at ``start`` that the DAG already covers (#457).
-
-        A retry after a cancelled-but-committed compaction replays rows up to the
-        lifecycle frontier F; they map to no store id, so summarizing them again
-        can never publish. The run must be exactly this session's durable rows
-        ending at F, followed by F+1 (or by nothing). Any failed check returns 0,
-        today's behaviour. Also returns the store-id map of ``working[start:]``
-        when one was computed.
-        """
+        """(#457) Length of the replayed run at ``start`` that is exactly this session's
+        durable rows ending at the lifecycle frontier F and followed by F+1 (or nothing),
+        plus the store-id map of ``working[start:]`` when computed. Any failed check
+        returns 0: today's behaviour."""
         state = self._lifecycle.get_by_conversation(self._conversation_id)
         frontier = int(getattr(state, "current_frontier_store_id", 0) or 0)
         if (
@@ -1381,17 +1376,13 @@ class CompactionMixin:
                 else self._compress_occurrences.get(id(working_messages[candidate_start]), (None, ()))[1] is None
             ):
                 candidate_start += 1
-            # #457: a retry replays rows an earlier, cancelled attempt already
-            # committed; drop them with the scaffold so only rows after F remain.
+            # #457: a retry replays rows a cancelled attempt already committed; drop
+            # them with the scaffold. Reuse the map when the pass maps this same list.
             scaffold_end, premapped_store_ids = candidate_start, None
             if leaf_passes == 0 and not resumed_prefix:
-                resumed_count, premapped_store_ids = self._committed_replay_prefix_len(
-                    working_messages, candidate_start
-                )
-                candidate_start += resumed_count
-                resumed_prefix = resumed_count > 0
-                if candidate_start != leading_anchor_count:
-                    premapped_store_ids = None
+                resumed_count, store_ids = self._committed_replay_prefix_len(working_messages, candidate_start)
+                candidate_start, resumed_prefix = candidate_start + resumed_count, resumed_count > 0
+                premapped_store_ids = store_ids if candidate_start == leading_anchor_count else None
             if candidate_start > leading_anchor_count:
                 publication_excluded_store_ids.extend(
                     self._get_store_ids_for_messages(
