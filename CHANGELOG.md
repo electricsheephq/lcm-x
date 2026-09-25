@@ -6,6 +6,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Docs: the README and operator guide say how a `--ref`-pinned install moves to a new commit
+  (`hermes plugins install … --force --ref <sha>`); `hermes plugins update` re-pins catalog installs only.
+
 ## v0.24.1 - 2026-09-25 (#488: replay skips bound to proven emitted occurrences; #517 rollback-readable proof)
 
 - Fix: replay reconciliation binds every skip to a proven emitted occurrence (#488; #510 emission
