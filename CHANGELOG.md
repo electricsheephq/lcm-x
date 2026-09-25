@@ -63,7 +63,7 @@ Migration (run exactly one LCM copy; change the config while Hermes is stopped):
    `context.engine: lcm` still selects LCM-X through an alias, with a once-per-process
    `DEPRECATED LCM-X config` warning, an `identity_migration` field in `lcm_status`, and an
    `identity_migration` `warn` check in `lcm_doctor`.
-3. Start Hermes and verify `hermes plugins` lists `hermes-lcm-x` and the log shows
+3. Start Hermes and verify `hermes plugins list` lists `hermes-lcm-x` and the log shows
    `LCM plugin loaded — lossless context management active`. Remove a separate old directory by
    hand later; keep it until then for rollback.
 4. If the config is not updated, Hermes logs `Context engine 'lcm' not found — falling back to

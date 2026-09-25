@@ -214,7 +214,7 @@ missing or stale.
 Run:
 
 ```bash
-hermes plugins
+hermes plugins list
 ```
 
 Expected signals:

@@ -237,7 +237,7 @@ Restart Hermes after changing plugin or context-engine config.
 Run:
 
 ```bash
-hermes plugins
+hermes plugins list
 ```
 
 Expected signals:

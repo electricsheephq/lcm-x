@@ -115,7 +115,7 @@ context:
 
 Verification:
   1. Restart Hermes.
-  2. Run: hermes plugins
+  2. Run: hermes plugins list
   3. Confirm the plugin list includes hermes-lcm-x and the selected context engine is lcm-x.
   4. Confirm the available skills include hermes-lcm.
 EOF

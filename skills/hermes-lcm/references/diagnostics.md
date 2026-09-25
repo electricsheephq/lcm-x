@@ -4,7 +4,7 @@ Use read-only product tools before changing configuration or running an apply pa
 
 ## Fast path
 
-1. `hermes plugins`: confirm `hermes-lcm-x` is enabled and the selected context engine is `lcm-x` (`lcm` is the deprecated alias; `lcm_doctor` flags it under `identity_migration`).
+1. `hermes plugins list`: confirm `hermes-lcm-x` is enabled and the selected context engine is `lcm-x` (`lcm` is the deprecated alias; `lcm_doctor` flags it under `identity_migration`).
 2. Send one normal message if the session has not been bound since restart.
 3. `lcm_status`: inspect runtime identity, database path, context pressure, summary/store counts, filters, and lifecycle state.
 4. `lcm_inspect`: inspect current-session lineage, frontiers, fresh tail, externalized-ref readability, and skip/no-op reasons without retrieving content.
