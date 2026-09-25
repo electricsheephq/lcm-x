@@ -23,6 +23,26 @@ def _record(engine, before, returned):
     return proof
 
 
+def _carry_forward_through_real_ingest(engine, monkeypatch, first, second):
+    engine.ingest(first)
+    assert engine._compress_commit_proof is None
+    host = [dict(message) for message in second]
+    host.append(_turn(99)[1])
+    engine.ingest(host)
+
+    def compact_again(_messages, **_kwargs):
+        engine._last_compression_status = "compacted"
+        engine._ingest_cursor = len(second)
+        engine._pending_emission_candidates = []
+        return second
+
+    monkeypatch.setattr(engine, "_compress_impl", compact_again)
+    returned = engine.compress(host, force=True)
+    assert engine._last_compression_status == "compacted"
+    assert engine._compress_commit_proof is not None
+    return returned, engine._compress_commit_proof
+
+
 def _assert_exact_descriptors(returned, proof):
     descriptors = proof["emissions"]
     assert descriptors
@@ -140,6 +160,32 @@ def test_legacy_proof_authorizes_no_emission_projection(version):
     assert all(entry.effective_identity == entry.full_identity for entry in projection.entries)
 
 
+@pytest.mark.parametrize("missing_field", ["role", "same_prefix_ordinal"])
+def test_v4_descriptor_without_occurrence_provenance_is_ignored(missing_field):
+    scope = {
+        "hermes_home": "home",
+        "session_id": "session",
+        "conversation_id": "conversation",
+        "reset_epoch": None,
+    }
+    descriptor = {
+        "kind": "carrier",
+        "role": "user",
+        "same_prefix_ordinal": 0,
+        "output_occurrence": {"index": 0, "same_identity_ordinal": 0},
+        "generated_span_sha256": hashlib.sha256(b"summary\n\n").hexdigest(),
+        "generated_span_bytes": len(b"summary\n\n"),
+        "scope": scope,
+    }
+    del descriptor[missing_field]
+    projection = _project_emitted_occurrences(
+        [{"role": "user", "content": "summary\n\nauthored"}],
+        proof={"version": 4, **scope, "emissions": [descriptor]},
+    )
+    assert projection.entries[0].generated_span is None
+    assert projection.entries[0].effective_identity == projection.entries[0].full_identity
+
+
 def test_emission_descriptor_carries_forward_to_the_next_proof(tmp_path):
     engine, compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
     try:
@@ -211,6 +257,80 @@ def test_real_ingest_keeps_emission_descriptor_for_next_compress(tmp_path, monke
             and descriptor["retained_source"] == original["retained_source"]
             for descriptor in engine._compress_commit_proof["emissions"]
         ), second
+    finally:
+        engine.shutdown()
+
+
+def test_carry_forward_keeps_generated_user_when_system_has_same_span(tmp_path, monkeypatch):
+    engine, compacted, _tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        generated = engine._assemble_context(None, [])
+        span = generated[0]["content"]
+        first = engine._assemble_context(
+            {"role": "system", "content": span}, [], include_lcm_note=False
+        )
+        first_proof = _record(engine, [compacted], first)
+        assert first_proof["emissions"][0]["output_occurrence"]["index"] == 1
+
+        second, second_proof = _carry_forward_through_real_ingest(
+            engine, monkeypatch, first, [dict(message) for message in first]
+        )
+        projection = _project_emitted_occurrences(second, proof=second_proof)
+
+        assert second_proof["emissions"][0]["output_occurrence"]["index"] == 1
+        assert second_proof["emissions"][0]["role"] == "user"
+        assert projection.entries[0].generated_span is None
+        assert projection.entries[1].generated_span == span
+    finally:
+        engine.shutdown()
+
+
+def test_carry_forward_keeps_rewritten_generated_user_after_authored_prefix(
+    tmp_path, monkeypatch
+):
+    engine, compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        generated = engine._assemble_context(None, tail)
+        span = engine._pending_emission_candidates[0]["span"]
+        first = [{"role": "user", "content": span}, *generated]
+        first_proof = _record(engine, [compacted, *tail], first)
+        assert first_proof["emissions"][0]["output_occurrence"]["index"] == 1
+
+        rewritten = [dict(message) for message in first]
+        rewritten[1]["content"] = span + "\n\nnew host turn"
+        second, second_proof = _carry_forward_through_real_ingest(
+            engine, monkeypatch, first, rewritten
+        )
+        projection = _project_emitted_occurrences(second, proof=second_proof)
+
+        assert second_proof["emissions"][0]["output_occurrence"]["index"] == 1
+        assert second_proof["emissions"][0]["same_prefix_ordinal"] == 1
+        assert projection.entries[0].generated_span is None
+        assert projection.entries[1].effective_identity[1] == "\n\nnew host turn"
+    finally:
+        engine.shutdown()
+
+
+def test_carry_forward_merged_same_role_collision_fails_closed(tmp_path, monkeypatch):
+    engine, compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        generated = engine._assemble_context(None, tail)
+        span = engine._pending_emission_candidates[0]["span"]
+        first = [{"role": "user", "content": span}, *generated]
+        first_proof = _record(engine, [compacted, *tail], first)
+        assert first_proof["emissions"][0]["output_occurrence"]["index"] == 1
+
+        merged = _real_hermes_merge(first)
+        second, second_proof = _carry_forward_through_real_ingest(
+            engine, monkeypatch, first, merged
+        )
+
+        assert len(second) < len(first)
+        assert second_proof["emissions"] == []
+        assert all(
+            entry.generated_span is None
+            for entry in _project_emitted_occurrences(second, proof=second_proof).entries
+        )
     finally:
         engine.shutdown()
 

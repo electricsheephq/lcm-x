@@ -164,16 +164,26 @@ def _finalize_emission_descriptors(messages, candidates, scope):
             identity = _emission_identity(message) if isinstance(message, dict) else None
             if not isinstance(content, str) or not content.startswith(span) or (
                 expected_identity is not None and identity != expected_identity
-            ):
+            ) or message.get("tool_calls") or message.get("tool_call_id"):
                 continue
             span_bytes = span.encode("utf-8")
+            role = str(message.get("role") or "unknown")
             ordinal = sum(
                 _emission_identity(previous) == identity
                 for previous in messages[: index + 1]
                 if isinstance(previous, dict)
             ) - 1
+            same_prefix_ordinal = sum(
+                str(previous.get("role") or "unknown") == role
+                and isinstance(previous.get("content"), str)
+                and previous["content"].startswith(span)
+                for previous in messages[: index + 1]
+                if isinstance(previous, dict)
+            ) - 1
             descriptors.append({
                 "kind": kind,
+                "role": role,
+                "same_prefix_ordinal": same_prefix_ordinal,
                 "output_occurrence": {"index": index, "same_identity_ordinal": ordinal},
                 "generated_span_sha256": hashlib.sha256(span_bytes).hexdigest(),
                 "generated_span_bytes": len(span_bytes),
@@ -204,15 +214,27 @@ def _project_emitted_occurrences(
             continue
         length = descriptor.get("generated_span_bytes")
         digest = descriptor.get("generated_span_sha256")
-        if not isinstance(length, int) or length <= 0 or not isinstance(digest, str):
+        role = descriptor.get("role")
+        ordinal = descriptor.get("same_prefix_ordinal")
+        if not isinstance(length, int) or length <= 0 or not isinstance(digest, str) or (
+            not isinstance(role, str) or not role or type(ordinal) is not int or ordinal < 0
+        ):
             continue
-        for index in range(search_from, len(messages)):
-            content = messages[index].get("content")
-            if not isinstance(content, str):
+        candidate_ordinal = -1
+        for index, message in enumerate(messages):
+            content = message.get("content")
+            if str(message.get("role") or "unknown") != role or message.get("tool_calls") or (
+                message.get("tool_call_id")
+            ) or not isinstance(content, str):
                 continue
             raw = content.encode("utf-8")
             if len(raw) < length or hashlib.sha256(raw[:length]).hexdigest() != digest:
                 continue
+            candidate_ordinal += 1
+            if candidate_ordinal != ordinal:
+                continue
+            if index < search_from:
+                break
             try:
                 span, suffix = raw[:length].decode("utf-8"), raw[length:].decode("utf-8")
             except UnicodeDecodeError:
