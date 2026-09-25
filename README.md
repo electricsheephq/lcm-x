@@ -310,7 +310,10 @@ git -C /path/to/lcm-x pull --ff-only && /path/to/lcm-x/scripts/install.sh
 
 A catalog install (`hermes plugins install hermes-lcm-x`) updates only through
 the reviewed catalog pin: `hermes plugins update hermes-lcm-x`. LCM-X ships no
-self-updater.
+self-updater. An install pinned with `--ref <sha>` (outside the catalog) refuses
+`hermes plugins update`; move it to the new reviewed commit with
+`hermes plugins install https://github.com/electricsheephq/lcm-x --force --ref <40-character commit SHA>`
+(the refusal prints that command).
 
 Restart Hermes after updating.
 
