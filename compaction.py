@@ -1101,6 +1101,8 @@ class CompactionMixin:
         ):
             return [], None, 0, 0
         ids = self._get_store_id_map_for_messages(working[start:])
+        # #524: LCM scaffold heading a superseded emission drops with the run it heads.
+        scaffold, (start, carrier) = start, self._replay_head(working, start)
         end = next(
             (i for i in range(start, len(working)) if ids.get(id(working[i]), 0) > frontier),
             len(working),
@@ -1117,16 +1119,16 @@ class CompactionMixin:
             return [], ids, 0, 0
         self._load_host_rewrite_overrides(rows)
         if not all(
-            self._message_replay_identity(message, strip_carrier=False)
-            in self._stored_row_forms(row)
-            for message, row in zip(working[start:end], rows)
+            self._replay_row_admits(message, row, carrier=carrier and not offset)
+            for offset, (message, row) in enumerate(zip(working[start:end], rows))
         ):
             return [], ids, 0, 0
         leaf_sources = self._dag.get_leaf_sources_through(self._session_id, frontier)
         lineage = {store_id for _node, _tokens, store_id in leaf_sources}
         replies = {"assistant", "tool"}
+        low, high = (min(lineage), max(lineage)) if lineage else (0, 0)
         if not lineage or any(
-            int(row["store_id"]) > max(lineage) and str(row.get("role") or "") not in replies
+            int(row["store_id"]) > high and str(row.get("role") or "") not in replies
             for row in rows
         ):
             return [], ids, 0, 0
@@ -1134,10 +1136,11 @@ class CompactionMixin:
             start + offset: int(row["store_id"])
             for offset, row in enumerate(rows)
             if int(row["store_id"]) in lineage
-            or (int(row["store_id"]) > min(lineage) and str(row.get("role") or "") in replies)
+            or (int(row["store_id"]) > low and str(row.get("role") or "") in replies)
         }
-        covering = {node: tokens for node, tokens, store_id in leaf_sources if store_id in dropped.values()}
-        return sorted(dropped), ids, sum(covering.values()), len(rows) - len(dropped)
+        dropped_ids = set(dropped.values())
+        covering = {node: tokens for node, tokens, store_id in leaf_sources if store_id in dropped_ids}
+        return [*range(scaffold, start), *sorted(dropped)], ids, sum(covering.values()), len(rows) - len(dropped)
 
     def _compress_impl(self, messages: List[Dict[str, Any]],
                        current_tokens: int = None,
@@ -1290,7 +1293,7 @@ class CompactionMixin:
         pressure_messages = messages if len(messages) == len(working_messages) else working_messages
         leaf_compacted_this_turn = False
         dropped_replayed_scaffold_messages = False
-        resumed_prefix = False
+        resumed_prefix, resumed_ahead = False, 0
         leaf_passes = 0
         estimated_active_tokens = (
             observed_prompt_tokens
@@ -1406,6 +1409,7 @@ class CompactionMixin:
                     working_messages, candidate_start
                 )
                 resumed_prefix = bool(resumed)
+                resumed_ahead = resumed[0] - candidate_start if resumed else 0  # kept rows before lineage
                 premapped_store_ids = None if drops or resumed else store_ids
                 if resumed:  # the committed summary replaces the dropped rows in the estimate
                     resumed_tokens = count_messages_tokens([working_messages[index] for index in resumed])
@@ -1902,6 +1906,8 @@ class CompactionMixin:
             )
             if dropped_replayed_scaffold_messages:
                 leading_anchor_count = self._leading_anchor_count(active_context_messages)
+                if resumed_ahead == 1 and leading_anchor_count == 1 and active_context_messages[1].get("role") == "user":
+                    leading_anchor_count = 2  # #457: attempt 1's retained anchor, kept, goes back ahead of its summary
                 anchor_leading_count = self._leading_anchor_count(anchor_source_messages)
                 self._pending_context_anchor_messages = anchor_source_messages[anchor_leading_count:]
                 try:

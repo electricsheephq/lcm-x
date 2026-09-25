@@ -663,6 +663,11 @@ class ReconcileMixin:
         forms = (self._message_replay_identity(row, stored_row=True, with_host_rewrite=h) for h in (False, True))
         return set(forms)
 
+    def _replay_row_admits(self, message, row: Dict[str, Any], *, carrier: bool = False) -> bool:
+        """A replayed message is a stored row's exact or override form; a DAG-verified carrier
+        by its glued row. Shared by the #524 replay term and the #457 resume so they agree."""
+        return self._message_replay_identity(message, strip_carrier=carrier) in self._stored_row_forms(row)
+
     def _anchor_row_admits(self, live_identity, row: Dict[str, Any]) -> bool:
         """messages[1] is bound by position to the retained row: its stored or override
         form, or either up to edge whitespace -- never across a lossy redaction (#498)."""
@@ -2223,6 +2228,45 @@ class ReconcileMixin:
             rewritten = rewritten or identity != stored
         return session_count if rewritten else None
 
+    def _replay_head(self, messages, start: int) -> tuple[int, bool]:
+        """End of the verified LCM scaffold rows at ``start``, and whether a DAG-verified carrier
+        follows them. Shared by the #524 replay term and the #457 resume so they agree."""
+        while start < len(messages) and self._is_verified_replay_scaffold_message(messages[start]):
+            start += 1
+        return start, start < len(messages) and self._generated_context_carrier_remainder(messages[start]) is not None
+
+    def _cursor_from_frontier_bound_replay(self, messages, rows) -> Optional[int]:
+        """#524: a list replaying an LCM emission a later commit superseded (a cancelled retry
+        after a prior adopted compaction replaced the durable proof). After an LCM head (verified
+        scaffold and/or a DAG-verified carrier) this session's rows must follow exactly, from a
+        row <= the frontier F through the LAST durable row, in one fit only; a carrier pins that
+        row to the first after its summary's coverage. Else None: today's persisted batch."""
+        n, (h, carrier) = len(messages), self._replay_head(messages, 0)
+        state = self._lifecycle.get_by_conversation(self._conversation_id) if (h or carrier) and h < n else None
+        frontier = int(getattr(state, "current_frontier_store_id", 0) or 0)
+        if state is None or str(state.current_session_id or "") != self._session_id or not (
+            0 < frontier == int(self._last_compacted_store_id or 0)
+        ):
+            return None
+        starts = range(max(0, len(rows) - n + h), len(rows))  # the run ends at the last durable row
+        if carrier:  # rows are the session tail: j == 0 is in range only when they are all of it
+            parts = self._verified_lcm_summary_prefix(normalize_content_value(messages[h].get("content")) or "")[1]
+            covered = self._dag.coverage_end(parts)
+            starts = [j for j in starts if covered and int(rows[j]["store_id"]) > covered >= (int(rows[j - 1]["store_id"]) if j else 0)]
+        above = sum(int(row["store_id"]) > frontier for row in rows)
+        self._load_host_rewrite_overrides(rows)
+        fits = [
+            h + len(rows) - j
+            for j in starts
+            if int(rows[j]["store_id"]) <= frontier and len(rows) - j > above
+            and all(self._replay_row_admits(messages[h + i], row, carrier=carrier and not i) for i, row in enumerate(rows[j:]))
+            and not any(
+                _has_lossy_redacted_identity(self._message_replay_identity(message, strip_carrier=carrier and not i))
+                for i, message in enumerate(messages[h:h + len(rows) - j])
+            )
+        ]
+        return fits[0] if len(fits) == 1 else None
+
     def _reconcile_ingest_cursor_from_store(
         self,
         messages: List[Dict[str, Any]],
@@ -2342,6 +2386,14 @@ class ReconcileMixin:
                 effective_incoming=proof_cursor,
             )
             return proof_cursor
+        replay_cursor = self._cursor_from_frontier_bound_replay(messages, stored_rows)
+        if replay_cursor is not None and replay_cursor > (cursor or 0):
+            self._record_ingest_reconciliation(
+                action="advanced cursor", reason="replayed superseded own-session emission below frontier",
+                cursor=replay_cursor, incoming=len(messages), session_count=session_count,
+                stored_tail_count=len(stored_tail), effective_incoming=replay_cursor,
+            )
+            return replay_cursor
         lossy_at = next(
             (
                 index
