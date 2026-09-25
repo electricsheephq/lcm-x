@@ -329,18 +329,23 @@ def test_tail_zero_merged_new_row_survives_restart(tmp_path, monkeypatch, mode, 
         engine.shutdown()
 
 
-def test_nested_authored_summary_is_not_recursively_stripped(tmp_path, monkeypatch):
+def test_nested_authored_summary_keeps_full_identity_under_a_v4_proof(tmp_path, monkeypatch):
+    """Under a v4 proof an authored S+S+X is never mapped by a DAG strip onto a stored S+X row:
+    unmapped before ingest, then stored whole as its own row (fix round 2: store direction)."""
     engine, _pre, compressed = _phase1_compacted_engine(tmp_path, monkeypatch, tail=0)
     block = _summary_block(engine, compressed)
     authored = block + "\n\n" + X
     nested = {"role": "user", "content": block + "\n\n" + authored}
     try:
-        assert engine._generated_context_carrier_remainder(nested) == authored
-        assert engine._message_replay_identity(nested)[1] == authored
         stored_id = engine._store.append("S0", {"role": "user", "content": authored})
-        mapped = engine._get_store_id_map_for_messages([nested])
-        assert mapped[id(nested)] == stored_id
-        assert engine._store.get_batch([stored_id])[stored_id]["content"] == authored
+        assert engine._get_store_id_map_for_messages([nested]).get(id(nested)) is None
+        host = [dict(m) for m in compressed] + [nested]
+        engine.ingest(host)
+        own_id = engine._get_store_id_map_for_messages(host).get(id(nested))
+        assert own_id is not None and own_id != stored_id
+        rows = engine._store.get_batch([stored_id, own_id])
+        assert rows[own_id]["content"] == nested["content"]
+        assert rows[stored_id]["content"] == authored
     finally:
         engine.shutdown()
 
