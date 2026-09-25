@@ -4931,14 +4931,18 @@ class LCMEngine(
     def _verified_lcm_summary_prefix_end(self, content: str) -> Optional[int]:
         """End offset of the leading LCM summary parts, each verified byte for byte
         against its DAG node; None when the content does not start with one."""
+        return self._verified_lcm_summary_prefix(content)[0]
+
+    def _verified_lcm_summary_prefix(self, content: str) -> tuple[Optional[int], list[int]]:
+        """(end offset, node ids) of the verified leading LCM summary parts, else (None, [])."""
         if not content.startswith("[") or "[Expand for details:" not in content:
-            return None
+            return None, []
         dag = getattr(self, "_dag", None)
         session_id = getattr(self, "_session_id", "")
         if dag is None or not session_id:
-            return None
+            return None, []
         pos = 0
-        saw_part = False
+        node_ids: list[int] = []
         while True:
             header = self._LCM_SUMMARY_PART_HEADER_RE.match(content, pos)
             if header is None:
@@ -4946,26 +4950,26 @@ class LCMEngine(
             try:
                 node = dag.get_node(int(header.group(2)))
             except Exception:
-                return None
+                return None, []
             # Only the bound session's own nodes: compress() renders them, and a
             # rotation carries them to the child. A quoted part of another
             # session's summary is content (#484 item 11j).
             if node is None or node.session_id != session_id or int(node.depth) != int(header.group(1)):
-                return None
+                return None, []
             label = {0: "Recent", 1: "Session Arc", 2: "Durable"}.get(node.depth, f"Depth-{node.depth}")
             part = (
                 f"[{label} Summary (d{node.depth}, node {node.node_id})]\n"
                 f"{node.summary}\n[Expand for details: {node.expand_hint}]"
             )
             if not content.startswith(part, pos):
-                return None
+                return None, []
             pos += len(part)
-            saw_part = True
+            node_ids.append(int(node.node_id))
             if content.startswith("\n\n---\n\n", pos) and self._LCM_SUMMARY_PART_HEADER_RE.match(content, pos + 7):
                 pos += 7
                 continue
             break
-        return pos if saw_part else None
+        return (pos, node_ids) if node_ids else (None, [])
 
     def _generated_context_carrier_remainder(self, msg: Dict[str, Any]) -> Optional[str]:
         """Return the real row glued behind a verified LCM summary prefix, else None.

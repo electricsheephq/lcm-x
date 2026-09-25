@@ -478,10 +478,12 @@ def test_retained_anchor_that_loses_anchor_status_is_preserved(tmp_path, monkeyp
         assert not any(set(n.source_ids) & set(leaf1.source_ids) for n in new_leaves), "3..18 not re-summarized"
         assert provider.calls <= 2 and conflicts == []
         assert engine._last_compression_status == "compacted"
-        # Kept raw right after the committed summary; the retry makes no provider call.
+        # Attempt 1's chronology: [system, kept row 2, summary of 3..18, remainder]; no provider call.
         assert provider.calls == 1 and new_leaves == []
-        assert [m["content"] for m in out[2:]] == [m["content"] for m in retry[1:2] + retry[18:]]
-        assert f"{HEADER}{leaf1.node_id})" in str(out[1]["content"]) and out[0] == messages[0]
+        assert out[0] == messages[0] and out[1] == messages[1] == committed[1]
+        assert str(out[2]["content"]).startswith(f"[Recent {HEADER}{leaf1.node_id})]")
+        assert [m["content"] for m in out[2:]] == [m["content"] for m in committed[2:]] + [retry[-1]["content"]]
+        assert all(str(m["content"]) in _texts(out[2:]) for m in retry[18:]), "the remainder, in order"
         rows = engine._store._conn.execute("SELECT session_id, role, content FROM messages").fetchall()
         assert len(rows) == len(retry) and len(set(rows)) == len(rows), "0 duplicate rows"
     finally:
