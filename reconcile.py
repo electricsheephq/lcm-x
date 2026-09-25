@@ -1322,6 +1322,11 @@ class ReconcileMixin:
         # One projection over the complete list (#488): skips are occurrence-bound.
         projection, occurrences = self._occurrence_replay_identities(messages, self._active_emission_proof())
         occurrence_identities = {id(m): i for m, i in zip(messages, occurrences) if i is not None}
+        stored_forms = set(stored_tail)
+        for m, e, i in zip(messages, projection.entries, occurrences):  # #499 composite: stored whole
+            if i is not None and e.generated_span and i not in stored_forms:
+                whole = self._message_replay_identity(m, stored_row=True)
+                occurrence_identities[id(m)] = whole if whole in stored_forms else i
         scaffold_ids = {id(m) for m, i in zip(messages, occurrences) if i is None}
         objective_ids = {
             id(m) for m, e in zip(messages, projection.entries) if e.kind == "objective" and e.generated_span is not None
@@ -2046,7 +2051,7 @@ class ReconcileMixin:
             native = bool(payload.get("native") and summary_index is not None and len(droppable) == len(target))
             skip_metadata_valid = len(skip_landing) == len(target)
             matched = 0
-            index = 0
+            index = composite = 0
             n = len(messages)
             if not target:
                 # A scaffold-only output (fresh_tail_count=0): the proof covers exactly
@@ -2061,7 +2066,8 @@ class ReconcileMixin:
                     ):
                         return None
                     if occurrences[index] is not None:
-                        break  # the host merged a new row into it (#499): stored whole, matched in full below
+                        composite = index + 1  # the host merged a new row into it (#499): stored whole, matched below
+                        break
                     index += 1
             while index < n and matched < len(target):
                 identity = occurrences[index]
@@ -2118,7 +2124,7 @@ class ReconcileMixin:
                 for row in page:
                     if index >= n:
                         return None
-                    identity = proof_identity(messages[index])
+                    identity = proof_identity(messages[index], stored_row=index + 1 == composite)
                     if _has_lossy_redacted_identity(identity) or identity != proof_identity(
                         row, stored_row=True, with_host_rewrite=True
                     ):
@@ -2795,6 +2801,9 @@ class ReconcileMixin:
         stored_forms = {*stored_identities, *filter(None, stored_alt_identities)}
         for msg in messages:
             identity = occurrences.get(id(msg))
+            if identity is not None and identity not in stored_forms:  # #499: a row the host merged
+                whole = self._message_replay_identity(msg, stored_row=True)  # into an emitted one is stored whole
+                identity = whole if whole in stored_forms else identity
             if identity is None:
                 identity = self._message_replay_identity(msg, strip_carrier=False)
                 identity = identity if identity in stored_forms else self._message_replay_identity(msg)

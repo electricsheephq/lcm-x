@@ -11,9 +11,16 @@ import time
 
 import pytest
 
+import hermes_lcm.engine as lcm_engine_module
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
-from tests.test_compression_boundary import _config, _summary_carrier_fixture, _turn
+from tests.test_compression_boundary import (
+    _config,
+    _host_merge_consecutive_users,
+    _stub_summarizer,
+    _summary_carrier_fixture,
+    _turn,
+)
 from tests.test_issue_488_emission_descriptors import _record, _scoped_proof
 from tests.test_issue_488_emission_proof import (
     _phase1_compacted_engine,
@@ -164,5 +171,77 @@ def test_carrier_remainder_only_when_its_suffix_matched(tmp_path, kind, retained
             messages, _scoped_proof(kind, span, "retained", retained_source=retained)
         )
         assert identities[1][1] == (row["content"] if remainder is None else remainder)
+    finally:
+        engine.shutdown()
+
+
+def _merged_composite_session(tmp_path, monkeypatch, *, tail, mode, objective=""):
+    """Compact once, then the host merges a NEW user row into the emitted head (#499)."""
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
+
+    def make():
+        return LCMEngine(config=_config(tmp_path, fresh_tail_count=tail), hermes_home=str(tmp_path / "home"))
+
+    engine, host, child = make(), [], "S0" if mode == "inplace" else "S1"
+    engine.on_session_start("S0", platform="acp", context_length=200_000)
+
+    def add(message):
+        host.append(dict(message))
+        host[:] = _host_merge_consecutive_users(host)
+        engine.ingest(host)
+
+    for i in range(1, 13):
+        add(_turn(i)[0])
+        add(_turn(i)[1])
+    add({"role": "user", "content": _turn(13)[0]["content"] + objective})
+    pre = list(host)
+    out = engine.compress(list(host), force=True)
+    assert engine._last_compression_status == "compacted"
+    engine.on_session_end("S0", pre)
+    engine.on_session_start(child, boundary_reason="compression", old_session_id="S0", platform="acp")
+    host[:] = [dict(m) for m in out]
+    add({"role": "user", "content": "NEW-0 typed after the compaction"})
+    add({"role": "assistant", "content": "reply to NEW-0"})
+    return engine, host, make, child, add
+
+
+def _rows(engine):
+    return engine._store._conn.execute("SELECT role, content FROM messages ORDER BY store_id").fetchall()
+
+
+@pytest.mark.parametrize("mode", ["inplace", "rotation"])
+def test_host_merged_composite_maps_whole_and_compacts_again(tmp_path, monkeypatch, mode):
+    """#499 tail 0: the composite is stored whole, so the mapper maps it whole (no source gap)."""
+    engine, host, _make, _child, add = _merged_composite_session(tmp_path, monkeypatch, tail=0, mode=mode)
+    try:
+        for i in range(30, 34):
+            add(_turn(i)[0])
+            add(_turn(i)[1])
+        add(_turn(34)[0])
+        assert id(host[0]) in engine._get_store_id_map_for_messages(list(host))
+        engine.compress(list(host), force=True)
+        assert engine._last_compression_status == "compacted", engine._last_compression_noop_reason
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize(
+    "tail,mode,objective",
+    [(1, "rotation", ""), (0, "inplace", "\nimage data:image/png;base64," + "iVBORw0KGgoAAAANSUhEUgAA" * 400)],
+    ids=["carrier-extension", "objective-payload"],
+)
+def test_host_merged_composite_is_not_stored_again_after_restart(tmp_path, monkeypatch, tail, mode, objective):
+    """#499 after a restart: the store-tail walk and the durable proof walk match the composite
+    in its stored (whole) form, so the replayed rows are not persisted twice."""
+    engine, host, make, child, _add = _merged_composite_session(
+        tmp_path, monkeypatch, tail=tail, mode=mode, objective=objective
+    )
+    before = _rows(engine)
+    engine.shutdown()
+    engine = make()
+    try:
+        engine.on_session_start(child, platform="acp", context_length=200_000)
+        engine.ingest(host)
+        assert _rows(engine) == before
     finally:
         engine.shutdown()
