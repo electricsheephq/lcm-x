@@ -664,7 +664,8 @@ class ReconcileMixin:
         self._bound_host_rewrite_overrides({store_id})
 
     def _message_replay_identity(
-        self, msg: Dict[str, Any], *, stored_row: bool = False, with_host_rewrite: bool = False
+        self, msg: Dict[str, Any], *, stored_row: bool = False, with_host_rewrite: bool = False,
+        strip_carrier: bool = True,
     ) -> tuple[str, str, str, str, str]:
         role = str(msg.get("role") or "unknown")
         content = normalize_content_value(msg.get("content")) or ""
@@ -676,9 +677,10 @@ class ReconcileMixin:
             override = self._host_rewrite_state()[1].get(int(msg.get("store_id") or 0))
             strip_payload = override_content is not None and bool(override.get("strip_payload"))
         # A host-merged LCM summary carrier (#483) is identified by the real row
-        # glued behind its DAG-verified summary prefix.
+        # glued behind its DAG-verified summary prefix. Stored rows keep FULL
+        # identity (#488): a stored row is exactly what was durably written.
         carrier_rest = getattr(self, "_generated_context_carrier_remainder", None)
-        if role == "user" and callable(carrier_rest):
+        if role == "user" and strip_carrier and not stored_row and callable(carrier_rest):
             glued_row = carrier_rest({"role": "user", "content": content})
             if glued_row is not None:
                 content = glued_row
