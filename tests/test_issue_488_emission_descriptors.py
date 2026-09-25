@@ -711,6 +711,31 @@ def test_remember_keeps_live_original_generated_provenance_until_replaced(tmp_pa
         engine.shutdown()
 
 
+def test_append_after_remember_keeps_live_original_generated_provenance(tmp_path):
+    engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "append.db")))
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        placeholder = engine._ignored_active_replay_placeholder("api_key=sk-ignore...cdef")
+        digest = engine._active_replay_placeholder_digest(placeholder)
+        assert digest is not None
+        literal = {"role": "user", "content": placeholder}
+        generated = {"role": "user", "content": placeholder}
+        assert engine._store.append("S0", literal) == 1
+        engine._remember_generated_ignored_placeholder_hash(digest)
+        engine._generated_ignored_active_replay_placeholder_message_ids.add(id(generated))
+        active = [literal, generated]
+        engine._remember_active_replay_messages(active, active)
+        engine._ingest_cursor = len(active)
+
+        active.append({"role": "assistant", "content": "appended assistant reply"})
+        engine.ingest(active)
+
+        mapping = engine._get_store_id_map_for_messages(active)
+        assert [mapping.get(id(message)) for message in active] == [1, None, 2]
+    finally:
+        engine.shutdown()
+
+
 def test_projection_retained_source_is_immutable_and_detached(tmp_path):
     engine, compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
     try:

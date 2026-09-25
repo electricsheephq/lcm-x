@@ -4831,6 +4831,7 @@ class LCMEngine(
             active_replay_messages
         )
         self._refresh_generated_active_replay_placeholder_retention(
+            original_messages,
             active_replay_messages,
             self._last_active_replay_messages,
         )
