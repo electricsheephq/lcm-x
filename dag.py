@@ -745,6 +745,20 @@ class SummaryDAG:
         ).fetchall()
         return [self._row_to_node(r) for r in rows]
 
+    def get_leaf_sources_through(self, session_id: str,
+                                 end_store_id: int) -> List[tuple[int, int, int]]:
+        """(node_id, token_count, store_id) for each source row at or before
+        ``end_store_id`` of this session's leaf (``messages``) nodes."""
+        with self._db_lock:
+            rows = self._conn.execute(
+                """SELECT n.node_id, n.token_count, source.value
+                   FROM summary_nodes AS n, json_each(n.source_ids) AS source
+                   WHERE n.session_id = ? AND n.source_type = 'messages'
+                     AND source.value <= ?""",
+                (session_id, int(end_store_id)),
+            ).fetchall()
+        return [(int(row[0]), int(row[1] or 0), int(row[2])) for row in rows]
+
     def source_message_ids(self, node_id: int, *, limit: int) -> List[int]:
         """Resolve a node to the store_ids of the messages underneath it.
 

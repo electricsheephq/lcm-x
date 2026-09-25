@@ -1075,15 +1075,21 @@ class CompactionMixin:
                 after_store_id = int(rows[-1].get("store_id") or after_store_id)
         return proofs
 
-    def _committed_replay_prefix_len(
+    def _committed_replay_drops(
         self,
         working: List[Dict[str, Any]],
         start: int,
-    ) -> tuple[int, Optional[dict[int, int]]]:
-        """(#457) Length of the replayed run at ``start`` that is exactly this session's
-        durable rows ending at the lifecycle frontier F and followed by F+1 (or nothing),
-        plus the store-id map of ``working[start:]`` when computed. Any failed check
-        returns 0: today's behaviour."""
+    ) -> tuple[list[int], Optional[dict[int, int]], int, int]:
+        """(#457) Positions of the replayed run at ``start`` that committed lineage accounts
+        for, the store-id map of ``working[start:]`` when computed, the token cost of the
+        covering leaves, and how many run rows stay. The run must be exactly this session's
+        durable rows ending at the lifecycle frontier F and followed by F+1 (or nothing).
+        A row is consumed only when a leaf's ``source_ids`` hold it, or when it is an
+        assistant/tool reply the publication folded in after the first lineage row (a run
+        trailing the lineage must hold only such replies). Every other row stays in place:
+        a user row outside lineage is never consumed. Any failed check consumes nothing:
+        today's behaviour. Leaf nodes are deleted only by a session reset or purge, which
+        can only shrink the lineage and so keep more rows."""
         state = self._lifecycle.get_by_conversation(self._conversation_id)
         frontier = int(getattr(state, "current_frontier_store_id", 0) or 0)
         if (
@@ -1093,7 +1099,7 @@ class CompactionMixin:
             or frontier <= 0
             or int(self._last_compacted_store_id or 0) != frontier
         ):
-            return 0, None
+            return [], None, 0, 0
         ids = self._get_store_id_map_for_messages(working[start:])
         end = next(
             (i for i in range(start, len(working)) if ids.get(id(working[i]), 0) > frontier),
@@ -1108,15 +1114,30 @@ class CompactionMixin:
             or [int(row["store_id"]) for row in after]
             != ([ids[id(working[end])]] if end < len(working) else [])
         ):
-            return 0, ids
+            return [], ids, 0, 0
         self._load_host_rewrite_overrides(rows)
         if not all(
             self._message_replay_identity(message, strip_carrier=False)
             in self._stored_row_forms(row)
             for message, row in zip(working[start:end], rows)
         ):
-            return 0, ids
-        return end - start, ids
+            return [], ids, 0, 0
+        leaf_sources = self._dag.get_leaf_sources_through(self._session_id, frontier)
+        lineage = {store_id for _node, _tokens, store_id in leaf_sources}
+        replies = {"assistant", "tool"}
+        if not lineage or any(
+            int(row["store_id"]) > max(lineage) and str(row.get("role") or "") not in replies
+            for row in rows
+        ):
+            return [], ids, 0, 0
+        dropped = {
+            start + offset: int(row["store_id"])
+            for offset, row in enumerate(rows)
+            if int(row["store_id"]) in lineage
+            or (int(row["store_id"]) > min(lineage) and str(row.get("role") or "") in replies)
+        }
+        covering = {node: tokens for node, tokens, store_id in leaf_sources if store_id in dropped.values()}
+        return sorted(dropped), ids, sum(covering.values()), len(rows) - len(dropped)
 
     def _compress_impl(self, messages: List[Dict[str, Any]],
                        current_tokens: int = None,
@@ -1377,24 +1398,33 @@ class CompactionMixin:
             ):
                 candidate_start += 1
             # #457: a retry replays rows a cancelled attempt already committed; drop
-            # them with the scaffold. Reuse the map when the pass maps this same list.
-            scaffold_end, premapped_store_ids = candidate_start, None
+            # those with the scaffold, keeping any row committed lineage does not hold.
+            # Reuse the map when the pass maps this same list.
+            drops, premapped_store_ids, kept = set(range(leading_anchor_count, candidate_start)), None, 0
             if leaf_passes == 0 and not resumed_prefix:
-                resumed_count, store_ids = self._committed_replay_prefix_len(working_messages, candidate_start)
-                candidate_start, resumed_prefix = candidate_start + resumed_count, resumed_count > 0
-                premapped_store_ids = store_ids if candidate_start == leading_anchor_count else None
-            if candidate_start > leading_anchor_count:
+                resumed, store_ids, summary_tokens, kept = self._committed_replay_drops(
+                    working_messages, candidate_start
+                )
+                resumed_prefix = bool(resumed)
+                premapped_store_ids = None if drops or resumed else store_ids
+                if resumed:  # the committed summary replaces the dropped rows in the estimate
+                    resumed_tokens = count_messages_tokens([working_messages[index] for index in resumed])
+                    estimated_active_tokens = max(0, estimated_active_tokens - resumed_tokens + summary_tokens)
+                drops.update(resumed)
+            if drops:
                 publication_excluded_store_ids.extend(
                     self._get_store_ids_for_messages(
-                        working_messages[leading_anchor_count:scaffold_end]
+                        working_messages[leading_anchor_count:candidate_start]
                     )
                 )
                 dropped_replayed_scaffold_messages = True
-                working_messages = working_messages[:leading_anchor_count] + working_messages[candidate_start:]
-                pressure_messages = pressure_messages[:leading_anchor_count] + pressure_messages[candidate_start:]
+                working_messages = [message for index, message in enumerate(working_messages) if index not in drops]
+                pressure_messages = [message for index, message in enumerate(pressure_messages) if index not in drops]
                 candidate_start = leading_anchor_count
                 fresh_tail_start = self._fresh_tail_start(pressure_messages)
-                if fresh_tail_start <= leading_anchor_count:
+                # A kept row at or below F has no raw store lineage for a new leaf: return it
+                # raw after the committed summary instead of a pass that cannot publish.
+                if fresh_tail_start <= leading_anchor_count or (resumed_prefix and kept):
                     noop_reason = "selected leaf chunk lacks raw store lineage"
                     break
 

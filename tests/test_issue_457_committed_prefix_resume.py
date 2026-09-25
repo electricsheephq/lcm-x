@@ -76,14 +76,14 @@ def test_default_tuning_late_cancel_then_retry_resumes(tmp_path, monkeypatch, ca
 
     monkeypatch.setattr(aux, "call_llm", provider)
     resumes = []
-    real_prefix_len = LCMEngine._committed_replay_prefix_len
+    real_prefix_len = LCMEngine._committed_replay_drops
 
     def spy_prefix_len(self, working, start):
         found = real_prefix_len(self, working, start)
-        resumes.append({"k": found[0], "start": start, "v4": self._compress_occurrences is not None})
+        resumes.append({"k": len(found[0]), "start": start, "v4": self._compress_occurrences is not None})
         return found
 
-    monkeypatch.setattr(LCMEngine, "_committed_replay_prefix_len", spy_prefix_len)
+    monkeypatch.setattr(LCMEngine, "_committed_replay_drops", spy_prefix_len)
     messages = _transcript()
     original = deepcopy(messages)
     engine = _engine(tmp_path)

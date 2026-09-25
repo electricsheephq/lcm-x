@@ -53,9 +53,9 @@ def _engine(tmp_path, **overrides):
     return engine
 
 
-def _transcript():
+def _transcript(prefix_tokens=24_000):
     plain, i = [], 0
-    while len(plain) < 40 or count_messages_tokens(plain[:-30]) < 24_000:
+    while len(plain) < 40 or count_messages_tokens(plain[:-30]) < prefix_tokens:
         plain.append({"role": "user" if i % 2 == 0 else "assistant",
                       "content": f"owned turn {i} " + " ".join(f"w{i}x{j}" for j in range(120))})
         i += 1
@@ -78,16 +78,24 @@ def _leaves(engine):
     return [n for n in engine._dag.get_session_nodes(SID) if n.source_type == "messages"]
 
 
+RESUME_HELPER = "_committed_replay_drops"
+
+
+def _NO_RESUME(self, working, start):
+    return [], None, 0, 0
+
+
 def _spy_resumes(monkeypatch):
+    """Record how many replayed rows each first-pass resume check consumed."""
     found = []
-    real = LCMEngine._committed_replay_prefix_len
+    real = getattr(LCMEngine, RESUME_HELPER)
 
     def spy(self, working, start):
         result = real(self, working, start)
-        found.append(result[0])
+        found.append(len(result[0]))
         return result
 
-    monkeypatch.setattr(LCMEngine, "_committed_replay_prefix_len", spy)
+    monkeypatch.setattr(LCMEngine, RESUME_HELPER, spy)
     return found
 
 
@@ -166,7 +174,7 @@ def _control_run(tmp_path, monkeypatch, mutate, *, resume):
                 found = _spy_resumes(patch)
             else:
                 found = []
-                patch.setattr(LCMEngine, "_committed_replay_prefix_len", lambda self, w, s: (0, None))
+                patch.setattr(LCMEngine, RESUME_HELPER, _NO_RESUME)
             out = _compress(engine, replay)
         return {**_snapshot(engine, provider, out), "resumed": [k for k in found if k]}
     finally:
@@ -181,9 +189,11 @@ def test_negative_controls_keep_the_prefix_fail_open_output(tmp_path, monkeypatc
     assert fixed == {**today, "resumed": []}
 
 
-def test_operator_rotate_frontier_without_summary_is_not_resumed(tmp_path, monkeypatch):
+@pytest.mark.parametrize("restart", [False, True], ids=["same-engine", "cold-engine"])
+def test_operator_rotate_frontier_without_summary_is_not_resumed(tmp_path, monkeypatch, restart):
     """rotate_active_session advances the lifecycle frontier with NO summary and leaves the
-    in-process marker behind: those rows must never be dropped from the active view."""
+    in-process marker behind; a cold restart re-binds the marker to that frontier. Either
+    way those rows have no committed lineage and must never be dropped from the active view."""
     def run(resume):
         messages = _transcript()
         provider = _Provider()
@@ -194,11 +204,14 @@ def test_operator_rotate_frontier_without_summary_is_not_resumed(tmp_path, monke
                 engine.ingest(messages)
                 assert engine.rotate_active_session(apply=True)["ok"]
                 assert _frontier(engine) > int(engine._last_compacted_store_id or 0)
+                if restart:
+                    engine = _restart(engine, tmp_path / str(resume))
+                    assert _frontier(engine) == int(engine._last_compacted_store_id or 0)
                 if resume:
                     found = _spy_resumes(patch)
                 else:
                     found = []
-                    patch.setattr(LCMEngine, "_committed_replay_prefix_len", lambda self, w, s: (0, None))
+                    patch.setattr(LCMEngine, RESUME_HELPER, _NO_RESUME)
                 out = _compress(engine, messages)
                 return {**_snapshot(engine, provider, out), "resumed": [k for k in found if k]}
             finally:
@@ -300,12 +313,16 @@ def _anchored_tool_transcript():
     return messages
 
 
+ANCHORED = {"fresh_tail_count": 4, "leaf_chunk_tokens": 1,
+            "large_output_externalization_enabled": True,
+            "large_output_externalization_threshold_chars": 500}
+
+
 def test_retained_anchor_tool_pairs_and_externalized_payloads_resume(tmp_path, monkeypatch):
-    anchored = {"fresh_tail_count": 4, "leaf_chunk_tokens": 1,
-                "large_output_externalization_enabled": True,
-                "large_output_externalization_threshold_chars": 500}
+    """The anchor-status flip of this same fixture is
+    test_retained_anchor_that_loses_anchor_status_is_preserved."""
     messages = _anchored_tool_transcript()
-    engine, provider, committed = _cancelled_commit(tmp_path, monkeypatch, messages, **anchored)
+    engine, provider, committed = _cancelled_commit(tmp_path, monkeypatch, messages, **ANCHORED)
     try:
         assert engine._last_compression_status == "compacted" and provider.calls == 1
         assert committed[1] == messages[1], "the sole real user stays the retained anchor"
@@ -385,7 +402,7 @@ def test_steady_state_after_resume_consumes_nothing_extra(tmp_path, monkeypatch)
                     found = _spy_resumes(patch)
                 else:
                     found = []
-                    patch.setattr(LCMEngine, "_committed_replay_prefix_len", lambda self, w, s: (0, None))
+                    patch.setattr(LCMEngine, RESUME_HELPER, _NO_RESUME)
                 result = _compress(engine, live)
             return {**_snapshot(engine, provider, result), "resumed": [k for k in found if k]}
         finally:
@@ -420,5 +437,146 @@ def test_resume_does_not_engage_the_fresh_tail_pressure_yield(tmp_path, monkeypa
         found = _spy_resumes(monkeypatch)
         out = _compress(engine, messages)
         assert found == [110] and yields == [] and out == committed and provider.calls == 1
+    finally:
+        engine.shutdown()
+
+
+# -- round 2: consumed rows must be accounted for by committed lineage ---------------------------
+
+def _texts(out):
+    return "\n".join(str(m.get("content") or "") for m in out)
+
+
+def test_retained_anchor_that_loses_anchor_status_is_preserved(tmp_path, monkeypatch):
+    """N1: attempt 1 keeps user row 2 as the retained anchor and summarizes 3..18. A new user
+    turn before the retry ends row 2's anchor status; it was never summarized, so the retry
+    must keep it (raw or under a NEW leaf) while rows 3..18 are not summarized again."""
+    messages = _anchored_tool_transcript()
+    engine, provider, committed = _cancelled_commit(tmp_path, monkeypatch, messages, **ANCHORED)
+    try:
+        (leaf1,) = _leaves(engine)
+        assert committed[1] == messages[1] and leaf1.source_ids == list(range(3, 19))
+        assert _frontier(engine) == 18 and provider.calls == 1
+        retry = deepcopy(messages) + [{"role": "user", "content": "a NEW user turn before the retry"}]
+        conflicts = []
+        real_stage = LifecycleStateStore.stage_compaction_publication
+
+        def stage(self, *args, **kwargs):
+            try:
+                return real_stage(self, *args, **kwargs)
+            except LifecyclePublicationConflictError as exc:
+                conflicts.append(str(exc))
+                raise
+
+        monkeypatch.setattr(LifecycleStateStore, "stage_compaction_publication", stage)
+        engine.ingest(retry)
+        out = _compress(engine, retry)
+        leaves = _leaves(engine)
+        new_leaves = [n for n in leaves if n.node_id != leaf1.node_id]
+        assert messages[1]["content"] in _texts(out) or any(2 in n.source_ids for n in new_leaves), \
+            "the original prompt stays in the active context"
+        assert not any(set(n.source_ids) & set(leaf1.source_ids) for n in new_leaves), "3..18 not re-summarized"
+        assert provider.calls <= 2 and conflicts == []
+        assert engine._last_compression_status == "compacted"
+        # Kept raw right after the committed summary; the retry makes no provider call.
+        assert provider.calls == 1 and new_leaves == []
+        assert [m["content"] for m in out[2:]] == [m["content"] for m in retry[1:2] + retry[18:]]
+        assert f"{HEADER}{leaf1.node_id})" in str(out[1]["content"]) and out[0] == messages[0]
+        rows = engine._store._conn.execute("SELECT session_id, role, content FROM messages").fetchall()
+        assert len(rows) == len(retry) and len(set(rows)) == len(rows), "0 duplicate rows"
+    finally:
+        engine.shutdown()
+
+
+def test_cold_restart_after_operator_rotation_drops_nothing(tmp_path, monkeypatch):
+    """N2: rotate_active_session advances the frontier with no summary; a cold restart binds
+    the in-process marker to it. The replay still has no committed lineage: nothing is dropped."""
+    messages = _transcript()
+    provider = _Provider()
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", provider)
+    engine = _engine(tmp_path)
+    try:
+        engine.ingest(messages)
+        assert engine.rotate_active_session(apply=True)["ok"] and _frontier(engine) == 110
+        engine = _restart(engine, tmp_path)
+        assert int(engine._last_compacted_store_id or 0) == _frontier(engine) == 110
+        out = _compress(engine, deepcopy(messages))
+        text = _texts(out)
+        assert all(str(m["content"]) in text for m in messages if m.get("content")), "all 142 rows kept"
+        # The resume-disabled control makes the same one provider call and keeps the same rows.
+        assert engine._dag.get_session_nodes(SID) == [] and engine._store.get_session_count(SID) == 142
+    finally:
+        engine.shutdown()
+
+
+def test_frontier_on_a_user_row_outside_lineage_is_not_resumed(tmp_path, monkeypatch):
+    """N3: a cancelled compaction commits 1..110, then an operator rotation moves the frontier
+    to a later USER row with no summary; after a cold restart the run's last row F is a user
+    row outside committed lineage, so the helper consumes nothing."""
+    def run(resume):
+        messages = _transcript()
+        for index in range(13):
+            messages.append({"role": "user" if index % 2 == 0 else "assistant",
+                             "content": f"extra turn {index} " + " ".join(f"e{index}x{j}" for j in range(60))})
+        engine, provider, _ = _cancelled_commit(tmp_path / str(resume), monkeypatch, messages[:142])
+        try:
+            engine.ingest(messages)
+            assert engine.rotate_active_session(apply=True)["ok"]
+            frontier = _frontier(engine)
+            engine = _restart(engine, tmp_path / str(resume))
+            role = engine._store._conn.execute(
+                "SELECT role FROM messages WHERE store_id = ?", (frontier,)).fetchone()[0]
+            with monkeypatch.context() as patch:
+                if resume:
+                    found = _spy_resumes(patch)
+                else:
+                    found = []
+                    patch.setattr(LCMEngine, RESUME_HELPER, _NO_RESUME)
+                out = _compress(engine, deepcopy(messages))
+            return {**_snapshot(engine, provider, out), "resumed": [k for k in found if k],
+                    "f_role": role, "frontier_before": frontier}
+        finally:
+            engine.shutdown()
+
+    fixed, today = run(True), run(False)
+    assert fixed["f_role"] == "user" and fixed["frontier_before"] > 110
+    assert fixed["resumed"] == [] and fixed == {**today, "resumed": []}
+
+
+def test_resumed_rows_are_discounted_from_the_token_estimate(tmp_path, monkeypatch):
+    """T2: with dynamic leaf chunking the retry stops where an uninterrupted run stops: the
+    committed summary, not the dropped rows, counts toward the continuation estimate."""
+    dynamic = {"dynamic_leaf_chunk_enabled": True, "leaf_chunk_tokens": 4_000}
+    messages = _transcript(80_000)
+    tokens = count_messages_tokens(messages)
+
+    with monkeypatch.context() as patch:
+        control = _Provider()
+        patch.setattr(lcm_engine_module, "summarize_with_escalation", control)
+        engine = _engine(tmp_path / "control", **dynamic)
+        try:
+            engine.threshold_tokens = 40_000
+            engine.ingest(messages)
+            engine.compress(messages, current_tokens=tokens)
+            control_leaves = [len(n.source_ids) for n in _leaves(engine)]
+            raw_left = engine._store.get_session_count(SID) - _frontier(engine) - 32
+        finally:
+            engine.shutdown()
+    assert control.calls == len(control_leaves) == 2 and raw_left > 0, "stopped by the threshold"
+
+    provider = _Provider(cancel_on={2})
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", provider)
+    engine = _engine(tmp_path / "retry", **dynamic)
+    try:
+        engine.threshold_tokens = 40_000
+        engine.ingest(messages)
+        with pytest.raises(_HostCancel):
+            engine.compress(messages, current_tokens=tokens)
+        assert [len(n.source_ids) for n in _leaves(engine)] == control_leaves[:1]
+        found = _spy_resumes(monkeypatch)
+        engine.compress(deepcopy(messages), current_tokens=tokens)
+        assert found[:1] == [control_leaves[0]]
+        assert provider.calls - 2 == control.calls - 1, "the retry runs only the control's remaining pass"
+        assert len(_leaves(engine)) == len(control_leaves)
     finally:
         engine.shutdown()
