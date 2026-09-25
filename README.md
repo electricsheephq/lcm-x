@@ -131,7 +131,7 @@ separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
 The `main` line now identifies itself as
-`hermes-lcm-x v0.24.1 (15 tools)` — the #488 replay-reconciliation patch (#510, #515) on top of the
+`hermes-lcm-x v0.24.1 (15 tools)` — the #488 replay-reconciliation patch (#510, #515; #517 rollback-readable proof) on top of the
 `v0.24.0` release tag, which identifies itself as `hermes-lcm-x v0.24.0 (15 tools)`.
 This is the forward bump for the next patch release, never a restamp
 of any past commit's own recorded identity (#385 fixed the earlier drift).
