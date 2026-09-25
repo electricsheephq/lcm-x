@@ -645,8 +645,64 @@ def test_placeholder_keepalive_tracks_only_current_snapshot(tmp_path):
         )
         assert current_placeholder_count == len(messages)
         assert len(engine._generated_ignored_active_replay_placeholder_messages) <= (
-            current_placeholder_count
+            2 * current_placeholder_count
         )
+    finally:
+        engine.shutdown()
+
+
+def test_cache_hit_placeholder_retention_stays_bounded_to_live_replay(tmp_path):
+    engine, _compacted, _tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        generated = {"role": "user", "content": "ignored generated placeholder"}
+        engine._generated_ignored_active_replay_placeholder_message_ids.add(id(generated))
+        engine._remember_active_replay_messages([generated], [generated])
+        engine._ingest_cursor = 1
+
+        for _ in range(200):
+            returned = engine._ingest_messages([generated])
+
+        assert len(engine._generated_ignored_active_replay_placeholder_messages) == 2
+        assert engine._generated_ignored_active_replay_placeholder_message_ids == {
+            id(generated),
+            id(returned[0]),
+        }
+    finally:
+        engine.shutdown()
+
+
+def test_remember_keeps_live_original_generated_provenance_until_replaced(tmp_path):
+    engine, _compacted, _tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        placeholder = engine._ignored_active_replay_placeholder("api_key=sk-ignore...cdef")
+        digest = engine._active_replay_placeholder_digest(placeholder)
+        assert digest is not None
+        literal = {"role": "user", "content": placeholder}
+        generated = {"role": "user", "content": placeholder}
+        literal_store_id = engine._store.append("S0", literal)
+        engine._remember_generated_ignored_placeholder_hash(digest)
+        engine._generated_ignored_active_replay_placeholder_message_ids.add(id(generated))
+        active = [literal, generated]
+
+        before = engine._get_store_id_map_for_messages(active)
+        assert before.get(id(literal)) == literal_store_id
+        assert id(generated) not in before
+
+        returned = engine._remember_active_replay_messages(active, active)
+        after = engine._get_store_id_map_for_messages(returned)
+        assert after.get(id(literal)) == literal_store_id
+        assert id(generated) not in after
+        old_generated_ids = set(
+            engine._generated_ignored_active_replay_placeholder_message_ids
+        )
+
+        replacement = {"role": "user", "content": placeholder}
+        engine._generated_ignored_active_replay_placeholder_message_ids.add(id(replacement))
+        engine._remember_active_replay_messages([replacement], [replacement])
+        assert old_generated_ids.isdisjoint(
+            engine._generated_ignored_active_replay_placeholder_message_ids
+        )
+        assert len(engine._generated_ignored_active_replay_placeholder_messages) == 2
     finally:
         engine.shutdown()
 

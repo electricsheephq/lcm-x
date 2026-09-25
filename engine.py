@@ -4805,6 +4805,20 @@ class LCMEngine(
             copied_replay_messages.append(copied_message)
         return copied_replay_messages
 
+    def _refresh_generated_active_replay_placeholder_retention(
+        self,
+        *active_replays: List[Dict[str, Any]],
+    ) -> None:
+        generated_message_ids = self._generated_ignored_active_replay_placeholder_message_ids
+        current_placeholders = {
+            id(message): message
+            for active_replay_messages in active_replays
+            for message in active_replay_messages
+            if id(message) in generated_message_ids
+        }
+        self._generated_ignored_active_replay_placeholder_message_ids = set(current_placeholders)
+        self._generated_ignored_active_replay_placeholder_messages = current_placeholders
+
     def _remember_active_replay_messages(
         self,
         original_messages: List[Dict[str, Any]],
@@ -4816,10 +4830,10 @@ class LCMEngine(
         self._last_active_replay_messages = self._copy_active_replay_messages_preserving_generated_ids(
             active_replay_messages
         )
-        current_placeholders = {id(message): message for message in self._last_active_replay_messages
-                                if id(message) in self._generated_ignored_active_replay_placeholder_message_ids}
-        self._generated_ignored_active_replay_placeholder_message_ids = set(current_placeholders)
-        self._generated_ignored_active_replay_placeholder_messages = current_placeholders
+        self._refresh_generated_active_replay_placeholder_retention(
+            active_replay_messages,
+            self._last_active_replay_messages,
+        )
         self._write_generated_ignored_placeholder_hash_counts(
             self._generated_placeholder_digest_budget_for_active_replay(active_replay_messages)
         )
@@ -4836,7 +4850,13 @@ class LCMEngine(
         if identities == getattr(self, "_last_active_replay_source_identities", None):
             cached = getattr(self, "_last_active_replay_messages", None)
             if cached is not None:
-                return self._copy_active_replay_messages_preserving_generated_ids(cached)
+                current = self._copy_active_replay_messages_preserving_generated_ids(cached)
+                self._last_active_replay_messages = current
+                self._refresh_generated_active_replay_placeholder_retention(
+                    original_messages,
+                    current,
+                )
+                return current
         return None
 
     def _remap_cursor_through_host_merge(self, messages, proof) -> Optional[int]:
