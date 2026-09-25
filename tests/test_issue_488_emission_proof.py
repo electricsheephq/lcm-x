@@ -1,8 +1,8 @@
 """Phase-1 acceptance matrix for #488's emission-bound projection.
 
-These tests describe the occurrence-level contract.  Red cells are marked
-strict xfail until Phase 2 adds production support; green cells pin the
-#498/#492/#504 behavior that the fix must retain.
+These tests describe the occurrence-level contract. The Phase-1 red cells pass
+since the PR-B consumer switch; the control cells pin the #498/#492/#504
+behavior that the fix must retain.
 """
 
 from __future__ import annotations
@@ -261,11 +261,6 @@ AUTHORED_SHAPE_CASES = [
         position,
         order,
         id=f"{shape}-{position}-{order}",
-        marks=(
-            pytest.mark.xfail(strict=True, reason="#488")
-            if (shape, position, order) == ("carrier", "head", "plain-first")
-            else ()
-        ),
     )
     for shape in ("summary", "carrier", "objective-carrier")
     for position in ("head", "middle", "fresh-tail-boundary")
@@ -304,13 +299,7 @@ def test_authored_summary_shapes_keep_occurrence_identity(
         engine.shutdown()
 
 
-@pytest.mark.parametrize(
-    "mode",
-    [
-        pytest.param("inplace", marks=pytest.mark.xfail(strict=True, reason="#488")),
-        "rotation",
-    ],
-)
+@pytest.mark.parametrize("mode", ["inplace", "rotation"])
 @pytest.mark.parametrize("restart", ["before-first-ingest", "after-new-row", "after-new-row-twice"])
 def test_tail_zero_merged_new_row_survives_restart(tmp_path, monkeypatch, mode, restart):
     engine, pre, compressed = _phase1_compacted_engine(tmp_path, monkeypatch, tail=0)
@@ -340,7 +329,6 @@ def test_tail_zero_merged_new_row_survives_restart(tmp_path, monkeypatch, mode, 
         engine.shutdown()
 
 
-@pytest.mark.xfail(strict=True, reason="#488")
 def test_nested_authored_summary_is_not_recursively_stripped(tmp_path, monkeypatch):
     engine, _pre, compressed = _phase1_compacted_engine(tmp_path, monkeypatch, tail=0)
     block = _summary_block(engine, compressed)
@@ -380,7 +368,6 @@ def test_unproven_summary_shapes_remain_full_identity(tmp_path, monkeypatch, kin
         engine.shutdown()
 
 
-@pytest.mark.xfail(strict=True, reason="#488")
 def test_dynamic_leaf_subset_keeps_authored_carrier_store_id(tmp_path, monkeypatch):
     monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
     engine = LCMEngine(
@@ -408,7 +395,6 @@ def test_dynamic_leaf_subset_keeps_authored_carrier_store_id(tmp_path, monkeypat
         engine.shutdown()
 
 
-@pytest.mark.xfail(strict=True, reason="#488")
 def test_authored_bytes_identical_to_emitted_carrier_keep_their_source(tmp_path):
     engine, _compacted, tail, tail_ids = _summary_carrier_fixture(tmp_path)
     try:

@@ -9,9 +9,17 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
-from tests.test_compression_boundary import _config
+from tests.test_compression_boundary import _config, _summary_carrier_fixture, _turn
+from tests.test_issue_488_emission_descriptors import _record, _scoped_proof
+from tests.test_issue_488_emission_proof import (
+    _phase1_compacted_engine,
+    _stored_user_rows,
+    _summary_block,
+)
 
 X = "ISSUE-488-X authored remainder"
 
@@ -67,5 +75,94 @@ def test_replay_cache_never_serves_a_carrier_view_for_its_remainder(tmp_path):
         assert engine._cached_active_replay_messages([dict(m) for m in authored]) is not None
         assert engine._cached_active_replay_messages(plain) is None
         assert not engine._is_cached_active_replay_message_at_index(1, plain[1])
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("emitted_row", ["present", "gone"])
+def test_authored_summary_prefix_past_its_emission_is_stored_whole(tmp_path, monkeypatch, emitted_row):
+    """AMENDMENT 2: S+Y matching a standalone summary descriptor past the emitted
+    occurrence's position is authored: full identity, stored whole, never a skip."""
+    engine, _pre, compressed = _phase1_compacted_engine(tmp_path, monkeypatch, tail=1)
+    block = _summary_block(engine, compressed)
+    assert compressed[0]["content"] == block
+    authored = {"role": "user", "content": block + "\n\n" + X}
+    host = [dict(m) for m in compressed] + [_turn(13)[1], authored]
+    if emitted_row == "gone":
+        host = host[1:]
+    try:
+        projection, identities = engine._occurrence_replay_identities(host, engine._active_emission_proof())
+        # Gone: the projection alone would admit the authored row (N6). Present: the emitted row
+        # takes the descriptor and stays a proven scaffold.
+        assert projection.entries[-1].generated_span == (block if emitted_row == "gone" else None)
+        assert (identities[0] is None) == (emitted_row == "present")
+        assert identities[-1][1] == authored["content"]
+        engine.ingest(host)
+        stored = [content for _store_id, content in _stored_user_rows(engine)]
+        assert stored.count(authored["content"]) == 1
+        assert stored.count(X) == 0
+    finally:
+        engine.shutdown()
+
+
+def test_identical_authored_summary_after_the_emitted_one_is_content(tmp_path, monkeypatch):
+    """AMENDMENT 2: a sole emitted S gone and an identical authored S later (multiplicity
+    one) is content, not a proven scaffold."""
+    engine, _pre, compressed = _phase1_compacted_engine(tmp_path, monkeypatch, tail=1)
+    block = _summary_block(engine, compressed)
+    host = [dict(m) for m in compressed[1:]] + [_turn(13)[1], {"role": "user", "content": block}]
+    try:
+        projection, identities = engine._occurrence_replay_identities(host, engine._active_emission_proof())
+        assert projection.entries[-1].generated_span == block
+        assert identities[-1] is not None and identities[-1][1] == block
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("source", ["cached", "durable"])
+def test_declined_empty_suffix_descriptor_keeps_full_identity(tmp_path, source):
+    """AMENDMENT 3: an empty-suffix descriptor the projection declines (ambiguous
+    multiplicity) leaves the row as content in the walks and the mapper, cached and
+    after a durable reload; no span is re-derived from the descriptor."""
+    engine, compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        engine._assemble_context({"role": "system", "content": "system"}, tail, include_lcm_note=False)
+        candidate = next(item for item in engine._pending_emission_candidates if item["kind"] == "summary")
+        span = candidate["span"]
+        _record(engine, [compacted, *tail], [candidate["row"], {"role": "user", "content": span}])
+        if source == "durable":
+            engine._last_emission_descriptors = None
+            assert engine._active_emission_proof()["emissions"]
+        remaining = [{"role": "user", "content": span}]
+        full = engine._message_replay_identity(remaining[0], strip_carrier=False)
+        _projection, identities = engine._occurrence_replay_identities(remaining, engine._active_emission_proof())
+        assert identities == [full]
+        assert engine._effective_replay_identities(remaining) == [full]
+        stored_id = engine._store.append("S0", {"role": "user", "content": span})
+        assert engine._get_store_id_map_for_messages(remaining) == {id(remaining[0]): stored_id}
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("retained", [{"store_id": 7}], ids=["retained"])
+@pytest.mark.parametrize("kind", ["carrier", "summary"], ids=["carrier", "folded"])
+@pytest.mark.parametrize(
+    "suffix,remainder",
+    [("retained", "retained"), ("authored instead", None), ("retained\n\nnew turn", "retained\n\nnew turn")],
+    ids=["matched", "unmatched", "prefix-extension"],
+)
+def test_carrier_remainder_only_when_its_suffix_matched(tmp_path, kind, retained, suffix, remainder):
+    """AMENDMENTS 1, 4, 5: a carrier or folded carrier yields its remainder only when its
+    recorded suffix matched (else full identity); bytes past the recorded suffix stay in
+    the identity, so they never match the retained row (store direction)."""
+    engine, _block = _engine_with_verified_block(tmp_path)
+    span = "GENERATED\n\n"
+    row = {"role": "user", "content": span + suffix}
+    try:
+        messages = [{"role": "assistant", "content": "earlier"}, row]  # past output index 0: still bound
+        _projection, identities = engine._occurrence_replay_identities(
+            messages, _scoped_proof(kind, span, "retained", retained_source=retained)
+        )
+        assert identities[1][1] == (row["content"] if remainder is None else remainder)
     finally:
         engine.shutdown()
