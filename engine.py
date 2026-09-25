@@ -3940,7 +3940,7 @@ class LCMEngine(
             and not proof.get("end_consumed")
             and proof.get("input") is not None
             and len(messages) == len(proof["input"])
-            and [self._proof_replay_identity(m) for m in messages] == proof["input"]
+            and [self._proof_replay_identity(m, strip_carrier=False) for m in messages] == proof["input"]
         ):
             # Compaction commit (#483): every input row is already durable and the
             # cursor indexes compress()'s output, so skip the re-ingest. Still
@@ -5272,11 +5272,11 @@ class LCMEngine(
             if native_lossy:
                 self._ingest_cursor_needs_reconcile = True
             elif n >= self._ingest_cursor and [
-                self._proof_replay_identity(m) for m in messages[: self._ingest_cursor]
+                self._proof_replay_identity(m, strip_carrier=False) for m in messages[: self._ingest_cursor]
             ] == proof["output"]:
                 self._compress_commit_proof = None
             elif (proof.get("end_consumed") or proof.get("native")) and host_input is not None and n >= len(host_input) and [
-                self._proof_replay_identity(m) for m in messages[: len(host_input)]
+                self._proof_replay_identity(m, strip_carrier=False) for m in messages[: len(host_input)]
             ] == host_input:
                 self._ingest_cursor = len(host_input)
                 cursor = self._ingest_cursor

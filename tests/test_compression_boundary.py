@@ -603,7 +603,7 @@ def test_assembly_emits_verified_summary_carrier_with_original_row_identity(tmp_
         engine._record_compress_commit_proof([compacted, *tail], assembled)
         proof = engine._compress_commit_proof
         assert proof is not None
-        assert proof["output"][0] == engine._proof_replay_identity(tail[0])
+        assert proof["output"][0] == engine._proof_replay_identity(carrier, strip_carrier=False)  # #488 F4: full
         assert proof["output_effective"][0] == engine._proof_replay_identity(tail[0])
     finally:
         engine.shutdown()

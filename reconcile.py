@@ -552,8 +552,8 @@ class ReconcileMixin:
                 return False
         return True
 
-    def _proof_replay_identity(self, msg: Dict[str, Any]) -> tuple[str, str, str, str, str]:
-        return _proof_user_identity(self._message_replay_identity(msg))
+    def _proof_replay_identity(self, msg: Dict[str, Any], strip_carrier: bool = True) -> tuple[str, str, str, str, str]:
+        return _proof_user_identity(self._message_replay_identity(msg, strip_carrier=strip_carrier))
 
     def _projected_occurrence_map(self, messages) -> Optional[dict[int, Optional[tuple[str, str, str, str, str]]]]:
         """Proven occurrences of this complete list, by object: projected identity or None

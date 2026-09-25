@@ -641,8 +641,9 @@ class CompactionMixin:
                 **emission_binding,
                 "session_id": self._session_id,
                 "conversation_id": self._conversation_id,
-                "input": [self._proof_replay_identity(m) for m in messages],
-                "output": [self._proof_replay_identity(m) for m in result],
+                # Full identities: the multiplicity witness (F4); output_effective is the projection.
+                "input": [self._proof_replay_identity(m, strip_carrier=False) for m in messages],
+                "output": [self._proof_replay_identity(m, strip_carrier=False) for m in result],
                 "end_consumed": False,
                 "carry_ranges": self._coalesce_compression_carry_ranges(
                     (str(row["session_id"]), store_id - 1, store_id)

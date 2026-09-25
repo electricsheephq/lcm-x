@@ -250,6 +250,22 @@ def test_host_merged_composite_is_not_stored_again_after_restart(tmp_path, monke
 # --- fix round 1 (gpt-6-astra review of 5e015fee): each test reproduces a reviewer counterexample.
 
 
+def test_proof_input_and_output_keep_full_identity(tmp_path):
+    """F4: the proof's input/output arrays are the full-identity multiplicity witness;
+    only output_effective carries the projected remainder."""
+    engine, compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        assembled = engine._assemble_context(None, tail)
+        carrier = assembled[0]
+        assert carrier["content"] != tail[0]["content"] and carrier["content"].endswith(tail[0]["content"])
+        proof = _record(engine, [compacted, *assembled], assembled)
+        assert proof["output"][0][1] == carrier["content"]
+        assert proof["input"][1][1] == carrier["content"]
+        assert proof["output_effective"][0][1] == tail[0]["content"]
+    finally:
+        engine.shutdown()
+
+
 @pytest.mark.parametrize("bad", ["bad", {"index": "0"}], ids=["non-mapping", "non-int-index"])
 def test_malformed_output_occurrence_declines_the_descriptor(tmp_path, monkeypatch, bad):
     """F7: a persisted v4 descriptor with a malformed output_occurrence is declined (full
