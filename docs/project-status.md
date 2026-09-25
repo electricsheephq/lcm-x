@@ -12,13 +12,13 @@ The project is **LCM-X — Lossless Context Memory eXtension**. From v0.24.0 (#4
 | Plugin manifest and install directory | `hermes-lcm-x` (legacy, v0.23.x and earlier: `hermes-lcm`) |
 | Runtime context engine | `lcm-x` (legacy alias `lcm` accepted with a deprecation warning) |
 | Bundled skill | `hermes-lcm` (unchanged) |
-| Latest stable | `v0.24.0@d346ab9e3e325c2b10c2a7b514cf03abfcd44176` (ships `hermes-lcm-x` / `lcm-x`; `v0.24.1` follows its rc gauntlet) |
+| Latest stable | `v0.24.1@98ac62fee5316cdf461e77f28951720f523489f1` (ships `hermes-lcm-x` / `lcm-x`) |
 
 The rename is a breaking change with a documented migration path; see the operator guide's migration section. Historical notes and upstream evidence retain the names and identities used when they were created.
 
 ## Released product and development source
 
-The latest stable release is `v0.24.0` at `d346ab9e3e325c2b10c2a7b514cf03abfcd44176`. GitHub publishes it as a non-prerelease release. Because GitHub reports the tag as mutable, operators and evidence packets must verify the exact SHA rather than trust the tag name alone.
+The latest stable release is `v0.24.1` at `98ac62fee5316cdf461e77f28951720f523489f1`. GitHub publishes it as a non-prerelease release. Because GitHub reports the tag as mutable, operators and evidence packets must verify the exact SHA rather than trust the tag name alone.
 
 The source snapshot used for this reconciliation is `main@6700cc942f391f57d8f1446eb6bc0ef6c6717646`. Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits.
 
