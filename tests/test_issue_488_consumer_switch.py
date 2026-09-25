@@ -485,12 +485,12 @@ def test_an_aliased_object_keeps_one_identity_per_position(tmp_path):
 
 @pytest.mark.parametrize(
     "bad",
-    ["bad", {"index": "0", "of": 2}, {"index": 99, "of": 2}],
-    ids=["non-mapping", "non-int-index", "out-of-range"],
+    ["bad", {"index": "0", "of": 2}, {"index": 99, "of": 2}, {"index": 99, "of": "2"}],
+    ids=["non-mapping", "non-int-index", "out-of-range", "non-int-of"],
 )
 def test_malformed_output_occurrence_declines_the_descriptor(tmp_path, monkeypatch, bad):
     """F7: a persisted v4 descriptor with a malformed output_occurrence (non-mapping, non-int
-    index, or an index beyond the recorded length of the proof's own output) is declined (full identity for its row); reconciliation never raises on it."""
+    index, a malformed recorded length, or an index beyond the recorded length of the proof's own output) is declined (full identity for its row); reconciliation never raises on it."""
     engine, _pre, compressed = _phase1_compacted_engine(tmp_path, monkeypatch, tail=1)
     block = _summary_block(engine, compressed)
     try:

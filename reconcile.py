@@ -248,12 +248,18 @@ def _project_emitted_occurrences(
         ordinal = descriptor.get("same_prefix_ordinal")
         occurrence = descriptor.get("output_occurrence")
         output_index = occurrence.get("index") if isinstance(occurrence, Mapping) else None
-        output_length = occurrence.get("of") if isinstance(occurrence, Mapping) else None  # the output's recorded length
+        has_length = isinstance(occurrence, Mapping) and "of" in occurrence  # recorded by the finalizer
+        output_length = occurrence.get("of") if has_length else None
+        output = proof.get("output")
+        if not isinstance(output, (list, tuple)) or not all(isinstance(item, (list, tuple)) for item in output):
+            output = ()  # a malformed output carries no bound and no multiplicity witness
         if not isinstance(length, int) or length <= 0 or not isinstance(digest, str) or (
             not isinstance(role, str) or not role or type(ordinal) is not int or ordinal < 0
         ) or type(suffix_length) is not int or suffix_length < 0 or not isinstance(suffix_digest, str) or (
             type(output_index) is not int or output_index < 0  # malformed (F7): decline, never raise
-        ) or (type(output_length) is int and output_index >= output_length):  # an index beyond its own output
+        ) or (has_length and (type(output_length) is not int or output_index >= output_length)) or (
+            output and output_index >= len(output)  # a malformed or exceeded recorded length, or an index beyond the output
+        ):
             continue
         candidate_ordinal = -1
         for index, message in _emission_candidate_rows(messages, role, length, digest):
@@ -280,7 +286,6 @@ def _project_emitted_occurrences(
             ).hexdigest() != suffix_digest:
                 continue
             if not suffix_length and not normalized_suffix:
-                output = proof.get("output") or ()
                 multiplicity = sum(
                     tuple(item) == tuple(output[output_index]) for item in output
                 ) if output_index < len(output) else descriptor.get("output_multiplicity")
