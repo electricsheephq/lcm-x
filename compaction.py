@@ -1075,6 +1075,54 @@ class CompactionMixin:
                 after_store_id = int(rows[-1].get("store_id") or after_store_id)
         return proofs
 
+    def _committed_replay_prefix_len(
+        self,
+        working: List[Dict[str, Any]],
+        start: int,
+    ) -> tuple[int, Optional[dict[int, int]]]:
+        """Length of the replayed run at ``start`` that the DAG already covers (#457).
+
+        A retry after a cancelled-but-committed compaction replays rows up to the
+        lifecycle frontier F; they map to no store id, so summarizing them again
+        can never publish. The run must be exactly this session's durable rows
+        ending at F, followed by F+1 (or by nothing). Any failed check returns 0,
+        today's behaviour. Also returns the store-id map of ``working[start:]``
+        when one was computed.
+        """
+        state = self._lifecycle.get_by_conversation(self._conversation_id)
+        frontier = int(getattr(state, "current_frontier_store_id", 0) or 0)
+        if (
+            state is None
+            or not self._session_id
+            or str(state.current_session_id or "") != self._session_id
+            or frontier <= 0
+            or int(self._last_compacted_store_id or 0) != frontier
+        ):
+            return 0, None
+        ids = self._get_store_id_map_for_messages(working[start:])
+        end = next(
+            (i for i in range(start, len(working)) if ids.get(id(working[i]), 0) > frontier),
+            len(working),
+        )
+        rows = self._store.get_session_rows_through(self._session_id, frontier, end - start)
+        after = self._store.get_session_messages_after(self._session_id, frontier, limit=1)
+        if (
+            not rows
+            or len(rows) != end - start
+            or int(rows[-1]["store_id"]) != frontier
+            or [int(row["store_id"]) for row in after]
+            != ([ids[id(working[end])]] if end < len(working) else [])
+        ):
+            return 0, ids
+        self._load_host_rewrite_overrides(rows)
+        if not all(
+            self._message_replay_identity(message, strip_carrier=False)
+            in self._stored_row_forms(row)
+            for message, row in zip(working[start:end], rows)
+        ):
+            return 0, ids
+        return end - start, ids
+
     def _compress_impl(self, messages: List[Dict[str, Any]],
                        current_tokens: int = None,
                        focus_topic: Optional[str] = None,
@@ -1226,6 +1274,7 @@ class CompactionMixin:
         pressure_messages = messages if len(messages) == len(working_messages) else working_messages
         leaf_compacted_this_turn = False
         dropped_replayed_scaffold_messages = False
+        resumed_prefix = False
         leaf_passes = 0
         estimated_active_tokens = (
             observed_prompt_tokens
@@ -1332,10 +1381,21 @@ class CompactionMixin:
                 else self._compress_occurrences.get(id(working_messages[candidate_start]), (None, ()))[1] is None
             ):
                 candidate_start += 1
+            # #457: a retry replays rows an earlier, cancelled attempt already
+            # committed; drop them with the scaffold so only rows after F remain.
+            scaffold_end, premapped_store_ids = candidate_start, None
+            if leaf_passes == 0 and not resumed_prefix:
+                resumed_count, premapped_store_ids = self._committed_replay_prefix_len(
+                    working_messages, candidate_start
+                )
+                candidate_start += resumed_count
+                resumed_prefix = resumed_count > 0
+                if candidate_start != leading_anchor_count:
+                    premapped_store_ids = None
             if candidate_start > leading_anchor_count:
                 publication_excluded_store_ids.extend(
                     self._get_store_ids_for_messages(
-                        working_messages[leading_anchor_count:candidate_start]
+                        working_messages[leading_anchor_count:scaffold_end]
                     )
                 )
                 dropped_replayed_scaffold_messages = True
@@ -1348,8 +1408,10 @@ class CompactionMixin:
                     break
 
             if candidate_start < fresh_tail_start:
-                self._current_compress_store_ids_by_message_id = self._get_store_id_map_for_messages(
-                    working_messages[leading_anchor_count:]
+                self._current_compress_store_ids_by_message_id = (
+                    premapped_store_ids
+                    if premapped_store_ids is not None
+                    else self._get_store_id_map_for_messages(working_messages[leading_anchor_count:])
                 )
                 compactable_pairs = list(
                     zip(
@@ -1846,7 +1908,8 @@ class CompactionMixin:
                 # next appended messages look already ingested. This applies to
                 # content-only cleanup as well as dropped-message cleanup.
                 self._ingest_cursor = len(sanitized_messages)
-                self._last_compression_status = "sanitized"
+                # A resumed committed prefix returns that compaction's output.
+                self._last_compression_status = "compacted" if resumed_prefix else "sanitized"
                 self._last_compression_noop_reason = ""
                 self._note_fresh_tail_pressure_relieved()
             else:
