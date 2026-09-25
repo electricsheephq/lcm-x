@@ -446,8 +446,8 @@ def test_an_ambiguous_fit_is_not_a_replay(tmp_path, provider):
     as replay at the longer fit. Only one fit binds; several persist (today's behaviour)."""
     engine, _host, _out2, _proof1 = _gen2(tmp_path)
     try:
-        note = {"role": "system", "content": "[Note: This conversation uses Lossless Context Management (LCM). "
-                "Earlier turns have been compacted into hierarchical summaries below.]"}
+        note = {"role": "system", "content": engine._append_lcm_note_to_content("host system prompt")}
+
         def turn(store_id, repeating):
             text = ("continue" if store_id % 2 else "continuing") if repeating else f"turn {store_id}"
             return {"store_id": store_id, "session_id": SID, "role": "user" if store_id % 2 else "assistant", "content": text}
@@ -467,6 +467,79 @@ def test_an_ambiguous_fit_is_not_a_replay(tmp_path, provider):
         assert term(replay(range(225, 233), False), unique) is None
     finally:
         engine.shutdown()
+
+
+def test_a_long_ambiguous_list_computes_each_identity_once(tmp_path, provider, monkeypatch):
+    """400 periodic rows: every start fits, so the term stops at the second fit, and each message
+    identity and each stored row's forms are computed at most once."""
+    engine, _host, _out2, _proof1 = _gen2(tmp_path)
+    try:
+        note = {"role": "system", "content": engine._append_lcm_note_to_content("host system prompt")}
+        rows = [{"store_id": i, "session_id": SID, "role": "user" if i % 2 else "assistant",
+                 "content": "continue" if i % 2 else "continuing"} for i in range(29, 429)]  # F = 228
+        messages = [note] + [{"role": row["role"], "content": row["content"]} for row in rows[100:]]
+        live, forms = [], []
+        real_identity, real_forms = engine._message_replay_identity, engine._stored_row_forms
+        monkeypatch.setattr(engine, "_message_replay_identity", lambda m, **kw: (
+            live.append(1) if not kw.get("stored_row") else None) or real_identity(m, **kw))
+        monkeypatch.setattr(engine, "_stored_row_forms", lambda row: forms.append(1) or real_forms(row))
+        assert engine._cursor_from_frontier_bound_replay(messages, rows) is None
+        assert len(live) <= len(messages) and len(forms) <= len(rows), (len(live), len(forms))
+    finally:
+        engine.shutdown()
+
+
+# -- fresh rows shaped like LCM scaffold are content, not a replay head (#524 fix round 1) ----------
+
+NEW = "NEW never-stored user objective 524"
+OBJECTIVE = "[Current user objective preserved from compacted history]"
+TODO = "[Your active task list was preserved across context compression]"
+
+
+def _new_objective():
+    return {"role": "user", "content": f"{OBJECTIVE}\n{NEW}"}
+
+
+def _glued_row(host):
+    return {"role": "user", "content": host[0]["content"].split("\n\n---\n\n")[-1]}
+
+
+FRESH_HEADS = {
+    "objective_before_rows_below_frontier": lambda host: [_new_objective()] + host[118:],  # rows 227..260
+    "objective_before_raw_rows": lambda host: [_new_objective(), _glued_row(host)] + host[1:],
+    "objective_merged_into_the_carrier": lambda host: [
+        {"role": "user", "content": f"{OBJECTIVE}\n{NEW}\n\n---\n\n{host[0]['content']}"}] + host[1:],
+    "objective_before_the_old_carrier": lambda host: [_new_objective()] + host,
+    "note_phrases_mid_system_text": lambda host: [{"role": "system", "content": (
+        "[Note: This conversation uses Lossless Context Management (LCM). Earlier turns have been "
+        f"compacted into hierarchical summaries below.] {NEW}")}] + host,
+    "todo_head": lambda host: [{"role": "user", "content": f"{TODO}\n- [ ] {NEW}"}] + host,
+}
+
+
+def _fresh_head_run(tmp_path, monkeypatch, case, *, term):
+    if not term:
+        _no_term(monkeypatch)
+    provider = _Provider()
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", provider)
+    engine, host, _out2, _proof1 = _gen2(tmp_path)
+    try:
+        got = _retry_and_measure(engine, provider, FRESH_HEADS[case](deepcopy(host)))
+        stored = [str(row.get("content")) for row in engine._store.get_session_messages(SID, limit=100_000)]
+        return {**got, "new_stored": any(NEW in text for text in stored),
+                "new_returned": any(NEW in str(row.get("content")) for row in got.pop("out"))}
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("case", sorted(FRESH_HEADS))
+def test_a_fresh_row_shaped_like_scaffold_is_not_skipped(tmp_path, monkeypatch, case):
+    fixed = _fresh_head_run(tmp_path / "fixed", monkeypatch, case, term=True)
+    monkeypatch.undo()
+    today = _fresh_head_run(tmp_path / "today", monkeypatch, case, term=False)
+    assert fixed["reason"] != REASON and fixed == today
+    # Today's store matcher treats todo / note-phrase rows as scaffold (unchanged here).
+    assert fixed["new_stored"] or case in ("todo_head", "note_phrases_mid_system_text"), fixed
 
 
 # -- eva-shaped cell: the real Hermes host helpers around a real (unpatched) engine ------------------

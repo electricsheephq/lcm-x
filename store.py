@@ -884,6 +884,17 @@ class MessageStore:
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
+    def find_session_rows_by_content(self, session_id: str, role: str, content: str,
+                                     end_store_id: int, limit: int = 8) -> List[Dict[str, Any]]:
+        """This session's ``role`` rows at or before ``end_store_id`` whose content is exactly ``content``."""
+        rows = self._conn.execute(
+            f"""SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages
+               WHERE session_id = ? AND role = ? AND content = ? AND store_id <= ?
+               ORDER BY store_id DESC LIMIT ?""",
+            (session_id, role, content, end_store_id, limit),
+        ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
     def get_session_count(self, session_id: str) -> int:
         """Count messages in a session."""
         row = self._conn.execute(

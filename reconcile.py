@@ -664,8 +664,8 @@ class ReconcileMixin:
         return set(forms)
 
     def _replay_row_admits(self, message, row: Dict[str, Any], *, carrier: bool = False) -> bool:
-        """A replayed message is a stored row's exact or override form; a DAG-verified carrier
-        by its glued row. Shared by the #524 replay term and the #457 resume so they agree."""
+        """A replayed message is a stored row's exact or override form; a DAG-verified carrier by its
+        glued row. The #457 resume's form of the #524 term's per-row check (same identity, forms)."""
         return self._message_replay_identity(message, strip_carrier=carrier) in self._stored_row_forms(row)
 
     def _anchor_row_admits(self, live_identity, row: Dict[str, Any]) -> bool:
@@ -2228,44 +2228,65 @@ class ReconcileMixin:
             rewritten = rewritten or identity != stored
         return session_count if rewritten else None
 
-    def _replay_head(self, messages, start: int) -> tuple[int, bool]:
-        """End of the verified LCM scaffold rows at ``start``, and whether a DAG-verified carrier
+    def _is_lcm_emitted_head_row(self, message, frontier: int) -> bool:
+        """#524 head rule: bytes provably LCM's own emission for this session. A DAG-verified pure
+        summary; a system row ending with the exact LCM note; an objective part re-rendered from a
+        stored own-session user row <= F, then only verified summary parts. Never a todo row."""
+        role, content = message.get("role"), message.get("content")
+        if role == "system":
+            if isinstance(content, list):
+                return bool(content) and isinstance(content[-1], dict) and content[-1].get("text") == self._append_lcm_note_to_content(None)
+            return isinstance(content, str) and ("\n\n" + content).endswith(self._append_lcm_note_to_content(""))
+        end = self._verified_lcm_summary_prefix_end(content) if role in ("user", "assistant") and isinstance(content, str) else None
+        if end is not None or role not in ("user", "assistant") or not isinstance(content, str):
+            return end is not None and not content[end:].strip()
+        prefix, cuts = _PRESERVED_OBJECTIVE_CONTEXT_PREFIX + "\n", [len(content)]
+        pos = content.find("\n\n---\n\n")
+        while pos != -1:  # the objective part, then (optionally) only verified summary parts
+            cuts += [pos] if self._verified_lcm_summary_prefix_end(content[pos + 7:]) == len(content) - pos - 7 else []
+            pos = content.find("\n\n---\n\n", pos + 7)
+        return content.startswith(prefix) and any(
+            self._build_preserved_objective_summary_part(row) == content[:cut]
+            for cut in cuts
+            for row in self._store.find_session_rows_by_content(self._session_id, "user", content[len(prefix):cut], frontier)
+        )
+
+    def _replay_head(self, messages, start: int, frontier: int) -> tuple[int, bool]:
+        """End of the LCM-emitted head rows at ``start``, and whether a DAG-verified carrier
         follows them. Shared by the #524 replay term and the #457 resume so they agree."""
-        while start < len(messages) and self._is_verified_replay_scaffold_message(messages[start]):
+        while start < len(messages) and self._is_lcm_emitted_head_row(messages[start], frontier):
             start += 1
         return start, start < len(messages) and self._generated_context_carrier_remainder(messages[start]) is not None
 
     def _cursor_from_frontier_bound_replay(self, messages, rows) -> Optional[int]:
-        """#524: a list replaying an LCM emission a later commit superseded (a cancelled retry
-        after a prior adopted compaction replaced the durable proof). After an LCM head (verified
-        scaffold and/or a DAG-verified carrier) this session's rows must follow exactly, from a
-        row <= the frontier F through the LAST durable row, in one fit only; a carrier pins that
-        row to the first after its summary's coverage. Else None: today's persisted batch."""
-        n, (h, carrier) = len(messages), self._replay_head(messages, 0)
-        state = self._lifecycle.get_by_conversation(self._conversation_id) if (h or carrier) and h < n else None
+        """#524: a replay of an LCM emission a later commit superseded (its proof was replaced).
+        After an LCM head this session's rows follow exactly, from a row <= F through the LAST
+        durable row, in one fit; a carrier pins the first to its coverage end. Else None (persist)."""
+        state = self._lifecycle.get_by_conversation(self._conversation_id)
         frontier = int(getattr(state, "current_frontier_store_id", 0) or 0)
         if state is None or str(state.current_session_id or "") != self._session_id or not (
             0 < frontier == int(self._last_compacted_store_id or 0)
         ):
+            return None
+        n, (h, carrier) = len(messages), self._replay_head(messages, 0, frontier)
+        if h >= n or not (h or carrier):
             return None
         starts = range(max(0, len(rows) - n + h), len(rows))  # the run ends at the last durable row
         if carrier:  # rows are the session tail: j == 0 is in range only when they are all of it
             parts = self._verified_lcm_summary_prefix(normalize_content_value(messages[h].get("content")) or "")[1]
             covered = self._dag.coverage_end(parts)
             starts = [j for j in starts if covered and int(rows[j]["store_id"]) > covered >= (int(rows[j - 1]["store_id"]) if j else 0)]
-        above = sum(int(row["store_id"]) > frontier for row in rows)
+        starts = [j for j in starts if int(rows[j]["store_id"]) <= frontier and len(rows) - j > sum(int(r["store_id"]) > frontier for r in rows)]
         self._load_host_rewrite_overrides(rows)
-        fits = [
-            h + len(rows) - j
-            for j in starts
-            if int(rows[j]["store_id"]) <= frontier and len(rows) - j > above
-            and all(self._replay_row_admits(messages[h + i], row, carrier=carrier and not i) for i, row in enumerate(rows[j:]))
-            and not any(
-                _has_lossy_redacted_identity(self._message_replay_identity(message, strip_carrier=carrier and not i))
-                for i, message in enumerate(messages[h:h + len(rows) - j])
-            )
-        ]
-        return fits[0] if len(fits) == 1 else None
+        ident = [self._message_replay_identity(m, strip_carrier=carrier and not i) for i, m in enumerate(messages[h:])]
+        forms = {j: self._stored_row_forms(rows[j]) for j in range(starts[0], len(rows))} if starts else {}
+        fits = []
+        for j in starts:  # computed once each; a second fit is ambiguous
+            if all(ident[i] in forms[j + i] and not _has_lossy_redacted_identity(ident[i]) for i in range(len(rows) - j)):
+                fits.append(h + len(rows) - j)
+                if len(fits) > 1:
+                    return None
+        return fits[0] if fits else None
 
     def _reconcile_ingest_cursor_from_store(
         self,

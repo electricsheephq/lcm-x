@@ -1102,7 +1102,7 @@ class CompactionMixin:
             return [], None, 0, 0
         ids = self._get_store_id_map_for_messages(working[start:])
         # #524: LCM scaffold heading a superseded emission drops with the run it heads.
-        scaffold, (start, carrier) = start, self._replay_head(working, start)
+        scaffold, (start, carrier) = start, self._replay_head(working, start, frontier)
         end = next(
             (i for i in range(start, len(working)) if ids.get(id(working[i]), 0) > frontier),
             len(working),
