@@ -865,6 +865,25 @@ class MessageStore:
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
+    def get_session_rows_through(self, session_id: str, end_store_id: int,
+                                 limit: int) -> List[Dict[str, Any]]:
+        """Get the latest ``limit`` session messages at or before ``end_store_id``, in store order."""
+        if limit <= 0:
+            return []
+        rows = self._conn.execute(
+            f"""SELECT {_MESSAGE_SELECT_COLUMNS}
+               FROM (
+                   SELECT {_MESSAGE_SELECT_COLUMNS}
+                   FROM messages
+                   WHERE session_id = ? AND store_id <= ?
+                   ORDER BY store_id DESC
+                   LIMIT ?
+               )
+               ORDER BY store_id""",
+            (session_id, end_store_id, limit),
+        ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
     def get_session_count(self, session_id: str) -> int:
         """Count messages in a session."""
         row = self._conn.execute(
