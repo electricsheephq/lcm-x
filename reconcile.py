@@ -129,6 +129,7 @@ class EmissionProjectionEntry:
     kind: Optional[str] = None
     suffix_sha256: Optional[str] = None
     suffix_length: Optional[int] = None
+    output_index: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -273,9 +274,9 @@ def _project_emitted_occurrences(
                 normalized_suffix[:suffix_length]
             ).hexdigest() != suffix_digest:
                 continue
+            output_index = (descriptor.get("output_occurrence") or {}).get("index")
             if not suffix_length and not normalized_suffix:
                 output = proof.get("output") or ()
-                output_index = (descriptor.get("output_occurrence") or {}).get("index")
                 multiplicity = sum(
                     tuple(item) == tuple(output[output_index]) for item in output
                 ) if type(output_index) is int and 0 <= output_index < len(output) else descriptor.get("output_multiplicity")
@@ -292,6 +293,7 @@ def _project_emitted_occurrences(
                 str(descriptor["kind"]),
                 suffix_digest,
                 suffix_length,
+                output_index if type(output_index) is int else None,
             )
             search_from = index + 1
             break
@@ -549,6 +551,43 @@ class ReconcileMixin:
 
     def _proof_replay_identity(self, msg: Dict[str, Any]) -> tuple[str, str, str, str, str]:
         return _proof_user_identity(self._message_replay_identity(msg))
+
+    def _active_emission_proof(self):
+        """The scoped v4 emissions in force: this process's, else the durable proof's."""
+        try:
+            return getattr(self, "_last_emission_descriptors", None) or self._durable_commit_proof_payload()
+        except Exception:  # malformed durable history: no proof, full identity everywhere
+            return None
+
+    def _occurrence_replay_identities(self, messages, proof, projection=None):
+        """#488: per occurrence of the COMPLETE list, from its one projection: None for a proven
+        emitted scaffold, the remainder of a proven emitted prefix, else FULL identity. Legacy,
+        unmatched or ambiguous descriptors project nothing, so those rows keep full identity."""
+        projection = projection or _project_emitted_occurrences(messages, proof=proof)
+        if not isinstance(proof, Mapping) or proof.get("version") != 4:
+            # No v4 proof in force (never compacted, legacy v2/v3): the rc4 contract, unchanged (A5).
+            return projection, [
+                None if self._is_verified_replay_scaffold_message(m) else self._message_replay_identity(m)
+                for m in messages
+            ]
+        identities = []
+        for index, (message, entry) in enumerate(zip(messages, projection.entries)):
+            content = None if entry.generated_span is None else entry.effective_identity[1]
+            if content is not None and entry.retained_source is None and entry.kind != "carrier":
+                # A standalone summary/objective occurrence sits where it was returned or, merged by
+                # the host, further left; a matching row past that is authored (N6): full identity.
+                content = content[2:] if content.startswith("\n\n") else content
+                if entry.output_index is None or projection.offset + index > entry.output_index:
+                    content = None
+            if (content is not None and not content.strip()) or content is None and (  # descriptor-less
+                self._is_replayed_context_scaffold_message(message)  # host scaffold: LCM note, task list
+                and (message.get("role") == "system" or self._is_preserved_todo_context_message(message))
+            ):
+                identities.append(None)
+                continue
+            projected = message if content is None else {**message, "content": content}
+            identities.append(self._message_replay_identity(projected, strip_carrier=False))
+        return projection, identities
 
     def _stored_row_forms(self, row: Dict[str, Any]) -> set:
         """A stored row's admissible identities: exact and its host-rewrite override form."""

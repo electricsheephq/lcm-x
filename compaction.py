@@ -33,6 +33,7 @@ from .reconcile import (
     _finalize_emission_descriptors,
     _has_lossy_redacted_identity,
     _project_emitted_occurrences,
+    _proof_user_identity,
 )
 from .sanitize import _contains_sensitive_redaction
 from .sqlite_util import _is_sqlite_locked_error
@@ -653,8 +654,12 @@ class CompactionMixin:
                 # No-progress compress: Hermes has nothing to commit, and an
                 # end call with this list must stay a real session end.
                 return
-            effective_rows = [m for m in result if not self._is_replayed_context_scaffold_message(m)]
-            proof["output_effective"] = [self._proof_replay_identity(m) for m in effective_rows]
+            _projection, output_identities = self._occurrence_replay_identities(
+                result, {**proof, **emission_binding}
+            )
+            proof["output_effective"] = [
+                _proof_user_identity(identity) for identity in output_identities if identity is not None
+            ]
             proof["native"] = self._last_compression_status == "host_native"
             if proof["native"]:
                 matched_tool_ids = _matched_tool_call_ids(result)
@@ -670,10 +675,8 @@ class CompactionMixin:
                     )
                     proof["skip_landing"].append(not identity[2] and not identity[3])
                 summary_index = getattr(self, "_last_native_summary_index", None)
-                rows_before_summary = result[:summary_index] if summary_index is not None else ()
                 proof["native_summary_index"] = sum(
-                    not self._is_replayed_context_scaffold_message(row)
-                    for row in rows_before_summary
+                    identity is not None for identity in output_identities[:summary_index]
                 ) if summary_index is not None else None
             proof["published"] = self._last_compression_status == "compacted"
             self._last_emission_descriptors = {
