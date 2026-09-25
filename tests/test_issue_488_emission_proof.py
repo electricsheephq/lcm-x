@@ -8,6 +8,7 @@ strict xfail until Phase 2 adds production support; green cells pin the
 from __future__ import annotations
 
 import re
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -24,7 +25,7 @@ from tests.test_compression_boundary import (
 )
 
 
-HERMES_AGENT_ROOT = Path("/Users/m1/.hermes/hermes-agent")
+HERMES_AGENT_ROOT = Path(os.environ.get("LCM_TEST_HERMES_AGENT_ROOT", "/Users/m1/.hermes/hermes-agent"))
 HERMES_AGENT_HEAD = "37aad38c62771d223cdce7e3d5e3157334f1ce82"
 if str(HERMES_AGENT_ROOT) not in sys.path:
     sys.path.insert(0, str(HERMES_AGENT_ROOT))
@@ -203,6 +204,8 @@ def _run_layout(tmp_path, monkeypatch, *, mode, tail, system, merge, order):
 
 
 def test_real_hermes_merge_fixture_is_pinned():
+    if not (HERMES_AGENT_ROOT / ".git").exists():
+        pytest.skip(f"pinned Hermes checkout not present at {HERMES_AGENT_ROOT} (CI stub layout)")
     head = subprocess.check_output(
         ["git", "-C", str(HERMES_AGENT_ROOT), "rev-parse", "HEAD"],
         text=True,
