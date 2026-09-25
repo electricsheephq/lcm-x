@@ -192,26 +192,15 @@ def test_legacy_proof_authorizes_no_emission_projection(version):
 
 @pytest.mark.parametrize("missing_field", ["role", "same_prefix_ordinal"])
 def test_v4_descriptor_without_occurrence_provenance_is_ignored(missing_field):
-    scope = {
-        "hermes_home": "home",
-        "session_id": "session",
-        "conversation_id": "conversation",
-        "reset_epoch": None,
-    }
-    descriptor = {
-        "kind": "carrier",
-        "role": "user",
-        "same_prefix_ordinal": 0,
-        "output_occurrence": {"index": 0, "same_identity_ordinal": 0},
-        "generated_span_sha256": hashlib.sha256(b"summary\n\n").hexdigest(),
-        "generated_span_bytes": len(b"summary\n\n"),
-        "scope": scope,
-    }
-    del descriptor[missing_field]
-    projection = _project_emitted_occurrences(
-        [{"role": "user", "content": "summary\n\nauthored"}],
-        proof={"version": 4, **scope, "emissions": [descriptor]},
+    messages = [{"role": "user", "content": "summary\n\nauthored"}]
+    valid = _project_emitted_occurrences(
+        messages, proof=_scoped_proof("carrier", "summary\n\n", "authored")
     )
+    assert valid.entries[0].generated_span == "summary\n\n"
+
+    proof = _scoped_proof("carrier", "summary\n\n", "authored")
+    del proof["emissions"][0][missing_field]
+    projection = _project_emitted_occurrences(messages, proof=proof)
     assert projection.entries[0].generated_span is None
     assert projection.entries[0].effective_identity == projection.entries[0].full_identity
 
