@@ -905,6 +905,7 @@ def test_malformed_durable_proof_history_does_not_block_a_fresh_proof(tmp_path):
         assert proof["emissions"]
         assert engine._last_emission_descriptors is not None
         durable = engine._store.read_metadata_json(key)
-        assert isinstance(durable, dict) and durable.get("version") == 4
+        assert isinstance(durable, dict) and durable.get("version") == 3
+        assert durable.get("descriptor_version") == 4
     finally:
         engine.shutdown()

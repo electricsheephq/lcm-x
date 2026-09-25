@@ -29,6 +29,7 @@ from .message_content import text_content_for_pattern_matching
 from .reconcile import (
     _COMPACTION_COMMIT_PROOF_METADATA_PREFIX,
     _COMPACTION_COMMIT_PROOF_VERSION,
+    _COMPACTION_COMMIT_PROOF_WIRE_VERSION,
     _commit_proof_identity_digest,
     _emission_identity,
     _finalize_emission_descriptors,
@@ -711,7 +712,8 @@ class CompactionMixin:
         try:
             tail = self._store.get_session_tail(self._session_id, limit=1)
             payload = {
-                "version": _COMPACTION_COMMIT_PROOF_VERSION,
+                "version": _COMPACTION_COMMIT_PROOF_WIRE_VERSION,
+                "descriptor_version": _COMPACTION_COMMIT_PROOF_VERSION,
                 # Scope: the Hermes home that wrote it (a configured shared
                 # database_path serves several homes) and its creation time,
                 # so a proof older than a lifecycle reset is ignored.

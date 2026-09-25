@@ -118,6 +118,10 @@ _COMPACTION_COMMIT_PROOF_METADATA_PREFIX = "compaction_commit_proof"
 # proof hashed exact identities and is still verified with them. Version 4 adds
 # descriptors; legacy versions never authorize generated-span removal.
 _COMPACTION_COMMIT_PROOF_VERSION = 4
+# The durable record keeps the version-3 label v0.24.0's reader accepts (it
+# reads versions 2 and 3 only), so a rollback still compacts (#517); version-4
+# descriptors ride along under "descriptor_version".
+_COMPACTION_COMMIT_PROOF_WIRE_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -2028,9 +2032,21 @@ class ReconcileMixin:
             return None
         payload = dict(payload)
         reset_epoch = state.last_reset_at if state is not None else None
-        if payload.get("version") != 4 or payload.get("session_id") != effective_session_id or payload.get("reset_epoch") != reset_epoch:
-            payload["emissions"] = []
-        elif not isinstance(payload.get("emissions"), list):
+        # A version-3 wire record with descriptor_version 4 is relabelled 4 for
+        # every consumer; a top-level version 4 (pre-#517 main) still counts. A
+        # version-2 record keeps its exact-identity hashes: never relabelled.
+        wire = (payload.get("version"), payload.get("descriptor_version"))
+        has_descriptors = (
+            (wire[0] == _COMPACTION_COMMIT_PROOF_VERSION
+             or wire == (_COMPACTION_COMMIT_PROOF_WIRE_VERSION, _COMPACTION_COMMIT_PROOF_VERSION))
+            and payload.get("session_id") == effective_session_id
+            and payload.get("reset_epoch") == reset_epoch
+            and isinstance(payload.get("emissions"), list)
+        )
+        if has_descriptors:
+            payload["version"] = _COMPACTION_COMMIT_PROOF_VERSION
+        else:
+            payload["version"] = 2 if payload.get("version") == 2 else 3
             payload["emissions"] = []
         return payload
 

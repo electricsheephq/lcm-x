@@ -947,7 +947,8 @@ def test_durable_commit_proof_is_written_only_for_a_published_compaction(tmp_pat
     engine, _pre, compressed = _compacted_engine(tmp_path, monkeypatch)
     try:
         payload = _durable_commit_proof(engine, "S0")
-        assert payload["version"] == 4
+        assert payload["version"] == 3
+        assert payload["descriptor_version"] == 4
         assert payload["hermes_home"] == str(tmp_path / "home")
         assert len(payload["effective_sha256"]) == len(engine._compress_commit_proof["output_effective"])
         assert payload["last_store_id"] > 0
@@ -959,6 +960,35 @@ def test_durable_commit_proof_is_written_only_for_a_published_compaction(tmp_pat
         engine._record_compress_commit_proof(compressed, extended)
         assert engine._compress_commit_proof["published"] is False
         assert _durable_commit_proof(engine, "S0") is None
+    finally:
+        engine.shutdown()
+
+
+# The durable record keys v0.24.0 (b9ad016e) writes and reads back after a
+# rollback (scaffold_sha256 is conditional in both writers).
+_V0240_DURABLE_PROOF_KEYS = frozenset({
+    "carry_ranges", "conversation_id", "created_at", "droppable", "effective_sha256",
+    "hermes_home", "last_store_id", "native", "native_summary_index", "skip_landing", "version",
+})
+
+
+def test_durable_commit_proof_keeps_the_v0240_wire_format(tmp_path, monkeypatch):
+    """#517: the durable record is labelled version 3 with every v0.24.0 key, so a
+    rollback to v0.24.0 still reads it; descriptors ride along under
+    descriptor_version 4 and this reader relabels the record back to version 4."""
+    engine, _pre, _compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        payload = _durable_commit_proof(engine, "S0")
+        assert payload["version"] == 3
+        assert payload["descriptor_version"] == 4
+        assert isinstance(payload["emissions"], list) and payload["emissions"]
+        assert _V0240_DURABLE_PROOF_KEYS <= set(payload)
+        assert set(payload) - _V0240_DURABLE_PROOF_KEYS == {
+            "descriptor_version", "emissions", "reset_epoch", "session_id"
+        }
+        read = engine._durable_commit_proof_payload()
+        assert read["version"] == 4
+        assert read["emissions"] == payload["emissions"]
     finally:
         engine.shutdown()
 
@@ -1379,6 +1409,82 @@ def test_rc3_durable_commit_proof_stays_exact_for_user_whitespace(tmp_path, monk
         assert resumed._cursor_from_durable_commit_proof(padded) is None
     finally:
         resumed.shutdown()
+
+
+_DROP = object()
+
+
+def _rewrite_durable_proof(engine, **changes):
+    """Rewrite S0's durable proof in place; ``_DROP`` removes a key."""
+    payload = _durable_commit_proof(engine, "S0")
+    for key, value in changes.items():
+        if value is _DROP:
+            payload.pop(key, None)
+        else:
+            payload[key] = value
+    engine._store.write_metadata_json(["compaction_commit_proof:S0"], json.dumps(payload, sort_keys=True))
+    return payload
+
+
+def test_durable_proof_reader_relabels_the_descriptor_record_to_version_4(tmp_path, monkeypatch):
+    """#517 (E1b): a version-3 wire record carrying descriptor_version 4 reads back
+    as version 4 with its emissions, never as a legacy record."""
+    engine, _pre, _compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        stored = _rewrite_durable_proof(engine, version=3, descriptor_version=4)
+        assert stored["emissions"]
+        read = engine._durable_commit_proof_payload()
+        assert read["version"] == 4
+        assert read["emissions"] == stored["emissions"]
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("version", [2, 3])
+def test_durable_proof_reader_keeps_a_v0240_record_legacy(tmp_path, monkeypatch, version):
+    """#517: a record as v0.24.0 (version 3) or rc3 (version 2) wrote it — no
+    descriptor_version, emissions, session_id or reset_epoch — stays legacy."""
+    engine, _pre, _compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        _rewrite_durable_proof(
+            engine, version=version, descriptor_version=_DROP, emissions=_DROP,
+            session_id=_DROP, reset_epoch=_DROP,
+        )
+        read = engine._durable_commit_proof_payload()
+        assert read["version"] == version
+        assert read["emissions"] == []
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("wire", [3, 4], ids=["wire3", "pre-fix-v4"])
+@pytest.mark.parametrize(("key", "stale"), [("session_id", "other-session"), ("reset_epoch", 123.0)])
+def test_durable_proof_reader_treats_stale_descriptors_as_legacy(tmp_path, monkeypatch, wire, key, stale):
+    """#517: descriptors from another session or reset epoch never authorize: the
+    record reads back as version 3 with no emissions."""
+    engine, _pre, _compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        _rewrite_durable_proof(
+            engine, version=wire, descriptor_version=4 if wire == 3 else _DROP, **{key: stale}
+        )
+        read = engine._durable_commit_proof_payload()
+        assert read["version"] == 3
+        assert read["emissions"] == []
+    finally:
+        engine.shutdown()
+
+
+def test_durable_proof_reader_still_reads_a_pre_fix_version_4_record(tmp_path, monkeypatch):
+    """#517 compat: a record written by main between #510 and #517 (top-level
+    version 4, no descriptor_version) keeps version 4 and its emissions."""
+    engine, _pre, _compressed = _compacted_engine(tmp_path, monkeypatch)
+    try:
+        stored = _rewrite_durable_proof(engine, version=4, descriptor_version=_DROP)
+        read = engine._durable_commit_proof_payload()
+        assert read["version"] == 4
+        assert read["emissions"] == stored["emissions"] and stored["emissions"]
+    finally:
+        engine.shutdown()
 
 
 @pytest.mark.parametrize(("stored", "replayed"), [("retry", " retry\n"), ("", "  ")], ids=["retry", "empty"])
