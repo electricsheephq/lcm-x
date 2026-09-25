@@ -279,9 +279,10 @@ def _project_emitted_occurrences(
             if not suffix_length and not normalized_suffix:
                 output = proof.get("output") or ()
                 output_index = (descriptor.get("output_occurrence") or {}).get("index")
-                if type(output_index) is int and 0 <= output_index < len(output) and sum(
+                multiplicity = sum(
                     tuple(item) == tuple(output[output_index]) for item in output
-                ) > sum(message.get("content") == span for _, message in _emission_candidate_rows(messages, role, length, digest)):
+                ) if type(output_index) is int and 0 <= output_index < len(output) else descriptor.get("output_multiplicity")
+                if type(multiplicity) is not int or multiplicity > sum(message.get("content") == span for _, message in _emission_candidate_rows(messages, role, length, digest)):
                     continue
             retained_source = descriptor.get("retained_source")
             if isinstance(retained_source, Mapping):

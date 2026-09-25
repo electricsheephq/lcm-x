@@ -645,6 +645,8 @@ class CompactionMixin:
                 ),
                 "emissions": emissions,
             }
+            for item in emissions:  # multiplicity witness for carried-forward proofs, which omit "output"
+                item["output_multiplicity"] = proof["output"].count(proof["output"][item["output_occurrence"]["index"]])
             if proof["output"] == proof["input"]:
                 # No-progress compress: Hermes has nothing to commit, and an
                 # end call with this list must stay a real session end.

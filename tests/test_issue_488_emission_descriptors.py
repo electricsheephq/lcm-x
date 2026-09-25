@@ -597,6 +597,37 @@ def test_empty_suffix_summary_requires_unambiguous_occurrence(tmp_path):
         engine.shutdown()
 
 
+@pytest.mark.parametrize("source", ["cached", "durable"])
+def test_empty_suffix_ambiguity_survives_carried_forward_proofs(tmp_path, source):
+    engine, compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        engine._assemble_context(
+            {"role": "system", "content": "system"}, tail, include_lcm_note=False
+        )
+        candidate = next(
+            item for item in engine._pending_emission_candidates if item["kind"] == "summary"
+        )
+        span = candidate["span"]
+        first = [candidate["row"], {"role": "user", "content": span}]
+        full_proof = _record(engine, [compacted, *tail], first)
+        if source == "durable":
+            engine._last_emission_descriptors = None
+            prior = engine._durable_commit_proof_payload()
+        else:
+            prior = engine._last_emission_descriptors
+        remaining = [{"role": "user", "content": span}]
+
+        for proof in (full_proof, prior):
+            projection = _project_emitted_occurrences(remaining, proof=proof)
+            assert projection.entries[0].generated_span is None
+
+        engine._pending_emission_candidates = []
+        carried = _record(engine, [*remaining, {"role": "user", "content": "later"}], remaining)
+        assert carried["emissions"] == []
+    finally:
+        engine.shutdown()
+
+
 def test_conversation_rebind_drops_cached_emission_descriptors(tmp_path):
     engine, compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
     try:
