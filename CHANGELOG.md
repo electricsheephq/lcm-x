@@ -6,7 +6,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
-## v0.24.1 - 2026-09-25 (#488: replay skips bound to proven emitted occurrences)
+## v0.24.1 - 2026-09-25 (#488: replay skips bound to proven emitted occurrences; #517 rollback-readable proof)
 
 - Fix: replay reconciliation binds every skip to a proven emitted occurrence (#488; #510 emission
   descriptors and the pure projection, #515 the consumer switch). The compaction commit proof moves to
