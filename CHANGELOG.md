@@ -43,6 +43,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   80-turn default rotation-plus-trailing cell. (#495)
 - Docs: the migration verify step names `hermes plugins list` (bare `hermes plugins` opens the interactive
   toggle); `scripts/install.sh` prints the same command. (#481)
+- Fix: the durable compaction-commit proof keeps the version-3 wire format so v0.24.0 reads it
+  after a rollback and that conversation compacts again; emission descriptors ride along under
+  `descriptor_version: 4`, and this reader relabels such a record to version 4. (#517)
 
 ## v0.24.0 - BREAKING: plugin renamed to hermes-lcm-x, engine to lcm-x (2026-09-25)
 
