@@ -6,41 +6,21 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
-- Fix: Hermes ACP turns no longer store duplicate rows or hit `publication_invariant_conflict`
-  when the host trims the prompt at turn end (#498). LCM watches the user rows it stored; when
-  the host rewrites that same object by edge whitespace only, it records an identity override
-  under `host_rewrite_identity:<store_id>` (protected like ingest, bound to a digest of the
-  stored content, refused for lossy redactions; a failed capture retries and never blocks the
-  ingest; the in-process override cache is FIFO-bounded and reloads on a miss). Stored content is never modified. Only position-bound matchers read an override or
-  tolerate edge whitespace: the retained user anchor, head-anchored restart
-  replay (row i vs incoming i, only for a list extending past the stored session, so a rewrite
-  LCM never saw before a crash is covered too), the durable proof walk, and the in-order store-id
-  mapper (either form, one-to-one). Full-replay and tail classification stay exact.
-  The durable commit proof moves to version 3; version-2 (rc3) proofs are still honoured.
-- Native recovery now compresses only history before LCM-X's protected fresh
-  tail, carries that tail forward verbatim, and records adopted-output proof so
-  host commits do not duplicate durable rows. (#482, #487)
-- Native rejection logs one secret-free warning with its reason class (such as
-  `prefix_too_short`, `suffix_changed`, or `native_aborted`), adoption logs one
-  info line, and `last_compression_noop_reason` carries the rejection class.
-- Native adoption proof records summary positions in the same effective-row
-  space used by replay reconciliation. The first mismatch after the summary
-  remains the delta start; unsafe skip landings are guarded by leaving the
-  landing unconsumed. Re-issued byte-identical call-only rows remain the known
-  pre-existing #500 case.
+## v0.24.1 - 2026-09-25 (#488: replay skips bound to proven emitted occurrences; #517 rollback-readable proof)
 
-- Fix: proof-backed Hermes rotation children now carry authority only for the exact parent rows
-  mapped from the adopted compaction output, without moving raw-row ownership. Publication SQL
-  reads only the current session and those carried ranges, while ignored carried rows receive
-  explicit exclusion proofs. Metadata-only sanitized results remain host no-ops, but a failed
-  publication keeps its distinct replay-safe result so Hermes can perform its rotation heal. When
-  there is no system message, LCM now emits a verified user-role summary plus the following
-  historical string user row as the same `summary\n\nrow` carrier Hermes would build, preserving
-  that row's proof, store-id and carry identity before rotation. The tail's only user row is the
-  current prompt and is deliberately not folded, so that residual adjacency remains; list-content
-  rows and system-message contexts are unchanged. Before this carrier fix, #498 alone produced
-  640 stored rows, 468 duplicates, 7 publication conflicts and 19 sessions in the affected
-  80-turn default rotation-plus-trailing cell. (#495)
+- Fix: replay reconciliation binds every skip to a proven emitted occurrence (#488; #510 emission
+  descriptors and the pure projection, #515 the consumer switch). The compaction commit proof's
+  descriptors are version 4 while the durable record keeps wire version 3 (#517; versions 2 and 3 are
+  still read for exact cursor matching): every emitted summary or
+  objective row carries a descriptor (span digest, suffix witness, role, same-prefix ordinal,
+  multiplicity witness, and the `output_occurrence` index and length). A live row is skipped only where
+  its projection binds an emitted occurrence; an unproven row keeps its full identity and is stored; a
+  merged composite maps to its own stored row, or — only when the remainder is in the proof's own
+  effective output — to the row Hermes merged behind the emitted one, and otherwise stays unmapped
+  until it is stored. Under a version-2/3 proof (until a session's first version-4 compaction) the
+  v0.24.0 replay rules stay in force, narrowed so an objective head with a merged row is stored whole.
+  Malformed descriptors are declined (full identity for their row), never raised on.
+
 - Docs: the migration verify step names `hermes plugins list` (bare `hermes plugins` opens the interactive
   toggle); `scripts/install.sh` prints the same command. (#481)
 - Fix: the durable compaction-commit proof keeps the version-3 wire format so v0.24.0 reads it
@@ -133,6 +113,47 @@ Hermes plugin-catalog admission (#471):
 Unchanged: `lcm.db` (name and location), the `lcm:` config block, `LCM_*` environment
 variables, all `lcm_*` tool names, `/lcm`, the bundled skill name `hermes-lcm`, and the log line
 `LCM plugin loaded — lossless context management active`.
+
+_Folded from "Unreleased" at v0.24.1: the rc4 fix train and follow-ups that shipped in v0.24.0._
+
+- Fix: Hermes ACP turns no longer store duplicate rows or hit `publication_invariant_conflict`
+  when the host trims the prompt at turn end (#498). LCM watches the user rows it stored; when
+  the host rewrites that same object by edge whitespace only, it records an identity override
+  under `host_rewrite_identity:<store_id>` (protected like ingest, bound to a digest of the
+  stored content, refused for lossy redactions; a failed capture retries and never blocks the
+  ingest; the in-process override cache is FIFO-bounded and reloads on a miss). Stored content is never modified. Only position-bound matchers read an override or
+  tolerate edge whitespace: the retained user anchor, head-anchored restart
+  replay (row i vs incoming i, only for a list extending past the stored session, so a rewrite
+  LCM never saw before a crash is covered too), the durable proof walk, and the in-order store-id
+  mapper (either form, one-to-one). Full-replay and tail classification stay exact.
+  The durable commit proof moves to version 3; version-2 (rc3) proofs are still honoured.
+
+- Native recovery now compresses only history before LCM-X's protected fresh
+  tail, carries that tail forward verbatim, and records adopted-output proof so
+  host commits do not duplicate durable rows. (#482, #487)
+
+- Native rejection logs one secret-free warning with its reason class (such as
+  `prefix_too_short`, `suffix_changed`, or `native_aborted`), adoption logs one
+  info line, and `last_compression_noop_reason` carries the rejection class.
+
+- Native adoption proof records summary positions in the same effective-row
+  space used by replay reconciliation. The first mismatch after the summary
+  remains the delta start; unsafe skip landings are guarded by leaving the
+  landing unconsumed. Re-issued byte-identical call-only rows remain the known
+  pre-existing #500 case.
+
+- Fix: proof-backed Hermes rotation children now carry authority only for the exact parent rows
+  mapped from the adopted compaction output, without moving raw-row ownership. Publication SQL
+  reads only the current session and those carried ranges, while ignored carried rows receive
+  explicit exclusion proofs. Metadata-only sanitized results remain host no-ops, but a failed
+  publication keeps its distinct replay-safe result so Hermes can perform its rotation heal. When
+  there is no system message, LCM now emits a verified user-role summary plus the following
+  historical string user row as the same `summary\n\nrow` carrier Hermes would build, preserving
+  that row's proof, store-id and carry identity before rotation. The tail's only user row is the
+  current prompt and is deliberately not folded, so that residual adjacency remains; list-content
+  rows and system-message contexts are unchanged. Before this carrier fix, #498 alone produced
+  640 stored rows, 468 duplicates, 7 publication conflicts and 19 sessions in the affected
+  80-turn default rotation-plus-trailing cell. (#495)
 
 ## v0.23.3 - maintenance point release
 
