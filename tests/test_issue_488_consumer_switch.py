@@ -141,8 +141,12 @@ def test_declined_empty_suffix_descriptor_keeps_full_identity(tmp_path, source):
         candidate = next(item for item in engine._pending_emission_candidates if item["kind"] == "summary")
         span = candidate["span"]
         _record(engine, [compacted, *tail], [candidate["row"], {"role": "user", "content": span}])
-        if source == "durable":
-            engine._last_emission_descriptors = None
+        if source == "durable":  # a real restart: close and re-open the engine on the same database
+            config = engine._config
+            engine.shutdown()
+            engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
+            engine.on_session_start("S0", platform="acp", context_length=200_000)
+            assert engine._last_emission_descriptors is None
             assert engine._active_emission_proof()["emissions"]
         remaining = [{"role": "user", "content": span}]
         full = engine._message_replay_identity(remaining[0], strip_carrier=False)
@@ -169,12 +173,21 @@ def test_carrier_remainder_only_when_its_suffix_matched(tmp_path, kind, retained
     engine, _block = _engine_with_verified_block(tmp_path)
     span = "GENERATED\n\n"
     row = {"role": "user", "content": span + suffix}
+    proof = _scoped_proof(kind, span, "retained", retained_source=retained)
     try:
         messages = [{"role": "assistant", "content": "earlier"}, row]  # past output index 0: still bound
-        _projection, identities = engine._occurrence_replay_identities(
-            messages, _scoped_proof(kind, span, "retained", retained_source=retained)
-        )
+        _projection, identities = engine._occurrence_replay_identities(messages, proof)
         assert identities[1][1] == (row["content"] if remainder is None else remainder)
+        # Store direction shown: with [earlier, retained] durable, a restarted ingest of the
+        # live pair stores the row unless its remainder is exactly the retained source.
+        engine.ingest([messages[0], {"role": "user", "content": "retained"}])
+        engine.shutdown()
+        engine = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        engine._last_emission_descriptors = proof
+        engine.ingest([dict(m) for m in messages])
+        stored = [content for _store_id, content in _stored_user_rows(engine)]
+        assert stored.count(row["content"]) == (0 if remainder == "retained" else 1)
     finally:
         engine.shutdown()
 
@@ -241,6 +254,7 @@ def test_host_merged_composite_is_not_stored_again_after_restart(tmp_path, monke
         tmp_path, monkeypatch, tail=tail, mode=mode, objective=objective
     )
     before = _rows(engine)
+    assert any("NEW-0 typed after the compaction" in (content or "") for _role, content in before)
     engine.shutdown()
     engine = make()
     try:
@@ -249,6 +263,7 @@ def test_host_merged_composite_is_not_stored_again_after_restart(tmp_path, monke
         assert _rows(engine) == before
     finally:
         engine.shutdown()
+
 
 # --- fix round 1 (gpt-6-astra review of 5e015fee): each test reproduces a reviewer counterexample.
 
@@ -331,6 +346,19 @@ def test_composite_is_not_skipped_by_an_older_remainder_row(tmp_path, monkeypatc
         live = [{"role": "user", "content": block + "\n\nY"}, {"role": "assistant", "content": "old reply"}]
         assert engine._cursor_from_durable_commit_proof(live) == 0
         assert engine._reconcile_ingest_cursor_from_store(live) == 0
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.xfail(strict=True, reason="F3 STOP: legacy full identity breaks #498 rc3-upgrade controls (fix1 RESULT.md)")
+@pytest.mark.parametrize("proof", [None, {"version": 3}], ids=["never-compacted", "legacy-v3"])
+def test_without_a_v4_proof_user_rows_keep_full_identity(tmp_path, proof):
+    """F3: no v4 emission authority, so no scaffold skip of a user row and no span strip."""
+    engine, block = _engine_with_verified_block(tmp_path)
+    try:
+        rows = [{"role": "user", "content": block}, {"role": "user", "content": block + "\n\nB"}]
+        _projection, identities = engine._occurrence_replay_identities(rows, proof)
+        assert [identity and identity[1] for identity in identities] == [m["content"] for m in rows]
     finally:
         engine.shutdown()
 
