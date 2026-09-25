@@ -350,15 +350,74 @@ def test_composite_is_not_skipped_by_an_older_remainder_row(tmp_path, monkeypatc
         engine.shutdown()
 
 
-@pytest.mark.xfail(strict=True, reason="F3 STOP: legacy full identity breaks #498 rc3-upgrade controls (fix1 RESULT.md)")
-@pytest.mark.parametrize("proof", [None, {"version": 3}], ids=["never-compacted", "legacy-v3"])
-def test_without_a_v4_proof_user_rows_keep_full_identity(tmp_path, proof):
-    """F3: no v4 emission authority, so no scaffold skip of a user row and no span strip."""
-    engine, block = _engine_with_verified_block(tmp_path)
+def _legacy_v3_restart(engine, tmp_path, host, *, tail):
+    """Store the host list, downgrade the durable proof to rc3's v3 (no emissions), restart."""
+    engine.ingest(host)
+    key = "compaction_commit_proof:S0"
+    payload = engine._store.read_metadata_json(key)
+    payload["version"] = 3
+    payload.pop("emissions", None)
+    engine._store.write_metadata_json([key], json.dumps(payload, sort_keys=True))
+    engine.shutdown()
+    resumed = LCMEngine(config=_config(tmp_path, fresh_tail_count=tail), hermes_home=str(tmp_path / "home"))
+    resumed.on_session_start("S0", platform="acp", context_length=200_000)
+    assert resumed._active_emission_proof()["version"] == 3
+    return resumed
+
+
+@pytest.mark.parametrize("tail", [0, 1], ids=["objective-head", "merged-carrier"])
+def test_legacy_proof_replay_is_not_stored_again(tmp_path, monkeypatch, tail):
+    """F3' L1: under a v3 proof the rc4 path holds: the replayed [OBJ, reply] and the host-merged
+    carrier [S+U, reply] re-store nothing and the cursor lands exactly at the end."""
+    engine, _pre, compressed = _phase1_compacted_engine(tmp_path, monkeypatch, tail=tail)
+    host = _host_merge_consecutive_users([dict(m) for m in compressed] + [_turn(13)[1]])
+    assert len(host) == 2
+    engine = _legacy_v3_restart(engine, tmp_path, host, tail=tail)
     try:
-        rows = [{"role": "user", "content": block}, {"role": "user", "content": block + "\n\nB"}]
-        _projection, identities = engine._occurrence_replay_identities(rows, proof)
-        assert [identity and identity[1] for identity in identities] == [m["content"] for m in rows]
+        before = _rows(engine)
+        engine.ingest([dict(m) for m in host])
+        assert _rows(engine) == before
+        assert engine._ingest_cursor == len(host)
+    finally:
+        engine.shutdown()
+
+
+def test_legacy_proof_objective_with_a_merged_row_is_stored_whole_once(tmp_path, monkeypatch):
+    """F3' L2: under a v3 proof an objective head carrying any other suffix (the host merged NEW
+    into it) keeps full identity: stored whole, once, and a second restart does not re-store it."""
+    engine, _pre, compressed = _phase1_compacted_engine(tmp_path, monkeypatch, tail=0)
+    assert len(compressed) == 1 and engine._legacy_objective_head(compressed[0]) is None
+    merged = {"role": "user", "content": compressed[0]["content"] + "\n\nNEW row typed after the upgrade"}
+    assert engine._legacy_objective_head(merged) == compressed[0]["content"]
+    engine = _legacy_v3_restart(engine, tmp_path, [dict(m) for m in compressed], tail=0)
+    try:
+        engine.ingest([dict(merged)])
+        rows = [content for _role, content in _rows(engine) if "NEW row typed" in (content or "")]
+        assert rows == [merged["content"]]
+        before = _rows(engine)
+    finally:
+        engine.shutdown()
+    for _ in range(2):
+        engine = LCMEngine(config=_config(tmp_path, fresh_tail_count=0), hermes_home=str(tmp_path / "home"))
+        try:
+            engine.on_session_start("S0", platform="acp", context_length=200_000)
+            engine.ingest([dict(merged)])
+            assert _rows(engine) == before
+        finally:
+            engine.shutdown()
+
+
+@pytest.mark.xfail(strict=True, reason="F3' accepted tradeoff: the legacy (v2/v3) carrier DAG strip, upgrade window only")
+def test_legacy_proof_authored_summary_is_not_mapped_to_a_stored_remainder(tmp_path, monkeypatch):
+    """F3' L3 residual: under a v3 proof an authored S+X whose X is already stored is skipped by
+    shape: the legacy carrier strip maps it to X's row. Ideal (the v4 behaviour): unmapped."""
+    engine, _pre, compressed = _phase1_compacted_engine(tmp_path, monkeypatch, tail=0)
+    block = _summary_block(engine, compressed)
+    engine = _legacy_v3_restart(engine, tmp_path, [dict(m) for m in compressed], tail=0)
+    try:
+        engine._store.append("S0", {"role": "user", "content": X})
+        authored = {"role": "user", "content": block + "\n\n" + X}
+        assert engine._get_store_id_map_for_messages([authored]).get(id(authored)) is None
     finally:
         engine.shutdown()
 

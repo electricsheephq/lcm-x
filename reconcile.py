@@ -592,9 +592,11 @@ class ReconcileMixin:
         unmatched or ambiguous descriptors project nothing, so those rows keep full identity."""
         projection = projection or _project_emitted_occurrences(messages, proof=proof)
         if not isinstance(proof, Mapping) or proof.get("version") != 4:
-            # No v4 proof in force (never compacted, legacy v2/v3): the rc4 contract, unchanged (A5).
+            # No v4 proof in force (never compacted, legacy v2/v3): the rc4 contract (A5), except that
+            # an objective scaffold is skipped only as the exact emitted head (F3').
             return projection, [
-                None if self._is_verified_replay_scaffold_message(m) else self._message_replay_identity(m)
+                None if self._is_verified_replay_scaffold_message(m) and self._legacy_objective_head(m) is None
+                else self._message_replay_identity(m)
                 for m in messages
             ]
         identities = []
@@ -615,6 +617,23 @@ class ReconcileMixin:
             projected = message if content is None else {**message, "content": content}
             identities.append(self._message_replay_identity(projected, strip_carrier=False))
         return projection, identities
+
+    def _legacy_objective_head(self, message) -> Optional[str]:
+        """F3' (#488, legacy proof window): the emitted objective head (objective, then DAG-verified
+        summary parts; todo annotation cut) when ``message`` carries any other suffix after it (the
+        host merged a new row in): that row keeps full identity and is stored whole. Else None."""
+        content = (normalize_content_value(message.get("content")) or "").lstrip()
+        if not content.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
+            return None
+        todo = content.find(_PRESERVED_TODO_CONTEXT_PREFIX)
+        content = content[:todo] if todo > 0 else content
+        pos = content.find("\n\n---\n\n")
+        while pos != -1:
+            end = self._verified_lcm_summary_prefix_end(content[pos + 7:])
+            if end is not None:  # an objective-only head has nothing to verify: rc4's skip
+                return content[: pos + 7 + end] if content[pos + 7 + end:].strip() else None
+            pos = content.find("\n\n---\n\n", pos + 7)
+        return None
 
     def _stored_row_forms(self, row: Dict[str, Any]) -> set:
         """A stored row's admissible identities: exact and its host-rewrite override form."""
@@ -2069,8 +2088,10 @@ class ReconcileMixin:
                 if not scaffold or n < len(scaffold):
                     return None
                 for message, digest, entry in zip(messages, scaffold, projection.entries):
-                    emitted = message if occurrences[index] is None else {**message, "content": entry.generated_span}
-                    if (occurrences[index] is not None and entry.generated_span is None) or (
+                    span = entry.generated_span  # legacy proof: an objective head with a merged row (F3')
+                    span = self._legacy_objective_head(message) if span is None and payload.get("version") != 4 else span
+                    emitted = message if occurrences[index] is None else {**message, "content": span}
+                    if (occurrences[index] is not None and span is None) or (
                         _commit_proof_identity_digest(proof_identity(emitted)) != digest
                     ):
                         return None
