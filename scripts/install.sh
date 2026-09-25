@@ -115,7 +115,7 @@ context:
 
 Verification:
   1. Restart Hermes.
-  2. Run: hermes plugins
+  2. Run: hermes plugins list
   3. Confirm the plugin list includes hermes-lcm-x and the selected context engine is lcm-x.
   4. Confirm the available skills include hermes-lcm.
 EOF
@@ -141,7 +141,7 @@ EOF
     echo "     plugins/hermes-lcm is this checkout, so also keeping hermes-lcm listed is harmless."
   fi
   cat <<EOF
-  3. Start Hermes; confirm hermes plugins lists hermes-lcm-x and the log shows
+  3. Start Hermes; confirm 'hermes plugins list' shows hermes-lcm-x enabled and the log shows
      "LCM plugin loaded — lossless context management active".
 EOF
   if [[ ${#LEGACY_LEFTOVERS[@]} -gt 0 ]]; then

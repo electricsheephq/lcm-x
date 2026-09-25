@@ -237,7 +237,7 @@ Restart Hermes after changing plugin or context-engine config.
 Run:
 
 ```bash
-hermes plugins
+hermes plugins list
 ```
 
 Expected signals:
@@ -372,7 +372,7 @@ change the config while Hermes is stopped:
      logs a once-per-process `DEPRECATED LCM-X config` warning and reports an
      `identity_migration` field in `lcm_status` and a `warn` check in
      `lcm_doctor` naming the exact change.
-4. **Start Hermes and verify:** `hermes plugins` lists `hermes-lcm-x` as
+4. **Start Hermes and verify:** `hermes plugins list` shows `hermes-lcm-x` as
    enabled and `hermes-lcm` as not enabled (an old directory kept for rollback
    may still be listed), and the log shows
    `LCM plugin loaded — lossless context management active`.
