@@ -2229,10 +2229,13 @@ class ReconcileMixin:
         return session_count if rewritten else None
 
     def _is_lcm_emitted_head_row(self, message, frontier: int) -> bool:
-        """#524 head rule: bytes provably LCM's own emission for this session. A DAG-verified pure
-        summary; a system row ending with the exact LCM note; an objective part re-rendered from a
-        stored own-session user row <= F, then only verified summary parts. Never a todo row."""
+        """#524 head rule: a row provably LCM's own emission for this session: bare content (no
+        tool identity) that is a DAG-verified pure summary; a system row ending with the exact LCM
+        note; an objective part re-rendered from a stored own-session user row <= F, then only
+        verified summary parts. Never a todo row."""
         role, content = message.get("role"), message.get("content")
+        if message.get("tool_calls") or message.get("tool_call_id"):  # the identity fields beyond role+content
+            return False  # LCM emits bare content: a tool call or call id is never its emission (tool rows below)
         if role == "system":
             if isinstance(content, list):
                 return bool(content) and isinstance(content[-1], dict) and content[-1].get("text") == self._append_lcm_note_to_content(None)
@@ -2276,7 +2279,8 @@ class ReconcileMixin:
             parts = self._verified_lcm_summary_prefix(normalize_content_value(messages[h].get("content")) or "")[1]
             covered = self._dag.coverage_end(parts)
             starts = [j for j in starts if covered and int(rows[j]["store_id"]) > covered >= (int(rows[j - 1]["store_id"]) if j else 0)]
-        starts = [j for j in starts if int(rows[j]["store_id"]) <= frontier and len(rows) - j > sum(int(r["store_id"]) > frontier for r in rows)]
+        above = sum(int(r["store_id"]) > frontier for r in rows)
+        starts = [j for j in starts if int(rows[j]["store_id"]) <= frontier and len(rows) - j > above]
         self._load_host_rewrite_overrides(rows)
         ident = [self._message_replay_identity(m, strip_carrier=carrier and not i) for i, m in enumerate(messages[h:])]
         forms = {j: self._stored_row_forms(rows[j]) for j in range(starts[0], len(rows))} if starts else {}

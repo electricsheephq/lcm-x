@@ -542,6 +542,68 @@ def test_a_fresh_row_shaped_like_scaffold_is_not_skipped(tmp_path, monkeypatch, 
     assert fixed["new_stored"] or case in ("todo_head", "note_phrases_mid_system_text"), fixed
 
 
+# -- fix round 2: a head whose identity goes beyond its bytes (tool calls) is never LCM's emission --
+
+def _tool_call(call_id, arguments):
+    return {"id": call_id, "type": "function", "function": {"name": "ledger", "arguments": json.dumps(arguments)}}
+
+
+def _objective_gen2(tmp_path):
+    """Attempt 1 over an objective + tool-pair transcript, adopted; attempt 2 committed and cancelled."""
+    engine = _engine(tmp_path)
+    first = _transcript() + [{"role": "user", "content": "OBJECTIVE: reconcile the vendor ledger end to end"}]
+    for index in range(20):
+        first += [{"role": "assistant", "content": f"step {index}", "tool_calls": [_tool_call(f"call_{index}", {})]},
+                  {"role": "tool", "tool_call_id": f"call_{index}", "content": f"ledger page {index} " + "x " * 80}]
+    engine.ingest(first)
+    out1 = deepcopy(_compress(engine, first))
+    _adopt(engine, first)
+    host = deepcopy(out1) + _more(0, 120)
+    engine.ingest(host)
+    _compress(engine, host)
+    assert engine._last_compression_status == "compacted"
+    return engine, host
+
+
+def _metadata_head_run(tmp_path, monkeypatch, case, *, term):
+    if not term:
+        _no_term(monkeypatch)
+    provider = _Provider()
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", provider)
+    if case == "objective_head_reusing_a_stored_call_id":
+        engine, host = _objective_gen2(tmp_path)
+        objective = next(m for m in host if str(m.get("content")).startswith(OBJECTIVE))
+        call = next(i for i, m in enumerate(host) if m.get("tool_calls"))  # a durable call below F
+        head = {"role": "assistant", "content": objective["content"],
+                "tool_calls": [_tool_call(host[call]["tool_calls"][0]["id"], {"query": NEW})]}
+        retry = [head] + deepcopy(host[call + 1:])  # its stored result pairs with the reused id
+    else:
+        engine, host, _out2, _proof1 = _gen2(tmp_path)
+        head_text = host[0]["content"]
+        summary = head_text[: head_text.index("\n\n---\n\n") if "\n\n---\n\n" in head_text else head_text.rindex("]") + 1]
+        assert engine._is_lcm_emitted_head_row({"role": "assistant", "content": summary}, 10**9)
+        head = {"role": "assistant", "content": summary, "tool_calls": [_tool_call("call_new_524", {"query": NEW})]}
+        retry = [head, _glued_row(host)] + deepcopy(host[1:])
+    try:
+        got = _retry_and_measure(engine, provider, retry)
+        stored = engine._store.get_session_messages(SID, limit=100_000)
+        return {**got, "new_stored": any(NEW in json.dumps(row.get("tool_calls"), default=str) for row in stored),
+                "new_returned": any(NEW in json.dumps(row.get("tool_calls"), default=str) for row in got.pop("out"))}
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("case", ["objective_head_reusing_a_stored_call_id", "summary_head_with_tool_calls"])
+def test_a_head_with_identity_beyond_its_bytes_is_not_skipped(tmp_path, monkeypatch, case):
+    """LCM emits summaries, notes and objective parts as bare content: a head row carrying
+    tool calls (an identity beyond its bytes) is a real row, whatever its text says."""
+    fixed = _metadata_head_run(tmp_path / "fixed", monkeypatch, case, term=True)
+    monkeypatch.undo()
+    today = _metadata_head_run(tmp_path / "today", monkeypatch, case, term=False)
+    assert fixed["reason"] != REASON and fixed == today
+    assert fixed["new_stored"] and fixed["new_returned"], fixed
+
+
 # -- eva-shaped cell: the real Hermes host helpers around a real (unpatched) engine ------------------
 
 _EVA_PROBE = r'''
