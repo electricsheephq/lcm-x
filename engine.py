@@ -134,7 +134,7 @@ from .aux_session import AuxiliarySessionMixin
 from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from .reconcile import _emission_identity
-from .reconcile import _has_lossy_redacted_identity
+from .reconcile import _has_lossy_redacted_identity, _proof_user_identity
 from .compaction import CompactionMixin
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
@@ -4871,12 +4871,12 @@ class LCMEngine(
         if not target:
             return None
         effective: list = []
-        for index, message in enumerate(messages):
+        for index, identity in enumerate(self._occurrence_replay_identities(messages, proof)[1]):
             if len(effective) == len(target):
                 return index if effective == target else None
-            if self._is_verified_replay_scaffold_message(message):
+            if identity is None:
                 continue
-            effective.append(self._proof_replay_identity(message))
+            effective.append(_proof_user_identity(identity))
             if effective != target[: len(effective)]:
                 return None
         return len(messages) if effective == target else None
@@ -4898,10 +4898,10 @@ class LCMEngine(
             return None
         skip_metadata_valid = len(skip_landing) == len(target)
         matched = 0
-        for index, message in enumerate(messages):
-            if self._is_verified_replay_scaffold_message(message):
+        for index, identity in enumerate(self._occurrence_replay_identities(messages, proof)[1]):
+            if identity is None:
                 continue
-            identity = self._proof_replay_identity(message)
+            identity = _proof_user_identity(identity)
             if _has_lossy_redacted_identity(identity):
                 return None
             try:

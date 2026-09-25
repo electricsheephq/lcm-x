@@ -531,6 +531,7 @@ class CompactionMixin:
         """Run compaction and leave a terminal public status on every failure."""
         try:
             self._pending_emission_candidates = []
+            self._compress_occurrences = None
             with self._fresh_tail_pressure_yield_invocation():
                 result = self._compress_impl(
                     messages,
@@ -538,6 +539,7 @@ class CompactionMixin:
                     focus_topic=focus_topic,
                     force=force,
                 )
+            self._compress_occurrences = None
             if (
                 isinstance(result, list)
                 and result is not messages
@@ -560,6 +562,7 @@ class CompactionMixin:
             self._rekey_host_rewrite_watch(messages, result)
             return result
         except BaseException:
+            self._compress_occurrences = None
             self._last_compression_status = "error"
             self._last_compression_noop_reason = ""
             raise
@@ -1136,6 +1139,8 @@ class CompactionMixin:
         # replay-safe view so quarantined assistant loops do not enter summaries
         # or provider context after the durable row has been written.
         working_messages = self._ingest_messages(messages)
+        # #488: project the complete admitted list ONCE; subset consumers look rows up here.
+        self._compress_occurrences = self._projected_occurrence_map(working_messages)
         self._prepare_retained_user_anchor(working_messages)
         native_cleanup_only = bool(
             self._config.native_recovery
@@ -1293,9 +1298,10 @@ class CompactionMixin:
                 break
 
             candidate_start = leading_anchor_count
-            while (
-                candidate_start < fresh_tail_start
-                and self._is_replayed_context_scaffold_message(working_messages[candidate_start])
+            while candidate_start < fresh_tail_start and (
+                self._is_replayed_context_scaffold_message(working_messages[candidate_start])
+                if self._compress_occurrences is None  # no v4 proof in force: the rc4 contract
+                else self._compress_occurrences.get(id(working_messages[candidate_start]), ()) is None
             ):
                 candidate_start += 1
             if candidate_start > leading_anchor_count:

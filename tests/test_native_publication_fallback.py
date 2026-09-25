@@ -797,7 +797,7 @@ def test_native_commit_proof_persists_before_host_publication(candidate, monkeyp
     )["native"] is True
 
 
-@pytest.mark.parametrize("proven", [True], ids=["emitted-objective"])
+@pytest.mark.parametrize("proven", [True, False], ids=["emitted-objective", "unproven-objective-shape"])
 def test_native_summary_index_uses_effective_output_space(candidate, proven):
     scaffold = {
         "role": "user",

@@ -552,6 +552,17 @@ class ReconcileMixin:
     def _proof_replay_identity(self, msg: Dict[str, Any]) -> tuple[str, str, str, str, str]:
         return _proof_user_identity(self._message_replay_identity(msg))
 
+    def _projected_occurrence_map(self, messages) -> Optional[dict[int, Optional[tuple[str, str, str, str, str]]]]:
+        """Proven occurrences of this complete list, by object: projected identity or None
+        (scaffold); None when no v4 proof is in force (the rc4 contract applies)."""
+        proof = self._active_emission_proof()
+        if not isinstance(proof, Mapping) or proof.get("version") != 4:
+            return None
+        projection, identities = self._occurrence_replay_identities(messages, proof)
+        return {
+            id(m): i for m, e, i in zip(messages, projection.entries, identities) if e.generated_span or i is None
+        }
+
     def _active_emission_proof(self):
         """The scoped v4 emissions in force: this process's, else the durable proof's."""
         try:
@@ -1308,13 +1319,20 @@ class ReconcileMixin:
         active_lineage_identities = self._active_folded_tail_identity_overrides(
             messages
         )
+        # One projection over the complete list (#488): skips are occurrence-bound.
+        projection, occurrences = self._occurrence_replay_identities(messages, self._active_emission_proof())
+        occurrence_identities = {id(m): i for m, i in zip(messages, occurrences) if i is not None}
+        scaffold_ids = {id(m) for m, i in zip(messages, occurrences) if i is None}
+        objective_ids = {
+            id(m) for m, e in zip(messages, projection.entries) if e.kind == "objective" and e.generated_span is not None
+        }
 
         def active_identity(
             message: Dict[str, Any],
         ) -> tuple[str, str, str, str, str]:
             return active_lineage_identities.get(
                 id(message),
-                self._message_replay_identity(message),
+                occurrence_identities.get(id(message)) or self._message_replay_identity(message, strip_carrier=False),
             )
 
         sanitized_replay_tail = self._stored_tail_for_sanitized_active_replay(stored_tail)
@@ -1414,7 +1432,7 @@ class ReconcileMixin:
             candidate_visible_messages = [
                 msg
                 for msg in candidate_messages
-                if not self._is_verified_replay_scaffold_message(msg)
+                if id(msg) not in scaffold_ids
                 and not self._matches_ignore_message_patterns(msg)
             ]
             candidate_non_placeholder_messages = [
@@ -1438,7 +1456,7 @@ class ReconcileMixin:
             ]
             filtered_candidate_placeholders = len(candidate_non_placeholder_messages) < len(candidate_visible_messages)
             candidate_has_scaffold_evidence = any(
-                self._is_verified_replay_scaffold_message(msg) for msg in candidate_messages
+                id(msg) in scaffold_ids for msg in candidate_messages
             )
             candidate_has_quarantined_replay_evidence = any(
                 self._is_quarantined_assistant_replay_identity(active_identity(msg))
@@ -1821,7 +1839,7 @@ class ReconcileMixin:
             )
 
             has_scaffold_evidence = any(
-                self._is_verified_replay_scaffold_message(msg) for msg in candidate_messages
+                id(msg) in scaffold_ids for msg in candidate_messages
             )
             has_raw_full_replay = (
                 has_persisted_marker_specific_replay_evidence
@@ -1830,13 +1848,7 @@ class ReconcileMixin:
                 and len(candidate_messages) >= raw_session_count
                 and raw_session_count > 1
             )
-            has_preserved_objective_scaffold = any(
-                str(msg.get("role") or "") != "system"
-                and (normalize_content_value(msg.get("content")) or "").lstrip().startswith(
-                    _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
-                )
-                for msg in candidate_messages
-            )
+            has_preserved_objective_scaffold = any(id(msg) in objective_ids for msg in candidate_messages)
             candidate_suffix_has_user_turn = any(identity[0] == "user" for identity in candidate_prefix)
             has_scaffold_suffix_replay = (
                 has_persisted_marker_specific_replay_evidence
@@ -1898,13 +1910,14 @@ class ReconcileMixin:
         active_lineage_identities = self._active_folded_tail_identity_overrides(
             messages
         )
+        _projection, identities = self._occurrence_replay_identities(messages, self._active_emission_proof())
         return [
             active_lineage_identities.get(
                 id(msg),
-                self._message_replay_identity(msg),
+                identity,
             )
-            for msg in messages
-            if not self._is_verified_replay_scaffold_message(msg)
+            for msg, identity in zip(messages, identities)
+            if identity is not None
             and not self._matches_ignore_message_patterns(msg)
         ]
 
@@ -2018,9 +2031,13 @@ class ReconcileMixin:
                 return None
 
             def proof_identity(message, **kwargs):
-                identity = self._message_replay_identity(message, **kwargs)
+                identity = message if isinstance(message, tuple) else self._message_replay_identity(
+                    message, strip_carrier=False, **kwargs
+                )
                 # rc3 (version 2) hashed exact identities.
                 return _proof_user_identity(identity) if payload.get("version") != 2 else identity
+
+            projection, occurrences = self._occurrence_replay_identities(messages, payload)
 
             target = list(payload.get("effective_sha256") or [])
             droppable = list(payload.get("droppable") or [])
@@ -2037,18 +2054,21 @@ class ReconcileMixin:
                 scaffold = list(payload.get("scaffold_sha256") or [])
                 if not scaffold or n < len(scaffold):
                     return None
-                for message, digest in zip(messages, scaffold):
-                    if not self._is_verified_replay_scaffold_message(message) or (
-                        _commit_proof_identity_digest(proof_identity(message)) != digest
+                for message, digest, entry in zip(messages, scaffold, projection.entries):
+                    emitted = message if occurrences[index] is None else {**message, "content": entry.generated_span}
+                    if (occurrences[index] is not None and entry.generated_span is None) or (
+                        _commit_proof_identity_digest(proof_identity(emitted)) != digest
                     ):
                         return None
-                index = len(scaffold)
+                    if occurrences[index] is not None:
+                        break  # the host merged a new row into it (#499): stored whole, matched in full below
+                    index += 1
             while index < n and matched < len(target):
-                message = messages[index]
+                identity = occurrences[index]
                 index += 1
-                if self._is_verified_replay_scaffold_message(message):
+                if identity is None:
                     continue
-                identity = proof_identity(message)
+                identity = proof_identity(identity)
                 # A digest-less redaction (password_assignment) is not identity:
                 # different same-length secrets share it, so it proves nothing.
                 if _has_lossy_redacted_identity(identity):
@@ -2121,7 +2141,7 @@ class ReconcileMixin:
             return None
         rewritten = any(self._host_rewrite_override_content(r) is not None for r in rows)
         for row, message in zip(rows, messages):
-            identity = self._message_replay_identity(message)
+            identity = self._message_replay_identity(message, strip_carrier=False)
             stored = self._message_replay_identity(row, stored_row=True, with_host_rewrite=True)
             if _has_lossy_redacted_identity(identity) or _proof_user_identity(identity) != _proof_user_identity(stored):
                 return None
@@ -2722,18 +2742,15 @@ class ReconcileMixin:
         candidates.sort(key=lambda candidate: int(candidate["store_id"]))
         self._load_host_rewrite_overrides(candidates)
 
+        live_identities: dict[int, tuple[Any, ...]] = {}
+
         def active_lineage_identity(
             message: Dict[str, Any],
         ) -> tuple[str, str, str, str, str]:
-            return active_lineage_identities.get(
-                id(message),
-                self._message_replay_identity(message),
-            )
+            return active_lineage_identities.get(id(message)) or live_identities.get(
+                id(message)
+            ) or self._message_replay_identity(message)
 
-        active_identity_counts: dict[tuple[Any, ...], int] = {}
-        for msg in messages:
-            identity = active_lineage_identity(msg)
-            active_identity_counts[identity] = active_identity_counts.get(identity, 0) + 1
         stored_identity_counts: dict[tuple[Any, ...], int] = {}
         stored_cleanup_identity_counts: dict[tuple[Any, ...], int] = {}
         # Capture each candidate's identity (and its cleanup variant) here - both
@@ -2767,6 +2784,25 @@ class ReconcileMixin:
                 stored_cleanup_identity_counts[cleanup_identity] = (
                     stored_cleanup_identity_counts.get(cleanup_identity, 0) + 1
                 )
+
+        # #488: map occurrences, never bytes alone. A proven emitted occurrence maps by its
+        # projected remainder (from the complete list: compress() projects its admitted list
+        # once); any other row by its full identity when that is durable, else by the
+        # verified-carrier remainder (a pre-descriptor carrier's retained source).
+        occurrences = getattr(self, "_compress_occurrences", None)
+        if occurrences is None:
+            occurrences = self._projected_occurrence_map(messages) or {}
+        stored_forms = {*stored_identities, *filter(None, stored_alt_identities)}
+        for msg in messages:
+            identity = occurrences.get(id(msg))
+            if identity is None:
+                identity = self._message_replay_identity(msg, strip_carrier=False)
+                identity = identity if identity in stored_forms else self._message_replay_identity(msg)
+            live_identities[id(msg)] = identity
+        active_identity_counts: dict[tuple[Any, ...], int] = {}
+        for msg in messages:
+            identity = active_lineage_identity(msg)
+            active_identity_counts[identity] = active_identity_counts.get(identity, 0) + 1
 
         # Lazily memoize raw-placeholder identities: only the placeholder-ref
         # paths need them, and most histories have few (or none), so computing
