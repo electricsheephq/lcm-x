@@ -6,7 +6,8 @@ reviewers need. From v0.24.0 (#471) the runtime identifiers are `hermes-lcm-x`
 for the plugin and `lcm-x` for the context engine (legacy v0.23.x: `hermes-lcm`
 / `lcm`).
 
-The released product baseline for this note is
+The released product baseline for this note (a dated snapshot; the current
+stable is recorded in `docs/project-status.md`) is
 `v0.23.1@81d8d41197dddc4c09b57097f4955ebae32366a9`. The source snapshot
 used for reconciliation is
 `main@3d4fbb4c979dc09aef0b831bb50d928e0e18d68f`. Stable product and main

@@ -8,7 +8,7 @@ LCM-X is Lossless Context Memory eXtension: a Hermes-compatible context engine t
 
 ## Current product baseline
 
-Latest stable is `v0.23.1@81d8d41197dddc4c09b57097f4955ebae32366a9`. The source snapshot for this roadmap is `main@3d4fbb4c979dc09aef0b831bb50d928e0e18d68f`.
+Latest stable at the time of this roadmap snapshot was `v0.23.1@81d8d41197dddc4c09b57097f4955ebae32366a9` (the current stable is recorded in [docs/project-status.md](docs/project-status.md)). The source snapshot for this roadmap is `main@3d4fbb4c979dc09aef0b831bb50d928e0e18d68f`.
 
 Stable and main are separate identities. Stable is the product-under-test and installed-runtime baseline; main is the continuing development line. #342 owns main's deferred version-metadata policy.
 
