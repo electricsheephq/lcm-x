@@ -29,7 +29,10 @@ from .reconcile import (
     _COMPACTION_COMMIT_PROOF_METADATA_PREFIX,
     _COMPACTION_COMMIT_PROOF_VERSION,
     _commit_proof_identity_digest,
+    _emission_identity,
+    _finalize_emission_descriptors,
     _has_lossy_redacted_identity,
+    _project_emitted_occurrences,
 )
 from .sanitize import _contains_sensitive_redaction
 from .sqlite_util import _is_sqlite_locked_error
@@ -526,6 +529,7 @@ class CompactionMixin:
                  force: bool = False) -> List[Dict[str, Any]]:
         """Run compaction and leave a terminal public status on every failure."""
         try:
+            self._pending_emission_candidates = []
             with self._fresh_tail_pressure_yield_invocation():
                 result = self._compress_impl(
                     messages,
@@ -546,6 +550,9 @@ class CompactionMixin:
             ):
                 result = messages
             self._record_compress_commit_proof(messages, result)
+            self._generated_ignored_active_replay_placeholder_message_ids.intersection_update(map(id, getattr(self, "_last_active_replay_messages", ())))
+            logger.debug("LCM compaction emission descriptor count=%d",
+                         len((self._compress_commit_proof or {}).get("emissions") or ()))
             proof_missing = self._last_compression_status == "host_native" and self._compress_commit_proof is None
             if proof_missing:
                 self._ingest_cursor = 0
@@ -573,6 +580,7 @@ class CompactionMixin:
         the re-ingest; it still finalizes the session with its own frontier (#483).
         """
         try:
+            prior_proof = self._compress_commit_proof
             self._compress_commit_proof = None
             if (
                 not self._session_id
@@ -585,7 +593,41 @@ class CompactionMixin:
             carried_rows = self._store.get_batch(
                 sorted(set(self._get_store_ids_for_messages(result)))
             )
+            state = (
+                self._lifecycle.get_by_conversation(self._conversation_id)
+                if self._conversation_id
+                else self._lifecycle.get_by_session(self._session_id)
+            )
+            emission_binding = {
+                "hermes_home": str(self._hermes_home or ""),
+                "session_id": self._session_id,
+                "conversation_id": self._conversation_id or "",
+                "reset_epoch": state.last_reset_at if state is not None else None,
+            }
+            emissions = _finalize_emission_descriptors(
+                result, getattr(self, "_pending_emission_candidates", ()), emission_binding
+            )
+            if prior_proof:
+                prior_projection = _project_emitted_occurrences(messages, proof=prior_proof)
+                result_identities = [_emission_identity(message) for message in result]
+                for entry in prior_projection.entries:
+                    if entry.generated_span is None or result_identities.count(entry.full_identity) != 1:
+                        continue
+                    carried = _finalize_emission_descriptors(result, [{
+                        "kind": entry.kind,
+                        "span": entry.generated_span,
+                        "retained_source": entry.retained_source,
+                        "full_identity": entry.full_identity,
+                    }], emission_binding)
+                    if carried and all(
+                        item["output_occurrence"]["index"] != carried[0]["output_occurrence"]["index"]
+                        for item in emissions
+                    ):
+                        emissions.extend(carried)
+            emissions.sort(key=lambda item: item["output_occurrence"]["index"])
             proof = {
+                "version": _COMPACTION_COMMIT_PROOF_VERSION,
+                **emission_binding,
                 "session_id": self._session_id,
                 "conversation_id": self._conversation_id,
                 "input": [self._proof_replay_identity(m) for m in messages],
@@ -596,6 +638,7 @@ class CompactionMixin:
                     for store_id, row in sorted(carried_rows.items())
                     if row.get("session_id")
                 ),
+                "emissions": emissions,
             }
             if proof["output"] == proof["input"]:
                 # No-progress compress: Hermes has nothing to commit, and an
@@ -645,7 +688,9 @@ class CompactionMixin:
                 # database_path serves several homes) and its creation time,
                 # so a proof older than a lifecycle reset is ignored.
                 "hermes_home": str(self._hermes_home or ""),
+                "session_id": proof.get("session_id") or "",
                 "conversation_id": proof.get("conversation_id") or "",
+                "reset_epoch": proof.get("reset_epoch"),
                 "created_at": time.time(),
                 "effective_sha256": [
                     _commit_proof_identity_digest(identity) for identity in proof["output_effective"]
@@ -661,6 +706,7 @@ class CompactionMixin:
                         proof.get("carry_ranges") or []
                     )
                 ],
+                "emissions": copy.deepcopy(proof.get("emissions") or []),
             }
             if not proof["output_effective"]:
                 # Scaffold-only output: bind the proof to the emitted rows (#484 item 11l).

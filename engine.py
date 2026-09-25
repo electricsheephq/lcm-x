@@ -3312,6 +3312,8 @@ class LCMEngine(
             # so its first ingest re-indexes a host-merged prefix instead of
             # trusting a positional cursor, and persist it for a resumed child.
             commit_proof["session_id"] = session_id
+            for emission in commit_proof.get("emissions") or ():
+                emission["scope"] = {**(emission.get("scope") or {}), "session_id": session_id}
             commit_proof["input"] = None
             if commit_proof.get("published") or commit_proof.get("native"):
                 self._persist_compress_commit_proof(commit_proof)
@@ -6869,6 +6871,8 @@ class LCMEngine(
           [fresh tail messages]
         """
         result = []
+        emission_candidates: list[dict[str, Any]] = []
+        summary_candidate: Optional[dict[str, Any]] = None
 
         # Leading anchor with optional LCM annotation. Only a true system prompt
         # is a safe permanent anchor; gateway sessions can start directly with
@@ -7003,6 +7007,11 @@ class LCMEngine(
                 else:
                     summary_message = {"role": summary_role, "content": combined}
                     result.append(summary_message)
+                    summary_candidate = {
+                        "kind": "objective" if combined.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else "summary",
+                        "span": combined,
+                    }
+                    emission_candidates.append(summary_candidate)
 
         # Proactive memory injection (SPEC F, default-off). One bounded block is
         # placed adjacent to the summary prefix — a stable position below the
@@ -7052,6 +7061,13 @@ class LCMEngine(
                         ),
                         *tail_selected[1:],
                     ]
+                    normalized_tail = normalize_content_value(folded_original_tail.get("content")) or ""
+                    if isinstance(folded_original_tail.get("content"), str):
+                        emission_candidates.append({
+                            "kind": "objective" if generated_context.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else "summary",
+                            "span": generated_context + ("\n\n---\n\n" if normalized_tail else ""),
+                            "retained_source": {"store_id": folded_source_store_id},
+                        })
                 else:
                     logger.warning(
                         "LCM omitted generated context because the same-role "
@@ -7061,6 +7077,10 @@ class LCMEngine(
                 result.append(
                     {"role": summary_role, "content": generated_context}
                 )
+                emission_candidates.append({
+                    "kind": "objective" if generated_context.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else "summary",
+                    "span": generated_context,
+                })
 
         # Fresh tail. A user-role summary directly ahead of a historical user
         # row is emitted as the carrier a host's alternation repair would build
@@ -7085,7 +7105,14 @@ class LCMEngine(
                 "content": f"{summary_message['content']}\n\n{tail_selected[0]['content']}",
             }
             if self._generated_context_carrier_remainder(carrier) == tail_selected[0]["content"]:
+                source_ids = self._get_store_ids_for_messages([tail_selected[0]])
                 result[-1] = carrier
+                if summary_candidate is not None:
+                    summary_candidate.update({
+                        "kind": "carrier",
+                        "span": f"{summary_message['content']}\n\n",
+                        "retained_source": {"store_id": source_ids[0]} if source_ids else None,
+                    })
                 tail_selected = tail_selected[1:]
         result.extend(tail_selected)
 
@@ -7136,6 +7163,7 @@ class LCMEngine(
         # Persist proof only for the exact provider-visible compacted snapshot
         # assembled by this engine. Ingested input is not trusted replay proof.
         self._remember_compacted_active_replay_snapshot(result)
+        self._pending_emission_candidates = emission_candidates
         return result
 
     def _is_budget_droppable_tail_message(self, message: Dict[str, Any]) -> bool:

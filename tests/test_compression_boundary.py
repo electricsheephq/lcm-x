@@ -962,7 +962,7 @@ def test_durable_commit_proof_is_written_only_for_a_published_compaction(tmp_pat
     engine, _pre, compressed = _compacted_engine(tmp_path, monkeypatch)
     try:
         payload = _durable_commit_proof(engine, "S0")
-        assert payload["version"] == 3
+        assert payload["version"] == 4
         assert payload["hermes_home"] == str(tmp_path / "home")
         assert len(payload["effective_sha256"]) == len(engine._compress_commit_proof["output_effective"])
         assert payload["last_store_id"] > 0

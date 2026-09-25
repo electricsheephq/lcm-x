@@ -22,8 +22,9 @@ import hashlib
 import json
 import re
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .externalize import (
     extract_externalized_ref,
@@ -113,8 +114,119 @@ _SESSION_END_REPLAY_METADATA_PREFIX = "session_end_replay_snapshot_digests"
 _NATIVE_RECOVERY_REPLAY_METADATA_PREFIX = "native_recovery_replay_snapshot_digests"
 _COMPACTION_COMMIT_PROOF_METADATA_PREFIX = "compaction_commit_proof"
 # Version 3 hashes proof identities (_proof_user_identity). A version-2 (rc3)
-# proof hashed exact identities and is still verified with them.
-_COMPACTION_COMMIT_PROOF_VERSION = 3
+# proof hashed exact identities and is still verified with them. Version 4 adds
+# descriptors; legacy versions never authorize generated-span removal.
+_COMPACTION_COMMIT_PROOF_VERSION = 4
+
+
+@dataclass(frozen=True)
+class EmissionProjectionEntry:
+    full_identity: tuple[str, str, str, str, str]
+    effective_identity: tuple[str, str, str, str, str]
+    generated_span: Optional[str] = None
+    retained_source: Any = None
+    kind: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class EmissionProjection:
+    entries: tuple[EmissionProjectionEntry, ...]
+    offset: int = 0
+    complete_length: int = 0
+
+    def slice(self, offset: int, length: Optional[int] = None) -> "EmissionProjection":
+        stop = None if length is None else offset + length
+        return EmissionProjection(self.entries[offset:stop], self.offset + offset, self.complete_length)
+
+
+def _emission_identity(message: Mapping[str, Any], content: Optional[str] = None):
+    role = str(message.get("role") or "unknown")
+    normalized = normalize_content_value(message.get("content")) or "" if content is None else content
+    tool_calls = json.dumps(
+        message.get("tool_calls") or [], ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    tool_name = str(message.get("tool_name") or message.get("name") or "") if role == "tool" else ""
+    return role, normalized, str(message.get("tool_call_id") or ""), tool_calls, tool_name
+
+
+def _finalize_emission_descriptors(messages, candidates, scope):
+    """Bind assembly candidates to the exact returned occurrences."""
+    descriptors = []
+    search_from = 0
+    for candidate in candidates:
+        kind, span = candidate.get("kind"), candidate.get("span")
+        if kind not in {"summary", "carrier", "objective"} or not isinstance(span, str) or not span:
+            continue
+        expected_identity = candidate.get("full_identity")
+        for index in range(search_from, len(messages)):
+            message = messages[index]
+            content = message.get("content") if isinstance(message, dict) else None
+            identity = _emission_identity(message) if isinstance(message, dict) else None
+            if not isinstance(content, str) or not content.startswith(span) or (
+                expected_identity is not None and identity != expected_identity
+            ):
+                continue
+            span_bytes = span.encode("utf-8")
+            ordinal = sum(
+                _emission_identity(previous) == identity
+                for previous in messages[: index + 1]
+                if isinstance(previous, dict)
+            ) - 1
+            descriptors.append({
+                "kind": kind,
+                "output_occurrence": {"index": index, "same_identity_ordinal": ordinal},
+                "generated_span_sha256": hashlib.sha256(span_bytes).hexdigest(),
+                "generated_span_bytes": len(span_bytes),
+                "retained_source": candidate.get("retained_source"),
+                "scope": dict(scope),
+            })
+            search_from = index + 1
+            break
+    return descriptors
+
+
+def _project_emitted_occurrences(
+    messages: Sequence[dict], *, proof: Mapping[str, Any] | None
+) -> EmissionProjection:
+    """Project proof-bound generated prefixes without changing stored identity."""
+    entries = [
+        EmissionProjectionEntry(_emission_identity(message), _emission_identity(message))
+        for message in messages
+    ]
+    if not isinstance(proof, Mapping) or proof.get("version") != 4:
+        return EmissionProjection(tuple(entries), complete_length=len(entries))
+    expected_binding = {key: proof.get(key) for key in ("hermes_home", "session_id", "conversation_id", "reset_epoch")}
+    search_from = 0
+    for descriptor in proof.get("emissions") or ():
+        if not isinstance(descriptor, Mapping) or descriptor.get("kind") not in {
+            "summary", "carrier", "objective"
+        } or descriptor.get("scope") != expected_binding:
+            continue
+        length = descriptor.get("generated_span_bytes")
+        digest = descriptor.get("generated_span_sha256")
+        if not isinstance(length, int) or length <= 0 or not isinstance(digest, str):
+            continue
+        for index in range(search_from, len(messages)):
+            content = messages[index].get("content")
+            if not isinstance(content, str):
+                continue
+            raw = content.encode("utf-8")
+            if len(raw) < length or hashlib.sha256(raw[:length]).hexdigest() != digest:
+                continue
+            try:
+                span, suffix = raw[:length].decode("utf-8"), raw[length:].decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            entries[index] = EmissionProjectionEntry(
+                entries[index].full_identity,
+                _emission_identity(messages[index], suffix),
+                span,
+                descriptor.get("retained_source"),
+                str(descriptor["kind"]),
+            )
+            search_from = index + 1
+            break
+    return EmissionProjection(tuple(entries), complete_length=len(entries))
 
 
 def _proof_user_identity(identity):
@@ -1723,7 +1835,7 @@ class ReconcileMixin:
                 _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, effective_session_id
             )
         )
-        if not isinstance(payload, dict) or payload.get("version") not in (2, _COMPACTION_COMMIT_PROOF_VERSION):
+        if not isinstance(payload, dict) or payload.get("version") not in (2, 3, _COMPACTION_COMMIT_PROOF_VERSION):
             return None
         if payload.get("hermes_home") != str(getattr(self, "_hermes_home", "") or ""):
             return None
@@ -1739,6 +1851,12 @@ class ReconcileMixin:
         # lifecycle reset of this conversation proves the current list.
         if state is not None and state.last_reset_at is not None and float(payload.get("created_at") or 0) <= state.last_reset_at:
             return None
+        payload = dict(payload)
+        reset_epoch = state.last_reset_at if state is not None else None
+        if payload.get("version") != 4 or payload.get("session_id") != effective_session_id or payload.get("reset_epoch") != reset_epoch:
+            payload["emissions"] = []
+        elif not isinstance(payload.get("emissions"), list):
+            payload["emissions"] = []
         return payload
 
     def _load_compression_carry_ranges(
