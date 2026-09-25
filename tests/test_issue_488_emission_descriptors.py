@@ -4,6 +4,8 @@ import hashlib
 
 import pytest
 
+from hermes_lcm.config import LCMConfig
+from hermes_lcm.engine import LCMEngine
 from hermes_lcm.reconcile import _project_emitted_occurrences
 from tests.test_compression_boundary import _summary_carrier_fixture, _turn
 from tests.test_issue_488_emission_proof import (
@@ -672,14 +674,16 @@ def test_cache_hit_placeholder_retention_stays_bounded_to_live_replay(tmp_path):
 
 
 def test_remember_keeps_live_original_generated_provenance_until_replaced(tmp_path):
-    engine, _compacted, _tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "provenance.db")))
     try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
         placeholder = engine._ignored_active_replay_placeholder("api_key=sk-ignore...cdef")
         digest = engine._active_replay_placeholder_digest(placeholder)
         assert digest is not None
         literal = {"role": "user", "content": placeholder}
         generated = {"role": "user", "content": placeholder}
         literal_store_id = engine._store.append("S0", literal)
+        assert literal_store_id == 1
         engine._remember_generated_ignored_placeholder_hash(digest)
         engine._generated_ignored_active_replay_placeholder_message_ids.add(id(generated))
         active = [literal, generated]
