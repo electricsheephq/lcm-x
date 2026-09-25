@@ -29,7 +29,31 @@ HERMES_AGENT_HEAD = "37aad38c62771d223cdce7e3d5e3157334f1ce82"
 if str(HERMES_AGENT_ROOT) not in sys.path:
     sys.path.insert(0, str(HERMES_AGENT_ROOT))
 
-from agent.agent_runtime_helpers import _merge_consecutive_users as _hermes_merge_users
+try:  # the real host helper when a Hermes checkout is importable (local runs)
+    from agent.agent_runtime_helpers import _merge_consecutive_users as _hermes_merge_users
+except ImportError:  # CI stubs only agent.context_engine: pin the host rule these tests rely on
+    def _hermes_merge_users(messages):
+        """Pinned copy of hermes-agent 37aad38c agent/agent_runtime_helpers.py:553
+        ``_merge_consecutive_users`` for plain-text rows (the only shape these tests feed it):
+        consecutive user rows merge into the earlier row with a blank line, the api_content
+        sidecar is dropped, and the repair count is returned."""
+        merged, repairs = [], 0
+        for msg in messages:
+            prev = merged[-1] if merged and isinstance(merged[-1], dict) else None
+            if (
+                prev is not None and prev.get("role") == "user"
+                and isinstance(msg, dict) and msg.get("role") == "user"
+                and isinstance(prev.get("content", ""), str) and isinstance(msg.get("content", ""), str)
+            ):
+                prev_content, new_content = prev.get("content", ""), msg.get("content", "")
+                prev["content"] = (
+                    (prev_content + "\n\n" + new_content) if prev_content and new_content else (prev_content or new_content)
+                )
+                prev.pop("api_content", None)
+                repairs += 1
+                continue
+            merged.append(msg)
+        return merged, repairs
 
 
 X = "ISSUE-488-X authored remainder"
