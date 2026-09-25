@@ -116,7 +116,7 @@ copy-paste setups per agent type.
 ## Project status
 
 The latest stable release is
-`v0.24.0@d346ab9e3e325c2b10c2a7b514cf03abfcd44176` (plugin `hermes-lcm-x`, engine
+`v0.24.1@98ac62fee5316cdf461e77f28951720f523489f1` (plugin `hermes-lcm-x`, engine
 `lcm-x`; the rename shipped in v0.24.0, #471). It carries
 the v0.23.2 lossless
 default (durable sensitive-pattern redaction is opt-in; cloud-embedding privacy
@@ -130,10 +130,10 @@ Stable release identity and the continuing `main` development line are
 separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
-The `main` line now identifies itself as
+`main` and the `v0.24.1` tag identify themselves as
 `hermes-lcm-x v0.24.1 (15 tools)` — the #488 replay-reconciliation patch (#510, #515; #517 rollback-readable proof) on top of the
 `v0.24.0` release tag, which identifies itself as `hermes-lcm-x v0.24.0 (15 tools)`.
-This is the forward bump for the next patch release, never a restamp
+The next identity bump is the forward bump for the next release, never a restamp
 of any past commit's own recorded identity (#385 fixed the earlier drift).
 
 Eva has accepted exact stable v0.23.1 with hosted `voyage-4-large`,
@@ -1027,7 +1027,7 @@ exposes retrieval tools that can drill back into exact stored sources.
 - [Operator guide](docs/operator-guide.md) — install, activation, full
   configuration reference, diagnostics
 - [Retrieval tools reference](docs/retrieval-tools.md) — exact tool contracts
-- [Current project state](docs/project-status.md) — v0.23.2 stable baseline,
+- [Current project state](docs/project-status.md) — v0.24.1 stable baseline,
   separate main-development identity, active work, and proof boundaries
 - [Benchmark methodology and results](benchmarks/METHODOLOGY.md) — retrieval
   and judged-QA evaluation contracts, reproduction, and landed result index
@@ -1079,7 +1079,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
 [tags page](https://github.com/electricsheephq/lcm-x/tags), and
-[CHANGELOG](CHANGELOG.md) for version history. `v0.24.0` is the latest stable
+[CHANGELOG](CHANGELOG.md) for version history. `v0.24.1` is the latest stable
 GitHub Release; verify its exact SHA before installation.
 
 ## License
