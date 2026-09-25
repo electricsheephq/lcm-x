@@ -195,12 +195,9 @@ def _finalize_emission_descriptors(messages, candidates, scope):
                 continue
             span_bytes = span.encode("utf-8")
             suffix_bytes = content.encode("utf-8")[len(span_bytes):]
-            normalized_suffix = b"" if kind in {"summary", "objective"} else suffix_bytes.decode("utf-8").strip().encode("utf-8")
-            suffix_sha256 = candidate.get("suffix_sha256")
-            suffix_length = candidate.get("suffix_length")
-            if not isinstance(suffix_sha256, str) or type(suffix_length) is not int:
-                suffix_sha256 = hashlib.sha256(normalized_suffix).hexdigest()
-                suffix_length = len(normalized_suffix)
+            normalized_suffix = b"" if kind in {"summary", "objective"} and candidate.get("retained_source") is None else suffix_bytes.decode("utf-8").strip().encode("utf-8")
+            suffix_sha256 = hashlib.sha256(normalized_suffix).hexdigest()  # the bound row's current suffix
+            suffix_length = len(normalized_suffix)
             role = str(message.get("role") or "unknown")
             ordinal = sum(
                 _emission_identity(previous) == identity

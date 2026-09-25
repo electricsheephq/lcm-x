@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import time
 
 import pytest
 
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
-from hermes_lcm.reconcile import _project_emitted_occurrences
+from hermes_lcm.dag import SummaryNode
+from hermes_lcm.reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, _project_emitted_occurrences
 from tests.test_compression_boundary import _summary_carrier_fixture, _turn
 from tests.test_issue_488_emission_proof import (
     OBJECTIVE,
@@ -770,5 +772,139 @@ def test_projection_retained_source_is_immutable_and_detached(tmp_path):
             entry.retained_source["store_id"] = original_store_id + 1
 
         assert descriptor["retained_source"]["store_id"] == original_store_id
+    finally:
+        engine.shutdown()
+
+
+def _folded_carrier_fixture(tmp_path):
+    """Like ``_summary_carrier_fixture`` but the tail starts with an assistant row: with a
+    retained user anchor the generated context is FOLDED into that same-role stored row
+    (engine ``_assemble_context``), which yields a summary/objective descriptor carrying
+    ``retained_source``."""
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "folded.db"),
+            fresh_tail_count=3,
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    engine.on_session_start("S0", platform="acp", context_length=200_000)
+    compacted = {"role": "assistant", "content": "older compacted answer"}
+    compacted_id = engine._store.append("S0", compacted)
+    engine._last_compacted_store_id = compacted_id
+    engine._dag.add_node(
+        SummaryNode(
+            session_id="S0",
+            depth=0,
+            summary="Folded carrier summary.",
+            token_count=3,
+            source_token_count=5,
+            source_ids=[compacted_id],
+            source_type="messages",
+            created_at=time.time(),
+            earliest_at=time.time(),
+            latest_at=time.time(),
+            expand_hint="folded carrier summary",
+        )
+    )
+    tail = [
+        {"role": "assistant", "content": "historical assistant row"},
+        {"role": "user", "content": "current prompt"},
+    ]
+    tail_ids = engine._store.append_batch("S0", tail)
+    anchor = {"role": "user", "content": "retained anchor question"}
+    return engine, compacted, tail, tail_ids, anchor
+
+
+def test_folded_carrier_binds_its_retained_suffix(tmp_path):
+    """A summary/objective descriptor that carries ``retained_source`` is a folded carrier: generated
+    prefix + the authored text of a real stored row. Its suffix must be bound, so a same-prefix host
+    rewrite of the authored text is never attributed to the old retained source (#510 review)."""
+    engine, compacted, tail, tail_ids, anchor = _folded_carrier_fixture(tmp_path)
+    try:
+        returned = engine._assemble_context(None, tail, retained_user_message=anchor)
+        proof = _record(engine, [compacted, *tail], returned)
+        descriptor = next(item for item in proof["emissions"] if item["retained_source"] is not None)
+        assert descriptor["kind"] in {"summary", "objective"}
+        assert descriptor["retained_source"] == {"store_id": tail_ids[0]}
+        assert descriptor["suffix_length"] == len(tail[0]["content"].encode("utf-8"))
+
+        index = descriptor["output_occurrence"]["index"]
+        row = returned[index]
+        span = row["content"].encode("utf-8")[: descriptor["generated_span_bytes"]].decode("utf-8")
+        assert row["content"] == span + tail[0]["content"]
+
+        projection = _project_emitted_occurrences(returned, proof=proof)
+        assert projection.entries[index].generated_span == span
+        assert projection.entries[index].retained_source == {"store_id": tail_ids[0]}
+
+        rewritten = list(returned)
+        rewritten[index] = {**row, "content": span + "entirely different authored text after the same prefix"}
+        projection = _project_emitted_occurrences(rewritten, proof=proof)
+        assert projection.entries[index].generated_span is None
+        assert projection.entries[index].retained_source is None
+        assert projection.entries[index].effective_identity == projection.entries[index].full_identity
+    finally:
+        engine.shutdown()
+
+
+def test_carry_forward_rebinds_witness_to_the_current_carrier_suffix(tmp_path):
+    """A carrier that absorbed a Hermes-appended turn is carried into the next proof with a witness
+    of its CURRENT full suffix, so a later replacement of the appended turn (turn A -> turn B) is
+    no longer admitted by the older, shorter witness (#510 review)."""
+    engine, compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        first = engine._assemble_context(None, tail)
+        first_proof = _record(engine, [compacted, *tail], first)
+        original = first_proof["emissions"][0]
+        assert original["output_occurrence"]["index"] == 0
+        span = first[0]["content"].encode("utf-8")[: original["generated_span_bytes"]].decode("utf-8")
+        remainder = first[0]["content"][len(span):]
+        assert remainder == tail[0]["content"]
+
+        appended = {**first[0], "content": first[0]["content"] + "\n\nturn A"}
+        host = [appended, *first[1:]]
+        engine._pending_emission_candidates = []
+        second = [appended, *first[2:]]
+        second_proof = _record(engine, host, second)
+        carried = second_proof["emissions"][0]
+        assert carried["generated_span_sha256"] == original["generated_span_sha256"]
+        current_suffix = (remainder + "\n\nturn A").strip().encode("utf-8")
+        assert carried["suffix_length"] == len(current_suffix)
+        assert carried["suffix_sha256"] == hashlib.sha256(current_suffix).hexdigest()
+
+        assert _project_emitted_occurrences(second, proof=second_proof).entries[0].generated_span == span
+        replaced = [{**appended, "content": span + remainder + "\n\nturn B"}, *second[1:]]
+        entry = _project_emitted_occurrences(replaced, proof=second_proof).entries[0]
+        assert entry.generated_span is None
+        assert entry.retained_source is None
+        assert entry.effective_identity == entry.full_identity
+    finally:
+        engine.shutdown()
+
+
+def test_malformed_durable_proof_history_does_not_block_a_fresh_proof(tmp_path):
+    """A malformed ``compaction_commit_proof:*`` metadata row (read as prior emissions when no
+    process-local descriptors exist) must not abort proof recording: the fresh proof is recorded
+    and its durable twin replaces the bad row (#510 review)."""
+    engine, compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        key = engine._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)
+        with engine._store._write_lock:
+            engine._store._conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)", (key, "{not json")
+            )
+            engine._store._conn.commit()
+        with pytest.raises(ValueError):
+            engine._store.read_metadata_json(key)
+        assert engine._last_emission_descriptors is None
+
+        returned = engine._assemble_context(None, tail)
+        proof = _record(engine, [compacted, *tail], returned)
+        assert proof["emissions"]
+        assert engine._last_emission_descriptors is not None
+        durable = engine._store.read_metadata_json(key)
+        assert isinstance(durable, dict) and durable.get("version") == 4
     finally:
         engine.shutdown()

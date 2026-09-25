@@ -605,8 +605,12 @@ class CompactionMixin:
             prior_proof = getattr(self, "_last_emission_descriptors", None)
             if not self._emission_proof_matches_binding(prior_proof, emission_binding):
                 prior_proof = None
-            if not prior_proof and (durable_proof := self._durable_commit_proof_payload()):
-                prior_proof = durable_proof if durable_proof.get("emissions") else None
+            if not prior_proof:
+                try:
+                    durable_proof = self._durable_commit_proof_payload()
+                except Exception:  # malformed durable history never blocks a fresh proof
+                    durable_proof = None
+                prior_proof = durable_proof if durable_proof and durable_proof.get("emissions") else None
             emissions = _finalize_emission_descriptors(
                 result, getattr(self, "_pending_emission_candidates", ()), emission_binding
             )
@@ -621,8 +625,6 @@ class CompactionMixin:
                         "span": entry.generated_span,
                         "retained_source": dict(entry.retained_source) if entry.retained_source is not None else None,
                         "full_identity": entry.full_identity,
-                        "suffix_sha256": entry.suffix_sha256,
-                        "suffix_length": entry.suffix_length,
                     }], emission_binding)
                     if carried and all(
                         item["output_occurrence"]["index"] != carried[0]["output_occurrence"]["index"]
