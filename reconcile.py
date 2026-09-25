@@ -24,6 +24,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .externalize import (
@@ -126,6 +127,8 @@ class EmissionProjectionEntry:
     generated_span: Optional[str] = None
     retained_source: Any = None
     kind: Optional[str] = None
+    suffix_sha256: Optional[str] = None
+    suffix_length: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -191,6 +194,13 @@ def _finalize_emission_descriptors(messages, candidates, scope):
             ) or message.get("tool_calls") or message.get("tool_call_id"):
                 continue
             span_bytes = span.encode("utf-8")
+            suffix_bytes = content.encode("utf-8")[len(span_bytes):]
+            normalized_suffix = b"" if kind in {"summary", "objective"} else suffix_bytes.decode("utf-8").strip().encode("utf-8")
+            suffix_sha256 = candidate.get("suffix_sha256")
+            suffix_length = candidate.get("suffix_length")
+            if not isinstance(suffix_sha256, str) or type(suffix_length) is not int:
+                suffix_sha256 = hashlib.sha256(normalized_suffix).hexdigest()
+                suffix_length = len(normalized_suffix)
             role = str(message.get("role") or "unknown")
             ordinal = sum(
                 _emission_identity(previous) == identity
@@ -205,6 +215,8 @@ def _finalize_emission_descriptors(messages, candidates, scope):
                 "output_occurrence": {"index": index, "same_identity_ordinal": ordinal},
                 "generated_span_sha256": hashlib.sha256(span_bytes).hexdigest(),
                 "generated_span_bytes": len(span_bytes),
+                "suffix_sha256": suffix_sha256,
+                "suffix_length": suffix_length,
                 "retained_source": candidate.get("retained_source"),
                 "scope": dict(scope),
             })
@@ -232,11 +244,13 @@ def _project_emitted_occurrences(
             continue
         length = descriptor.get("generated_span_bytes")
         digest = descriptor.get("generated_span_sha256")
+        suffix_length = descriptor.get("suffix_length")
+        suffix_digest = descriptor.get("suffix_sha256")
         role = descriptor.get("role")
         ordinal = descriptor.get("same_prefix_ordinal")
         if not isinstance(length, int) or length <= 0 or not isinstance(digest, str) or (
             not isinstance(role, str) or not role or type(ordinal) is not int or ordinal < 0
-        ):
+        ) or type(suffix_length) is not int or suffix_length < 0 or not isinstance(suffix_digest, str):
             continue
         candidate_ordinal = -1
         for index, message in _emission_candidate_rows(messages, role, length, digest):
@@ -257,12 +271,29 @@ def _project_emitted_occurrences(
                 span, suffix = raw[:length].decode("utf-8"), raw[length:].decode("utf-8")
             except UnicodeDecodeError:
                 continue
+            normalized_suffix = suffix.strip().encode("utf-8")
+            if len(normalized_suffix) < suffix_length or hashlib.sha256(
+                normalized_suffix[:suffix_length]
+            ).hexdigest() != suffix_digest:
+                continue
+            if not suffix_length and not normalized_suffix:
+                output = proof.get("output") or ()
+                output_index = (descriptor.get("output_occurrence") or {}).get("index")
+                if type(output_index) is int and 0 <= output_index < len(output) and sum(
+                    tuple(item) == tuple(output[output_index]) for item in output
+                ) > sum(message.get("content") == span for _, message in _emission_candidate_rows(messages, role, length, digest)):
+                    continue
+            retained_source = descriptor.get("retained_source")
+            if isinstance(retained_source, Mapping):
+                retained_source = MappingProxyType(dict(retained_source))
             entries[index] = EmissionProjectionEntry(
                 entries[index].full_identity,
                 _emission_identity(messages[index], suffix),
                 span,
-                descriptor.get("retained_source"),
+                retained_source,
                 str(descriptor["kind"]),
+                suffix_digest,
+                suffix_length,
             )
             search_from = index + 1
             break

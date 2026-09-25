@@ -54,6 +54,34 @@ def _assert_exact_descriptors(returned, proof):
         assert hashlib.sha256(span).hexdigest() == descriptor["generated_span_sha256"]
 
 
+def _scoped_proof(kind, span, suffix, *, output=None, retained_source=None):
+    scope = {
+        "hermes_home": "home",
+        "session_id": "session",
+        "conversation_id": "conversation",
+        "reset_epoch": None,
+    }
+    normalized_suffix = suffix.strip().encode("utf-8")
+    identity = ("user", span + suffix, "", "[]", "")
+    return {
+        "version": 4,
+        **scope,
+        "output": output if output is not None else [identity],
+        "emissions": [{
+            "kind": kind,
+            "role": "user",
+            "same_prefix_ordinal": 0,
+            "output_occurrence": {"index": 0, "same_identity_ordinal": 0},
+            "generated_span_sha256": hashlib.sha256(span.encode("utf-8")).hexdigest(),
+            "generated_span_bytes": len(span.encode("utf-8")),
+            "suffix_sha256": hashlib.sha256(normalized_suffix).hexdigest(),
+            "suffix_length": len(normalized_suffix),
+            "retained_source": retained_source,
+            "scope": scope,
+        }],
+    }
+
+
 def test_descriptor_exactness_for_carrier_and_system_layouts(tmp_path):
     engine, compacted, tail, tail_ids = _summary_carrier_fixture(tmp_path)
     try:
@@ -297,7 +325,8 @@ def test_carry_forward_keeps_rewritten_generated_user_after_authored_prefix(
         assert first_proof["emissions"][0]["output_occurrence"]["index"] == 1
 
         rewritten = [dict(message) for message in first]
-        rewritten[1]["content"] = span + "\n\nnew host turn"
+        original_suffix = generated[0]["content"][len(span):]
+        rewritten[1]["content"] = span + original_suffix + "\n\nnew host turn"
         second, second_proof = _carry_forward_through_real_ingest(
             engine, monkeypatch, first, rewritten
         )
@@ -306,7 +335,7 @@ def test_carry_forward_keeps_rewritten_generated_user_after_authored_prefix(
         assert second_proof["emissions"][0]["output_occurrence"]["index"] == 1
         assert second_proof["emissions"][0]["same_prefix_ordinal"] == 1
         assert projection.entries[0].generated_span is None
-        assert projection.entries[1].effective_identity[1] == "\n\nnew host turn"
+        assert projection.entries[1].effective_identity[1] == original_suffix + "\n\nnew host turn"
     finally:
         engine.shutdown()
 
@@ -481,5 +510,160 @@ def test_rotation_transfers_emissions_and_reset_clears_them(tmp_path, monkeypatc
         assert engine._compress_commit_proof is None
         assert engine._last_emission_descriptors is None
         assert engine._durable_commit_proof_payload() is None
+    finally:
+        engine.shutdown()
+
+
+def test_projection_rejects_same_prefix_authored_replacement():
+    span = "GENERATED\n\n"
+    proof = _scoped_proof(
+        "carrier",
+        span,
+        "old retained",
+        retained_source={"store_id": 7},
+    )
+
+    projection = _project_emitted_occurrences(
+        [{"role": "user", "content": span + "authored"}],
+        proof=proof,
+    )
+
+    assert projection.entries[0].generated_span is None
+    assert projection.entries[0].retained_source is None
+    assert projection.entries[0].effective_identity == projection.entries[0].full_identity
+
+
+def test_projection_accepts_hermes_append_after_recorded_suffix():
+    span = "GENERATED\n\n"
+    proof = _scoped_proof(
+        "carrier",
+        span,
+        "retained",
+        retained_source={"store_id": 7},
+    )
+
+    projection = _project_emitted_occurrences(
+        [{"role": "user", "content": span + "retained\n\nnew turn"}],
+        proof=proof,
+    )
+
+    entry = projection.entries[0]
+    assert entry.generated_span == span
+    assert entry.effective_identity[1] == "retained\n\nnew turn"
+    assert entry.retained_source == {"store_id": 7}
+
+
+def test_projection_normalizes_emission_suffix_edge_whitespace():
+    span = "GENERATED\n\n"
+    proof = _scoped_proof("carrier", span, "retained\n")
+
+    projection = _project_emitted_occurrences(
+        [{"role": "user", "content": span + "retained"}],
+        proof=proof,
+    )
+
+    assert projection.entries[0].generated_span == span
+    assert projection.entries[0].effective_identity[1] == "retained"
+
+
+def test_empty_suffix_summary_requires_unambiguous_occurrence(tmp_path):
+    engine, compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        engine._assemble_context(
+            {"role": "system", "content": "system"}, tail, include_lcm_note=False
+        )
+        candidate = next(
+            item for item in engine._pending_emission_candidates if item["kind"] == "summary"
+        )
+        span = candidate["span"]
+        first = [candidate["row"], {"role": "user", "content": span}]
+        proof = _record(engine, [compacted, *tail], first)
+
+        appended = _project_emitted_occurrences(
+            [{"role": "user", "content": span + "\n\nnew turn"}], proof=proof
+        )
+        replacement = _project_emitted_occurrences(
+            [{"role": "user", "content": span}], proof=proof
+        )
+
+        assert proof["emissions"][0]["suffix_length"] == 0
+        assert appended.entries[0].generated_span == span
+        assert appended.entries[0].effective_identity[1] == "\n\nnew turn"
+        assert replacement.entries[0].generated_span is None
+        assert replacement.entries[0].effective_identity == replacement.entries[0].full_identity
+    finally:
+        engine.shutdown()
+
+
+def test_conversation_rebind_drops_cached_emission_descriptors(tmp_path):
+    engine, compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        first = engine._assemble_context(None, tail)
+        old_proof = _record(engine, [compacted, *tail], first)
+        old_content = first[old_proof["emissions"][0]["output_occurrence"]["index"]]["content"]
+
+        engine.on_session_start(
+            "S0",
+            platform="acp",
+            conversation_id="new-conversation",
+            context_length=200_000,
+        )
+        assert engine._last_emission_descriptors is None
+
+        engine._pending_emission_candidates = []
+        generated_looking = {"role": "user", "content": old_content}
+        new_proof = _record(
+            engine,
+            [{"role": "system", "content": "new conversation"}, generated_looking],
+            [generated_looking],
+        )
+        assert new_proof["emissions"] == []
+    finally:
+        engine.shutdown()
+
+
+def test_placeholder_keepalive_tracks_only_current_snapshot(tmp_path):
+    engine, _compacted, _tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        class IgnoreRowPattern:
+            pattern = "^ignored row"
+
+            @staticmethod
+            def search(text, timeout=None):
+                return text.startswith("ignored row")
+
+        engine._compiled_ignore_message_patterns = [IgnoreRowPattern()]
+        messages = []
+        for turn in range(200):
+            messages.append({"role": "user", "content": f"ignored row {turn}"})
+            engine._ingest_messages(messages)
+
+        current = engine._last_active_replay_messages
+        current_placeholder_count = sum(
+            id(message) in engine._generated_ignored_active_replay_placeholder_message_ids
+            for message in current
+        )
+        assert current_placeholder_count == len(messages)
+        assert len(engine._generated_ignored_active_replay_placeholder_messages) <= (
+            current_placeholder_count
+        )
+    finally:
+        engine.shutdown()
+
+
+def test_projection_retained_source_is_immutable_and_detached(tmp_path):
+    engine, compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        returned = engine._assemble_context(None, tail)
+        proof = _record(engine, [compacted, *tail], returned)
+        projection = _project_emitted_occurrences(returned, proof=proof)
+        entry = next(item for item in projection.entries if item.retained_source is not None)
+        descriptor = next(item for item in proof["emissions"] if item["retained_source"] is not None)
+        original_store_id = descriptor["retained_source"]["store_id"]
+
+        with pytest.raises(TypeError):
+            entry.retained_source["store_id"] = original_store_id + 1
+
+        assert descriptor["retained_source"]["store_id"] == original_store_id
     finally:
         engine.shutdown()

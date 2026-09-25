@@ -3314,6 +3314,16 @@ class LCMEngine(
             # The child segment starts from compress()'s output: re-key the proof
             # so its first ingest re-indexes a host-merged prefix instead of
             # trusting a positional cursor, and persist it for a resumed child.
+            source_binding = {
+                "hermes_home": str(self._hermes_home or ""),
+                "session_id": source_session_id,
+                "conversation_id": conversation_id or "",
+                "reset_epoch": source_state.last_reset_at if source_state is not None else None,
+            }
+            if not self._emission_proof_matches_binding(
+                self._last_emission_descriptors, source_binding
+            ):
+                self._last_emission_descriptors = None
             for scoped_proof in (commit_proof, self._last_emission_descriptors):
                 if scoped_proof is None:
                     continue
@@ -3332,15 +3342,25 @@ class LCMEngine(
             self._ingest_cursor_needs_reconcile = True
         self._log_session_filter_diagnostics()
 
+    @staticmethod
+    def _emission_proof_matches_binding(proof, binding) -> bool:
+        return isinstance(proof, dict) and all(proof.get(key) == value for key, value in binding.items())
+
     def on_session_start(self, session_id: str, **kwargs) -> None:
         with self._exclusive_lifecycle("rebind"):
             if self._stable_use_closed:
                 raise RuntimeError("LCM engine is closed")
             self._on_session_start_unlocked(session_id, **kwargs)
-            proof = self._compress_commit_proof
-            if proof is not None and proof.get("conversation_id") != self._conversation_id:
-                # The proof is bound to the conversation it was made in (#484 11c).
-                self._compress_commit_proof = None
+            state = self._lifecycle.get_by_conversation(self._conversation_id)
+            binding = {
+                "hermes_home": str(self._hermes_home or ""),
+                "session_id": self._session_id,
+                "conversation_id": self._conversation_id or "",
+                "reset_epoch": state.last_reset_at if state is not None else None,
+            }
+            for name in ("_compress_commit_proof", "_last_emission_descriptors"):
+                if not self._emission_proof_matches_binding(getattr(self, name), binding):
+                    setattr(self, name, None)
 
     def _on_session_start_unlocked(self, session_id: str, **kwargs) -> None:
         if "hermes_home" in kwargs:
@@ -4796,6 +4816,10 @@ class LCMEngine(
         self._last_active_replay_messages = self._copy_active_replay_messages_preserving_generated_ids(
             active_replay_messages
         )
+        current_placeholders = {id(message): message for message in self._last_active_replay_messages
+                                if id(message) in self._generated_ignored_active_replay_placeholder_message_ids}
+        self._generated_ignored_active_replay_placeholder_message_ids = set(current_placeholders)
+        self._generated_ignored_active_replay_placeholder_messages = current_placeholders
         self._write_generated_ignored_placeholder_hash_counts(
             self._generated_placeholder_digest_budget_for_active_replay(active_replay_messages)
         )
