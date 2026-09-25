@@ -5,7 +5,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
 IDENTITY_VERSION = "0.24.1"
-RC_TAG = "0.24.1"
+RC_TAG = "0.24.1-rc1"
 RELEASE_NOTES = REPO_ROOT / ".github" / "release-notes" / f"v{RC_TAG}.md"
 
 

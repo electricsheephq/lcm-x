@@ -9,8 +9,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 ## v0.24.1 - 2026-09-25 (#488: replay skips bound to proven emitted occurrences; #517 rollback-readable proof)
 
 - Fix: replay reconciliation binds every skip to a proven emitted occurrence (#488; #510 emission
-  descriptors and the pure projection, #515 the consumer switch). The compaction commit proof moves to
-  version 4 (versions 2 and 3 are still read for exact cursor matching): every emitted summary or
+  descriptors and the pure projection, #515 the consumer switch). The compaction commit proof's
+  descriptors are version 4 while the durable record keeps wire version 3 (#517; versions 2 and 3 are
+  still read for exact cursor matching): every emitted summary or
   objective row carries a descriptor (span digest, suffix witness, role, same-prefix ordinal,
   multiplicity witness, and the `output_occurrence` index and length). A live row is skipped only where
   its projection binds an emitted occurrence; an unproven row keeps its full identity and is stored; a

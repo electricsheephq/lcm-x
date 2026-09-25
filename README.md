@@ -116,8 +116,8 @@ copy-paste setups per agent type.
 ## Project status
 
 The latest stable release is
-`v0.23.3@523161769329174514a0b995025201e3dc316df2` (plugin `hermes-lcm`, engine
-`lcm`; the `hermes-lcm-x` / `lcm-x` rename is unreleased on `main`). It carries
+`v0.24.0@d346ab9e3e325c2b10c2a7b514cf03abfcd44176` (plugin `hermes-lcm-x`, engine
+`lcm-x`; the rename shipped in v0.24.0, #471). It carries
 the v0.23.2 lossless
 default (durable sensitive-pattern redaction is opt-in; cloud-embedding privacy
 is an independent flag that transforms only the provider-bound copy — see
@@ -260,7 +260,7 @@ Provider Plugins:
   Context Engine: lcm-x
 ```
 
-The exact `v0.23.3` stable tag instead reports `hermes-lcm v0.23.3 (15 tools)`
+Older `v0.23.x` stable tags instead report `hermes-lcm v0.23.x (15 tools)`
 and engine `lcm`; verify the loaded commit before treating either string as
 release proof.
 
@@ -1079,7 +1079,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
 [tags page](https://github.com/electricsheephq/lcm-x/tags), and
-[CHANGELOG](CHANGELOG.md) for version history. `v0.23.3` is the latest stable
+[CHANGELOG](CHANGELOG.md) for version history. `v0.24.0` is the latest stable
 GitHub Release; verify its exact SHA before installation.
 
 ## License
