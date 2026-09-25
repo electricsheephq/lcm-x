@@ -7019,6 +7019,7 @@ class LCMEngine(
                         "kind": "objective" if combined.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else "summary",
                         "span": combined,
                         "full_identity": _emission_identity(summary_message),
+                        "row": summary_message,
                     }
                     emission_candidates.append(summary_candidate)
 
@@ -7077,6 +7078,7 @@ class LCMEngine(
                             "span": generated_context + ("\n\n---\n\n" if normalized_tail else ""),
                             "retained_source": {"store_id": folded_source_store_id},
                             "full_identity": _emission_identity(tail_selected[0]),
+                            "row": tail_selected[0],
                         })
                 else:
                     logger.warning(
@@ -7091,6 +7093,7 @@ class LCMEngine(
                     "kind": "objective" if generated_context.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else "summary",
                     "span": generated_context,
                     "full_identity": _emission_identity(result[-1]),
+                    "row": result[-1],
                 })
 
         # Fresh tail. A user-role summary directly ahead of a historical user
@@ -7124,6 +7127,7 @@ class LCMEngine(
                         "span": f"{summary_message['content']}\n\n",
                         "retained_source": {"store_id": source_ids[0]} if source_ids else None,
                         "full_identity": _emission_identity(carrier),
+                        "row": carrier,
                     })
                 tail_selected = tail_selected[1:]
         result.extend(tail_selected)

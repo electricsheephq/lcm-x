@@ -311,6 +311,108 @@ def test_carry_forward_keeps_rewritten_generated_user_after_authored_prefix(
         engine.shutdown()
 
 
+def test_carry_forward_binds_identical_same_role_generated_row(
+    tmp_path, monkeypatch
+):
+    engine, compacted, _tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        generated = engine._assemble_context(None, [])
+        assert len(generated) == 1 and generated[0]["role"] == "user"
+        span = generated[0]["content"]
+        first = [{"role": "user", "content": span}, *generated]
+        first_proof = _record(engine, [compacted], first)
+
+        assert first_proof["emissions"][0]["output_occurrence"]["index"] == 1
+        assert first_proof["emissions"][0]["same_prefix_ordinal"] == 1
+
+        rewritten = [dict(message) for message in first]
+        rewritten[1]["content"] = span + "\n\nnew host turn"
+        second, second_proof = _carry_forward_through_real_ingest(
+            engine, monkeypatch, first, rewritten
+        )
+        projection = _project_emitted_occurrences(second, proof=second_proof)
+
+        assert second_proof["emissions"][0]["output_occurrence"]["index"] == 1
+        assert second_proof["emissions"][0]["same_prefix_ordinal"] == 1
+        assert projection.entries[0].generated_span is None
+        assert projection.entries[0].effective_identity == projection.entries[0].full_identity
+        assert projection.entries[1].effective_identity[1] == "\n\nnew host turn"
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize(
+    "tool_fields",
+    [
+        {"tool_calls": [{"id": "call-1"}]},
+        {"tool_call_id": "call-1"},
+    ],
+)
+def test_descriptor_ordinal_excludes_tool_bearing_rows(
+    tmp_path, monkeypatch, tool_fields
+):
+    engine, compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        assembled = engine._assemble_context(None, tail)
+        generated = assembled[0]
+        span = engine._pending_emission_candidates[0]["span"]
+        first = [
+            {"role": "user", "content": span + "tool", **tool_fields},
+            generated,
+            {"role": "user", "content": span + "authored"},
+        ]
+        first_proof = _record(engine, [compacted, *tail], first)
+        first_projection = _project_emitted_occurrences(first, proof=first_proof)
+
+        assert first_proof["emissions"][0]["output_occurrence"]["index"] == 1
+        assert first_proof["emissions"][0]["same_prefix_ordinal"] == 0
+        assert first_projection.entries[0].generated_span is None
+        assert first_projection.entries[1].generated_span == span
+        assert first_projection.entries[2].generated_span is None
+
+        second, second_proof = _carry_forward_through_real_ingest(
+            engine, monkeypatch, first, [dict(message) for message in first]
+        )
+        second_projection = _project_emitted_occurrences(second, proof=second_proof)
+
+        assert second_proof["emissions"][0]["output_occurrence"]["index"] == 1
+        assert second_projection.entries[1].generated_span == span
+        assert second_projection.entries[2].generated_span is None
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_finalizer_copy_fallback_requires_unique_identity(tmp_path, duplicate):
+    engine, compacted, _tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        generated = engine._assemble_context(None, [])
+        copied = dict(generated[0])
+        returned = [copied, dict(copied)] if duplicate else [copied]
+        proof = _record(engine, [compacted], returned)
+
+        if duplicate:
+            assert proof["emissions"] == []
+        else:
+            assert proof["emissions"][0]["output_occurrence"]["index"] == 0
+    finally:
+        engine.shutdown()
+
+
+def test_finalizer_prefers_constructed_row_after_in_place_rewrite(tmp_path):
+    engine, compacted, _tail, _tail_ids = _summary_carrier_fixture(tmp_path)
+    try:
+        returned = engine._assemble_context(None, [])
+        span = returned[0]["content"]
+        returned[0]["content"] = span + "\n\nhost suffix"
+        proof = _record(engine, [compacted], returned)
+
+        assert proof["emissions"][0]["output_occurrence"]["index"] == 0
+        assert _project_emitted_occurrences(returned, proof=proof).entries[0].generated_span == span
+    finally:
+        engine.shutdown()
+
+
 def test_carry_forward_merged_same_role_collision_fails_closed(tmp_path, monkeypatch):
     engine, compacted, tail, _tail_ids = _summary_carrier_fixture(tmp_path)
     try:

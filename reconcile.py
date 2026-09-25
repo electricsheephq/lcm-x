@@ -149,6 +149,19 @@ def _emission_identity(message: Mapping[str, Any], content: Optional[str] = None
     return role, normalized, str(message.get("tool_call_id") or ""), tool_calls, tool_name
 
 
+def _emission_candidate_rows(messages, role, span, digest=None):
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("tool_calls") or message.get("tool_call_id"):
+            continue
+        content = message.get("content")
+        if str(message.get("role") or "unknown") != role or not isinstance(content, str):
+            continue
+        raw = content.encode("utf-8")
+        if (content.startswith(span) if isinstance(span, str)
+                else len(raw) >= span and hashlib.sha256(raw[:span]).hexdigest() == digest):
+            yield index, message
+
+
 def _finalize_emission_descriptors(messages, candidates, scope):
     """Bind assembly candidates to the exact returned occurrences."""
     descriptors = []
@@ -158,12 +171,23 @@ def _finalize_emission_descriptors(messages, candidates, scope):
         if kind not in {"summary", "carrier", "objective"} or not isinstance(span, str) or not span:
             continue
         expected_identity = candidate.get("full_identity")
+        candidate_rows = list(_emission_candidate_rows(messages, expected_identity[0] if isinstance(expected_identity, tuple) else None, span))
+        remaining = [(index, message) for index, message in candidate_rows if index >= search_from]
+        bound = [(index, message) for index, message in remaining if message is candidate.get("row")]
+        if not bound:
+            bound = [(index, message) for index, message in remaining
+                     if _emission_identity(message) == expected_identity]
+        if len(bound) != 1:
+            continue
         for index in range(search_from, len(messages)):
+            if index != bound[0][0]:
+                continue
             message = messages[index]
             content = message.get("content") if isinstance(message, dict) else None
             identity = _emission_identity(message) if isinstance(message, dict) else None
             if not isinstance(content, str) or not content.startswith(span) or (
                 expected_identity is not None and identity != expected_identity
+                and message is not candidate.get("row")
             ) or message.get("tool_calls") or message.get("tool_call_id"):
                 continue
             span_bytes = span.encode("utf-8")
@@ -173,13 +197,7 @@ def _finalize_emission_descriptors(messages, candidates, scope):
                 for previous in messages[: index + 1]
                 if isinstance(previous, dict)
             ) - 1
-            same_prefix_ordinal = sum(
-                str(previous.get("role") or "unknown") == role
-                and isinstance(previous.get("content"), str)
-                and previous["content"].startswith(span)
-                for previous in messages[: index + 1]
-                if isinstance(previous, dict)
-            ) - 1
+            same_prefix_ordinal = [row_index for row_index, _ in candidate_rows].index(index)
             descriptors.append({
                 "kind": kind,
                 "role": role,
@@ -221,7 +239,7 @@ def _project_emitted_occurrences(
         ):
             continue
         candidate_ordinal = -1
-        for index, message in enumerate(messages):
+        for index, message in _emission_candidate_rows(messages, role, length, digest):
             content = message.get("content")
             if str(message.get("role") or "unknown") != role or message.get("tool_calls") or (
                 message.get("tool_call_id")
