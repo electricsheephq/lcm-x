@@ -8,7 +8,11 @@ import pytest
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.dag import SummaryNode
-from hermes_lcm.reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, _project_emitted_occurrences
+from hermes_lcm.reconcile import (
+    _COMPACTION_COMMIT_PROOF_METADATA_PREFIX,
+    _commit_proof_identity_digest,
+    _project_emitted_occurrences,
+)
 from tests.test_compression_boundary import _summary_carrier_fixture, _turn
 from tests.test_issue_488_emission_proof import (
     OBJECTIVE,
@@ -847,6 +851,45 @@ def test_folded_carrier_binds_its_retained_suffix(tmp_path):
         assert projection.entries[index].effective_identity == projection.entries[index].full_identity
     finally:
         engine.shutdown()
+
+
+def test_folded_carrier_durable_proof_carries_v0240_and_projection_digests(tmp_path):
+    """#517 F1: v0.24.0 strips carriers from user rows only, so it hashes a folded assistant row
+    whole. The wire's effective_sha256 is v0.24.0's own digests, the projection digests ride in
+    effective_sha256_v4, and a restart of this reader still proves the list through them."""
+    engine, compacted, tail, _tail_ids, anchor = _folded_carrier_fixture(tmp_path)
+    try:
+        returned = engine._assemble_context(None, tail, retained_user_message=anchor)
+        proof = _record(engine, [compacted, *tail], returned)
+        stored = engine._store.read_metadata_json(f"{_COMPACTION_COMMIT_PROOF_METADATA_PREFIX}:S0")
+        v0240 = [
+            _commit_proof_identity_digest(engine._proof_replay_identity(m))
+            for m in returned
+            if not engine._is_replayed_context_scaffold_message(m)
+        ]
+        folded = next(m for m in returned if m["role"] == "assistant")
+        assert engine._proof_replay_identity(folded)[1] == folded["content"]  # hashed whole
+        assert stored["effective_sha256"] == v0240
+        assert stored["effective_sha256_v4"] == [_commit_proof_identity_digest(i) for i in proof["output_effective"]]
+        assert stored["effective_sha256"] != stored["effective_sha256_v4"]
+    finally:
+        engine.shutdown()
+    resumed = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "folded.db"),
+            fresh_tail_count=3,
+            large_output_externalization_path=str(tmp_path / "externalized"),
+        ),
+        hermes_home=str(tmp_path / "home"),
+    )
+    try:
+        resumed.on_session_start("S0", platform="acp", context_length=200_000)
+        assert resumed._cursor_from_durable_commit_proof(list(returned)) == len(returned)
+        rows = resumed._store.get_session_count("S0")
+        resumed.ingest(list(returned) + [{"role": "assistant", "content": "NEW-5171 reply"}])
+        assert resumed._store.get_session_count("S0") == rows + 1
+    finally:
+        resumed.shutdown()
 
 
 def test_carry_forward_rebinds_witness_to_the_current_carrier_suffix(tmp_path):

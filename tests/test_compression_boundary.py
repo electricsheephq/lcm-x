@@ -913,6 +913,30 @@ def test_scaffold_only_proof_does_not_skip_a_new_row_quoting_the_summary(tmp_pat
 
 
 @pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
+def test_scaffold_only_durable_proof_carries_v0240_and_projection_digests(tmp_path, monkeypatch, in_place):
+    """#517 F1: v0.24.0 hashes the scaffold rows' stripped identities, this reader their full
+    ones (scaffold_sha256_v4); a restart before the first ingest re-stores nothing."""
+    resumed, compressed = _scaffold_only_compaction(tmp_path, monkeypatch, in_place=in_place)
+    child = "S0" if in_place else "S1"
+    try:
+        stored = _durable_commit_proof(resumed, child)
+        assert stored["effective_sha256"] == [] and stored["effective_sha256_v4"] == []
+        assert stored["scaffold_sha256"] == [
+            _commit_proof_identity_digest(resumed._proof_replay_identity(m)) for m in compressed
+        ]
+        assert stored["scaffold_sha256_v4"] == [
+            _commit_proof_identity_digest(resumed._proof_replay_identity(m, strip_carrier=False))
+            for m in compressed
+        ]
+        assert resumed._cursor_from_durable_commit_proof(list(compressed)) is not None
+        rows = _row_count(resumed, child)
+        resumed.ingest(list(compressed) + [{"role": "user", "content": "NEW-5170 after the compaction"}])
+        assert _row_count(resumed, child) == rows + 1
+    finally:
+        resumed.shutdown()
+
+
+@pytest.mark.parametrize("in_place", [True, False], ids=["inplace", "rotation"])
 def test_scaffold_only_proof_refuses_a_host_list_without_the_note(tmp_path, monkeypatch, in_place):
     """#484 item 11l negative: the host dropped the generated note row, so the list
     is not the emitted sequence: the proof returns None and nothing is lost."""
@@ -984,7 +1008,7 @@ def test_durable_commit_proof_keeps_the_v0240_wire_format(tmp_path, monkeypatch)
         assert isinstance(payload["emissions"], list) and payload["emissions"]
         assert _V0240_DURABLE_PROOF_KEYS <= set(payload)
         assert set(payload) - _V0240_DURABLE_PROOF_KEYS == {
-            "descriptor_version", "emissions", "reset_epoch", "session_id"
+            "descriptor_version", "effective_sha256_v4", "emissions", "reset_epoch", "session_id"
         }
         read = engine._durable_commit_proof_payload()
         assert read["version"] == 4
@@ -1436,6 +1460,7 @@ def test_durable_proof_reader_relabels_the_descriptor_record_to_version_4(tmp_pa
         read = engine._durable_commit_proof_payload()
         assert read["version"] == 4
         assert read["emissions"] == stored["emissions"]
+        assert read["effective_sha256"] == stored["effective_sha256_v4"]
     finally:
         engine.shutdown()
 
@@ -1448,11 +1473,12 @@ def test_durable_proof_reader_keeps_a_v0240_record_legacy(tmp_path, monkeypatch,
     try:
         _rewrite_durable_proof(
             engine, version=version, descriptor_version=_DROP, emissions=_DROP,
-            session_id=_DROP, reset_epoch=_DROP,
+            session_id=_DROP, reset_epoch=_DROP, effective_sha256_v4=_DROP,
         )
         read = engine._durable_commit_proof_payload()
         assert read["version"] == version
         assert read["emissions"] == []
+        assert "effective_sha256_v4" not in read
     finally:
         engine.shutdown()
 
@@ -1460,16 +1486,21 @@ def test_durable_proof_reader_keeps_a_v0240_record_legacy(tmp_path, monkeypatch,
 @pytest.mark.parametrize("wire", [3, 4], ids=["wire3", "pre-fix-v4"])
 @pytest.mark.parametrize(("key", "stale"), [("session_id", "other-session"), ("reset_epoch", 123.0)])
 def test_durable_proof_reader_treats_stale_descriptors_as_legacy(tmp_path, monkeypatch, wire, key, stale):
-    """#517: descriptors from another session or reset epoch never authorize: the
-    record reads back as version 3 with no emissions."""
+    """#517: descriptors from another session or reset epoch never authorize: a wire-3
+    record reads back as version 3 with no emissions and v0.24.0's digests; an unbound
+    top-level version-4 record (pre-#517 main) is no proof at all."""
     engine, _pre, _compressed = _compacted_engine(tmp_path, monkeypatch)
     try:
-        _rewrite_durable_proof(
+        stored = _rewrite_durable_proof(
             engine, version=wire, descriptor_version=4 if wire == 3 else _DROP, **{key: stale}
         )
         read = engine._durable_commit_proof_payload()
+        if wire == 4:
+            assert read is None
+            return
         assert read["version"] == 3
         assert read["emissions"] == []
+        assert read["effective_sha256"] == stored["effective_sha256"]
     finally:
         engine.shutdown()
 
@@ -1479,10 +1510,14 @@ def test_durable_proof_reader_still_reads_a_pre_fix_version_4_record(tmp_path, m
     version 4, no descriptor_version) keeps version 4 and its emissions."""
     engine, _pre, _compressed = _compacted_engine(tmp_path, monkeypatch)
     try:
-        stored = _rewrite_durable_proof(engine, version=4, descriptor_version=_DROP)
+        projected = _durable_commit_proof(engine, "S0")["effective_sha256_v4"]
+        stored = _rewrite_durable_proof(
+            engine, version=4, descriptor_version=_DROP, effective_sha256=projected, effective_sha256_v4=_DROP
+        )
         read = engine._durable_commit_proof_payload()
         assert read["version"] == 4
         assert read["emissions"] == stored["emissions"] and stored["emissions"]
+        assert read["effective_sha256"] == projected
     finally:
         engine.shutdown()
 

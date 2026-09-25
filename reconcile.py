@@ -2033,8 +2033,8 @@ class ReconcileMixin:
         payload = dict(payload)
         reset_epoch = state.last_reset_at if state is not None else None
         # A version-3 wire record with descriptor_version 4 is relabelled 4 for
-        # every consumer; a top-level version 4 (pre-#517 main) still counts. A
-        # version-2 record keeps its exact-identity hashes: never relabelled.
+        # every consumer; a bound top-level version 4 (pre-#517 main) still counts.
+        # A version-2 record keeps its exact-identity hashes: never relabelled.
         wire = (payload.get("version"), payload.get("descriptor_version"))
         has_descriptors = (
             (wire[0] == _COMPACTION_COMMIT_PROOF_VERSION
@@ -2045,8 +2045,12 @@ class ReconcileMixin:
         )
         if has_descriptors:
             payload["version"] = _COMPACTION_COMMIT_PROOF_VERSION
+            for key in ("effective_sha256", "scaffold_sha256"):  # this reader's projection digests
+                if f"{key}_v4" in payload:
+                    payload[key] = payload[f"{key}_v4"]
+        elif wire[0] == _COMPACTION_COMMIT_PROOF_VERSION:
+            return None  # a pre-#517 version-4 record not bound here proves nothing
         else:
-            payload["version"] = 2 if payload.get("version") == 2 else 3
             payload["emissions"] = []
         return payload
 

@@ -672,6 +672,13 @@ class CompactionMixin:
             proof["output_effective"] = [
                 _proof_user_identity(identity) for identity in output_identities if identity is not None
             ]
+            # v0.24.0's own digests (b9ad016e: stripped identities, scaffold-filtered), which its
+            # reader recomputes after a rollback (#517); the durable record carries both sets.
+            proof["output_sha256_v3"] = [_commit_proof_identity_digest(self._proof_replay_identity(m)) for m in result]
+            proof["effective_sha256_v3"] = [
+                digest for m, digest in zip(result, proof["output_sha256_v3"])
+                if not self._is_replayed_context_scaffold_message(m)
+            ]
             proof["native"] = self._last_compression_status == "host_native"
             if proof["native"]:
                 matched_tool_ids = _matched_tool_call_ids(result)
@@ -711,6 +718,8 @@ class CompactionMixin:
         """
         try:
             tail = self._store.get_session_tail(self._session_id, limit=1)
+            effective = [_commit_proof_identity_digest(identity) for identity in proof["output_effective"]]
+            full = [_commit_proof_identity_digest(identity) for identity in proof["output"]]
             payload = {
                 "version": _COMPACTION_COMMIT_PROOF_WIRE_VERSION,
                 "descriptor_version": _COMPACTION_COMMIT_PROOF_VERSION,
@@ -722,9 +731,10 @@ class CompactionMixin:
                 "conversation_id": proof.get("conversation_id") or "",
                 "reset_epoch": proof.get("reset_epoch"),
                 "created_at": time.time(),
-                "effective_sha256": [
-                    _commit_proof_identity_digest(identity) for identity in proof["output_effective"]
-                ],
+                # effective_sha256/scaffold_sha256 are what v0.24.0 compares; the *_v4 twins are
+                # this reader's projection digests, swapped in for a bound record (#517).
+                "effective_sha256": proof.get("effective_sha256_v3", effective),
+                "effective_sha256_v4": effective,
                 "last_store_id": int(tail[-1]["store_id"]) if tail else 0,
                 "native": bool(proof.get("native")),
                 "droppable": list(proof.get("droppable") or []),
@@ -738,9 +748,11 @@ class CompactionMixin:
                 ],
                 "emissions": copy.deepcopy(proof.get("emissions") or []),
             }
-            if not proof["output_effective"]:
+            if not payload["effective_sha256"]:
                 # Scaffold-only output: bind the proof to the emitted rows (#484 item 11l).
-                payload["scaffold_sha256"] = [_commit_proof_identity_digest(i) for i in proof["output"]]
+                payload["scaffold_sha256"] = proof.get("output_sha256_v3", full)
+            if not effective:
+                payload["scaffold_sha256_v4"] = full
             self._store.write_metadata_json(
                 [self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)],
                 json.dumps(payload, sort_keys=True),
