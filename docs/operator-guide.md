@@ -244,9 +244,9 @@ Provider Plugins:
 
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. `0.24.2` is the identity the next patch release carries: the `v0.24.2-rc1`
-tag carries it first, the gauntlet runs at that tag, and the GA tree is the rc
-tree plus the GA release-notes file (`v0.24.1` at `98ac62fe` shipped the same way).
+and tag. `v0.24.2` shipped rc-first: the `v0.24.2-rc1` tag carried the identity first, the
+gauntlet ran at that tag, and the GA tree is the rc tree plus the GA release-notes
+file (as `v0.24.1` did).
 
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
 `lcm_doctor`, and `/lcm doctor` also report the loaded plugin path and
