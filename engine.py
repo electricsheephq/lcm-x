@@ -379,6 +379,13 @@ def _normalize_total_compactions(value: Any) -> int:
     return value
 
 
+_OVERFLOW_RECOVERY_PLACEHOLDER = (
+    "[LCM overflow recovery] The active context held only orphaned tool results, "
+    "which cannot be sent to the provider on their own, so they were dropped. "
+    "Continue from the user's next message."
+)
+
+
 class LCMEngine(
     CompactionMixin,
     ResetStateMixin,
@@ -7417,7 +7424,59 @@ class LCMEngine(
                 and count_messages_tokens(fallback) > assembly_cap_override
             ):
                 return candidate
-            return self._sanitize_active_context_messages(fallback)
+            sanitized = self._sanitize_active_context_messages(fallback)
+            if any(msg.get("role") != "tool" for msg in sanitized):
+                return sanitized
+            # #91: never return an empty transcript. Priority: newest user (or
+            # preserved-objective) row that fits the cap, then newest other
+            # non-tool row that fits (a tool call keeps its real results when
+            # the pair fits), then the smallest over-cap user row, then the
+            # smallest over-cap other row.
+            cap = (
+                assembly_cap_override
+                if assembly_cap_override is not None
+                else self._effective_assembly_token_cap()
+            )
+            over_cap: list[list[List[Dict[str, Any]]]] = [[], []]
+            for want_user in (True, False):
+                for idx in range(len(tail_messages) - 1, -1, -1):
+                    msg = tail_messages[idx]
+                    is_user = msg.get("role") == "user" or bool(
+                        self._preserved_objective_context_content(msg)
+                    )
+                    if msg.get("role") == "tool" or is_user != want_user:
+                        continue
+                    end = idx + 1
+                    if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                        while end < len(tail_messages) and tail_messages[end].get("role") == "tool":
+                            end += 1
+                    suffixes = ([tail_messages[idx:end]] if end > idx + 1 else []) + [[msg]]
+                    for suffix in suffixes:
+                        option = self._sanitize_active_context_messages(fallback[:-1] + suffix)
+                        if not option:
+                            continue
+                        if cap is None or count_messages_tokens(option) <= cap:
+                            return option
+                        over_cap[0 if want_user else 1].append(option)
+            for options in over_cap:
+                if options:
+                    return min(options, key=count_messages_tokens)
+            # Nothing non-tool survives: never hand the provider bare orphan
+            # tool rows (invalid sequencing) and never return [] (#91). Emit
+            # one bounded, non-tool recovery row after whatever prefix survives.
+            # The row is user-role on purpose: the host's Anthropic conversion
+            # hoists system rows into the top-level system field, so a
+            # system-only transcript reaches the provider as messages=[] (see
+            # test_assemble_context_summary_role_is_user_after_system_anchor);
+            # the self-describing prefix marks it as LCM-generated text.
+            logger.warning(
+                "LCM overflow recovery tail has no non-tool row that survives "
+                "sanitization (%d rows); emitting a recovery placeholder row",
+                len(tail_messages),
+            )
+            return self._sanitize_active_context_messages(fallback[:-1]) + [
+                {"role": "user", "content": _OVERFLOW_RECOVERY_PLACEHOLDER}
+            ]
         return candidate
 
     @staticmethod
