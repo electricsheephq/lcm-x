@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+from collections import Counter
 from copy import deepcopy
 from pathlib import Path
 
@@ -253,15 +254,19 @@ def _no_term(monkeypatch):
 
 
 def _identities_lost(engine, messages, lineage=()):
-    """Retry rows whose replay identity no stored row of the bound session (or of the rotation
-    parents in ``lineage``, whose rows a child's DAG covers) holds."""
+    """Retry occurrences the stored rows of the bound session (or of the rotation parents in
+    ``lineage``, whose rows a child's DAG covers) do not account for. A multiset: an identity the
+    list holds k times needs k stored rows, so a repeated turn cannot hide behind an older copy."""
     rows = [row for sid in (engine._session_id, *lineage) for row in engine._store.get_session_messages(sid, limit=100_000)]
-    stored = set().union(*(engine._stored_row_forms(row) for row in rows))
+    stored = Counter(form for row in rows for form in engine._stored_row_forms(row))
     protected = protect_messages_for_ingest(messages, config=engine._config, hermes_home=engine._hermes_home,
                                             session_id=engine._session_id)
-    return [str(m.get("content"))[:60] for m, p in zip(messages, protected)
-            if not engine._is_verified_replay_scaffold_message(m)
-            and engine._message_replay_identity(p) not in stored]
+    need, lost = Counter(), []
+    for m, p in zip(messages, protected):
+        if not engine._is_verified_replay_scaffold_message(m):
+            need[identity := engine._message_replay_identity(p)] += 1
+            lost += [str(m.get("content"))[:60]] if need[identity] > stored[identity] else []
+    return lost
 
 
 def _edit_row(host, out1):
@@ -494,6 +499,34 @@ def test_rotation_child_interleaved_with_another_conversation(tmp_path, provider
         assert (got["rows"], got["status"], got["calls"], got["reason"], got["out"]) == (rows, "compacted", 0, REASON, out2)
     finally:
         other.shutdown()
+        engine.shutdown()
+
+
+def test_rotation_child_ambiguous_occurrences_keep_the_new_turns(tmp_path, provider):
+    """#530 review P1: every turn repeats one (X, Y) pair. Read as the host omitting the parent's
+    retained rows (their summary glued to the child's first X), replaying the child's rows and
+    appending as many NEW identical turns, the list is byte for byte the lineage replay. The
+    child's own alignment fits too: the smaller cursor wins, so every new occurrence is stored."""
+    engine = _engine(tmp_path)
+    x = {"role": "user", "content": "repeat question " + " ".join(f"x{j}" for j in range(150))}
+    y = {"role": "assistant", "content": "repeat answer " + " ".join(f"y{j}" for j in range(150))}
+    try:
+        first = _transcript() + [dict(m) for _ in range(20) for m in (x, y)]
+        engine.ingest(first)
+        out1 = deepcopy(_compress(engine, first))
+        assert engine._generated_context_carrier_remainder(out1[0]) == x["content"]
+        engine.on_session_end(SID, first)
+        engine.on_session_start(CHILD, boundary_reason="compression", old_session_id=SID,
+                                platform="cli", conversation_id=CID, context_length=200_000)
+        host = deepcopy(out1) + [dict(m) for _ in range(60) for m in (x, y)]
+        engine.ingest(host)
+        rows = engine._store.get_session_count(CHILD)
+        _compress(engine, host)
+        assert engine._last_compression_status == "compacted"
+        _retry_and_measure(engine, provider, deepcopy(host))
+        assert engine._store.get_session_count(CHILD) >= rows + len(out1)  # the new turns (dups allowed)
+        assert _identities_lost(engine, host) == []  # the child alone holds every occurrence
+    finally:
         engine.shutdown()
 
 

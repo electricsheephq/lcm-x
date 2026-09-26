@@ -2290,29 +2290,40 @@ class ReconcileMixin:
         if h >= n or not (h or carrier):
             return None
         starts = range(max(0, len(rows) - n + h), len(rows))  # the run ends at the last durable row
-        above_rows = [r for r in rows if int(r["store_id"]) > frontier]
-        lineage = (  # the tail holds every row above F only when it reaches a row <= F
-            self._head_lineage_rows(messages[h if carrier else h - 1], frontier, n - h) if len(above_rows) < len(rows) else None
-        )
-        if lineage is not None:  # #526: a rotation child's run is its lineage (C, F], then its rows above F
-            rows = lineage + above_rows
-            starts = [0] if len(rows) <= n - h else []  # pinned to the first lineage row after C
-        elif carrier:  # rows are the session tail: j == 0 is in range only when they are all of it
+        if carrier:  # rows are the session tail: j == 0 is in range only when they are all of it
             parts = self._verified_lcm_summary_prefix(normalize_content_value(messages[h].get("content")) or "")[1]
             covered = self._dag.coverage_end(parts)
             starts = [j for j in starts if covered and int(rows[j]["store_id"]) > covered >= (int(rows[j - 1]["store_id"]) if j else 0)]
+        ident = [self._message_replay_identity(m, strip_carrier=carrier and not i) for i, m in enumerate(messages[h:])]
+        fits = self._frontier_replay_fits(ident, rows, starts, frontier)
+        above_rows = [r for r in rows if int(r["store_id"]) > frontier]
+        lineage = (  # the tail holds every row above F only when it reaches a row <= F
+            self._head_lineage_rows(messages[h if carrier else h - 1], frontier, n - h)
+            if len(fits) < 2 and len(above_rows) < len(rows) else None
+        )
+        if lineage is not None:  # #526: a rotation child's run is its lineage (C, F], then its rows above F,
+            # pinned to the first lineage row after C. If this session's own alignment fits too, the list is
+            # ambiguous (identity is content, not occurrence) and the SMALLER cursor wins: both claim a prefix
+            # of the list as replayed, the smaller a prefix of the larger's, so it can only re-store (dup)
+            # rows the larger would skip, never skip a row the host appended (loss).
+            run = lineage + above_rows
+            fits = sorted(fits + self._frontier_replay_fits(ident, run, [0] if len(run) <= n - h else [], frontier))[:1]
+        return h + fits[0] if len(fits) == 1 else None
+
+    def _frontier_replay_fits(self, ident, rows, starts, frontier: int) -> list:
+        """Lengths of the runs ``ident`` replays from a start in ``starts`` (a row <= F) through the
+        last of ``rows``, covering every row above F; it stops at a second fit (ambiguous)."""
         above = sum(int(r["store_id"]) > frontier for r in rows)
         starts = [j for j in starts if int(rows[j]["store_id"]) <= frontier and len(rows) - j > above]
         self._load_host_rewrite_overrides(rows)
-        ident = [self._message_replay_identity(m, strip_carrier=carrier and not i) for i, m in enumerate(messages[h:])]
         forms = {j: self._stored_row_forms(rows[j]) for j in range(starts[0], len(rows))} if starts else {}
         fits = []
         for j in starts:  # computed once each; a second fit is ambiguous
             if all(ident[i] in forms[j + i] and not _has_lossy_redacted_identity(ident[i]) for i in range(len(rows) - j)):
-                fits.append(h + len(rows) - j)
+                fits.append(len(rows) - j)
                 if len(fits) > 1:
-                    return None
-        return fits[0] if fits else None
+                    break
+        return fits
 
     def _reconcile_ingest_cursor_from_store(
         self,
