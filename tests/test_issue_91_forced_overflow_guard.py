@@ -11,6 +11,7 @@ import pytest
 
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
+from tests.test_issue_529_overflow_followups import assert_provider_shape
 
 OBJECTIVE = (
     "[Current user objective preserved from compacted history]\n"
@@ -36,12 +37,12 @@ def engine(tmp_path):
         instance.shutdown()
 
 
-def _recover(engine, tail):
+def _recover(engine, tail, system_msg=None):
     result = engine._assemble_overflow_recovery_context(
-        None, tail, assembly_cap_override=120
+        system_msg, tail, assembly_cap_override=120
     )
     return engine._finalize_forced_overflow_result(
-        tail, result, assembly_cap_override=120
+        ([system_msg] if system_msg else []) + tail, result, assembly_cap_override=120
     )
 
 
@@ -105,6 +106,7 @@ def test_older_user_row_that_fits_wins_over_newer_assistant_that_fits(engine):
     # scaffold) before the #91 fallback is reached; pin that it stays kept.
     assert any("USER_OBJECTIVE" in str(m.get("content")) for m in final)
     assert engine._last_overflow_recovery_failed is False
+    assert_provider_shape(final)
 
 
 def test_newer_oversized_user_request_wins_over_older_smaller_assistant(engine):
@@ -118,6 +120,7 @@ def test_newer_oversized_user_request_wins_over_older_smaller_assistant(engine):
     final = _recover(engine, tail)
 
     assert final == [request]
+    assert_provider_shape(final)
     assert engine._last_compression_status == "overflow_recovery"
     # Over the cap, reported as such by the finalizer.
     assert engine._last_overflow_recovery_failed is True
@@ -183,23 +186,26 @@ def test_smallest_non_tool_row_is_chosen_when_none_fits(engine):
     assert engine._last_overflow_recovery_failed is True
 
 
-def test_all_tool_tail_overflow_recovery_emits_placeholder(engine, caplog):
+@pytest.mark.parametrize("system_msg", [None, {"role": "system", "content": "You are an agent."}])
+def test_all_tool_tail_overflow_recovery_emits_placeholder(engine, caplog, system_msg):
     tail = [
         {"role": "tool", "tool_call_id": "orphan-a", "content": "status a"},
         {"role": "tool", "tool_call_id": "orphan-b", "content": "status b"},
     ]
 
     with caplog.at_level(logging.WARNING):
-        final = _recover(engine, tail)
+        final = _recover(engine, tail, system_msg)
 
     # Never empty, never bare orphan tool rows: one non-tool recovery row.
     assert final, "overflow recovery returned an empty transcript"
     # User role: a system-only transcript is hoisted into the top-level
     # system field by the host's Anthropic conversion and arrives as
-    # messages=[] (the same constraint that makes DAG summaries user-role).
-    assert [m.get("role") for m in final] == ["user"]
+    # messages=[] (the same constraint that makes DAG summaries user-role);
+    # #529: a system anchor alone must not escape as that empty transcript.
+    assert [m.get("role") for m in final] == (["system"] if system_msg else []) + ["user"]
     assert all(m.get("role") != "tool" for m in final)
-    assert "overflow recovery" in final[0]["content"]
+    assert "overflow recovery" in final[-1]["content"]
+    assert_provider_shape(final)
     shape_warnings = [
         r for r in caplog.records
         if r.levelno == logging.WARNING and "no non-tool row" in r.getMessage()
