@@ -7464,13 +7464,18 @@ class LCMEngine(
             # Nothing non-tool survives: never hand the provider bare orphan
             # tool rows (invalid sequencing) and never return [] (#91). Emit
             # one bounded, non-tool recovery row after whatever prefix survives.
+            # The row is user-role on purpose: the host's Anthropic conversion
+            # hoists system rows into the top-level system field, so a
+            # system-only transcript reaches the provider as messages=[] (see
+            # test_assemble_context_summary_role_is_user_after_system_anchor);
+            # the self-describing prefix marks it as LCM-generated text.
             logger.warning(
                 "LCM overflow recovery tail has no non-tool row that survives "
                 "sanitization (%d rows); emitting a recovery placeholder row",
                 len(tail_messages),
             )
             return self._sanitize_active_context_messages(fallback[:-1]) + [
-                {"role": "system", "content": _OVERFLOW_RECOVERY_PLACEHOLDER}
+                {"role": "user", "content": _OVERFLOW_RECOVERY_PLACEHOLDER}
             ]
         return candidate
 

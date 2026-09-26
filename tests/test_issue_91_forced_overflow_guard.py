@@ -194,7 +194,10 @@ def test_all_tool_tail_overflow_recovery_emits_placeholder(engine, caplog):
 
     # Never empty, never bare orphan tool rows: one non-tool recovery row.
     assert final, "overflow recovery returned an empty transcript"
-    assert [m.get("role") for m in final] == ["system"]
+    # User role: a system-only transcript is hoisted into the top-level
+    # system field by the host's Anthropic conversion and arrives as
+    # messages=[] (the same constraint that makes DAG summaries user-role).
+    assert [m.get("role") for m in final] == ["user"]
     assert all(m.get("role") != "tool" for m in final)
     assert "overflow recovery" in final[0]["content"]
     shape_warnings = [
