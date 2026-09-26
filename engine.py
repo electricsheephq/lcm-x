@@ -379,6 +379,13 @@ def _normalize_total_compactions(value: Any) -> int:
     return value
 
 
+_OVERFLOW_RECOVERY_PLACEHOLDER = (
+    "[LCM overflow recovery] The active context held only orphaned tool results, "
+    "which cannot be sent to the provider on their own, so they were dropped. "
+    "Continue from the user's next message."
+)
+
+
 class LCMEngine(
     CompactionMixin,
     ResetStateMixin,
@@ -7441,12 +7448,17 @@ class LCMEngine(
                     smallest = (tokens, option)
             if smallest is not None:
                 return smallest[1]
+            # Nothing non-tool survives: never hand the provider bare orphan
+            # tool rows (invalid sequencing) and never return [] (#91). Emit
+            # one bounded, non-tool recovery row after whatever prefix survives.
             logger.warning(
                 "LCM overflow recovery tail has no non-tool row that survives "
-                "sanitization (%d rows); returning the raw tail unchanged",
+                "sanitization (%d rows); emitting a recovery placeholder row",
                 len(tail_messages),
             )
-            return list(tail_messages)
+            return self._sanitize_active_context_messages(fallback[:-1]) + [
+                {"role": "user", "content": _OVERFLOW_RECOVERY_PLACEHOLDER}
+            ]
         return candidate
 
     @staticmethod

@@ -106,7 +106,7 @@ def test_smallest_non_tool_row_is_chosen_when_none_fits(engine):
     assert engine._last_overflow_recovery_failed is True
 
 
-def test_all_tool_tail_overflow_recovery_returns_raw_tail(engine, caplog):
+def test_all_tool_tail_overflow_recovery_emits_placeholder(engine, caplog):
     tail = [
         {"role": "tool", "tool_call_id": "orphan-a", "content": "status a"},
         {"role": "tool", "tool_call_id": "orphan-b", "content": "status b"},
@@ -115,7 +115,11 @@ def test_all_tool_tail_overflow_recovery_returns_raw_tail(engine, caplog):
     with caplog.at_level(logging.WARNING):
         final = _recover(engine, tail)
 
-    assert final == tail
+    # Never empty, never bare orphan tool rows: one non-tool recovery row.
+    assert final, "overflow recovery returned an empty transcript"
+    assert [m.get("role") for m in final] == ["user"]
+    assert all(m.get("role") != "tool" for m in final)
+    assert "overflow recovery" in final[0]["content"]
     shape_warnings = [
         r for r in caplog.records
         if r.levelno == logging.WARNING and "no non-tool row" in r.getMessage()
