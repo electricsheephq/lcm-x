@@ -425,14 +425,11 @@ def test_merged_row_behind_the_annotation_is_stored_once_after_restart(tmp_path,
         assert expected.endswith(tail_row.rstrip() + "\n\n" + _NEW)  # the cut rstrips the head (rc4)
         assert [i for i in gained.elements() if _NEW in i] == [expected]
         assert after.count(tail_row) == before.count(tail_row)
-        # A rotation child also stores the carrier once: the plain merge does the same on the base.
-        assert sum(gained.values()) == (1 if mode == "inplace" or glue_carrier else 2)
+        assert sum(gained.values()) == 1  # #535: a rotation child no longer stores the carrier again
     finally:
         engine.shutdown()
 
 
-@pytest.mark.xfail(strict=True, reason="pre-existing #499 family: a row the host merged into the retained "
-                   "tail row is re-ingested on each LATER restart; the plain merge does the same on the base")
 @pytest.mark.parametrize("annotation", ["", _TODO_ANNOTATION_V2.rstrip("\n")], ids=["plain", "annotated"])
 def test_merged_row_is_not_stored_again_on_a_later_restart(tmp_path, monkeypatch, annotation):
     from tests.test_issue_488_emission_proof import _restart

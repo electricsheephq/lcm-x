@@ -1103,23 +1103,23 @@ class CompactionMixin:
             (i for i in range(start, len(working)) if ids.get(id(working[i]), 0) > frontier),
             len(working),
         )
-        rows = self._store.get_session_rows_through(self._session_id, frontier, end - start)
-        if (carrier or start > scaffold) and len(rows) != end - start:  # #526: a rotation child's run is its lineage
-            rows = self._head_lineage_rows(working[start if carrier else start - 1], frontier, end - start) or rows
-        after = self._store.get_session_messages_after(self._session_id, frontier, limit=1)
-        if (
-            not rows
-            or len(rows) != end - start
-            or int(rows[-1]["store_id"]) != frontier
-            or [int(row["store_id"]) for row in after]
-            != ([ids[id(working[end])]] if end < len(working) else [])
-        ):
+        for collapse in (False, True):  # #535: raw rows first, then a stored merge-append pair as one row
+            rows = self._store.get_session_rows_through(self._session_id, frontier, (1 + collapse) * (end - start))
+            rows = self._collapse_merge_append_bases(rows)[-(end - start):] if collapse and end > start else rows
+            if (carrier or start > scaffold) and (collapse or len(rows) != end - start):  # #526: a rotation child's run is its lineage
+                lineage = self._head_lineage_rows(working[start if carrier else start - 1], frontier, (1 + collapse) * (end - start)) or []
+                merged = self._collapse_merge_append_bases(lineage) if collapse else lineage  # collapsed only when a pair is
+                rows = merged if merged and (not collapse or len(merged) < len(lineage)) else rows
+            self._load_host_rewrite_overrides(rows)
+            if rows and len(rows) == end - start and int(rows[-1]["store_id"]) == frontier and all(
+                self._replay_row_admits(message, row, carrier=carrier and not offset)
+                for offset, (message, row) in enumerate(zip(working[start:end], rows))
+            ):
+                break
+        else:
             return [], ids, 0, 0
-        self._load_host_rewrite_overrides(rows)
-        if not all(
-            self._replay_row_admits(message, row, carrier=carrier and not offset)
-            for offset, (message, row) in enumerate(zip(working[start:end], rows))
-        ):
+        after = self._store.get_session_messages_after(self._session_id, frontier, limit=1)
+        if [int(row["store_id"]) for row in after] != ([ids[id(working[end])]] if end < len(working) else []):
             return [], ids, 0, 0
         leaf_sources = self._dag.get_leaf_sources_through(self._session_id, frontier)
         lineage = {store_id for _node, _tokens, store_id in leaf_sources}
@@ -1712,9 +1712,10 @@ class CompactionMixin:
             source_lineage_chunk = [
                 message for message in source_lookup_chunk if id(message) not in dependent_reply_message_ids
             ]
-            source_store_ids = self._get_store_ids_for_messages(source_lineage_chunk)
+            full_map = self._current_compress_store_ids_by_message_id  # #535: the pass maps the whole list
+            source_store_ids = self._get_store_ids_for_messages(source_lineage_chunk, full_map)
             source_store_ids = sorted(dict.fromkeys(source_store_ids))
-            consumed_store_ids = self._get_store_ids_for_messages(source_lookup_chunk)
+            consumed_store_ids = self._get_store_ids_for_messages(source_lookup_chunk, full_map)
             consumed_store_ids = sorted(dict.fromkeys(consumed_store_ids))
             earliest_at, latest_at = self._store.get_time_bounds(source_store_ids)
             summary_tokens = count_tokens(summary_text)

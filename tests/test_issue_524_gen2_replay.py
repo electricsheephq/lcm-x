@@ -853,12 +853,7 @@ def _hermes_python():
 
 # #535: in the pure shape the compacted output ends in a retained real user row, and the host's
 # _merge_consecutive_users glues the next user text behind it (behind the todo fold, when one is
-# present). The base passed [pure] only because #516 dropped that text from the replay identity.
-_ISSUE_535 = (
-    "#535: the host merges the new user text behind the retained last user row and the gen-2 retry "
-    "does not align it: the retry compaction errors and the retained rows are stored again "
-    "(duplicates, no loss)"
-)
+# present): the composite is stored whole and the stored pair aligns as one occurrence.
 _EVA_TODO_WRITE = 'todo.write([{"id": "1", "content": "reconcile the vendor ledger", "status": "in_progress"}])'
 assert _EVA_TODO_WRITE in _EVA_PROBE  # the no-todo variant below must really drop the fold
 
@@ -885,7 +880,7 @@ def _assert_eva_gen2_retry(done, shape):
 
 @pytest.mark.skipif(_hermes_python() is None, reason="no real Hermes runtime available")
 @pytest.mark.parametrize(
-    "shape", ["objective", pytest.param("pure", marks=pytest.mark.xfail(strict=True, reason=_ISSUE_535)), "carrier"]
+    "shape", ["objective", "pure", "carrier"]
 )
 def test_eva_shaped_gen2_retry(tmp_path, shape):
     """Tool pairs with persisted-output markers, externalized payloads, adjacent assistant rows the
@@ -894,7 +889,6 @@ def test_eva_shaped_gen2_retry(tmp_path, shape):
 
 
 @pytest.mark.skipif(_hermes_python() is None, reason="no real Hermes runtime available")
-@pytest.mark.xfail(strict=True, reason=_ISSUE_535)
 def test_eva_shaped_gen2_retry_plain_merge_behind_retained_user_row(tmp_path):
     """#535 pinned without the todo fold: an empty host todo store folds nothing, so the host merges
     the next user text straight behind the retained last user row (same gap, same target)."""
