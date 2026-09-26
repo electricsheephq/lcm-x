@@ -7420,15 +7420,27 @@ class LCMEngine(
             sanitized = self._sanitize_active_context_messages(fallback)
             if any(msg.get("role") != "tool" for msg in sanitized):
                 return sanitized
-            # #91: never return an empty transcript. Keep the last non-tool
-            # row even if oversized; the next compaction can shrink it.
+            # #91: never return an empty transcript. Keep the newest non-tool
+            # row that fits the cap, else the smallest one (least over cap).
+            cap = (
+                assembly_cap_override
+                if assembly_cap_override is not None
+                else self._effective_assembly_token_cap()
+            )
+            smallest: Optional[tuple[int, List[Dict[str, Any]]]] = None
             for msg in reversed(tail_messages):
-                if msg.get("role") != "tool":
-                    sanitized = self._sanitize_active_context_messages(
-                        fallback[:-1] + [msg]
-                    )
-                    if sanitized:
-                        return sanitized
+                if msg.get("role") == "tool":
+                    continue
+                option = self._sanitize_active_context_messages(fallback[:-1] + [msg])
+                if not option:
+                    continue
+                tokens = count_messages_tokens(option)
+                if cap is None or tokens <= cap:
+                    return option
+                if smallest is None or tokens < smallest[0]:
+                    smallest = (tokens, option)
+            if smallest is not None:
+                return smallest[1]
             logger.warning(
                 "LCM overflow recovery tail has no non-tool row that survives "
                 "sanitization (%d rows); returning the raw tail unchanged",

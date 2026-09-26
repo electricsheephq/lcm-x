@@ -63,14 +63,47 @@ def test_no_system_orphan_tool_tail_overflow_recovery_not_empty(engine, head_rol
     assert final, "forced-overflow recovery returned an empty transcript"
     assert any(m.get("role") != "tool" for m in final)
     assert not any(m.get("tool_call_id") == "orphan-call" for m in final)
+    # The head is the only non-tool row under the cap, so the objective survives.
+    assert any("KEEP_OBJECTIVE" in str(m.get("content")) for m in final)
+    assert not any(OVERSIZED in str(m.get("content")) for m in final)
     assert engine._last_compression_status == "overflow_recovery"
     assert engine._ingest_cursor == len(final)
-    if head_role == "user":
-        # Green on main before the guard; kept as a regression.
-        assert any("KEEP_OBJECTIVE" in str(m.get("content")) for m in final)
-    else:
-        # Fallback keeps the LAST non-tool row of the raw tail, even oversized.
-        assert final == [{"role": "assistant", "content": OVERSIZED}]
+    assert engine._last_overflow_recovery_failed is False
+
+
+def test_newest_non_tool_row_that_fits_is_chosen_over_older_head(engine):
+    newest = {"role": "assistant", "content": "NEWEST_FITS: short status reply."}
+    tail = [
+        {"role": "assistant", "content": OBJECTIVE},
+        {"role": "assistant", "content": OVERSIZED},
+        newest,
+        {"role": "tool", "tool_call_id": "orphan-call", "content": "latest tool status"},
+    ]
+
+    final = _recover(engine, tail)
+
+    assert final == [newest]
+    assert engine._last_compression_status == "overflow_recovery"
+    assert engine._ingest_cursor == 1
+    assert engine._last_overflow_recovery_failed is False
+
+
+def test_smallest_non_tool_row_is_chosen_when_none_fits(engine):
+    smaller = {"role": "assistant", "content": "older over-cap chatter " * 100}
+    larger = {"role": "assistant", "content": "newest over-cap chatter " * 300}
+    tail = [
+        smaller,
+        larger,
+        {"role": "tool", "tool_call_id": "orphan-call", "content": "latest tool status"},
+    ]
+
+    final = _recover(engine, tail)
+
+    assert final == [smaller]
+    assert engine._last_compression_status == "overflow_recovery"
+    assert engine._ingest_cursor == 1
+    # Still over the cap, but the least-over-cap choice.
+    assert engine._last_overflow_recovery_failed is True
 
 
 def test_all_tool_tail_overflow_recovery_returns_raw_tail(engine, caplog):
