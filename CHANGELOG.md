@@ -15,8 +15,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix: prior-proof consumption declines malformed projections strictly and records a fresh proof on failure. (#514)
 - Fix: a host merge-append behind the retained last user row aligns in both walks; the post-adoption re-store wedge is closed. (#535)
 - Fix: a rotation restart before the last carried prompt is answered no longer re-stores the restored list into the empty child; the durable walk accepts the host's replacement of that row and stale carry ranges are voided on the cursor-0 fallback. (#519)
-- Fix: `lcm_compile_evidence` no longer declares a top-level `allOf`, which Anthropic's API rejects; Anthropic-backed
-  providers work with lcm-x loaded again (every request failed with HTTP 400 since v0.21.0-rc2). (#550)
+- Fix: `lcm_compile_evidence` no longer declares a top-level `allOf`, which Anthropic's API rejects; a request carrying
+  the lcm-x tool list failed with HTTP 400 on Anthropic routes since v0.21.0-rc2 (400→200 measured on one route). (#550)
 - Tests: the `LCM_TEST_HERMES_AGENT_ROOT` opt-in is isolated from later test modules. (#513)
 - Docs: the README and operator guide say how a `--ref`-pinned install moves to a new commit
   (`hermes plugins install … --force --ref <sha>`); `hermes plugins update` re-pins catalog installs only. (#523)
