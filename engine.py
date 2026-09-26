@@ -7417,7 +7417,24 @@ class LCMEngine(
                 and count_messages_tokens(fallback) > assembly_cap_override
             ):
                 return candidate
-            return self._sanitize_active_context_messages(fallback)
+            sanitized = self._sanitize_active_context_messages(fallback)
+            if any(msg.get("role") != "tool" for msg in sanitized):
+                return sanitized
+            # #91: never return an empty transcript. Keep the last non-tool
+            # row even if oversized; the next compaction can shrink it.
+            for msg in reversed(tail_messages):
+                if msg.get("role") != "tool":
+                    sanitized = self._sanitize_active_context_messages(
+                        fallback[:-1] + [msg]
+                    )
+                    if sanitized:
+                        return sanitized
+            logger.warning(
+                "LCM overflow recovery tail has no non-tool row that survives "
+                "sanitization (%d rows); returning the raw tail unchanged",
+                len(tail_messages),
+            )
+            return list(tail_messages)
         return candidate
 
     @staticmethod
