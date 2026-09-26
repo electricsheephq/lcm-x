@@ -226,10 +226,12 @@ def _rows(engine):
     return engine._store._conn.execute("SELECT role, content FROM messages ORDER BY store_id").fetchall()
 
 
+@pytest.mark.parametrize("tail", [0, 1], ids=["emitted-head", "carrier-extension"])
 @pytest.mark.parametrize("mode", ["inplace", "rotation"])
-def test_host_merged_composite_maps_whole_and_compacts_again(tmp_path, monkeypatch, mode):
-    """#499 tail 0: the composite is stored whole, so the mapper maps it whole (no source gap)."""
-    engine, host, _make, _child, add = _merged_composite_session(tmp_path, monkeypatch, tail=0, mode=mode)
+def test_host_merged_composite_maps_whole_and_compacts_again(tmp_path, monkeypatch, mode, tail):
+    """#499: the composite is stored whole, so the mapper maps it whole (no source gap); tail 1
+    (#535): the retained row U inside the carrier extension is consumed with it."""
+    engine, host, _make, _child, add = _merged_composite_session(tmp_path, monkeypatch, tail=tail, mode=mode)
     try:
         for i in range(30, 34):
             add(_turn(i)[0])

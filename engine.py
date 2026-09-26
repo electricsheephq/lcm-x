@@ -134,7 +134,7 @@ from .aux_session import AuxiliarySessionMixin
 from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from .reconcile import _emission_identity
-from .reconcile import _has_lossy_redacted_identity, _proof_user_identity
+from .reconcile import _has_lossy_redacted_identity, _merge_append_cut, _proof_user_identity
 from .compaction import CompactionMixin
 from .reset_state import ResetStateMixin
 from .bypass import BypassMixin
@@ -4898,7 +4898,12 @@ class LCMEngine(
                 return index if effective == target else None
             if identity is None:
                 continue
-            effective.append(_proof_user_identity(identity))
+            identity = _proof_user_identity(identity)
+            if len(effective) == len(target) - 1 and _merge_append_cut(  # the proof strips B's trailing whitespace
+                identity, lambda head: _proof_user_identity(head) == target[-1], len(target[-1][1])
+            ):
+                return index  # #535: a new user row merged behind the last output row: stored whole
+            effective.append(identity)
             if effective != target[: len(effective)]:
                 return None
         return len(messages) if effective == target else None
@@ -5765,9 +5770,33 @@ class LCMEngine(
             "[Externalized payload: kind=raw_payload;"
         )
 
-    def _get_store_ids_for_messages(self, messages: List[Dict[str, Any]]) -> List[int]:
+    def _get_store_ids_for_messages(self, messages: List[Dict[str, Any]], full_map=None) -> List[int]:
         ids_by_message_id = self._get_store_id_map_for_messages(messages)
-        return [ids_by_message_id[id(msg)] for msg in messages if id(msg) in ids_by_message_id]
+        ids = [ids_by_message_id[id(msg)] for msg in messages if id(msg) in ids_by_message_id]
+        return ids if full_map is None else self._with_merge_append_bases(ids, set(full_map.values()))
+
+    def _with_merge_append_bases(self, ids: List[int], mapped: set) -> List[int]:
+        """#535: a consumed row the host built by merging a new user row behind the previous lineage
+        row B consumes B too when B is above F, owned as the publication requires (this session or a
+        proven carry range, same conversation), no message of the full list maps it, and its bytes
+        are inside the consumed row (the summarizer reads them there)."""
+        frontier, rows, carry, out = int(self._last_compacted_store_id or 0), self._store.get_batch(ids), None, []
+        for store_id in ids:
+            row = rows.get(store_id) or {}
+            if row.get("role") == "user" and "\n\n" in str(row.get("content") or ""):
+                carry = self._load_compression_carry_ranges() if carry is None else carry  # a rotation child's parents
+                prior = self._store.get_session_rows_through(self._session_id, store_id - 1, 1) + [
+                    r for sid, start, end in carry
+                    for r in self._store.get_session_rows_through(sid, min(end, store_id - 1), 1) if int(r["store_id"]) > start
+                ]
+                base = max(prior, key=lambda r: int(r["store_id"]), default=None) or {}
+                base_id, owner = int(base.get("store_id") or 0), str(base.get("session_id") or "")
+                owned = owner == self._session_id or any(owner == sid and start < base_id <= end for sid, start, end in carry)
+                owned = owned and str(base.get("conversation_id") or "").strip() in {"", str(self._conversation_id or "")}
+                if owned and frontier < base_id and base_id not in mapped.union(ids, out) and self._merged_pair_row(base, row):
+                    out.append(base_id)
+            out.append(store_id)
+        return out
 
     # -- Internal: summarization -------------------------------------------
 

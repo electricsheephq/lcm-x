@@ -348,6 +348,21 @@ def _proof_user_identity(identity):
     return (identity[0], identity[1].strip(), *identity[2:])
 
 
+def _merge_append_cut(identity, is_base, start: int = 0) -> bool:
+    """#535: plain user ``identity`` is a row ``is_base`` accepts, the exact joiner of Hermes'
+    consecutive-user merge (``prev + "\\n\\n" + next``), then a non-blank row. Bounded: the
+    first 64 cuts at or after ``start``."""
+    cut = start - 1 if identity[0] == "user" and tuple(identity[2:]) == ("", "", "") else None
+    for _ in range(64 if cut is not None else 0):
+        cut = identity[1].find("\n\n", cut + 1)
+        if cut < 0:
+            return False
+        head = (identity[0], identity[1][:cut], *identity[2:])
+        if head[1].strip() and identity[1][cut + 2:].strip() and is_base(head):
+            return True
+    return False
+
+
 # Per stored user row, keyed by store_id (survives rotation and restart): the
 # identity content of the form a host rewrote that row to in place (#498).
 _HOST_REWRITE_IDENTITY_METADATA_PREFIX = "host_rewrite_identity"
@@ -2201,6 +2216,12 @@ class ReconcileMixin:
                 if _has_lossy_redacted_identity(identity):
                     return None
                 digest = _commit_proof_identity_digest(identity)
+                if digest != target[matched] and matched == len(target) - 1 and _merge_append_cut(
+                    identity, lambda head: _commit_proof_identity_digest(proof_identity(head)) == target[matched]
+                ):
+                    index -= 1  # #535: a new user row merged behind the last output row: stored whole
+                    matched += 1
+                    break
                 if digest != target[matched]:
                     if not native:
                         return None
@@ -2322,7 +2343,7 @@ class ReconcileMixin:
         found = self._store.get_batch(ids) if 0 < len(ids) <= limit else {}
         return [found[store_id] for store_id in ids] if ids and ids[-1] == frontier and len(found) == len(ids) else None
 
-    def _cursor_from_frontier_bound_replay(self, messages, rows) -> Optional[int]:
+    def _cursor_from_frontier_bound_replay(self, messages, rows, collapse: bool = False) -> Optional[int]:
         """#524: a replay of an LCM emission a later commit superseded (its proof was replaced).
         After an LCM head this session's rows follow exactly, from a row <= F through the LAST
         durable row, in one fit; a carrier pins the first to its coverage end. A rotation child's
@@ -2336,6 +2357,7 @@ class ReconcileMixin:
         n, (h, carrier) = len(messages), self._replay_head(messages, 0, frontier)
         if h >= n or not (h or carrier):
             return None
+        rows = self._collapse_merge_append_bases(rows) if collapse else rows  # #535
         starts = range(max(0, len(rows) - n + h), len(rows))  # the run ends at the last durable row
         if carrier:  # rows are the session tail: j == 0 is in range only when they are all of it
             parts = self._verified_lcm_summary_prefix(normalize_content_value(messages[h].get("content")) or "")[1]
@@ -2345,9 +2367,10 @@ class ReconcileMixin:
         fits = self._frontier_replay_fits(ident, rows, starts, frontier)
         above_rows = [r for r in rows if int(r["store_id"]) > frontier]
         lineage = (  # the tail holds every row above F only when it reaches a row <= F
-            self._head_lineage_rows(messages[h if carrier else h - 1], frontier, n - h)
+            self._head_lineage_rows(messages[h if carrier else h - 1], frontier, (1 + collapse) * (n - h))
             if len(fits) < 2 and len(above_rows) < len(rows) else None
         )
+        lineage = self._collapse_merge_append_bases(lineage) if collapse and lineage else lineage  # #535
         if lineage is not None:  # #526: a rotation child's run is its lineage (C, F], then its rows above F,
             # pinned to the first lineage row after C. If this session's own alignment fits too, the list is
             # ambiguous (identity is content, not occurrence) and the SMALLER cursor wins: both claim a prefix
@@ -2355,7 +2378,33 @@ class ReconcileMixin:
             # rows the larger would skip, never skip a row the host appended (loss).
             run = lineage + above_rows
             fits = sorted(fits + self._frontier_replay_fits(ident, run, [0] if len(run) <= n - h else [], frontier))[:1]
-        return h + fits[0] if len(fits) == 1 else None
+        if fits or collapse:
+            return h + fits[0] if len(fits) == 1 else None
+        # #535: the raw rows fit nothing; a stored merge-append pair is then one host occurrence.
+        return self._cursor_from_frontier_bound_replay(messages, rows, collapse=True)
+
+    def _merged_pair_row(self, base, row) -> Optional[dict]:
+        """#535: stored ``row`` is stored ``base`` with a user row the host merged behind it, and holds
+        ``base``'s bytes: the pair as the host's list carries it (``row``; a carrier by its DAG-verified
+        remainder), else None."""
+        if base.get("role") != "user" or row.get("role") != "user" or (normalize_content_value(base.get("content")) or "").strip() not in (
+            normalize_content_value(row.get("content")) or ""
+        ):
+            return None
+        ident, rest = self._message_replay_identity(row, stored_row=True), self._generated_context_carrier_remainder(row)
+        head = self._message_replay_identity(base, stored_row=True)
+        bases = (head, (head[0], head[1].rstrip(), *head[2:]))  # the exact joiner; only B's trailing whitespace may go
+        pairs = [(ident, row)] + ([((ident[0], rest, *ident[2:]), {**row, "content": rest})] if rest is not None else [])
+        return next((pair for form, pair in pairs if _merge_append_cut(form, lambda prefix: prefix in bases, len(bases[1][1]))), None)
+
+    def _collapse_merge_append_bases(self, rows) -> list:
+        """#535: a stored row the next stored row holds merge-appended is one host occurrence with it
+        (that row); only a comparison loses the row, never the store."""
+        out: list = []
+        for row in rows:
+            pair = self._merged_pair_row(out[-1], row) if out else None
+            out[-1:] = [pair] if pair is not None else out[-1:] + [row]
+        return out
 
     def _frontier_replay_fits(self, ident, rows, starts, frontier: int) -> list:
         """Lengths of the runs ``ident`` replays from a start in ``starts`` (a row <= F) through the
