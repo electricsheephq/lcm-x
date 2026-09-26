@@ -577,6 +577,10 @@ LCM_COMPILE_EVIDENCE = {
             },
             "proposal": {
                 "type": "object",
+                "description": (
+                    "Required when mode is proposal; a missing proposal returns "
+                    "selector_schema_invalid."
+                ),
                 "additionalProperties": False,
                 "required": [
                     "version",
@@ -709,14 +713,6 @@ LCM_COMPILE_EVIDENCE = {
             },
         },
         "required": ["question", "baseline_refs"],
-        "allOf": [
-            {
-                "if": {
-                    "properties": {"mode": {"const": "proposal"}},
-                },
-                "then": {"required": ["proposal"]},
-            }
-        ],
     },
 }
 
