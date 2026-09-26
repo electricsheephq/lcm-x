@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+from collections import Counter
 from copy import deepcopy
 from pathlib import Path
 
@@ -252,15 +253,20 @@ def _no_term(monkeypatch):
     monkeypatch.setattr(LCMEngine, "_cursor_from_frontier_bound_replay", lambda self, m, rows: None, raising=False)
 
 
-def _identities_lost(engine, messages):
-    """Retry rows whose replay identity no stored row of the bound session holds."""
-    rows = engine._store.get_session_messages(engine._session_id, limit=100_000)
-    stored = set().union(*(engine._stored_row_forms(row) for row in rows))
+def _identities_lost(engine, messages, lineage=()):
+    """Retry occurrences the stored rows of the bound session (or of the rotation parents in
+    ``lineage``, whose rows a child's DAG covers) do not account for. A multiset: an identity the
+    list holds k times needs k stored rows, so a repeated turn cannot hide behind an older copy."""
+    rows = [row for sid in (engine._session_id, *lineage) for row in engine._store.get_session_messages(sid, limit=100_000)]
+    stored = Counter(form for row in rows for form in engine._stored_row_forms(row))
     protected = protect_messages_for_ingest(messages, config=engine._config, hermes_home=engine._hermes_home,
                                             session_id=engine._session_id)
-    return [str(m.get("content"))[:60] for m, p in zip(messages, protected)
-            if not engine._is_verified_replay_scaffold_message(m)
-            and engine._message_replay_identity(p) not in stored]
+    need, lost = Counter(), []
+    for m, p in zip(messages, protected):
+        if not engine._is_verified_replay_scaffold_message(m):
+            need[identity := engine._message_replay_identity(p)] += 1
+            lost += [str(m.get("content"))[:60]] if need[identity] > stored[identity] else []
+    return lost
 
 
 def _edit_row(host, out1):
@@ -418,27 +424,144 @@ def test_rollover_to_a_new_session_is_not_a_replay(tmp_path, monkeypatch):
     assert counts[0] == counts[1] and counts[0][2] is False and counts[0][3] == []
 
 
-@pytest.mark.xfail(strict=True, reason="#526: a rotation child (compression.in_place=false) replays parent "
-                   "rows the child does not own; follow-up (lineage walk over (C, F] + carry-aware resume)")
-def test_rotation_child_gen2_retry(tmp_path, provider):
+# -- #526: a rotation child (compression.in_place=false) replays rows its parent owns --------------
+
+CHILD = "issue-524-child"
+
+
+def _child_gen2(tmp_path, head="carrier", interleave=False, exclude=None):
+    """Attempt 1 in the parent; the host rotates to a child session; attempt 2 commits in the
+    child and is cancelled. The child owns only its 120 rows: the carrier's glued row and the
+    rows up to 140 stay the parent's. Returns (engine, host, out2, other engine or None)."""
     engine = _engine(tmp_path)
-    child = "issue-524-child"
-    try:
-        first = _transcript()
-        engine.ingest(first)
-        out1 = deepcopy(_compress(engine, first))
-        engine.on_session_end(SID, first)
-        engine.on_session_start(child, boundary_reason="compression", old_session_id=SID,
-                                platform="cli", conversation_id=CID, context_length=200_000)
-        host = deepcopy(out1) + _more(0, 120)
+    other = None
+    if interleave:
+        other = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "l.db")), hermes_home=str(tmp_path / "h"))
+        other.on_session_start("other", platform="cli", conversation_id="other-conv", context_length=200_000)
+    first = _transcript()
+    if head == "pure-summary":
+        first.append({"role": "assistant" if len(first) % 2 else "user", "content": "one more owned turn"})
+    engine.ingest(first)
+    out1 = deepcopy(_compress(engine, first))
+    assert (engine._generated_context_carrier_remainder(out1[0]) is not None) == (head == "carrier")
+    engine.on_session_end(SID, first)
+    engine.on_session_start(CHILD, boundary_reason="compression", old_session_id=SID,
+                            platform="cli", conversation_id=CID, context_length=200_000)
+    host = deepcopy(out1)
+    first_new = 1 if out1[-1]["role"] == "user" else 0
+    for chunk in range(first_new, first_new + 120, 20 if interleave else 120):
+        host += _more(chunk, 20 if interleave else 120)
         engine.ingest(host)
-        rows = engine._store.get_session_count(child)
-        _compress(engine, host)
+        if other is not None:
+            other.ingest([{"role": "user", "content": f"other {j}"} for j in range(chunk + 3)])
+    if exclude is not None:  # a parent row in (C, F] that attempt 2's publication filters out
+        marker = host[exclude]["content"]
+        engine._compiled_ignore_message_patterns = [type("P", (), {"search": lambda self, t, timeout=None: marker in str(t) or None})()]
+    out2 = _rows(_compress(engine, host))
+    assert engine._last_compression_status == "compacted"
+    return engine, host, out2, other
+
+
+@pytest.mark.parametrize("cold", [False, True], ids=["same-engine", "cold-engine"])
+def test_rotation_child_gen2_retry(tmp_path, provider, cold):
+    engine, host, out2, _other = _child_gen2(tmp_path)
+    try:
+        rows, parent = engine._store.get_session_count(CHILD), engine._store.get_session_count(SID)
+        if cold:
+            engine.shutdown()
+            engine = _engine(tmp_path, session_id=CHILD)
         got = _retry_and_measure(engine, provider, deepcopy(host))
-        assert _identities_lost(engine, host) == []  # today: duplicates and one error, never loss
+        assert _identities_lost(engine, host, lineage=(SID,)) == []
         assert (got["rows"], got["status"], got["calls"]) == (rows, "compacted", 0)
+        assert (got["reason"], got["out"], engine._store.get_session_count(SID)) == (REASON, out2, parent)
     finally:
         engine.shutdown()
+
+
+def test_rotation_child_pure_summary_head(tmp_path, provider):
+    engine, host, out2, _other = _child_gen2(tmp_path, head="pure-summary")
+    try:
+        rows = engine._store.get_session_count(CHILD)
+        got = _retry_and_measure(engine, provider, deepcopy(host))
+        assert _identities_lost(engine, host, lineage=(SID,)) == []
+        assert (got["rows"], got["status"], got["calls"], got["reason"], got["out"]) == (rows, "compacted", 0, REASON, out2)
+    finally:
+        engine.shutdown()
+
+
+def test_rotation_child_interleaved_with_another_conversation(tmp_path, provider):
+    """Store ids of the lineage are not contiguous: only the exact leaf ids are the run."""
+    engine, host, out2, other = _child_gen2(tmp_path, interleave=True)
+    try:
+        rows = engine._store.get_session_count(CHILD)
+        got = _retry_and_measure(engine, provider, deepcopy(host))
+        assert _identities_lost(engine, host, lineage=(SID,)) == []
+        assert (got["rows"], got["status"], got["calls"], got["reason"], got["out"]) == (rows, "compacted", 0, REASON, out2)
+    finally:
+        other.shutdown()
+        engine.shutdown()
+
+
+def test_rotation_child_ambiguous_occurrences_keep_the_new_turns(tmp_path, provider):
+    """#530 review P1: every turn repeats one (X, Y) pair. Read as the host omitting the parent's
+    retained rows (their summary glued to the child's first X), replaying the child's rows and
+    appending as many NEW identical turns, the list is byte for byte the lineage replay. The
+    child's own alignment fits too: the smaller cursor wins, so every new occurrence is stored."""
+    engine = _engine(tmp_path)
+    x = {"role": "user", "content": "repeat question " + " ".join(f"x{j}" for j in range(150))}
+    y = {"role": "assistant", "content": "repeat answer " + " ".join(f"y{j}" for j in range(150))}
+    try:
+        first = _transcript() + [dict(m) for _ in range(20) for m in (x, y)]
+        engine.ingest(first)
+        out1 = deepcopy(_compress(engine, first))
+        assert engine._generated_context_carrier_remainder(out1[0]) == x["content"]
+        engine.on_session_end(SID, first)
+        engine.on_session_start(CHILD, boundary_reason="compression", old_session_id=SID,
+                                platform="cli", conversation_id=CID, context_length=200_000)
+        host = deepcopy(out1) + [dict(m) for _ in range(60) for m in (x, y)]
+        engine.ingest(host)
+        rows = engine._store.get_session_count(CHILD)
+        _compress(engine, host)
+        assert engine._last_compression_status == "compacted"
+        _retry_and_measure(engine, provider, deepcopy(host))
+        assert engine._store.get_session_count(CHILD) >= rows + len(out1)  # the new turns (dups allowed)
+        assert _identities_lost(engine, host) == []  # the child alone holds every occurrence
+    finally:
+        engine.shutdown()
+
+
+CHILD_CONTROLS = {  # (fixture kwargs, retry list): each stays on today's persisted-batch path
+    "forged_carrier": ({}, lambda host: _forge_carrier(host, None)),
+    "excluded_parent_lineage_row": ({"exclude": 5}, lambda host: host),
+    "edited_parent_row": ({}, lambda host: _edit_row(host, None)),
+}
+
+
+def _child_control_run(tmp_path, monkeypatch, case, *, lineage):
+    if not lineage:
+        monkeypatch.setattr(LCMEngine, "_head_lineage_rows", lambda self, head, frontier, limit: None, raising=False)
+    provider = _Provider()
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", provider)
+    kwargs, build = CHILD_CONTROLS[case]
+    engine, host, _out2, _other = _child_gen2(tmp_path, **kwargs)
+    try:
+        retry = build(deepcopy(host))
+        got = _retry_and_measure(engine, provider, retry)
+        got["lost"] = _identities_lost(engine, retry, lineage=(SID,))
+        got["parent"] = engine._store.get_session_count(SID)
+        return got
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("case", sorted(CHILD_CONTROLS))
+def test_rotation_child_failed_checks_store_what_today_stores(tmp_path, monkeypatch, case):
+    fixed = _child_control_run(tmp_path / "fixed", monkeypatch, case, lineage=True)
+    monkeypatch.undo()
+    today = _child_control_run(tmp_path / "today", monkeypatch, case, lineage=False)
+    assert fixed["reason"] != REASON and fixed["lost"] == [] == today["lost"]
+    assert (fixed["rows"], fixed["status"], fixed["calls"], fixed["parent"]) == (
+        today["rows"], today["status"], today["calls"], today["parent"])
 
 
 def test_an_ambiguous_fit_is_not_a_replay(tmp_path, provider):

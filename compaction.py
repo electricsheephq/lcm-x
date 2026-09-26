@@ -1083,7 +1083,8 @@ class CompactionMixin:
         """(#457) Positions of the replayed run at ``start`` that committed lineage accounts
         for, the store-id map of ``working[start:]`` when computed, the token cost of the
         covering leaves, and how many run rows stay. The run must be exactly this session's
-        durable rows ending at the lifecycle frontier F and followed by F+1 (or nothing).
+        durable rows ending at the lifecycle frontier F and followed by F+1 (or nothing); a
+        rotation child's run behind a verified summary head is its lineage (C, F] (#526).
         A row is consumed only when a leaf's ``source_ids`` hold it, or when it is an
         assistant/tool reply the publication folded in after the first lineage row (a run
         trailing the lineage must hold only such replies). Every other row stays in place:
@@ -1108,6 +1109,8 @@ class CompactionMixin:
             len(working),
         )
         rows = self._store.get_session_rows_through(self._session_id, frontier, end - start)
+        if (carrier or start > scaffold) and len(rows) != end - start:  # #526: a rotation child's run is its lineage
+            rows = self._head_lineage_rows(working[start if carrier else start - 1], frontier, end - start) or rows
         after = self._store.get_session_messages_after(self._session_id, frontier, limit=1)
         if (
             not rows
