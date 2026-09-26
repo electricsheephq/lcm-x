@@ -7427,27 +7427,40 @@ class LCMEngine(
             sanitized = self._sanitize_active_context_messages(fallback)
             if any(msg.get("role") != "tool" for msg in sanitized):
                 return sanitized
-            # #91: never return an empty transcript. Keep the newest non-tool
-            # row that fits the cap, else the smallest one (least over cap).
+            # #91: never return an empty transcript. Priority: newest user (or
+            # preserved-objective) row that fits the cap, then newest other
+            # non-tool row that fits (a tool call keeps its real results when
+            # the pair fits), then the smallest over-cap user row, then the
+            # smallest over-cap other row.
             cap = (
                 assembly_cap_override
                 if assembly_cap_override is not None
                 else self._effective_assembly_token_cap()
             )
-            smallest: Optional[tuple[int, List[Dict[str, Any]]]] = None
-            for msg in reversed(tail_messages):
-                if msg.get("role") == "tool":
-                    continue
-                option = self._sanitize_active_context_messages(fallback[:-1] + [msg])
-                if not option:
-                    continue
-                tokens = count_messages_tokens(option)
-                if cap is None or tokens <= cap:
-                    return option
-                if smallest is None or tokens < smallest[0]:
-                    smallest = (tokens, option)
-            if smallest is not None:
-                return smallest[1]
+            over_cap: list[list[List[Dict[str, Any]]]] = [[], []]
+            for want_user in (True, False):
+                for idx in range(len(tail_messages) - 1, -1, -1):
+                    msg = tail_messages[idx]
+                    is_user = msg.get("role") == "user" or bool(
+                        self._preserved_objective_context_content(msg)
+                    )
+                    if msg.get("role") == "tool" or is_user != want_user:
+                        continue
+                    end = idx + 1
+                    if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                        while end < len(tail_messages) and tail_messages[end].get("role") == "tool":
+                            end += 1
+                    suffixes = ([tail_messages[idx:end]] if end > idx + 1 else []) + [[msg]]
+                    for suffix in suffixes:
+                        option = self._sanitize_active_context_messages(fallback[:-1] + suffix)
+                        if not option:
+                            continue
+                        if cap is None or count_messages_tokens(option) <= cap:
+                            return option
+                        over_cap[0 if want_user else 1].append(option)
+            for options in over_cap:
+                if options:
+                    return min(options, key=count_messages_tokens)
             # Nothing non-tool survives: never hand the provider bare orphan
             # tool rows (invalid sequencing) and never return [] (#91). Emit
             # one bounded, non-tool recovery row after whatever prefix survives.
@@ -7457,7 +7470,7 @@ class LCMEngine(
                 len(tail_messages),
             )
             return self._sanitize_active_context_messages(fallback[:-1]) + [
-                {"role": "user", "content": _OVERFLOW_RECOVERY_PLACEHOLDER}
+                {"role": "system", "content": _OVERFLOW_RECOVERY_PLACEHOLDER}
             ]
         return candidate
 
