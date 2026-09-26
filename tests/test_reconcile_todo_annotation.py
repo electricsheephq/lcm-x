@@ -297,7 +297,7 @@ class TestTodoAnnotationSpanKeepsMergedRow:
         engine = _make_engine(tmp_path)
         try:
             stored = _identity(engine, "Do the thing" + _TODO_ANNOTATION_V1, stored_row=True)
-            merged = _identity(engine, "Do the thing" + _TODO_ANNOTATION_V2 + "\n\n" + _NEW)
+            merged = _identity(engine, "Do the thing" + _TODO_ANNOTATION_V2.rstrip("\n") + "\n\n" + _NEW)
             assert merged != stored, "the merged NEW row must survive the annotation cut"
             assert merged[1] == "Do the thing\n\n" + _NEW
             assert _identity(engine, "Do the thing" + _TODO_ANNOTATION_V2) == stored
@@ -332,6 +332,39 @@ class TestTodoAnnotationSpanKeepsMergedRow:
             identity = _identity(engine, content)
             assert identity[1] == "Do the thing\n\nfree text"
             assert _PRESERVED_TODO_CONTEXT_PREFIX not in identity[1]
+        finally:
+            engine.shutdown()
+
+
+class TestTodoAnnotationSpanFixRound1:
+    """#516 fix round 1: exactly one host delimiter is removed after the span, and a model-switch
+    note at the head of the merged row is stripped by the same rule as at the head of any row."""
+
+    _HOST_ANNOTATION = _TODO_ANNOTATION_V2.rstrip("\n")  # the host renders no trailing newline
+
+    def test_merged_rows_differing_in_leading_newlines_keep_distinct_identities(self, tmp_path):
+        engine = _make_engine(tmp_path)
+        try:
+            head = "Do the thing" + self._HOST_ANNOTATION + "\n\n"
+            assert _identity(engine, head + _NEW) != _identity(engine, head + "\n" + _NEW)
+            assert _identity(engine, head + _NEW)[1] == "Do the thing\n\n" + _NEW
+        finally:
+            engine.shutdown()
+
+    def test_merged_row_keeps_its_own_leading_newline(self, tmp_path):
+        engine = _make_engine(tmp_path)
+        try:
+            identity = _identity(engine, "Do the thing" + self._HOST_ANNOTATION + "\n\n\n" + _NEW)
+            assert identity[1] == "Do the thing\n\n\n" + _NEW
+        finally:
+            engine.shutdown()
+
+    def test_model_switch_note_heading_the_merged_row_is_stripped(self, tmp_path):
+        engine = _make_engine(tmp_path)
+        try:
+            head = "Do the thing" + self._HOST_ANNOTATION + "\n\n"
+            note = "[Note: model was just switched from qwen3.8 to kimi-k3 via router.]\n\n"
+            assert _identity(engine, head + note + _NEW) == _identity(engine, head + _NEW)
         finally:
             engine.shutdown()
 

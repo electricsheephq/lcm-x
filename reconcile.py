@@ -678,8 +678,9 @@ class ReconcileMixin:
             return None
         todo = content.find(_PRESERVED_TODO_CONTEXT_PREFIX)
         if todo > 0:  # cut the annotation span only: a row merged behind it is a suffix (#516)
-            rest = content[_todo_annotation_span(content, todo):].lstrip("\n")
-            content = content[:todo].rstrip() + ("\n\n" + rest if rest else "")
+            tail = content[_todo_annotation_span(content, todo):]
+            rest = tail[2:] if tail.startswith("\n\n") else tail  # one host delimiter, never user newlines
+            content = content[:todo].rstrip() + ("\n\n" + rest if rest.strip() else "")
         pos = content.find("\n\n---\n\n")
         while pos != -1:
             end = self._verified_lcm_summary_prefix_end(content[pos + 7:])
@@ -837,8 +838,11 @@ class ReconcileMixin:
         # new content and keeps the identity distinct (#516).
         _todo_idx = content.find(_PRESERVED_TODO_CONTEXT_PREFIX)
         if _todo_idx > 0:
-            _rest = content[_todo_annotation_span(content, _todo_idx):].lstrip("\n")
-            content = content[:_todo_idx].rstrip() + ("\n\n" + _rest if _rest else "")
+            _tail = content[_todo_annotation_span(content, _todo_idx):]
+            _rest = _tail[2:] if _tail.startswith("\n\n") else _tail  # one host delimiter, never user newlines
+            if _rest.startswith(_MODEL_SWITCH_NOTIFICATION_PREFIX) and "]" in _rest:  # same rule as below
+                _rest = _rest[_rest.find("]") + 1:].lstrip("\n")
+            content = content[:_todo_idx].rstrip() + ("\n\n" + _rest if _rest.strip() else "")
         # Model-switch notifications are ephemeral host scaffolding: the
         # host prepends "[Note: model was just switched from X to Y...]"
         # to the user's message, then strips the prefix on the next turn.
