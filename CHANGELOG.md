@@ -6,8 +6,20 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+## v0.24.2 - 2026-09-26 (post-v0.24.1 fix train: committed-frontier resume, replay binding of superseded outputs, forced-overflow recovery, todo-span identity, merge-append alignment, Anthropic tool schemas)
+
+- Fix: a retried compaction after a host cancel resumes from the committed frontier instead of re-summarizing the covered prefix; non-consumable rows are preserved in place. (#457)
+- Fix: a gen-2 retry after an adopted compaction binds the replay of the superseded output as a replay; only proven emissions (DAG-verified summaries, an objective re-render of a stored own-session row, the exact LCM note) are skipped, never a tool-carrying head. (#524; rotation child #526)
+- Fix: forced-overflow recovery never returns an empty or system-only transcript; an over-cap newest user turn is announced instead of dropped. (#91, #529)
+- Fix: the replay identity cuts only the Hermes todo-annotation span, so a row merged behind the annotation is stored. (#516)
+- Fix: prior-proof consumption declines malformed projections strictly and records a fresh proof on failure. (#514)
+- Fix: a host merge-append behind the retained last user row aligns in both walks; the post-adoption re-store wedge is closed. (#535)
+- Fix: a rotation restart before the last carried prompt is answered no longer re-stores the restored list into the empty child; the durable walk accepts the host's replacement of that row and stale carry ranges are voided on the cursor-0 fallback. (#519)
+- Fix: `lcm_compile_evidence` no longer declares a top-level `allOf`, which Anthropic's API rejects; Anthropic-backed
+  providers work with lcm-x loaded again (every request failed with HTTP 400 since v0.21.0-rc2). (#550)
+- Tests: the `LCM_TEST_HERMES_AGENT_ROOT` opt-in is isolated from later test modules. (#513)
 - Docs: the README and operator guide say how a `--ref`-pinned install moves to a new commit
-  (`hermes plugins install … --force --ref <sha>`); `hermes plugins update` re-pins catalog installs only.
+  (`hermes plugins install … --force --ref <sha>`); `hermes plugins update` re-pins catalog installs only. (#523)
 
 ## v0.24.1 - 2026-09-25 (#488: replay skips bound to proven emitted occurrences; #517 rollback-readable proof)
 
