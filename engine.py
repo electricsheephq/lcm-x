@@ -384,6 +384,11 @@ _OVERFLOW_RECOVERY_PLACEHOLDER = (
     "which cannot be sent to the provider on their own, so they were dropped. "
     "Continue from the user's next message."
 )
+_OVERFLOW_RECOVERY_OVERCAP_NOTE = (
+    "[LCM overflow recovery] Your latest message ({tokens} tokens) is stored but exceeds "
+    "the recovery budget of {cap} tokens; it was not included. "
+    "Re-send a shorter version or ask LCM to recall it."
+)
 
 
 class LCMEngine(
@@ -7425,7 +7430,9 @@ class LCMEngine(
             ):
                 return candidate
             sanitized = self._sanitize_active_context_messages(fallback)
-            if any(msg.get("role") != "tool" for msg in sanitized):
+            # #529: a system anchor is hoisted out of messages by the host, so
+            # [system] alone would reach the provider as messages=[].
+            if any(msg.get("role") not in ("tool", "system") for msg in sanitized):
                 return sanitized
             # #91: never return an empty transcript. Priority: newest user (or
             # preserved-objective) row that fits the cap, then newest other
@@ -7438,6 +7445,7 @@ class LCMEngine(
                 else self._effective_assembly_token_cap()
             )
             over_cap: list[list[List[Dict[str, Any]]]] = [[], []]
+            skipped_user_tokens: Optional[int] = None
             for want_user in (True, False):
                 for idx in range(len(tail_messages) - 1, -1, -1):
                     msg = tail_messages[idx]
@@ -7456,7 +7464,27 @@ class LCMEngine(
                         if not option:
                             continue
                         if cap is None or count_messages_tokens(option) <= cap:
-                            return option
+                            if skipped_user_tokens is None or not want_user:
+                                return option
+                            # #529: a newer user turn was skipped for size; say so
+                            # rather than answer stale intent. The note beats the
+                            # older row when both do not fit.
+                            note = {
+                                "role": "user",
+                                "content": _OVERFLOW_RECOVERY_OVERCAP_NOTE.format(
+                                    tokens=skipped_user_tokens, cap=cap
+                                ),
+                            }
+                            if count_messages_tokens(option + [note]) <= cap:
+                                return option + [note]
+                            # Drop the retained row, then the system anchor, before the cap.
+                            for head in (fallback[:-1], [system_msg] if system_msg is not None else []):
+                                rows = self._sanitize_active_context_messages(head) + [note]
+                                if count_messages_tokens(rows) <= cap:
+                                    return rows
+                            return [note]
+                        if want_user and msg.get("role") == "user" and skipped_user_tokens is None:
+                            skipped_user_tokens = count_messages_tokens([msg])
                         over_cap[0 if want_user else 1].append(option)
             for options in over_cap:
                 if options:
