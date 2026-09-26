@@ -2157,12 +2157,15 @@ class ReconcileMixin:
                 coalesced.append((source, start, end))
         return coalesced
 
-    def _cursor_from_durable_commit_proof(self, messages) -> Optional[int]:
+    def _cursor_from_durable_commit_proof(self, messages, allow_replaced_tail: Optional[list] = None) -> Optional[int]:
         """Cursor proven by the last compaction's durable output proof, else None.
 
         The host prefix must carry exactly the compress() output's non-scaffold
         identities in order (a merged carrier keeps its glued row's identity),
         and every row stored after that compaction must follow in order.
+        ``allow_replaced_tail`` (the empty rotation child's list, #519) admits a
+        last output position the host replaced (see ``_replaced_carry_tail``);
+        the accepted carry range is appended to it.
         """
         try:
             payload = self._durable_commit_proof_payload()
@@ -2222,6 +2225,11 @@ class ReconcileMixin:
                     index -= 1  # #535: a new user row merged behind the last output row: stored whole
                     matched += 1
                     break
+                if digest != target[matched] and matched == len(target) - 1 and (
+                    allow_replaced_tail is not None and not native and identity[0] == "user" and tuple(identity[2:]) == ("", "", "")
+                ):
+                    index -= 1  # #519: the host may have replaced the last carried user row (checked below)
+                    break
                 if digest != target[matched]:
                     if not native:
                         return None
@@ -2246,6 +2254,15 @@ class ReconcileMixin:
                     matched = len(target)
                     break
                 matched += 1
+            if matched == len(target) - 1 and allow_replaced_tail is not None and not native and (
+                index < n or occurrences[-1] is not None  # a list ending on the last matched row
+            ):
+                replaced = self._replaced_carry_tail(
+                    payload, lambda row: _commit_proof_identity_digest(proof_identity(row, stored_row=True))
+                )
+                if replaced is not None:  # #519: that position and every later row are stored as new
+                    allow_replaced_tail.append(replaced)
+                    matched += 1
             safe_trailing_skip = (
                 native
                 and skip_metadata_valid
@@ -2277,6 +2294,34 @@ class ReconcileMixin:
         except Exception:
             logger.debug("LCM durable compaction-commit proof load failed", exc_info=True)
             return None
+
+    def _replaced_carry_tail(self, payload, digest_of) -> Optional[tuple]:
+        """#519 R1: the last carry range when its end row is the parent row the host replaced at the
+        last output position (Hermes' persist step rewrote the merged dangling prompt to the new one):
+        a user row whose proof digest is the proof's last target, and the child owns no row after
+        the proof. Else None."""
+        ranges = self._coalesce_compression_carry_ranges(payload.get("carry_ranges") or [])
+        last_store_id = int(payload.get("last_store_id") or 0)
+        if not ranges or self._store.get_session_messages_after(self._session_id, after_store_id=last_store_id, limit=1):
+            return None
+        source, start, end = max(ranges, key=lambda item: item[2])
+        row = next(iter(self._store.get_range(source, end, end)), None)
+        target = list(payload.get("effective_sha256") or [])
+        return (source, start, end) if row and row.get("role") == "user" and target and digest_of(row) == target[-1] else None
+
+    def _rewrite_own_carry_ranges(self, carry_ranges, reason: str, store_ids) -> None:
+        """#519: rewrite this session's OWN raw proof record with ``carry_ranges``; the wire and
+        descriptor versions, emissions and both digest twins stay as written. A failed write keeps
+        the record as it was (today's carry)."""
+        key = self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)
+        try:
+            payload = self._store.read_metadata_json(key)
+            if isinstance(payload, dict):
+                payload["carry_ranges"] = [list(item) for item in self._coalesce_compression_carry_ranges(carry_ranges)]
+                self._store.write_metadata_json([key], json.dumps(payload, sort_keys=True))
+                logger.info("LCM rewrote the rotation child's carry ranges (%s): store ids %s", reason, store_ids)
+        except Exception:
+            logger.debug("LCM carry-range rewrite failed", exc_info=True)
 
     def _cursor_from_host_rewrite_head(self, messages, session_count: int) -> Optional[int]:
         """Head-anchored replay (#498): stored row i vs incoming i from the session start,
@@ -2439,8 +2484,14 @@ class ReconcileMixin:
         if session_count <= 0:
             # An empty rotation child resumed before its first ingest: its own
             # durable proof re-indexes the host's post-compaction list (#483, C7).
-            proof_cursor = self._cursor_from_durable_commit_proof(messages)
+            replaced: list = []
+            proof_cursor = self._cursor_from_durable_commit_proof(messages, allow_replaced_tail=replaced)
             if proof_cursor is not None:
+                for source, start, end in replaced:  # #519 R1: the vanished parent row leaves the carry
+                    self._rewrite_own_carry_ranges(
+                        [(s, a, b - 1 if (s, a, b) == (source, start, end) else b) for s, a, b in self._load_compression_carry_ranges()],
+                        "host replaced the last carried user row", [end],
+                    )
                 self._record_ingest_reconciliation(
                     action="advanced cursor",
                     reason="replayed proven post-compaction continuation in empty session",
@@ -2498,6 +2549,9 @@ class ReconcileMixin:
                         effective_incoming=cursor,
                     )
                     return cursor
+            stale = self._load_compression_carry_ranges()
+            if stale:  # #519 R2: the re-stored copies are the child's only rows; publication owns them alone
+                self._rewrite_own_carry_ranges([], "empty child re-stores its list", [(a + 1, b) for _s, a, b in stale])
             return 0
 
         tail_limit = min(max(len(messages) * 4, 64), session_count)

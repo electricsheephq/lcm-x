@@ -822,10 +822,11 @@ class CompactionMixin:
             }
         logger.warning(
             "LCM summary publication could not finish; preserving replay-safe "
-            "context (reason=%s, code=%s, name=%s)",
+            "context (reason=%s, code=%s, name=%s, detail=%s)",
             failure_reason,
             getattr(exc, "sqlite_errorcode", None),
             getattr(exc, "sqlite_errorname", None),
+            str(exc)[:500],  # #519: the raise site's ids (never message content)
         )
         return fallback
 
