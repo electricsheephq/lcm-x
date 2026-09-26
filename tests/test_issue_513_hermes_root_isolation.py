@@ -21,7 +21,7 @@ REPO = Path(__file__).resolve().parents[1]
 _ROOT_ENV = os.environ.get("LCM_TEST_HERMES_AGENT_ROOT")
 ROOT = Path(_ROOT_ENV) if _ROOT_ENV else None
 OPT_IN_MODULE = "tests.test_issue_488_emission_proof"
-# Its head check is about which checkout was named, not isolation, and runs in the suite itself.
+# Its hash check is about which helper bytes the root carries, not isolation; it runs in the suite itself.
 PIN_TEST = "tests/test_issue_488_emission_proof.py::test_real_hermes_merge_fixture_is_pinned"
 
 pytestmark = pytest.mark.skipif(

@@ -7,6 +7,7 @@ behavior that the fix must retain.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import os
@@ -26,12 +27,16 @@ from tests.test_compression_boundary import (
 )
 
 
-# The real Hermes checkout is OPT-IN: set LCM_TEST_HERMES_AGENT_ROOT to a hermes-agent checkout at
-# HERMES_AGENT_HEAD to exercise the host helper itself; unset, the suite uses the pinned copy below and
-# never inspects ambient machine state (a developer checkout at any other head cannot fail this suite).
+# The real Hermes checkout is OPT-IN: set LCM_TEST_HERMES_AGENT_ROOT to a hermes-agent checkout whose
+# agent/agent_runtime_helpers.py matches HERMES_AGENT_HELPER_SHA256 to exercise the host helper itself;
+# unset, the suite uses the pinned copy below and never inspects ambient machine state.
 _HERMES_AGENT_ROOT_ENV = os.environ.get("LCM_TEST_HERMES_AGENT_ROOT")
 HERMES_AGENT_ROOT = Path(_HERMES_AGENT_ROOT_ENV) if _HERMES_AGENT_ROOT_ENV else None
+# The pinned copy below was taken from this commit.
 HERMES_AGENT_HEAD = "37aad38c62771d223cdce7e3d5e3157334f1ce82"
+# sha256 of agent/agent_runtime_helpers.py at HERMES_AGENT_HEAD: the pin guards the helper bytes, so a
+# checkout at any later head passes until the host actually changes the helper.
+HERMES_AGENT_HELPER_SHA256 = "b6454ff58e70702a45cd50e67f1ccc542d134c8cf4fa74d65dec9463c3c029f6"
 
 # The named checkout's helper runs in ONE child interpreter per module, with the checkout on the
 # child's sys.path only (#513): importing agent.agent_runtime_helpers here pulls the real host
@@ -290,20 +295,42 @@ def _run_layout(tmp_path, monkeypatch, *, mode, tail, system, merge, order):
         engine.shutdown()
 
 
+def _hermes_agent_root_head():
+    """Best effort: the named root's git HEAD, for the receipt and the mismatch message."""
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(HERMES_AGENT_ROOT), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown (not a git checkout)"
+    return head or "unknown"
+
+
 def test_real_hermes_merge_fixture_is_pinned():
     if HERMES_AGENT_ROOT is None:
         pytest.skip("LCM_TEST_HERMES_AGENT_ROOT unset: the real Hermes checkout is opt-in (pinned copy in use)")
-    if not (HERMES_AGENT_ROOT / ".git").exists():
-        pytest.skip(f"no git checkout at LCM_TEST_HERMES_AGENT_ROOT={HERMES_AGENT_ROOT}")
-    head = subprocess.check_output(
-        ["git", "-C", str(HERMES_AGENT_ROOT), "rev-parse", "HEAD"],
-        text=True,
-    ).strip()
-    assert head == HERMES_AGENT_HEAD
+    helper = HERMES_AGENT_ROOT / "agent" / "agent_runtime_helpers.py"
+    if not helper.is_file():
+        pytest.skip(f"no agent/agent_runtime_helpers.py at LCM_TEST_HERMES_AGENT_ROOT={HERMES_AGENT_ROOT}")
+    root_head = _hermes_agent_root_head()
+    digest = hashlib.sha256(helper.read_bytes()).hexdigest()
+    assert digest == HERMES_AGENT_HELPER_SHA256, (
+        f"host helper changed: {helper} at root head {root_head} has sha256 {digest}, but the pinned copy "
+        f"was taken from {HERMES_AGENT_HEAD} with sha256 {HERMES_AGENT_HELPER_SHA256}; "
+        "refresh the pinned copy, the head and the hash together"
+    )
+    # Receipt (pytest -rP): which host was exercised; a later head passes while the helper bytes match.
+    print(
+        f"host helper exercised: root={HERMES_AGENT_ROOT} head={root_head} sha256={digest} "
+        f"(pinned copy from {HERMES_AGENT_HEAD}; head {'matches' if root_head == HERMES_AGENT_HEAD else 'differs'})"
+    )
     assert _real_hermes_merge(
         [{"role": "user", "content": "a"}, {"role": "user", "content": "b"}]
     ) == [{"role": "user", "content": "a\n\nb"}]
-    assert _host_helper().helper_file == (HERMES_AGENT_ROOT / "agent" / "agent_runtime_helpers.py").resolve()
+    assert _host_helper().helper_file == helper.resolve()
 
 
 LAYOUTS = [
