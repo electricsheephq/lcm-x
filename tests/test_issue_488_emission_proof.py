@@ -7,6 +7,7 @@ behavior that the fix must retain.
 
 from __future__ import annotations
 
+import json
 import re
 import os
 import subprocess
@@ -31,14 +32,94 @@ from tests.test_compression_boundary import (
 _HERMES_AGENT_ROOT_ENV = os.environ.get("LCM_TEST_HERMES_AGENT_ROOT")
 HERMES_AGENT_ROOT = Path(_HERMES_AGENT_ROOT_ENV) if _HERMES_AGENT_ROOT_ENV else None
 HERMES_AGENT_HEAD = "37aad38c62771d223cdce7e3d5e3157334f1ce82"
-if HERMES_AGENT_ROOT is not None and str(HERMES_AGENT_ROOT) not in sys.path:
-    sys.path.insert(0, str(HERMES_AGENT_ROOT))
 
-try:  # the real host helper only when a checkout was named explicitly (opt-in local runs)
-    if HERMES_AGENT_ROOT is None:
-        raise ImportError("LCM_TEST_HERMES_AGENT_ROOT unset: use the pinned host rule")
-    from agent.agent_runtime_helpers import _merge_consecutive_users as _hermes_merge_users
-except ImportError:  # CI stubs only agent.context_engine: pin the host rule these tests rely on
+# The named checkout's helper runs in ONE child interpreter per module, with the checkout on the
+# child's sys.path only (#513): importing agent.agent_runtime_helpers here pulls the real host
+# `agent` package into this process and breaks later modules that stub the host.
+_HOST_HELPER_CHILD = r"""
+import json, sys, traceback
+channel, sys.stdout = sys.stdout, sys.stderr  # host import noise must not reach the JSON channel
+def send(payload):
+    channel.write(json.dumps(payload) + "\n")
+    channel.flush()
+try:
+    sys.path.insert(0, sys.argv[1])
+    from agent import agent_runtime_helpers as helpers
+except Exception:
+    send({"error": traceback.format_exc()})
+    raise SystemExit(1)
+send({"helper": helpers.__file__})
+for line in sys.stdin:
+    try:
+        merged, repairs = helpers._merge_consecutive_users(json.loads(line))
+        send({"merged": merged, "repairs": repairs})
+    except Exception:
+        send({"error": traceback.format_exc()})
+"""
+
+
+class _HostHelperChild:
+    """The named checkout's ``_merge_consecutive_users``, called over line-delimited JSON."""
+
+    def __init__(self, root):
+        self._proc = subprocess.Popen(
+            [sys.executable, "-c", _HOST_HELPER_CHILD, str(root)],
+            cwd=str(root),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        try:
+            self.helper_file = Path(self._receive()["helper"]).resolve()
+        except BaseException:
+            self.close()
+            raise
+
+    def _receive(self):
+        line = self._proc.stdout.readline()
+        if not line:
+            raise RuntimeError(f"host helper child exited (rc={self._proc.poll()}) for {HERMES_AGENT_ROOT}")
+        payload = json.loads(line)
+        if "error" in payload:
+            raise RuntimeError("host helper child failed:\n" + payload["error"])
+        return payload
+
+    def merge(self, messages):
+        self._proc.stdin.write(json.dumps(messages) + "\n")
+        self._proc.stdin.flush()
+        payload = self._receive()
+        return payload["merged"], payload["repairs"]
+
+    def close(self):
+        self._proc.stdin.close()
+        self._proc.stdout.close()
+        self._proc.wait(timeout=30)
+
+
+_HOST_HELPER = None
+
+
+def _host_helper():
+    global _HOST_HELPER
+    if _HOST_HELPER is None:
+        _HOST_HELPER = _HostHelperChild(HERMES_AGENT_ROOT)
+    return _HOST_HELPER
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _close_host_helper_child():
+    yield
+    global _HOST_HELPER
+    if _HOST_HELPER is not None:
+        _HOST_HELPER.close()
+        _HOST_HELPER = None
+
+
+if HERMES_AGENT_ROOT is not None:  # the real host helper only when a checkout was named (opt-in local runs)
+    def _hermes_merge_users(messages):
+        return _host_helper().merge(messages)
+else:  # CI stubs only agent.context_engine: pin the host rule these tests rely on
     def _hermes_merge_users(messages):
         """Pinned copy of hermes-agent 37aad38c agent/agent_runtime_helpers.py:553
         ``_merge_consecutive_users`` for plain-text rows (the only shape these tests feed it):
@@ -222,6 +303,7 @@ def test_real_hermes_merge_fixture_is_pinned():
     assert _real_hermes_merge(
         [{"role": "user", "content": "a"}, {"role": "user", "content": "b"}]
     ) == [{"role": "user", "content": "a\n\nb"}]
+    assert _host_helper().helper_file == (HERMES_AGENT_ROOT / "agent" / "agent_runtime_helpers.py").resolve()
 
 
 LAYOUTS = [
