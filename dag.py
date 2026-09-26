@@ -759,6 +759,21 @@ class SummaryDAG:
             ).fetchall()
         return [(int(row[0]), int(row[1] or 0), int(row[2])) for row in rows]
 
+    def leaf_source_ids_after(self, session_id: str, after_store_id: int) -> List[int]:
+        """Distinct store_ids after ``after_store_id`` held by this session's leaf (``messages``)
+        nodes, in store order. A rotation carries its parent's nodes, so these include the
+        parent rows the child's lineage covers (#526)."""
+        with self._db_lock:
+            rows = self._conn.execute(
+                """SELECT DISTINCT CAST(source.value AS INTEGER) AS store_id
+                   FROM summary_nodes AS n, json_each(n.source_ids) AS source
+                   WHERE n.session_id = ? AND n.source_type = 'messages'
+                     AND CAST(source.value AS INTEGER) > ?
+                   ORDER BY store_id""",
+                (session_id, int(after_store_id)),
+            ).fetchall()
+        return [int(row[0]) for row in rows]
+
     def coverage_end(self, node_ids: List[int]) -> Optional[int]:
         """The greatest store_id under ``node_ids``, walked down to the ``messages`` leaves."""
         with self._db_lock:
