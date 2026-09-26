@@ -851,17 +851,28 @@ def _hermes_python():
     return None
 
 
-@pytest.mark.skipif(_hermes_python() is None, reason="no real Hermes runtime available")
-@pytest.mark.parametrize("shape", ["objective", "pure", "carrier"])
-def test_eva_shaped_gen2_retry(tmp_path, shape):
-    """Tool pairs with persisted-output markers, externalized payloads, adjacent assistant rows the
-    host repair merges, the host's todo fold, and an objective / pure-summary / carrier head."""
+# #535: in the pure shape the compacted output ends in a retained real user row, and the host's
+# _merge_consecutive_users glues the next user text behind it (behind the todo fold, when one is
+# present). The base passed [pure] only because #516 dropped that text from the replay identity.
+_ISSUE_535 = (
+    "#535: the host merges the new user text behind the retained last user row and the gen-2 retry "
+    "does not align it: the retry compaction errors and the retained rows are stored again "
+    "(duplicates, no loss)"
+)
+_EVA_TODO_WRITE = 'todo.write([{"id": "1", "content": "reconcile the vendor ledger", "status": "in_progress"}])'
+assert _EVA_TODO_WRITE in _EVA_PROBE  # the no-todo variant below must really drop the fold
+
+
+def _run_eva_probe(tmp_path, shape, probe=_EVA_PROBE):
     python, src = _hermes_python()
-    done = subprocess.run(
-        [python, "-c", _EVA_PROBE, str(Path(__file__).resolve().parent.parent), str(tmp_path), shape],
+    return subprocess.run(
+        [python, "-c", probe, str(Path(__file__).resolve().parent.parent), str(tmp_path), shape],
         cwd=src or str(tmp_path), capture_output=True, text=True, timeout=600, check=False,
         env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin", "TMPDIR": str(tmp_path), "PYTHONDONTWRITEBYTECODE": "1"},
     )
+
+
+def _assert_eva_gen2_retry(done, shape):
     assert done.returncode == 0, done.stderr[-4000:]
     got = json.loads(done.stdout.strip().splitlines()[-1])
     assert got["s1"] == got["s2"] == "compacted" and got["repairs_first"] > 0, got
@@ -870,3 +881,21 @@ def test_eva_shaped_gen2_retry(tmp_path, shape):
     assert got["out1_head"][0][1].startswith("[Current user objective" if shape == "objective" else "[Recent Summary"), got
     assert got["rows_after_retry"] == got["rows_before_retry"], got
     assert (got["retry"], got["retry_calls"], got["reason"], got["output_eq_attempt2"]) == ("compacted", 0, REASON, True), got
+
+
+@pytest.mark.skipif(_hermes_python() is None, reason="no real Hermes runtime available")
+@pytest.mark.parametrize(
+    "shape", ["objective", pytest.param("pure", marks=pytest.mark.xfail(strict=True, reason=_ISSUE_535)), "carrier"]
+)
+def test_eva_shaped_gen2_retry(tmp_path, shape):
+    """Tool pairs with persisted-output markers, externalized payloads, adjacent assistant rows the
+    host repair merges, the host's todo fold, and an objective / pure-summary / carrier head."""
+    _assert_eva_gen2_retry(_run_eva_probe(tmp_path, shape), shape)
+
+
+@pytest.mark.skipif(_hermes_python() is None, reason="no real Hermes runtime available")
+@pytest.mark.xfail(strict=True, reason=_ISSUE_535)
+def test_eva_shaped_gen2_retry_plain_merge_behind_retained_user_row(tmp_path):
+    """#535 pinned without the todo fold: an empty host todo store folds nothing, so the host merges
+    the next user text straight behind the retained last user row (same gap, same target)."""
+    _assert_eva_gen2_retry(_run_eva_probe(tmp_path, "pure", _EVA_PROBE.replace(_EVA_TODO_WRITE, "")), "pure")
