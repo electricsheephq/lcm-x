@@ -56,6 +56,14 @@ logger = logging.getLogger(__name__)
 
 _PRESERVED_OBJECTIVE_CONTEXT_PREFIX = "[Current user objective preserved from compacted history]"
 _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across context compression]"
+# The host's todo snapshot (hermes-agent tools/todo_tool.py TodoStore.format_for_injection) is the
+# header, one line per kept item ("- [>] 1. text (in_progress)", subtasks indented two spaces), and
+# optionally "\n\n" + the pruned-skill reload notice (agent/conversation_compression.py
+# _pruned_skill_reload_notice). The host's consecutive-user merge (agent/agent_runtime_helpers.py
+# _merge_consecutive_users) can glue the NEXT user row behind it after "\n\n": content (#516).
+_TODO_ITEM_LINE_RE = re.compile(r"(?:  )*- \[[ x>~?]\] ")
+_TODO_ITEM_END_RE = re.compile(r" \((?:pending|in_progress|completed|cancelled)\)$")
+_PRUNED_SKILL_RELOAD_NOTICE_HEADER = "[Skills pruned during compression — reload before acting on these tasks]"
 _MODEL_SWITCH_NOTIFICATION_PREFIX = "[Note: model was just switched from "
 # When the user sends a message mid-turn (/steer), the host appends it to a
 # tool result already sitting in the message list, wrapped in this block
@@ -380,6 +388,26 @@ def _has_lossy_redacted_identity(identity: tuple[str, str, str, str, str]) -> bo
     return _has_lossy_sensitive_redaction(identity[1]) or _has_lossy_sensitive_redaction(identity[3])
 
 
+def _todo_annotation_span(content: str, start: int) -> int:
+    """#516: the end of the todo annotation whose header starts at ``start``: the header line, its
+    item block (an item whose text holds a blank line runs on to its status), then a reload notice
+    block. Past that, after a blank line, is a row the host merged in: kept, never cut."""
+    lines = content[start:].split("\n")
+    end = start + len(lines[0])
+    if len(lines) < 2 or not _TODO_ITEM_LINE_RE.match(lines[1]):
+        return end  # no item line: not a rendered snapshot (the host renders none), the header alone
+    notice = open_item = False
+    for index, line in enumerate(lines[1:], 2):
+        if not line.strip() and not open_item:
+            if notice or index >= len(lines) or not lines[index].startswith(_PRUNED_SKILL_RELOAD_NOTICE_HEADER):
+                break
+            notice = True
+        elif line.strip() and not notice:
+            open_item = not _TODO_ITEM_END_RE.search(line)
+        end += 1 + len(line)
+    return end
+
+
 class ReconcileMixin:
     @staticmethod
     def _canonicalize_tool_call_identity_value(value: Any) -> Any:
@@ -649,7 +677,9 @@ class ReconcileMixin:
         if not content.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
             return None
         todo = content.find(_PRESERVED_TODO_CONTEXT_PREFIX)
-        content = content[:todo] if todo > 0 else content
+        if todo > 0:  # cut the annotation span only: a row merged behind it is a suffix (#516)
+            rest = content[_todo_annotation_span(content, todo):].lstrip("\n")
+            content = content[:todo].rstrip() + ("\n\n" + rest if rest else "")
         pos = content.find("\n\n---\n\n")
         while pos != -1:
             end = self._verified_lcm_summary_prefix_end(content[pos + 7:])
@@ -802,10 +832,13 @@ class ReconcileMixin:
         # to the last user message during context compression; the annotation
         # changes on every cycle (task statuses update), so including it in the
         # replay identity causes reconciliation to fail and triggers full
-        # re-ingest of already-stored messages (duplication bug).
+        # re-ingest of already-stored messages (duplication bug).  Only the
+        # annotation SPAN is cut: a user row the host merged in behind it is
+        # new content and keeps the identity distinct (#516).
         _todo_idx = content.find(_PRESERVED_TODO_CONTEXT_PREFIX)
         if _todo_idx > 0:
-            content = content[:_todo_idx].rstrip()
+            _rest = content[_todo_annotation_span(content, _todo_idx):].lstrip("\n")
+            content = content[:_todo_idx].rstrip() + ("\n\n" + _rest if _rest else "")
         # Model-switch notifications are ephemeral host scaffolding: the
         # host prepends "[Note: model was just switched from X to Y...]"
         # to the user's message, then strips the prefix on the next turn.

@@ -18,8 +18,11 @@ These tests verify that:
 from __future__ import annotations
 
 import sys
+from collections import Counter
 from pathlib import Path
 from types import ModuleType
+
+import pytest
 
 # engine.py imports agent.context_engine at module level; provide a stub
 # before the conftest partial-import can poison sys.modules.
@@ -256,5 +259,187 @@ class TestReconcileAfterCompactionWithTodoAnnotation:
                 assert replay_engine._store.get_session_count("reconcile-todo") == 4
             finally:
                 replay_engine.shutdown()
+        finally:
+            engine.shutdown()
+
+
+# #516: the host folds its todo snapshot into the trailing real user row, and its
+# consecutive-user merge (hermes-agent agent/agent_runtime_helpers.py
+# _merge_consecutive_users: ``prev + "\n\n" + next``) can glue the NEXT user row
+# behind that annotation.  The identity cut must drop only the annotation span.
+_NEW = "NEW instruction typed before any reply"
+_RELOAD_NOTICE = (
+    "[Skills pruned during compression — reload before acting on these tasks]\n"
+    "The task list above crossed the compression boundary verbatim, but the skill "
+    "instructions that governed it were pruned. Before executing any preserved task that "
+    "depends on these skills, reload them first: skill_view(name='deploy'). After reloading, "
+    "re-check that each pending task is still justified — findings recorded before the "
+    "boundary may have invalidated it."
+)
+_TODO_ANNOTATION_NESTED = (
+    f"\n\n{_PRESERVED_TODO_CONTEXT_PREFIX}\n"
+    "- [x] ship. Ship the release (completed)\n"
+    "  - [>] ship.1. Tag the build (in_progress)\n"
+    "    - [ ] ship.1.a. Push the tag (pending)\n"
+    "- [ ] 4. Write notes (pending)"
+    f"\n\n{_RELOAD_NOTICE}"
+)
+
+
+def _identity(engine, content, **kwargs):
+    return engine._message_replay_identity({"role": "user", "content": content}, **kwargs)
+
+
+class TestTodoAnnotationSpanKeepsMergedRow:
+    """#516: only the annotation span is volatile; a row merged behind it is content."""
+
+    def test_merged_row_keeps_its_identity_distinct(self, tmp_path):
+        engine = _make_engine(tmp_path)
+        try:
+            stored = _identity(engine, "Do the thing" + _TODO_ANNOTATION_V1, stored_row=True)
+            merged = _identity(engine, "Do the thing" + _TODO_ANNOTATION_V2 + "\n\n" + _NEW)
+            assert merged != stored, "the merged NEW row must survive the annotation cut"
+            assert merged[1] == "Do the thing\n\n" + _NEW
+            assert _identity(engine, "Do the thing" + _TODO_ANNOTATION_V2) == stored
+        finally:
+            engine.shutdown()
+
+    def test_nested_items_and_reload_notice_are_one_span(self, tmp_path):
+        engine = _make_engine(tmp_path)
+        try:
+            stored = _identity(engine, "Do the thing" + _TODO_ANNOTATION_V1, stored_row=True)
+            assert _identity(engine, "Do the thing" + _TODO_ANNOTATION_NESTED) == stored
+            merged = _identity(engine, "Do the thing" + _TODO_ANNOTATION_NESTED + "\n\n" + _NEW)
+            assert merged[1] == "Do the thing\n\n" + _NEW
+        finally:
+            engine.shutdown()
+
+    def test_item_text_holding_a_blank_line_runs_on_to_its_status(self, tmp_path):
+        """The host keeps an item's text verbatim, blank lines included: the span ends at its status."""
+        engine = _make_engine(tmp_path)
+        try:
+            annotation = f"\n\n{_PRESERVED_TODO_CONTEXT_PREFIX}\n- [>] 5. Line one\n\nline two (in_progress)"
+            stored = _identity(engine, "Do the thing" + _TODO_ANNOTATION_V1, stored_row=True)
+            assert _identity(engine, "Do the thing" + annotation) == stored
+            assert _identity(engine, "Do the thing" + annotation + "\n\n" + _NEW)[1] == "Do the thing\n\n" + _NEW
+        finally:
+            engine.shutdown()
+
+    def test_header_without_items_is_the_whole_span(self, tmp_path):
+        engine = _make_engine(tmp_path)
+        try:
+            content = f"Do the thing\n\n{_PRESERVED_TODO_CONTEXT_PREFIX}\n\nfree text"
+            identity = _identity(engine, content)
+            assert identity[1] == "Do the thing\n\nfree text"
+            assert _PRESERVED_TODO_CONTEXT_PREFIX not in identity[1]
+        finally:
+            engine.shutdown()
+
+
+def _compacted_tail_one(tmp_path, monkeypatch, mode):
+    """A real tail-1 compaction; the host folds the todo snapshot into the retained trailing user row."""
+    from tests.test_issue_488_emission_proof import _phase1_compacted_engine
+
+    engine, pre, compressed = _phase1_compacted_engine(tmp_path, monkeypatch, tail=1)
+    child = "S0" if mode == "inplace" else "S1"
+    engine.on_session_end("S0", pre)
+    engine.on_session_start(child, boundary_reason="compression", old_session_id="S0", platform="acp")
+    tail_row = compressed[-1]["content"]
+    folded = [dict(m) for m in compressed[:-1]] + [{"role": "user", "content": tail_row + _TODO_ANNOTATION_V1.rstrip("\n")}]
+    engine.ingest(folded)
+    return engine, compressed, child, tail_row
+
+
+def _stored_user_identities(engine):
+    from tests.test_issue_488_emission_proof import _stored_user_rows
+
+    return [_identity(engine, content, stored_row=True)[1] for _store_id, content in _stored_user_rows(engine)]
+
+
+def _host_merged(compressed, tail_row, annotation, *, glue_carrier):
+    """``[.., U + todo]`` then NEW with no reply between, merged as hermes-agent v2026.9.24
+    agent/agent_runtime_helpers.py:553 ``_merge_consecutive_users`` does (``prev + "\\n\\n" + next``;
+    a summary carrier is never merged into) or, ``glue_carrier``, as the pinned 37aad38c copy does."""
+    rows = [dict(m) for m in compressed[:-1]] + [{"role": "user", "content": tail_row + annotation + "\n\n" + _NEW}]
+    if glue_carrier:
+        rows = [{"role": "user", "content": "\n\n".join(m["content"] for m in rows)}]
+    return rows
+
+
+@pytest.mark.parametrize("glue_carrier", [False, True], ids=["host-v2026.9.24", "pinned-37aad38c"])
+@pytest.mark.parametrize("mode", ["inplace", "rotation"])
+def test_merged_row_behind_the_annotation_is_stored_once_after_restart(tmp_path, monkeypatch, mode, glue_carrier):
+    """#516: the host merges ``U + todo + NEW``. After a restart NEW is stored exactly once, whole
+    (multiset over identities); a refreshed snapshot alone stores nothing."""
+    from tests.test_issue_488_emission_proof import _restart, _stored_user_rows
+
+    engine, compressed, child, tail_row = _compacted_tail_one(tmp_path, monkeypatch, mode)
+    annotation = _TODO_ANNOTATION_V2.rstrip("\n")
+    refreshed = [dict(m) for m in compressed[:-1]] + [{"role": "user", "content": tail_row + annotation}]
+    merged = _host_merged(compressed, tail_row, annotation, glue_carrier=glue_carrier)
+    try:
+        before = _stored_user_identities(engine)
+        engine = _restart(engine, tmp_path, child, tail=1)
+        engine.ingest([dict(m) for m in refreshed])
+        assert _stored_user_identities(engine) == before  # control: the refresh is a replay
+        engine = _restart(engine, tmp_path, child, tail=1)
+        engine.ingest([dict(m) for m in merged])
+        stored_new = [content for _store_id, content in _stored_user_rows(engine) if _NEW in (content or "")]
+        assert stored_new == [merged[-1]["content"]], "NEW must be stored exactly once, whole"
+        after = _stored_user_identities(engine)
+        gained = Counter(after) - Counter(before)
+        expected = _identity(engine, merged[-1]["content"], stored_row=True)[1]
+        assert expected.endswith(tail_row.rstrip() + "\n\n" + _NEW)  # the cut rstrips the head (rc4)
+        assert [i for i in gained.elements() if _NEW in i] == [expected]
+        assert after.count(tail_row) == before.count(tail_row)
+        # A rotation child also stores the carrier once: the plain merge does the same on the base.
+        assert sum(gained.values()) == (1 if mode == "inplace" or glue_carrier else 2)
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.xfail(strict=True, reason="pre-existing #499 family: a row the host merged into the retained "
+                   "tail row is re-ingested on each LATER restart; the plain merge does the same on the base")
+@pytest.mark.parametrize("annotation", ["", _TODO_ANNOTATION_V2.rstrip("\n")], ids=["plain", "annotated"])
+def test_merged_row_is_not_stored_again_on_a_later_restart(tmp_path, monkeypatch, annotation):
+    from tests.test_issue_488_emission_proof import _restart
+
+    engine, compressed, child, tail_row = _compacted_tail_one(tmp_path, monkeypatch, "inplace")
+    merged = _host_merged(compressed, tail_row, annotation, glue_carrier=False)
+    try:
+        for _ in range(2):
+            engine = _restart(engine, tmp_path, child, tail=1)
+            engine.ingest([dict(m) for m in merged])
+        assert sum(_NEW in identity for identity in _stored_user_identities(engine)) == 1
+    finally:
+        engine.shutdown()
+
+
+def test_legacy_objective_head_cuts_only_the_annotation_span(tmp_path, monkeypatch):
+    """#516 x F3': an objective head + annotation + a merged row returns the head, and the merged
+    row is stored whole once; the annotation alone is still the emitted head (rc4 skip)."""
+    from tests.test_compression_boundary import _config
+    from tests.test_issue_488_consumer_switch import _legacy_v3_restart, _rows
+    from tests.test_issue_488_emission_proof import _phase1_compacted_engine
+
+    engine, _pre, compressed = _phase1_compacted_engine(tmp_path, monkeypatch, tail=0)
+    head = compressed[0]["content"]
+    annotated = {"role": "user", "content": head + _TODO_ANNOTATION_V1}
+    merged = {"role": "user", "content": head + _TODO_ANNOTATION_V2 + "\n\n" + _NEW}
+    assert engine._legacy_objective_head(annotated) is None
+    assert engine._legacy_objective_head(merged) == head
+    engine = _legacy_v3_restart(engine, tmp_path, [dict(m) for m in compressed], tail=0)
+    try:
+        before = _rows(engine)
+        engine.ingest([dict(annotated)])
+        assert _rows(engine) == before  # control: the annotation alone is the emitted head
+    finally:
+        engine.shutdown()
+    for _ in range(2):  # stored whole once; a further restart re-stores nothing
+        engine = LCMEngine(config=_config(tmp_path, fresh_tail_count=0), hermes_home=str(tmp_path / "home"))
+        try:
+            engine.on_session_start("S0", platform="acp", context_length=200_000)
+            engine.ingest([dict(merged)])
+            assert [content for _role, content in _rows(engine) if _NEW in (content or "")] == [merged["content"]]
         finally:
             engine.shutdown()
