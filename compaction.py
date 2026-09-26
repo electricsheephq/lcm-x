@@ -599,17 +599,7 @@ class CompactionMixin:
                 or self._ingest_cursor != len(result)
             ):
                 return
-            state = (
-                self._lifecycle.get_by_conversation(self._conversation_id)
-                if self._conversation_id
-                else self._lifecycle.get_by_session(self._session_id)
-            )
-            emission_binding = {
-                "hermes_home": str(self._hermes_home or ""),
-                "session_id": self._session_id,
-                "conversation_id": self._conversation_id or "",
-                "reset_epoch": state.last_reset_at if state is not None else None,
-            }
+            emission_binding = self._emission_binding()
             prior_proof = getattr(self, "_last_emission_descriptors", None)
             if not self._emission_proof_matches_binding(prior_proof, emission_binding):
                 prior_proof = None
@@ -623,22 +613,27 @@ class CompactionMixin:
                 result, getattr(self, "_pending_emission_candidates", ()), emission_binding
             )
             if prior_proof:
-                prior_projection = _project_emitted_occurrences(messages, proof=prior_proof)
-                result_identities = [_emission_identity(message) for message in result]
-                for entry in prior_projection.entries:
-                    if entry.generated_span is None or result_identities.count(entry.full_identity) != 1:
-                        continue
-                    carried = _finalize_emission_descriptors(result, [{
-                        "kind": entry.kind,
-                        "span": entry.generated_span,
-                        "retained_source": dict(entry.retained_source) if entry.retained_source is not None else None,
-                        "full_identity": entry.full_identity,
-                    }], emission_binding)
-                    if carried and all(
-                        item["output_occurrence"]["index"] != carried[0]["output_occurrence"]["index"]
-                        for item in emissions
-                    ):
-                        emissions.extend(carried)
+                fresh_count = len(emissions)
+                try:
+                    prior_projection = _project_emitted_occurrences(messages, proof=prior_proof)
+                    result_identities = [_emission_identity(message) for message in result]
+                    for entry in prior_projection.entries:
+                        if entry.generated_span is None or result_identities.count(entry.full_identity) != 1:
+                            continue
+                        carried = _finalize_emission_descriptors(result, [{
+                            "kind": entry.kind,
+                            "span": entry.generated_span,
+                            "retained_source": dict(entry.retained_source) if entry.retained_source is not None else None,
+                            "full_identity": entry.full_identity,
+                        }], emission_binding)
+                        if carried and all(
+                            item["output_occurrence"]["index"] != carried[0]["output_occurrence"]["index"]
+                            for item in emissions
+                        ):
+                            emissions.extend(carried)
+                except Exception as exc:  # a bad prior proof costs its carry-forward, never the fresh proof (#514)
+                    logger.warning("LCM prior-proof carry-forward skipped: %r", exc)
+                    del emissions[fresh_count:]
             emissions.sort(key=lambda item: item["output_occurrence"]["index"])
             # The output's rows map through THIS proof's emissions (A3), never a DAG-shaped strip (F1).
             occurrences, _v4 = self._replay_occurrences(result, {"version": 4, **emission_binding, "emissions": emissions})

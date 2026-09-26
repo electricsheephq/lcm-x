@@ -3358,18 +3358,28 @@ class LCMEngine(
     def _emission_proof_matches_binding(proof, binding) -> bool:
         return isinstance(proof, dict) and all(proof.get(key) == value for key, value in binding.items())
 
+    def _emission_binding(self, session_id: str | None = None) -> dict:
+        """The scope an emission proof is bound to: one rule for the writer, the durable reader and rebind (#514)."""
+        session_id = session_id or self._session_id
+        conversation_id = getattr(self, "_conversation_id", "") or ""
+        state = (
+            self._lifecycle.get_by_conversation(conversation_id)
+            if conversation_id
+            else self._lifecycle.get_by_session(session_id)
+        )
+        return {
+            "hermes_home": str(getattr(self, "_hermes_home", "") or ""),
+            "session_id": session_id,
+            "conversation_id": conversation_id,
+            "reset_epoch": state.last_reset_at if state is not None else None,
+        }
+
     def on_session_start(self, session_id: str, **kwargs) -> None:
         with self._exclusive_lifecycle("rebind"):
             if self._stable_use_closed:
                 raise RuntimeError("LCM engine is closed")
             self._on_session_start_unlocked(session_id, **kwargs)
-            state = self._lifecycle.get_by_conversation(self._conversation_id)
-            binding = {
-                "hermes_home": str(self._hermes_home or ""),
-                "session_id": self._session_id,
-                "conversation_id": self._conversation_id or "",
-                "reset_epoch": state.last_reset_at if state is not None else None,
-            }
+            binding = self._emission_binding()
             for name in ("_compress_commit_proof", "_last_emission_descriptors"):
                 if not self._emission_proof_matches_binding(getattr(self, name), binding):
                     setattr(self, name, None)

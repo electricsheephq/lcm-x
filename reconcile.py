@@ -235,6 +235,17 @@ def _finalize_emission_descriptors(messages, candidates, scope):
     return descriptors
 
 
+def _descriptor_shape_is_well_formed(descriptor: Any) -> bool:
+    """The nested shapes proof consumers index into (#514); projection still declines the rest."""
+    occurrence = descriptor.get("output_occurrence") if isinstance(descriptor, Mapping) else None
+    if not isinstance(occurrence, Mapping) or not isinstance(descriptor.get("scope"), Mapping):
+        return False
+    index = occurrence.get("index")
+    if type(index) is not int or index < 0:
+        return False
+    return "of" not in occurrence or (type(occurrence["of"]) is int and occurrence["of"] > index)
+
+
 def _project_emitted_occurrences(
     messages: Sequence[dict], *, proof: Mapping[str, Any] | None
 ) -> EmissionProjection:
@@ -2063,17 +2074,13 @@ class ReconcileMixin:
         conversation_id = getattr(self, "_conversation_id", "")
         if payload.get("conversation_id") != (conversation_id or ""):
             return None
-        state = (
-            self._lifecycle.get_by_conversation(conversation_id)
-            if conversation_id
-            else self._lifecycle.get_by_session(effective_session_id)
-        )
+        binding = self._emission_binding(effective_session_id)
+        reset_epoch = binding["reset_epoch"]
         # Same rule as bind_session's frontier resume: nothing from before a
         # lifecycle reset of this conversation proves the current list.
-        if state is not None and state.last_reset_at is not None and float(payload.get("created_at") or 0) <= state.last_reset_at:
+        if reset_epoch is not None and float(payload.get("created_at") or 0) <= reset_epoch:
             return None
         payload = dict(payload)
-        reset_epoch = state.last_reset_at if state is not None else None
         # A version-3 wire record with descriptor_version 4 is relabelled 4 for
         # every consumer; a bound top-level version 4 (pre-#517 main) still counts.
         # A version-2 record keeps its exact-identity hashes: never relabelled.
@@ -2081,12 +2088,15 @@ class ReconcileMixin:
         has_descriptors = (
             (wire[0] == _COMPACTION_COMMIT_PROOF_VERSION
              or wire == (_COMPACTION_COMMIT_PROOF_WIRE_VERSION, _COMPACTION_COMMIT_PROOF_VERSION))
-            and payload.get("session_id") == effective_session_id
-            and payload.get("reset_epoch") == reset_epoch
+            and self._emission_proof_matches_binding(payload, binding)
             and isinstance(payload.get("emissions"), list)
         )
         if has_descriptors:
             payload["version"] = _COMPACTION_COMMIT_PROOF_VERSION
+            emissions = [item for item in payload["emissions"] if _descriptor_shape_is_well_formed(item)]
+            if len(emissions) != len(payload["emissions"]):
+                logger.debug("LCM durable proof dropped %d malformed emission descriptors", len(payload["emissions"]) - len(emissions))
+            payload["emissions"] = emissions
             for key in ("effective_sha256", "scaffold_sha256"):  # this reader's projection digests
                 if f"{key}_v4" in payload:
                     payload[key] = payload[f"{key}_v4"]
