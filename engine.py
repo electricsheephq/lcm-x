@@ -389,18 +389,6 @@ _OVERFLOW_RECOVERY_OVERCAP_NOTE = (
     "the recovery budget of {cap} tokens; it was not included. "
     "Re-send a shorter version or ask LCM to recall it."
 )
-_OVERFLOW_RECOVERY_OVERCAP_NOTE_RE = re.compile(
-    "[0-9]+".join(re.escape(part) for part in re.split(r"\{\w+\}", _OVERFLOW_RECOVERY_OVERCAP_NOTE))
-)
-
-
-def _is_overflow_recovery_scaffold_text(content: str) -> bool:
-    """#529: only the two exact LCM-generated overflow-recovery rows are scaffold."""
-    stripped = content.lstrip()
-    return stripped.startswith("[LCM overflow recovery] ") and (
-        stripped == _OVERFLOW_RECOVERY_PLACEHOLDER
-        or _OVERFLOW_RECOVERY_OVERCAP_NOTE_RE.fullmatch(stripped) is not None
-    )
 
 
 class LCMEngine(
@@ -5033,8 +5021,6 @@ class LCMEngine(
         stripped = content.lstrip()
         if stripped.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) or stripped.startswith(_PRESERVED_TODO_CONTEXT_PREFIX):
             return True
-        if str(msg.get("role") or "") == "user" and _is_overflow_recovery_scaffold_text(content):
-            return True
         end = self._verified_lcm_summary_prefix_end(content)
         return end is not None and not content[end:].strip()
 
@@ -5062,8 +5048,6 @@ class LCMEngine(
         if content.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
             return True
         if content.lstrip().startswith(_PRESERVED_TODO_CONTEXT_PREFIX):
-            return True
-        if role == "user" and _is_overflow_recovery_scaffold_text(content):
             return True
         if "[Expand for details:" not in content:
             return False
@@ -7493,7 +7477,12 @@ class LCMEngine(
                             }
                             if count_messages_tokens(option + [note]) <= cap:
                                 return option + [note]
-                            return self._sanitize_active_context_messages(fallback[:-1]) + [note]
+                            # Drop the retained row, then the system anchor, before the cap.
+                            for head in (fallback[:-1], [system_msg] if system_msg is not None else []):
+                                rows = self._sanitize_active_context_messages(head) + [note]
+                                if count_messages_tokens(rows) <= cap:
+                                    return rows
+                            return [note]
                         if want_user and msg.get("role") == "user" and skipped_user_tokens is None:
                             skipped_user_tokens = count_messages_tokens([msg])
                         over_cap[0 if want_user else 1].append(option)

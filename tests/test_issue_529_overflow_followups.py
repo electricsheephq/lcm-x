@@ -103,6 +103,28 @@ def test_note_follows_system_and_retained_prefix(engine):
     assert_provider_shape(final)
 
 
+@pytest.mark.parametrize("system_words", [25, 1], ids=["note-alone", "system-plus-note"])
+def test_note_only_fallback_stays_within_cap(engine, system_words):
+    # The older row fits with the prefix, the older row + note does not, and
+    # neither may the prefix + note: drop the prefix rather than exceed the cap.
+    # (A retained user row never reaches this loop: the fallback's early
+    # return already keeps it as a non-system, non-tool row.)
+    system_msg = {"role": "system", "content": "anchor text " * system_words}
+    older = {"role": "user", "content": "older ask " * (1 if system_words > 1 else 30)}
+    newest = {"role": "user", "content": "NEWEST_ASK: rebuild the index " * 300}
+    tail = [older, {"role": "assistant", "content": OVERSIZED}, newest, ORPHAN]
+    note = _note(newest)
+    assert count_messages_tokens([system_msg, older]) <= CAP < count_messages_tokens([system_msg, older, note])
+    expected = [note] if count_messages_tokens([system_msg, note]) > CAP else [system_msg, note]
+    assert expected == ([note] if system_words > 1 else [system_msg, note])
+
+    result = engine._assemble_overflow_recovery_context(system_msg, tail, assembly_cap_override=CAP)
+
+    assert count_messages_tokens(result) <= CAP, result
+    assert result == expected
+    assert_provider_shape(result)
+
+
 def test_no_note_when_newest_user_row_is_kept(engine):
     newest = {"role": "user", "content": "NEWEST_ASK: short."}
     tail = [
@@ -154,7 +176,9 @@ def test_system_anchor_alone_is_never_returned(engine, tail):
     assert [m for m in final if m.get("role") != "system"], final
 
 
-# -- item 3: the two generated rows are scaffold across a restart; nothing else is
+# -- item 3 was reverted (fix round 1): matching the generated text by content
+# would drop a real user turn that byte-equals it (loss); provenance-based
+# detection is #534. A replayed generated row is stored (duplicate direction).
 
 
 def _make_engine(tmp_path, session_id="issue-529-replay"):
@@ -172,36 +196,8 @@ def _make_engine(tmp_path, session_id="issue-529-replay"):
 NOTE_TEXT = _OVERFLOW_RECOVERY_OVERCAP_NOTE.format(tokens=1234, cap=CAP)
 
 
-@pytest.mark.parametrize("text", [_OVERFLOW_RECOVERY_PLACEHOLDER, NOTE_TEXT, "  \n" + NOTE_TEXT])
-def test_generated_overflow_rows_are_verified_scaffold(engine, text):
-    row = {"role": "user", "content": text}
-    assert engine._is_replayed_context_scaffold_message(row) is True
-    assert engine._is_verified_replay_scaffold_message(row) is True
-
-
-@pytest.mark.parametrize(
-    "row",
-    [
-        {"role": "user", "content": "I saw this: " + _OVERFLOW_RECOVERY_PLACEHOLDER},
-        {"role": "user", "content": _OVERFLOW_RECOVERY_PLACEHOLDER + " Why?"},
-        {"role": "user", "content": _OVERFLOW_RECOVERY_PLACEHOLDER.replace("dropped", "kept")},
-        {"role": "user", "content": _OVERFLOW_RECOVERY_OVERCAP_NOTE.format(tokens="many", cap=CAP)},
-        {"role": "user", "content": _OVERFLOW_RECOVERY_OVERCAP_NOTE.format(tokens=-5, cap=CAP)},
-        {"role": "user", "content": NOTE_TEXT + "\nplease retry"},
-        {"role": "user", "content": "[LCM overflow recovery] please recall my last message"},
-        {"role": "assistant", "content": _OVERFLOW_RECOVERY_PLACEHOLDER},
-        {"role": "tool", "tool_call_id": "t", "content": NOTE_TEXT},
-    ],
-    ids=["quoted", "appended", "edited", "word-slot", "negative-slot", "note-plus-text",
-         "prefix-only", "assistant-role", "tool-role"],
-)
-def test_forged_or_edited_overflow_rows_stay_real_content(engine, row):
-    assert engine._is_replayed_context_scaffold_message(row) is False
-    assert engine._is_verified_replay_scaffold_message(row) is False
-
-
 @pytest.mark.parametrize("generated", [_OVERFLOW_RECOVERY_PLACEHOLDER, NOTE_TEXT])
-def test_cold_restart_does_not_store_generated_overflow_row(tmp_path, generated):
+def test_cold_restart_stores_replayed_generated_row_as_real_user_row(tmp_path, generated):
     first = _make_engine(tmp_path)
     try:
         first._ingest_messages(
@@ -230,7 +226,7 @@ def test_cold_restart_does_not_store_generated_overflow_row(tmp_path, generated)
     finally:
         replay.shutdown()
 
-    assert contents.count(generated) == 0
+    assert contents.count(generated) == 1
     assert contents.count("Brand new question after restart") == 1
     assert contents.count("First user request") == 1
 
