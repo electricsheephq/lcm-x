@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import tomllib
 import types
 
 import pytest
@@ -2020,3 +2021,36 @@ def test_install_script_reuses_relative_symlinks_to_this_checkout(tmp_path, plug
     assert sorted(p.name for p in plugins.iterdir()) == [plugin_dir]
     assert sorted(p.name for p in skills.iterdir()) == [skill_dir]
     assert not os.path.isabs(os.readlink(plugins / plugin_dir))
+
+
+def test_pyproject_survives_hermes_pm_workspace_member_rewrite():
+    """The pyproject must stay a valid uv workspace member after the Hermes PM rewrite.
+
+    Hermes' package manager snapshots a plugin checkout as a uv workspace member.
+    For plugins without a ``[build-system]`` (a "virtual" member), it rewrites
+    ``[project].name`` to a ``hermes-plugin-*`` key and re-serializes the file.
+    uv enforces PEP 621 on the result: a ``[project]`` table with no ``version``
+    (and no ``dynamic = ["version"]``) is a hard parse error, which breaks
+    ``hermes plugins enable`` / install with ``uv lock`` exit 2.
+
+    This regression re-runs the rewrite on the committed pyproject and asserts
+    the generated member carries a resolvable version.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    document = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8-sig"))
+
+    # Mirrors pm/workspace.py::_workspace_member for a virtual member.
+    virtual = (
+        "build-system" not in document
+        and document.get("tool", {}).get("uv", {}).get("package") is not True
+    )
+    assert virtual, "LCM-X is installed via scripts/install.sh, not as a build package"
+
+    project = document.setdefault("project", {})
+    project["name"] = "hermes-plugin-hermes-lcm-x-0000000000000000"
+
+    assert "version" in project or "version" in project.get("dynamic", []), (
+        "A Hermes-PM-rewritten workspace member must declare a version: add "
+        "project.version to pyproject.toml (kept in sync with the release tag), "
+        "otherwise `uv lock` rejects it with a PEP 621 parse error."
+    )

@@ -1,8 +1,17 @@
 # Tooling configuration for LCM-X (plugin name: hermes-lcm-x).
 #
 # This file exists only to pin lint settings so `ruff` behaves identically
-# locally and in CI. It intentionally declares no [build-system] or project
-# metadata: the plugin is installed via scripts/install.sh, not pip.
+# locally and in CI. It intentionally declares no [build-system]: the plugin is
+# installed via scripts/install.sh, not pip.
+#
+# The [project] table below is required by Hermes' PM, which snapshots this
+# checkout as a uv workspace member and rewrites [project].name to a
+# hermes-plugin-* key. uv (PEP 621) rejects a [project] table with no version,
+# so the version is declared here (kept in sync with the release tag).
+
+[project]
+name = "hermes-lcm-x"
+version = "0.24.5"
 
 [tool.ruff]
 # Match the oldest runtime CI exercises; keeps lint aligned with the 3.11 leg.
