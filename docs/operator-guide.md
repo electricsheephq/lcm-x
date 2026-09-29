@@ -431,6 +431,10 @@ refused, a compaction that is not a forced overflow recovery writes no new leaf 
 for a later compaction and logs `LCM compaction stopped: summary route unavailable (circuit open, Ns left); N
 leaves written, backlog kept`. When it wrote no leaf, the threshold answer is held until a route is allowed again
 (at most 600 s). A forced overflow recovery still converges through level 3.
+With a summary route that never works, compaction pauses and the survival fit keeps the request under the window;
+the rows stay stored and are summarised once a route works again, and the WARNING line repeats until then. With the
+survival fit off (`LCM_SURVIVAL_FIT=false`) or the model window unknown, the plugin converges through level 3 as
+before.
 
 ### Evidence and adaptive retrieval (0.21 RC)
 

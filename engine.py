@@ -1564,6 +1564,13 @@ class LCMEngine(
         return summary_route_available(
             self._config.summary_model, self._config.summary_fallback_models, self._summary_circuit_breaker)
 
+    def _summary_route_stop_applies(self, force_overflow: bool) -> bool:
+        """#628: write no leaf or node while every route is refused, unless forced or no survival fit can keep
+        the request under the window (fit off, or window unknown): then level 3 converges as before."""
+        if force_overflow or int(self.context_length or 0) <= 0 or not getattr(self._config, "survival_fit", True):
+            return False
+        return not self._summary_route_available()
+
     def _summary_route_seconds_left(self) -> float:
         return self._summary_circuit_breaker.seconds_until_allowed(
             _summary_model_chain(self._config.summary_model, self._config.summary_fallback_models))
@@ -6664,7 +6671,7 @@ class LCMEngine(
         max_depth = self._config.incremental_max_depth
         if max_depth == 0:
             return 0  # condensation disabled
-        if not force_overflow and not self._summary_route_available():
+        if self._summary_route_stop_applies(force_overflow):
             self._last_condensation_suppressed_reason = "summary_route_unavailable"  # #628: no level 3 node
             return 0
 
@@ -6839,7 +6846,7 @@ class LCMEngine(
                 return passes, "pass_budget_exhausted"
             if time.monotonic() >= deadline:
                 return passes, "time_budget_exhausted"
-            if not self._summary_route_available():
+            if self._summary_route_stop_applies(False):
                 return passes, "summary_route_unavailable"  # #628: no level 3 node while the circuit is open
             group = self._select_threshold_sweep_condensation_group()
             if not group:

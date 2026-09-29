@@ -1404,7 +1404,7 @@ class CompactionMixin:
             if threshold_full_sweep_active and time.monotonic() >= sweep_deadline:
                 sweep_stop_reason = "time_budget_exhausted"
                 break
-            if not force_overflow and not self._summary_route_available():
+            if self._summary_route_stop_applies(force_overflow):
                 sweep_stop_reason = "summary_route_unavailable"  # #628: no level 3 leaf while every route is refused
                 break
             fresh_tail_start = self._fresh_tail_start(pressure_messages)

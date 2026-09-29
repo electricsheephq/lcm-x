@@ -11,7 +11,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   the failure threshold (2); rejections open the route at their own threshold,
   `LCM_SUMMARY_CIRCUIT_BREAKER_REJECTION_THRESHOLD` (default 6). Every rejected result logs its reason. (#628)
 - Fix: while every summary route is refused, a compaction that is not a forced overflow recovery stops before the
-  next leaf or condensed node instead of writing level 3 truncations; the rows stay for a later compaction, and a
+  next leaf or condensed node instead of writing level 3 truncations, when the survival fit can run (on, and the
+  model window known); the rows stay for a later compaction, and a
   stop before the first leaf holds the threshold answer until a route is allowed again (at most 600 s). The
   compaction line counts the level 3 leaves it wrote. (#628)
 - Fix: `/lcm doctor` and the operator guide no longer call a plugin-only rollback within 0.24.x supported after a

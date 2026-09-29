@@ -413,3 +413,24 @@ def test_t11_condensation_not_forced_writes_no_node_and_forced_converges(tmp_pat
         assert len(_nodes(engine)) == 3 and levels == [3] and provider.calls == []
     finally:
         engine.shutdown()
+
+
+# -- T12, T13: without a survival fit the stop does not apply; level 3 converges as at the base -----------------
+
+@pytest.mark.parametrize("no_fit", ["survival_fit_off", "window_unknown"])
+def test_t12_t13_without_a_survival_fit_the_leaf_is_written_at_level_3(tmp_path, monkeypatch, levels, caplog, no_fit):
+    config = {"survival_fit": False} if no_fit == "survival_fit_off" else {}
+    engine = _engine(tmp_path, **config)
+    if no_fit == "window_unknown":
+        engine.context_length = 0
+    provider = _provider(monkeypatch, ACCEPTED)
+    view = _view()
+    try:
+        _open_circuit(engine)
+        assert engine.threshold_tokens > 0
+        result = _compress(engine, view, caplog)
+        assert result is not view and _nodes(engine) and levels and set(levels) == {3}
+        assert provider.calls == [] and engine._last_compression_status == "compacted"
+        assert engine._sweep_budget_hold_until == 0.0 and _count(caplog, STOP_LINE) == 0
+    finally:
+        engine.shutdown()
