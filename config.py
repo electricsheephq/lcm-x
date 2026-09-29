@@ -487,6 +487,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("survival_reserve", "LCM_SURVIVAL_RESERVE", float),
     _EnvFieldSpec("summary_circuit_breaker_failure_threshold", "LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD", int),
     _EnvFieldSpec("summary_circuit_breaker_cooldown_seconds", "LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS", int),
+    _EnvFieldSpec("summary_circuit_breaker_rejection_threshold", "LCM_SUMMARY_CIRCUIT_BREAKER_REJECTION_THRESHOLD", int),
     _EnvFieldSpec("summary_spend_max_calls", "LCM_SUMMARY_SPEND_MAX_CALLS", int),
     _EnvFieldSpec("summary_spend_window_seconds", "LCM_SUMMARY_SPEND_WINDOW_SECONDS", float),
     _EnvFieldSpec("summary_spend_backoff_seconds", "LCM_SUMMARY_SPEND_BACKOFF_SECONDS", float),
@@ -746,6 +747,9 @@ class LCMConfig:
     summary_circuit_breaker_failure_threshold: int = 2
     # Seconds to skip an open summary route before allowing a retry.
     summary_circuit_breaker_cooldown_seconds: int = 300
+    # Consecutive rejected summary results (no usable text, or not shorter than
+    # the source) before a route is skipped temporarily; minimum 1.
+    summary_circuit_breaker_rejection_threshold: int = 6
     # Sliding-window cap for paid/auxiliary summarizer calls before falling
     # back to deterministic L3 truncation. 0 disables the spend guard.
     summary_spend_max_calls: int = 24

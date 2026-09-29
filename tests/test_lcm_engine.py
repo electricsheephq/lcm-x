@@ -6831,6 +6831,9 @@ class TestMessageFiltering:
             return "literal placeholder summary\n[Expand for details: literal placeholder]", 1
 
         monkeypatch.setattr(lcm_engine, "summarize_with_escalation", capture_summary)
+        # #628: the unstubbed first compaction had no summariser and opened the circuit, which now pauses
+        # the next compaction; this pass stubs the summariser, so close the circuit first.
+        engine._summary_circuit_breaker.record_success(engine._config.summary_model)
         engine._config.ignore_message_patterns = []
         engine._compiled_ignore_message_patterns = []
         engine.compress(

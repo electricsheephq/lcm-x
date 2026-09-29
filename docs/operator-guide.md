@@ -369,6 +369,7 @@ environment variables:
 | `LCM_SUMMARY_FALLBACK_MODELS` | empty | Comma-separated summarization models tried after `LCM_SUMMARY_MODEL` or the auxiliary task default fails |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `2` | Consecutive failed summarization calls before a route is skipped temporarily |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_COOLDOWN_SECONDS` | `300` | Seconds to skip an open summary route before retrying it |
+| `LCM_SUMMARY_CIRCUIT_BREAKER_REJECTION_THRESHOLD` | `6` | Consecutive rejected summary results (no usable text, or not shorter than the source) before a route is skipped temporarily; minimum 1 |
 | `LCM_EXPANSION_MODEL` | summary model / auxiliary | Override `lcm_expand_query` synthesis model |
 | `LCM_EXPANSION_CONTEXT_TOKENS` | `32000` | Context budget used by the auxiliary LLM for `lcm_expand_query` |
 | `LCM_SUMMARY_TIMEOUT_MS` | `60000` | Timeout for one summarization call |
@@ -409,6 +410,27 @@ environment variables:
 fault, not load shedding: proactive injection is disabled until the embedding-privacy policy
 is fixed, one WARNING is logged per engine instance, and `lcm_recall` raises rather than degrading to
 full-text on the same fault (#370).
+
+### Summary circuit breaker
+
+A summary call that raises or times out is a failure and counts toward
+`LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD`. A result that LCM rejects for its content counts toward
+`LCM_SUMMARY_CIRCUIT_BREAKER_REJECTION_THRESHOLD` instead, and each one logs
+`LCM summary result rejected (reason=..., source_tokens=..., result_tokens=..., model=...)`: `reason=no_content`
+follows a line that names the kind (`LCM summary discarded empty output`, `... reasoning-only output` or
+`... output that violated the integrity contract`); `reason=not_shorter` means the result was not shorter than its
+source. A route opens with `LCM summary route circuit opened for <route> after N failure(s)` or
+`... after N rejected result(s)`.
+
+A leaf whose own level 1 and level 2 results were rejected is written at level 3: a deterministic cut of its
+source that keeps the start and the end. Its rows stay stored; read them with `lcm_expand` on that leaf. The
+compaction line counts these leaves (`, N level 3 leaves`).
+
+An open circuit now pauses compaction instead of writing level 3 truncations: while every summary route is
+refused, a compaction that is not a forced overflow recovery writes no new leaf or condensed node, keeps the rows
+for a later compaction and logs `LCM compaction stopped: summary route unavailable (circuit open, Ns left); N
+leaves written, backlog kept`. When it wrote no leaf, the threshold answer is held until a route is allowed again
+(at most 600 s). A forced overflow recovery still converges through level 3.
 
 ### Evidence and adaptive retrieval (0.21 RC)
 

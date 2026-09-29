@@ -43,7 +43,9 @@ from .engine_registry import (
 from .escalation import (
     SummaryCircuitBreaker,
     SummarySpendGuard,
+    _summary_model_chain,
     summarize_with_escalation,
+    summary_route_available,
 )
 from .externalize import (
     build_transcript_gc_placeholder,
@@ -618,6 +620,7 @@ class LCMEngine(
         self._summary_circuit_breaker = SummaryCircuitBreaker(
             failure_threshold=self._config.summary_circuit_breaker_failure_threshold,
             cooldown_seconds=self._config.summary_circuit_breaker_cooldown_seconds,
+            rejection_threshold=self._config.summary_circuit_breaker_rejection_threshold,
         )
         # Summary spend guard: process-local sliding window so a loop that
         # keeps succeeding cannot burn auxiliary-model budget without bound. When
@@ -1552,8 +1555,18 @@ class LCMEngine(
         self._last_boundary_skip_time = 0
         return False
 
-    def _start_sweep_budget_hold(self) -> None:
-        self._sweep_budget_hold_until = time.time() + _SWEEP_BUDGET_HOLD_SECONDS
+    def _start_sweep_budget_hold(self, seconds: Optional[float] = None) -> None:
+        hold = _SWEEP_BUDGET_HOLD_SECONDS if seconds is None else min(_SWEEP_BUDGET_HOLD_SECONDS, max(1.0, seconds))
+        self._sweep_budget_hold_until = time.time() + hold
+
+    def _summary_route_available(self) -> bool:
+        """#628: false while the circuit refuses every summary route."""
+        return summary_route_available(
+            self._config.summary_model, self._config.summary_fallback_models, self._summary_circuit_breaker)
+
+    def _summary_route_seconds_left(self) -> float:
+        return self._summary_circuit_breaker.seconds_until_allowed(
+            _summary_model_chain(self._config.summary_model, self._config.summary_fallback_models))
 
     def _sweep_budget_hold_active(self) -> bool:
         """#608: return true while a no-leaf sweep budget stop holds the threshold answer."""
@@ -6651,6 +6664,9 @@ class LCMEngine(
         max_depth = self._config.incremental_max_depth
         if max_depth == 0:
             return 0  # condensation disabled
+        if not force_overflow and not self._summary_route_available():
+            self._last_condensation_suppressed_reason = "summary_route_unavailable"  # #628: no level 3 node
+            return 0
 
         # When max_depth is -1 (unlimited), derive the upper bound from
         # the deepest existing node + 1, so condensation can always
@@ -6823,6 +6839,8 @@ class LCMEngine(
                 return passes, "pass_budget_exhausted"
             if time.monotonic() >= deadline:
                 return passes, "time_budget_exhausted"
+            if not self._summary_route_available():
+                return passes, "summary_route_unavailable"  # #628: no level 3 node while the circuit is open
             group = self._select_threshold_sweep_condensation_group()
             if not group:
                 return passes, "no_same_depth_condensation_group"
