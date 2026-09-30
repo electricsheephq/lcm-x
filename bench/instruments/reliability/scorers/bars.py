@@ -20,7 +20,7 @@ import sqlite3
 from collections import Counter
 from pathlib import Path
 
-from . import chronology, host_parity, multiset, summary, tool_calls, tool_groups
+from . import chronology, drain, host_parity, multiset, summary, tool_calls, tool_groups
 
 ALL_BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8")
 
@@ -312,6 +312,10 @@ def score(cell: dict, cell_dir: Path) -> dict:
     numbers["B7"] = native
     if native["native_unusable"] or native["summary_generation_aborted"] or native["max_native_attempts_per_turn"] > 1:
         failed["B7"] = native
+    if cell.get("drain"):  # D1-D3 (scorers/drain.py): the drain/hidden-backlog cells
+        d_failed, d_inconclusive, numbers["drain"] = drain.score(cell, phases)
+        failed.update(d_failed)
+        inconclusive.update(d_inconclusive)
     failed = {b: v for b, v in failed.items() if b in applicable}
     numbers["diagnostic"] = {
         "log_counts": {k: sum(p.get("log_counts", {}).get(k, 0) for p in phases)

@@ -488,3 +488,68 @@ def test_ci_gate_fails_a_missing_lane_or_host(tmp_path, capsys):
     assert rc == 1 and f"empty result file: {r2}" in out
     rc, out = run(full_set(), [dict(r, host="B") for r in full_set("acp-process")])
     assert rc == 1 and "has no rows for host(s) ['B']" in out and "has no rows for host(s) ['h']" in out
+
+
+def load_observer():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_rel_observer_test", PC.OBSERVER / "rel_observer.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_observer_counts_host_rows_a_leaf_replaced_by_identity(tmp_path, monkeypatch):
+    """#597 drain cell: two summaries replace five input rows -> in 7, out 4, host_rows_summarized 5. LCM returns
+    retained rows as equal copies, so an equal dict is retained too (``copied``); a changed copy is not."""
+    obs = load_observer()
+    monkeypatch.setattr(obs, "DIR", tmp_path)
+    monkeypatch.setattr(obs, "_r1", probe)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    host_cc = types.ModuleType("agent.context_compressor")
+    monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
+    monkeypatch.setitem(sys.modules, "agent.context_compressor", host_cc)
+    rows = [{"role": "user" if i % 2 else "assistant", "content": f"row {i}"} for i in range(7)]
+
+    class Engine:
+        def compress(self, messages, *a, **k):
+            self._last_compression_status = "compacted"
+            out = [{"role": "user", "content": "summary 1"}, {"role": "user", "content": "summary 2"}, *messages[5:]]
+            messages[:] = out  # an in-place rewrite of the input list must not hide a replaced row
+            return out
+
+        def handle_tool_call(self, name, args, **k):
+            return "{}"
+    obs.patch_engine(types.SimpleNamespace(context_compressor=Engine()))
+    obs.cur.update(turn=42)
+    Engine().compress(list(rows))
+    assert obs.counters["compactions"][-1] == {"turn": 42, "in": 7, "out": 4, "host_rows_summarized": 5, "copied": 0,
+                                               "status": "compacted", "final": False,
+                                               "secs": obs.counters["compactions"][-1]["secs"]}
+    copies = [{"role": "user", "content": "summary 1"}, *[dict(m) for m in rows[5:]]]
+    assert obs.list_counts(rows, copies) == {"in": 7, "out": 3, "host_rows_summarized": 5, "copied": 2}
+    changed = [{"role": "user", "content": "summary 1"}, dict(rows[5], content="row 5 rewritten"), rows[6]]
+    assert obs.list_counts(rows, changed) == {"in": 7, "out": 3, "host_rows_summarized": 6, "copied": 0}
+    assert obs.list_counts(rows, [{"role": "user", "content": "summary"}, *rows]) == {
+        "in": 7, "out": 8, "host_rows_summarized": 0, "copied": 0}  # a leaf of hidden rows only: the list grows
+    assert obs.counters["compacted_turns"] == [42]
+
+
+def test_drain_bars_fail_a_hidden_only_leaf_and_are_inconclusive_below_two_compactions(tmp_path):
+    from bench.instruments.reliability.scorers import drain
+    cell = {"drain": {"phase2_turn": 41, "hold_seconds": 10.0}}
+
+    def phase(*calls):
+        return {"phase": "B", "counters": {"compactions": [dict(zip(("turn", "in", "out", "host_rows_summarized",
+                                                                      "status", "secs"), c), final=False) for c in calls]}}
+    stuck = phase((30, 80, 50, 32, "compacted", 0.2), (55, 60, 61, 0, "compacted", 11.0), (57, 62, 63, 0, "compacted", 0.1))
+    failed, unsure, numbers = drain.score(cell, [stuck])
+    assert set(failed) == {"D1", "D2", "D3"} and not unsure
+    assert numbers["D2"]["turns"] == [55, 57] and numbers["D3"]["over_hold"] == [{"turn": 55, "secs": 11.0}]
+    drains = phase((55, 60, 61, 0, "compacted", 0.1), (57, 62, 40, 24, "compacted", 0.1), (58, 42, 42, 0, "noop", 0.0))
+    assert drain.score(cell, [drains])[:2] == ({"D2": {"compactions": 2, "no_host_row_and_no_shrink": 1, "turns": [55]}}, {})
+    failed, unsure, _ = drain.score(cell, [phase((55, 60, 61, 0, "compacted", 0.1))])
+    assert not failed and set(unsure) == {"D1", "D2", "D3"}
+    by = {c["id"]: c for c in cells.select("drain/*")}
+    assert set(by) == {"drain/hidden-backlog/in-place", "drain/hidden-backlog/rotation"}
+    assert all(not ci.in_gate_set(c) and c in ci.expected_cells("acp-process") for c in by)
+    assert PC.unsupported(by["drain/hidden-backlog/in-place"], "acp-process") is None

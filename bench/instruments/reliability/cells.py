@@ -9,6 +9,7 @@ from __future__ import annotations
 import fnmatch
 
 BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8")
+DRAIN_BARS = ("D1", "D2", "D3")  # scorers/drain.py: the host list drains under a hidden backlog (#597, #626)
 TRANSPORTS = ("acp", "gateway")
 FAULTS = {"crash_after_compaction_before_reply", "clean_exit_before_turn", "crash_mid_tool_call",
           "crash_after_rotation_before_child_row", "crash_between_session_end_and_start", "cancel_then_retry",
@@ -28,6 +29,7 @@ ISSUES = {
     485: (("B2",), "upgrade from a pre-fix DB (R2)"), 542: (("B4",), "upgrade from a pre-#535 wedged DB (R2)"),
     559: (("B6", "B4"), ""), 566: (("B1", "B2", "B5"), ""),  # B5: a cross-lineage summary is recorded only there
     581: (("B3", "B4"), ""), 582: (("B8",), ""),  # native-on-off: every candidate event after the plugin switch
+    597: (("D1", "D2"), ""), 626: (("D3",), ""),  # drain/hidden-backlog: data cells (ci.NON_GATE)
 }
 
 
@@ -105,6 +107,15 @@ def registry() -> list[dict]:
                                   "event after the plugin switch (pre_publication_counts: a diagnostic); B4 asks it "
                                   "to publish. B1/B2/B5-B7 are reported, not scored: the older "
                                   "ref's own phase decides them."))
+        cells.append(cell(f"drain/hidden-backlog/{m}", [597, 626], in_place=ip, turns=70, min_compactions=2,
+                          faults=[{"kind": "clean_exit_before_turn", "turn": 41}] if ip else [],
+                          bars=list(DRAIN_BARS), drain={"phase2_turn": 41, "hold_seconds": 10.0},
+                          doc="Data, not a gate (ci.NON_GATE): turns 1-40 store a backlog over >= 2 compactions, then "
+                              "the host session ends (in-place: a clean host exit before turn 41 and an ACP restore; "
+                              "rotation: the compaction rotation), so stored raw rows not yet summarized are no longer "
+                              "in the host's list; turns 41-70 run on the new list. Per compaction the observer "
+                              "records the list handed to compress, the list returned and how many host rows a leaf "
+                              "replaced (scorers/drain.py D1-D3). Expected to FAIL on main: that is the measurement."))
         for tr in ("acp-history", "gateway-reload"):
             cells.append(cell(f"crash-after-compaction/{m}/{tr}", [553, 561], in_place=ip,
                               transport="acp" if tr == "acp-history" else "gateway", faults=[crash],
@@ -154,7 +165,7 @@ def registry() -> list[dict]:
 
 def validate(c: dict) -> None:
     assert c["transport"] in TRANSPORTS, c["id"]
-    assert set(c["bars"]) <= set(BARS), c["id"]
+    assert set(c["bars"]) <= set(BARS + DRAIN_BARS), c["id"]
     assert {f["kind"] for f in c["faults"]} <= FAULTS, c["id"]
     assert c["window"] in (128000, 1000000), c["id"]
     assert all(t in ISSUES or t in (483, 494, 519) for t in c["targets"]), c["id"]

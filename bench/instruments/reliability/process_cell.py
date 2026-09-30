@@ -30,7 +30,7 @@ SANDBOX = ('(version 1)(allow default)(deny network-outbound)(allow network-outb
            '(allow network-outbound (remote unix-socket))')
 FAKE_KEY = "rel-fake-key-not-a-secret"
 PROCESS_FAULTS = {"acp-process": {"crash_after_compaction_before_reply", "cancel_then_retry",
-                                   "crash_after_rotation_before_child_row"}}
+                                   "crash_after_rotation_before_child_row", "clean_exit_before_turn"}}
 # R2-only: the main route over the Anthropic Messages API (a ``/anthropic`` base path selects the anthropic_messages
 # transport, hermes_cli/runtime_provider.py _detect_api_mode_for_url); the #550 class.
 R2_CELLS = [{**C.cell("anthropic-route/acp-process", [], in_place=True,
@@ -308,7 +308,11 @@ class ProcessCell:
             else:  # ACP _restore: the stable ACP id, restored from state.db by the fresh process
                 self.proc.load_session(self.sid, self.files, self.budget())
             cancel = next((f for f in self.cell["faults"] if f["kind"] == "cancel_then_retry"), None)
+            clean = next((f for f in self.cell["faults"] if f["kind"] == "clean_exit_before_turn"), None)
             for t in P1.extend_turns(self.cell, first, self.low_backlog):
+                if clean and t == clean.get("turn") and t != first and "clean_exit_before_turn" not in self.fired:
+                    self.fire("clean_exit_before_turn", t)  # between turns: stdin EOF + SIGTERM (close), no SIGKILL
+                    return {"exit": "clean_exit", "next_turn": t}
                 if cancel and t == cancel["turn"] and "cancel_then_retry" not in self.fired:
                     self.turn(t, "cancel")
                     end = [n for n in self.notes("turn_end") if n["tag"] == f"T{t:02d}" and n["turn_kind"] == "cancel"]
@@ -447,7 +451,7 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
             last = run.run_phase(first)
             (d / f"phase-{phase}.json").write_text(json.dumps(run.phase_record(first, last), indent=1, default=str))
             phases.append(phase)
-            if last["exit"] != "crash":
+            if last["exit"] not in ("crash", "clean_exit"):
                 break
             first = last["next_turn"]
     finally:

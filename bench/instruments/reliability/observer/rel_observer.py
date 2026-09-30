@@ -28,7 +28,7 @@ PHASE = os.environ.get("REL_PHASE", "A")
 COMMITTED = '"commit_status":"committed"'
 _lock = threading.Lock()
 cur = {"turn": 0, "prefix": "T", "kind": "normal", "native": 0, "final": False, "commits0": 0}
-counters = {"compacted_turns": [], "lcm_tool_calls": 0, "orphan_drops": 0, "native_max": 0, "failed": []}
+counters = {"compacted_turns": [], "lcm_tool_calls": 0, "orphan_drops": 0, "native_max": 0, "failed": [], "compactions": []}
 logstate = {"commits": 0, "conflicts": 0}
 _depth = threading.local()
 _r1 = None
@@ -179,6 +179,28 @@ def depth0():
         return None
 
 
+def list_counts(messages, result) -> dict:
+    """``in``/``out``: the lengths of the list handed to ``compress`` and of the list it returned;
+    ``host_rows_summarized``: the input rows absent from the output, i.e. the host rows a leaf replaced with a
+    summary. A leaf built only from stored rows the host no longer holds removes none. An input row is retained when
+    the output holds that very dict or, since LCM returns retained rows as equal copies (measured at 2e04a205), an
+    equal dict (``==``: every key, timestamp included) not already matched; ``copied`` counts the latter. Taken
+    from a list captured before the call, so an in-place mutation of the input list cannot hide a row."""
+    if not isinstance(result, list) or not isinstance(messages, list):
+        return {"in": len(messages) if isinstance(messages, list) else None,
+                "out": len(result) if isinstance(result, list) else None, "host_rows_summarized": None, "copied": None}
+    free = {id(m) for m in result}
+    unmatched = [m for m in messages if id(m) not in free]
+    free -= {id(m) for m in messages}
+    pool, copied = [m for m in result if id(m) in free], 0
+    for m in unmatched:
+        k = next((i for i, o in enumerate(pool) if o == m), None)
+        if k is not None:
+            pool.pop(k)
+            copied += 1
+    return {"in": len(messages), "out": len(result), "host_rows_summarized": len(unmatched) - copied, "copied": copied}
+
+
 def patch_engine(agent):
     engine = getattr(agent, "context_compressor", None)
     etype = type(engine)
@@ -188,8 +210,12 @@ def patch_engine(agent):
     orig_compress, orig_tool = etype.compress, etype.handle_tool_call
 
     def traced_compress(self, messages, *args, **kwargs):
+        given, started = list(messages) if isinstance(messages, list) else messages, time.monotonic()
         result = orig_compress(self, messages, *args, **kwargs)
+        secs = round(time.monotonic() - started, 3)
         status = getattr(self, "_last_compression_status", None)
+        counters["compactions"].append({"turn": cur["turn"], **list_counts(given, result), "status": status,
+                                        "final": cur["final"], "secs": secs})
         self._probe_calls, self._probe_status = getattr(self, "_probe_calls", 0) + 1, status
         if status in ("compacted", "host_native"):
             counters["compacted_turns"].append(cur["turn"])
