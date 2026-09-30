@@ -1120,6 +1120,9 @@ def _doctor_repair_level3_apply_text(engine) -> str:
             f"affected_ancestors={len(second['ancestors'])}"
         )
     lines.append("note: raw rows are never changed; a rerun repairs whatever the scan still finds")
+    lines.append("note: run apply while the agent is idle; a condensation in another process that finishes during "
+                 "the apply can still build a parent on the old fragment text (no data is lost; that parent is as it "
+                 "would have been without the repair)")
     return "\n".join(lines)
 
 

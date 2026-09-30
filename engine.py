@@ -442,6 +442,9 @@ class LCMEngine(
         self._config = config or LCMConfig.from_env()
         self._hermes_home = hermes_home
         self._stable_use_lock = threading.Lock()
+        # #667: node ids a condensation has selected, until it publishes or fails; the level 3 repair skips them.
+        self._condensation_inflight_ids: set[int] = set()
+        self._condensation_inflight_lock = threading.Lock()
         self._stable_use_owner_thread: int | None = None
         self._stable_use_closed = False
         self._assertion_extraction_metrics_lock = threading.RLock()
@@ -6793,11 +6796,12 @@ class LCMEngine(
             # Take the first fanin nodes and condense
             to_condense = uncondensed[:fanin]
             try:
-                source_tokens, summary_tokens, level = self._condense_summary_nodes(
-                    to_condense,
-                    focus_topic=focus_topic,
-                    force_overflow=force_overflow,
-                )
+                with self._condensation_in_flight(to_condense):
+                    source_tokens, summary_tokens, level = self._condense_summary_nodes(
+                        to_condense,
+                        focus_topic=focus_topic,
+                        force_overflow=force_overflow,
+                    )
             except SummaryResultRejected:
                 result_rejected = True  # #652: the nodes stay on the frontier
                 break
@@ -6827,6 +6831,18 @@ class LCMEngine(
         if result_rejected:
             self._last_condensation_suppressed_reason = "summary_result_rejected"
         return condensation_passes
+
+    @contextmanager
+    def _condensation_in_flight(self, nodes: List[SummaryNode]):
+        """#667: hold the selected node ids in the in-flight set from selection until publish or failure."""
+        node_ids = {node.node_id for node in nodes}
+        with self._condensation_inflight_lock:
+            self._condensation_inflight_ids |= node_ids
+        try:
+            yield
+        finally:
+            with self._condensation_inflight_lock:
+                self._condensation_inflight_ids -= node_ids
 
     def _condense_summary_nodes(
         self,
@@ -6950,11 +6966,12 @@ class LCMEngine(
                 return passes, "no_same_depth_condensation_group"
             before = self._summary_frontier_tokens()
             try:
-                self._condense_summary_nodes(
-                    group,
-                    focus_topic=focus_topic,
-                    deadline=deadline,
-                )
+                with self._condensation_in_flight(group):
+                    self._condense_summary_nodes(
+                        group,
+                        focus_topic=focus_topic,
+                        deadline=deadline,
+                    )
             except SweepBudgetExhausted:
                 return passes, "time_budget_exhausted"
             except SummaryResultRejected:

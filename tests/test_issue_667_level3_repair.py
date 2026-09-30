@@ -3,11 +3,15 @@
 import hashlib
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
 
+import hermes_lcm.engine as engine_mod
+import hermes_lcm.escalation as escalation_mod
 import hermes_lcm.level3_repair as level3_repair
+from hermes_lcm.maintenance import flush_engine_connections
 from hermes_lcm.command import handle_lcm_command
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode, build_nodes_fts_spec
@@ -168,7 +172,7 @@ def _fake_route(monkeypatch, level=1, on_call=None):
             on_call(len(calls))
         return f"Model summary {len(calls)} at d{depth}.\nExpand for details about: repaired {len(calls)}", level
 
-    monkeypatch.setattr(level3_repair, "summarize_with_escalation", fake)
+    monkeypatch.setattr(level3_repair, "summarize_with_escalation", fake, raising=False)  # red on behaviour
     return calls
 
 
@@ -226,7 +230,7 @@ def test_apply_skips_a_group_with_missing_raw_rows(engine, monkeypatch):
     result = handle_lcm_command("doctor repair level3 apply", engine)
 
     assert "status: partial" in result and "summariser_calls: 0" in result and "backup_path" not in result
-    assert f"skipped — sources missing: node {leaf} (session s1) 1/2 stored" in result
+    assert f"skipped — sources missing: node {leaf} (session s1) 1/2 message rows stored" in result
     assert calls == [] and _texts(engine) == before
 
 
@@ -235,7 +239,7 @@ def test_apply_refuses_before_backup_while_no_route(engine, monkeypatch):
     db_path = Path(engine._store.db_path)
     state = _file_state(db_path)
     calls = _fake_route(monkeypatch)
-    monkeypatch.setattr(level3_repair, "summary_route_available", lambda *_args: False)
+    monkeypatch.setattr(level3_repair, "summary_route_available", lambda *_args: False, raising=False)
 
     result = handle_lcm_command("doctor repair level3 apply", engine)
 
@@ -283,7 +287,7 @@ def test_tool_path_never_writes(engine):
 
     payload = json.loads(engine.handle_tool_call("lcm_doctor", {"action": "repair_level3", "apply": True}))
 
-    assert "operator-only" in payload["error"]
+    assert "operator-only" in payload.get("error", "")
     assert _file_state(db_path) == state and not engine.backup_dir().exists()
 
 
@@ -292,7 +296,7 @@ def test_a_crash_between_group_commits_leaves_a_consistent_store_and_a_rerun_com
     rows = _rows(engine, "s1", 1)
     lone = _node(engine, "s1", 0, _deterministic_truncate(LONG_SOURCE, 512), rows)  # a second group
     _fake_route(monkeypatch)
-    real_commit, commits = level3_repair._commit_group, []
+    real_commit, commits = getattr(level3_repair, "_commit_group", None), []
 
     def crash_on_second(*args):
         commits.append(1)
@@ -300,7 +304,7 @@ def test_a_crash_between_group_commits_leaves_a_consistent_store_and_a_rerun_com
             raise RuntimeError("injected crash")
         return real_commit(*args)
 
-    monkeypatch.setattr(level3_repair, "_commit_group", crash_on_second)
+    monkeypatch.setattr(level3_repair, "_commit_group", crash_on_second, raising=False)
     with pytest.raises(RuntimeError):
         handle_lcm_command("doctor repair level3 apply", engine)
 
@@ -308,7 +312,129 @@ def test_a_crash_between_group_commits_leaves_a_consistent_store_and_a_rerun_com
     assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert check_external_content_fts_integrity(conn, build_nodes_fts_spec())["status"] == "pass"
     assert [item["node_id"] for item in level3_repair.scan_level3_fragments(engine)["flagged"]] == [lone]
-    monkeypatch.setattr(level3_repair, "_commit_group", real_commit)
+    monkeypatch.setattr(level3_repair, "_commit_group", real_commit, raising=False)
     result = handle_lcm_command("doctor repair level3 apply", engine)
     assert f"top node {lone}): repaired" in result and "second_scan: flagged_leaves=0" in result
     assert ids["truncated"] not in {item["node_id"] for item in level3_repair.scan_level3_fragments(engine)["flagged"]}
+
+
+# -- Round 3: the #689 review findings ---------------------------------------------------------------------------
+
+
+def test_m1_an_ancestor_with_a_missing_child_skips_the_whole_group(engine, monkeypatch):
+    rows = _rows(engine, "s1", 1)
+    fragment = _node(engine, "s1", 0, _deterministic_truncate(LONG_SOURCE, 512), rows)
+    parent = _node(engine, "s1", 1, "Arc: the fragment and a sibling that is gone.", [fragment, 999_999], "nodes")
+    before = _texts(engine)
+    calls = _fake_route(monkeypatch)
+
+    result = handle_lcm_command("doctor repair level3 apply", engine)
+
+    assert f"skipped — sources missing: node {parent} (session s1) 1/2 child nodes stored" in result
+    assert calls == [] and _texts(engine) == before and "backup_path" not in result
+
+
+def test_m2_a_group_a_live_condensation_selected_is_rolled_back(engine, monkeypatch):
+    rows = _rows(engine, "s1", 4)
+    fragment = _node(engine, "s1", 0, _deterministic_truncate(LONG_SOURCE, 512), rows[:1])
+    for row in rows[1:]:
+        _node(engine, "s1", 0, f"Healthy leaf {row}.", [row])
+    old_text = engine._dag.get_node(fragment).summary
+    _fake_route(monkeypatch)
+    repair_output = []
+
+    def live_condensation_summary(**_kwargs):  # the repair runs while the condensation waits on its summariser
+        repair_output.append(handle_lcm_command("doctor repair level3 apply", engine))
+        return "Arc summary of four leaves.", 1
+
+    monkeypatch.setattr(engine_mod, "summarize_with_escalation", live_condensation_summary)
+    assert engine._maybe_condense() == 1
+
+    assert (f"rolled back — a condensation in flight uses node {fragment}; run apply again when the agent is idle"
+            in repair_output[0])
+    assert engine._dag.get_node(fragment).summary == old_text
+    assert not engine._condensation_inflight_ids
+    rerun = handle_lcm_command("doctor repair level3 apply", engine)  # the new parent is found and repaired too
+    assert "groups_repaired: 1" in rerun and "nodes_repaired: 2" in rerun and "second_scan: flagged_leaves=0" in rerun
+
+
+def test_m3_the_backup_flush_waits_for_an_open_dag_transaction(engine):
+    done = threading.Event()
+    with engine._dag._db_lock:
+        engine._dag.connection.execute("BEGIN IMMEDIATE")
+        engine._dag.connection.execute("INSERT INTO metadata(key, value) VALUES('lcm_667_probe', 'x')")
+        flusher = threading.Thread(target=lambda: (flush_engine_connections(engine), done.set()))
+        flusher.start()
+        assert not done.wait(0.3)  # the flush does not commit the transaction this thread owns
+        engine._dag.connection.rollback()
+    flusher.join(5)
+    assert done.is_set()
+    assert engine._dag.connection.execute("SELECT 1 FROM metadata WHERE key = 'lcm_667_probe'").fetchone() is None
+
+
+def test_n2_a_repaired_ancestor_carries_its_children_token_counts(engine, monkeypatch):
+    ids = _build_store(engine)
+    _fake_route(monkeypatch)
+
+    handle_lcm_command("doctor repair level3 apply", engine)
+
+    for parent in (ids["parent"], ids["grandparent"]):
+        node = engine._dag.get_node(parent)
+        assert node.source_token_count == sum(engine._dag.get_node(i).token_count for i in node.source_ids)
+
+
+def test_n3_the_provenance_level_follows_the_repair(engine, monkeypatch):
+    ids = _build_store(engine)
+    conn = engine._dag.connection
+    conn.execute("CREATE TABLE summary_node_provenance (node_id INTEGER PRIMARY KEY, escalation_level INTEGER "
+                 "NOT NULL, model TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL)")
+    conn.executemany("INSERT INTO summary_node_provenance VALUES (?, ?, 'm', 7)",
+                     [(ids["truncated"], 3), (ids["parent"], 2), (ids["other_parent"], 2)])
+    conn.commit()
+    _fake_route(monkeypatch)
+
+    assert "status: ok" in handle_lcm_command("doctor repair level3 apply", engine)
+
+    assert dict((r[0], r[1:]) for r in conn.execute("SELECT * FROM summary_node_provenance")) == {
+        ids["truncated"]: (1, "m", 7.0), ids["parent"]: (1, "m", 7.0), ids["other_parent"]: (2, "m", 7.0)}
+
+
+def test_n4_repair_rejections_do_not_touch_the_live_route_keys(engine, monkeypatch):
+    _build_store(engine)
+    monkeypatch.setattr(escalation_mod, "_invoke_summary_llm", lambda *_a, **_k: LONG_SOURCE * 2)  # never shorter
+
+    result = handle_lcm_command("doctor repair level3 apply", engine)
+
+    assert "summary route refused at node" in result
+    breaker = engine._summary_circuit_breaker
+    assert breaker._rejections == {"repair:": 2} and not breaker._open_until
+
+
+def test_a_failed_backup_writes_nothing(engine, monkeypatch):
+    _build_store(engine)
+    before = _texts(engine)
+    calls = _fake_route(monkeypatch)
+    monkeypatch.setattr(level3_repair, "backup_database",
+                        lambda _engine: {"ok": False, "db_path": "x", "error": "disk full"}, raising=False)
+
+    result = handle_lcm_command("doctor repair level3 apply", engine)
+
+    assert "status: error" in result and "backup failed: disk full; nothing was changed" in result
+    assert calls == [] and _texts(engine) == before
+
+
+def test_a_text_changed_between_read_and_commit_rolls_back(engine, monkeypatch):
+    ids = _build_store(engine)
+
+    def edit(call_number):
+        if call_number == 2:
+            engine._dag.connection.execute(
+                "UPDATE summary_nodes SET summary = 'edited elsewhere' WHERE node_id = ?", (ids["parent"],))
+            engine._dag.connection.commit()
+
+    _fake_route(monkeypatch, on_call=edit)
+
+    result = handle_lcm_command("doctor repair level3 apply", engine)
+
+    assert "rolled back — a node changed or a new parent linked in during the repair" in result
+    assert _L3_TRUNCATION_MARKER in engine._dag.get_node(ids["truncated"]).summary

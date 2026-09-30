@@ -20,8 +20,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   nothing. `/lcm doctor repair level3 apply` (slash command only) takes a backup, then re-summarises each affected
   group in place from the stored raw rows, leaves first and each condensed node from its repaired children, one
   transaction per group; node ids, source links and raw rows are kept and the summary FTS index is updated in the same
-  transaction. It refuses while no summary route is available, never writes a level 3 result, skips a group whose raw
-  rows are incomplete, rolls a group back if it changed during the repair, and ends with a second scan. (#667)
+  transaction. It refuses while no summary route is available, never writes a level 3 result, skips a group with any
+  source row or child node missing, rolls a group back if it changed during the repair, and ends with a second scan. (#667)
 
 ## v0.24.7 - (unreleased; rc2) (P0 for long-running sessions: the survival fit keeps the summary, no in-turn thrash below the threshold, no level-3 fragments, a bounded summary prefix, steer rows stored)
 

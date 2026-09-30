@@ -7,6 +7,7 @@ condensations were then built from those fragments.
 from __future__ import annotations
 
 import json
+import threading
 from collections import Counter, defaultdict
 from typing import Any
 
@@ -16,6 +17,16 @@ from .tokens import count_messages_tokens, count_tokens
 from .vector_store import VectorStore
 
 _PROVENANCE_TABLE = "summary_node_provenance"  # #649 sidecar (escalation_level per node), when a store has it
+
+
+def _stored_sources(conn, source_ids: str, source_type: str) -> tuple[list[int], int]:
+    """A node's distinct source ids and how many of them are still stored (message rows or child nodes)."""
+    ids = sorted({int(value) for value in json.loads(source_ids or "[]")})
+    table, key = ("messages", "store_id") if source_type == "messages" else ("summary_nodes", "node_id")
+    stored = conn.execute(
+        f"SELECT COUNT(*) FROM {table} WHERE {key} IN (SELECT value FROM json_each(?))", (json.dumps(ids),)
+    ).fetchone()[0]
+    return ids, int(stored)
 
 
 def scan_level3_fragments(engine) -> dict[str, Any]:
@@ -50,11 +61,7 @@ def scan_level3_fragments(engine) -> dict[str, Any]:
                 tokens = min(tokens, int(token_count))  # the count stored at write time
             if tokens > bound:
                 continue
-        ids = sorted({int(value) for value in json.loads(source_ids or "[]")})
-        table, key = ("messages", "store_id") if source_type == "messages" else ("summary_nodes", "node_id")
-        stored = conn.execute(
-            f"SELECT COUNT(*) FROM {table} WHERE {key} IN (SELECT value FROM json_each(?))", (json.dumps(ids),)
-        ).fetchone()[0]
+        ids, stored = _stored_sources(conn, source_ids, source_type)
         flagged.append({
             "node_id": int(node_id), "session_id": session_id, "depth": int(depth),
             "leaf": source_type == "messages", "sources": len(ids), "sources_stored": int(stored),
@@ -111,8 +118,8 @@ def _groups(conn, scan: dict[str, Any]) -> tuple[dict[int, tuple], list[list[int
     return rows, [sorted(group, key=lambda i: (rows[i][2], i)) for group in sorted(members.values(), key=min)]
 
 
-def _summarise_group(engine, rows, group, result) -> tuple[dict[int, tuple[str, int, int]], str]:
-    """New (text, tokens, level) per node, leaves first and each ancestor from its repaired children."""
+def _summarise_group(engine, rows, group, result) -> tuple[dict[int, tuple[str, int, int, int | None]], str]:
+    """New (text, tokens, level, source tokens) per node, leaves first and each ancestor from its repaired children."""
     cfg, new = engine._config, {}
     for node_id in group:
         depth, source_ids, source_type = rows[node_id][2], json.loads(rows[node_id][5] or "[]"), rows[node_id][6]
@@ -120,7 +127,7 @@ def _summarise_group(engine, rows, group, result) -> tuple[dict[int, tuple[str, 
             by_id = engine._store.get_batch(sorted({int(i) for i in source_ids}))
             messages = [by_id[i] for i in sorted(by_id)]
             text, source_tokens = engine._serialize_messages(messages), count_messages_tokens(messages)
-            budget = engine._leaf_target_tokens(source_tokens)
+            budget, new_source_tokens = engine._leaf_target_tokens(source_tokens), None
         else:
             children = []
             for child_id in (int(i) for i in source_ids):
@@ -128,8 +135,10 @@ def _summarise_group(engine, rows, group, result) -> tuple[dict[int, tuple[str, 
                     children.append(new[child_id][:2])
                 elif (child := engine._dag.get_node(child_id)) is not None:
                     children.append((child.summary, child.token_count))
+                else:  # never an ancestor from a subset of its children (#667 review M1)
+                    return {}, f"source node {child_id} of node {node_id} is missing"
             text, source_tokens = "\n\n---\n\n".join(c[0] for c in children), sum(c[1] for c in children)
-            budget = max(1000, int(source_tokens * 0.40))
+            budget, new_source_tokens = max(1000, int(source_tokens * 0.40)), source_tokens
         result["calls"] += 1
         try:
             summary, level = summarize_with_escalation(
@@ -138,19 +147,21 @@ def _summarise_group(engine, rows, group, result) -> tuple[dict[int, tuple[str, 
                 circuit_breaker=engine._summary_circuit_breaker, spend_guard=engine._summary_spend_guard,
                 timeout=cfg.summary_timeout_ms / 1000, l2_budget_ratio=cfg.l2_budget_ratio,
                 l3_truncate_tokens=cfg.l3_truncate_tokens, custom_instructions=cfg.custom_instructions,
+                route_key_prefix="repair:",  # repair rejections never count against the live route's keys
             )
         except Exception as exc:
             return {}, f"summariser error at node {node_id}: {exc}"
         if level == 3:  # a truncation or a verbatim copy: never written by a repair
             return {}, f"summary route refused at node {node_id} (level 3)"
-        new[node_id] = (summary, count_tokens(summary), level)
+        new[node_id] = (summary, count_tokens(summary), level, new_source_tokens)
     return new, ""
 
 
-def _commit_group(engine, rows, group, new) -> bool:
-    """Replace the group's texts in place in one transaction, or roll back if the group changed since it was read."""
+def _commit_group(engine, rows, group, new) -> str:
+    """Replace the group's texts in place in one transaction; return why it was rolled back, or "" once committed."""
     conn, group_json = engine._dag.connection, json.dumps(group)
-    has_fts = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'nodes_fts'").fetchone()
+    tables = {row[0] for row in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('nodes_fts', ?)", (_PROVENANCE_TABLE,))}
     with engine._dag._db_lock:
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -161,14 +172,25 @@ def _commit_group(engine, rows, group, new) -> bool:
                 "SELECT 1 FROM summary_nodes p, json_each(p.source_ids) j WHERE p.source_type = 'nodes' "
                 "AND CAST(j.value AS INTEGER) IN (SELECT value FROM json_each(?)) "
                 "AND p.node_id NOT IN (SELECT value FROM json_each(?)) LIMIT 1", (group_json, group_json)).fetchone()
+            with getattr(engine, "_condensation_inflight_lock", threading.Lock()):
+                in_flight = sorted(set(group) & set(getattr(engine, "_condensation_inflight_ids", ())))
+            if in_flight:
+                conn.rollback()
+                return (f"a condensation in flight uses node {in_flight[0]}; "
+                        "run apply again when the agent is idle")
             if new_parent or any(current.get(i) != rows[i][3] for i in group):
                 conn.rollback()
-                return False
+                return "a node changed or a new parent linked in during the repair"
             for node_id in group:
-                text, tokens, _level = new[node_id]
-                conn.execute("UPDATE summary_nodes SET summary = ?, token_count = ?, expand_hint = ? WHERE node_id = ?",
-                             (text, tokens, engine._extract_expand_hint(text), node_id))
-                if has_fts:  # nodes_fts has no update trigger: mirror its delete + insert triggers
+                text, tokens, level, source_tokens = new[node_id]
+                conn.execute(
+                    "UPDATE summary_nodes SET summary = ?, token_count = ?, expand_hint = ?, "
+                    "source_token_count = COALESCE(?, source_token_count) WHERE node_id = ?",
+                    (text, tokens, engine._extract_expand_hint(text), source_tokens, node_id))
+                if _PROVENANCE_TABLE in tables:  # #649 sidecar: the repaired node's level, other columns kept
+                    conn.execute(f"UPDATE {_PROVENANCE_TABLE} SET escalation_level = ? WHERE node_id = ?",
+                                 (level, node_id))
+                if "nodes_fts" in tables:  # nodes_fts has no update trigger: mirror its delete + insert triggers
                     conn.execute("INSERT INTO nodes_fts(nodes_fts, rowid, summary) VALUES('delete', ?, ?)",
                                  (node_id, rows[node_id][3]))
                     conn.execute("INSERT INTO nodes_fts(rowid, summary) VALUES(?, ?)", (node_id, text))
@@ -178,24 +200,28 @@ def _commit_group(engine, rows, group, new) -> bool:
         except BaseException:
             conn.rollback()
             raise
-    return True
+    return ""
 
 
 def repair_level3_fragments(engine) -> dict[str, Any]:
     """#667 apply: re-summarise each connected group in place, backup first; refuse while no route is available."""
     scan = scan_level3_fragments(engine)
-    flagged = {item["node_id"]: item for item in scan["flagged"]}
-    rows, groups = _groups(engine._dag.connection, scan)
+    flagged = {item["node_id"] for item in scan["flagged"]}
+    conn = engine._dag.connection
+    rows, groups = _groups(conn, scan)
     result: dict[str, Any] = {"status": "ok", "reason": "", "backup": None, "groups": [], "calls": 0}
     for group in groups:
-        missing = [flagged[i] for i in group if i in flagged and flagged[i]["sources_stored"] < flagged[i]["sources"]]
+        missing = []  # any node of the group, fragment or ancestor, with a source that is no longer stored (M1)
+        for i in group:
+            ids, stored = _stored_sources(conn, rows[i][5], rows[i][6])
+            if stored < len(ids):
+                kind = "message rows" if rows[i][6] == "messages" else "child nodes"
+                missing.append(f"node {i} (session {rows[i][1]}) {stored}/{len(ids)} {kind} stored")
         result["groups"].append({
             "nodes": [(i, rows[i][2], "fragment" if i in flagged else "ancestor") for i in group],
             "top": group[-1], "session_id": rows[group[-1]][1], "levels": {},
             "outcome": "skipped" if missing else "pending",
-            "reason": "sources missing: " + ", ".join(
-                f"node {m['node_id']} (session {m['session_id']}) {m['sources_stored']}/{m['sources']} stored"
-                for m in missing) if missing else "",
+            "reason": "sources missing: " + ", ".join(missing) if missing else "",
         })
     todo = [(entry, group) for entry, group in zip(result["groups"], groups) if entry["outcome"] == "pending"]
     if todo:
@@ -211,10 +237,10 @@ def repair_level3_fragments(engine) -> dict[str, Any]:
         new, refusal = _summarise_group(engine, rows, group, result)
         if refusal:
             entry.update(outcome="skipped", reason=refusal)
-        elif _commit_group(engine, rows, group, new):
-            entry.update(outcome="repaired", levels={i: new[i][2] for i in group})
+        elif rollback := _commit_group(engine, rows, group, new):
+            entry.update(outcome="rolled back", reason=rollback)
         else:
-            entry.update(outcome="rolled back", reason="a node changed or a new parent linked in during the repair")
+            entry.update(outcome="repaired", levels={i: new[i][2] for i in group})
     if any(entry["outcome"] != "repaired" for entry in result["groups"]):
         result["status"] = "partial"
     result["second_scan"] = scan_level3_fragments(engine)
