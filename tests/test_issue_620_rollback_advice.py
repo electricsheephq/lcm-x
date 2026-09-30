@@ -22,7 +22,7 @@ from hermes_lcm.survival_fit import SURVIVAL_FIT_COUNTER_KEY
 
 PAD = " alpha beta gamma delta" * 30
 WINDOW = 6000
-RESTORE = "restore the lcm.db backup"
+RESTORE = "restore the database backup"
 COUNTER_FAILED = "LCM survival-fit counter write failed"
 
 

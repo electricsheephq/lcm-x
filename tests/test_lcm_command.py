@@ -560,7 +560,7 @@ def test_lcm_doctor_survival_fit_guidance_names_the_backup_restore_rollback(engi
     for phrase in ("v0.23.3", "LCM_NATIVE_RECOVERY=true", "keep the database file", "never a backup restore",
                    "plugins.enabled", "hermes-lcm", "context.engine: lcm", "config.yaml"):
         assert phrase in line, phrase
-    restore = "restore the lcm.db backup taken before the first v0.24.5 install together with the plugin"
+    restore = "restore the database backup taken before the first v0.24.5 install together with the plugin"
     assert not any("remain in the host session" in text for text in (observation, line))
     assert not any("plugin-only" in text for text in (observation, line))
     assert ("stop Hermes, move the configured database file (by default lcm.db, with its -wal and -shm companions) "
@@ -568,7 +568,7 @@ def test_lcm_doctor_survival_fit_guidance_names_the_backup_restore_rollback(engi
     assert restore in line and "stay in the file you moved aside" in line
     for phrase in ("stop Hermes", "-wal and -shm", "keep it"):  # the observation alone is the whole procedure
         assert phrase in observation, phrase
-    assert "restore the lcm.db backup taken before the first v0.24.5 install with the plugin" in observation
+    assert "restore the database backup taken before the first v0.24.5 install with the plugin" in observation
     assert "rows stored after that backup leave the LCM store" in line
 
 
