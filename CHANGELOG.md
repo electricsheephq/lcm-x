@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Docs: the embedding-dependency recovery note is linked from the README, the operator guide and the bundled skill, and two doctor messages say that a hand-installed dependency (not every optional dependency) can be dropped by a Hermes update. (#702)
+
 ## v0.24.8 - (unreleased; rc1) (repairs: level 3 fragment repair, tool-output stubs that name the read-back call, rollup stop, no silent fallback on a slow load)
 
 - Fix: a summary route that cannot serve its model (HTTP 400/404 whose message names the model as unknown, not
