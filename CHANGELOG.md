@@ -10,6 +10,10 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   produced it, in a new `summary_node_provenance` table written in the node's own transaction. `lcm_describe` shows
   both; `lcm_status` counts nodes by level (`unrecorded` for older and imported nodes, which are not backfilled). No
   schema version change and no new `summary_nodes` column, so a plugin rollback still opens the store. Refs #441
+- Config: the leaf summary target is configurable with `LCM_LEAF_TARGET_RATIO` (default 0.20),
+  `LCM_LEAF_TARGET_MIN_TOKENS` (default 2000) and `LCM_LEAF_TARGET_MAX_TOKENS` (default 12000). With the defaults every
+  target and `max_tokens` value is unchanged; an out-of-range value falls back to its default with a config warning.
+  (#614)
 
 ## v0.24.6 - (unreleased; rc1) (#628, #627: a summary circuit that counts rejections apart from failures, and images priced per image)
 
