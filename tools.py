@@ -8156,6 +8156,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         "identity_migration": full_status.get("identity_migration"),
         "lifecycle": lifecycle,
         "lifecycle_fragmentation": lifecycle_fragmentation,
+        "summary_route": engine._summary_route_status(),
     })
 
 

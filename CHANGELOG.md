@@ -6,6 +6,14 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: a summary route that cannot serve its model (HTTP 400/404 with an unknown-model, model-not-found, "does not
+  exist" or not-supported message) opens its circuit on the first failure instead of the second, so level 2 is not
+  attempted, and logs one WARNING per episode that names the provider and model the host used (`route_info`, on
+  hosts that take it), says whether LCM-X sent a model, and names the fix (`auxiliary.compression.provider` +
+  `auxiliary.compression.model` in the profile's `config.yaml`, or a consistent `model.provider` / `model.default`
+  pair). Repeats log at DEBUG; a success ends the episode. Other failures keep the threshold and cooldown. `lcm_status`
+  gains `summary_route` (`state`, `seconds_left`, `last_error_class`, `provider`, `model`). The circuit is still keyed
+  by the configured model, not by the effective route. (#682)
 ## v0.24.7 - (unreleased; rc2) (P0 for long-running sessions: the survival fit keeps the summary, no in-turn thrash below the threshold, no level-3 fragments, a bounded summary prefix, steer rows stored)
 
 - Config: the leaf summary target is configurable with `LCM_LEAF_TARGET_RATIO` (default 0.20),

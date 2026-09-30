@@ -1590,6 +1590,11 @@ class LCMEngine(
         return self._summary_circuit_breaker.seconds_until_allowed(
             _summary_model_chain(self._config.summary_model, self._config.summary_fallback_models))
 
+    def _summary_route_status(self) -> Dict[str, Any]:
+        """#682: the ``summary_route`` field of lcm_status."""
+        return self._summary_circuit_breaker.route_status(
+            _summary_model_chain(self._config.summary_model, self._config.summary_fallback_models))
+
     def _sweep_budget_hold_active(self) -> bool:
         """#608: return true while a no-leaf sweep budget stop holds the threshold answer."""
         if self._sweep_budget_hold_until <= 0:
