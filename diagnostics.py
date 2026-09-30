@@ -157,17 +157,19 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
         warning_only = True
         rationale = "context pressure is an operating state, not persisted-state corruption"
     elif name == "survival_fit":
-        within = ("within the 0.24.x line an older plugin cannot compact stored rows that a survival fit removed "
-                  "from the live context, with or without a projection, so stop Hermes, move the current lcm.db "
-                  "(with its -wal and -shm files) aside and keep it, then restore the lcm.db backup taken before the "
-                  "first v0.24.5 install together with the plugin (rows stored after that backup leave the LCM store "
-                  "and stay in the file you moved aside)")
+        within = ("to a 0.24.x version older than v0.24.5, that plugin cannot compact stored rows that a survival fit "
+                  "removed from the live context, with or without a projection, so stop Hermes, move the configured "
+                  "database file (by default lcm.db, with its -wal and -shm companions) aside and keep it, then "
+                  "restore the database backup taken before the first v0.24.5 install together with the plugin (rows "
+                  "stored after that backup leave the LCM store and stay in the file you moved aside); a rollback of "
+                  "the plugin alone to v0.24.5 or later is fine")
         command = ("inspect the 'LCM survival fit applied' log lines and the compaction failure reason; the dropped "
                    "turns stay stored verbatim (lcm_grep / lcm_load_session); nothing needs deleting. Rollback "
-                   f"(#601, #603): {within}. To v0.23.3: reinstall it with LCM_NATIVE_RECOVERY=true and keep lcm.db "
-                   "as it is — never with native recovery off, and never a backup restore (it drops rows and does "
-                   "not avoid the conflict) — and revert the v0.24.0 config migration (plugins.enabled back to "
-                   "hermes-lcm, context.engine: lcm; restore the pre-migration config.yaml) before restarting Hermes.")
+                   f"(#601, #603): {within}. To v0.23.3: reinstall it with LCM_NATIVE_RECOVERY=true and keep the "
+                   "database file as it is — never with native recovery off, and never a backup restore (it drops "
+                   "rows and does not avoid the conflict) — and revert the v0.24.0 config migration (plugins.enabled "
+                   "back to hermes-lcm, context.engine: lcm; restore the pre-migration config.yaml) before restarting "
+                   "Hermes.")
         warning_only = True
         rationale = "a survival fit kept an over-window session alive; it points at a compaction that could not publish"
     elif name == "cleanup_candidates":

@@ -25,8 +25,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix: a message whose structured content holds an image counts the image at the host's per-image price (default
   1,500) instead of the characters of the encoded image, so one screenshot no longer counts as about 130,000 tokens
   and no longer forces a compaction or cuts the fresh tail. Image data inside plain text still counts as text. (#627)
+- Docs: the rollback advice names its target 'a version older than v0.24.5' and the configured database file. (#620)
 
-## v0.24.5 - (unreleased; rc2) (#581, #582, #594: summaries sourced from the store, and a survival fit)
+## v0.24.5 - 2026-09-29 (#581, #582, #594: summaries sourced from the store, and a survival fit)
 
 - Fix: a leaf summary can cover stored rows the host no longer shows (rows the host compacted in place while native
   recovery was ON, older duplicate copies); the leaf input is a bounded, contiguous run of the conversation's stored

@@ -1710,16 +1710,17 @@ def _doctor_text(engine) -> str:
         fit_count = None
     if fit_count != 0:
         projected = survival_fit.get("projected_count")  # absent on a record from before the key: unknown
-        within = ("rollback within the 0.24.x line: an older plugin cannot compact stored rows that a survival fit "
-                  "removed from the live context; stop Hermes, move the current lcm.db (with its -wal and -shm files) "
-                  "aside and keep it, then restore the lcm.db backup taken before the first v0.24.5 install with the "
-                  "plugin")
+        within = ("rollback to a 0.24.x version older than v0.24.5: that plugin cannot compact stored rows that a "
+                  "survival fit removed from the live context; stop Hermes, move the configured database file (by "
+                  "default lcm.db, with its -wal and -shm companions) aside and keep it, then restore the database "
+                  "backup taken before the first v0.24.5 install with the plugin; a rollback of the plugin alone to "
+                  "v0.24.5 or later is fine")
         applied = ("applied an unknown number of times (the stored count is unreadable)" if fit_count is None
                    else f"applied {fit_count} time(s)")
         observations.append(f"survival_fit: {applied}; last reason "
                             f"{survival_fit.get('last_reason') or '(unknown)'}; projected_count "
                             f"{'unknown' if projected is None else projected}; {within}; a rollback to v0.23.3 "
-                            "keeps lcm.db and needs native recovery ON (see triage_guidance)")
+                            "keeps the database file and needs native recovery ON (see triage_guidance)")
         triage_checks.append({"check": "survival_fit", "status": "warn", "detail": survival_fit})
     triage_guidance = doctor_guidance_for_checks(triage_checks)
 

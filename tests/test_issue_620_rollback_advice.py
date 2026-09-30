@@ -22,7 +22,7 @@ from hermes_lcm.survival_fit import SURVIVAL_FIT_COUNTER_KEY
 
 PAD = " alpha beta gamma delta" * 30
 WINDOW = 6000
-RESTORE = "restore the lcm.db backup"
+RESTORE = "restore the database backup"
 COUNTER_FAILED = "LCM survival-fit counter write failed"
 
 
@@ -78,8 +78,9 @@ def _survival_lines(doctor: str) -> tuple[str, str]:
 
 
 def test_drop_only_fit_gets_the_backup_restore_advice(tmp_path, monkeypatch):
-    """After a drop-only fit (count 1, projected_count 0) neither the observation nor the triage
-    guidance calls a plugin-only rollback supported; both name the backup restore."""
+    """After a drop-only fit (count 1, projected_count 0) both the observation and the triage guidance name the
+    backup restore for a rollback to a version older than v0.24.5 and say that a rollback of the plugin alone to
+    v0.24.5 or later is fine."""
     engine = _engine(tmp_path)
     try:
         history, fitted = _fit_after_a_summary_outage(engine, monkeypatch)
@@ -89,8 +90,9 @@ def test_drop_only_fit_gets_the_backup_restore_advice(tmp_path, monkeypatch):
         observation, guidance = _survival_lines(handle_lcm_command("doctor", engine))
         assert "projected_count 0" in observation
         for text in (observation, guidance):
-            assert "plugin-only" not in text
             assert RESTORE in text
+            assert "older than v0.24.5" in text
+            assert "the plugin alone to v0.24.5 or later is fine" in text
     finally:
         engine.shutdown()
 
