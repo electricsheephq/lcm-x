@@ -369,6 +369,9 @@ def _check_summary_contract(content: str, nonce: str, max_tokens: int) -> tuple[
         if not plain:
             return "", "closing_hint", ()
         body = body[: len(body) - len(raw_last_line)] + plain
+        if count_tokens(body) < minimum_body_tokens:
+            # Accept a decorated reply only if its plain form would be accepted.
+            return "", "short_body", ()
         tolerated.append("hint_decoration")
     return body, "", tuple(tolerated)
 

@@ -95,6 +95,16 @@ def test_t2_other_violations_are_rejected_with_their_check(reply, expected):
     assert escalation._unwrap_summary_contract(reply, NONCE, MAX_TOKENS) == ""
 
 
+def test_t2_a_decorated_reply_is_accepted_only_if_its_plain_form_would_be():
+    quotes = '"' * 32
+    decorated = f"{OPEN}\n{quotes}Expand for details about: x{quotes}\n{CLOSE}"
+    assert escalation.count_tokens(f"{quotes}Expand for details about: x{quotes}") >= 10  # passes the minimum
+    assert _check(f"{OPEN}\nExpand for details about: x\n{CLOSE}") == ("", "short_body", ())
+    assert _check(decorated) == ("", "short_body", ())
+    # A real body before the decorated hint is still accepted with the same plain body.
+    assert _check(f'{OPEN}\n{LINES}\n{quotes}{HINT}{quotes}\n{CLOSE}') == (PLAIN_BODY, "", ("hint_decoration",))
+
+
 def test_t2_the_no_nonce_path_is_unchanged():
     assert escalation._unwrap_summary_contract("anything at all", "", MAX_TOKENS) == "anything at all"
     assert escalation._check_summary_contract("anything at all", "", MAX_TOKENS) == ("anything at all", "", ())
