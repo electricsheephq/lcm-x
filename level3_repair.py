@@ -11,7 +11,9 @@ import threading
 from collections import Counter, defaultdict
 from typing import Any
 
-from .escalation import _L3_TRUNCATION_MARKER, summarize_with_escalation, summary_route_available
+from .escalation import (
+    _L3_TRUNCATION_MARKER, SummarySpendGuard, summarize_with_escalation, summary_route_available,
+)
 from .maintenance import backup_database
 from .tokens import count_messages_tokens, count_tokens
 from .vector_store import VectorStore
@@ -118,8 +120,8 @@ def _groups(conn, scan: dict[str, Any]) -> tuple[dict[int, tuple], list[list[int
     return rows, [sorted(group, key=lambda i: (rows[i][2], i)) for group in sorted(members.values(), key=min)]
 
 
-def _summarise_group(engine, rows, group, result) -> tuple[dict[int, tuple[str, int, int, int | None]], str]:
-    """New (text, tokens, level, source tokens) per node, leaves first and each ancestor from its repaired children."""
+def _summarise_group(engine, rows, group, result, spend_guard) -> tuple[dict[int, tuple[str, int, int, int | None, str]], str]:
+    """New (text, tokens, level, source tokens, model) per node, leaves first and each ancestor from its repaired children."""
     cfg, new = engine._config, {}
     for node_id in group:
         depth, source_ids, source_type = rows[node_id][2], json.loads(rows[node_id][5] or "[]"), rows[node_id][6]
@@ -140,11 +142,13 @@ def _summarise_group(engine, rows, group, result) -> tuple[dict[int, tuple[str, 
             text, source_tokens = "\n\n---\n\n".join(c[0] for c in children), sum(c[1] for c in children)
             budget, new_source_tokens = max(1000, int(source_tokens * 0.40)), source_tokens
         result["calls"] += 1
+        provenance: dict = {}
         try:
             summary, level = summarize_with_escalation(
                 text=text, source_tokens=source_tokens, token_budget=budget, depth=depth, model=cfg.summary_model,
                 fallback_models=cfg.summary_fallback_models, reasoning_effort=cfg.summary_reasoning_effort,
-                circuit_breaker=engine._summary_circuit_breaker, spend_guard=engine._summary_spend_guard,
+                circuit_breaker=engine._summary_circuit_breaker, spend_guard=spend_guard,  # never the live budget
+                prompt_version=getattr(cfg, "summary_prompt_version", 1), provenance=provenance,
                 timeout=cfg.summary_timeout_ms / 1000, l2_budget_ratio=cfg.l2_budget_ratio,
                 l3_truncate_tokens=cfg.l3_truncate_tokens, custom_instructions=cfg.custom_instructions,
                 route_key_prefix="repair:",  # repair rejections never count against the live route's keys
@@ -153,7 +157,7 @@ def _summarise_group(engine, rows, group, result) -> tuple[dict[int, tuple[str, 
             return {}, f"summariser error at node {node_id}: {exc}"
         if level == 3:  # a truncation or a verbatim copy: never written by a repair
             return {}, f"summary route refused at node {node_id} (level 3)"
-        new[node_id] = (summary, count_tokens(summary), level, new_source_tokens)
+        new[node_id] = (summary, count_tokens(summary), level, new_source_tokens, str(provenance.get("model") or ""))
     return new, ""
 
 
@@ -182,14 +186,14 @@ def _commit_group(engine, rows, group, new) -> str:
                 conn.rollback()
                 return "a node changed or a new parent linked in during the repair"
             for node_id in group:
-                text, tokens, level, source_tokens = new[node_id]
+                text, tokens, level, source_tokens, model = new[node_id]
                 conn.execute(
                     "UPDATE summary_nodes SET summary = ?, token_count = ?, expand_hint = ?, "
                     "source_token_count = COALESCE(?, source_token_count) WHERE node_id = ?",
                     (text, tokens, engine._extract_expand_hint(text), source_tokens, node_id))
-                if _PROVENANCE_TABLE in tables:  # #649 sidecar: the repaired node's level, other columns kept
-                    conn.execute(f"UPDATE {_PROVENANCE_TABLE} SET escalation_level = ? WHERE node_id = ?",
-                                 (level, node_id))
+                if _PROVENANCE_TABLE in tables:  # #649 sidecar: the repair's level and model; created_at kept
+                    conn.execute(f"UPDATE {_PROVENANCE_TABLE} SET escalation_level = ?, model = ? WHERE node_id = ?",
+                                 (level, model, node_id))
                 if "nodes_fts" in tables:  # nodes_fts has no update trigger: mirror its delete + insert triggers
                     conn.execute("INSERT INTO nodes_fts(nodes_fts, rowid, summary) VALUES('delete', ?, ?)",
                                  (node_id, rows[node_id][3]))
@@ -226,15 +230,21 @@ def repair_level3_fragments(engine) -> dict[str, Any]:
     todo = [(entry, group) for entry, group in zip(result["groups"], groups) if entry["outcome"] == "pending"]
     if todo:
         cfg = engine._config
-        if not summary_route_available(cfg.summary_model, cfg.summary_fallback_models, engine._summary_circuit_breaker):
+        if not summary_route_available(cfg.summary_model, cfg.summary_fallback_models, engine._summary_circuit_breaker,
+                                       route_key_prefix="repair:"):  # the keys the repair dispatches on
             return {**result, "status": "refused", "groups": [],
                     "reason": "every summary route is refused; nothing was changed"}
         result["backup"] = backup_database(engine)
         if not result["backup"]["ok"]:
             return {**result, "status": "error", "groups": [],
                     "reason": f"backup failed: {result['backup']['error']}; nothing was changed"}
+    # The repair's own call budget, with the configured limits: a large repair never uses up the live compaction's.
+    cfg = engine._config
+    spend_guard = SummarySpendGuard(max_calls=int(cfg.summary_spend_max_calls),
+                                    window_seconds=float(cfg.summary_spend_window_seconds),
+                                    backoff_seconds=float(cfg.summary_spend_backoff_seconds))
     for entry, group in todo:
-        new, refusal = _summarise_group(engine, rows, group, result)
+        new, refusal = _summarise_group(engine, rows, group, result, spend_guard)
         if refusal:
             entry.update(outcome="skipped", reason=refusal)
         elif rollback := _commit_group(engine, rows, group, new):

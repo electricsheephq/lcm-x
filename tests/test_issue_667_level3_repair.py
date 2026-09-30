@@ -240,7 +240,7 @@ def test_apply_refuses_before_backup_while_no_route(engine, monkeypatch):
     db_path = Path(engine._store.db_path)
     state = _file_state(db_path)
     calls = _fake_route(monkeypatch)
-    monkeypatch.setattr(level3_repair, "summary_route_available", lambda *_args: False, raising=False)
+    monkeypatch.setattr(level3_repair, "summary_route_available", lambda *_args, **_kwargs: False, raising=False)
 
     result = handle_lcm_command("doctor repair level3 apply", engine)
 
@@ -397,7 +397,7 @@ def test_n3_the_provenance_level_follows_the_repair(engine, monkeypatch):
     assert "status: ok" in handle_lcm_command("doctor repair level3 apply", engine)
 
     assert dict((r[0], r[1:]) for r in conn.execute("SELECT * FROM summary_node_provenance")) == {
-        ids["truncated"]: (1, "m", 7.0), ids["parent"]: (1, "m", 7.0), ids["other_parent"]: (2, "m", 7.0)}
+        ids["truncated"]: (1, "", 7.0), ids["parent"]: (1, "", 7.0), ids["other_parent"]: (2, "m", 7.0)}
 
 
 def test_n4_repair_rejections_do_not_touch_the_live_route_keys(engine, monkeypatch):
@@ -547,3 +547,80 @@ def test_a_repaired_leaf_externalizes_tool_output_under_its_own_session(engine, 
 
     assert "groups_repaired: 1" in result and f"top node {leaf}" in result
     assert sessions == [("call-s2", "s2")]
+
+
+# -- Round 6 (bot threads at fda0d60c): the repair's own call budget, its own route keys, the prompt version, the model --
+
+
+def test_r6a_the_repair_never_uses_the_live_spend_budget(engine, monkeypatch):
+    _build_store(engine)
+    seen = []
+
+    def fake(*, text, depth, spend_guard=None, **_kwargs):
+        seen.append(spend_guard)
+        assert spend_guard is not None and spend_guard.try_record_call()
+        return f"Model summary at d{depth}.\nExpand for details about: repaired", 1
+
+    monkeypatch.setattr(level3_repair, "summarize_with_escalation", fake, raising=False)
+
+    assert "status: ok" in handle_lcm_command("doctor repair level3 apply", engine)
+
+    assert seen and all(guard is not engine._summary_spend_guard for guard in seen)
+    assert engine._summary_spend_guard._calls == [] and engine._summary_spend_guard.allows()
+
+
+def test_r6b_the_route_check_reads_the_repair_keys(engine, monkeypatch):
+    _build_store(engine)
+    _fake_route(monkeypatch)
+    breaker, model = engine._summary_circuit_breaker, engine._config.summary_model
+    for _ in range(max(1, breaker.failure_threshold)):
+        breaker.record_failure(model)  # the live route is open; the repair keys are healthy
+    assert not breaker.allows(model)
+
+    assert "status: ok" in handle_lcm_command("doctor repair level3 apply", engine)
+
+
+def test_r6b_an_open_repair_route_refuses_before_the_backup(engine, monkeypatch):
+    _build_store(engine)
+    calls = _fake_route(monkeypatch)
+    breaker, model = engine._summary_circuit_breaker, engine._config.summary_model
+    for _ in range(max(1, breaker.failure_threshold)):
+        breaker.record_failure("repair:" + model)  # the repair keys are open; the live route is healthy
+    assert breaker.allows(model)
+
+    result = handle_lcm_command("doctor repair level3 apply", engine)
+
+    assert "status: refused" in result and calls == []
+    assert not engine.backup_dir().exists() or not any(engine.backup_dir().iterdir())
+
+
+def test_r6c_the_repair_uses_the_configured_prompt_version(engine, monkeypatch):
+    _build_store(engine)
+    engine._config.summary_prompt_version = 2
+    versions = []
+
+    def fake(*, text, depth, prompt_version=1, **_kwargs):
+        versions.append(prompt_version)
+        return f"Model summary at d{depth}.\nExpand for details about: repaired", 1
+
+    monkeypatch.setattr(level3_repair, "summarize_with_escalation", fake, raising=False)
+
+    assert "status: ok" in handle_lcm_command("doctor repair level3 apply", engine)
+    assert versions and set(versions) == {2}
+
+
+def test_r6d_the_provenance_row_names_the_repair_model(engine, monkeypatch):
+    ids = _build_store(engine)
+    conn = engine._dag.connection
+    conn.execute("INSERT OR REPLACE INTO summary_node_provenance VALUES (?, 3, 'old-model', 7)", (ids["truncated"],))
+    conn.commit()
+
+    def fake(*, text, depth, provenance=None, **_kwargs):
+        provenance["model"] = "repair-model"
+        return f"Model summary at d{depth}.\nExpand for details about: repaired", 1
+
+    monkeypatch.setattr(level3_repair, "summarize_with_escalation", fake, raising=False)
+
+    assert "status: ok" in handle_lcm_command("doctor repair level3 apply", engine)
+    assert conn.execute("SELECT escalation_level, model, created_at FROM summary_node_provenance WHERE node_id = ?",
+                        (ids["truncated"],)).fetchone() == (1, "repair-model", 7.0)
