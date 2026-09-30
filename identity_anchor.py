@@ -28,6 +28,7 @@ import logging
 import os
 import sqlite3
 from collections import Counter, defaultdict, deque
+from difflib import SequenceMatcher
 from typing import Any, Dict, Optional
 
 from .fresh_tail import tool_group_safe_end
@@ -43,6 +44,7 @@ _POOL_WINDOW = 256  # store ids either side of a stamp donor searched for a comp
 _MAX_DECOMPOSITIONS = 3
 _DECOMPOSE_BUDGET = 2048  # T3: prefixes visited per decomposition (ingest thread)
 _DECOMPOSE_MAX_PARTS = 64
+_INSERT_DIFF_BUDGET = 1_000_000  # #633: old x new rows compared per insertion diff (quadratic worst case ~40 ms)
 _MATCH_WORK_PER_ITEM, _MATCH_WORK_FLOOR = 32, 4096  # matching search budget per row + occurrence + key (see below)
 
 
@@ -216,7 +218,8 @@ class IdentityAnchorMixin:
         """Rows at or after ``cursor`` recognised as replays of stored occurrences, plus the R3
         remainders to store, the relations to record and the R5 backfills. ``audit_from``: the host
         changed its list before the cursor from there (a positional cursor no longer proves those rows
-        stored): a stamped row there that no stored occurrence explains moves ``plan["cursor"]`` back."""
+        stored): a stamped row -- or an unstamped user row (#633) -- there that no stored occurrence
+        explains moves ``plan["cursor"]`` back."""
         plan: Dict[str, Any] = {"replayed": set(), "remainders": {}, "relations": [], "carry": [], "backfill": [],
                                 "cursor": cursor}
         self._identity_anchor_text_memo: dict[int, str] = {}
@@ -233,12 +236,13 @@ class IdentityAnchorMixin:
             if observed_at is not None:
                 stamps[idx] = observed_at
         wanted = {stamps[idx] for idx in range(start, n) if idx in stamps}
-        if not wanted:
+        if not wanted and start >= cursor:
             return plan
+        # #633: nothing stamped from ``start`` on still leaves a changed prefix to audit (an unstamped row).
         chain = self._identity_anchor_chain()
         rows = self._store.find_rows_by_observed_at(
             str(self._conversation_id or ""), [str(self._session_id), *chain], sorted(wanted)
-        )
+        ) if wanted else []
         self._load_host_rewrite_overrides(rows)
         by_stamp: dict[float, list] = defaultdict(list)
         for row in rows:
@@ -279,7 +283,7 @@ class IdentityAnchorMixin:
             matched[idx] = [next(r for r, _forms in by_stamp[stamps[idx]] if int(r["store_id"]) == store_id)]
             if idx >= start:
                 plan["replayed"].add(idx)
-        for idx in range(start, n):
+        for idx in range(start, n if wanted else start):  # nothing stamped: only the #633 audit below
             identity = identity_at(idx) if idx in stamps and idx not in plan["replayed"] else None
             if identity is not None and identity[0] == "user":
                 row = self._identity_anchor_ws_row(identity, stamps[idx], [r for r, _f in by_stamp[stamps[idx]]], consumed)
@@ -318,8 +322,9 @@ class IdentityAnchorMixin:
         return plan
 
     def _identity_anchor_audit(self, messages, identity_messages, cursor, start, stamps, identity_at, consumed, plan) -> None:
-        """Rows in ``[start, cursor)`` of a list the host changed before the cursor: a stamped host row
-        that no stored occurrence explains (key, witness, alias, or a stored copy of its content -- up to
+        """Rows in ``[start, cursor)`` of a list the host changed before the cursor: a stamped host row,
+        or an unstamped user row the host inserted there (#633: a /steer row; by content alone), that
+        no stored occurrence explains (key, witness, alias, or a stored copy of its content -- up to
         edge whitespace, under another stamp or none -- in the tail of this session or a verified
         ancestor, each copy used once) and no ignore pattern drops was never stored. The cursor moves back
         to the first such row; every other row of that range stays a replay (today's positional proof)."""
@@ -331,9 +336,18 @@ class IdentityAnchorMixin:
             for row in self._store.get_session_tail(session, limit=span):
                 if int(row["store_id"]) not in consumed:
                     held[_proof_user_identity(self._message_replay_identity(row, stored_row=True))].append(row)
-        missed = []
+        missed, deferred, audited = [], [], set()
+        inserted = None
         for idx in range(start, cursor):
-            identity = identity_at(idx) if idx in stamps else None
+            identity = identity_at(idx)
+            if idx not in stamps:  # #633: an unstamped user row the host inserted (a /steer), not a rewrite
+                if identity is None or identity[0] != "user":
+                    continue
+                if inserted is None:
+                    inserted = self._identity_anchor_inserted(messages, start, cursor)
+                if idx in inserted:
+                    deferred.append(idx)
+                continue
             if idx in plan["remainders"]:  # a held head plus a new remainder: the remainder is unstored
                 missed.append(idx)
                 continue
@@ -342,6 +356,7 @@ class IdentityAnchorMixin:
                     or self._message_replay_identity(identity_messages[idx]) != identity  # carries LCM's carrier (R8)
                     or self._matches_ignore_message_patterns(messages[idx])):
                 continue
+            audited.add(idx)
             copies = [row for row in held.get(_proof_user_identity(identity), ()) if int(row["store_id"]) not in consumed]
             ws = self._identity_anchor_ws_row(identity, stamps[idx], copies, consumed)
             if ws is not None:  # R1-ws: the same occurrence (same stamp, edge whitespace only), recorded
@@ -355,12 +370,41 @@ class IdentityAnchorMixin:
                     plan["backfill"].append((int(copies[0]["store_id"]), stamps[idx]))
                 continue
             missed.append(idx)
+        if deferred:  # #633: an inserted row is explained only by a stored copy no other row of the view holds
+            reserved = Counter(_proof_user_identity(identity_at(i)) for i in range(cursor)
+                               if i not in inserted and i not in plan["replayed"] and i not in audited
+                               and identity_at(i) is not None)
+            for idx in deferred:
+                identity = identity_at(idx)
+                if (idx in plan["replayed"] or identity_messages[idx].get("tool_calls")
+                        or self._message_replay_identity(identity_messages[idx]) != identity  # carries LCM's carrier (R8)
+                        or self._matches_ignore_message_patterns(messages[idx])):
+                    continue
+                key = _proof_user_identity(identity)
+                copies = [row for row in held.get(key, ()) if int(row["store_id"]) not in consumed]
+                if len(copies) > reserved[key]:
+                    consumed.add(int(copies[-1]["store_id"]))
+                    continue
+                missed.append(idx)
         if missed:
             plan["cursor"] = min(missed)
             plan["positional"] = {idx for idx in range(min(missed), cursor) if idx not in missed}
             plan["replayed"].update(plan["positional"])
             logger.info("LCM identity-anchor: host changed its list before the cursor; %d unstored rows from %d: session=%s",
                         len(missed), min(missed), self._session_id)
+
+    def _identity_anchor_inserted(self, messages, start: int, cursor: int) -> set:
+        """#633: indexes in ``[start, cursor)`` the host inserted into the last list LCM ingested (Hermes
+        0.21.2+ inserts a /steer row after the newest tool result), by an identity diff of the two lists
+        from ``start``. A row that replaces, rewrites or re-merges an ingested one is not inserted. Over
+        the diff budget nothing counts as inserted (the v0.24.6 behaviour: the row is not audited)."""
+        before = getattr(self, "_last_active_replay_source_identities", None)
+        if not before or max(0, len(before) - start) * (len(messages) - start) > _INSERT_DIFF_BUDGET:
+            return set()
+        now = [self._message_replay_identity(message, strip_carrier=False) for message in messages[start:]]
+        opcodes = SequenceMatcher(None, list(before[start:]), now, autojunk=False).get_opcodes()
+        return {start + j for tag, _i1, _i2, j1, j2 in opcodes if tag == "insert" for j in range(j1, j2)
+                if start + j < cursor}
 
     def _identity_anchor_user_row(self, idx, identity, stamp, by_stamp, consumed, matched, plan, view_count, shown) -> None:
         """R2/R3/R5 for one unmatched user row: a recorded witness, an exact unique decomposition,

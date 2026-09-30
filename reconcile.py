@@ -65,19 +65,26 @@ _TODO_ITEM_LINE_RE = re.compile(r"(?:  )*- \[[ x>~?]\] ")
 _TODO_ITEM_END_RE = re.compile(r" \((?:pending|in_progress|completed|cancelled)\)$")
 _PRUNED_SKILL_RELOAD_NOTICE_HEADER = "[Skills pruned during compression — reload before acting on these tasks]"
 _MODEL_SWITCH_NOTIFICATION_PREFIX = "[Note: model was just switched from "
-# When the user sends a message mid-turn (/steer), the host appends it to a
-# tool result already sitting in the message list, wrapped in this block
-# (hermes-agent agent/prompt_builder.py:685 format_steer_marker; appended in
-# place at agent/agent_runtime_helpers.py:3983 and
-# agent/conversation_loop.py:1723).  The stored row and the replayed row can
-# therefore differ by exactly this block, in EITHER direction, so the block is
-# stripped from the replay identity to keep matching stable across the split.
+# When the user sends a message mid-turn (/steer), the host wraps it in this
+# block (hermes-agent agent/prompt_builder.py format_steer_marker).  Hermes
+# 0.21.1 and earlier appended the block in place to a tool result already
+# sitting in the message list (agent/agent_runtime_helpers.py,
+# agent/conversation_loop.py).  Hermes 0.21.2 and later -- the tested hosts --
+# instead insert it as a standalone, unstamped user row right after the newest
+# tool result (agent/turn_iteration_prep.py _inject_steer_after_newest_tool_result);
+# at a turn's first iteration that row lands before the steady-state ingest
+# cursor, where the #436 audit stores it (#633).  This block handling concerns
+# the in-place shape: the stored row and the replayed row can differ by exactly
+# this block, in EITHER direction, so the block is stripped from the replay
+# identity to keep matching stable across the split.  A standalone steer row
+# carries no ``tool_call_id`` and is never stripped (see below).
 #
 # The strip is only sound when the block's text is ALREADY durable.  The host
 # never removes the marker once appended (no strip site exists in the host) and
 # persists the mutated list verbatim (run_agent.py:_persist_session ->
-# _flush_messages_to_session_db), so the live direction is "stored WITHOUT,
+# _flush_messages_to_session_db), so the in-place direction is "stored WITHOUT,
 # replayed WITH": a steer appended to a tool row LCM had already ingested.
+# (On the steady-state path that in-place shape is still not stored: #633.)
 # Stripping that unconditionally lets reconciliation advance past the enriched
 # row, and the user's out-of-band text — a genuine instruction, per the host's
 # own STEER_CHANNEL_NOTE — never reaches the store.  So the incoming side is
