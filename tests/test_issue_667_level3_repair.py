@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -438,3 +439,89 @@ def test_a_text_changed_between_read_and_commit_rolls_back(engine, monkeypatch):
 
     assert "rolled back — a node changed or a new parent linked in during the repair" in result
     assert _L3_TRUNCATION_MARKER in engine._dag.get_node(ids["truncated"]).summary
+
+
+# -- Round 4: a repair commit between a condensation's selection and its registration ----------------------------
+
+
+def _frontier_with_fragment(engine):
+    rows = _rows(engine, "s1", 4)
+    fragment = _node(engine, "s1", 0, _deterministic_truncate(LONG_SOURCE, 512), rows[:1])
+    others = [_node(engine, "s1", 0, f"Healthy leaf {row}.", [row]) for row in rows[1:]]
+    return fragment, others
+
+
+def _capture_condensation(monkeypatch):
+    inputs = []
+
+    def live_summary(*, text, **_kwargs):
+        inputs.append(text)
+        return f"Arc summary {len(inputs)}.", 1
+
+    monkeypatch.setattr(engine_mod, "summarize_with_escalation", live_summary)
+    return inputs
+
+
+def _after_first_call(monkeypatch, owner, name, action):
+    original, fired = getattr(owner, name), []
+
+    def wrapped(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if not fired:
+            fired.append(1)
+            action()
+        return result
+
+    monkeypatch.setattr(owner, name, wrapped)
+
+
+def test_r4a_the_sweep_condenses_the_text_a_repair_committed_after_selection(engine, monkeypatch):
+    fragment, _others = _frontier_with_fragment(engine)
+    _fake_route(monkeypatch)
+    inputs = _capture_condensation(monkeypatch)
+    repairs = []
+    _after_first_call(monkeypatch, engine, "_select_threshold_sweep_condensation_group",
+                      lambda: repairs.append(handle_lcm_command("doctor repair level3 apply", engine)))
+
+    passes, _reason = engine._run_threshold_sweep_condensation(
+        target_tokens=0, pass_budget=1, deadline=time.monotonic() + 120)
+
+    assert passes == 1 and "groups_repaired: 1" in repairs[0]
+    repaired = engine._dag.get_node(fragment).summary
+    assert _L3_TRUNCATION_MARKER not in repaired and repaired in inputs[0]
+    assert _L3_TRUNCATION_MARKER not in inputs[0]
+
+
+def test_r4b_maybe_condense_condenses_the_text_a_repair_committed_after_selection(engine, monkeypatch):
+    fragment, _others = _frontier_with_fragment(engine)
+    _fake_route(monkeypatch)
+    inputs = _capture_condensation(monkeypatch)
+    repairs = []
+    _after_first_call(monkeypatch, engine._dag, "get_uncondensed_at_depth",
+                      lambda: repairs.append(handle_lcm_command("doctor repair level3 apply", engine)))
+
+    assert engine._maybe_condense() == 1
+
+    assert "groups_repaired: 1" in repairs[0]
+    repaired = engine._dag.get_node(fragment).summary
+    assert repaired in inputs[0] and _L3_TRUNCATION_MARKER not in inputs[0]
+
+
+def test_r4c_a_node_deleted_before_registration_skips_the_pass(engine, monkeypatch):
+    fragment, others = _frontier_with_fragment(engine)
+    inputs = _capture_condensation(monkeypatch)
+    conn = engine._dag.connection
+
+    def delete_one():
+        conn.execute("DELETE FROM summary_nodes WHERE node_id = ?", (others[0],))
+        conn.commit()
+
+    _after_first_call(monkeypatch, engine, "_select_threshold_sweep_condensation_group", delete_one)
+
+    passes, reason = engine._run_threshold_sweep_condensation(
+        target_tokens=0, pass_budget=1, deadline=time.monotonic() + 120)
+
+    parents = [node for node in engine._dag.get_session_nodes("s1") if node.depth == 1]
+    assert passes == 1 and reason == "pass_budget_exhausted" and len(inputs) == 1  # skipped, then re-selected
+    assert len(parents) == 1 and others[0] not in parents[0].source_ids
+    assert sorted(parents[0].source_ids) == sorted([fragment, *others[1:]])

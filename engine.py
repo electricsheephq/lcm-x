@@ -6796,9 +6796,11 @@ class LCMEngine(
             # Take the first fanin nodes and condense
             to_condense = uncondensed[:fanin]
             try:
-                with self._condensation_in_flight(to_condense):
+                with self._condensation_in_flight(to_condense) as fresh:
+                    if fresh is None:
+                        continue  # a selected node went away before registration (#667): nothing to condense here
                     source_tokens, summary_tokens, level = self._condense_summary_nodes(
-                        to_condense,
+                        fresh,
                         focus_topic=focus_topic,
                         force_overflow=force_overflow,
                     )
@@ -6834,12 +6836,16 @@ class LCMEngine(
 
     @contextmanager
     def _condensation_in_flight(self, nodes: List[SummaryNode]):
-        """#667: hold the selected node ids in the in-flight set from selection until publish or failure."""
+        """#667: hold the selected node ids in the in-flight set until publish or failure, and yield fresh copies read
+        after registration (None when a node is gone or moved), so a repair commit before registration is seen."""
         node_ids = {node.node_id for node in nodes}
         with self._condensation_inflight_lock:
             self._condensation_inflight_ids |= node_ids
         try:
-            yield
+            with self._dag._db_lock:  # waits for a repair transaction in progress
+                fresh = [self._dag.get_node(node.node_id) for node in nodes]
+            moved = any(copy is None or copy.depth != node.depth for copy, node in zip(fresh, nodes))
+            yield None if moved else fresh
         finally:
             with self._condensation_inflight_lock:
                 self._condensation_inflight_ids -= node_ids
@@ -6964,11 +6970,13 @@ class LCMEngine(
             group = self._select_threshold_sweep_condensation_group()
             if not group:
                 return passes, "no_same_depth_condensation_group"
-            before = self._summary_frontier_tokens()
             try:
-                with self._condensation_in_flight(group):
+                with self._condensation_in_flight(group) as fresh:
+                    if fresh is None:
+                        continue  # a selected node went away before registration (#667): select again
+                    before = self._summary_frontier_tokens()
                     self._condense_summary_nodes(
-                        group,
+                        fresh,
                         focus_topic=focus_topic,
                         deadline=deadline,
                     )
