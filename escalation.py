@@ -298,12 +298,51 @@ def _summary_contract_messages(prompt: str) -> tuple[list[dict[str, str]], str]:
     ], nonce
 
 
-def _unwrap_summary_contract(content: str, nonce: str, max_tokens: int) -> str:
+_SUMMARY_WRAPPER_RE = re.compile(r"^<summary>(?P<inner>.*)</summary>$", re.DOTALL)
+_SUMMARY_HINT_LABEL = "expand for details about:"
+
+
+def _plain_expand_hint(line: str) -> str:
+    """Return ``line`` as a plain hint after removing one layer of quotes or emphasis, or "" (#612).
+
+    One layer is a run of one of ``"`` ``'`` `` ` `` ``*`` ``_`` on both ends of the line, or a ``*``/``_`` run
+    around the label alone (``**Expand for details about:** ...``). Scanned without regex backtracking.
+    """
+    mark = line[:1]
+    if not mark or mark not in "\"'`*_":
+        return ""
+    run_length = len(line) - len(line.lstrip(mark))
+    after_run = line[run_length:]
+    label_end = len(_SUMMARY_HINT_LABEL)
+    if (mark in "*_" and after_run[:label_end].lower() == _SUMMARY_HINT_LABEL
+            and after_run[label_end:].startswith(line[:run_length])):
+        candidate = after_run[:label_end] + after_run[label_end + run_length:]
+    elif len(line) - len(line.rstrip(mark)) == run_length and len(line) > 2 * run_length:
+        candidate = line[run_length:-run_length].strip()
+    else:
+        return ""
+    if not _SUMMARY_EXPAND_HINT_RE.fullmatch(candidate):
+        return ""
+    return "Expand for details about: " + candidate.split(":", 1)[1].strip()
+
+
+def _check_summary_contract(content: str, nonce: str, max_tokens: int) -> tuple[str, str, tuple[str, ...]]:
+    """Return ``(body, failed_check, tolerated)`` for a reply under the nonce contract.
+
+    ``failed_check`` is "" when accepted, else ``envelope``, ``nonce_count``, ``short_body`` or ``closing_hint``.
+    ``tolerated`` names the known formatting mistakes that were accepted (#612): the ``</summary>`` closer, one
+    ``<summary>`` wrapper around the whole body, and one layer of quotes or emphasis on the closing hint. The
+    nonce opening tag, its uniqueness, the body minimum and a recognised closing hint are still required.
+    """
     if not nonce:
-        return content
+        return content, "", ()
     opening_tag = f'<lcm-summary nonce="{nonce}">'
     closing_tag = "</lcm-summary>"
+    tolerated: list[str] = []
     stripped = content.strip()
+    if not stripped.endswith(closing_tag) and stripped.endswith("</summary>"):
+        closing_tag = "</summary>"
+        tolerated.append("summary_closer")
     # No count check on the closing tag. The body is extracted by slicing from
     # both ends, so an interior `</lcm-summary>` cannot affect what is extracted
     # -- it only ever caused a valid summary to be discarded. And unlike the
@@ -312,20 +351,33 @@ def _unwrap_summary_contract(content: str, nonce: str, max_tokens: int) -> str:
     # envelope contract could never be summarized again. The opening-tag count
     # is kept because it is nonce-bearing, so a second occurrence is genuinely
     # anomalous rather than ordinary transcript content.
-    if (
-        not stripped.startswith(opening_tag)
-        or not stripped.endswith(closing_tag)
-        or stripped.count(opening_tag) != 1
-    ):
-        return ""
+    if not stripped.startswith(opening_tag) or not stripped.endswith(closing_tag):
+        return "", "envelope", ()
+    if stripped.count(opening_tag) != 1:
+        return "", "nonce_count", ()
     body = stripped[len(opening_tag) : -len(closing_tag)].strip()
+    wrapper = _SUMMARY_WRAPPER_RE.match(body)
+    if wrapper and "<summary>" not in wrapper.group("inner") and "</summary>" not in wrapper.group("inner"):
+        body = wrapper.group("inner").strip()
+        tolerated.append("summary_wrapper")
     minimum_body_tokens = max(4, min(16, max(1, int(max_tokens) // 16)))
     if count_tokens(body) < minimum_body_tokens:
-        return ""
-    body_lines = [line.strip() for line in body.splitlines() if line.strip()]
-    if not body_lines or not _SUMMARY_EXPAND_HINT_RE.fullmatch(body_lines[-1]):
-        return ""
-    return body
+        return "", "short_body", ()
+    raw_last_line = body.splitlines()[-1]
+    if not _SUMMARY_EXPAND_HINT_RE.fullmatch(raw_last_line.strip()):
+        plain = _plain_expand_hint(raw_last_line.strip())
+        if not plain:
+            return "", "closing_hint", ()
+        body = body[: len(body) - len(raw_last_line)] + plain
+        if count_tokens(body) < minimum_body_tokens:
+            # Accept a decorated reply only if its plain form would be accepted.
+            return "", "short_body", ()
+        tolerated.append("hint_decoration")
+    return body, "", tuple(tolerated)
+
+
+def _unwrap_summary_contract(content: str, nonce: str, max_tokens: int) -> str:
+    return _check_summary_contract(content, nonce, max_tokens)[0]
 
 
 def _call_llm_for_summary(prompt: str, max_tokens: int,
@@ -357,13 +409,15 @@ def _call_llm_for_summary(prompt: str, max_tokens: int,
                 "LCM summary discarded reasoning-only output (model=%s); escalating",
                 model or "<default>",
             )
-        validated = _unwrap_summary_contract(sanitized, contract_nonce, max_tokens)
+        validated, failed_check, tolerated = _check_summary_contract(sanitized, contract_nonce, max_tokens)
         if sanitized and contract_nonce and not validated:
             logger.warning(
                 "LCM summary discarded output that violated the integrity contract "
-                "(model=%s); escalating",
-                model or "<default>",
+                "(model=%s, check=%s); escalating",
+                model or "<default>", failed_check,
             )
+        elif validated and tolerated:
+            logger.info("LCM summary contract: tolerated %s (model=%s)", "+".join(tolerated), model or "<default>")
         return validated
     except Exception as e:
         logger.warning("LLM summarization failed: %s", e)
