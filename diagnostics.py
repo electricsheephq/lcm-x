@@ -138,7 +138,16 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
     elif name == "config_validation":
         command = "inspect LCM_* environment/config values and adjust only intentional operator overrides"
     elif name == "embedding_provider_health":
-        if status == "warn":
+        if status == "warn" and isinstance(detail, dict) and detail.get("embeddings_enabled") is False:
+            action = DOCTOR_ACTION_INSPECT
+            command = (
+                "embeddings are off but this store still has an active embedding profile whose "
+                "vectors will go stale: set LCM_EMBEDDINGS_ENABLED=true if semantic recall is "
+                "wanted; otherwise nothing to do (full-text recall is unaffected)"
+            )
+            warning_only = True
+            rationale = "stale stored vectors affect only semantic recall, which is switched off"
+        elif status == "warn":
             action = DOCTOR_ACTION_INSPECT
             command = (
                 "semantic retrieval is configured but not runnable: reinstall the optional "
