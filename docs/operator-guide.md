@@ -986,6 +986,7 @@ Available commands:
 - `/lcm doctor clean lifecycle apply` - backup-first cleanup of empty lifecycle rows; requires `LCM_DOCTOR_CLEAN_APPLY_ENABLED=true`
 - `/lcm doctor repair` - read-only SQLite/FTS repair diagnostics
 - `/lcm doctor repair apply` - backup-first SQLite/FTS repair
+- `/lcm doctor repair level3` - read-only scan for level 3 truncation fragments and the condensed nodes built on them (also `lcm_doctor` with `action: repair_level3`)
 - `/lcm doctor source` - read-only scan for legacy blank-source rows
 - `/lcm doctor source apply` - backup-first normalization of legacy blank-source rows to `unknown`
 - `/lcm doctor retention` - read-only retention analysis
