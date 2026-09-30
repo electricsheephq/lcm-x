@@ -46,6 +46,7 @@ from .escalation import (
     SummarySpendGuard,
     SweepBudgetExhausted,  # re-exported: compaction and tests import it from .engine
     _summary_model_chain,
+    closed_summary_route_status,
     summarize_with_escalation,
     summary_route_available,
 )
@@ -1592,6 +1593,8 @@ class LCMEngine(
 
     def _summary_route_status(self) -> Dict[str, Any]:
         """#682: the ``summary_route`` field of lcm_status."""
+        if self._summary_circuit_breaker is None:
+            return closed_summary_route_status()
         return self._summary_circuit_breaker.route_status(
             _summary_model_chain(self._config.summary_model, self._config.summary_fallback_models))
 

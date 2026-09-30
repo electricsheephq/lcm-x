@@ -61,8 +61,9 @@ CODEX_NOT_SUPPORTED = _StatusError(
     _ResponseError("model_not_found: no such model", 404),
     RuntimeError("Error code: 400 - Unknown Model"),  # string only: judged by its text
     RuntimeError("The model `x` does not exist"),
+    _StatusError("Error code: 404 - the requested model 'gpt-5.6-sol' does not exist on this route", 404),
 ], ids=["zai-400-unknown-model", "anthropic-404-not-found", "openai-does-not-exist", "codex-not-supported",
-        "response-status-404", "string-only-400", "string-only-no-status"])
+        "response-status-404", "string-only-400", "string-only-no-status", "404-route-names-the-model"])
 def test_truth_table_positives(exc):
     assert escalation.is_summary_route_config_error(exc) is True
 
@@ -81,9 +82,14 @@ def test_truth_table_positives(exc):
     _StatusError("HERMES_MODEL_ADMISSION_CONSUMED: admission already used", 400),
     RuntimeError("Error code: 503 - unknown model"),
     None,
+    # Review of #693: generic tokens without a model named are not route config errors.
+    _StatusError('Error code: 404 - {"type":"not_found_error","message":"Not Found"}', 404),
+    _StatusError("Bad request: the file 'attachments/notes.json' does not exist", 400),
+    _StatusError("Streaming is not supported when using this endpoint", 400),
 ], ids=["context-length-400", "rate-limit-429", "model-token-429", "timeout-type", "timeout-text", "server-500",
         "response-502", "billing-402", "model-token-402", "400-without-model-token", "admission-consumed-400",
-        "string-only-503", "none"])
+        "string-only-503", "none", "generic-404-not-found", "400-file-does-not-exist",
+        "400-not-supported-without-model"])
 def test_truth_table_negatives(exc):
     assert escalation.is_summary_route_config_error(exc) is False
 
@@ -319,5 +325,21 @@ def test_lcm_status_shows_the_summary_route(tmp_path, monkeypatch, _pinned_count
         assert (opened["last_error_class"], opened["provider"], opened["model"]) == (
             "config_error", "zai", "gpt-5.6-sol")
         assert json.loads(lcm_tools.lcm_status({}, engine=engine))["config"]["summary_model"] == "(auxiliary)"
+    finally:
+        engine.shutdown()
+
+
+CLOSED = {"state": "closed", "seconds_left": 0, "last_error_class": None, "provider": None, "model": None}
+
+
+def test_route_status_of_an_empty_route_list_is_closed():
+    assert SummaryCircuitBreaker().route_status([]) == CLOSED
+
+
+def test_lcm_status_summary_route_is_closed_without_a_breaker(tmp_path):
+    engine = _engine(tmp_path)
+    try:
+        engine._summary_circuit_breaker = None
+        assert json.loads(lcm_tools.lcm_status({}, engine=engine))["summary_route"] == CLOSED
     finally:
         engine.shutdown()

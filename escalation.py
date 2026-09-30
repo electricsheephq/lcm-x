@@ -65,10 +65,11 @@ _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS = 15.0
 # #682: a summary route that cannot serve its model is host/profile config, not a transient failure.
 _STATUS_IN_MESSAGE_RE = re.compile(r"(?:error code|status(?: code)?)\s*[:=]?\s*(\d{3})\b")
 _ROUTE_CONFIG_ERROR_TOKENS = (
-    "model not found", "model_not_found", "not_found_error", "unknown model", "no such model",
-    "is not a valid model", "model not supported", "model is not supported", "model_not_supported",
-    "not supported when using", "unsupported model", "does not exist",
+    "model not found", "model_not_found", "unknown model", "no such model", "is not a valid model",
+    "model not supported", "model is not supported", "model_not_supported", "unsupported model",
 )
+# Generic tokens count only when the message also names a model (a bare 404 or a missing file is not one).
+_ROUTE_CONFIG_ERROR_GENERIC_TOKENS = ("not_found_error", "does not exist", "not supported when using")
 _NOT_ROUTE_CONFIG_TOKENS = (
     "context length", "context_length", "context window", "maximum context", "too many tokens", "rate limit",
     "rate_limit", "too many requests", "billing", "credits", "insufficient", "quota", "payment", "free tier",
@@ -76,6 +77,11 @@ _NOT_ROUTE_CONFIG_TOKENS = (
 )
 _summary_call = threading.local()  # #682: the last summary call's error and host route, per thread
 _route_info_support: dict[int, tuple[object, bool]] = {}
+
+
+def closed_summary_route_status() -> dict:
+    """#682: ``summary_route`` with no breaker in use, or no route to describe."""
+    return {"state": "closed", "seconds_left": 0, "last_error_class": None, "provider": None, "model": None}
 
 
 def is_summary_route_config_error(exc: BaseException | None) -> bool:
@@ -90,7 +96,8 @@ def is_summary_route_config_error(exc: BaseException | None) -> bool:
         status = int(match.group(1))
     if status not in (400, 404, None) or any(token in message for token in _NOT_ROUTE_CONFIG_TOKENS):
         return False
-    return any(token in message for token in _ROUTE_CONFIG_ERROR_TOKENS)
+    return any(token in message for token in _ROUTE_CONFIG_ERROR_TOKENS) or (
+        "model" in message and any(token in message for token in _ROUTE_CONFIG_ERROR_GENERIC_TOKENS))
 
 
 def _accepts_route_info(call_llm) -> bool:
@@ -201,6 +208,8 @@ class SummaryCircuitBreaker:
         """#682: ``open`` while every route of ``models`` is refused; the rest describes the primary route.
         ``route_key_prefix`` selects a caller's own keys (#669); empty is the live compaction route."""
         keys = [route_key_prefix + model for model in models]
+        if not keys:
+            return closed_summary_route_status()
         seconds = self.seconds_until_allowed(keys, now=now)
         with self._lock:
             state = dict(self._route_state.get(self._key(keys[0]), {}))
