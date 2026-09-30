@@ -523,7 +523,7 @@ def test_observer_counts_host_rows_a_leaf_replaced_by_identity(tmp_path, monkeyp
     obs.cur.update(turn=42)
     Engine().compress(list(rows))
     assert obs.counters["compactions"][-1] == {"turn": 42, "in": 7, "out": 4, "host_rows_summarized": 5, "copied": 0,
-                                               "status": "compacted", "final": False,
+                                               "status": "compacted", "final": False, "leaves": None, "rows_covered": None,
                                                "secs": obs.counters["compactions"][-1]["secs"]}
     copies = [{"role": "user", "content": "summary 1"}, *[dict(m) for m in rows[5:]]]
     assert obs.list_counts(rows, copies) == {"in": 7, "out": 3, "host_rows_summarized": 5, "copied": 2}
@@ -550,6 +550,40 @@ def test_drain_bars_fail_a_hidden_only_leaf_and_are_inconclusive_below_two_compa
     failed, unsure, _ = drain.score(cell, [phase((55, 60, 61, 0, "compacted", 0.1))])
     assert not failed and set(unsure) == {"D1", "D2", "D3"}
     by = {c["id"]: c for c in cells.select("drain/*")}
-    assert set(by) == {"drain/hidden-backlog/in-place", "drain/hidden-backlog/rotation"}
+    assert set(by) == {f"drain/{f}/{m}" for f in ("hidden-backlog", "hidden-backlog-large") for m in ("in-place", "rotation")}
     assert all(not ci.in_gate_set(c) and c in ci.expected_cells("acp-process") for c in by)
-    assert PC.unsupported(by["drain/hidden-backlog/in-place"], "acp-process") is None
+    assert all(PC.unsupported(c, "acp-process") is None for c in by.values())
+
+
+def test_fixture_b_forgets_host_rows_switches_threshold_and_counts_the_plateau(tmp_path):
+    import sqlite3
+    from bench.instruments.reliability.scorers import drain
+    big = cells.select("drain/hidden-backlog-large/in-place")[0]
+    assert probe.user_text(big, "T", 150).count("alpha") == 100 and probe.user_text(big, "T", 151).count("alpha") == 800
+    assert PC.phase_lcm_env(big, "A")["LCM_CONTEXT_THRESHOLD"] == "0.99"
+    assert PC.phase_lcm_env(big, "B")["LCM_CONTEXT_THRESHOLD"] == "0.5"
+    assert "context_threshold: 0.5" in PC.config_yaml({**big, "lcm_env": PC.phase_lcm_env(big, "B")},
+                                                      {"engine": "lcm-x", "enabled": "hermes-lcm-x"}, "http://127.0.0.1:5/v1")
+    db = tmp_path / "state.db"
+    con = sqlite3.connect(db)
+    con.execute("create table messages (id integer primary key, session_id text, active integer not null default 1)")
+    con.executemany("insert into messages (session_id, active) values (?, ?)", [("acp", 1)] * 3 + [("acp", 0), ("other", 1)])
+    con.commit()
+    con.close()
+    assert PC.forget_host_rows(db, "acp") == 3
+    con = sqlite3.connect(db)
+    assert con.execute("select session_id, sum(active) from messages group by session_id").fetchall() == [("acp", 0), ("other", 1)]
+    con.close()
+
+    def call(turn, n_in, n_out, host, covered):
+        return {"turn": turn, "in": n_in, "out": n_out, "host_rows_summarized": host, "status": "compacted",
+                "final": False, "secs": 0.1, "leaves": 1, "rows_covered": covered}
+    phases = [{"phase": "B", "counters": {"compactions": [call(165, 29, 29, 0, 36), call(166, 31, 31, 0, 36),
+                                                          call(167, 33, 21, 14, 30)]}}]
+    unsure = drain.score(big, phases, tmp_path)[1]
+    assert set(unsure) == {"D1", "D2", "D3"} and "archived no row" in unsure["D1"]
+    (tmp_path / "fixture.jsonl").write_text(json.dumps({"kind": "forget_host_rows", "rows": 300}) + "\n")
+    failed, unsure, numbers = drain.score(big, phases, tmp_path)
+    assert set(failed) == {"D1", "D2"} and not unsure
+    assert numbers["D4"] == {"plateau_compactions": 2, "plateau_turns": [165, 166], "first_shrink_pass": 3,
+                             "hidden_rows_covered_per_pass": [36, 36, 16], "hidden_rows_covered_running": [36, 72, 88]}

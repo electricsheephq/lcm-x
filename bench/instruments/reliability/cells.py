@@ -116,6 +116,18 @@ def registry() -> list[dict]:
                               "in the host's list; turns 41-70 run on the new list. Per compaction the observer "
                               "records the list handed to compress, the list returned and how many host rows a leaf "
                               "replaced (scorers/drain.py D1-D3). Expected to FAIL on main: that is the measurement."))
+        cells.append(cell(f"drain/hidden-backlog-large/{m}", [597, 626], in_place=ip, turns=180, repeat=100,
+                          user={"repeat_from": {"151": 800}}, min_compactions=0,
+                          lcm_env={**tight(128000), "LCM_CONTEXT_THRESHOLD": "0.99"},
+                          faults=[{"kind": "clean_exit_before_turn", "turn": 151}], bars=list(DRAIN_BARS),
+                          drain={"phase2_turn": 151, "hold_seconds": 10.0, "forget_host_rows": True,
+                                 "phase2_lcm_env": {"LCM_CONTEXT_THRESHOLD": tight(128000)["LCM_CONTEXT_THRESHOLD"]}},
+                          doc="Data, not a gate (ci.NON_GATE), acp-process only. Fixture B: turns 1-150 at LCM threshold "
+                              "0.99 with short prompts (no compaction; ~300 raw stored rows), a clean host exit, then "
+                              "the harness soft-archives the ACP session's active rows in the cell's state.db (the "
+                              "host forgets its list; no host or plugin code changes), so every stored row is hidden. "
+                              "Turns 151-180 run at the tight threshold with full-size prompts on the empty restored "
+                              "list. D4 counts the phase-2 compactions with out == in (the plateau)."))
         for tr in ("acp-history", "gateway-reload"):
             cells.append(cell(f"crash-after-compaction/{m}/{tr}", [553, 561], in_place=ip,
                               transport="acp" if tr == "acp-history" else "gateway", faults=[crash],

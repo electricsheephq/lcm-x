@@ -313,7 +313,7 @@ def score(cell: dict, cell_dir: Path) -> dict:
     if native["native_unusable"] or native["summary_generation_aborted"] or native["max_native_attempts_per_turn"] > 1:
         failed["B7"] = native
     if cell.get("drain"):  # D1-D3 (scorers/drain.py): the drain/hidden-backlog cells
-        d_failed, d_inconclusive, numbers["drain"] = drain.score(cell, phases)
+        d_failed, d_inconclusive, numbers["drain"] = drain.score(cell, phases, cell_dir)
         failed.update(d_failed)
         inconclusive.update(d_inconclusive)
     failed = {b: v for b, v in failed.items() if b in applicable}

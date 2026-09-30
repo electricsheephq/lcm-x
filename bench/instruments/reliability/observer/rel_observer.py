@@ -179,6 +179,21 @@ def depth0():
         return None
 
 
+def store_cover():
+    """(message-sourced depth-0 summaries, distinct store ids they cover) in lcm.db, or (None, None)."""
+    try:
+        con = sqlite3.connect(f"file:{Path(os.environ['HERMES_HOME']) / 'lcm.db'}?mode=ro", uri=True)
+        try:
+            return con.execute(
+                "SELECT (SELECT COUNT(*) FROM summary_nodes WHERE depth = 0 AND source_type = 'messages'), "
+                "(SELECT COUNT(DISTINCT source.value) FROM summary_nodes AS node, json_each(node.source_ids) AS source "
+                "WHERE node.depth = 0 AND node.source_type = 'messages')").fetchone()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None, None
+
+
 def list_counts(messages, result) -> dict:
     """``in``/``out``: the lengths of the list handed to ``compress`` and of the list it returned;
     ``host_rows_summarized``: the input rows absent from the output, i.e. the host rows a leaf replaced with a
@@ -210,12 +225,14 @@ def patch_engine(agent):
     orig_compress, orig_tool = etype.compress, etype.handle_tool_call
 
     def traced_compress(self, messages, *args, **kwargs):
-        given, started = list(messages) if isinstance(messages, list) else messages, time.monotonic()
+        given, cover0, started = list(messages) if isinstance(messages, list) else messages, store_cover(), time.monotonic()
         result = orig_compress(self, messages, *args, **kwargs)
         secs = round(time.monotonic() - started, 3)
         status = getattr(self, "_last_compression_status", None)
+        cover = store_cover()  # leaves written by this call and the stored rows they newly cover (hidden or host)
+        delta = [None if a is None or b is None else b - a for a, b in zip(cover0, cover)]
         counters["compactions"].append({"turn": cur["turn"], **list_counts(given, result), "status": status,
-                                        "final": cur["final"], "secs": secs})
+                                        "final": cur["final"], "secs": secs, "leaves": delta[0], "rows_covered": delta[1]})
         self._probe_calls, self._probe_status = getattr(self, "_probe_calls", 0) + 1, status
         if status in ("compacted", "host_native"):
             counters["compacted_turns"].append(cur["turn"])

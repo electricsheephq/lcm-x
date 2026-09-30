@@ -99,6 +99,24 @@ def config_yaml(cell: dict, plugin: dict, base_url: str) -> str:
             f"platform_toolsets:\n  acp: [{', '.join(cell.get('toolsets', ['todo', 'context_engine', 'file']))}]\n")
 
 
+def phase_lcm_env(cell: dict, phase: str) -> dict:
+    """The cell's LCM env; after the first phase, overlaid with ``drain.phase2_lcm_env`` (Fixture B)."""
+    return {**cell["lcm_env"], **((cell.get("drain") or {}).get("phase2_lcm_env") or {} if phase != "A" else {})}
+
+
+def forget_host_rows(state_db: Path, session_id: str) -> int:
+    """Fixture B, harness state only (no host or plugin code): the host's own soft-archive (active=0, as its in-place
+    compaction ``archive_and_compact`` leaves superseded rows) on every active row of the ACP session, so the next ACP
+    restore starts from an empty list while LCM's stored rows stay unsummarized above the frontier (hidden)."""
+    con = sqlite3.connect(state_db)
+    try:
+        n = con.execute("UPDATE messages SET active = 0 WHERE session_id = ? AND active = 1", (session_id,)).rowcount
+        con.commit()
+        return n
+    finally:
+        con.close()
+
+
 def reply_text(cell: dict, prefix: str, t: int) -> str:
     asst = cell["assistant"]
     if asst.get("mode") == "repeat-identical" and t in asst.get("repeat_turns", []):
@@ -238,7 +256,7 @@ class ProcessCell:
                "LCM_SUMMARY_MODEL": "rel/lcm-summary",
                # Time compression: a cell runs 60 turns in ~20 s, which trips the per-window summary spend guard
                # that a real session spreads over hours; without this the "real" summariser path is mostly skipped.
-               "LCM_SUMMARY_SPEND_MAX_CALLS": "100000", **self.cell["lcm_env"],
+               "LCM_SUMMARY_SPEND_MAX_CALLS": "100000", **phase_lcm_env(self.cell, self.phase),
                "LCM_NATIVE_RECOVERY": "true" if self.cell["native_recovery"] else "false"}
         for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
             env[k] = self.proxy.url  # a recording sink that refuses everything
@@ -454,6 +472,13 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
             if last["exit"] not in ("crash", "clean_exit"):
                 break
             first = last["next_turn"]
+            drain = cell.get("drain") or {}
+            if drain.get("phase2_lcm_env"):  # the next phase's config carries its LCM threshold too
+                (home / "config.yaml").write_text(config_yaml({**cell, "lcm_env": phase_lcm_env(cell, "B")}, plugin,
+                                                              run.provider.base_url))
+            if last["exit"] == "clean_exit" and drain.get("forget_host_rows"):
+                append(d / "fixture.jsonl", {"kind": "forget_host_rows", "after_phase": phase, "before_turn": first,
+                                             "rows": forget_host_rows(home / "state.db", run.sid)})
     finally:
         run.provider.stop()
         run.proxy.stop()
