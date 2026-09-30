@@ -987,6 +987,7 @@ Available commands:
 - `/lcm doctor repair` - read-only SQLite/FTS repair diagnostics
 - `/lcm doctor repair apply` - backup-first SQLite/FTS repair
 - `/lcm doctor repair level3` - read-only scan for level 3 truncation fragments and the condensed nodes built on them (also `lcm_doctor` with `action: repair_level3`)
+- `/lcm doctor repair level3 apply` - backup-first repair of those nodes in place: each connected group (fragments plus the nodes built on them) is re-summarised bottom-up by the configured summary route and committed in one transaction; ids, links and raw rows are kept. Refused before the backup while no summary route is available; a group with missing raw rows, a level 3 result or a concurrent change is left untouched and reported. Slash command only; the `lcm_doctor` tool refuses `apply`.
 - `/lcm doctor source` - read-only scan for legacy blank-source rows
 - `/lcm doctor source apply` - backup-first normalization of legacy blank-source rows to `unknown`
 - `/lcm doctor retention` - read-only retention analysis

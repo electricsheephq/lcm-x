@@ -1174,7 +1174,7 @@ LCM_DOCTOR = {
                 "enum": ["repair_level3"],
                 "description": (
                     "Optional. repair_level3: read-only scan for level 3 truncation fragments and the condensed "
-                    "summary nodes built on them; writes nothing."
+                    "summary nodes built on them; writes nothing. The repair itself is operator-only."
                 ),
             },
         },

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from enum import Enum
@@ -54,7 +55,7 @@ from .presets import (
     unsupported_runtime_fields_text,
 )
 from .maintenance import backup_database, rotate_backup_database
-from .level3_repair import scan_level3_fragments
+from .level3_repair import repair_level3_fragments, scan_level3_fragments
 from .assertion_rebuild import rebuild_assertions
 from .assertion_store import AssertionSchemaUnavailableError, AssertionStore
 from . import rollup_builder
@@ -483,6 +484,7 @@ def _help_text(error: str | None = None) -> str:
         "- /lcm doctor repair: read-only scan for SQLite/FTS index repair needs",
         "- /lcm doctor repair apply: backup-first repair/rebuild of message and summary FTS indexes",
         "- /lcm doctor repair level3: read-only scan for level 3 truncation fragments and the condensed nodes built on them",
+        "- /lcm doctor repair level3 apply: backup-first re-summary of those nodes in place (ids and links kept)",
         "- /lcm doctor repair schema-stamp: read-only scan for an interim-build schema_version stamp ahead of the actual v5 shape",
         "- /lcm doctor repair schema-stamp apply: backup-first reset of an interim schema_version stamp back to the supported version",
         "- /lcm doctor source: read-only scan for legacy blank-source rows",
@@ -1080,6 +1082,44 @@ def _doctor_repair_level3_text(engine) -> str:
             f"{label}={_fmt_bool(complete)} ({item['sources_stored']}/{item['sources']})"
         )
     lines.append("note: read-only scan only — nothing was changed")
+    return "\n".join(lines)
+
+
+def _doctor_repair_level3_apply_text(engine) -> str:
+    """#667: backup-first in-place repair; one line per group, totals, then a second scan."""
+    join_background_integrity_scans()
+    result = repair_level3_fragments(engine)
+    lines = ["LCM doctor repair level3 apply", f"status: {result['status']}"]
+    if result["reason"]:
+        lines.append(f"reason: {result['reason']}")
+    backup = result["backup"]
+    if backup and backup["ok"]:
+        lines += [f"backup_path: {backup['backup_path']}", f"backup_size: {_fmt_size(int(backup['backup_size']))}"]
+    for number, group in enumerate(result["groups"], 1):
+        head = f"group {number} (session {group['session_id']}, top node {group['top']}): {group['outcome']}"
+        if group["outcome"] == "repaired":
+            nodes = ", ".join(
+                f"node {node_id} d{depth} {kind} -> level {group['levels'][node_id]}"
+                for node_id, depth, kind in group["nodes"])
+            lines.append(f"{head} — {nodes} (ids and links unchanged)")
+        else:
+            lines.append(f"{head} — {group['reason']}")
+    outcomes = Counter(group["outcome"] for group in result["groups"])
+    lines += [
+        f"groups_repaired: {outcomes['repaired']}",
+        f"groups_skipped: {outcomes['skipped']}",
+        f"groups_rolled_back: {outcomes['rolled back']}",
+        f"nodes_repaired: {sum(len(g['nodes']) for g in result['groups'] if g['outcome'] == 'repaired')}",
+        f"summariser_calls: {result['calls']}",
+    ]
+    second = result.get("second_scan")
+    if second is not None:
+        lines.append(
+            f"second_scan: flagged_leaves={sum(i['leaf'] for i in second['flagged'])} "
+            f"flagged_nodes={sum(not i['leaf'] for i in second['flagged'])} "
+            f"affected_ancestors={len(second['ancestors'])}"
+        )
+    lines.append("note: raw rows are never changed; a rerun repairs whatever the scan still finds")
     return "\n".join(lines)
 
 
@@ -5378,6 +5418,8 @@ def handle_lcm_command(raw_args: str | None, engine) -> str:
             return _doctor_repair_apply_text(engine)
         if len(rest) == 2 and rest[0].lower() == "repair" and rest[1].lower() == "level3":
             return _doctor_repair_level3_text(engine)
+        if len(rest) == 3 and [part.lower() for part in rest] == ["repair", "level3", "apply"]:
+            return _doctor_repair_level3_apply_text(engine)
         if len(rest) == 2 and rest[0].lower() == "repair" and rest[1].lower() == "schema-stamp":
             return _doctor_repair_schema_stamp_text(engine)
         if (
@@ -5389,7 +5431,7 @@ def handle_lcm_command(raw_args: str | None, engine) -> str:
             return _doctor_repair_schema_stamp_apply_text(engine)
         if len(rest) == 2 and rest[0].lower() == "source" and rest[1].lower() == "apply":
             return _doctor_source_apply_text(engine)
-        return _help_text("`/lcm doctor` currently supports `clean`, `clean apply`, `clean lifecycle`, `clean lifecycle apply`, `repair`, `repair apply`, `repair schema-stamp`, `repair schema-stamp apply`, `source`, `source apply`, and `retention` as extra subcommands, plus `repair level3`.")
+        return _help_text("`/lcm doctor` currently supports `clean`, `clean apply`, `clean lifecycle`, `clean lifecycle apply`, `repair`, `repair apply`, `repair schema-stamp`, `repair schema-stamp apply`, `source`, `source apply`, and `retention` as extra subcommands, plus `repair level3` and `repair level3 apply`.")
 
     if head == "backup":
         if rest:

@@ -8169,6 +8169,8 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     if action:
         if action != "repair_level3":
             return json.dumps({"error": f"unknown lcm_doctor action: {action}"})
+        if args.get("apply"):
+            return json.dumps({"error": "apply is operator-only: use `/lcm doctor repair level3 apply`"})
         scan = scan_level3_fragments(engine)  # #667: read-only, like `/lcm doctor repair level3`
         return json.dumps({
             "action": action, "status": "repair-needed" if scan["flagged"] else "ok", "read_only": True, **scan,
