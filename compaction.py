@@ -571,6 +571,8 @@ class CompactionMixin:
             self._no_progress_candidate = False
             if bypass_cooldown:  # #651: a host recovery attempt is never cleanup-only maintenance
                 self._preflight_below_threshold_cleanup_only = self._preflight_automatic_request = False
+                # #684: nor held by a boundary cooldown; native recovery keeps its own handoff (#463/#464).
+                self._preflight_cleanup_only_due_to_boundary_cooldown = False
             elif not force and self._no_progress_hold_active() and self._no_progress_hold_blocks(
                     current_tokens if current_tokens is not None else count_messages_tokens(messages)):
                 # #677: an automatic call the #651 hold blocks (a caller that skipped the host gate) is held

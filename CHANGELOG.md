@@ -18,6 +18,11 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   summary route is refused: on the first pass the adoption runs before the summary-route stop (#628), since it needs no
   summary route. With nothing to adopt the stop applies as before, and no new leaf is written while the circuit is
   open. (#640)
+- Fix: a host recovery call (`compress(..., bypass_cooldown=True)`, #608) after a preflight that saw a
+  compaction-boundary cooldown runs the summariser: it also clears the cooldown's cleanup-only handoff, so a list at
+  or over the threshold and under the survival ceiling is summarised instead of only sanitised and fitted. An ordinary
+  automatic call during the cooldown is still cleanup-only, and forced overflow is unchanged. The native-recovery
+  handoff is kept (native recovery owns a below-threshold list). (#684)
 ## v0.24.7 - (unreleased; rc2) (P0 for long-running sessions: the survival fit keeps the summary, no in-turn thrash below the threshold, no level-3 fragments, a bounded summary prefix, steer rows stored)
 
 - Config: the leaf summary target is configurable with `LCM_LEAF_TARGET_RATIO` (default 0.20),
