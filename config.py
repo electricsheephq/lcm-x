@@ -451,6 +451,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("max_assembly_tokens", "LCM_MAX_ASSEMBLY_TOKENS", int),
     _EnvFieldSpec("reserve_tokens_floor", "LCM_RESERVE_TOKENS_FLOOR", int),
     _EnvFieldSpec("custom_instructions", "LCM_CUSTOM_INSTRUCTIONS", str),
+    _EnvFieldSpec("summary_prompt_version", "LCM_SUMMARY_PROMPT_VERSION", int),
     _EnvFieldSpec("extraction_enabled", "LCM_EXTRACTION_ENABLED", bool),
     _EnvFieldSpec("extraction_model", "LCM_EXTRACTION_MODEL", str),
     _EnvFieldSpec("extraction_output_path", "LCM_EXTRACTION_OUTPUT_PATH", str),
@@ -565,6 +566,7 @@ _SOURCE_TRACKED_ENV_FIELDS = frozenset({
     "summary_spend_window_seconds",
     "summary_spend_backoff_seconds",
     "summary_timeout_ms",
+    "summary_prompt_version",
 })
 
 # Fields exposed as runtime preset overrides (consumed by presets.py).
@@ -965,6 +967,9 @@ class LCMConfig:
     survival_fit: bool = True
     # Share of the model window the survival fit keeps free for the response and host overhead.
     survival_reserve: float = 0.15
+    # Summariser prompt version (#646): 1 = original prompts and 2x output
+    # ceiling; 2 = v2 prompts, focus directives in the policy, 3x ceiling.
+    summary_prompt_version: int = 1
 
     @classmethod
     def from_env(cls) -> "LCMConfig":
@@ -1045,6 +1050,13 @@ class LCMConfig:
             default_source=summary_timeout_source,
         )
         _record("summary_timeout_ms", source, warning)
+        c.summary_prompt_version, source, warning = _parse_int_env_with_source(
+            "LCM_SUMMARY_PROMPT_VERSION", c.summary_prompt_version
+        )
+        if c.summary_prompt_version not in (1, 2):
+            warning = f"unsupported env LCM_SUMMARY_PROMPT_VERSION={c.summary_prompt_version!r} ignored; using 1"
+            c.summary_prompt_version, source = 1, "default"
+        _record("summary_prompt_version", source, warning)
 
         # Every other scalar LCM_* override is applied uniformly from the spec.
         for spec in ENV_FIELD_SPECS:

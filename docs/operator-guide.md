@@ -378,6 +378,7 @@ environment variables:
 | `LCM_EXPANSION_MODEL` | summary model / auxiliary | Override `lcm_expand_query` synthesis model |
 | `LCM_EXPANSION_CONTEXT_TOKENS` | `32000` | Context budget used by the auxiliary LLM for `lcm_expand_query` |
 | `LCM_SUMMARY_TIMEOUT_MS` | `60000` | Timeout for one summarization call |
+| `LCM_SUMMARY_PROMPT_VERSION` | `1` | Summariser prompt version: `1` (original prompts) or `2` (opt-in v2 prompts); other values fall back to `1` with a config warning. See [Summary prompt version](#summary-prompt-version) |
 | `LCM_TEMPORAL_ROLLUPS_ENABLED` | `false` | Enable derived UTC day/week/month summary rollups and their maintenance hooks |
 | `LCM_ROLLUP_DAILY_TARGET_TOKENS` | `5000` | Target size for daily rollup summarization |
 | `LCM_ROLLUP_DAILY_MAX_TOKENS` | `15000` | Hard token ceiling for a daily rollup |
@@ -415,6 +416,16 @@ environment variables:
 fault, not load shedding: proactive injection is disabled until the embedding-privacy policy
 is fixed, one WARNING is logged per engine instance, and `lcm_recall` raises rather than degrading to
 full-text on the same fault (#370).
+
+### Summary prompt version
+
+`LCM_SUMMARY_PROMPT_VERSION` (env only, default `1`) selects the summariser prompts for leaves, condensed nodes and
+rollups. Version `1` is unchanged: the same prompts and the same output ceiling (2x the summary budget) as before.
+Version `2` is opt-in: level 1 asks for six fixed headings and exact values, the focus directives move from the
+untrusted topical data into the trusted policy (only the topic label stays in the transcript message, tagged
+`<lcm-focus-topic>`), and the output ceiling rises to 3x the budget. The ceiling only applies on routes where the
+host forwards `max_tokens`. The integrity envelope and the `Expand for details about:` closing line are the same
+in both versions. `lcm_status` shows the active value as `summary_prompt_version` (#646).
 
 ### Summary circuit breaker
 
