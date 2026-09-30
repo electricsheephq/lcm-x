@@ -65,3 +65,5 @@ class ResetStateMixin:
         self._compression_boundary_active_placeholder_digest_budget = {}
         self._compression_boundary_active_placeholder_digest_ordinals = {}
         self._compression_boundary_stored_placeholder_digest_counts = {}
+        # #651: a hold armed by the previous binding never holds the next one.
+        self._no_progress_hold, self._no_progress_candidate = None, False

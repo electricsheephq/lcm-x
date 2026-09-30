@@ -1624,10 +1624,15 @@ class LCMEngine(
         """#651 host breaker gate, read on the type before every automatic compress. A host recovery attempt
         (``ignore_cooldown``), a pending below-threshold cleanup-only pass, forced overflow and the survival
         ceiling are never blocked; the hold governs LCM-managed compaction only, never a bypassed session."""
-        if (ignore_cooldown or self._preflight_below_threshold_cleanup_only
-                or self._bypasses_lcm_context_management() or not self._no_progress_hold_active()):
+        if ignore_cooldown or self._preflight_below_threshold_cleanup_only:
             return False
-        tokens = max(int(self.last_prompt_tokens or 0), self._last_gate_tokens)
+        return self._no_progress_hold_blocks(max(int(self.last_prompt_tokens or 0), self._last_gate_tokens))
+
+    def _no_progress_hold_blocks(self, tokens: int) -> bool:
+        """#651: the one hold decision the host gate and compress() share. The hold governs LCM-managed
+        compaction only, and forced overflow and the survival ceiling are never held."""
+        if self._bypasses_lcm_context_management() or not self._no_progress_hold_active():
+            return False
         if self._should_force_overflow_recovery(observed_tokens=tokens):
             return False
         return self._sweep_budget_hold_applies(tokens)

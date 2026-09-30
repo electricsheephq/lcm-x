@@ -72,13 +72,13 @@ def _stored(engine) -> int:
     return engine._store.get_session_count(engine._session_id)
 
 
-def _maintenance_engine(tmp_path, **config):
-    """Deferred maintenance under critical budget pressure, far below the host threshold: the preflight asks for
+def _maintenance_engine(tmp_path, threshold: int | None = None, **config):
+    """Deferred maintenance under critical budget pressure, below the host threshold: the preflight asks for
     the engine-driven sub-threshold compress() the host logs as 'below N threshold'."""
     engine = _engine(tmp_path, deferred_maintenance_enabled=True, critical_budget_pressure_ratio=0.5, **config)
     view = _view()
     rough = count_messages_tokens(view)
-    engine.threshold_tokens = 100_000
+    engine.threshold_tokens = 100_000 if threshold is None else threshold
     engine.context_length = int(rough * 1.6)  # pressure ~0.62 >= 0.5; the survival ceiling stays above rough
     assert rough < engine.threshold_tokens
     assert engine.should_compress_preflight(view) is True
@@ -280,17 +280,17 @@ def test_t4_the_hold_does_not_apply_at_the_survival_ceiling(tmp_path, summaries)
 
 def _review_trace_engine(tmp_path):
     """The review's trace: window 100k, threshold 35k, reserve 0.15, assembly cap 90k; a foreground no-progress
-    pass at 40k arms the hold; an auxiliary (stateless, LCM-bypassed) session is then bound."""
-    engine = _engine(tmp_path, context_length=100_000, leaf_chunk_tokens=100_000, max_assembly_tokens=90_000,
-                     stateless_session_patterns=["aux-*"])
+    pass at 40k arms the hold; an in-process auxiliary (LCM-bypassed) call then runs on this thread."""
+    engine = _engine(tmp_path, context_length=100_000, leaf_chunk_tokens=100_000, max_assembly_tokens=90_000)
     view = _view(3)
     assert engine.threshold_tokens == 35_000
     engine.last_prompt_tokens = 40_000
     assert engine.should_compress(40_000) is True
     engine.compress(view, current_tokens=40_000)
     assert engine.get_status()["no_progress_hold"]["reason"] == "no_progress" and _host_gate(engine) is True
-    engine.on_session_start("aux-1", platform="cli", context_length=100_000)
-    engine.last_prompt_tokens = 40_000  # auxiliary usage keeps the foreground observation
+    engine._mark_thread_context_stateless("aux-1")
+    engine.update_from_response({"prompt_tokens": 95_000, "completion_tokens": 1, "total_tokens": 95_001})
+    assert engine.last_prompt_tokens == 40_000  # auxiliary usage keeps the foreground observation
     assert engine._bypasses_lcm_context_management() and engine.threshold_tokens == 35_000
     return engine, view
 
@@ -313,11 +313,62 @@ def test_f1_a_foreground_call_after_an_auxiliary_call_is_judged_on_its_own_token
     engine, _view_ = _review_trace_engine(tmp_path)
     try:
         assert engine.should_compress(95_000) is True and _host_gate(engine) is False  # auxiliary
-        engine.on_session_start("S", platform="telegram", context_length=100_000, conversation_id="conv")
-        engine.last_prompt_tokens = 40_000
+        engine._clear_thread_context_stateless("aux-1")
         assert not engine._bypasses_lcm_context_management()
         assert engine.should_compress(85_000) is True and _host_gate(engine) is False  # at the ceiling
         assert engine.should_compress(40_000) is False and _host_gate(engine) is True  # not the auxiliary 95k
+    finally:
+        engine.shutdown()
+
+
+# -- G1 (PR #655). a held pass stays cleanup-only when the host's tokens reach the threshold ------------------
+
+def _held_cleanup_request(tmp_path):
+    """The preflight's message estimate is below the threshold; the host's own count (system prompt, tool
+    schemas) is above it and below the survival ceiling. The no-progress hold is armed."""
+    rough = count_messages_tokens(_view())
+    engine, view, rough = _maintenance_engine(tmp_path, threshold=rough + 100)
+    ceiling = int(engine.context_length * (1 - engine._config.survival_reserve))
+    assert rough < engine.threshold_tokens < rough + 200 < ceiling
+    engine.record_rejected_compaction()
+    assert engine._preflight_below_threshold_cleanup_only is True
+    return engine, view, rough, ceiling
+
+
+def test_g1_a_held_pass_above_the_threshold_stays_cleanup_only(tmp_path, summaries):
+    engine, view, rough, ceiling = _held_cleanup_request(tmp_path)
+    try:
+        assert engine._no_progress_hold_blocks(rough + 200) is True  # the one predicate the gate also uses
+        engine.compress(view, current_tokens=rough + 200)
+        assert summaries == [] and _leaves(engine) == 0
+        assert engine._last_compression_status == "sanitized"
+        assert engine.get_status()["no_progress_hold"]["reason"] == "host_rejected"
+    finally:
+        engine.shutdown()
+
+
+def test_g1_at_the_survival_ceiling_a_held_pass_is_not_forced_cleanup_only(tmp_path, summaries):
+    engine, view, rough, ceiling = _held_cleanup_request(tmp_path)
+    try:
+        assert engine._no_progress_hold_blocks(ceiling) is False
+        engine.compress(view, current_tokens=ceiling)
+        assert summaries and _leaves(engine) >= 1, engine._last_compression_noop_reason
+    finally:
+        engine.shutdown()
+
+
+# -- G2 (PR #655). a hold never leaks across a session rebind ------------------------------------------------
+
+def test_g2_a_rebind_to_another_session_is_not_held(tmp_path, summaries):
+    engine = _engine(tmp_path)
+    try:
+        engine.threshold_tokens = 100
+        engine.record_rejected_compaction()
+        assert engine.should_compress(1_000) is False and _host_gate(engine) is True
+        engine.on_session_start("S2", platform="telegram", context_length=200_000, conversation_id="conv2")
+        engine.threshold_tokens = 100
+        assert engine.get_status()["no_progress_hold"] is None
+        assert engine.should_compress(1_000) is True and _host_gate(engine) is False
     finally:
         engine.shutdown()
 

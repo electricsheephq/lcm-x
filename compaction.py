@@ -1307,11 +1307,16 @@ class CompactionMixin:
         ingest_cleanup_changed_active_context = working_messages != messages
         # #651: below the host threshold, the automatic compress() a preflight
         # maintenance request asked for runs no summariser leaf pass.
+        # A held pass stays cleanup-only when the host's tokens reach the
+        # threshold, except at the survival ceiling or on forced overflow.
         below_threshold_cleanup_only = bool(
             below_threshold_cleanup_only_requested
             and not force
             and self.threshold_tokens > 0
-            and (observed_prompt_tokens or 0) < self.threshold_tokens
+            and (
+                (observed_prompt_tokens or 0) < self.threshold_tokens
+                or self._no_progress_hold_blocks(observed_prompt_tokens or 0)
+            )
         )
         cleanup_only_requested = bool(
             (
