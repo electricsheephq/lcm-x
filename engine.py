@@ -6305,8 +6305,12 @@ class LCMEngine(
                 store_id, placeholder, before_commit=_archive_in_rewrite_txn
             )
 
-    def _serialize_messages(self, messages: List[Dict[str, Any]]) -> str:
-        """Serialize messages into labeled text for the summarizer."""
+    def _serialize_messages(self, messages: List[Dict[str, Any]], session_id: Optional[str] = None) -> str:
+        """Serialize messages into labeled text for the summarizer.
+
+        *session_id* names the session that owns the rows; it defaults to the
+        bound session. A large tool result is externalized under that session.
+        """
         parts = []
         matched_tool_ids = _matched_tool_call_ids(messages)
         for msg in messages:
@@ -6321,7 +6325,7 @@ class LCMEngine(
                 externalized = maybe_externalize_tool_output(
                     content,
                     tool_call_id=tool_id,
-                    session_id=self._session_id,
+                    session_id=self._session_id if session_id is None else session_id,
                     config=self._config,
                     hermes_home=self._hermes_home,
                 )

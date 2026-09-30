@@ -126,7 +126,7 @@ def _summarise_group(engine, rows, group, result) -> tuple[dict[int, tuple[str, 
         if source_type == "messages":
             by_id = engine._store.get_batch(sorted({int(i) for i in source_ids}))
             messages = [by_id[i] for i in sorted(by_id)]
-            text, source_tokens = engine._serialize_messages(messages), count_messages_tokens(messages)
+            text, source_tokens = engine._serialize_messages(messages, rows[node_id][1]), count_messages_tokens(messages)
             budget, new_source_tokens = engine._leaf_target_tokens(source_tokens), None
         else:
             children = []

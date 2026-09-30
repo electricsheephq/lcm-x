@@ -525,3 +525,25 @@ def test_r4c_a_node_deleted_before_registration_skips_the_pass(engine, monkeypat
     assert passes == 1 and reason == "pass_budget_exhausted" and len(inputs) == 1  # skipped, then re-selected
     assert len(parents) == 1 and others[0] not in parents[0].source_ids
     assert sorted(parents[0].source_ids) == sorted([fragment, *others[1:]])
+
+
+def test_a_repaired_leaf_externalizes_tool_output_under_its_own_session(engine, monkeypatch):
+    """Repair of another session's leaf must not label that session's tool output with the bound session."""
+    rows = [engine._store.append("s2", {"role": "user", "content": "run the report"}, token_estimate=4),
+            engine._store.append("s2", {"role": "tool", "tool_call_id": "call-s2", "content": "report body " * 40},
+                                 token_estimate=120)]
+    leaf = _node(engine, "s2", 0, _deterministic_truncate(LONG_SOURCE, 512), rows)
+    sessions = []
+
+    def capture(content, *, tool_call_id, session_id, **_kwargs):
+        sessions.append((tool_call_id, session_id))
+        return None
+
+    monkeypatch.setattr(engine_mod, "maybe_externalize_tool_output", capture)
+    _fake_route(monkeypatch)
+    assert engine._session_id == "s1"
+
+    result = handle_lcm_command("doctor repair level3 apply", engine)
+
+    assert "groups_repaired: 1" in result and f"top node {leaf}" in result
+    assert sessions == [("call-s2", "s2")]
