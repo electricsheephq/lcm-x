@@ -218,7 +218,7 @@ def repair_level3_fragments(engine) -> dict[str, Any]:
         missing = []  # any node of the group, fragment or ancestor, with a source that is no longer stored (M1)
         for i in group:
             ids, stored = _stored_sources(conn, rows[i][5], rows[i][6])
-            if stored < len(ids):
+            if not ids or stored < len(ids):  # no recorded source: the node's text is its content's only copy
                 kind = "message rows" if rows[i][6] == "messages" else "child nodes"
                 missing.append(f"node {i} (session {rows[i][1]}) {stored}/{len(ids)} {kind} stored")
         result["groups"].append({

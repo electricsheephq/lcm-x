@@ -624,3 +624,16 @@ def test_r6d_the_provenance_row_names_the_repair_model(engine, monkeypatch):
     assert "status: ok" in handle_lcm_command("doctor repair level3 apply", engine)
     assert conn.execute("SELECT escalation_level, model, created_at FROM summary_node_provenance WHERE node_id = ?",
                         (ids["truncated"],)).fetchone() == (1, "repair-model", 7.0)
+
+
+def test_r7_a_fragment_with_no_recorded_source_is_left_untouched(engine, monkeypatch):
+    fragment = _deterministic_truncate(LONG_SOURCE, 512)
+    leaf = _node(engine, "s1", 0, fragment, [])  # no source row recorded: the text is the content's only copy
+    calls = _fake_route(monkeypatch)
+
+    dry = handle_lcm_command("doctor repair level3", engine)
+    result = handle_lcm_command("doctor repair level3 apply", engine)
+
+    assert f"node {leaf} (session s1, d0): raw_rows_stored=no (0/0)" in dry
+    assert "skipped" in result and f"node {leaf} (session s1) 0/0 message rows stored" in result
+    assert calls == [] and _texts(engine)[leaf][0] == fragment

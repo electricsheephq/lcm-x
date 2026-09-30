@@ -1077,7 +1077,7 @@ def _doctor_repair_level3_text(engine) -> str:
         )
     for item in flagged:
         label = "raw_rows_stored" if item["leaf"] else "source_nodes_stored"
-        complete = item["sources_stored"] == item["sources"]
+        complete = bool(item["sources"]) and item["sources_stored"] == item["sources"]
         lines.append(
             f"node {item['node_id']} (session {item['session_id']}, d{item['depth']}): "
             f"{label}={_fmt_bool(complete)} ({item['sources_stored']}/{item['sources']})"
