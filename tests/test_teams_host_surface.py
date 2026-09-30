@@ -78,6 +78,9 @@ HOST_ONLY = {
     # Sets the host-facing engine name from the Hermes config at register /
     # clone time (#471); it reads no store and grants nothing.
     "apply_identity_migration",
+    # The host breaker's refusal notification (#651): it starts the in-memory
+    # no-progress hold of this engine; it reads no store and grants nothing.
+    "record_rejected_compaction",
 }
 
 

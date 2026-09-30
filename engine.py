@@ -676,6 +676,14 @@ class LCMEngine(
         # #608: wall clock until which the threshold answer is no, after a sweep
         # spent its time budget before the first leaf. A stored leaf clears it.
         self._sweep_budget_hold_until: float = 0.0
+        # #651: (until, reason) after an automatic threshold pass made no progress or
+        # the host refused one. Like the #608 hold, only its time or a stored leaf ends it.
+        self._no_progress_hold: Optional[tuple[float, str]] = None
+        self._no_progress_candidate = False  # set by _compress_impl for compress()
+        self._last_gate_tokens = 0  # the latest should_compress/preflight observation
+        # #651 one-shot handoff: preflight asked for maintenance below the host
+        # threshold, so the automatic compress() that follows is cleanup-only.
+        self._preflight_below_threshold_cleanup_only = False
         # One-shot handoff from preflight: adopt an already-durable replay
         # cleanup during boundary cooldown without running summary work.
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
@@ -1586,9 +1594,58 @@ class LCMEngine(
         self._sweep_budget_hold_until = 0.0
         return False
 
+    def _start_no_progress_hold(self, reason: str) -> None:
+        """#651: hold automatic threshold passes across turns, like the #608 hold: only its time or a stored leaf
+        ends it."""
+        self._no_progress_hold = (time.time() + _SWEEP_BUDGET_HOLD_SECONDS, reason)
+        logger.info("LCM automatic compaction held for %.0fs: %s", _SWEEP_BUDGET_HOLD_SECONDS, reason)
+
+    def _no_progress_hold_active(self) -> bool:
+        """#651: never latches; it ends at its time (a stored leaf clears it in compress())."""
+        if self._no_progress_hold is None:
+            return False
+        if time.time() < self._no_progress_hold[0]:
+            return True
+        self._no_progress_hold = None
+        return False
+
+    def _no_progress_hold_status(self) -> Optional[dict]:
+        if not self._no_progress_hold_active():
+            return None
+        until, reason = self._no_progress_hold
+        return {"reason": reason, "until": until}
+
+    def record_rejected_compaction(self) -> None:
+        """#651 host breaker hook: the host refused the last compaction (the result would be larger). Called
+        without arguments inside an error-swallowing wrapper; a rejection counts as no progress."""
+        self._start_no_progress_hold("host_rejected")
+
+    def _automatic_compression_blocked(self, *, ignore_cooldown: bool = False) -> bool:
+        """#651 host breaker gate, read on the type before every automatic compress. A host recovery attempt
+        (``ignore_cooldown``), a pending below-threshold cleanup-only pass, forced overflow and the survival
+        ceiling are never blocked; the hold governs LCM-managed compaction only, never a bypassed session."""
+        if ignore_cooldown or self._preflight_below_threshold_cleanup_only:
+            return False
+        return self._no_progress_hold_blocks(max(int(self.last_prompt_tokens or 0), self._last_gate_tokens))
+
+    def _no_progress_hold_blocks(self, tokens: int) -> bool:
+        """#651: the one hold decision the host gate and compress() share. The hold governs LCM-managed
+        compaction only, and forced overflow and the survival ceiling are never held."""
+        if self._bypasses_lcm_context_management() or not self._no_progress_hold_active():
+            return False
+        if self._should_force_overflow_recovery(observed_tokens=tokens):
+            return False
+        return self._sweep_budget_hold_applies(tokens)
+
+    def _compression_block_reason(self) -> Optional[str]:
+        """#651: the host classifies ``cooldown*`` as a transient block: defer, never exhaust."""
+        status = self._no_progress_hold_status()
+        return f"cooldown:lcm_{status['reason']}" if status else None
+
     def _sweep_budget_hold_applies(self, tokens: Optional[int]) -> bool:
-        """#608: the hold never applies at or over the survival ceiling, whose fit only compress() runs."""
-        if not self._sweep_budget_hold_active():
+        """#608: the hold never applies at or over the survival ceiling, whose fit only compress() runs.
+        #651: the no-progress hold applies the same way."""
+        if not self._sweep_budget_hold_active() and not self._no_progress_hold_active():
             return False
         window = int(self.context_length or 0)
         if window <= 0 or tokens is None:
@@ -4571,6 +4628,7 @@ class LCMEngine(
             "last_compression_noop_reason": self._last_compression_noop_reason,
             "last_survival_fit": dict(self._last_survival_fit) if self._last_survival_fit else None,
             "threshold_full_sweep": dict(self._last_threshold_full_sweep),
+            "no_progress_hold": self._no_progress_hold_status(),
             "ingest_failure_count": self._ingest_failure_count,
             "consecutive_ingest_failures": self._consecutive_ingest_failures,
             "last_ingest_error": self._last_ingest_error,
