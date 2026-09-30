@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+## v0.24.8 - (unreleased; rc1) (repairs: level 3 fragment repair, tool-output stubs that name the read-back call, rollup stop, no silent fallback on a slow load)
+
 - Fix: a summary route that cannot serve its model (HTTP 400/404 whose message names the model as unknown, not
   found, not existing or not supported) opens its circuit on the first failure instead of the second, so level 2 is not
   attempted, and logs one WARNING per episode that names the provider and model the host used (`route_info`, on
@@ -68,7 +70,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   transaction. It refuses while no summary route is available, never writes a level 3 result, skips a group with any
   source row or child node missing, rolls a group back if it changed during the repair, and ends with a second scan. (#667)
 
-## v0.24.7 - (unreleased; rc2) (P0 for long-running sessions: the survival fit keeps the summary, no in-turn thrash below the threshold, no level-3 fragments, a bounded summary prefix, steer rows stored)
+## v0.24.7 - 2026-09-30 (P0 for long-running sessions: the survival fit keeps the summary, no in-turn thrash below the threshold, no level-3 fragments, a bounded summary prefix, steer rows stored)
 
 - Config: the leaf summary target is configurable with `LCM_LEAF_TARGET_RATIO` (default 0.20),
   `LCM_LEAF_TARGET_MIN_TOKENS` (default 2000) and `LCM_LEAF_TARGET_MAX_TOKENS` (default 12000). With the defaults every
