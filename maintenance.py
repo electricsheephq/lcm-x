@@ -9,6 +9,7 @@ formatting, and the store/dag/lifecycle connection handling lives in one place.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 import sqlite3
@@ -23,7 +24,9 @@ def flush_engine_connections(engine) -> None:
     contract stays in one place.
     """
     engine._store.commit()
-    engine._dag._conn.commit()
+    # #667: never commit a DAG transaction another thread holds open (the level 3 repair)
+    with getattr(engine._dag, "_db_lock", nullcontext()):
+        engine._dag._conn.commit()
     lifecycle_conn = getattr(getattr(engine, "_lifecycle", None), "_conn", None)
     if lifecycle_conn is not None:
         lifecycle_conn.commit()

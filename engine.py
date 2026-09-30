@@ -445,6 +445,9 @@ class LCMEngine(
         self._config = config or LCMConfig.from_env()
         self._hermes_home = hermes_home
         self._stable_use_lock = threading.Lock()
+        # #667: node ids a condensation has selected, until it publishes or fails; the level 3 repair skips them.
+        self._condensation_inflight_ids: set[int] = set()
+        self._condensation_inflight_lock = threading.Lock()
         self._stable_use_owner_thread: int | None = None
         self._stable_use_closed = False
         self._assertion_extraction_metrics_lock = threading.RLock()
@@ -6359,8 +6362,12 @@ class LCMEngine(
                 store_id, placeholder, before_commit=_archive_in_rewrite_txn
             )
 
-    def _serialize_messages(self, messages: List[Dict[str, Any]]) -> str:
-        """Serialize messages into labeled text for the summarizer."""
+    def _serialize_messages(self, messages: List[Dict[str, Any]], session_id: Optional[str] = None) -> str:
+        """Serialize messages into labeled text for the summarizer.
+
+        *session_id* names the session that owns the rows; it defaults to the
+        bound session. A large tool result is externalized under that session.
+        """
         parts = []
         matched_tool_ids = _matched_tool_call_ids(messages)
         tool_result_names = _tool_result_names(messages)
@@ -6376,7 +6383,7 @@ class LCMEngine(
                 externalized = maybe_externalize_tool_output(
                     content,
                     tool_call_id=tool_id,
-                    session_id=self._session_id,
+                    session_id=self._session_id if session_id is None else session_id,
                     config=self._config,
                     hermes_home=self._hermes_home,
                     tool_name=str(msg.get("tool_name") or tool_result_names.get(index, "")),
@@ -6852,11 +6859,14 @@ class LCMEngine(
             # Take the first fanin nodes and condense
             to_condense = uncondensed[:fanin]
             try:
-                source_tokens, summary_tokens, level = self._condense_summary_nodes(
-                    to_condense,
-                    focus_topic=focus_topic,
-                    force_overflow=force_overflow,
-                )
+                with self._condensation_in_flight(to_condense) as fresh:
+                    if fresh is None:
+                        continue  # a selected node went away before registration (#667): nothing to condense here
+                    source_tokens, summary_tokens, level = self._condense_summary_nodes(
+                        fresh,
+                        focus_topic=focus_topic,
+                        force_overflow=force_overflow,
+                    )
             except SummaryResultRejected:
                 result_rejected = True  # #652: the nodes stay on the frontier
                 break
@@ -6886,6 +6896,22 @@ class LCMEngine(
         if result_rejected:
             self._last_condensation_suppressed_reason = "summary_result_rejected"
         return condensation_passes
+
+    @contextmanager
+    def _condensation_in_flight(self, nodes: List[SummaryNode]):
+        """#667: hold the selected node ids in the in-flight set until publish or failure, and yield fresh copies read
+        after registration (None when a node is gone or moved), so a repair commit before registration is seen."""
+        node_ids = {node.node_id for node in nodes}
+        with self._condensation_inflight_lock:
+            self._condensation_inflight_ids |= node_ids
+        try:
+            with self._dag._db_lock:  # waits for a repair transaction in progress
+                fresh = [self._dag.get_node(node.node_id) for node in nodes]
+            moved = any(copy is None or copy.depth != node.depth for copy, node in zip(fresh, nodes))
+            yield None if moved else fresh
+        finally:
+            with self._condensation_inflight_lock:
+                self._condensation_inflight_ids -= node_ids
 
     def _condense_summary_nodes(
         self,
@@ -7012,13 +7038,16 @@ class LCMEngine(
             group = self._select_threshold_sweep_condensation_group()
             if not group:
                 return passes, "no_same_depth_condensation_group"
-            before = self._summary_frontier_tokens()
             try:
-                self._condense_summary_nodes(
-                    group,
-                    focus_topic=focus_topic,
-                    deadline=deadline,
-                )
+                with self._condensation_in_flight(group) as fresh:
+                    if fresh is None:
+                        continue  # a selected node went away before registration (#667): select again
+                    before = self._summary_frontier_tokens()
+                    self._condense_summary_nodes(
+                        fresh,
+                        focus_topic=focus_topic,
+                        deadline=deadline,
+                    )
             except SweepBudgetExhausted:
                 return passes, "time_budget_exhausted"
             except SummaryResultRejected:

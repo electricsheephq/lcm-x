@@ -59,6 +59,14 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix: when the host refuses a compaction of an LCM-bypassed session (an auxiliary side channel or a stateless
   session) as larger, the foreground session's automatic compaction is no longer held for up to 600 seconds; the
   same refusal on the foreground session still arms the no-progress hold. (#665)
+- Doctor: `/lcm doctor repair level3` (and `lcm_doctor` with `action: repair_level3`) finds the level 3 truncation
+  fragments that a refused summary route wrote before v0.24.6/v0.24.7, and every condensed node built on them, per
+  session, with a check that each fragment's source rows are still stored. It is a read-only scan and changes
+  nothing. `/lcm doctor repair level3 apply` (slash command only) takes a backup, then re-summarises each affected
+  group in place from the stored raw rows, leaves first and each condensed node from its repaired children, one
+  transaction per group; node ids, source links and raw rows are kept and the summary FTS index is updated in the same
+  transaction. It refuses while no summary route is available, never writes a level 3 result, skips a group with any
+  source row or child node missing, rolls a group back if it changed during the repair, and ends with a second scan. (#667)
 
 ## v0.24.7 - (unreleased; rc2) (P0 for long-running sessions: the survival fit keeps the summary, no in-turn thrash below the threshold, no level-3 fragments, a bounded summary prefix, steer rows stored)
 
