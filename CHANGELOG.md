@@ -13,7 +13,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix: when a leaf or condensation gets only a level 3 truncation back and the compaction is not a forced overflow
   recovery with the survival fit able to run (on, and the model window known), no leaf or node is written; the
   compaction stops with `summary_result_rejected`, logs one warning and keeps the rows and nodes for a later compaction.
-  A level 3 result that is the whole source (it fits the truncation budget) is still written. (#652)
+  A level 3 result that is the whole source (it fits the truncation budget) is still written. A sweep whose
+  condensation before the leaves was rejected does not condense again after them in the same compaction. (#652)
 - Fix: a threshold sweep whose summary prefix is over its target condenses it before the leaves, in at most half of
   the sweep's passes and time, so sweeps stopped by their budget no longer grow the prefix. Assembly renders the
   newest uncondensed summaries of each depth (oldest first), and a summary budget keeps the newest parts of a depth.

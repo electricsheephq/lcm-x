@@ -2149,9 +2149,14 @@ class CompactionMixin:
             recovery_assembly_cap,
         )
         condensation_passes = 0
+        # #652: a route that just rejected the pre-leaf condensation is not asked again in this call.
+        post_drain_condensation_skipped = ""
         try:
             if threshold_full_sweep_active:
-                if sweep_raw_drained:
+                if sweep_raw_drained and pre_leaf_condensation_reason == "summary_result_rejected":
+                    post_drain_condensation_skipped = "pre_leaf_rejected"
+                    sweep_stop_reason = "summary_result_rejected"
+                elif sweep_raw_drained:
                     remaining_passes = max(
                         0,
                         _THRESHOLD_FULL_SWEEP_MAX_PASSES - leaf_passes - pre_leaf_condensation_passes,
@@ -2260,6 +2265,7 @@ class CompactionMixin:
                 "condensation_passes": pre_leaf_condensation_passes + condensation_passes,
                 "pre_leaf_condensation_passes": pre_leaf_condensation_passes,
                 "pre_leaf_condensation_stop_reason": pre_leaf_condensation_reason,
+                "post_drain_condensation_skipped": post_drain_condensation_skipped,
                 "total_passes": total_passes,
                 "duration_ms": round(duration_ms, 3),
                 "tokens_before": self._last_threshold_full_sweep["tokens_before"],

@@ -223,6 +223,31 @@ def test_t4_partial_sweep_condenses_before_the_leaves(tmp_path, monkeypatch, cap
         engine.shutdown()
 
 
+def test_t4_pre_leaf_rejection_skips_the_post_drain_condensation(tmp_path, monkeypatch, caplog):
+    engine = _engine(tmp_path, condensation_fanin=2)
+    calls: list[int] = []
+
+    def summarize(**kwargs):  # leaves are accepted; every condensation comes back as a level 3 truncation
+        depth = int(kwargs.get("depth", 0))
+        calls.append(depth)
+        return (LEAF, 1) if depth == 0 else (LEVEL_3, 3)
+
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", summarize)
+    _depth_0_nodes(engine, 6)
+    try:
+        before = _frontier_ids(engine)
+        _compress(engine, _view(), caplog)
+        telemetry = engine.get_status()["threshold_full_sweep"]
+        assert telemetry["pre_leaf_condensation_stop_reason"] == "summary_result_rejected"
+        assert telemetry["leaf_passes"] > 0 and calls.count(0) == telemetry["leaf_passes"]
+        assert [depth for depth in calls if depth > 0] == [1]  # one condensation call in this compress()
+        assert telemetry["post_drain_condensation_skipped"] == "pre_leaf_rejected"
+        assert telemetry["stop_reason"] == "summary_result_rejected" and telemetry["status"] == "partial"
+        assert set(before) <= set(_frontier_ids(engine))  # the rejected group stays on the frontier
+    finally:
+        engine.shutdown()
+
+
 # -- T5: at or below the target nothing changes --------------------------------------------------------------
 
 # Recorded at the base of this change (v0.24.6 for these paths): per sweep shape, the summariser calls as
