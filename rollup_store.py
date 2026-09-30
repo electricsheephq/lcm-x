@@ -89,7 +89,13 @@ class RollupStore:
                     "temporal rollup schema incomplete after ensure: "
                     + ", ".join(missing)
                 )
-        mark_migration_step_complete(self._conn, "temporal_rollups_v1")
+        # Write the marker only when missing: an unconditional UPSERT takes the
+        # write lock on every start and can wait behind another writer (#622).
+        if not self._conn.execute(
+            "SELECT 1 FROM lcm_migration_state WHERE step_name = ?",
+            ("temporal_rollups_v1",),
+        ).fetchone():
+            mark_migration_step_complete(self._conn, "temporal_rollups_v1")
         self._conn.commit()
 
     @contextmanager

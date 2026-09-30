@@ -37,6 +37,7 @@ from .db_bootstrap import (
     load_integrity_failed,
 )
 from .extraction import sanitize_pre_compaction_content
+from .inactive_record import inactive_record_notice
 from .ingest_protection import (
     EmbeddingPrivacyPolicyError,
     embedding_provider_requires_privacy,
@@ -8004,11 +8005,15 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
     # been bound, so cron-only or stateless-only deployments still report
     # something usable.
     session_id = engine.current_session_id
+    # #622: another process of this profile where Hermes did not take LCM-X.
+    inactive_process = inactive_record_notice(getattr(engine, "_hermes_home", ""))
+    inactive_payload = {"inactive_process": inactive_process} if inactive_process else {}
     if not session_id:
         return json.dumps({
             "error": "No active session",
             "runtime_identity": engine.get_runtime_identity(),
             "identity_migration": getattr(engine, "identity_migration", None),
+            **inactive_payload,
         })
 
     # Store stats
@@ -8156,6 +8161,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         "identity_migration": full_status.get("identity_migration"),
         "lifecycle": lifecycle,
         "lifecycle_fragmentation": lifecycle_fragmentation,
+        **inactive_payload,
     })
 
 

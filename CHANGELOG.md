@@ -6,6 +6,16 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: a slow plugin load no longer leaves Hermes silently without LCM-X. When Hermes 0.21.5+ ignores
+  `register_context_engine()` because the load overran `plugins.load_timeout_seconds`, `register()` logs one ERROR
+  with the load time and the setting, and does not print "LCM plugin loaded — … active"; another engine in the slot
+  gets a WARNING. The affected process leaves `lcm-x-not-active.json` in the Hermes home, and `lcm_status` and
+  `/lcm doctor` in other processes report it while that process runs. The active line now carries the load time.
+  The store open no longer waits for the write lock in steady state: a due FTS deep check whose claim cannot get
+  the lock within 50 ms is skipped for that open (a later open runs it), the `ingested_at` NULL backfill scan runs
+  once per store behind a migration marker, and with temporal rollups on the rollup marker and range normalization
+  write only when needed. The lossless-claw importer writes `ingested_at` itself. (#622)
+
 ## v0.24.7 - (unreleased; rc2) (P0 for long-running sessions: the survival fit keeps the summary, no in-turn thrash below the threshold, no level-3 fragments, a bounded summary prefix, steer rows stored)
 
 - Config: the leaf summary target is configurable with `LCM_LEAF_TARGET_RATIO` (default 0.20),

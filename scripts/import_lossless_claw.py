@@ -1041,11 +1041,13 @@ def _insert_import_candidate(
         session_id=candidate.target_session_id,
     )
     tool_calls_json = json.dumps(protected_msg.get("tool_calls")) if protected_msg.get("tool_calls") else None
+    # ingested_at = timestamp is what the store's one-time backfill writes; it
+    # no longer re-runs on every open (#622).
     cur = conn.execute(
         """INSERT INTO messages
            (session_id, source, role, content, tool_call_id, tool_calls,
-            tool_name, timestamp, token_estimate, pinned)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+            tool_name, timestamp, token_estimate, pinned, ingested_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
         (
             candidate.target_session_id,
             _normalize_source_value(candidate.source),
@@ -1056,6 +1058,7 @@ def _insert_import_candidate(
             protected_msg.get("tool_name"),
             candidate.timestamp,
             count_message_tokens(protected_msg),
+            candidate.timestamp,
         ),
     )
     store_id = int(cur.lastrowid)
