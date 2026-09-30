@@ -434,6 +434,9 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
         int,
     ),
     _EnvFieldSpec("leaf_chunk_tokens", "LCM_LEAF_CHUNK_TOKENS", int),
+    _EnvFieldSpec("leaf_target_ratio", "LCM_LEAF_TARGET_RATIO", float),
+    _EnvFieldSpec("leaf_target_min_tokens", "LCM_LEAF_TARGET_MIN_TOKENS", int),
+    _EnvFieldSpec("leaf_target_max_tokens", "LCM_LEAF_TARGET_MAX_TOKENS", int),
     _EnvFieldSpec("context_threshold", "LCM_CONTEXT_THRESHOLD", float),
     _EnvFieldSpec("incremental_max_depth", "LCM_INCREMENTAL_MAX_DEPTH", int),
     _EnvFieldSpec("condensation_fanin", "LCM_CONDENSATION_FANIN", int),
@@ -561,6 +564,9 @@ _SOURCE_TRACKED_ENV_FIELDS = frozenset({
     "fresh_tail_count",
     "fresh_tail_max_tokens",
     "leaf_chunk_tokens",
+    "leaf_target_ratio",
+    "leaf_target_min_tokens",
+    "leaf_target_max_tokens",
     "context_threshold",
     "summary_spend_max_calls",
     "summary_spend_window_seconds",
@@ -967,6 +973,11 @@ class LCMConfig:
     survival_fit: bool = True
     # Share of the model window the survival fit keeps free for the response and host overhead.
     survival_reserve: float = 0.15
+    # #614: leaf summary target = min(max, max(min, int(source_tokens * ratio))); the L1 call
+    # receives twice the target as max_tokens. Defaults reproduce the historical constants.
+    leaf_target_ratio: float = 0.20
+    leaf_target_min_tokens: int = 2_000
+    leaf_target_max_tokens: int = 12_000
     # Summariser prompt version (#646): 1 = original prompts and 2x output
     # ceiling; 2 = v2 prompts, focus directives in the policy, 3x ceiling.
     summary_prompt_version: int = 1
@@ -1000,6 +1011,35 @@ class LCMConfig:
             "LCM_LEAF_CHUNK_TOKENS", c.leaf_chunk_tokens
         )
         _record("leaf_chunk_tokens", source, warning)
+        # #614 leaf summary target; an out-of-range value falls back to its default with a warning.
+        c.leaf_target_ratio, source, warning = _parse_float_env_with_source(
+            "LCM_LEAF_TARGET_RATIO", c.leaf_target_ratio
+        )
+        if not 0 < c.leaf_target_ratio <= 1:
+            warning = f"invalid env LCM_LEAF_TARGET_RATIO={c.leaf_target_ratio!r} ignored (must be > 0 and <= 1)"
+            c.leaf_target_ratio, source = LCMConfig.leaf_target_ratio, "default"
+        _record("leaf_target_ratio", source, warning)
+        c.leaf_target_min_tokens, min_source, warning = _parse_int_env_with_source(
+            "LCM_LEAF_TARGET_MIN_TOKENS", c.leaf_target_min_tokens
+        )
+        if c.leaf_target_min_tokens < 1:
+            warning = f"invalid env LCM_LEAF_TARGET_MIN_TOKENS={c.leaf_target_min_tokens!r} ignored (must be >= 1)"
+            c.leaf_target_min_tokens, min_source = LCMConfig.leaf_target_min_tokens, "default"
+        _record("leaf_target_min_tokens", min_source, warning)
+        c.leaf_target_max_tokens, source, warning = _parse_int_env_with_source(
+            "LCM_LEAF_TARGET_MAX_TOKENS", c.leaf_target_max_tokens
+        )
+        if c.leaf_target_max_tokens < c.leaf_target_min_tokens and source != "default":
+            warning = (f"invalid env LCM_LEAF_TARGET_MAX_TOKENS={c.leaf_target_max_tokens!r} ignored "
+                       f"(must be >= leaf_target_min_tokens={c.leaf_target_min_tokens})")
+            c.leaf_target_max_tokens, source = LCMConfig.leaf_target_max_tokens, "default"
+        _record("leaf_target_max_tokens", source, warning)
+        if c.leaf_target_max_tokens < c.leaf_target_min_tokens:
+            # Only the minimum was set, above the default maximum: the minimum is the offending key.
+            _record("leaf_target_min_tokens", "default",
+                    f"invalid env LCM_LEAF_TARGET_MIN_TOKENS={c.leaf_target_min_tokens!r} ignored "
+                    f"(must be <= leaf_target_max_tokens={c.leaf_target_max_tokens})")
+            c.leaf_target_min_tokens = LCMConfig.leaf_target_min_tokens
         context_default, context_source = _hermes_compression_threshold_with_source(c.context_threshold)
         c.context_threshold, source, warning = _parse_float_env_with_source(
             "LCM_CONTEXT_THRESHOLD",

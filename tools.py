@@ -88,6 +88,7 @@ from .session_patterns import build_session_match_keys, compile_session_pattern
 from .sqlite_util import _sqlite_savepoint
 from .store import build_message_fts_spec
 from .vector_store import VectorStore
+from .config import LCMConfig
 
 if TYPE_CHECKING:
     from .engine import LCMEngine
@@ -8082,6 +8083,15 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
             "fresh_tail_count": engine._config.fresh_tail_count,
             "fresh_tail_max_tokens": engine._config.fresh_tail_max_tokens,
             "leaf_chunk_tokens": engine._config.leaf_chunk_tokens,
+            "leaf_target_ratio": getattr(
+                engine._config, "leaf_target_ratio", LCMConfig.leaf_target_ratio
+            ),
+            "leaf_target_min_tokens": getattr(
+                engine._config, "leaf_target_min_tokens", LCMConfig.leaf_target_min_tokens
+            ),
+            "leaf_target_max_tokens": getattr(
+                engine._config, "leaf_target_max_tokens", LCMConfig.leaf_target_max_tokens
+            ),
             "dynamic_leaf_chunk_enabled": engine._config.dynamic_leaf_chunk_enabled,
             "dynamic_leaf_chunk_max": engine._config.dynamic_leaf_chunk_max,
             "cache_friendly_condensation_enabled": engine._config.cache_friendly_condensation_enabled,
