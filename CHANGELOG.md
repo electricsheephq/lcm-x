@@ -6,6 +6,15 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: a summary result rejected for its content (empty, reasoning only, output contract violated, not shorter than
+  its source) no longer counts as a failure of the summary route. Only a call that raises or times out counts toward
+  the failure threshold (2); rejections open the route at their own threshold,
+  `LCM_SUMMARY_CIRCUIT_BREAKER_REJECTION_THRESHOLD` (default 6). Every rejected result logs its reason. (#628)
+- Fix: while every summary route is refused, a compaction that is not a forced overflow recovery stops before the
+  next leaf or condensed node instead of writing level 3 truncations, when the survival fit can run (on, and the
+  model window known); the rows stay for a later compaction, and a
+  stop before the first leaf holds the threshold answer until a route is allowed again (at most 600 s). The
+  compaction line counts the level 3 leaves it wrote. (#628)
 - Fix: `/lcm doctor` and the operator guide no longer call a plugin-only rollback within 0.24.x supported after a
   survival fit that dropped turns without a projection. Every store with a survival fit gets the backup restore. A
   stored count that cannot be read is treated as a fit. (#620)

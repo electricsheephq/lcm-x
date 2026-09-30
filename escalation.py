@@ -70,7 +70,12 @@ class SummaryCircuitBreaker:
 
     failure_threshold: int = 2
     cooldown_seconds: int = 300
+    # Content rejections (no usable text, or not shorter than the source) are
+    # counted apart from provider failures and open the route at their own,
+    # higher threshold (#628).
+    rejection_threshold: int = 6
     _failures: dict[str, int] = field(default_factory=dict)
+    _rejections: dict[str, int] = field(default_factory=dict)
     _open_until: dict[str, float] = field(default_factory=dict)
     _lock: threading.Lock = field(
         default_factory=threading.Lock,
@@ -96,6 +101,7 @@ class SummaryCircuitBreaker:
         key = self._key(model)
         with self._lock:
             self._failures.pop(key, None)
+            self._rejections.pop(key, None)
             self._open_until.pop(key, None)
 
     def record_failure(self, model: str | None, *, now: float | None = None) -> None:
@@ -114,6 +120,28 @@ class SummaryCircuitBreaker:
                     failures,
                     cooldown,
                 )
+
+    def record_rejection(self, model: str | None, *, now: float | None = None) -> None:
+        key = self._key(model)
+        with self._lock:
+            rejections = self._rejections.get(key, 0) + 1
+            self._rejections[key] = rejections
+            if rejections >= max(1, int(self.rejection_threshold or 1)):
+                current_time = time.monotonic() if now is None else now
+                cooldown = max(0, int(self.cooldown_seconds or 0))
+                self._open_until[key] = current_time + cooldown
+                logger.warning(
+                    "LCM summary route circuit opened for %s after %d rejected result(s); cooldown=%ss",
+                    key,
+                    rejections,
+                    cooldown,
+                )
+
+    def seconds_until_allowed(self, models, *, now: float | None = None) -> float:
+        """Seconds until the first of ``models`` is allowed again (0 when one is allowed now)."""
+        current_time = time.monotonic() if now is None else now
+        with self._lock:
+            return max(0.0, min(self._open_until.get(self._key(model), 0.0) - current_time for model in models))
 
 
 @dataclass
@@ -321,6 +349,8 @@ def _call_llm_for_summary(prompt: str, max_tokens: int,
         content = response.choices[0].message.content
         if not isinstance(content, str):
             content = str(content) if content else ""
+        if not content.strip():
+            logger.warning("LCM summary discarded empty output (model=%s); escalating", model or "<default>")
         sanitized = _sanitize_reasoning_summary(content)
         if content.strip() and not sanitized:
             logger.warning(
@@ -448,6 +478,17 @@ def _summary_model_chain(primary_model: str = "", fallback_models: list[str] | t
     return chain
 
 
+def summary_route_available(
+    model: str,
+    fallback_models: list[str] | tuple[str, ...] | None,
+    circuit_breaker: SummaryCircuitBreaker | None,
+) -> bool:
+    """True when no breaker is in use or it allows one route of the summary chain (#628)."""
+    if circuit_breaker is None:
+        return True
+    return any(circuit_breaker.allows(candidate) for candidate in _summary_model_chain(model, fallback_models))
+
+
 def _invoke_summary_llm_chain(
     prompt: str,
     max_tokens: int,
@@ -459,6 +500,7 @@ def _invoke_summary_llm_chain(
     circuit_breaker: SummaryCircuitBreaker | None = None,
     spend_guard: "SummarySpendGuard | None" = None,
     accepts_result: Callable[[str], bool] | None = None,
+    source_tokens: int | None = None,
 ) -> Optional[str]:
     chain = _summary_model_chain(model, fallback_models)
     skipped = 0
@@ -493,8 +535,19 @@ def _invoke_summary_llm_chain(
             if circuit_breaker is not None:
                 circuit_breaker.record_success(candidate_model)
             return result
+        if result is not None:  # #628: a content rejection, not a provider failure
+            logger.warning(
+                "LCM summary result rejected (reason=%s, source_tokens=%s, result_tokens=%d, model=%s)",
+                "not_shorter" if result else "no_content",
+                "unknown" if source_tokens is None else source_tokens,
+                count_tokens(result) if result else 0,
+                candidate_model or _DEFAULT_ROUTE_KEY,
+            )
         if circuit_breaker is not None:
-            circuit_breaker.record_failure(candidate_model)
+            if result is None:
+                circuit_breaker.record_failure(candidate_model)
+            else:
+                circuit_breaker.record_rejection(candidate_model)
     if skipped == len(chain):
         logger.warning("LCM summary fallback chain exhausted: all routes are temporarily open")
     return None
@@ -679,6 +732,7 @@ def summarize_with_escalation(
         circuit_breaker=circuit_breaker,
         spend_guard=spend_guard,
         accepts_result=lambda result: count_tokens(result) < source_tokens,
+        source_tokens=source_tokens,
     )
 
     if l1_result:
@@ -700,6 +754,7 @@ def summarize_with_escalation(
         circuit_breaker=circuit_breaker,
         spend_guard=spend_guard,
         accepts_result=lambda result: count_tokens(result) < source_tokens,
+        source_tokens=source_tokens,
     )
 
     if l2_result:
