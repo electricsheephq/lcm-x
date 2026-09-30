@@ -276,6 +276,52 @@ def test_t4_the_hold_does_not_apply_at_the_survival_ceiling(tmp_path, summaries)
         engine.shutdown()
 
 
+# -- F1 (PR #655 review). a bypassed (auxiliary) session is never governed by the foreground hold ----------
+
+def _review_trace_engine(tmp_path):
+    """The review's trace: window 100k, threshold 35k, reserve 0.15, assembly cap 90k; a foreground no-progress
+    pass at 40k arms the hold; an auxiliary (stateless, LCM-bypassed) session is then bound."""
+    engine = _engine(tmp_path, context_length=100_000, leaf_chunk_tokens=100_000, max_assembly_tokens=90_000,
+                     stateless_session_patterns=["aux-*"])
+    view = _view(3)
+    assert engine.threshold_tokens == 35_000
+    engine.last_prompt_tokens = 40_000
+    assert engine.should_compress(40_000) is True
+    engine.compress(view, current_tokens=40_000)
+    assert engine.get_status()["no_progress_hold"]["reason"] == "no_progress" and _host_gate(engine) is True
+    engine.on_session_start("aux-1", platform="cli", context_length=100_000)
+    engine.last_prompt_tokens = 40_000  # auxiliary usage keeps the foreground observation
+    assert engine._bypasses_lcm_context_management() and engine.threshold_tokens == 35_000
+    return engine, view
+
+
+def test_f1_auxiliary_forced_overflow_is_not_blocked_by_the_foreground_hold(tmp_path, summaries):
+    engine, view = _review_trace_engine(tmp_path)
+    try:
+        assert engine.should_compress(95_000) is True  # over the 90k cap and the 85k survival ceiling
+        assert _host_gate(engine) is False  # the host proceeds to compress()
+        big = [{"role": "system", "content": "system prompt"},
+               *[row for i in range(40) for row in _turn(f"A{i}", 10.0 * (i + 1))]]
+        result = engine.compress(big, current_tokens=95_000)
+        assert count_messages_tokens(result) < count_messages_tokens(big)  # the bypass path bounded it
+        assert engine.get_status()["no_progress_hold"] is not None  # the foreground hold itself is untouched
+    finally:
+        engine.shutdown()
+
+
+def test_f1_a_foreground_call_after_an_auxiliary_call_is_judged_on_its_own_tokens(tmp_path, summaries):
+    engine, _view_ = _review_trace_engine(tmp_path)
+    try:
+        assert engine.should_compress(95_000) is True and _host_gate(engine) is False  # auxiliary
+        engine.on_session_start("S", platform="telegram", context_length=100_000, conversation_id="conv")
+        engine.last_prompt_tokens = 40_000
+        assert not engine._bypasses_lcm_context_management()
+        assert engine.should_compress(85_000) is True and _host_gate(engine) is False  # at the ceiling
+        assert engine.should_compress(40_000) is False and _host_gate(engine) is True  # not the auxiliary 95k
+    finally:
+        engine.shutdown()
+
+
 # -- T5. the host breaker hooks ------------------------------------------------------------------------------
 
 def test_t5_record_rejected_compaction_arms_the_hold_per_the_host_contract(tmp_path, summaries):

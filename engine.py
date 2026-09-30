@@ -1623,8 +1623,9 @@ class LCMEngine(
     def _automatic_compression_blocked(self, *, ignore_cooldown: bool = False) -> bool:
         """#651 host breaker gate, read on the type before every automatic compress. A host recovery attempt
         (``ignore_cooldown``), a pending below-threshold cleanup-only pass, forced overflow and the survival
-        ceiling are never blocked."""
-        if ignore_cooldown or self._preflight_below_threshold_cleanup_only or not self._no_progress_hold_active():
+        ceiling are never blocked; the hold governs LCM-managed compaction only, never a bypassed session."""
+        if (ignore_cooldown or self._preflight_below_threshold_cleanup_only
+                or self._bypasses_lcm_context_management() or not self._no_progress_hold_active()):
             return False
         tokens = max(int(self.last_prompt_tokens or 0), self._last_gate_tokens)
         if self._should_force_overflow_recovery(observed_tokens=tokens):

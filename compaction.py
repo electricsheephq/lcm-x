@@ -72,6 +72,7 @@ class CompactionMixin:
                     tokens = self._current_auxiliary_prompt_tokens(auxiliary_session_id)
                 else:
                     tokens = self.last_prompt_tokens
+            self._last_gate_tokens = int(tokens or 0)  # #651: the gate never reads another traffic class's value
             if self._should_force_overflow_recovery(observed_tokens=tokens):
                 return True
             if self.threshold_tokens <= 0:
@@ -103,6 +104,7 @@ class CompactionMixin:
             self._pressure_yield_invocation_verdict = "neutral"
             self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
             rough = count_messages_tokens(messages)
+            self._last_gate_tokens = rough
             if self._compression_boundary_cooldown_active():
                 return False
             if self._should_force_overflow_recovery(observed_tokens=rough, messages=messages):
@@ -160,6 +162,7 @@ class CompactionMixin:
                 return False
         if replay_messages is not None and replay_messages != messages:
             replay_rough = count_messages_tokens(replay_messages)
+            self._last_gate_tokens = max(rough, replay_rough)
             cleanup_requested = self._replay_diff_requests_ingest_cleanup(
                 messages,
                 replay_messages,
