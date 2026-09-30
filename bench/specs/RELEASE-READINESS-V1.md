@@ -71,11 +71,12 @@ A hands-on lane runs beside the sweep: the release's own fault cells and the reg
 on each supported host build, at the rc tag. The release manager adjudicates the sweep and the
 hands-on results together in `PHASE-B-RECEIPT.md`.
 
-**Differential rule.** A verified P0/P1 shape that the previous GA tree also shows is
-pre-existing, not a regression of the candidate. It is established by a base-versus-candidate
-probe whose pass rule is written down before it runs (same host pin, fixture and configuration;
-counts per cell on both trees). A pre-existing shape is recorded as KNOWN with a tracked issue
-and does not force a respin. A shape the base does not show follows the P0/P1 rule above; in
+**Differential rule.** A verified P0/P1 shape that the previous GA tree also shows, where the
+candidate is no worse than the base in every compared cell, is pre-existing, not a regression of
+the candidate. It is established by a base-versus-candidate probe whose pass rule is written
+down before it runs (same host pin, fixture and configuration; counts per cell on both trees).
+A pre-existing shape is recorded as KNOWN with a tracked issue and does not force a respin. A
+cell where the candidate is worse than the base follows the P0/P1 rule above. A shape the base does not show follows the P0/P1 rule above; in
 particular the candidate respins when, against the base, it adds loss, duplicate rows, a wedge,
 a session reset, or a request over the model window. The probe, its rule and both counts go
 into the Phase B receipt.
