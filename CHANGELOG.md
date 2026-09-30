@@ -10,6 +10,11 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   `LCM_LEAF_TARGET_MIN_TOKENS` (default 2000) and `LCM_LEAF_TARGET_MAX_TOKENS` (default 12000). With the defaults every
   target and `max_tokens` value is unchanged; an out-of-range value falls back to its default with a config warning.
   (#614)
+- Fix: the summary envelope accepts three named formatting mistakes: `</summary>` in place of `</lcm-summary>`, one
+  `<summary>` wrapper around the whole body, and one layer of quotes or emphasis on the closing hint (stored as the
+  plain `Expand for details about:` line). The nonce opening tag, its uniqueness, the body minimum and a closing hint
+  are still required. A discarded reply's warning names the failed check (`check=envelope|nonce_count|short_body|
+  closing_hint`), and an accepted mistake logs one INFO line with its name. (#612)
 
 ## v0.24.6 - (unreleased; rc1) (#628, #627: a summary circuit that counts rejections apart from failures, and images priced per image)
 
