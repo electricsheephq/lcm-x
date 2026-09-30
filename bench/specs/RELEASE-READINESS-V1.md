@@ -67,16 +67,41 @@ placeholders, revisions) under the rc tree and exercise re-embed/migration paths
 rule applies: finders and verifiers must not all share the author's model family.
 Findings: P0/P1 verified ⇒ respin. P2 ⇒ tracked issue with disposition before GA.
 
+A hands-on lane runs beside the sweep: the release's own fault cells and the regression suites
+on each supported host build, at the rc tag. The release manager adjudicates the sweep and the
+hands-on results together in `PHASE-B-RECEIPT.md`.
+
+**Differential rule.** A verified P0/P1 shape that the previous GA tree also shows is
+pre-existing, not a regression of the candidate. It is established by a base-versus-candidate
+probe whose pass rule is written down before it runs (same host pin, fixture and configuration;
+counts per cell on both trees). A pre-existing shape is recorded as KNOWN with a tracked issue
+and does not force a respin. A shape the base does not show follows the P0/P1 rule above; in
+particular the candidate respins when, against the base, it adds loss, duplicate rows, a wedge,
+a session reset, or a request over the model window. The probe, its rule and both counts go
+into the Phase B receipt.
+
 ## Phase C — Live-session soak
 
 A scripted multi-turn session battery over `hermes acp` (the measured headless single-session
 transport) against the clone: ingest-heavy turns, recall probes, compaction crossing at least
-one threshold, doctor at close. Green = zero unexpected errors in engine logs, zero
-publication-invariant conflicts (#247-class), recall probes hit, doctor clean. Minimum 30 turns.
+one threshold, doctor at close. Minimum 30 turns. Green =
+
+- zero unexpected errors in engine logs. A provider failure the engine handles as designed (a
+  rejected summary result logged with its reason, after which the compaction commits or stops
+  without writing a fragment) is not unexpected; the receipt lists each one;
+- zero NEW publication-invariant conflicts (#247-class): when the count is not zero, the same
+  soak runs on the previous GA tree on the same host, and the candidate fails only on a
+  conflict kind the base does not show or a higher count. Both counts go into the receipt;
+- zero recall-probe LOSS. Each probe is scored `exact` (the answer carries the planted literal),
+  `recoverable` (the literal is stored, in a raw row or a summary the LCM tools reach, but the
+  answer does not carry it; readers sometimes treat a planted decision as an injected claim) or
+  `LOSS` (the literal is not stored). Only LOSS fails; the receipt reports all three counts;
+- doctor clean.
 
 ## Receipts
 
 Each phase writes `PHASE-{A,B,C}-RECEIPT.md`: rc tag + tree sha, exact commands, matrix results
 (per-row pass/fail), findings + dispositions, and the claim class per the gate-closeout
-discipline (a phase receipt claims what it measured, never "customer ready"). The GA release
-notes link all three.
+discipline (a phase receipt claims what it measured, never "customer ready"). The receipts are
+published as assets of the GA release, redacted (no local paths, host names or people), with a
+`SHA256SUMS` file, and the GA release notes link each asset.

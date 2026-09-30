@@ -166,6 +166,7 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   `hermes acp` soak) — before the GA tag.
 - The GA commit may differ from the passing rc tree by EXACTLY the release-notes addition
   (mechanically verified: `git diff rcN..GA --name-only` ⊆ `.github/release-notes/`); GA notes
-  link the three phase receipts. A P0/P1 gauntlet finding means fix → new rc → re-run.
+  link the three phase receipts. A P0/P1 gauntlet finding that the previous GA does not show
+  means fix → new rc → re-run (the spec's differential rule).
 - Agents preparing a release produce the rc tag and receipts; the GA cut itself follows the
   maintainers-own-releases rule above.
