@@ -923,8 +923,8 @@ def _ground_one(
             source_observed_at = (
                 stored.get("observed_at")
                 if stored.get("observed_at") is not None
-                # A present-but-NULL ingested_at (legacy row) falls back too.
-                else stored.get("ingested_at") or stored.get("timestamp")
+                # A present-but-NULL ingested_at (legacy row) falls back too; any stored value is kept.
+                else stored.get("ingested_at") if stored.get("ingested_at") is not None else stored.get("timestamp")
             )
             try:
                 observed_at = float(source_observed_at)

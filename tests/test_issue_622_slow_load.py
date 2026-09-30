@@ -563,3 +563,32 @@ def test_n3_null_ingested_at_falls_back_to_timestamp_in_reasoning(tmp_path):
 
     assert error is None
     assert grounded is not None and grounded.store_id == store_id
+
+
+def test_n3_non_null_ingested_at_zero_is_kept_in_reasoning(tmp_path):
+    from hermes_lcm.reasoning import _ground_one
+    from hermes_lcm.store import MessageStore
+
+    store = MessageStore(tmp_path / "lcm.db")
+    try:
+        quote = "The deck has 12 slides."
+        store_id = store.append("s-622", {"role": "user", "content": quote})
+        store._conn.execute(
+            "UPDATE messages SET ingested_at = 0.0, observed_at = NULL, timestamp = 100.0 WHERE store_id = ?",
+            (store_id,),
+        )
+        store._conn.commit()
+
+        grounded, error = _ground_one(
+            {"store_id": store_id, "span_start": 0, "span_end": len(quote), "quote": quote},
+            messages=store,
+            assertions=None,
+            as_of=75.0,
+            session_dates=None,
+        )
+    finally:
+        store.close()
+
+    # ingested_at 0.0 is a stored value, not NULL: it is the observation time, so the row is before as_of.
+    assert error is None
+    assert grounded is not None and grounded.store_id == store_id
