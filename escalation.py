@@ -160,18 +160,25 @@ class SummaryCircuitBreaker:
         with self._lock:
             return self._key(model) in self._config_episodes
 
-    def record_success(self, model: str | None, *, route: dict | None = None) -> None:
+    def note_route(self, model: str | None, route: dict | None) -> None:
+        """#682: remember the provider/model the host reported for this route key."""
+        key = self._key(model)
+        with self._lock:
+            self._note(key, self._route_state.get(key, {}).get("last_error_class"), route)
+
+    def record_success(self, model: str | None) -> None:
         key = self._key(model)
         with self._lock:
             self._failures.pop(key, None)
             self._rejections.pop(key, None)
             self._open_until.pop(key, None)
             self._config_episodes.discard(key)  # #682: a success ends the episode
-            self._note(key, None, route)
+            self._note(key, None, None)
 
     def record_config_error(self, model: str | None, *, route: dict | None = None, error: BaseException | None = None,
-                            now: float | None = None) -> None:
-        """#682: a route that cannot serve its model opens on the first failure; one WARNING per episode."""
+                            now: float | None = None, sent_model: str | None = None) -> None:
+        """#682: a route that cannot serve its model opens on the first failure; one WARNING per episode.
+        ``model`` is the breaker key (#669: a rollup key carries its prefix); ``sent_model`` is what LCM-X sent."""
         key = self._key(model)
         with self._lock:
             self._note(key, "config_error", route)
@@ -179,29 +186,32 @@ class SummaryCircuitBreaker:
             self._open_until[key] = (time.monotonic() if now is None else now) + cooldown
             first = key not in self._config_episodes
             self._config_episodes.add(key)
+        sent = (model if sent_model is None else sent_model) or ""
         (logger.warning if first else logger.debug)(
-            "LCM summary route cannot serve the summary model: %s; LCM-X sent %s; circuit open for %ss per "
+            "LCM summary route cannot serve the summary model: %s; LCM-X sent %s; circuit %s open for %ss per "
             "failure until a summary succeeds (%s). Fix: set auxiliary.compression.provider and "
             "auxiliary.compression.model together in the profile's config.yaml, or a consistent "
             "model.provider / model.default pair",
             f"provider={route.get('provider')} model={route.get('model')}" if route else "host default route",
-            f"model {model!r}" if (model or "").strip() else "no model (summary_model unset)",
-            cooldown, str(error)[:200],
+            f"model {sent!r}" if sent.strip() else "no model (summary_model unset)",
+            key, cooldown, str(error)[:200],
         )
 
-    def route_status(self, models, *, now: float | None = None) -> dict:
-        """#682: ``open`` while every route of ``models`` is refused; the rest describes the primary route."""
-        seconds = self.seconds_until_allowed(models, now=now)
+    def route_status(self, models, *, now: float | None = None, route_key_prefix: str = "") -> dict:
+        """#682: ``open`` while every route of ``models`` is refused; the rest describes the primary route.
+        ``route_key_prefix`` selects a caller's own keys (#669); empty is the live compaction route."""
+        keys = [route_key_prefix + model for model in models]
+        seconds = self.seconds_until_allowed(keys, now=now)
         with self._lock:
-            state = dict(self._route_state.get(self._key(list(models)[0]), {}))
+            state = dict(self._route_state.get(self._key(keys[0]), {}))
         return {"state": "open" if seconds > 0 else "closed", "seconds_left": int(math.ceil(seconds)),
                 "last_error_class": state.get("last_error_class"), "provider": state.get("provider"),
                 "model": state.get("model")}
 
-    def record_failure(self, model: str | None, *, now: float | None = None, route: dict | None = None) -> None:
+    def record_failure(self, model: str | None, *, now: float | None = None) -> None:
         key = self._key(model)
         with self._lock:
-            self._note(key, "provider_failure", route)
+            self._note(key, "provider_failure", None)
             failures = self._failures.get(key, 0) + 1
             self._failures[key] = failures
             threshold = max(1, int(self.failure_threshold or 1))
@@ -637,11 +647,14 @@ def summary_route_available(
     model: str,
     fallback_models: list[str] | tuple[str, ...] | None,
     circuit_breaker: SummaryCircuitBreaker | None,
+    *,
+    route_key_prefix: str = "",
 ) -> bool:
     """True when no breaker is in use or it allows one route of the summary chain (#628)."""
     if circuit_breaker is None:
         return True
-    return any(circuit_breaker.allows(candidate) for candidate in _summary_model_chain(model, fallback_models))
+    return any(circuit_breaker.allows(route_key_prefix + candidate)
+               for candidate in _summary_model_chain(model, fallback_models))
 
 
 def _invoke_summary_llm_chain(
@@ -657,14 +670,17 @@ def _invoke_summary_llm_chain(
     accepts_result: Callable[[str], bool] | None = None,
     source_tokens: int | None = None,
     deadline: float | None = None,
+    route_key_prefix: str = "",
 ) -> Optional[str]:
-    """``deadline`` (absolute ``time.monotonic()``) bounds every route attempt (#666)."""
+    """``deadline`` (absolute ``time.monotonic()``) bounds every route attempt (#666).
+    ``route_key_prefix`` gives a caller its own breaker keys (#669: rollups); empty keeps the live keys."""
     chain = _summary_model_chain(model, fallback_models)
     skipped = 0
     for candidate_model in chain:
-        if circuit_breaker is not None and not circuit_breaker.allows(candidate_model):
+        route_key = route_key_prefix + candidate_model
+        if circuit_breaker is not None and not circuit_breaker.allows(route_key):
             skipped += 1
-            (logger.debug if circuit_breaker.in_config_episode(candidate_model) else logger.warning)(
+            (logger.debug if circuit_breaker.in_config_episode(route_key) else logger.warning)(
                 "LCM summary route skipped by open circuit: %s",
                 candidate_model or _DEFAULT_ROUTE_KEY,
             )
@@ -698,9 +714,11 @@ def _invoke_summary_llm_chain(
                 "LLM summarization failed: %s", exc)
             result = None
         route, error = dict(_summary_call.route or {}), _summary_call.error
+        if circuit_breaker is not None and route:
+            circuit_breaker.note_route(route_key, route)
         if result and (accepts_result is None or accepts_result(result)):
             if circuit_breaker is not None:
-                circuit_breaker.record_success(candidate_model, route=route)
+                circuit_breaker.record_success(route_key)
             return result
         if result is not None:  # #628: a content rejection, not a provider failure
             logger.warning(
@@ -714,14 +732,14 @@ def _invoke_summary_llm_chain(
             if circuit_breaker is None:
                 logger.warning("LLM summarization failed: %s", error)
             else:
-                circuit_breaker.record_config_error(candidate_model, route=route, error=error)
+                circuit_breaker.record_config_error(route_key, route=route, error=error, sent_model=candidate_model)
         elif circuit_breaker is not None:
             if result is None:
-                circuit_breaker.record_failure(candidate_model, route=route)
+                circuit_breaker.record_failure(route_key)
             else:
-                circuit_breaker.record_rejection(candidate_model)
+                circuit_breaker.record_rejection(route_key)
     if skipped == len(chain):
-        (logger.debug if all(circuit_breaker.in_config_episode(m) for m in chain) else logger.warning)(
+        (logger.debug if all(circuit_breaker.in_config_episode(route_key_prefix + m) for m in chain) else logger.warning)(
             "LCM summary fallback chain exhausted: all routes are temporarily open")
     return None
 
@@ -886,6 +904,8 @@ def summarize_with_escalation(
     circuit_breaker: SummaryCircuitBreaker | None = None,
     spend_guard: "SummarySpendGuard | None" = None,
     deadline: float | None = None,
+    *,
+    route_key_prefix: str = "",
 ) -> tuple[str, int]:
     """Run 3-level escalation. Returns (summary, level_used).
 
@@ -911,6 +931,7 @@ def summarize_with_escalation(
         accepts_result=lambda result: count_tokens(result) < source_tokens,
         source_tokens=source_tokens,
         deadline=deadline,
+        route_key_prefix=route_key_prefix,
     )
 
     if l1_result:
@@ -934,6 +955,7 @@ def summarize_with_escalation(
         accepts_result=lambda result: count_tokens(result) < source_tokens,
         source_tokens=source_tokens,
         deadline=deadline,
+        route_key_prefix=route_key_prefix,
     )
 
     if l2_result:
