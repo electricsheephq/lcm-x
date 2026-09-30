@@ -6,6 +6,14 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: a temporal rollup whose summary comes back as a level 3 truncation is not stored; the rollup stays pending for
+  its next build and one warning is logged (a level 3 result that is the whole source is still stored). Rollup
+  maintenance starts no build while the summary route is refused, and rollups record circuit results under their own
+  breaker keys, so a rollup burst can neither open nor close the live compaction route's circuit. (#669)
+- Docs (#685): the operator guide and the skill reference now say that since #652 a leaf whose level 1 and level 2 results are rejected is not stored while the survival fit can rescue the request; level 3 is still written when the cut is the whole source, in a forced overflow recovery, with the survival fit off or when the model window is unknown.
+- Fix: when the host refuses a compaction of an LCM-bypassed session (an auxiliary side channel or a stateless
+  session) as larger, the foreground session's automatic compaction is no longer held for up to 600 seconds; the
+  same refusal on the foreground session still arms the no-progress hold. (#665)
 - Doctor: `/lcm doctor repair level3` (and `lcm_doctor` with `action: repair_level3`) finds the level 3 truncation
   fragments that a refused summary route wrote before v0.24.6/v0.24.7, and every condensed node built on them, per
   session, with a check that each fragment's source rows are still stored. It is a read-only scan and changes
