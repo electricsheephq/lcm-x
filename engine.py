@@ -7385,7 +7385,9 @@ class LCMEngine(
             # #636 (forced recovery only): newest-first tool rows since the last kept
             # row, over-cap ones replaced by a bounded stub, kept only with their call.
             pending_results: list[Dict[str, Any]] = []
-            for msg in reversed(tail_for_selection):
+            result_names = _tool_result_names(tail_for_selection) if stub_over_cap_tool_results else {}
+            for index in range(len(tail_for_selection) - 1, -1, -1):
+                msg = tail_for_selection[index]
                 msg_tokens = count_message_tokens(msg)
                 pending_tokens = count_messages_tokens(pending_results) if pending_results else 0
                 if used + tail_token_total + pending_tokens + msg_tokens > assembly_cap:
@@ -7395,7 +7397,7 @@ class LCMEngine(
                         and not skipped_tail_gap
                         and self._is_budget_droppable_tail_message(msg)
                     ):
-                        pending_results.append(self._over_cap_tool_result_stub(msg))
+                        pending_results.append(self._over_cap_tool_result_stub(msg, result_names.get(index, "")))
                         continue
                     if self._is_budget_droppable_tail_message(msg):
                         skipped_tail_gap = True
@@ -7668,7 +7670,7 @@ class LCMEngine(
             "tool_call_id": tool_call_id,
         }
 
-    def _over_cap_tool_result_stub(self, message: Dict[str, Any]) -> Dict[str, Any]:
+    def _over_cap_tool_result_stub(self, message: Dict[str, Any], tool_name: str = "") -> Dict[str, Any]:
         """#636: the bounded row that answers a kept call whose result exceeds the cap.
 
         An externalized result is answered by its #680 stub (read-only lookup, no
@@ -7688,8 +7690,9 @@ class LCMEngine(
             except Exception:  # pragma: no cover - defensive; fall back to the plain stub
                 existing = None
             if existing is not None:
-                if message.get("tool_name") and existing.get("tool_name") != message.get("tool_name"):
-                    existing = {**existing, "tool_name": message["tool_name"]}
+                name = message.get("tool_name") or tool_name  # the nearest preceding call's name
+                if name and existing.get("tool_name") != name:
+                    existing = {**existing, "tool_name": name}
                 return {**self._missing_tool_result_stub(tool_call_id), "content": _build_externalized_placeholder(existing)}
         return self._missing_tool_result_stub(tool_call_id)
 

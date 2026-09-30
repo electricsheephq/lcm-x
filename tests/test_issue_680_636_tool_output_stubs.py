@@ -580,3 +580,52 @@ def test_q5b_reused_payload_shows_the_supplied_tool_name(tmp_path):
     assert second["path"] == first["path"]  # the payload is reused, not rewritten
     assert "tool=read_file; tool_call_id=call_0;" in second["placeholder"]
     assert json.loads(first["path"].read_text())["tool_name"] == "terminal"
+
+
+# --- #692 review round 3: forced recovery takes the nearest preceding call's name ------------
+def _recovery_stub_labels(out):
+    return _labels([m["content"] for m in out if m.get("role") == "tool"])
+
+
+def test_r3_recovery_stubs_take_the_positional_name_for_identical_reused_payloads(overflow_engine):
+    engine = overflow_engine(
+        large_output_externalization_enabled=True,
+        large_output_externalization_threshold_chars=1_000,
+    )
+    payload = "IDENTICAL reused output " * 300  # 7,200 characters
+    messages = [
+        SYSTEM,
+        USER,
+        *_tool_pair("call_0", payload, "terminal"),
+        *_tool_pair("call_0", payload, "read_file"),
+    ]
+
+    out = engine.compress(messages)
+
+    stored = [row[1] for row in _stored_tool_rows(engine)]
+    assert _labels(stored) == ["terminal", "read_file"]
+    assert engine._last_compression_status == "overflow_recovery"
+    assert count_messages_tokens(out) <= CAP
+    assert _recovery_stub_labels(out) == ["terminal", "read_file"]
+
+
+def test_r3_recovery_stub_names_the_call_when_the_payload_holds_no_name(overflow_engine):
+    engine = overflow_engine(
+        large_output_externalization_enabled=True,
+        large_output_externalization_threshold_chars=1_000,
+    )
+    payload = "UNNAMED payload output " * 300
+    first = maybe_externalize_tool_output(  # a payload written without a tool name
+        payload,
+        tool_call_id="call_x",
+        session_id=engine._session_id,
+        config=engine._config,
+        hermes_home=engine._hermes_home,
+    )
+
+    out = engine.compress([SYSTEM, USER, *_tool_pair("call_x", payload, "grep_repo")])
+
+    assert _recovery_stub_labels(out) == ["grep_repo"]
+    assert "tool_name" not in json.loads(first["path"].read_text())  # no payload file written
+    no_call = engine._over_cap_tool_result_stub({"role": "tool", "tool_call_id": "call_x", "content": payload})
+    assert _labels([no_call["content"]]) == ["?"]
