@@ -8,11 +8,13 @@ import threading
 from functools import lru_cache
 from typing import Any, Dict, List
 
-from .message_content import normalize_content_value
+from .message_content import normalize_content_value, split_image_parts
 
 logger = logging.getLogger(__name__)
 
 _CHARS_PER_TOKEN = 4
+# Host default per-image price (agent.image_token_cost.DEFAULT_IMAGE_TOKEN_COST).
+_DEFAULT_IMAGE_TOKEN_COST = 1500
 _encoder = None
 _encoder_ready = False
 _encoder_lock = threading.Lock()
@@ -151,11 +153,32 @@ def count_tokens(text) -> int:
     return _count_tokens_core(text)
 
 
+def image_token_cost() -> int:
+    """Per-image token price: the host's current value, else its default."""
+    try:
+        from agent.image_token_cost import current_image_token_cost
+
+        cost = current_image_token_cost()
+    except Exception:
+        return _DEFAULT_IMAGE_TOKEN_COST
+    if isinstance(cost, int) and not isinstance(cost, bool) and cost > 0:
+        return cost
+    return _DEFAULT_IMAGE_TOKEN_COST
+
+
 def count_message_tokens(msg: Dict[str, Any]) -> int:
     """Estimate tokens for a single OpenAI-format message."""
     total = 4  # role + overhead
-    content = normalize_content_value(msg.get("content")) or ""
-    total += count_tokens(content)
+    raw_content = msg.get("content")
+    stripped, image_count = split_image_parts(raw_content)
+    if image_count:
+        # Structured image parts are priced flat, as the host and provider do,
+        # not by the characters of their encoded payload (#627).
+        total += count_tokens(normalize_content_value(stripped) or "")
+        total += image_count * image_token_cost()
+    else:
+        content = normalize_content_value(raw_content) or ""
+        total += count_tokens(content)
     for tc in msg.get("tool_calls") or []:
         if isinstance(tc, dict):
             fn = tc.get("function", {})
