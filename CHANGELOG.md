@@ -10,12 +10,51 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   produced it, in a new `summary_node_provenance` table written in the node's own transaction. `lcm_describe` shows
   both; `lcm_status` counts nodes by level (`unrecorded` for older and imported nodes, which are not backfilled). No
   schema version change and no new `summary_nodes` column, so a plugin rollback still opens the store. Refs #441
+
+## v0.24.7 - (unreleased; rc2) (P0 for long-running sessions: the survival fit keeps the summary, no in-turn thrash below the threshold, no level-3 fragments, a bounded summary prefix, steer rows stored)
+
 - Config: the leaf summary target is configurable with `LCM_LEAF_TARGET_RATIO` (default 0.20),
   `LCM_LEAF_TARGET_MIN_TOKENS` (default 2000) and `LCM_LEAF_TARGET_MAX_TOKENS` (default 12000). With the defaults every
   target and `max_tokens` value is unchanged; an out-of-range value falls back to its default with a config warning.
   (#614)
+- Fix: a mid-turn `/steer` that Hermes 0.21.2+ inserts as an unstamped user row before the steady-state ingest
+  cursor is stored. The #436 prefix audit now also checks unstamped user rows against stored copies and moves the
+  cursor back to one no stored copy explains; with host timestamps the displaced reply is not stored twice. The
+  in-place shape of Hermes 0.21.1 and earlier and `LCM_IDENTITY_ANCHOR=0` are not covered. (#633)
+- Fix: the summary envelope accepts three named formatting mistakes: `</summary>` in place of `</lcm-summary>`, one
+  `<summary>` wrapper around the whole body, and one layer of quotes or emphasis on the closing hint (stored as the
+  plain `Expand for details about:` line). The nonce opening tag, its uniqueness, the body minimum and a closing hint
+  are still required. A discarded reply's warning names the failed check (`check=envelope|nonce_count|short_body|
+  closing_hint`), and an accepted mistake logs one INFO line with its name. (#612)
+- Fix: when a leaf or condensation gets only a level 3 truncation back and the compaction is not a forced overflow
+  recovery with the survival fit able to run (on, and the model window known), no leaf or node is written; the
+  compaction stops with `summary_result_rejected`, logs one warning and keeps the rows and nodes for a later compaction.
+  A level 3 result that is the whole source (it fits the truncation budget) is still written. A sweep whose
+  condensation before the leaves was rejected does not condense again after them in the same compaction. (#652)
+- Fix: a threshold sweep whose summary prefix is over its target condenses it before the leaves, in at most half of
+  the sweep's passes and time, so sweeps stopped by their budget no longer grow the prefix. Assembly renders the
+  newest uncondensed summaries of each depth (oldest first), and a summary budget keeps the newest parts of a depth.
+  At or below the target the sweep is unchanged. Every summariser attempt of a sweep (each route, each level) is
+  bounded by the sweep's deadline, and one with less than 15 s left is not started. (#653)
+- Fix: the survival fit keeps LCM's summary prefix and removes only whole oldest turns after it, choosing the cut by
+  the final list's size, notice included. A carrier (the summary joined to the first user row) is split so the user
+  row leaves with its reply, then re-formed as assembly forms it. The notice goes only into a real system row. When no
+  whole-turn cut can hold the prefix, the v0.24.6 rule applies with one WARNING `LCM survival fit dropped the summary
+  prefix (emergency: …)`, and the result is never larger than v0.24.6's. (#650)
+- Fix (rc2): a Hermes update that brings in the new plugin package manager (`pm/`, after v2026.9.24) no longer disables
+  `hermes-lcm-x`. The lint settings moved from `pyproject.toml` to `ruff.toml` and `pyproject.toml` is gone, so the
+  checkout is not a uv workspace member; the stale root `uv.lock` is removed too. Before, the manager staged the
+  lint-only `pyproject.toml` with a name and no version, `uv lock` failed and the plugin went into
+  `plugins.disabled`. PR #632 diagnosed the same failure. (#631)
+- Fix (rc2): below the host's compaction threshold the host count decides on every preflight branch: an automatic
+  `compress()` after any preflight request is cleanup-only when the host's `current_tokens` is known and below the
+  threshold, and an automatic call the #651 hold blocks is cleanup-only (the hold never blocks the survival ceiling).
+  The one-shot flags clear on a session reset or rebind. Forced, `/compress` and provider-overflow calls are
+  unchanged. (#677)
+- Fix (rc2): the survival fit protects only DAG-verified summary rows as its prefix; a row quoting a summary header for a
+  missing or foreign node is an ordinary row, so its turn leaves whole (the v0.24.6 rule). (#678)
 
-## v0.24.6 - (unreleased; rc1) (#628, #627: a summary circuit that counts rejections apart from failures, and images priced per image)
+## v0.24.6 - 2026-09-30 (#628, #627: a summary circuit that counts rejections apart from failures, and images priced per image)
 
 - Fix: a summary result rejected for its content (empty, reasoning only, output contract violated, not shorter than
   its source) no longer counts as a failure of the summary route. Only a call that raises or times out counts toward

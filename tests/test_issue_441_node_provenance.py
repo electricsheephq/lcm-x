@@ -100,7 +100,7 @@ def _summarizer(level: int, model: str):
         provenance = kwargs.get("provenance")
         if provenance is not None:
             provenance["model"] = model
-        return ACCEPTED, level
+        return (kwargs["text"] if level == 3 else ACCEPTED), level  # #652: level 3 only verbatim
     return fake
 
 

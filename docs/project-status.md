@@ -1,6 +1,6 @@
 # LCM-X project state
 
-This page separates released product identity, current development source, evaluation evidence, and later roadmap work. GitHub issues, pull requests, tags, releases, and exact commit heads are the live source of truth. This snapshot was reconciled on 2026-09-05; the naming table and latest-stable identity were updated on 2026-09-24 for the #471 rename and on 2026-09-25 for the v0.24.1 GA, and on 2026-09-26 for the v0.24.2 GA, and on 2026-09-28 for the v0.24.3 GA; and on 2026-09-28 for the v0.24.4 GA; and on 2026-09-29 for the v0.24.5 GA; the main identity was updated on 2026-09-29 for the v0.24.6 release candidate.
+This page separates released product identity, current development source, evaluation evidence, and later roadmap work. GitHub issues, pull requests, tags, releases, and exact commit heads are the live source of truth. This snapshot was reconciled on 2026-09-05; the naming table and latest-stable identity were updated on 2026-09-24 for the #471 rename and on 2026-09-25 for the v0.24.1 GA, and on 2026-09-26 for the v0.24.2 GA, and on 2026-09-28 for the v0.24.3 GA; and on 2026-09-28 for the v0.24.4 GA; and on 2026-09-29 for the v0.24.5 GA; and on 2026-09-30 for the v0.24.6 GA; the main identity was updated on 2026-09-30 for the v0.24.7 release candidate.
 
 ## Naming and compatibility
 
@@ -12,17 +12,17 @@ The project is **LCM-X — Lossless Context Memory eXtension**. From v0.24.0 (#4
 | Plugin manifest and install directory | `hermes-lcm-x` (legacy, v0.23.x and earlier: `hermes-lcm`) |
 | Runtime context engine | `lcm-x` (legacy alias `lcm` accepted with a deprecation warning) |
 | Bundled skill | `hermes-lcm` (unchanged) |
-| Latest stable | `v0.24.5@19ed634136f5e1e9ce252fd7e8d6ca993cd6dac2` (ships `hermes-lcm-x` / `lcm-x`; `v0.24.6` follows its rc gauntlet) |
+| Latest stable | `v0.24.6@ae0e996de291625d5d638fe915a1c5a0a24d753c` (ships `hermes-lcm-x` / `lcm-x`; `v0.24.7` follows its rc gauntlet) |
 
 The rename is a breaking change with a documented migration path; see the operator guide's migration section. Historical notes and upstream evidence retain the names and identities used when they were created.
 
 ## Released product and development source
 
-The latest stable release is `v0.24.5` at `19ed634136f5e1e9ce252fd7e8d6ca993cd6dac2`. GitHub publishes it as a non-prerelease release. Because GitHub reports the tag as mutable, operators and evidence packets must verify the exact SHA rather than trust the tag name alone.
+The latest stable release is `v0.24.6` at `ae0e996de291625d5d638fe915a1c5a0a24d753c`. GitHub publishes it as a non-prerelease release. Because GitHub reports the tag as mutable, operators and evidence packets must verify the exact SHA rather than trust the tag name alone.
 
-The source snapshot used for this reconciliation is `main@2e04a205c6ead75e35fb0ed4af68835722689c62` (the #641 merge). Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits.
+The source snapshot used for this reconciliation is `main@9edfa46072d61f0180dc5f9df0e8b0fb3b603687` (the #679 merge). Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits.
 
-Main carries the forward identity `0.24.6` (`hermes-lcm-x`) for the next patch release (rc-first under `bench/specs/RELEASE-READINESS-V1.md`); the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
+Main carries the forward identity `0.24.7` (`hermes-lcm-x`) for the next patch release (rc-first under `bench/specs/RELEASE-READINESS-V1.md`); the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
 
 v0.23.2 (2026-08-27) shipped those contracts: durable redaction and cloud-embedding privacy are
 independent flags (`LCM_SENSITIVE_PATTERNS_ENABLED` vs `LCM_EMBEDDING_PRIVACY_ENABLED`, #374),
