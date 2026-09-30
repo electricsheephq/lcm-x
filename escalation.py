@@ -58,6 +58,13 @@ _REASONING_START_RE = re.compile(
 
 _DEFAULT_ROUTE_KEY = "<task-default>"
 
+# #608: a threshold sweep does not start a summariser call with less time than this left.
+_THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS = 15.0
+
+
+class SweepBudgetExhausted(TimeoutError):
+    """The threshold sweep's own time budget is spent: a stop condition, not a provider failure."""
+
 
 @dataclass
 class SummaryCircuitBreaker:
@@ -298,12 +305,51 @@ def _summary_contract_messages(prompt: str) -> tuple[list[dict[str, str]], str]:
     ], nonce
 
 
-def _unwrap_summary_contract(content: str, nonce: str, max_tokens: int) -> str:
+_SUMMARY_WRAPPER_RE = re.compile(r"^<summary>(?P<inner>.*)</summary>$", re.DOTALL)
+_SUMMARY_HINT_LABEL = "expand for details about:"
+
+
+def _plain_expand_hint(line: str) -> str:
+    """Return ``line`` as a plain hint after removing one layer of quotes or emphasis, or "" (#612).
+
+    One layer is a run of one of ``"`` ``'`` `` ` `` ``*`` ``_`` on both ends of the line, or a ``*``/``_`` run
+    around the label alone (``**Expand for details about:** ...``). Scanned without regex backtracking.
+    """
+    mark = line[:1]
+    if not mark or mark not in "\"'`*_":
+        return ""
+    run_length = len(line) - len(line.lstrip(mark))
+    after_run = line[run_length:]
+    label_end = len(_SUMMARY_HINT_LABEL)
+    if (mark in "*_" and after_run[:label_end].lower() == _SUMMARY_HINT_LABEL
+            and after_run[label_end:].startswith(line[:run_length])):
+        candidate = after_run[:label_end] + after_run[label_end + run_length:]
+    elif len(line) - len(line.rstrip(mark)) == run_length and len(line) > 2 * run_length:
+        candidate = line[run_length:-run_length].strip()
+    else:
+        return ""
+    if not _SUMMARY_EXPAND_HINT_RE.fullmatch(candidate):
+        return ""
+    return "Expand for details about: " + candidate.split(":", 1)[1].strip()
+
+
+def _check_summary_contract(content: str, nonce: str, max_tokens: int) -> tuple[str, str, tuple[str, ...]]:
+    """Return ``(body, failed_check, tolerated)`` for a reply under the nonce contract.
+
+    ``failed_check`` is "" when accepted, else ``envelope``, ``nonce_count``, ``short_body`` or ``closing_hint``.
+    ``tolerated`` names the known formatting mistakes that were accepted (#612): the ``</summary>`` closer, one
+    ``<summary>`` wrapper around the whole body, and one layer of quotes or emphasis on the closing hint. The
+    nonce opening tag, its uniqueness, the body minimum and a recognised closing hint are still required.
+    """
     if not nonce:
-        return content
+        return content, "", ()
     opening_tag = f'<lcm-summary nonce="{nonce}">'
     closing_tag = "</lcm-summary>"
+    tolerated: list[str] = []
     stripped = content.strip()
+    if not stripped.endswith(closing_tag) and stripped.endswith("</summary>"):
+        closing_tag = "</summary>"
+        tolerated.append("summary_closer")
     # No count check on the closing tag. The body is extracted by slicing from
     # both ends, so an interior `</lcm-summary>` cannot affect what is extracted
     # -- it only ever caused a valid summary to be discarded. And unlike the
@@ -312,20 +358,33 @@ def _unwrap_summary_contract(content: str, nonce: str, max_tokens: int) -> str:
     # envelope contract could never be summarized again. The opening-tag count
     # is kept because it is nonce-bearing, so a second occurrence is genuinely
     # anomalous rather than ordinary transcript content.
-    if (
-        not stripped.startswith(opening_tag)
-        or not stripped.endswith(closing_tag)
-        or stripped.count(opening_tag) != 1
-    ):
-        return ""
+    if not stripped.startswith(opening_tag) or not stripped.endswith(closing_tag):
+        return "", "envelope", ()
+    if stripped.count(opening_tag) != 1:
+        return "", "nonce_count", ()
     body = stripped[len(opening_tag) : -len(closing_tag)].strip()
+    wrapper = _SUMMARY_WRAPPER_RE.match(body)
+    if wrapper and "<summary>" not in wrapper.group("inner") and "</summary>" not in wrapper.group("inner"):
+        body = wrapper.group("inner").strip()
+        tolerated.append("summary_wrapper")
     minimum_body_tokens = max(4, min(16, max(1, int(max_tokens) // 16)))
     if count_tokens(body) < minimum_body_tokens:
-        return ""
-    body_lines = [line.strip() for line in body.splitlines() if line.strip()]
-    if not body_lines or not _SUMMARY_EXPAND_HINT_RE.fullmatch(body_lines[-1]):
-        return ""
-    return body
+        return "", "short_body", ()
+    raw_last_line = body.splitlines()[-1]
+    if not _SUMMARY_EXPAND_HINT_RE.fullmatch(raw_last_line.strip()):
+        plain = _plain_expand_hint(raw_last_line.strip())
+        if not plain:
+            return "", "closing_hint", ()
+        body = body[: len(body) - len(raw_last_line)] + plain
+        if count_tokens(body) < minimum_body_tokens:
+            # Accept a decorated reply only if its plain form would be accepted.
+            return "", "short_body", ()
+        tolerated.append("hint_decoration")
+    return body, "", tuple(tolerated)
+
+
+def _unwrap_summary_contract(content: str, nonce: str, max_tokens: int) -> str:
+    return _check_summary_contract(content, nonce, max_tokens)[0]
 
 
 def _call_llm_for_summary(prompt: str, max_tokens: int,
@@ -357,13 +416,15 @@ def _call_llm_for_summary(prompt: str, max_tokens: int,
                 "LCM summary discarded reasoning-only output (model=%s); escalating",
                 model or "<default>",
             )
-        validated = _unwrap_summary_contract(sanitized, contract_nonce, max_tokens)
+        validated, failed_check, tolerated = _check_summary_contract(sanitized, contract_nonce, max_tokens)
         if sanitized and contract_nonce and not validated:
             logger.warning(
                 "LCM summary discarded output that violated the integrity contract "
-                "(model=%s); escalating",
-                model or "<default>",
+                "(model=%s, check=%s); escalating",
+                model or "<default>", failed_check,
             )
+        elif validated and tolerated:
+            logger.info("LCM summary contract: tolerated %s (model=%s)", "+".join(tolerated), model or "<default>")
         return validated
     except Exception as e:
         logger.warning("LLM summarization failed: %s", e)
@@ -584,7 +645,9 @@ def _invoke_summary_llm_chain(
     spend_guard: "SummarySpendGuard | None" = None,
     accepts_result: Callable[[str], bool] | None = None,
     source_tokens: int | None = None,
+    deadline: float | None = None,
 ) -> Optional[str]:
+    """``deadline`` (absolute ``time.monotonic()``) bounds every route attempt (#666)."""
     chain = _summary_model_chain(model, fallback_models)
     skipped = 0
     for candidate_model in chain:
@@ -595,6 +658,12 @@ def _invoke_summary_llm_chain(
                 candidate_model or _DEFAULT_ROUTE_KEY,
             )
             continue
+        call_timeout = timeout
+        if deadline is not None:  # #666: checked before the call, so nothing is recorded or spent
+            remaining = deadline - time.monotonic()
+            if remaining < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
+                raise SweepBudgetExhausted("threshold full sweep time budget exhausted")
+            call_timeout = remaining if timeout is None else min(timeout, remaining)
         # Check the spend guard per-route so a mid-chain trip stops the
         # remaining fallbacks instead of over-spending by up to len(chain)-1.
         if spend_guard is not None and not spend_guard.try_record_call():
@@ -608,7 +677,7 @@ def _invoke_summary_llm_chain(
                 prompt,
                 max_tokens,
                 model=candidate_model,
-                timeout=timeout,
+                timeout=call_timeout,
                 reasoning_effort=reasoning_effort,
             )
         except Exception as exc:
@@ -802,12 +871,17 @@ def summarize_with_escalation(
     circuit_breaker: SummaryCircuitBreaker | None = None,
     spend_guard: "SummarySpendGuard | None" = None,
     prompt_version: int = 1,
+    deadline: float | None = None,
 ) -> tuple[str, int]:
     """Run 3-level escalation. Returns (summary, level_used).
 
     Guarantees convergence: level 3 is deterministic and always produces
     output shorter than the source. ``prompt_version`` 2 (#646) selects the v2
-    prompts and a 3x output ceiling; 1 keeps the original prompts and 2x.
+    prompts and a 3x output ceiling; 1 keeps the original prompts and 2x. With
+    ``deadline`` (absolute ``time.monotonic()``), every route attempt gets at most
+    the time left and SweepBudgetExhausted is raised instead of starting one with
+    less than ``_THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS`` (#666); it never falls
+    through to level 3.
     """
     # Level 1: detailed summary
     l1_prompt = _build_l1_prompt(text, token_budget, depth,
@@ -825,6 +899,7 @@ def summarize_with_escalation(
         spend_guard=spend_guard,
         accepts_result=lambda result: count_tokens(result) < source_tokens,
         source_tokens=source_tokens,
+        deadline=deadline,
     )
 
     if l1_result:
@@ -848,12 +923,15 @@ def summarize_with_escalation(
         spend_guard=spend_guard,
         accepts_result=lambda result: count_tokens(result) < source_tokens,
         source_tokens=source_tokens,
+        deadline=deadline,
     )
 
     if l2_result:
         logger.debug("L2 summarization succeeded (%d tokens)", count_tokens(l2_result))
         return l2_result, 2
 
+    if deadline is not None and deadline - time.monotonic() < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
+        raise SweepBudgetExhausted("threshold full sweep time budget exhausted")  # #666: time never yields L3
     # Level 3: deterministic truncation — guaranteed convergence
     l3_result = _deterministic_truncate(text, l3_truncate_tokens)
     logger.debug("L3 deterministic truncation (%d tokens)", count_tokens(l3_result))

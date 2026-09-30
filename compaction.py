@@ -72,6 +72,7 @@ class CompactionMixin:
                     tokens = self._current_auxiliary_prompt_tokens(auxiliary_session_id)
                 else:
                     tokens = self.last_prompt_tokens
+            self._last_gate_tokens = int(tokens or 0)  # #651: the gate never reads another traffic class's value
             if self._should_force_overflow_recovery(observed_tokens=tokens):
                 return True
             if self.threshold_tokens <= 0:
@@ -80,6 +81,7 @@ class CompactionMixin:
         if self._compression_boundary_cooldown_active():
             return False
         tokens = prompt_tokens if prompt_tokens is not None else self.last_prompt_tokens
+        self._last_gate_tokens = int(tokens or 0)
         if self._should_force_overflow_recovery(observed_tokens=tokens):
             return True
         if self.threshold_tokens <= 0:
@@ -94,6 +96,8 @@ class CompactionMixin:
     def _should_compress_preflight_impl(self, messages):
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
         self._native_recovery_preflight_cleanup_only = False
+        self._preflight_below_threshold_cleanup_only = False
+        self._preflight_automatic_request = False
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         if self._bypasses_lcm_context_management():
             # Bypassed traffic observes nothing about the pressured session's
@@ -101,12 +105,14 @@ class CompactionMixin:
             self._pressure_yield_invocation_verdict = "neutral"
             self._remember_lcm_bypass_message_prefix(self._bypass_lcm_session_id(), messages)
             rough = count_messages_tokens(messages)
+            self._last_gate_tokens = rough
             if self._compression_boundary_cooldown_active():
                 return False
             if self._should_force_overflow_recovery(observed_tokens=rough, messages=messages):
                 return True
             return self.threshold_tokens > 0 and rough >= self.threshold_tokens
         rough = count_messages_tokens(messages)
+        self._last_gate_tokens = rough
         if self.threshold_tokens > 0 and rough < self.threshold_tokens:
             self._note_fresh_tail_pressure_relieved()
         pre_ingest_placeholder_ambiguous_noop = False
@@ -157,6 +163,7 @@ class CompactionMixin:
                 return False
         if replay_messages is not None and replay_messages != messages:
             replay_rough = count_messages_tokens(replay_messages)
+            self._last_gate_tokens = max(rough, replay_rough)
             cleanup_requested = self._replay_diff_requests_ingest_cleanup(
                 messages,
                 replay_messages,
@@ -182,6 +189,8 @@ class CompactionMixin:
                     and self._compression_boundary_cooldown_active()
                 ):
                     self._preflight_cleanup_only_due_to_boundary_cooldown = True
+                if not force_overflow_requested and max(rough, replay_rough) < self.threshold_tokens:
+                    return self._mark_below_threshold_maintenance()
                 return self._mark_preflight_compression_requested()
             if force_overflow_requested:
                 return self._mark_preflight_compression_requested()
@@ -237,11 +246,13 @@ class CompactionMixin:
                     observed_tokens=replay_rough,
                     messages=replay_messages,
                 ):
-                    return self._mark_preflight_compression_requested(
+                    return self._mark_below_threshold_maintenance(
                         depends_on_pressure_yield=self._pressure_yield_preflight_candidate,
                     )
                 return False
             if self._has_ignored_backlog_outside_fresh_tail(replay_messages):
+                if max(rough, replay_rough) < self.threshold_tokens:
+                    return self._mark_below_threshold_maintenance()
                 return self._mark_preflight_compression_requested()
             if self.threshold_tokens > 0 and replay_rough >= self.threshold_tokens:
                 if self._should_run_deferred_maintenance(replay_messages, observed_tokens=replay_rough):
@@ -261,7 +272,7 @@ class CompactionMixin:
                 replay_messages,
                 observed_tokens=replay_rough,
             ):
-                return self._mark_preflight_compression_requested()
+                return self._mark_below_threshold_maintenance()
             return False
         if self._compression_boundary_cooldown_active():
             return False
@@ -310,8 +321,14 @@ class CompactionMixin:
             messages,
             observed_tokens=rough,
         ):
-            return self._mark_preflight_compression_requested()
+            return self._mark_below_threshold_maintenance()
         return False
+
+    def _mark_below_threshold_maintenance(self, **kwargs: Any) -> bool:
+        """#651: a request below the host threshold is maintenance; the automatic compress() it asks for is
+        cleanup-only (compress() rechecks its own tokens against the threshold)."""
+        self._preflight_below_threshold_cleanup_only = self.threshold_tokens > 0
+        return self._mark_preflight_compression_requested(**kwargs)
 
     def _replay_diff_requests_ingest_cleanup(
         self,
@@ -551,6 +568,14 @@ class CompactionMixin:
             self._pending_emission_candidates = []
             self._compress_occurrences = None
             self._survival_fit_reason = None
+            self._no_progress_candidate = False
+            if bypass_cooldown:  # #651: a host recovery attempt is never cleanup-only maintenance
+                self._preflight_below_threshold_cleanup_only = self._preflight_automatic_request = False
+            elif not force and self._no_progress_hold_active() and self._no_progress_hold_blocks(
+                    current_tokens if current_tokens is not None else count_messages_tokens(messages)):
+                # #677: an automatic call the #651 hold blocks (a caller that skipped the host gate) is held
+                # maintenance; the survival ceiling and forced overflow are never blocked, so they summarise.
+                self._preflight_below_threshold_cleanup_only = True
             with self._fresh_tail_pressure_yield_invocation():
                 result = self._compress_impl(
                     messages,
@@ -574,6 +599,9 @@ class CompactionMixin:
             reason = self._survival_fit_reason or str(self._last_compression_status or "unknown")
             result = self._survival_fit(messages, result, current_tokens,
                                         **self._survival_fit_args(messages, current_tokens, reason, bypass_cooldown))
+            if self._no_progress_candidate and not bypass_cooldown and len(result) >= len(messages) and (
+                    count_messages_tokens(result) >= count_messages_tokens(messages)):
+                self._start_no_progress_hold("no_progress")  # #651: no leaf, and neither rows nor tokens fell
             self._record_compress_commit_proof(messages, result)
             logger.debug("LCM compaction emission descriptor count=%d",
                          len((self._compress_commit_proof or {}).get("emissions") or ()))
@@ -1193,8 +1221,14 @@ class CompactionMixin:
         boundary_cleanup_only_requested = bool(
             self._preflight_cleanup_only_due_to_boundary_cooldown
         )
+        below_threshold_cleanup_only_requested = bool(
+            self._preflight_below_threshold_cleanup_only
+        )
+        automatic_preflight_requested = bool(self._preflight_automatic_request)
         self._native_recovery_preflight_cleanup_only = False
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
+        self._preflight_below_threshold_cleanup_only = False
+        self._preflight_automatic_request = False
 
         if not messages:
             self._last_compression_status = "noop"
@@ -1279,10 +1313,29 @@ class CompactionMixin:
             )
         )
         ingest_cleanup_changed_active_context = working_messages != messages
+        # #651: below the host threshold, the automatic compress() a preflight
+        # maintenance request asked for runs no summariser leaf pass.
+        # A held pass stays cleanup-only when the host's tokens reach the
+        # threshold, except at the survival ceiling or on forced overflow.
+        # #677: the host count decides: after ANY preflight request, a known
+        # host count below the threshold makes the call cleanup-only too.
+        below_threshold_cleanup_only = bool(
+            (
+                below_threshold_cleanup_only_requested
+                or (automatic_preflight_requested and (current_tokens or 0) > 0)
+            )
+            and not force
+            and self.threshold_tokens > 0
+            and (
+                (observed_prompt_tokens or 0) < self.threshold_tokens
+                or self._no_progress_hold_blocks(observed_prompt_tokens or 0)
+            )
+        )
         cleanup_only_requested = bool(
             (
                 boundary_cleanup_only_requested
                 or native_cleanup_only
+                or below_threshold_cleanup_only
             )
             and not force_overflow
         )
@@ -1320,6 +1373,14 @@ class CompactionMixin:
                 working_messages,
                 current_tokens=observed_prompt_tokens,
             )
+        # #651: an automatic threshold pass that stores no leaf is a no-progress
+        # candidate; compress() arms the hold if neither rows nor tokens fell.
+        self._no_progress_candidate = bool(
+            not force
+            and not force_overflow
+            and self.threshold_tokens > 0
+            and observed_prompt_tokens >= self.threshold_tokens
+        )
         anchor_source_messages = list(working_messages)
         pressure_messages = messages if len(messages) == len(working_messages) else working_messages
         leaf_compacted_this_turn = False
@@ -1399,6 +1460,56 @@ class CompactionMixin:
             now = time.monotonic()
             sweep_step_seconds[step] = sweep_step_seconds.get(step, 0.0) + now - started
             return now
+
+        rejection_warned = False
+
+        def warn_rejected() -> None:
+            """#652: the stop line, once per compaction, whichever step got the level 3 result."""
+            nonlocal rejection_warned
+            if not rejection_warned:
+                rejection_warned = True
+                logger.warning(
+                    "LCM compaction stopped: summary result rejected at level 3; %d leaves written, backlog kept",
+                    leaf_passes,
+                )
+
+        # #653: a sweep stopped by its budget never reaches the post-drain condensation, so an oversized
+        # summary prefix is condensed first, in half the sweep's passes and time; the leaves use the rest.
+        pre_leaf_condensation_passes, pre_leaf_condensation_reason = 0, ""
+        if (
+            threshold_full_sweep_active
+            and sweep_summary_prefix_before > sweep_target_tokens
+            and self._summary_route_available()
+        ):
+            try:
+                pre_leaf_condensation_passes, pre_leaf_condensation_reason = (
+                    self._run_threshold_sweep_condensation(
+                        target_tokens=sweep_target_tokens,
+                        pass_budget=_THRESHOLD_FULL_SWEEP_MAX_PASSES // 2,
+                        deadline=sweep_deadline - _THRESHOLD_FULL_SWEEP_MAX_SECONDS / 2,
+                        focus_topic=focus_topic,
+                    )
+                )
+            except Exception as exc:
+                if not _is_sqlite_locked_error(exc):
+                    raise
+                return self._fail_open_after_publication_failure(
+                    working_messages,
+                    exc,
+                    compress_started=_compress_started,
+                    threshold_full_sweep_active=threshold_full_sweep_active,
+                    recovery_assembly_cap=recovery_assembly_cap,
+                    leaf_passes=0,
+                    condensation_passes=int(getattr(exc, "lcm_completed_condensation_passes", 0)),
+                )
+            max_leaf_passes -= pre_leaf_condensation_passes
+        if threshold_full_sweep_active:
+            self._last_threshold_full_sweep.update(
+                condensation_passes=pre_leaf_condensation_passes,
+                total_passes=pre_leaf_condensation_passes,
+                pre_leaf_condensation_passes=pre_leaf_condensation_passes,
+                pre_leaf_condensation_stop_reason=pre_leaf_condensation_reason,
+            )
 
         while leaf_passes < max_leaf_passes:
             if threshold_full_sweep_active and time.monotonic() >= sweep_deadline:
@@ -1752,6 +1863,7 @@ class CompactionMixin:
                     self._schedule_pre_compaction_assertions(summary_input_chunk)
 
                 step_started = time.monotonic() if threshold_full_sweep_active else 0.0
+                self._last_leaf_level_3_verbatim = False
                 try:
                     summary_kwargs: dict[str, Any] = {"focus_topic": focus_topic}
                     if threshold_full_sweep_active:
@@ -1784,6 +1896,11 @@ class CompactionMixin:
                 finally:
                     if threshold_full_sweep_active:
                         sweep_step_done("summariser", step_started)
+                # #652: no truncated level 3 leaf while the fit can rescue; the backlog stays. A level 3 that
+                # is the whole source (it already fits the truncation budget) loses nothing and is written.
+                if _level == 3 and self._fit_can_rescue(force_overflow) and not self._last_leaf_level_3_verbatim:
+                    sweep_stop_reason = "summary_result_rejected"
+                    break
             anchor_claimed_ids = sorted({  # #436 R4: only claims whose text the summarizer actually read
                 store_id for message in compacted_chunk for store_id in anchor_claims.get(id(message), ())
             })
@@ -1897,6 +2014,7 @@ class CompactionMixin:
                     threshold_full_sweep_active=threshold_full_sweep_active,
                     recovery_assembly_cap=recovery_assembly_cap,
                     leaf_passes=leaf_passes,
+                    condensation_passes=pre_leaf_condensation_passes,  # #653: completed pre-leaf passes
                     context_is_assembled=context_is_assembled,
                 )
             self._last_compacted_store_id = published_frontier
@@ -1907,6 +2025,7 @@ class CompactionMixin:
             pressure_messages = pressure_messages[:leading_anchor_count] + pressure_remaining_messages
             leaf_compacted_this_turn = True
             self._sweep_budget_hold_until = 0.0  # #608: a stored leaf ends the hold
+            self._no_progress_hold, self._no_progress_candidate = None, False  # #651: hidden-only leaves too
             leaf_passes += 1
             level3_leaves += _level == 3
             estimated_active_tokens = max(0, estimated_active_tokens - source_tokens + summary_tokens)
@@ -1934,6 +2053,7 @@ class CompactionMixin:
                         threshold_full_sweep_active=threshold_full_sweep_active,
                         recovery_assembly_cap=recovery_assembly_cap,
                         leaf_passes=leaf_passes,
+                        condensation_passes=pre_leaf_condensation_passes,
                         context_is_assembled=True,
                     )
 
@@ -1990,8 +2110,14 @@ class CompactionMixin:
             if not leaf_compacted_this_turn:
                 noop_reason = "summary route unavailable"
                 self._start_sweep_budget_hold(seconds_left)
+        elif sweep_stop_reason == "summary_result_rejected":
+            warn_rejected()
+            if not leaf_compacted_this_turn:
+                noop_reason = "summary result rejected"
 
         if not leaf_compacted_this_turn:
+            if pre_leaf_condensation_reason == "summary_result_rejected":
+                warn_rejected()
             if sweep_stop_reason == "time_budget_exhausted":
                 noop_reason = "threshold sweep time budget spent before the first leaf"
                 logger.warning(
@@ -2098,12 +2224,17 @@ class CompactionMixin:
             recovery_assembly_cap,
         )
         condensation_passes = 0
+        # #652: a route that just rejected the pre-leaf condensation is not asked again in this call.
+        post_drain_condensation_skipped = ""
         try:
             if threshold_full_sweep_active:
-                if sweep_raw_drained:
+                if sweep_raw_drained and pre_leaf_condensation_reason == "summary_result_rejected":
+                    post_drain_condensation_skipped = "pre_leaf_rejected"
+                    sweep_stop_reason = "summary_result_rejected"
+                elif sweep_raw_drained:
                     remaining_passes = max(
                         0,
-                        _THRESHOLD_FULL_SWEEP_MAX_PASSES - leaf_passes,
+                        _THRESHOLD_FULL_SWEEP_MAX_PASSES - leaf_passes - pre_leaf_condensation_passes,
                     )
                     condensation_passes, sweep_stop_reason = (
                         self._run_threshold_sweep_condensation(
@@ -2130,11 +2261,18 @@ class CompactionMixin:
                 threshold_full_sweep_active=threshold_full_sweep_active,
                 recovery_assembly_cap=recovery_assembly_cap,
                 leaf_passes=leaf_passes,
-                condensation_passes=int(
+                condensation_passes=pre_leaf_condensation_passes + int(
                     getattr(exc, "lcm_completed_condensation_passes", 0)
                 ),
                 context_is_assembled=True,
             )
+        if (
+            sweep_stop_reason == "summary_result_rejected"
+            or pre_leaf_condensation_reason == "summary_result_rejected"
+            or (not threshold_full_sweep_active  # _maybe_condense sets it fresh on this path only
+                and self._last_condensation_suppressed_reason == "summary_result_rejected")
+        ):
+            warn_rejected()
 
         # Step 7: Assemble new active context
         self._refresh_raw_backlog_debt(
@@ -2190,13 +2328,14 @@ class CompactionMixin:
         # edge cases (e.g. forced overflow recovery bypassing _assemble_context).
         compressed = self._sanitize_active_context_messages(compressed)
         if threshold_full_sweep_active:
-            total_passes = leaf_passes + condensation_passes
+            total_passes = leaf_passes + pre_leaf_condensation_passes + condensation_passes
             duration_ms = (time.perf_counter() - _compress_started) * 1000.0
             final_stop_reason = sweep_stop_reason or "raw_prefix_drained"
             partial_stop_reasons = {
                 "pass_budget_exhausted",
                 "time_budget_exhausted",
                 "summary_route_unavailable",
+                "summary_result_rejected",
                 "leaf_summary_error",
                 "condensation_error",
                 "condensation_no_progress",
@@ -2205,7 +2344,10 @@ class CompactionMixin:
             self._last_threshold_full_sweep = {
                 "status": "partial" if final_stop_reason in partial_stop_reasons else "completed",
                 "leaf_passes": leaf_passes,
-                "condensation_passes": condensation_passes,
+                "condensation_passes": pre_leaf_condensation_passes + condensation_passes,
+                "pre_leaf_condensation_passes": pre_leaf_condensation_passes,
+                "pre_leaf_condensation_stop_reason": pre_leaf_condensation_reason,
+                "post_drain_condensation_skipped": post_drain_condensation_skipped,
                 "total_passes": total_passes,
                 "duration_ms": round(duration_ms, 3),
                 "tokens_before": self._last_threshold_full_sweep["tokens_before"],

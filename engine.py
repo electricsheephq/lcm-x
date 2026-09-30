@@ -41,8 +41,10 @@ from .engine_registry import (
     resolve_active_lcm_engine,  # noqa: F401  (re-exported: hosts import it from .engine)
 )
 from .escalation import (
+    _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS,
     SummaryCircuitBreaker,
     SummarySpendGuard,
+    SweepBudgetExhausted,  # re-exported: compaction and tests import it from .engine
     _summary_model_chain,
     summarize_with_escalation,
     summary_route_available,
@@ -377,14 +379,13 @@ _AUTO_FOCUS_MAX_CHARS = 700
 
 _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across context compression]"
 
-# #608: a threshold sweep does not start a summariser call with less time than this left, and after a
-# sweep that spent its budget before the first leaf, the threshold answer is no for the hold time.
-_THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS = 15.0
+# #608: after a sweep that spent its budget before the first leaf, the threshold answer is no for the hold
+# time. The minimum time for a summariser call and SweepBudgetExhausted live in escalation (#666).
 _SWEEP_BUDGET_HOLD_SECONDS = 600.0
 
 
-class SweepBudgetExhausted(TimeoutError):
-    """The threshold sweep's own time budget is spent: a stop condition, not a provider failure."""
+class SummaryResultRejected(RuntimeError):
+    """#652: a level 3 condensation while the survival fit can rescue the request; no node was written."""
 
 
 def _normalize_total_compactions(value: Any) -> int:
@@ -676,6 +677,16 @@ class LCMEngine(
         # #608: wall clock until which the threshold answer is no, after a sweep
         # spent its time budget before the first leaf. A stored leaf clears it.
         self._sweep_budget_hold_until: float = 0.0
+        # #651: (until, reason) after an automatic threshold pass made no progress or
+        # the host refused one. Like the #608 hold, only its time or a stored leaf ends it.
+        self._no_progress_hold: Optional[tuple[float, str]] = None
+        self._no_progress_candidate = False  # set by _compress_impl for compress()
+        self._last_gate_tokens = 0  # the latest should_compress/preflight observation
+        # #651 one-shot handoff: preflight asked for maintenance below the host
+        # threshold, so the automatic compress() that follows is cleanup-only.
+        self._preflight_below_threshold_cleanup_only = False
+        # #677 one-shot: any preflight request; compress() makes it cleanup-only below the host's count.
+        self._preflight_automatic_request = False
         # One-shot handoff from preflight: adopt an already-durable replay
         # cleanup during boundary cooldown without running summary work.
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
@@ -1206,6 +1217,7 @@ class LCMEngine(
         """
         self._last_compression_status = "pending"
         self._last_compression_noop_reason = ""
+        self._preflight_automatic_request = True
         if not depends_on_pressure_yield:
             self._pressure_yield_invocation_verdict = "clear"
         return True
@@ -1564,12 +1576,15 @@ class LCMEngine(
         return summary_route_available(
             self._config.summary_model, self._config.summary_fallback_models, self._summary_circuit_breaker)
 
+    def _fit_can_rescue(self, force_overflow: bool) -> bool:
+        """#652: false when forced or no survival fit can keep the request under the window (fit off, or
+        window unknown); only then does a level 3 truncation still converge as before."""
+        return not force_overflow and int(self.context_length or 0) > 0 and bool(
+            getattr(self._config, "survival_fit", True))
+
     def _summary_route_stop_applies(self, force_overflow: bool) -> bool:
-        """#628: write no leaf or node while every route is refused, unless forced or no survival fit can keep
-        the request under the window (fit off, or window unknown): then level 3 converges as before."""
-        if force_overflow or int(self.context_length or 0) <= 0 or not getattr(self._config, "survival_fit", True):
-            return False
-        return not self._summary_route_available()
+        """#628: write no leaf or node while every route is refused, unless the fit cannot rescue."""
+        return self._fit_can_rescue(force_overflow) and not self._summary_route_available()
 
     def _summary_route_seconds_left(self) -> float:
         return self._summary_circuit_breaker.seconds_until_allowed(
@@ -1586,9 +1601,58 @@ class LCMEngine(
         self._sweep_budget_hold_until = 0.0
         return False
 
+    def _start_no_progress_hold(self, reason: str) -> None:
+        """#651: hold automatic threshold passes across turns, like the #608 hold: only its time or a stored leaf
+        ends it."""
+        self._no_progress_hold = (time.time() + _SWEEP_BUDGET_HOLD_SECONDS, reason)
+        logger.info("LCM automatic compaction held for %.0fs: %s", _SWEEP_BUDGET_HOLD_SECONDS, reason)
+
+    def _no_progress_hold_active(self) -> bool:
+        """#651: never latches; it ends at its time (a stored leaf clears it in compress())."""
+        if self._no_progress_hold is None:
+            return False
+        if time.time() < self._no_progress_hold[0]:
+            return True
+        self._no_progress_hold = None
+        return False
+
+    def _no_progress_hold_status(self) -> Optional[dict]:
+        if not self._no_progress_hold_active():
+            return None
+        until, reason = self._no_progress_hold
+        return {"reason": reason, "until": until}
+
+    def record_rejected_compaction(self) -> None:
+        """#651 host breaker hook: the host refused the last compaction (the result would be larger). Called
+        without arguments inside an error-swallowing wrapper; a rejection counts as no progress."""
+        self._start_no_progress_hold("host_rejected")
+
+    def _automatic_compression_blocked(self, *, ignore_cooldown: bool = False) -> bool:
+        """#651 host breaker gate, read on the type before every automatic compress. A host recovery attempt
+        (``ignore_cooldown``), a pending below-threshold cleanup-only pass, forced overflow and the survival
+        ceiling are never blocked; the hold governs LCM-managed compaction only, never a bypassed session."""
+        if ignore_cooldown or self._preflight_below_threshold_cleanup_only:
+            return False
+        return self._no_progress_hold_blocks(max(int(self.last_prompt_tokens or 0), self._last_gate_tokens))
+
+    def _no_progress_hold_blocks(self, tokens: int) -> bool:
+        """#651: the one hold decision the host gate and compress() share. The hold governs LCM-managed
+        compaction only, and forced overflow and the survival ceiling are never held."""
+        if self._bypasses_lcm_context_management() or not self._no_progress_hold_active():
+            return False
+        if self._should_force_overflow_recovery(observed_tokens=tokens):
+            return False
+        return self._sweep_budget_hold_applies(tokens)
+
+    def _compression_block_reason(self) -> Optional[str]:
+        """#651: the host classifies ``cooldown*`` as a transient block: defer, never exhaust."""
+        status = self._no_progress_hold_status()
+        return f"cooldown:lcm_{status['reason']}" if status else None
+
     def _sweep_budget_hold_applies(self, tokens: Optional[int]) -> bool:
-        """#608: the hold never applies at or over the survival ceiling, whose fit only compress() runs."""
-        if not self._sweep_budget_hold_active():
+        """#608: the hold never applies at or over the survival ceiling, whose fit only compress() runs.
+        #651: the no-progress hold applies the same way."""
+        if not self._sweep_budget_hold_active() and not self._no_progress_hold_active():
             return False
         window = int(self.context_length or 0)
         if window <= 0 or tokens is None:
@@ -1958,7 +2022,9 @@ class LCMEngine(
                     focus_topic=focus_topic or "",
                     custom_instructions=self._config.custom_instructions,
                     prompt_version=getattr(self._config, "summary_prompt_version", 1),
+                    **({"deadline": deadline} if deadline is not None else {}),  # #666: bounds every attempt
                 )
+                self._last_leaf_level_3_verbatim = level == 3 and summary_text == serialized  # #652: no fragment
                 return attempt_chunk, source_tokens, summary_text, level, attempt_number
             except Exception as exc:
                 if isinstance(exc, SweepBudgetExhausted):
@@ -4572,6 +4638,7 @@ class LCMEngine(
             "last_compression_noop_reason": self._last_compression_noop_reason,
             "last_survival_fit": dict(self._last_survival_fit) if self._last_survival_fit else None,
             "threshold_full_sweep": dict(self._last_threshold_full_sweep),
+            "no_progress_hold": self._no_progress_hold_status(),
             "ingest_failure_count": self._ingest_failure_count,
             "consecutive_ingest_failures": self._consecutive_ingest_failures,
             "last_ingest_error": self._last_ingest_error,
@@ -6697,7 +6764,7 @@ class LCMEngine(
 
         condensation_passes = 0
         suppression_reason = ""
-        route_stopped = False
+        route_stopped = result_rejected = False
         fanin = max(1, self._config.condensation_fanin)
 
         for depth in range(upper):
@@ -6727,7 +6794,11 @@ class LCMEngine(
                 source_tokens, summary_tokens, level = self._condense_summary_nodes(
                     to_condense,
                     focus_topic=focus_topic,
+                    force_overflow=force_overflow,
                 )
+            except SummaryResultRejected:
+                result_rejected = True  # #652: the nodes stay on the frontier
+                break
             except Exception as exc:
                 if _is_sqlite_locked_error(exc):
                     setattr(
@@ -6751,6 +6822,8 @@ class LCMEngine(
             self._last_condensation_suppressed_reason = suppression_reason
         if route_stopped:
             self._last_condensation_suppressed_reason = "summary_route_unavailable"
+        if result_rejected:
+            self._last_condensation_suppressed_reason = "summary_result_rejected"
         return condensation_passes
 
     def _condense_summary_nodes(
@@ -6759,6 +6832,7 @@ class LCMEngine(
         *,
         focus_topic: Optional[str] = None,
         deadline: Optional[float] = None,
+        force_overflow: bool = False,
     ) -> tuple[int, int, int]:
         """Persist one same-depth condensation and return source/output tokens and level."""
         if not nodes:
@@ -6791,7 +6865,10 @@ class LCMEngine(
             focus_topic=focus_topic or "",
             custom_instructions=self._config.custom_instructions,
             prompt_version=getattr(self._config, "summary_prompt_version", 1),
+            **({"deadline": deadline} if deadline is not None else {}),  # #666: bounds every attempt
         )
+        if level == 3 and summary_text != combined_text and self._fit_can_rescue(force_overflow):
+            raise SummaryResultRejected("summary result rejected at level 3")  # a truncation, not the whole text
         earliest_at, latest_at = self._dag.get_source_time_window(
             [node.node_id for node in nodes]
         )
@@ -6879,6 +6956,8 @@ class LCMEngine(
                 )
             except SweepBudgetExhausted:
                 return passes, "time_budget_exhausted"
+            except SummaryResultRejected:
+                return passes, "summary_result_rejected"  # #652: no level 3 node; the group stays on the frontier
             except Exception as exc:
                 if _is_sqlite_locked_error(exc):
                     setattr(exc, "lcm_completed_condensation_passes", passes)
@@ -7287,10 +7366,13 @@ class LCMEngine(
             summary_role = "user"
         else:
             summary_role = "assistant" if last_role != "assistant" else "user"
+        # #653: (selection group, node id) per part; the anchor goes first, then each depth, deepest first.
+        part_keys: list[tuple[int, Optional[int]]] = []
         if anchor_part is not None:
             anchor_msg = {"role": summary_role, "content": anchor_part}
             if summary_budget is None or count_message_tokens(anchor_msg) <= summary_budget:
                 summary_parts.append(anchor_part)
+                part_keys.append((-1, None))
 
         # Node ids placed in the summary prefix — used to dedupe proactive-recall
         # injection against summaries already visible in the active context.
@@ -7301,10 +7383,10 @@ class LCMEngine(
             # For active context, we want the highest-level summaries
             # that haven't been condensed into even higher levels
             depths = sorted(set(n.depth for n in all_nodes), reverse=True)
-            for d in depths:
-                uncondensed = self._dag.get_uncondensed_at_depth(self._session_id, d)
+            for group, d in enumerate(depths):
+                uncondensed = self._dag.get_uncondensed_at_depth(self._session_id, d, newest=True)
                 for node in uncondensed:
-                    active_summary_node_ids.add(node.node_id)
+                    part_keys.append((group, node.node_id))
                     depth_label = {
                         0: "Recent",
                         1: "Session Arc",
@@ -7319,17 +7401,20 @@ class LCMEngine(
         retained_generated_context_parts: list[str] = []
         summary_message: Optional[Dict[str, Any]] = None
         if summary_parts:
-            selected_parts = summary_parts
+            kept_indexes = list(range(len(summary_parts)))
             if summary_budget is not None:
-                selected_parts = []
-                for part in summary_parts:
-                    candidate = "\n\n---\n\n".join(selected_parts + [part])
+                # #653: within a depth the newest parts are kept first; kept parts render in the order above.
+                kept_indexes = []
+                for index in sorted(range(len(summary_parts)), key=lambda i: (part_keys[i][0], -i)):
+                    candidate = "\n\n---\n\n".join(summary_parts[i] for i in sorted(kept_indexes + [index]))
                     candidate_msg = {"role": summary_role, "content": candidate}
                     if count_message_tokens(candidate_msg) > summary_budget:
-                        if part == anchor_part:
-                            continue
                         continue
-                    selected_parts.append(part)
+                    kept_indexes.append(index)
+                kept_indexes.sort()
+            selected_parts = [summary_parts[i] for i in kept_indexes]
+            active_summary_node_ids.update(
+                part_keys[i][1] for i in kept_indexes if part_keys[i][1] is not None)
             if selected_parts:
                 combined = "\n\n---\n\n".join(selected_parts)
                 if retained_user_msg is not None:
