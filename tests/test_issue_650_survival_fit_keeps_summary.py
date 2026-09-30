@@ -305,11 +305,16 @@ def test_t5_a_list_under_budget_is_not_fitted(tmp_path, host, monkeypatch):
 
 # -- round 2 F1: one store-id map over the whole list ---------------------------------------------------
 
+@pytest.mark.parametrize("lead", ["phrase-row", "carrier"])
 @pytest.mark.parametrize("stored_copy", [False, True], ids=["unstored-copy", "stored-copy"])
-def test_r2_f1_the_prefix_cut_maps_the_whole_list(tmp_path, host, stored_copy):
-    """A phrase-matched prefix row P ahead of a copy of an older stored reply: mapped on the whole list
-    the copy is new (unstored, so it never leaves, as v0.24.6 keeps it) or the newest stored copy; a
-    map of the list without P would take the older stored reply for it."""
+def test_r2_f1_the_prefix_cut_maps_the_whole_list(tmp_path, host, stored_copy, lead):
+    """The review's input: a stored row P (id 3) ahead of a copy of an older stored reply (id 2). Mapped on
+    the whole list the copy is new (unstored: it never leaves, as v0.24.6 keeps it) or the newest stored
+    copy (id 4); a map of the list without P would take id 2 for it. Since #650 round 3 a P that only
+    matches a summary phrase is an ordinary row (the v0.24.6 rule); as the remainder of a verified
+    carrier it is split out of the kept prefix and leaves with its turn."""
+    from hermes_lcm.dag import SummaryNode
+
     engine = _engine(tmp_path, window=200_000)
     reply = {"role": "assistant", "content": "An ordinary detailed reply. " * 400}
     phrase = {"role": "user", "content": "Please explain CONTEXT SUMMARY.", "timestamp": 3.0}
@@ -321,13 +326,22 @@ def test_r2_f1_the_prefix_cut_maps_the_whole_list(tmp_path, host, stored_copy):
         if stored_copy:
             assert engine._store.append("S", dict(copy), conversation_id="conv") == 4
         newest = {"role": "user", "content": "The newest question?", "timestamp": 5.0}
-        active = [phrase, copy, newest]
-        assert engine._survival_generated(phrase)
+        first, expected = phrase, [newest]
+        if lead == "carrier":
+            node = engine._dag.add_node(SummaryNode(session_id="S", summary="s", token_count=1, source_token_count=1,
+                                                    source_ids=[1], expand_hint="turns"))
+            summary = f"[Recent Summary (d0, node {node})]\ns\n[Expand for details: turns]"
+            first = {"role": "user", "content": f"{summary}\n\n{phrase['content']}"}
+            assert engine._generated_context_carrier_remainder(first) == phrase["content"]
+            expected = [{"role": "user", "content": summary}, newest]
+        active = [first, copy, newest]
         whole = engine._get_store_id_map_for_messages(active)
-        result = engine._survival_fit(active, list(active), 0, "test", after_exception=True, request_cap=40)
+        result = engine._survival_fit(active, list(active), 0, "test", after_exception=True,
+                                      request_cap=engine._survival_measure(expected))
         if stored_copy:
-            assert whole.get(id(copy)) == 4 and result == [phrase, newest]
-            assert "store ids 4..4" in engine._last_survival_fit["notice"]
+            assert whole.get(id(copy)) == 4 and result == expected
+            assert engine._get_store_id_map_for_messages(active[1:]).get(id(copy)) == 2  # a sublist map errs
+            assert "store ids 3..4" in engine._last_survival_fit["notice"]
         else:
             assert id(copy) not in whole
             assert any(m is copy for m in result) and engine._last_survival_fit is None
@@ -370,5 +384,81 @@ def test_r2_f2_the_notice_never_pushes_a_whole_turn_cut_over_budget(tmp_path, mo
             exact += old == budget
             assert measure(result) <= (budget if old <= budget else old), (pad, measure(result), old, budget)
         assert exact  # the sweep hit the list v0.24.6 returned at exactly the budget
+    finally:
+        engine.shutdown()
+
+
+# -- round 3 F5: the protected prefix is provenance, never a summary phrase ----------------------------
+
+PHRASE = "please explain this CONTEXT SUMMARY"
+
+
+@pytest.mark.parametrize("system", [False, True], ids=["no-system", "system"])
+def test_r3_f5_a_real_row_quoting_a_summary_phrase_is_not_protected(tmp_path, host, monkeypatch, system):
+    """The first kept raw user row mentions "CONTEXT SUMMARY" and follows LCM's summary. LCM's summary is
+    recognised by provenance (scaffold or verified carrier), never by the phrase; the phrase row is an
+    ordinary turn: it and its reply stay together, and no kept request loses its reply."""
+    engine = _engine(tmp_path)
+    try:
+        head = [{"role": "system", "content": "system prompt"}] if system else []
+        turns = [r for i in range(108) for r in _turn(f"T{i:03d}", 10.0 * i)]
+        turns[2 * 48]["content"] = f"[T048] {PHRASE}{PAD}"  # the first row the host still shows
+        engine.ingest(head + turns)
+        view = head + turns[2 * 48:]
+        engine._ingest_cursor = len(view)
+        seen = _spy(engine, monkeypatch)
+        result = engine.compress(view, current_tokens=host(view))
+        pre, budget, lead = seen["input"], seen["budget"], len(head)
+        summary = pre[lead]
+        phrase = pre[lead + 1] if system else {"role": "user", "content": view[lead]["content"]}
+        reply = pre[lead + 1 + system]
+        assert PHRASE in phrase["content"] and reply["role"] == "assistant"
+        assert not engine._is_context_summary_content(summary["content"].split("\n\n[T048]")[0])
+        assert (engine._is_replayed_context_scaffold_message(summary)
+                or engine._generated_context_carrier_remainder(summary) is not None)
+        if system:  # assembly emits [system, summary, phrase row, reply, ...]
+            assert engine._survival_generated(phrase)  # the phrase alone matches it
+        else:  # assembly glues the phrase row to the summary: a verified carrier
+            assert engine._generated_context_carrier_remainder(summary) == phrase["content"]
+        assert engine._last_survival_fit is not None and engine._survival_measure(result) <= budget
+        assert "Summary (d" in str(result[lead]["content"])[:40]  # LCM's summary kept
+        kept_phrase = any(m.get("content") == phrase["content"]
+                          or engine._generated_context_carrier_remainder(m) == phrase["content"] for m in result)
+        assert kept_phrase is any(m is reply for m in result)  # the turn stays whole
+        _assert_turns_whole(result)
+        if not system:
+            assert not (result[0]["role"] == "user" and result[1]["role"] == "user")
+    finally:
+        engine.shutdown()
+
+
+# -- round 3: the split carrier's fallback shape is assembly's own -------------------------------------
+
+@pytest.mark.parametrize("case", ["list-content-next", "next-is-newest"])
+def test_r3_split_carrier_without_a_carrier_shape_matches_assembly(tmp_path, host, case):
+    """When the first kept user row has list content, or is the newest user row, assembly
+    (engine._assemble_context, the carrier guard) emits the user-role summary and that row separately;
+    the fit's leading rows are exactly that shape: [summary, U_k, its reply, ...]."""
+    from hermes_lcm.dag import SummaryNode
+
+    engine = _engine(tmp_path, window=200_000)
+    try:
+        node = engine._dag.add_node(SummaryNode(session_id="S", summary="saved history " * 50, token_count=1,
+                                                source_token_count=1, source_ids=[1], expand_hint="turns"))
+        summary = f"[Recent Summary (d0, node {node})]\n{'saved history ' * 50}\n[Expand for details: turns]"
+        rows = _turn("U1", 1.0) + _turn("U2", 2.0, list_users=case == "list-content-next")
+        if case == "list-content-next":
+            rows += _turn("U3", 3.0)
+        for m in rows:
+            engine._store.append("S", dict(m), conversation_id="conv")
+        carrier = {"role": "user", "content": f"{summary}\n\n{rows[0]['content']}"}
+        assert engine._generated_context_carrier_remainder(carrier) == rows[0]["content"]
+        active = [carrier, *rows[1:]]
+        expected = [{"role": "user", "content": summary}, *rows[2:]]
+        engine._ingest_cursor, engine._ingest_cursor_needs_reconcile = len(active), False
+        result = engine._survival_fit(active, list(active), 0, "test",
+                                      request_cap=engine._survival_measure(expected))
+        assert result == expected
+        assert engine._is_replayed_context_scaffold_message(result[0])
     finally:
         engine.shutdown()

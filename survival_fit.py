@@ -14,8 +14,9 @@ deadline, a no-op, a lock after commit, an exception), the list is fitted on the
   old row's identity unless byte-identical to its projection. The raw rows stay in the store;
 - a row that is not durably stored is never omitted (a row the ingest cursor cannot prove stored counts
   as durable only when it is DAG-verified LCM scaffold), and the list is never empty (#91).
-- LCM's summary prefix (the generated rows right after the system slot) stays whenever whole oldest turns
-  can leave instead and the final list fits; otherwise the old rule applies and a WARNING says so (#650).
+- LCM's summary prefix (scaffold or verified carrier rows right after the system slot) stays whenever whole
+  oldest turns can leave instead and the final list fits; otherwise the old rule applies and a WARNING says
+  so (#650).
 It writes no message, node or lifecycle row: only the metadata counter /lcm doctor reads. The global
 assembly cap is never set (that would force overflow and trim every good compaction). The notice goes in
 the system-prefix slot when the list has one, never as a conversation row; the one-shot user warning goes
@@ -134,8 +135,11 @@ class SurvivalFitMixin:
             system += 1
         # #650: LCM's summary prefix right after the system slot (on Hermes the first row, role user) stays
         # when whole oldest turns can leave instead and the final list fits the budget; else the old rule.
+        # Only rows of proven provenance (scaffold, a verified carrier) are the prefix, never a phrase match.
         prefix = system
-        while prefix < len(result) and isinstance(result[prefix], dict) and self._survival_generated(result[prefix]):
+        while prefix < len(result) and isinstance(result[prefix], dict) and (
+                self._is_replayed_context_scaffold_message(result[prefix])
+                or self._generated_context_carrier_remainder(result[prefix]) is not None):
             prefix += 1
         # The ingest cursor indexes this list with nothing to reconcile: every row of it is persisted,
         # including rows the identity mapper cannot pin to one stored copy (duplicates, stubbed tools).
