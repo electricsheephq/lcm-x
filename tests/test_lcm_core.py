@@ -4810,7 +4810,8 @@ class TestAssemblyBudgetSelection:
         return engine
 
     def test_assembly_skips_oversized_assistant_turn_to_preserve_user_prompt(self, tmp_path, monkeypatch):
-        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=120)
+        # 160 (was 120): room for the #680 sentence in the LCM system note.
+        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=160)
         huge_assistant = "oversized assistant tool chatter " * 400
 
         assembled = engine._assemble_context(
