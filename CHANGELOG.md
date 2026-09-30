@@ -11,6 +11,12 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   checkout is not a uv workspace member; the stale root `uv.lock` is removed too. Before, the manager staged the
   lint-only `pyproject.toml` with a name and no version, `uv lock` failed and the plugin went into
   `plugins.disabled`. The open PR #632 diagnosed the same failure. (#631)
+- Fix: below the host's compaction threshold the host count decides on every preflight branch: an automatic
+  `compress()` after any preflight request is cleanup-only when the host's `current_tokens` is known and below the
+  threshold, and an automatic call while the #651 hold runs is cleanup-only. Forced, `/compress` and provider-overflow
+  calls are unchanged. (#677)
+- Fix: the survival fit protects only DAG-verified summary rows as its prefix; a row quoting a summary header for a
+  missing or foreign node is an ordinary row, so its turn leaves whole (the v0.24.6 rule). (#678)
 
 ## v0.24.7 - (unreleased; rc1) (P0 for long-running sessions: the survival fit keeps the summary, no in-turn thrash below the threshold, no level-3 fragments, a bounded summary prefix, steer rows stored)
 
