@@ -293,7 +293,14 @@ def _scenario(engine, tool, ctx, *, patterns, posture):
         inspected = _payload(engine, tool, {})
         assert inspected["read_only"] is True and inspected["session_id"] == "gauntlet-c" and inspected["messages"]["total"] == inspected["messages"]["fresh_tail"]["returned"] == 10
     elif tool == "lcm_doctor":
-        assert (value := _payload(engine, tool, {}))["overall"] == "healthy" and all(check["status"] == "pass" for check in value["checks"])
+        value = _payload(engine, tool, {})
+        statuses = {check["check"]: check["status"] for check in value["checks"]}
+        # #672: the embedding check warns when the configured provider cannot run in this
+        # process; the local posture configures fastembed, an optional dependency.
+        embedding_ok = posture != "local" or importlib.util.find_spec("fastembed") is not None
+        expected = {"embedding_provider_health": "pass" if embedding_ok else "warn"}
+        assert all(status == expected.get(name, "pass") for name, status in statuses.items()), statuses
+        assert value["overall"] == ("healthy" if all(s == "pass" for s in statuses.values()) else "warnings")
     else:
         raise AssertionError(f"no scenario implementation for {tool}")
     return "exact named postcondition passed"
