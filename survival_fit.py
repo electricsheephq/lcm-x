@@ -14,6 +14,8 @@ deadline, a no-op, a lock after commit, an exception), the list is fitted on the
   old row's identity unless byte-identical to its projection. The raw rows stay in the store;
 - a row that is not durably stored is never omitted (a row the ingest cursor cannot prove stored counts
   as durable only when it is DAG-verified LCM scaffold), and the list is never empty (#91).
+- LCM's summary prefix (the generated rows right after the system slot) stays whenever whole oldest turns
+  can leave instead and the final list fits; otherwise the old rule applies and a WARNING says so (#650).
 It writes no message, node or lifecycle row: only the metadata counter /lcm doctor reads. The global
 assembly cap is never set (that would force overflow and trim every good compaction). The notice goes in
 the system-prefix slot when the list has one, never as a conversation row; the one-shot user warning goes
@@ -127,17 +129,48 @@ class SurvivalFitMixin:
         before = self._survival_measure(result)
         if before <= budget:
             return result
-        lead = 0
-        while lead < len(result) and isinstance(result[lead], dict) and result[lead].get("role") == "system":
-            lead += 1
-        head, body = list(result[:lead]), list(result[lead:])
-        store_ids = self._get_store_id_map_for_messages(body)
+        system = 0
+        while system < len(result) and isinstance(result[system], dict) and result[system].get("role") == "system":
+            system += 1
+        # #650: LCM's summary prefix right after the system slot (on Hermes the first row, role user) stays
+        # when whole oldest turns can leave instead and the final list fits the budget; else the old rule.
+        prefix = system
+        while prefix < len(result) and isinstance(result[prefix], dict) and self._survival_generated(result[prefix]):
+            prefix += 1
         # The ingest cursor indexes this list with nothing to reconcile: every row of it is persisted,
         # including rows the identity mapper cannot pin to one stored copy (duplicates, stubbed tools).
         # After an exception the cursor proves nothing (this call's writes may have failed or been rolled
         # back): durability is then the store-id map and DAG-verified scaffold only.
         persisted = (not after_exception and not self._ingest_cursor_needs_reconcile
                      and self._ingest_cursor == len(result))
+        cut = self._survival_cut(result, prefix, budget, persisted, reason, True) if prefix > system else None
+        if cut is not None and self._survival_measure(cut[0]) > budget:
+            cut = None
+        emergency = prefix > system and cut is None
+        cut = cut or self._survival_cut(result, system, budget, persisted, reason, False)
+        if cut is None:
+            return result
+        fitted, count, ids, projected, notice = cut
+        after = self._survival_measure(fitted)
+        if after >= before:  # nothing stored could leave: the list is already as small as it gets
+            return result
+        if emergency and any(all(m is not row for m in fitted) for row in result[system:prefix]):
+            logger.warning("LCM survival fit dropped the summary prefix (emergency: prefix=%d tokens, budget=%d)",
+                           self._survival_measure(result[system:prefix]), budget)
+        if after_exception or not persisted:
+            self._ingest_cursor, self._ingest_cursor_needs_reconcile = 0, True
+        else:
+            self._ingest_cursor = len(fitted)
+        if after > budget:  # still the best list available: returned, but never reported as within budget
+            logger.warning("LCM survival fit could not reach budget (after=%d, budget=%d, reason=%s)", after, budget, reason)
+        self._survival_record(reason, count, ids, before, after, budget, projected, notice)
+        return fitted
+
+    def _survival_cut(self, result, lead: int, budget: int, persisted: bool, reason: str, whole_turns: bool):
+        """``(fitted, count, ids, projected, notice)`` with ``result[:lead]`` kept, else None. With
+        ``whole_turns`` only whole oldest turns may leave (no projection)."""
+        head, body = list(result[:lead]), list(result[lead:])
+        store_ids = self._get_store_id_map_for_messages(body)
 
         def durable(message) -> bool:  # unproven rows: only DAG-verified scaffold, never a phrase match
             return persisted or id(message) in store_ids or self._is_verified_replay_scaffold_message(message)
@@ -150,33 +183,26 @@ class SurvivalFitMixin:
             if index and self._survival_measure(head + body[index:]) <= budget:
                 cut = index
                 break
+        if cut is None and whole_turns:
+            return None
         if cut is None:  # the newest user turn alone is over budget: a bounded projection of it
             cut = users[-1] if users else 0
             if not all(durable(message) for message in body[:cut]):
                 logger.warning("LCM survival fit skipped: an over-budget list holds rows not yet stored (reason=%s)", reason)
-                return result
+                return None
             kept = self._survival_projection(body[cut:], store_ids, budget - self._survival_measure(head))
             projected = any(new is not old for new, old in zip(kept, body[cut:]))  # a row was actually replaced
         else:
             kept = body[cut:]
         dropped = body[:cut]
         ids = sorted(store_ids[id(message)] for message in dropped if id(message) in store_ids)
-        count = sum(1 for message in dropped if not self._survival_generated(message))
+        # raw rows only; a carrier (summary + a real user row) counts as that row
+        count = sum(1 for message in dropped if not self._survival_generated(message)
+                    or self._generated_context_carrier_remainder(message) is not None)
         notice = _NOTICE.format(n=count, first=ids[0] if ids else "-", last=ids[-1] if ids else "-")
-        if head:
+        if head and head[0].get("role") == "system":  # the notice never edits a generated summary row
             head[0] = {**head[0], "content": self._survival_with_notice(head[0].get("content"), notice)}
-        fitted = head + kept or result[-1:]
-        after = self._survival_measure(fitted)
-        if after >= before:  # nothing stored could leave: the list is already as small as it gets
-            return result
-        if after_exception or not persisted:
-            self._ingest_cursor, self._ingest_cursor_needs_reconcile = 0, True
-        else:
-            self._ingest_cursor = len(fitted)
-        if after > budget:  # still the best list available: returned, but never reported as within budget
-            logger.warning("LCM survival fit could not reach budget (after=%d, budget=%d, reason=%s)", after, budget, reason)
-        self._survival_record(reason, count, ids, before, after, budget, projected, notice)
-        return fitted
+        return head + kept or result[-1:], count, ids, projected, notice
 
     @staticmethod
     def _survival_with_notice(content: Any, notice: str) -> Any:
