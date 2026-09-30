@@ -80,6 +80,7 @@ class CompactionMixin:
         if self._compression_boundary_cooldown_active():
             return False
         tokens = prompt_tokens if prompt_tokens is not None else self.last_prompt_tokens
+        self._last_gate_tokens = int(tokens or 0)
         if self._should_force_overflow_recovery(observed_tokens=tokens):
             return True
         if self.threshold_tokens <= 0:
@@ -94,6 +95,7 @@ class CompactionMixin:
     def _should_compress_preflight_impl(self, messages):
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
         self._native_recovery_preflight_cleanup_only = False
+        self._preflight_below_threshold_cleanup_only = False
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         if self._bypasses_lcm_context_management():
             # Bypassed traffic observes nothing about the pressured session's
@@ -107,6 +109,7 @@ class CompactionMixin:
                 return True
             return self.threshold_tokens > 0 and rough >= self.threshold_tokens
         rough = count_messages_tokens(messages)
+        self._last_gate_tokens = rough
         if self.threshold_tokens > 0 and rough < self.threshold_tokens:
             self._note_fresh_tail_pressure_relieved()
         pre_ingest_placeholder_ambiguous_noop = False
@@ -182,6 +185,8 @@ class CompactionMixin:
                     and self._compression_boundary_cooldown_active()
                 ):
                     self._preflight_cleanup_only_due_to_boundary_cooldown = True
+                if not force_overflow_requested and max(rough, replay_rough) < self.threshold_tokens:
+                    return self._mark_below_threshold_maintenance()
                 return self._mark_preflight_compression_requested()
             if force_overflow_requested:
                 return self._mark_preflight_compression_requested()
@@ -237,11 +242,13 @@ class CompactionMixin:
                     observed_tokens=replay_rough,
                     messages=replay_messages,
                 ):
-                    return self._mark_preflight_compression_requested(
+                    return self._mark_below_threshold_maintenance(
                         depends_on_pressure_yield=self._pressure_yield_preflight_candidate,
                     )
                 return False
             if self._has_ignored_backlog_outside_fresh_tail(replay_messages):
+                if max(rough, replay_rough) < self.threshold_tokens:
+                    return self._mark_below_threshold_maintenance()
                 return self._mark_preflight_compression_requested()
             if self.threshold_tokens > 0 and replay_rough >= self.threshold_tokens:
                 if self._should_run_deferred_maintenance(replay_messages, observed_tokens=replay_rough):
@@ -261,7 +268,7 @@ class CompactionMixin:
                 replay_messages,
                 observed_tokens=replay_rough,
             ):
-                return self._mark_preflight_compression_requested()
+                return self._mark_below_threshold_maintenance()
             return False
         if self._compression_boundary_cooldown_active():
             return False
@@ -310,8 +317,14 @@ class CompactionMixin:
             messages,
             observed_tokens=rough,
         ):
-            return self._mark_preflight_compression_requested()
+            return self._mark_below_threshold_maintenance()
         return False
+
+    def _mark_below_threshold_maintenance(self, **kwargs: Any) -> bool:
+        """#651: a request below the host threshold is maintenance; the automatic compress() it asks for is
+        cleanup-only (compress() rechecks its own tokens against the threshold)."""
+        self._preflight_below_threshold_cleanup_only = self.threshold_tokens > 0
+        return self._mark_preflight_compression_requested(**kwargs)
 
     def _replay_diff_requests_ingest_cleanup(
         self,
@@ -551,6 +564,9 @@ class CompactionMixin:
             self._pending_emission_candidates = []
             self._compress_occurrences = None
             self._survival_fit_reason = None
+            self._no_progress_candidate = False
+            if bypass_cooldown:  # #651: a host recovery attempt is never cleanup-only maintenance
+                self._preflight_below_threshold_cleanup_only = False
             with self._fresh_tail_pressure_yield_invocation():
                 result = self._compress_impl(
                     messages,
@@ -574,6 +590,9 @@ class CompactionMixin:
             reason = self._survival_fit_reason or str(self._last_compression_status or "unknown")
             result = self._survival_fit(messages, result, current_tokens,
                                         **self._survival_fit_args(messages, current_tokens, reason, bypass_cooldown))
+            if self._no_progress_candidate and not bypass_cooldown and len(result) >= len(messages) and (
+                    count_messages_tokens(result) >= count_messages_tokens(messages)):
+                self._start_no_progress_hold("no_progress")  # #651: no leaf, and neither rows nor tokens fell
             self._record_compress_commit_proof(messages, result)
             logger.debug("LCM compaction emission descriptor count=%d",
                          len((self._compress_commit_proof or {}).get("emissions") or ()))
@@ -1193,8 +1212,12 @@ class CompactionMixin:
         boundary_cleanup_only_requested = bool(
             self._preflight_cleanup_only_due_to_boundary_cooldown
         )
+        below_threshold_cleanup_only_requested = bool(
+            self._preflight_below_threshold_cleanup_only
+        )
         self._native_recovery_preflight_cleanup_only = False
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
+        self._preflight_below_threshold_cleanup_only = False
 
         if not messages:
             self._last_compression_status = "noop"
@@ -1279,10 +1302,19 @@ class CompactionMixin:
             )
         )
         ingest_cleanup_changed_active_context = working_messages != messages
+        # #651: below the host threshold, the automatic compress() a preflight
+        # maintenance request asked for runs no summariser leaf pass.
+        below_threshold_cleanup_only = bool(
+            below_threshold_cleanup_only_requested
+            and not force
+            and self.threshold_tokens > 0
+            and (observed_prompt_tokens or 0) < self.threshold_tokens
+        )
         cleanup_only_requested = bool(
             (
                 boundary_cleanup_only_requested
                 or native_cleanup_only
+                or below_threshold_cleanup_only
             )
             and not force_overflow
         )
@@ -1320,6 +1352,14 @@ class CompactionMixin:
                 working_messages,
                 current_tokens=observed_prompt_tokens,
             )
+        # #651: an automatic threshold pass that stores no leaf is a no-progress
+        # candidate; compress() arms the hold if neither rows nor tokens fell.
+        self._no_progress_candidate = bool(
+            not force
+            and not force_overflow
+            and self.threshold_tokens > 0
+            and observed_prompt_tokens >= self.threshold_tokens
+        )
         anchor_source_messages = list(working_messages)
         pressure_messages = messages if len(messages) == len(working_messages) else working_messages
         leaf_compacted_this_turn = False
@@ -1907,6 +1947,7 @@ class CompactionMixin:
             pressure_messages = pressure_messages[:leading_anchor_count] + pressure_remaining_messages
             leaf_compacted_this_turn = True
             self._sweep_budget_hold_until = 0.0  # #608: a stored leaf ends the hold
+            self._no_progress_hold, self._no_progress_candidate = None, False  # #651: hidden-only leaves too
             leaf_passes += 1
             level3_leaves += _level == 3
             estimated_active_tokens = max(0, estimated_active_tokens - source_tokens + summary_tokens)
