@@ -2862,7 +2862,7 @@ def protect_messages_for_ingest(
     config,
     hermes_home: str = "",
     session_id: str = "",
-    tool_names_by_call_id: Dict[str, str] | None = None,
+    tool_name_hints: List[str] | None = None,
 ) -> List[Dict[str, Any]]:
     return [
         protect_message_for_ingest(
@@ -2870,9 +2870,9 @@ def protect_messages_for_ingest(
             config=config,
             hermes_home=hermes_home,
             session_id=session_id,
-            tool_name_hint=(tool_names_by_call_id or {}).get(str((message or {}).get("tool_call_id") or ""), ""),
+            tool_name_hint=(tool_name_hints or [])[index] if index < len(tool_name_hints or []) else "",
         )
-        for message in messages
+        for index, message in enumerate(messages)
     ]
 
 

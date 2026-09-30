@@ -30,17 +30,25 @@ def _tool_call_id(tool_call: Any) -> str:
     return str(value).strip() if value else ""
 
 
-def _tool_names_by_call_id(messages: List[Dict[str, Any]]) -> Dict[str, str]:
-    """Map each assistant tool call id to its function name (#680 stub text)."""
-    names: Dict[str, str] = {}
-    for msg in messages:
-        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+def _tool_result_names(messages: List[Dict[str, Any]]) -> Dict[int, str]:
+    """Map each tool result's index to the function name of the nearest preceding
+    assistant call with its id (#680 stub text; a call id may be reused)."""
+    latest: Dict[str, str] = {}
+    names: Dict[int, str] = {}
+    for index, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") == "tool":
+            name = latest.get(str(msg.get("tool_call_id") or "").strip(), "")
+            if name:
+                names[index] = name
+            continue
+        if msg.get("role") != "assistant":
             continue
         for tool_call in msg.get("tool_calls") or []:
             function = tool_call.get("function") if isinstance(tool_call, dict) else None
-            name = str(function.get("name") or "") if isinstance(function, dict) else ""
-            if _tool_call_id(tool_call) and name:
-                names[_tool_call_id(tool_call)] = name
+            if _tool_call_id(tool_call):
+                latest[_tool_call_id(tool_call)] = str(function.get("name") or "") if isinstance(function, dict) else ""
     return names
 
 

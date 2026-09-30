@@ -1245,8 +1245,9 @@ def maybe_externalize_payload(
                     existing = _externalized_summary(existing_path, existing_payload)
                 except OSError as exc:
                     logger.warning("Large payload metadata update skipped (non-blocking): %s", exc)
-        if tool_name and not existing.get("tool_name"):
-            existing = {**existing, "tool_name": tool_name}  # #680: an older payload has no tool_name
+        if tool_name and existing.get("tool_name") != tool_name:
+            # #680: the supplied name wins (an older payload may hold none, or another call's).
+            existing = {**existing, "tool_name": tool_name}
         return {
             "placeholder": _build_externalized_placeholder(existing),
             "path": existing_path,

@@ -132,7 +132,7 @@ from .message_analysis import (
     _matched_tool_call_ids,
     _merge_adjacent_assistant_messages,
     _tool_call_id,
-    _tool_names_by_call_id,
+    _tool_result_names,
 )
 from .fresh_tail import FreshTailBoundary, resolve_fresh_tail_boundary, tool_group_safe_end
 from .message_patterns import compile_message_patterns, matches_message_pattern
@@ -3450,6 +3450,8 @@ class LCMEngine(
             # old/child session as missing even though its payload was only
             # reassigned to the next compression segment.
             moved_nodes = self._dag.reassign_session_nodes(source_session_id, session_id)
+            # Same condition and old_session_id fallback that just handed the predecessor's
+            # DAG nodes to this session: its payloads add no new trust (#692 review Q2).
             self._record_rotation_predecessor(session_id, source_session_id)
             logger.debug(
                 "LCM compression boundary continued %s -> %s: carried %d DAG nodes; preserved raw message ownership",
@@ -5962,13 +5964,13 @@ class LCMEngine(
             self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
             return self._remember_active_replay_messages(messages, active_replay_messages)
 
-        tool_names_by_call_id = _tool_names_by_call_id(messages)
+        tool_result_names = _tool_result_names(messages)
         protected_messages = protect_messages_for_ingest(
             [msg for _idx, msg in messages_to_store_with_index],
             session_id=self._session_id,
             config=self._config,
             hermes_home=self._hermes_home,
-            tool_names_by_call_id=tool_names_by_call_id,
+            tool_name_hints=[tool_result_names.get(idx, "") for idx, _msg in messages_to_store_with_index],
         )
         recovery_tool_result_indices = self._active_replay_recovery_tool_result_indices(
             active_replay_messages
@@ -6006,7 +6008,7 @@ class LCMEngine(
             stubbed_message = self._maybe_stub_active_tool_result(
                 active_message,
                 is_recovery_tool_result=(absolute_idx in recovery_tool_result_indices),
-                tool_name=tool_names_by_call_id.get(str(active_message.get("tool_call_id") or "").strip(), ""),
+                tool_name=tool_result_names.get(absolute_idx, ""),
             )
             if stubbed_message is not None:
                 if active_replay_messages is replay_messages:
@@ -6344,8 +6346,8 @@ class LCMEngine(
         """Serialize messages into labeled text for the summarizer."""
         parts = []
         matched_tool_ids = _matched_tool_call_ids(messages)
-        tool_names_by_call_id = _tool_names_by_call_id(messages)
-        for msg in messages:
+        tool_result_names = _tool_result_names(messages)
+        for index, msg in enumerate(messages):
             role = msg.get("role", "unknown")
             content = redact_sensitive_value(
                 msg.get("content") or "",
@@ -6360,7 +6362,7 @@ class LCMEngine(
                     session_id=self._session_id,
                     config=self._config,
                     hermes_home=self._hermes_home,
-                    tool_name=str(msg.get("tool_name") or tool_names_by_call_id.get(tool_id, "")),
+                    tool_name=str(msg.get("tool_name") or tool_result_names.get(index, "")),
                 )
                 if externalized:
                     content = externalized["placeholder"]
@@ -6654,12 +6656,12 @@ class LCMEngine(
         result = list(messages)
         stubbed_count = 0
         tokens_saved = 0
-        tool_names_by_call_id = _tool_names_by_call_id(messages)
+        tool_result_names = _tool_result_names(messages)
         for idx, message in enumerate(messages[:eligible_end]):
             replacement = self._maybe_stub_active_tool_result(
                 message,
                 is_recovery_tool_result=(idx in recovery_tool_result_indices),
-                tool_name=tool_names_by_call_id.get(str(message.get("tool_call_id") or "").strip(), ""),
+                tool_name=tool_result_names.get(idx, ""),
             )
             if replacement is None:
                 continue
@@ -7686,7 +7688,7 @@ class LCMEngine(
             except Exception:  # pragma: no cover - defensive; fall back to the plain stub
                 existing = None
             if existing is not None:
-                if not existing.get("tool_name") and message.get("tool_name"):
+                if message.get("tool_name") and existing.get("tool_name") != message.get("tool_name"):
                     existing = {**existing, "tool_name": message["tool_name"]}
                 return {**self._missing_tool_result_stub(tool_call_id), "content": _build_externalized_placeholder(existing)}
         return self._missing_tool_result_stub(tool_call_id)

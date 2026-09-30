@@ -509,3 +509,74 @@ def test_t9_system_note_gains_one_sentence_and_is_otherwise_unchanged():
     assert note == BASE_LCM_NOTE[:-1] + " " + sentence + "]"
     assert extract_externalized_refs(note) == []
     assert not BASE_EXTERNALIZED_REF_RE.search(note)
+
+
+# --- #692 review round 2: Q5a call-id reuse, Q5b payload reuse ------------------------
+def _reused_call_id_list(payload_a, payload_b):
+    return [
+        {"role": "user", "content": "run both"},
+        *_tool_pair("call_0", payload_a, "terminal"),
+        *_tool_pair("call_0", payload_b, "read_file"),
+        {"role": "assistant", "content": "done"},
+        {"role": "user", "content": "next"},
+    ]
+
+
+def _labels(texts):
+    return [re.search(r"\[Externalized tool output: tool=([^;]*);", text).group(1) for text in texts]
+
+
+A_PAYLOAD = "RESULT_A terminal output " * 100
+B_PAYLOAD = "RESULT_B file contents " * 100
+
+
+def test_q5a_reused_call_id_takes_the_nearest_preceding_call_on_ingest_and_serialization(tmp_path):
+    engine = LCMEngine(
+        config=LCMConfig(
+            database_path=str(tmp_path / "lcm.db"),
+            large_output_externalization_enabled=True,
+            large_output_externalization_threshold_chars=200,
+        ),
+        hermes_home=str(tmp_path / "hermes"),
+    )
+    engine.on_session_start("q5a-ingest", conversation_id="c", context_length=200_000)
+    try:
+        engine.compress(_reused_call_id_list(A_PAYLOAD, B_PAYLOAD))
+        stored = [row[0] for row in engine._store._conn.execute(
+            "SELECT content FROM messages WHERE role = 'tool' ORDER BY store_id"
+        ).fetchall()]
+        serialized = engine._serialize_messages(_reused_call_id_list(A_PAYLOAD + "x", B_PAYLOAD + "x"))
+    finally:
+        engine.shutdown()
+
+    assert _labels(stored) == ["terminal", "read_file"]
+    assert _labels(re.findall(r"\[Externalized tool output: [^\]]*\]", serialized)) == ["terminal", "read_file"]
+
+
+def test_q5a_reused_call_id_on_active_replay_and_live_stubbing(tmp_path):
+    engine = _stub_engine(tmp_path, "q5a")
+    try:
+        messages = [{"role": "system", "content": "system"}] + _reused_call_id_list(A_PAYLOAD, B_PAYLOAD)
+        assembled = engine._assemble_context(messages[0], messages[1:])
+        live = engine.compress(copy.deepcopy(messages), current_tokens=1_000)
+    finally:
+        engine.shutdown()
+
+    for rows in (assembled, live):
+        stubs = [m["content"] for m in rows if m.get("role") == "tool"]
+        assert _labels(stubs) == ["terminal", "read_file"]
+
+
+def test_q5b_reused_payload_shows_the_supplied_tool_name(tmp_path):
+    config = LCMConfig(
+        database_path=str(tmp_path / "lcm.db"),
+        large_output_externalization_enabled=True,
+        large_output_externalization_threshold_chars=10,
+    )
+    kwargs = dict(tool_call_id="call_0", session_id="s", config=config, hermes_home=str(tmp_path))
+    first = maybe_externalize_tool_output("same output " * 50, tool_name="terminal", **kwargs)
+    second = maybe_externalize_tool_output("same output " * 50, tool_name="read_file", **kwargs)
+
+    assert second["path"] == first["path"]  # the payload is reused, not rewritten
+    assert "tool=read_file; tool_call_id=call_0;" in second["placeholder"]
+    assert json.loads(first["path"].read_text())["tool_name"] == "terminal"
