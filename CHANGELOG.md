@@ -22,8 +22,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Docs: the exception of the #600 fix counts rows that an earlier summary already covers toward the 8,000 owned rows.
   (#621)
 - Tests: the #608 tests no longer depend on which token counter is importable. (#615)
+- Docs: the rollback advice names its target 'a version older than v0.24.5' and the configured database file. (#620)
 
-## v0.24.5 - (unreleased; rc2) (#581, #582, #594: summaries sourced from the store, and a survival fit)
+## v0.24.5 - 2026-09-29 (#581, #582, #594: summaries sourced from the store, and a survival fit)
 
 - Fix: a leaf summary can cover stored rows the host no longer shows (rows the host compacted in place while native
   recovery was ON, older duplicate copies); the leaf input is a bounded, contiguous run of the conversation's stored

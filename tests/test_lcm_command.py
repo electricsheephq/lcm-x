@@ -538,10 +538,10 @@ def test_lcm_doctor_reports_health_checks(engine):
 
 @pytest.mark.parametrize("projected", [2, None, 0], ids=["projected", "unknown", "none-projected"])
 def test_lcm_doctor_survival_fit_guidance_names_the_backup_restore_rollback(engine, projected):
-    """A persisted survival fit (#601, #603, #620): within the 0.24.x line, with or without a projection
-    (projected_count > 0, 0, or unknown on an older record), the current lcm.db is moved aside and the backup
-    taken before the first v0.24.5 install is restored with the plugin; a plugin-only rollback is never
-    endorsed. A rollback to v0.23.3 keeps lcm.db and needs native recovery on."""
+    """A persisted survival fit (#601, #603, #620): for a rollback to a version older than v0.24.5, with or
+    without a projection (projected_count > 0, 0, or unknown on an older record), the configured database file
+    is moved aside and the backup taken before the first v0.24.5 install is restored with the plugin. A rollback
+    to v0.23.3 keeps the database file and needs native recovery on."""
     record = {"count": 2, "last_reason": "publication_invariant_conflict"}
     if projected is not None:
         record["projected_count"] = projected
@@ -553,15 +553,18 @@ def test_lcm_doctor_survival_fit_guidance_names_the_backup_restore_rollback(engi
     line = next(line for line in result.splitlines() if line.startswith("- survival_fit:") and " — " in line)
     assert f"projected_count {projected if projected is not None else 'unknown'}" in observation
     for text in (observation, line):
-        assert "within the 0.24.x line" in text and "v0.23.3" in text
+        assert "older than v0.24.5" in text and "v0.23.3" in text
+        assert "within the 0.24.x line" not in text
+        assert "the configured database file (by default lcm.db, with its -wal and -shm companions)" in text
         assert "a rollback to an older plugin restores" not in text
-    for phrase in ("v0.23.3", "LCM_NATIVE_RECOVERY=true", "keep lcm.db", "never a backup restore",
+    for phrase in ("v0.23.3", "LCM_NATIVE_RECOVERY=true", "keep the database file", "never a backup restore",
                    "plugins.enabled", "hermes-lcm", "context.engine: lcm", "config.yaml"):
         assert phrase in line, phrase
     restore = "restore the lcm.db backup taken before the first v0.24.5 install together with the plugin"
     assert not any("remain in the host session" in text for text in (observation, line))
     assert not any("plugin-only" in text for text in (observation, line))
-    assert "stop Hermes, move the current lcm.db (with its -wal and -shm files) aside and keep it" in line
+    assert ("stop Hermes, move the configured database file (by default lcm.db, with its -wal and -shm companions) "
+            "aside and keep it") in line
     assert restore in line and "stay in the file you moved aside" in line
     for phrase in ("stop Hermes", "-wal and -shm", "keep it"):  # the observation alone is the whole procedure
         assert phrase in observation, phrase
@@ -808,6 +811,18 @@ def test_lcm_doctor_tool_guidance_maps_warning_classes_to_operator_actions(engin
     assert guidance["payload_storage"]["action"] == "safe/ignore"
     assert guidance["summary_quality"]["action"] == "inspect"
     assert guidance["summary_quality"]["warning_only"] is True
+
+
+def test_lcm_doctor_survival_fit_guidance_scopes_the_restore_to_versions_older_than_v0245():
+    """#620: the diagnostics advice restores the backup only for a rollback to a version older than v0.24.5,
+    and names the configured database file rather than lcm.db alone."""
+    guidance = doctor_guidance_for_check({"check": "survival_fit", "status": "warn", "detail": {"count": 1}})
+
+    assert guidance is not None
+    text = guidance["operator_action"]
+    assert "older than v0.24.5" in text and "v0.24.5 or later is fine" in text
+    assert "within the 0.24.x line" not in text
+    assert "the configured database file (by default lcm.db, with its -wal and -shm companions)" in text
 
 
 def test_lcm_doctor_payload_failure_guidance_requires_inspection():
