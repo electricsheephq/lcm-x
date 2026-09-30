@@ -2024,6 +2024,7 @@ class LCMEngine(
                     l3_truncate_tokens=self._config.l3_truncate_tokens,
                     focus_topic=focus_topic or "",
                     custom_instructions=self._config.custom_instructions,
+                    prompt_version=getattr(self._config, "summary_prompt_version", 1),
                     **({"deadline": deadline} if deadline is not None else {}),  # #666: bounds every attempt
                 )
                 self._last_leaf_level_3_verbatim = level == 3 and summary_text == serialized  # #652: no fragment
@@ -6866,6 +6867,7 @@ class LCMEngine(
             l3_truncate_tokens=self._config.l3_truncate_tokens,
             focus_topic=focus_topic or "",
             custom_instructions=self._config.custom_instructions,
+            prompt_version=getattr(self._config, "summary_prompt_version", 1),
             **({"deadline": deadline} if deadline is not None else {}),  # #666: bounds every attempt
         )
         if level == 3 and summary_text != combined_text and self._fit_can_rescue(force_overflow):

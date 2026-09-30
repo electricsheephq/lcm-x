@@ -8110,6 +8110,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
             "summary_model": engine._config.summary_model or "(auxiliary)",
             "summary_reasoning_effort": engine._config.summary_reasoning_effort or "(task default)",
             "summary_timeout_ms": engine._config.summary_timeout_ms,
+            "summary_prompt_version": getattr(engine._config, "summary_prompt_version", 1),
             "summary_spend_max_calls": engine._config.summary_spend_max_calls,
             "summary_spend_window_seconds": engine._config.summary_spend_window_seconds,
             "summary_spend_backoff_seconds": engine._config.summary_spend_backoff_seconds,

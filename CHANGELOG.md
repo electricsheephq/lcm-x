@@ -6,6 +6,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Feature: `LCM_SUMMARY_PROMPT_VERSION` (default `1`, unchanged prompts) opts in to summariser prompt v2: six fixed
+  headings, focus directives in the trusted policy with only the tagged topic in the transcript message, and a 3x
+  output ceiling. Refs #646
 - Fix: a temporal rollup whose summary comes back as a level 3 truncation is not stored; the rollup stays pending for
   its next build and one warning is logged (a level 3 result that is the whole source is still stored). Rollup
   maintenance starts no build while the summary route is refused, and rollups record circuit results under their own
