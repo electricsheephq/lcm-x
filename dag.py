@@ -206,6 +206,15 @@ class SummaryDAG:
             CREATE INDEX IF NOT EXISTS idx_nodes_session_depth_node
                 ON summary_nodes(session_id, depth, node_id);
 
+            -- #441: a sidecar, not a summary_nodes column, because rows are
+            -- decoded by position here and by every older build after a rollback.
+            CREATE TABLE IF NOT EXISTS summary_node_provenance (
+                node_id INTEGER PRIMARY KEY,
+                escalation_level INTEGER NOT NULL,
+                model TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS metadata (
                 key TEXT PRIMARY KEY,
                 value TEXT
@@ -250,6 +259,8 @@ class SummaryDAG:
         node: SummaryNode,
         *,
         before_commit: Callable[[sqlite3.Connection, int], None] | None = None,
+        escalation_level: int | None = None,
+        model: str = "",
     ) -> int:
         """Insert a summary node and return its node_id.
 
@@ -257,6 +268,9 @@ class SummaryDAG:
         callback and node insert then commit or roll back as one transaction.
         A stale-snapshot retry can invoke the callback again with a new
         ``node_id``, so callbacks must be idempotent.
+
+        When ``escalation_level`` is given, the producing level and model are
+        recorded in ``summary_node_provenance`` in the same transaction (#441).
         """
         with self._db_lock:
             conn = self._conn
@@ -286,6 +300,13 @@ class SummaryDAG:
                 if cur.lastrowid is None:
                     raise RuntimeError("SQLite did not return a summary node id")
                 node_id = int(cur.lastrowid)
+                if escalation_level is not None:
+                    conn.execute(
+                        """INSERT OR REPLACE INTO summary_node_provenance
+                           (node_id, escalation_level, model, created_at)
+                           VALUES (?, ?, ?, ?)""",
+                        (node_id, int(escalation_level), model or "", time.time()),
+                    )
                 if before_commit is not None:
                     before_commit(conn, node_id)
                 return node_id
@@ -522,6 +543,39 @@ class SummaryDAG:
             }
             for row in rows
         }
+
+    def get_node_provenance(self, node_id: int) -> Optional[Dict[str, Any]]:
+        """Return the recorded escalation level and model for a node, or ``None`` (#441)."""
+        with self._db_lock:
+            row = self._conn.execute(
+                "SELECT escalation_level, model FROM summary_node_provenance WHERE node_id = ?",
+                (node_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"escalation_level": int(row[0]), "model": row[1] or ""}
+
+    def count_nodes_by_escalation_level(self, session_id: str | None = None) -> Dict[Any, int]:
+        """Count summary nodes by recorded escalation level (#441).
+
+        Nodes without a provenance row are counted under ``"unrecorded"``;
+        ``session_id=None`` counts every session.
+        """
+        where, params = ("WHERE n.session_id = ?", (session_id,)) if session_id is not None else ("", ())
+        with self._db_lock:
+            rows = self._conn.execute(
+                f"""SELECT p.escalation_level, COUNT(*)
+                    FROM summary_nodes AS n
+                    LEFT JOIN summary_node_provenance AS p ON p.node_id = n.node_id
+                    {where}
+                    GROUP BY p.escalation_level""",
+                params,
+            ).fetchall()
+        counts: Dict[Any, int] = {
+            int(level): int(count) for level, count in sorted(r for r in rows if r[0] is not None)
+        }
+        counts["unrecorded"] = sum(int(count) for level, count in rows if level is None)
+        return counts
 
     def get_session_depth_samples(
         self,

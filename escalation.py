@@ -501,6 +501,7 @@ def _invoke_summary_llm_chain(
     spend_guard: "SummarySpendGuard | None" = None,
     accepts_result: Callable[[str], bool] | None = None,
     source_tokens: int | None = None,
+    provenance: dict | None = None,
 ) -> Optional[str]:
     chain = _summary_model_chain(model, fallback_models)
     skipped = 0
@@ -534,6 +535,8 @@ def _invoke_summary_llm_chain(
         if result and (accepts_result is None or accepts_result(result)):
             if circuit_breaker is not None:
                 circuit_breaker.record_success(candidate_model)
+            if provenance is not None:  # #441: the route that actually answered
+                provenance["model"] = candidate_model
             return result
         if result is not None:  # #628: a content rejection, not a provider failure
             logger.warning(
@@ -712,11 +715,14 @@ def summarize_with_escalation(
     fallback_models: list[str] | tuple[str, ...] | None = None,
     circuit_breaker: SummaryCircuitBreaker | None = None,
     spend_guard: "SummarySpendGuard | None" = None,
+    provenance: dict | None = None,
 ) -> tuple[str, int]:
     """Run 3-level escalation. Returns (summary, level_used).
 
     Guarantees convergence: level 3 is deterministic and always produces
-    output shorter than the source.
+    output shorter than the source. When ``provenance`` is a dict, its
+    ``"model"`` is set to the model that produced the accepted summary
+    (``""`` = host default route, ``"deterministic"`` = level 3) (#441).
     """
     # Level 1: detailed summary
     l1_prompt = _build_l1_prompt(text, token_budget, depth,
@@ -733,6 +739,7 @@ def summarize_with_escalation(
         spend_guard=spend_guard,
         accepts_result=lambda result: count_tokens(result) < source_tokens,
         source_tokens=source_tokens,
+        provenance=provenance,
     )
 
     if l1_result:
@@ -755,6 +762,7 @@ def summarize_with_escalation(
         spend_guard=spend_guard,
         accepts_result=lambda result: count_tokens(result) < source_tokens,
         source_tokens=source_tokens,
+        provenance=provenance,
     )
 
     if l2_result:
@@ -763,5 +771,7 @@ def summarize_with_escalation(
 
     # Level 3: deterministic truncation — guaranteed convergence
     l3_result = _deterministic_truncate(text, l3_truncate_tokens)
+    if provenance is not None:
+        provenance["model"] = "deterministic"
     logger.debug("L3 deterministic truncation (%d tokens)", count_tokens(l3_result))
     return l3_result, 3

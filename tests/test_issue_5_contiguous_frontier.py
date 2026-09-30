@@ -195,9 +195,9 @@ def test_stale_expected_frontier_rolls_back_node_publication(
     engine._ingest_cursor = len(active)
     original_add_node = engine._dag.add_node
 
-    def advance_then_add(node, *, before_commit=None):
+    def advance_then_add(node, *, before_commit=None, **kwargs):
         engine._lifecycle.advance_frontier(identity, identity, durable_ids[0])
-        return original_add_node(node, before_commit=before_commit)
+        return original_add_node(node, before_commit=before_commit, **kwargs)
 
     monkeypatch.setattr(engine._dag, "add_node", advance_then_add)
 

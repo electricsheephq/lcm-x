@@ -6,6 +6,11 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Feature: every new leaf and condensed summary node records its escalation level (1, 2 or 3) and the model that
+  produced it, in a new `summary_node_provenance` table written in the node's own transaction. `lcm_describe` shows
+  both; `lcm_status` counts nodes by level (`unrecorded` for older and imported nodes, which are not backfilled). No
+  schema version change and no new `summary_nodes` column, so a plugin rollback still opens the store. Refs #441
+
 ## v0.24.6 - (unreleased; rc1) (#628, #627: a summary circuit that counts rejections apart from failures, and images priced per image)
 
 - Fix: a summary result rejected for its content (empty, reasoning only, output contract violated, not shorter than

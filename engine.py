@@ -1908,6 +1908,12 @@ class LCMEngine(
 
         return current_chunk[: tool_group_safe_end(current_chunk, len(current_chunk) - 1)]
 
+    def _take_leaf_summary_model(self) -> str:
+        """Return and clear the model that produced the last leaf summary (#441)."""
+        model = getattr(self, "_last_leaf_summary_model", "")
+        self._last_leaf_summary_model = ""
+        return model
+
     def _summarize_leaf_chunk_with_rescue(
         self,
         initial_chunk: List[Dict[str, Any]],
@@ -1932,6 +1938,7 @@ class LCMEngine(
                     if remaining_seconds < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
                         raise SweepBudgetExhausted("threshold full sweep time budget exhausted")
                     timeout_seconds = min(timeout_seconds, remaining_seconds)
+                provenance: dict[str, str] = {}
                 summary_text, level = summarize_with_escalation(
                     text=serialized,
                     source_tokens=source_tokens,
@@ -1947,7 +1954,9 @@ class LCMEngine(
                     l3_truncate_tokens=self._config.l3_truncate_tokens,
                     focus_topic=focus_topic or "",
                     custom_instructions=self._config.custom_instructions,
+                    provenance=provenance,
                 )
+                self._last_leaf_summary_model = provenance.get("model", "")
                 return attempt_chunk, source_tokens, summary_text, level, attempt_number
             except Exception as exc:
                 if isinstance(exc, SweepBudgetExhausted):
@@ -6764,6 +6773,7 @@ class LCMEngine(
             if remaining_seconds < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
                 raise SweepBudgetExhausted("threshold full sweep time budget exhausted")
             timeout_seconds = min(timeout_seconds, remaining_seconds)
+        provenance: dict[str, str] = {}
         summary_text, level = summarize_with_escalation(
             text=combined_text,
             source_tokens=source_tokens,
@@ -6779,6 +6789,7 @@ class LCMEngine(
             l3_truncate_tokens=self._config.l3_truncate_tokens,
             focus_topic=focus_topic or "",
             custom_instructions=self._config.custom_instructions,
+            provenance=provenance,
         )
         earliest_at, latest_at = self._dag.get_source_time_window(
             [node.node_id for node in nodes]
@@ -6797,7 +6808,9 @@ class LCMEngine(
             latest_at=latest_at,
             expand_hint=self._extract_expand_hint(summary_text),
         )
-        self._dag.add_node(condensed_node)
+        self._dag.add_node(
+            condensed_node, escalation_level=level, model=provenance.get("model", "")
+        )
         self._invalidate_rollups_for_published_node(condensed_node)
         return source_tokens, summary_tokens, level
 
