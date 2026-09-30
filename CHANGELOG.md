@@ -19,6 +19,16 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   plain `Expand for details about:` line). The nonce opening tag, its uniqueness, the body minimum and a closing hint
   are still required. A discarded reply's warning names the failed check (`check=envelope|nonce_count|short_body|
   closing_hint`), and an accepted mistake logs one INFO line with its name. (#612)
+- Fix: when a leaf or condensation gets only a level 3 truncation back and the compaction is not a forced overflow
+  recovery with the survival fit able to run (on, and the model window known), no leaf or node is written; the
+  compaction stops with `summary_result_rejected`, logs one warning and keeps the rows and nodes for a later compaction.
+  A level 3 result that is the whole source (it fits the truncation budget) is still written. A sweep whose
+  condensation before the leaves was rejected does not condense again after them in the same compaction. (#652)
+- Fix: a threshold sweep whose summary prefix is over its target condenses it before the leaves, in at most half of
+  the sweep's passes and time, so sweeps stopped by their budget no longer grow the prefix. Assembly renders the
+  newest uncondensed summaries of each depth (oldest first), and a summary budget keeps the newest parts of a depth.
+  At or below the target the sweep is unchanged. Every summariser attempt of a sweep (each route, each level) is
+  bounded by the sweep's deadline, and one with less than 15 s left is not started. (#653)
 
 ## v0.24.6 - (unreleased; rc1) (#628, #627: a summary circuit that counts rejections apart from failures, and images priced per image)
 

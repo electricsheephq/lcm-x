@@ -58,6 +58,13 @@ _REASONING_START_RE = re.compile(
 
 _DEFAULT_ROUTE_KEY = "<task-default>"
 
+# #608: a threshold sweep does not start a summariser call with less time than this left.
+_THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS = 15.0
+
+
+class SweepBudgetExhausted(TimeoutError):
+    """The threshold sweep's own time budget is spent: a stop condition, not a provider failure."""
+
 
 @dataclass
 class SummaryCircuitBreaker:
@@ -555,7 +562,9 @@ def _invoke_summary_llm_chain(
     spend_guard: "SummarySpendGuard | None" = None,
     accepts_result: Callable[[str], bool] | None = None,
     source_tokens: int | None = None,
+    deadline: float | None = None,
 ) -> Optional[str]:
+    """``deadline`` (absolute ``time.monotonic()``) bounds every route attempt (#666)."""
     chain = _summary_model_chain(model, fallback_models)
     skipped = 0
     for candidate_model in chain:
@@ -566,6 +575,12 @@ def _invoke_summary_llm_chain(
                 candidate_model or _DEFAULT_ROUTE_KEY,
             )
             continue
+        call_timeout = timeout
+        if deadline is not None:  # #666: checked before the call, so nothing is recorded or spent
+            remaining = deadline - time.monotonic()
+            if remaining < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
+                raise SweepBudgetExhausted("threshold full sweep time budget exhausted")
+            call_timeout = remaining if timeout is None else min(timeout, remaining)
         # Check the spend guard per-route so a mid-chain trip stops the
         # remaining fallbacks instead of over-spending by up to len(chain)-1.
         if spend_guard is not None and not spend_guard.try_record_call():
@@ -579,7 +594,7 @@ def _invoke_summary_llm_chain(
                 prompt,
                 max_tokens,
                 model=candidate_model,
-                timeout=timeout,
+                timeout=call_timeout,
                 reasoning_effort=reasoning_effort,
             )
         except Exception as exc:
@@ -766,11 +781,15 @@ def summarize_with_escalation(
     fallback_models: list[str] | tuple[str, ...] | None = None,
     circuit_breaker: SummaryCircuitBreaker | None = None,
     spend_guard: "SummarySpendGuard | None" = None,
+    deadline: float | None = None,
 ) -> tuple[str, int]:
     """Run 3-level escalation. Returns (summary, level_used).
 
     Guarantees convergence: level 3 is deterministic and always produces
-    output shorter than the source.
+    output shorter than the source. With ``deadline`` (absolute
+    ``time.monotonic()``), every route attempt gets at most the time left and
+    SweepBudgetExhausted is raised instead of starting one with less than
+    ``_THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS`` (#666); it never falls through to level 3.
     """
     # Level 1: detailed summary
     l1_prompt = _build_l1_prompt(text, token_budget, depth,
@@ -787,6 +806,7 @@ def summarize_with_escalation(
         spend_guard=spend_guard,
         accepts_result=lambda result: count_tokens(result) < source_tokens,
         source_tokens=source_tokens,
+        deadline=deadline,
     )
 
     if l1_result:
@@ -809,12 +829,15 @@ def summarize_with_escalation(
         spend_guard=spend_guard,
         accepts_result=lambda result: count_tokens(result) < source_tokens,
         source_tokens=source_tokens,
+        deadline=deadline,
     )
 
     if l2_result:
         logger.debug("L2 summarization succeeded (%d tokens)", count_tokens(l2_result))
         return l2_result, 2
 
+    if deadline is not None and deadline - time.monotonic() < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
+        raise SweepBudgetExhausted("threshold full sweep time budget exhausted")  # #666: time never yields L3
     # Level 3: deterministic truncation — guaranteed convergence
     l3_result = _deterministic_truncate(text, l3_truncate_tokens)
     logger.debug("L3 deterministic truncation (%d tokens)", count_tokens(l3_result))
