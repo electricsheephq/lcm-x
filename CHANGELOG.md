@@ -6,19 +6,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
-- Fix: a Hermes update that brings in the new plugin package manager (`pm/`, after v2026.9.24) no longer disables
-  `hermes-lcm-x`. The lint settings moved from `pyproject.toml` to `ruff.toml` and `pyproject.toml` is gone, so the
-  checkout is not a uv workspace member; the stale root `uv.lock` is removed too. Before, the manager staged the
-  lint-only `pyproject.toml` with a name and no version, `uv lock` failed and the plugin went into
-  `plugins.disabled`. The open PR #632 diagnosed the same failure. (#631)
-- Fix: below the host's compaction threshold the host count decides on every preflight branch: an automatic
-  `compress()` after any preflight request is cleanup-only when the host's `current_tokens` is known and below the
-  threshold, and an automatic call while the #651 hold runs is cleanup-only. Forced, `/compress` and provider-overflow
-  calls are unchanged. (#677)
-- Fix: the survival fit protects only DAG-verified summary rows as its prefix; a row quoting a summary header for a
-  missing or foreign node is an ordinary row, so its turn leaves whole (the v0.24.6 rule). (#678)
-
-## v0.24.7 - (unreleased; rc1) (P0 for long-running sessions: the survival fit keeps the summary, no in-turn thrash below the threshold, no level-3 fragments, a bounded summary prefix, steer rows stored)
+## v0.24.7 - (unreleased; rc2) (P0 for long-running sessions: the survival fit keeps the summary, no in-turn thrash below the threshold, no level-3 fragments, a bounded summary prefix, steer rows stored)
 
 - Config: the leaf summary target is configurable with `LCM_LEAF_TARGET_RATIO` (default 0.20),
   `LCM_LEAF_TARGET_MIN_TOKENS` (default 2000) and `LCM_LEAF_TARGET_MAX_TOKENS` (default 12000). With the defaults every
@@ -48,6 +36,18 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   row leaves with its reply, then re-formed as assembly forms it. The notice goes only into a real system row. When no
   whole-turn cut can hold the prefix, the v0.24.6 rule applies with one WARNING `LCM survival fit dropped the summary
   prefix (emergency: …)`, and the result is never larger than v0.24.6's. (#650)
+- Fix (rc2): a Hermes update that brings in the new plugin package manager (`pm/`, after v2026.9.24) no longer disables
+  `hermes-lcm-x`. The lint settings moved from `pyproject.toml` to `ruff.toml` and `pyproject.toml` is gone, so the
+  checkout is not a uv workspace member; the stale root `uv.lock` is removed too. Before, the manager staged the
+  lint-only `pyproject.toml` with a name and no version, `uv lock` failed and the plugin went into
+  `plugins.disabled`. PR #632 diagnosed the same failure. (#631)
+- Fix (rc2): below the host's compaction threshold the host count decides on every preflight branch: an automatic
+  `compress()` after any preflight request is cleanup-only when the host's `current_tokens` is known and below the
+  threshold, and an automatic call the #651 hold blocks is cleanup-only (the hold never blocks the survival ceiling).
+  The one-shot flags clear on a session reset or rebind. Forced, `/compress` and provider-overflow calls are
+  unchanged. (#677)
+- Fix (rc2): the survival fit protects only DAG-verified summary rows as its prefix; a row quoting a summary header for a
+  missing or foreign node is an ordinary row, so its turn leaves whole (the v0.24.6 rule). (#678)
 
 ## v0.24.6 - 2026-09-30 (#628, #627: a summary circuit that counts rejections apart from failures, and images priced per image)
 
