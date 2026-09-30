@@ -543,11 +543,14 @@ def summary_route_available(
     model: str,
     fallback_models: list[str] | tuple[str, ...] | None,
     circuit_breaker: SummaryCircuitBreaker | None,
+    *,
+    route_key_prefix: str = "",
 ) -> bool:
     """True when no breaker is in use or it allows one route of the summary chain (#628)."""
     if circuit_breaker is None:
         return True
-    return any(circuit_breaker.allows(candidate) for candidate in _summary_model_chain(model, fallback_models))
+    return any(circuit_breaker.allows(route_key_prefix + candidate)
+               for candidate in _summary_model_chain(model, fallback_models))
 
 
 def _invoke_summary_llm_chain(
@@ -564,12 +567,15 @@ def _invoke_summary_llm_chain(
     source_tokens: int | None = None,
     provenance: dict | None = None,
     deadline: float | None = None,
+    route_key_prefix: str = "",
 ) -> Optional[str]:
-    """``deadline`` (absolute ``time.monotonic()``) bounds every route attempt (#666)."""
+    """``deadline`` (absolute ``time.monotonic()``) bounds every route attempt (#666).
+    ``route_key_prefix`` gives a caller its own breaker keys (#669: rollups); empty keeps the live keys."""
     chain = _summary_model_chain(model, fallback_models)
     skipped = 0
     for candidate_model in chain:
-        if circuit_breaker is not None and not circuit_breaker.allows(candidate_model):
+        route_key = route_key_prefix + candidate_model
+        if circuit_breaker is not None and not circuit_breaker.allows(route_key):
             skipped += 1
             logger.warning(
                 "LCM summary route skipped by open circuit: %s",
@@ -603,7 +609,7 @@ def _invoke_summary_llm_chain(
             result = None
         if result and (accepts_result is None or accepts_result(result)):
             if circuit_breaker is not None:
-                circuit_breaker.record_success(candidate_model)
+                circuit_breaker.record_success(route_key)
             if provenance is not None:  # #441: the route that actually answered
                 provenance["model"] = candidate_model
             return result
@@ -617,9 +623,9 @@ def _invoke_summary_llm_chain(
             )
         if circuit_breaker is not None:
             if result is None:
-                circuit_breaker.record_failure(candidate_model)
+                circuit_breaker.record_failure(route_key)
             else:
-                circuit_breaker.record_rejection(candidate_model)
+                circuit_breaker.record_rejection(route_key)
     if skipped == len(chain):
         logger.warning("LCM summary fallback chain exhausted: all routes are temporarily open")
     return None
@@ -786,6 +792,8 @@ def summarize_with_escalation(
     spend_guard: "SummarySpendGuard | None" = None,
     provenance: dict | None = None,
     deadline: float | None = None,
+    *,
+    route_key_prefix: str = "",
 ) -> tuple[str, int]:
     """Run 3-level escalation. Returns (summary, level_used).
 
@@ -815,6 +823,7 @@ def summarize_with_escalation(
         source_tokens=source_tokens,
         provenance=provenance,
         deadline=deadline,
+        route_key_prefix=route_key_prefix,
     )
 
     if l1_result:
@@ -839,6 +848,7 @@ def summarize_with_escalation(
         source_tokens=source_tokens,
         provenance=provenance,
         deadline=deadline,
+        route_key_prefix=route_key_prefix,
     )
 
     if l2_result:
