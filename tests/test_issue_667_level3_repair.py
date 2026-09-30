@@ -150,7 +150,7 @@ def test_provenance_level_decides_where_recorded(engine):
     long_fragment = _node(engine, "s1", 0, LONG_SOURCE + _L3_TRUNCATION_MARKER + LONG_SOURCE, rows[1:2])
     unrecorded = _node(engine, "s1", 0, _deterministic_truncate(LONG_SOURCE, 512), rows[2:3])
     conn = engine._dag.connection
-    conn.execute("CREATE TABLE summary_node_provenance (node_id INTEGER PRIMARY KEY, escalation_level INTEGER "
+    conn.execute("CREATE TABLE IF NOT EXISTS summary_node_provenance (node_id INTEGER PRIMARY KEY, escalation_level INTEGER "
                  "NOT NULL, model TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL)")
     conn.executemany("INSERT INTO summary_node_provenance VALUES (?, ?, '', 0)", [(short_quote, 1), (long_fragment, 3)])
     conn.commit()
@@ -387,7 +387,7 @@ def test_n2_a_repaired_ancestor_carries_its_children_token_counts(engine, monkey
 def test_n3_the_provenance_level_follows_the_repair(engine, monkeypatch):
     ids = _build_store(engine)
     conn = engine._dag.connection
-    conn.execute("CREATE TABLE summary_node_provenance (node_id INTEGER PRIMARY KEY, escalation_level INTEGER "
+    conn.execute("CREATE TABLE IF NOT EXISTS summary_node_provenance (node_id INTEGER PRIMARY KEY, escalation_level INTEGER "
                  "NOT NULL, model TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL)")
     conn.executemany("INSERT INTO summary_node_provenance VALUES (?, ?, 'm', 7)",
                      [(ids["truncated"], 3), (ids["parent"], 2), (ids["other_parent"], 2)])
