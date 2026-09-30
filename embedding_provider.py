@@ -7,6 +7,7 @@ command; resolving a provider never performs network or disk-heavy work.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import os
@@ -1996,6 +1997,105 @@ def resolve_provider(
     raise ProviderUnavailable(
         f"Unsupported embedding provider {provider!r}; use voyage, ollama, "
         "fastembed, or openai-compatible (SiliconFlow)"
+    )
+
+
+def probe_provider_availability(config: LCMConfig) -> dict[str, Any]:
+    """Cheaply decide whether configured embeddings could actually run.
+
+    This is a diagnostic probe for ``lcm_doctor``. It is deliberately inert and
+    offline-safe: it never downloads a model, never opens a socket, never issues
+    a paid API call, and never warms a provider up. Availability is established
+    only by inspecting configuration, import specs, and environment variables.
+
+    Local providers are probed with :func:`importlib.util.find_spec`, which
+    locates a module without executing it. Remote providers are probed only for
+    credential presence, because reachability cannot be established without a
+    network round-trip. A provider whose liveness genuinely cannot be judged
+    offline reports ``available`` with ``probed=False`` rather than guessing.
+
+    Returns a mapping with ``available`` (bool), ``provider``, ``model``,
+    ``probed`` (whether a real availability signal was obtained) and a
+    ``detail`` string written for an operator.
+    """
+    provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
+    model = str(getattr(config, "embedding_model", "") or "").strip()
+
+    def result(available: bool, detail: str, *, probed: bool = True) -> dict[str, Any]:
+        return {
+            "available": available,
+            "provider": provider or None,
+            "model": model or None,
+            "probed": probed,
+            "detail": detail,
+        }
+
+    if not provider and not model:
+        return result(
+            False,
+            "embeddings are enabled but LCM_EMBEDDING_PROVIDER and "
+            "LCM_EMBEDDING_MODEL are unset",
+        )
+    if not provider or not model:
+        missing = "LCM_EMBEDDING_PROVIDER" if not provider else "LCM_EMBEDDING_MODEL"
+        return result(
+            False,
+            f"embeddings are enabled but {missing} is unset; both must be set",
+        )
+
+    if provider in {"fastembed", "fast-embed"}:
+        if importlib.util.find_spec("fastembed") is None:
+            return result(
+                False,
+                "FastEmbed is not installed; install the optional fastembed "
+                "dependency (a Hermes update rebuilds the virtualenv and drops "
+                "optional dependencies, so reinstall it after every update)",
+            )
+        return result(True, "fastembed is importable")
+
+    if provider in {"voyage", "voyageai"}:
+        if not os.environ.get("VOYAGE_API_KEY", "").strip():
+            return result(False, "VOYAGE_API_KEY is not set")
+        return result(
+            True,
+            "VOYAGE_API_KEY is set; endpoint reachability not probed (offline check)",
+            probed=False,
+        )
+
+    if provider in {"openai-compatible", "openai", "siliconflow"}:
+        api_key_env = str(
+            getattr(config, "embedding_api_key_env", "LCM_EMBEDDING_API_KEY")
+            or "LCM_EMBEDDING_API_KEY"
+        ).strip()
+        has_key = bool(
+            os.environ.get(api_key_env, "").strip()
+            or os.environ.get("SILICONFLOW_API_KEY", "").strip()
+        )
+        if not has_key:
+            return result(
+                False, f"{api_key_env} (or SILICONFLOW_API_KEY) is not set"
+            )
+        if not str(getattr(config, "embedding_base_url", "") or "").strip():
+            return result(False, "LCM_EMBEDDING_BASE_URL is not set")
+        return result(
+            True,
+            "credentials and base URL are set; endpoint reachability not probed "
+            "(offline check)",
+            probed=False,
+        )
+
+    if provider == "ollama":
+        return result(
+            True,
+            "ollama daemon reachability not probed (offline check); verify with "
+            "`/lcm embed warmup` if semantic recall looks empty",
+            probed=False,
+        )
+
+    return result(
+        False,
+        f"unsupported embedding provider {provider!r}; use voyage, ollama, "
+        "fastembed, or openai-compatible (SiliconFlow)",
     )
 
 

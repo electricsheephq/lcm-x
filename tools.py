@@ -24,7 +24,12 @@ from .externalize import (
     read_externalized_payload_metadata_prefix,
     read_externalized_payload_search_prefix,
 )
-from .embedding_provider import VoyageError, default_chunk_model, resolve_provider
+from .embedding_provider import (
+    VoyageError,
+    default_chunk_model,
+    probe_provider_availability,
+    resolve_provider,
+)
 from .diagnostics import (
     _has_lifecycle_fragmentation,
     _state_db_path_for_engine,
@@ -7357,6 +7362,96 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
     )
 
 
+def _active_embedding_profile_exists(engine: "LCMEngine") -> bool:
+    """Report whether the store holds an active summary embedding profile.
+
+    Read-only and defensive: a missing table, an older schema, or any SQLite
+    read problem answers ``False`` rather than raising, so a doctor run never
+    fails because embeddings were never initialized on this database.
+    """
+    conn = getattr(getattr(engine, "_dag", None), "connection", None)
+    if conn is None:
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM lcm_embedding_profile
+            WHERE active = 1 AND archived_at IS NULL AND task = 'summary'
+            LIMIT 1
+            """
+        ).fetchone()
+    except Exception:
+        return False
+    return row is not None
+
+
+def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
+    """Return the ``embedding_provider_health`` lcm_doctor check (#672).
+
+    Answers one operator question: *is the semantic retrieval I configured
+    actually able to run?* `lcm_recall` already discloses ``degraded`` when the
+    provider is missing, but nothing surfaced that state in `lcm_doctor`, so a
+    provider that disappeared (e.g. the optional ``fastembed`` dependency
+    dropped by a Hermes virtualenv rebuild) left semantic search silently
+    degraded to full-text behind an all-`pass` doctor report.
+
+    The probe is inert: configuration, import specs, and environment variables
+    only. No model download, no network call, no provider warmup.
+    """
+    config = engine._config
+    enabled = bool(getattr(config, "embeddings_enabled", False))
+    profile_active = _active_embedding_profile_exists(engine)
+
+    if not enabled:
+        if profile_active:
+            return {
+                "check": "embedding_provider_health",
+                "status": "warn",
+                "detail": {
+                    "embeddings_enabled": False,
+                    "active_embedding_profile": True,
+                    "available": False,
+                    "reason": (
+                        "embeddings are disabled (LCM_EMBEDDINGS_ENABLED=false) but this "
+                        "database still has an active summary embedding profile; stored "
+                        "vectors are no longer being maintained and will go stale"
+                    ),
+                },
+            }
+        return {
+            "check": "embedding_provider_health",
+            "status": "pass",
+            "detail": "semantic embeddings are disabled (LCM_EMBEDDINGS_ENABLED=false)",
+        }
+
+    probe = probe_provider_availability(config)
+    detail = {
+        "embeddings_enabled": True,
+        "active_embedding_profile": profile_active,
+        "provider": probe.get("provider"),
+        "model": probe.get("model"),
+        "available": bool(probe.get("available")),
+        "reachability_probed": bool(probe.get("probed")),
+        "reason": probe.get("detail"),
+    }
+    if not probe.get("available"):
+        detail["impact"] = (
+            "semantic retrieval is degraded: lcm_recall reports degraded=true and "
+            "lcm_grep mode=semantic falls back to full-text"
+        )
+        return {
+            "check": "embedding_provider_health",
+            "status": "warn",
+            "detail": detail,
+        }
+    return {
+        "check": "embedding_provider_health",
+        "status": "pass",
+        "detail": detail,
+    }
+
+
 def _summary_quality_stats(engine: "LCMEngine", session_id: str) -> dict[str, Any]:
     """Return read-only summary compression quality diagnostics for one session."""
     conn = engine._dag.connection
@@ -8452,6 +8547,23 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
         "status": "pass" if not config_warnings else "warn",
         "detail": config_warnings if config_warnings else "all settings within normal ranges",
     })
+
+    # 4b. Embedding provider health (#672)
+    #
+    # Without this check lcm_doctor stays silent while a configured embedding
+    # provider is dead: lcm_recall reports degraded=true and lcm_grep
+    # mode=semantic falls back to full-text, but every doctor check passes, so
+    # the operator has no signal that the semantic retrieval they enabled has
+    # stopped running. The probe is inert and offline-safe by contract -- no
+    # model download, no socket, no provider API call.
+    try:
+        checks.append(_embedding_provider_health_check(engine))
+    except Exception as e:
+        checks.append({
+            "check": "embedding_provider_health",
+            "status": "fail",
+            "detail": str(e),
+        })
 
     # 5. Source-lineage hygiene
     try:
