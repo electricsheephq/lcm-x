@@ -836,6 +836,8 @@ def summarize_with_escalation(
         logger.debug("L2 summarization succeeded (%d tokens)", count_tokens(l2_result))
         return l2_result, 2
 
+    if deadline is not None and deadline - time.monotonic() < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
+        raise SweepBudgetExhausted("threshold full sweep time budget exhausted")  # #666: time never yields L3
     # Level 3: deterministic truncation — guaranteed convergence
     l3_result = _deterministic_truncate(text, l3_truncate_tokens)
     logger.debug("L3 deterministic truncation (%d tokens)", count_tokens(l3_result))

@@ -197,3 +197,45 @@ def test_d5_leaf_publication_lock_keeps_the_pre_leaf_passes(tmp_path, monkeypatc
         assert telemetry["total_passes"] >= len(condensed)
     finally:
         engine.shutdown()
+
+
+# -- Round 4: the terminal fallback and the pre-leaf rejection without a leaf ---------------------------------
+
+def test_r4_deadline_spent_by_the_last_attempt_raises_instead_of_level_3(monkeypatch, clock):
+    route = _SlowFailingRoute(clock)
+    monkeypatch.setattr(escalation, "_invoke_summary_llm", route)
+    breaker, guard = escalation.SummaryCircuitBreaker(), escalation.SummarySpendGuard()
+    with pytest.raises(escalation.SweepBudgetExhausted):
+        escalation.summarize_with_escalation(
+            SOURCE, source_tokens=escalation.count_tokens(SOURCE), token_budget=50, model="m1", timeout=60.0,
+            circuit_breaker=breaker, spend_guard=guard, deadline=clock() + 120.0)
+    assert [model for model, _timeout, _started in route.calls] == ["m1", "m1"]  # level 1, level 2
+
+
+def test_r4_content_rejections_with_time_left_still_give_level_3(monkeypatch, clock):
+    calls = []
+
+    def not_shorter(prompt, max_tokens, model="", timeout=None, reasoning_effort=""):
+        calls.append(model)
+        return prompt  # never shorter than its source
+
+    monkeypatch.setattr(escalation, "_invoke_summary_llm", not_shorter)
+    summary, level = escalation.summarize_with_escalation(
+        SOURCE, source_tokens=escalation.count_tokens(SOURCE), token_budget=50, model="m1", timeout=60.0,
+        circuit_breaker=escalation.SummaryCircuitBreaker(), spend_guard=escalation.SummarySpendGuard(),
+        deadline=clock() + 120.0)
+    assert calls == ["m1", "m1"] and level == 3 and "deterministic truncation" in summary
+
+
+def test_r4_pre_leaf_rejection_without_a_leaf_logs_the_stop_line_once(tmp_path, monkeypatch, caplog):
+    engine = _engine(tmp_path)
+    _stub(monkeypatch)  # every condensation comes back as a truncating level 3
+    _depth_0_nodes(engine, 6)
+    try:
+        _compress(engine, _view(1), caplog)  # one fresh turn: no raw backlog for a leaf
+        telemetry = engine.get_status()["threshold_full_sweep"]
+        assert telemetry["pre_leaf_condensation_stop_reason"] == "summary_result_rejected"
+        assert telemetry["leaf_passes"] == 0
+        assert sum(REJECTED_LINE in record.getMessage() for record in caplog.records) == 1
+    finally:
+        engine.shutdown()

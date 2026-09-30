@@ -1448,6 +1448,18 @@ class CompactionMixin:
             sweep_step_seconds[step] = sweep_step_seconds.get(step, 0.0) + now - started
             return now
 
+        rejection_warned = False
+
+        def warn_rejected() -> None:
+            """#652: the stop line, once per compaction, whichever step got the level 3 result."""
+            nonlocal rejection_warned
+            if not rejection_warned:
+                rejection_warned = True
+                logger.warning(
+                    "LCM compaction stopped: summary result rejected at level 3; %d leaves written, backlog kept",
+                    leaf_passes,
+                )
+
         # #653: a sweep stopped by its budget never reaches the post-drain condensation, so an oversized
         # summary prefix is condensed first, in half the sweep's passes and time; the leaves use the rest.
         pre_leaf_condensation_passes, pre_leaf_condensation_reason = 0, ""
@@ -2086,14 +2098,13 @@ class CompactionMixin:
                 noop_reason = "summary route unavailable"
                 self._start_sweep_budget_hold(seconds_left)
         elif sweep_stop_reason == "summary_result_rejected":
-            logger.warning(
-                "LCM compaction stopped: summary result rejected at level 3; %d leaves written, backlog kept",
-                leaf_passes,
-            )
+            warn_rejected()
             if not leaf_compacted_this_turn:
                 noop_reason = "summary result rejected"
 
         if not leaf_compacted_this_turn:
+            if pre_leaf_condensation_reason == "summary_result_rejected":
+                warn_rejected()
             if sweep_stop_reason == "time_budget_exhausted":
                 noop_reason = "threshold sweep time budget spent before the first leaf"
                 logger.warning(
@@ -2200,7 +2211,6 @@ class CompactionMixin:
             recovery_assembly_cap,
         )
         condensation_passes = 0
-        rejection_warned = sweep_stop_reason == "summary_result_rejected"  # the leaf loop logged it
         # #652: a route that just rejected the pre-leaf condensation is not asked again in this call.
         post_drain_condensation_skipped = ""
         try:
@@ -2243,15 +2253,13 @@ class CompactionMixin:
                 ),
                 context_is_assembled=True,
             )
-        if not rejection_warned and (
+        if (
             sweep_stop_reason == "summary_result_rejected"
+            or pre_leaf_condensation_reason == "summary_result_rejected"
             or (not threshold_full_sweep_active  # _maybe_condense sets it fresh on this path only
                 and self._last_condensation_suppressed_reason == "summary_result_rejected")
         ):
-            logger.warning(  # #652: a condensation rejection, once per compaction
-                "LCM compaction stopped: summary result rejected at level 3; %d leaves written, backlog kept",
-                leaf_passes,
-            )
+            warn_rejected()
 
         # Step 7: Assemble new active context
         self._refresh_raw_backlog_debt(
