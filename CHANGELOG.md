@@ -36,6 +36,17 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   maintenance starts no build while the summary route is refused, and rollups record circuit results under their own
   breaker keys, so a rollup burst can neither open nor close the live compaction route's circuit. (#669)
 - Docs (#685): the operator guide and the skill reference now say that since #652 a leaf whose level 1 and level 2 results are rejected is not stored while the survival fit can rescue the request; level 3 is still written when the cut is the whole source, in a forced overflow recovery, with the survival fit off or when the model window is unknown.
+- Fix: a tool-output stub names the tool and says how to read the original, for example
+  `[Externalized tool output: tool=read_file; tool_call_id=…; chars=N; bytes=N; read it with
+  lcm_expand(externalized_ref="R"); ref=R]`. `ref=` stays the last field and the stub stays one line of at most 512
+  characters, so v0.24.7 still reads it after a rollback; stored old stubs keep their text. The payload records the
+  tool name; the LCM system note says how to read any tool-output stub. A ref written before a compression-boundary
+  rotation resolves in `lcm_expand` and `lcm_describe` through the recorded rotation lineage (up to 32 sessions back);
+  payload files are not rewritten, and a ref from an unrelated session still does not resolve. (#680)
+- Fix: forced overflow recovery keeps the newest tool call when a user row precedes it and its result is over the
+  recovery cap. The call is answered by the tool-pair stub, or by the result's #680 stub when it was externalized, as
+  the shape without a user row already was; the recovered context stays within the cap and the stub is not stored.
+  Capped assembly outside forced recovery is unchanged. (#636)
 - Fix: a slow plugin load no longer leaves Hermes silently without LCM-X. When Hermes 0.21.5+ ignores
   `register_context_engine()` because the load overran `plugins.load_timeout_seconds`, `register()` logs one ERROR
   with the load time and the setting, and does not print "LCM plugin loaded — … active"; another engine in the slot

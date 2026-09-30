@@ -174,7 +174,11 @@ def _get_externalized_payload(
     if payload is None:
         return None
     payload_session_id = payload.get("session_id") or ""
-    allowed = allowed_session_ids or {engine.current_session_id}
+    allowed = allowed_session_ids
+    if not allowed:
+        # #680: a ref written before a compression-boundary rotation stays readable.
+        lineage = getattr(engine, "_rotation_predecessor_session_ids", None)
+        allowed = {engine.current_session_id, *(lineage(engine.current_session_id) if callable(lineage) else [])}
     if payload_session_id and payload_session_id not in allowed:
         return None
     return payload
