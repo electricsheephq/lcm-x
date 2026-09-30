@@ -46,6 +46,7 @@ from .escalation import (
     SummarySpendGuard,
     SweepBudgetExhausted,  # re-exported: compaction and tests import it from .engine
     _summary_model_chain,
+    closed_summary_route_status,
     summarize_with_escalation,
     summary_route_available,
 )
@@ -1593,6 +1594,13 @@ class LCMEngine(
         return self._summary_circuit_breaker.seconds_until_allowed(
             _summary_model_chain(self._config.summary_model, self._config.summary_fallback_models))
 
+    def _summary_route_status(self) -> Dict[str, Any]:
+        """#682: the ``summary_route`` field of lcm_status."""
+        if self._summary_circuit_breaker is None:
+            return closed_summary_route_status()
+        return self._summary_circuit_breaker.route_status(
+            _summary_model_chain(self._config.summary_model, self._config.summary_fallback_models))
+
     def _sweep_budget_hold_active(self) -> bool:
         """#608: return true while a no-leaf sweep budget stop holds the threshold answer."""
         if self._sweep_budget_hold_until <= 0:
@@ -1988,6 +1996,11 @@ class LCMEngine(
         floor = getattr(cfg, "leaf_target_min_tokens", LCMConfig.leaf_target_min_tokens)
         cap = getattr(cfg, "leaf_target_max_tokens", LCMConfig.leaf_target_max_tokens)
         return min(cap, max(floor, int(source_tokens * ratio)))
+    def _take_leaf_summary_model(self) -> str:
+        """Return and clear the model that produced the last leaf summary (#441)."""
+        model = getattr(self, "_last_leaf_summary_model", "")
+        self._last_leaf_summary_model = ""
+        return model
 
     def _summarize_leaf_chunk_with_rescue(
         self,
@@ -2012,6 +2025,7 @@ class LCMEngine(
                     if remaining_seconds < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
                         raise SweepBudgetExhausted("threshold full sweep time budget exhausted")
                     timeout_seconds = min(timeout_seconds, remaining_seconds)
+                provenance: dict[str, str] = {}
                 summary_text, level = summarize_with_escalation(
                     text=serialized,
                     source_tokens=source_tokens,
@@ -2027,8 +2041,11 @@ class LCMEngine(
                     l3_truncate_tokens=self._config.l3_truncate_tokens,
                     focus_topic=focus_topic or "",
                     custom_instructions=self._config.custom_instructions,
+                    prompt_version=getattr(self._config, "summary_prompt_version", 1),
+                    provenance=provenance,
                     **({"deadline": deadline} if deadline is not None else {}),  # #666: bounds every attempt
                 )
+                self._last_leaf_summary_model = provenance.get("model", "")
                 self._last_leaf_level_3_verbatim = level == 3 and summary_text == serialized  # #652: no fragment
                 return attempt_chunk, source_tokens, summary_text, level, attempt_number
             except Exception as exc:
@@ -6877,6 +6894,7 @@ class LCMEngine(
             if remaining_seconds < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
                 raise SweepBudgetExhausted("threshold full sweep time budget exhausted")
             timeout_seconds = min(timeout_seconds, remaining_seconds)
+        provenance: dict[str, str] = {}
         summary_text, level = summarize_with_escalation(
             text=combined_text,
             source_tokens=source_tokens,
@@ -6892,6 +6910,8 @@ class LCMEngine(
             l3_truncate_tokens=self._config.l3_truncate_tokens,
             focus_topic=focus_topic or "",
             custom_instructions=self._config.custom_instructions,
+            prompt_version=getattr(self._config, "summary_prompt_version", 1),
+            provenance=provenance,
             **({"deadline": deadline} if deadline is not None else {}),  # #666: bounds every attempt
         )
         if level == 3 and summary_text != combined_text and self._fit_can_rescue(force_overflow):
@@ -6913,7 +6933,9 @@ class LCMEngine(
             latest_at=latest_at,
             expand_hint=self._extract_expand_hint(summary_text),
         )
-        self._dag.add_node(condensed_node)
+        self._dag.add_node(
+            condensed_node, escalation_level=level, model=provenance.get("model", "")
+        )
         self._invalidate_rollups_for_published_node(condensed_node)
         return source_tokens, summary_tokens, level
 
