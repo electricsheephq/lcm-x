@@ -97,6 +97,7 @@ class CompactionMixin:
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
         self._native_recovery_preflight_cleanup_only = False
         self._preflight_below_threshold_cleanup_only = False
+        self._preflight_automatic_request = False
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         if self._bypasses_lcm_context_management():
             # Bypassed traffic observes nothing about the pressured session's
@@ -569,7 +570,11 @@ class CompactionMixin:
             self._survival_fit_reason = None
             self._no_progress_candidate = False
             if bypass_cooldown:  # #651: a host recovery attempt is never cleanup-only maintenance
-                self._preflight_below_threshold_cleanup_only = False
+                self._preflight_below_threshold_cleanup_only = self._preflight_automatic_request = False
+            elif not force and self._no_progress_hold_active():
+                # #677: an automatic call while the #651 hold runs (a caller that skipped the host gate) is
+                # held maintenance; _compress_impl still summarises at the survival ceiling or forced overflow.
+                self._preflight_below_threshold_cleanup_only = True
             with self._fresh_tail_pressure_yield_invocation():
                 result = self._compress_impl(
                     messages,
@@ -1218,9 +1223,11 @@ class CompactionMixin:
         below_threshold_cleanup_only_requested = bool(
             self._preflight_below_threshold_cleanup_only
         )
+        automatic_preflight_requested = bool(self._preflight_automatic_request)
         self._native_recovery_preflight_cleanup_only = False
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
         self._preflight_below_threshold_cleanup_only = False
+        self._preflight_automatic_request = False
 
         if not messages:
             self._last_compression_status = "noop"
@@ -1309,8 +1316,13 @@ class CompactionMixin:
         # maintenance request asked for runs no summariser leaf pass.
         # A held pass stays cleanup-only when the host's tokens reach the
         # threshold, except at the survival ceiling or on forced overflow.
+        # #677: the host count decides: after ANY preflight request, a known
+        # host count below the threshold makes the call cleanup-only too.
         below_threshold_cleanup_only = bool(
-            below_threshold_cleanup_only_requested
+            (
+                below_threshold_cleanup_only_requested
+                or (automatic_preflight_requested and (current_tokens or 0) > 0)
+            )
             and not force
             and self.threshold_tokens > 0
             and (

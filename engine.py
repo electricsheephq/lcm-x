@@ -685,6 +685,8 @@ class LCMEngine(
         # #651 one-shot handoff: preflight asked for maintenance below the host
         # threshold, so the automatic compress() that follows is cleanup-only.
         self._preflight_below_threshold_cleanup_only = False
+        # #677 one-shot: any preflight request; compress() makes it cleanup-only below the host's count.
+        self._preflight_automatic_request = False
         # One-shot handoff from preflight: adopt an already-durable replay
         # cleanup during boundary cooldown without running summary work.
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
@@ -1215,6 +1217,7 @@ class LCMEngine(
         """
         self._last_compression_status = "pending"
         self._last_compression_noop_reason = ""
+        self._preflight_automatic_request = True
         if not depends_on_pressure_yield:
             self._pressure_yield_invocation_verdict = "clear"
         return True
