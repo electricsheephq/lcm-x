@@ -6,6 +6,31 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: a summary route that cannot serve its model (HTTP 400/404 whose message names the model as unknown, not
+  found, not existing or not supported) opens its circuit on the first failure instead of the second, so level 2 is not
+  attempted, and logs one WARNING per episode that names the provider and model the host used (`route_info`, on
+  hosts that take it), says whether LCM-X sent a model, and names the fix (`auxiliary.compression.provider` +
+  `auxiliary.compression.model` in the profile's `config.yaml`, or a consistent `model.provider` / `model.default`
+  pair). Repeats log at DEBUG; a success ends the episode. Other failures keep the threshold and cooldown. `lcm_status`
+  gains `summary_route` (`state`, `seconds_left`, `last_error_class`, `provider`, `model`). Rollups get their own
+  config-error episode under their own breaker keys (#669); the live key is still the configured model, not the
+  effective route. (#682)
+- Fix: a host retry after a cancelled but committed compaction adopts the committed summary (#457) while every
+  summary route is refused: on the first pass the adoption runs before the summary-route stop (#628), since it needs no
+  summary route. With nothing to adopt the stop applies as before, and no new leaf is written while the circuit is
+  open. (#640)
+- Fix: a host recovery call (`compress(..., bypass_cooldown=True)`, #608) after a preflight that saw a
+  compaction-boundary cooldown runs the summariser: it also clears the cooldown's cleanup-only handoff, so a list at
+  or over the threshold and under the survival ceiling is summarised instead of only sanitised and fitted. An ordinary
+  automatic call during the cooldown is still cleanup-only, and forced overflow is unchanged. The native-recovery
+  handoff is kept (native recovery owns a below-threshold list). (#684)
+- Feature: every new leaf and condensed summary node records its escalation level (1, 2 or 3) and the model that
+  produced it, in a new `summary_node_provenance` table written in the node's own transaction. `lcm_describe` shows
+  both; `lcm_status` counts nodes by level (`unrecorded` for older and imported nodes, which are not backfilled). No
+  schema version change and no new `summary_nodes` column, so a plugin rollback still opens the store. Refs #441
+- Feature: `LCM_SUMMARY_PROMPT_VERSION` (default `1`, unchanged prompts) opts in to summariser prompt v2: six fixed
+  headings, focus directives in the trusted policy with only the tagged topic in the transcript message, and a 3x
+  output ceiling. Refs #646
 - Fix: a temporal rollup whose summary comes back as a level 3 truncation is not stored; the rollup stays pending for
   its next build and one warning is logged (a level 3 result that is the whole source is still stored). Rollup
   maintenance starts no build while the summary route is refused, and rollups record circuit results under their own
@@ -22,6 +47,15 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   recovery cap. The call is answered by the tool-pair stub, or by the result's #680 stub when it was externalized, as
   the shape without a user row already was; the recovered context stays within the cap and the stub is not stored.
   Capped assembly outside forced recovery is unchanged. (#636)
+- Fix: a slow plugin load no longer leaves Hermes silently without LCM-X. When Hermes 0.21.5+ ignores
+  `register_context_engine()` because the load overran `plugins.load_timeout_seconds`, `register()` logs one ERROR
+  with the load time and the setting, and does not print "LCM plugin loaded — … active"; another engine in the slot
+  gets a WARNING. The affected process leaves `lcm-x-not-active.json` in the Hermes home, and `lcm_status` and
+  `/lcm doctor` in other processes report it while that process runs. The active line now carries the load time.
+  The store open no longer waits for the write lock in steady state: a due FTS deep check whose claim cannot get
+  the lock within 50 ms is skipped for that open (a later open runs it), the `ingested_at` NULL backfill scan runs
+  once per store behind a migration marker, and with temporal rollups on the rollup marker and range normalization
+  write only when needed. The lossless-claw importer writes `ingested_at` itself. (#622)
 - Fix: when the host refuses a compaction of an LCM-bypassed session (an auxiliary side channel or a stateless
   session) as larger, the foreground session's automatic compaction is no longer held for up to 600 seconds; the
   same refusal on the foreground session still arms the no-progress hold. (#665)

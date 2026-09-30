@@ -317,6 +317,7 @@ _KNOWN_FEATURE_TABLE_PREFIXES = (
     "lcm_assertion",
     "lcm_query",
     "lcm_trajectory",
+    "summary_node_provenance",  # #441 per-node level/model sidecar, not a derived cache
 )
 
 # The known opt-in feature families whose derived tables an interim build may
@@ -925,14 +926,19 @@ def ensure_temporal_rollup_tables(conn: sqlite3.Connection) -> None:
         "next_day",
         "ALTER TABLE lcm_rollup_invalidations ADD COLUMN next_day TEXT",
     )
-    conn.execute(
-        """
-        UPDATE lcm_rollup_invalidations
-        SET covered_start = MIN(covered_start, covered_end),
-            covered_end = MAX(covered_start, covered_end)
-        WHERE covered_start > covered_end
-        """
-    )
+    # Probe before the UPDATE: an UPDATE takes the write lock even when it
+    # matches nothing, and this runs on every rollups-on store open (#622).
+    if conn.execute(
+        "SELECT 1 FROM lcm_rollup_invalidations WHERE covered_start > covered_end LIMIT 1"
+    ).fetchone():
+        conn.execute(
+            """
+            UPDATE lcm_rollup_invalidations
+            SET covered_start = MIN(covered_start, covered_end),
+                covered_end = MAX(covered_start, covered_end)
+            WHERE covered_start > covered_end
+            """
+        )
 
     def ensure_index(name: str, create_sql: str) -> None:
         existing = conn.execute(
@@ -2630,6 +2636,10 @@ BACKGROUND_INTEGRITY_ENV = "LCM_FTS_INTEGRITY_BACKGROUND"
 # forever behind a stamp no live thread will ever clear.
 INTEGRITY_SCAN_STALE_SECONDS = 15 * 60.0
 
+# The startup claim for a due deep scan waits at most this long for the write
+# lock before skipping the scan for this open (#622).
+INTEGRITY_SCAN_CLAIM_BUSY_TIMEOUT_MS = 50
+
 # Guards the in-process registry and the one-scan-at-a-time decision below.
 _integrity_scan_lock = threading.Lock()
 # (db_path, table_name) -> daemon Thread. Exposed so tests can join a dispatched
@@ -2845,7 +2855,8 @@ def _dispatch_background_integrity_scan(
 
     Returns ``True`` when the caller should NOT run the check synchronously —
     either a scan was dispatched here or one is already in flight (in-process, or
-    in another process per a fresh ``fts_integrity_scan_started_at`` stamp).
+    in another process per a fresh ``fts_integrity_scan_started_at`` stamp), or
+    the scan was skipped for this open because the claim could not get the lock.
     Returns ``False`` to fall back to the synchronous check (e.g. an in-memory or
     anonymous DB that cannot be reopened from another thread).
     """
@@ -2868,22 +2879,29 @@ def _dispatch_background_integrity_scan(
         # ``thread.start()`` returns before that stamp is committed — a second
         # process racing ``ensure_external_content_fts`` in that window would read
         # no stamp and dispatch a duplicate deep scan (F6). Writing the stamp here
-        # under BEGIN IMMEDIATE closes that window; best-effort (a transient lock
-        # just falls back to the thread's own stamp).
-        claim_timeout = SQLITE_BUSY_TIMEOUT_MS / 1000.0
+        # under BEGIN IMMEDIATE closes that window. The claim waits only
+        # briefly: this runs inside plugin register(), which Hermes abandons
+        # after plugins.load_timeout_seconds (#622). When another writer (often
+        # a running deep scan) holds the lock, skip the check for this open; the
+        # marker stays due and a later open runs it.
         try:
             claim_conn = sqlite3.connect(
-                db_path, timeout=claim_timeout, check_same_thread=False
+                db_path,
+                timeout=INTEGRITY_SCAN_CLAIM_BUSY_TIMEOUT_MS / 1000.0,
+                check_same_thread=False,
             )
             try:
-                claim_conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+                claim_conn.execute(
+                    f"PRAGMA busy_timeout={INTEGRITY_SCAN_CLAIM_BUSY_TIMEOUT_MS}"
+                )
                 claim_conn.execute("BEGIN IMMEDIATE")
+                claim_conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
                 _record_scan_started(claim_conn, spec, now=current)
                 claim_conn.commit()
             finally:
                 claim_conn.close()
         except sqlite3.DatabaseError:
-            pass
+            return True
 
         thread = threading.Thread(
             target=_run_background_integrity_scan,

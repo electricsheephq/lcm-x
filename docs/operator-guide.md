@@ -382,6 +382,7 @@ environment variables:
 | `LCM_EXPANSION_MODEL` | summary model / auxiliary | Override `lcm_expand_query` synthesis model |
 | `LCM_EXPANSION_CONTEXT_TOKENS` | `32000` | Context budget used by the auxiliary LLM for `lcm_expand_query` |
 | `LCM_SUMMARY_TIMEOUT_MS` | `60000` | Timeout for one summarization call |
+| `LCM_SUMMARY_PROMPT_VERSION` | `1` | Summariser prompt version: `1` (original prompts) or `2` (opt-in v2 prompts); other values fall back to `1` with a config warning. See [Summary prompt version](#summary-prompt-version) |
 | `LCM_TEMPORAL_ROLLUPS_ENABLED` | `false` | Enable derived UTC day/week/month summary rollups and their maintenance hooks |
 | `LCM_ROLLUP_DAILY_TARGET_TOKENS` | `5000` | Target size for daily rollup summarization |
 | `LCM_ROLLUP_DAILY_MAX_TOKENS` | `15000` | Hard token ceiling for a daily rollup |
@@ -420,6 +421,16 @@ fault, not load shedding: proactive injection is disabled until the embedding-pr
 is fixed, one WARNING is logged per engine instance, and `lcm_recall` raises rather than degrading to
 full-text on the same fault (#370).
 
+### Summary prompt version
+
+`LCM_SUMMARY_PROMPT_VERSION` (env only, default `1`) selects the summariser prompts for leaves, condensed nodes and
+rollups. Version `1` is unchanged: the same prompts and the same output ceiling (2x the summary budget) as before.
+Version `2` is opt-in: level 1 asks for six fixed headings and exact values, the focus directives move from the
+untrusted topical data into the trusted policy (only the topic label stays in the transcript message, tagged
+`<lcm-focus-topic>`), and the output ceiling rises to 3x the budget. The ceiling only applies on routes where the
+host forwards `max_tokens`. The integrity envelope and the `Expand for details about:` closing line are the same
+in both versions. `lcm_status` shows the active value as `summary_prompt_version` (#646).
+
 ### Summary circuit breaker
 
 A summary call that raises or times out is a failure and counts toward
@@ -447,6 +458,26 @@ With a summary route that never works, compaction pauses and the survival fit ke
 the rows stay stored and are summarised once a route works again, and the WARNING line repeats until then. With the
 survival fit off (`LCM_SURVIVAL_FIT=false`) or the model window unknown, the plugin converges through level 3 as
 before.
+
+A summary route that cannot serve its model is a configuration error, not a transient failure (#682): an HTTP 400
+or 404 whose message says the model is unknown, not found, does not exist or is not supported (context-length,
+rate-limit, billing, timeout and 5xx errors are ordinary failures). It opens that route's circuit on the first
+failure, so level 2 is not attempted, and logs one WARNING per episode:
+`LCM summary route cannot serve the summary model: provider=<p> model=<m>; LCM-X sent no model (summary_model unset)
+...`. The route is the one the host reports it used (`route_info`; "host default route" on a host that reports
+none). Fix it in the profile's `config.yaml`: set `auxiliary.compression.provider` and `auxiliary.compression.model`
+together, or make `model.provider` and `model.default` a pair the provider can serve. Each retry after the cooldown
+that fails the same way logs at DEBUG; a successful summary ends the episode. Other failures keep the threshold and
+cooldown above. `lcm_status` reports the circuit as `summary_route`: `state` (`open` while every summary route is
+refused, else `closed`), `seconds_left`, and for the primary route `last_error_class` (`config_error`,
+`provider_failure`, `rejected` or null after a success) and the `provider` and `model` the host reported.
+
+Each new leaf and condensed node records the level that produced it (1, 2 or 3) and the model that answered
+(`""` for the host's default route, `deterministic` for level 3) in the `summary_node_provenance` table.
+`lcm_describe(node_id=...)` shows them as `escalation_level` and `model`, and `lcm_status` counts the session's nodes
+under `dag.nodes_by_escalation_level`. Nodes written before this change, and imported nodes, have no record and count
+as `unrecorded`; they are not backfilled. The table sits beside `summary_nodes`, so the schema version does not
+change and a rollback to an older plugin still opens the store (the older build ignores the table).
 
 ### Evidence and adaptive retrieval (0.21 RC)
 

@@ -26,6 +26,8 @@ Do not treat a short search snippet as sufficient evidence for a detail-heavy an
 
 Use for inexpensive inspection of a known current-session summary node or externalized payload reference. With no handle it returns a current-session DAG overview. It is a planning step, not broad discovery.
 
+A summary node produced by a model call also reports `escalation_level` (1 = full summary, 2 = compact summary, 3 = deterministic truncation of the source) and `model` (the route that answered; empty = the host default route, `deterministic` = level 3). Nodes written before this record existed report neither. A level-3 node is a lossy stand-in: prefer `lcm_expand` on it before relying on its text.
+
 ### `lcm_expand_query`
 
 Use when current-session compacted material must be expanded and synthesized into a precise bounded answer.

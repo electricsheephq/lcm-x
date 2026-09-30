@@ -42,6 +42,7 @@ from .ingest_protection import (
     validate_embedding_privacy_dispatch,
 )
 from .dag import SummaryDAG, build_nodes_fts_spec
+from .inactive_record import inactive_record_notice
 from .presets import (
     explicit_operator_overrides,
     get_preset,
@@ -1780,6 +1781,9 @@ def _doctor_text(engine) -> str:
         f"unreferenced_externalized_payload_files: {externalized_integrity['unreferenced_externalized_payload_files']}",
         f"survival_fit_count: {'unknown' if fit_count is None else fit_count}",
     ]
+    inactive_process = inactive_record_notice(getattr(engine, "_hermes_home", ""))
+    if inactive_process:
+        lines.append(f"inactive_process: {inactive_process}")
     if issues:
         lines.append(f"issues: {', '.join(issues)}")
     else:
