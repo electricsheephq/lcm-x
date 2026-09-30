@@ -137,6 +137,34 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
             rationale = "summary-quality diagnostic failures mean doctor could not read DAG quality state reliably"
     elif name == "config_validation":
         command = "inspect LCM_* environment/config values and adjust only intentional operator overrides"
+    elif name == "embedding_provider_health":
+        if status == "warn" and isinstance(detail, dict) and detail.get("embeddings_enabled") is False:
+            action = DOCTOR_ACTION_INSPECT
+            command = (
+                "embeddings are off but this store still has an active embedding profile whose "
+                "vectors will go stale: set LCM_EMBEDDINGS_ENABLED=true if semantic recall is "
+                "wanted; otherwise nothing to do (full-text recall is unaffected)"
+            )
+            warning_only = True
+            rationale = "stale stored vectors affect only semantic recall, which is switched off"
+        elif status == "warn":
+            action = DOCTOR_ACTION_INSPECT
+            command = (
+                "semantic retrieval is configured but not runnable: reinstall the optional "
+                "embedding dependency (e.g. `pip install fastembed` into the active Hermes "
+                "virtualenv) or fix LCM_EMBEDDING_PROVIDER/LCM_EMBEDDING_MODEL and the "
+                "provider credentials, then run `/lcm embed warmup` and re-run `/lcm doctor`. "
+                "A Hermes update rebuilds the virtualenv and drops optional dependencies, so "
+                "recheck this after every update. Nothing is lost meanwhile -- the lossless "
+                "store is intact and recall falls back to full-text"
+            )
+            warning_only = True
+            rationale = (
+                "an unavailable embedding provider degrades semantic recall to full-text; it "
+                "is a retrieval-capability problem, not persisted-state corruption"
+            )
+        else:
+            rationale = "the embedding provider probe could not read configuration state reliably"
     elif name == "source_lineage_hygiene" and status == "warn":
         action = DOCTOR_ACTION_SAFE_IGNORE
         command = "safe to ignore legacy blank-source observations; use `/lcm doctor source` only when you intentionally want backup-first normalization"
