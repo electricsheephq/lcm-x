@@ -226,3 +226,16 @@ def test_probe_reports_missing_voyage_credentials(monkeypatch):
     )
     assert probe["available"] is False
     assert "VOYAGE_API_KEY" in probe["detail"]
+
+
+def test_disabled_embeddings_warning_gets_its_own_guidance():
+    check = {
+        "check": "embedding_provider_health",
+        "status": "warn",
+        "detail": {"embeddings_enabled": False, "active_embedding_profile": True, "available": False},
+    }
+    guidance = doctor_guidance_for_check(check)
+    assert guidance is not None
+    text = str(guidance)
+    assert "LCM_EMBEDDINGS_ENABLED" in text
+    assert "pip install" not in text and "reinstall" not in text
