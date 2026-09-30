@@ -1389,6 +1389,7 @@ class CompactionMixin:
         noop_reason = "no eligible raw backlog outside fresh tail"
         sweep_stop_reason = ""
         sweep_raw_drained = False
+        level3_leaves = 0
         dependent_reply_message_ids: set[int] = set()
         preexisting_dependent_reply_records = self._load_generated_ignored_dependent_reply_records()
         sweep_step_seconds: Dict[str, float] = {}
@@ -1402,6 +1403,9 @@ class CompactionMixin:
         while leaf_passes < max_leaf_passes:
             if threshold_full_sweep_active and time.monotonic() >= sweep_deadline:
                 sweep_stop_reason = "time_budget_exhausted"
+                break
+            if self._summary_route_stop_applies(force_overflow):
+                sweep_stop_reason = "summary_route_unavailable"  # #628: no level 3 leaf while every route is refused
                 break
             fresh_tail_start = self._fresh_tail_start(pressure_messages)
 
@@ -1904,6 +1908,7 @@ class CompactionMixin:
             leaf_compacted_this_turn = True
             self._sweep_budget_hold_until = 0.0  # #608: a stored leaf ends the hold
             leaf_passes += 1
+            level3_leaves += _level == 3
             estimated_active_tokens = max(0, estimated_active_tokens - source_tokens + summary_tokens)
             if (
                 getattr(self._config, "large_output_transcript_gc_enabled", False)
@@ -1973,6 +1978,18 @@ class CompactionMixin:
             and leaf_passes >= max_leaf_passes
         ):
             sweep_stop_reason = "pass_budget_exhausted"
+
+        if sweep_stop_reason == "summary_route_unavailable":
+            seconds_left = self._summary_route_seconds_left()
+            logger.warning(
+                "LCM compaction stopped: summary route unavailable (circuit open, %ds left); %d leaves written, "
+                "backlog kept",
+                seconds_left,
+                leaf_passes,
+            )
+            if not leaf_compacted_this_turn:
+                noop_reason = "summary route unavailable"
+                self._start_sweep_budget_hold(seconds_left)
 
         if not leaf_compacted_this_turn:
             if sweep_stop_reason == "time_budget_exhausted":
@@ -2155,7 +2172,7 @@ class CompactionMixin:
         self._ingest_cursor_needs_reconcile = False
 
         logger.info(
-            "LCM compaction #%d: %d messages → %d (%d leaf pass%s, %d→%d tokens, %d DAG nodes%s)",
+            "LCM compaction #%d: %d messages → %d (%d leaf pass%s, %d→%d tokens, %d DAG nodes%s%s)",
             self.compression_count,
             len(messages),
             len(compressed),
@@ -2164,6 +2181,7 @@ class CompactionMixin:
             count_messages_tokens(messages),
             count_messages_tokens(compressed),
             len(self._dag.get_session_nodes(self._session_id)),
+            f", {level3_leaves} level 3 leaves" if level3_leaves else "",
             ", forced overflow recovery" if force_overflow else "",
         )
 
@@ -2178,6 +2196,7 @@ class CompactionMixin:
             partial_stop_reasons = {
                 "pass_budget_exhausted",
                 "time_budget_exhausted",
+                "summary_route_unavailable",
                 "leaf_summary_error",
                 "condensation_error",
                 "condensation_no_progress",
