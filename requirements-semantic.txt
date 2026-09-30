@@ -10,11 +10,13 @@
 #
 #     pip install -r requirements-semantic.txt
 #
-# IMPORTANT: `hermes update` builds a NEW environment under
-# installs/<id>/environments/<hash>/venv and installs only mandatory
-# dependencies, so anything here is dropped on every host update. Reinstall
-# after each update and confirm with `/lcm doctor` (the
-# embedding_provider_health check reports an unavailable provider). No restart
+# IMPORTANT: `hermes update` can build a NEW environment under
+# installs/<id>/environments/<hash>/venv. It carries over the dependencies
+# Hermes itself records (its extras and the dependencies plugins declare), but
+# a package installed by hand from this file is not recorded, so it can be
+# dropped by a host update. After an update, run `/lcm doctor` (the
+# embedding_provider_health check reports an unavailable provider) and
+# reinstall if it names a missing dependency. No restart
 # is needed once the dependency is present: the provider import is lazy and
 # existing vectors are untouched.
 #
