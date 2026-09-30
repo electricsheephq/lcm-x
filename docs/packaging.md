@@ -23,7 +23,9 @@ The repository is a Hermes plugin, not a standalone Python application. Runtime 
 - the operator placing or symlinking the checkout into Hermes' plugin search path
 - no required third-party runtime dependencies beyond Python 3.11+ and optional accelerators such as `tiktoken` and `regex`
 
-There is no `pyproject.toml` or package metadata today, and that is deliberate until Hermes plugin packaging/discovery has a stable target for pip-installed plugins. Adding generic Python packaging before the host install contract is clear would create a second install story without making first-run activation simpler.
+The repository deliberately has no `pyproject.toml` or package metadata. Package metadata waits until Hermes plugin packaging/discovery has a stable target for pip-installed plugins: adding generic Python packaging before the host install contract is clear would create a second install story without making first-run activation simpler.
+
+The lint settings live in `ruff.toml` for the same reason. Hermes' package manager (`pm/`, after v2026.9.24) treats any plugin checkout with a `pyproject.toml` as a uv workspace member. A `pyproject.toml` with no `[build-system]` gets a project name and no version, `uv lock` rejects it, and the Hermes update adds `hermes-lcm-x` to `plugins.disabled` (#631). Do not add a `pyproject.toml` back; `tests/test_issue_631_not_a_pm_member.py` guards this.
 
 ## Next packaging step
 
