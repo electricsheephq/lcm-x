@@ -10,6 +10,10 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   `LCM_LEAF_TARGET_MIN_TOKENS` (default 2000) and `LCM_LEAF_TARGET_MAX_TOKENS` (default 12000). With the defaults every
   target and `max_tokens` value is unchanged; an out-of-range value falls back to its default with a config warning.
   (#614)
+- Fix: a mid-turn `/steer` that Hermes 0.21.2+ inserts as an unstamped user row before the steady-state ingest
+  cursor is stored. The #436 prefix audit now also checks unstamped user rows against stored copies and moves the
+  cursor back to one no stored copy explains; with host timestamps the displaced reply is not stored twice. The
+  in-place shape of Hermes 0.21.1 and earlier and `LCM_IDENTITY_ANCHOR=0` are not covered. (#633)
 
 ## v0.24.6 - (unreleased; rc1) (#628, #627: a summary circuit that counts rejections apart from failures, and images priced per image)
 
