@@ -6,7 +6,71 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
-## v0.24.7 - (unreleased; rc1) (P0 for long-running sessions: the survival fit keeps the summary, no in-turn thrash below the threshold, no level-3 fragments, a bounded summary prefix, steer rows stored)
+## v0.24.8 - (unreleased; rc1) (repairs: level 3 fragment repair, tool-output stubs that name the read-back call, rollup stop, no silent fallback on a slow load)
+
+- Fix: a summary route that cannot serve its model (HTTP 400/404 whose message names the model as unknown, not
+  found, not existing or not supported) opens its circuit on the first failure instead of the second, so level 2 is not
+  attempted, and logs one WARNING per episode that names the provider and model the host used (`route_info`, on
+  hosts that take it), says whether LCM-X sent a model, and names the fix (`auxiliary.compression.provider` +
+  `auxiliary.compression.model` in the profile's `config.yaml`, or a consistent `model.provider` / `model.default`
+  pair). Repeats log at DEBUG; a success ends the episode. Other failures keep the threshold and cooldown. `lcm_status`
+  gains `summary_route` (`state`, `seconds_left`, `last_error_class`, `provider`, `model`). Rollups get their own
+  config-error episode under their own breaker keys (#669); the live key is still the configured model, not the
+  effective route. (#682)
+- Fix: a host retry after a cancelled but committed compaction adopts the committed summary (#457) while every
+  summary route is refused: on the first pass the adoption runs before the summary-route stop (#628), since it needs no
+  summary route. With nothing to adopt the stop applies as before, and no new leaf is written while the circuit is
+  open. (#640)
+- Fix: a host recovery call (`compress(..., bypass_cooldown=True)`, #608) after a preflight that saw a
+  compaction-boundary cooldown runs the summariser: it also clears the cooldown's cleanup-only handoff, so a list at
+  or over the threshold and under the survival ceiling is summarised instead of only sanitised and fitted. An ordinary
+  automatic call during the cooldown is still cleanup-only, and forced overflow is unchanged. The native-recovery
+  handoff is kept (native recovery owns a below-threshold list). (#684)
+- Feature: every new leaf and condensed summary node records its escalation level (1, 2 or 3) and the model that
+  produced it, in a new `summary_node_provenance` table written in the node's own transaction. `lcm_describe` shows
+  both; `lcm_status` counts nodes by level (`unrecorded` for older and imported nodes, which are not backfilled). No
+  schema version change and no new `summary_nodes` column, so a plugin rollback still opens the store. Refs #441
+- Feature: `LCM_SUMMARY_PROMPT_VERSION` (default `1`, unchanged prompts) opts in to summariser prompt v2: six fixed
+  headings, focus directives in the trusted policy with only the tagged topic in the transcript message, and a 3x
+  output ceiling. Refs #646
+- Fix: a temporal rollup whose summary comes back as a level 3 truncation is not stored; the rollup stays pending for
+  its next build and one warning is logged (a level 3 result that is the whole source is still stored). Rollup
+  maintenance starts no build while the summary route is refused, and rollups record circuit results under their own
+  breaker keys, so a rollup burst can neither open nor close the live compaction route's circuit. (#669)
+- Docs (#685): the operator guide and the skill reference now say that since #652 a leaf whose level 1 and level 2 results are rejected is not stored while the survival fit can rescue the request; level 3 is still written when the cut is the whole source, in a forced overflow recovery, with the survival fit off or when the model window is unknown.
+- Fix: a tool-output stub names the tool and says how to read the original, for example
+  `[Externalized tool output: tool=read_file; tool_call_id=…; chars=N; bytes=N; read it with
+  lcm_expand(externalized_ref="R"); ref=R]`. `ref=` stays the last field and the stub stays one line of at most 512
+  characters, so v0.24.7 still reads it after a rollback; stored old stubs keep their text. The payload records the
+  tool name; the LCM system note says how to read any tool-output stub. A ref written before a compression-boundary
+  rotation resolves in `lcm_expand` and `lcm_describe` through the recorded rotation lineage (up to 32 sessions back);
+  payload files are not rewritten, and a ref from an unrelated session still does not resolve. (#680)
+- Fix: forced overflow recovery keeps the newest tool call when a user row precedes it and its result is over the
+  recovery cap. The call is answered by the tool-pair stub, or by the result's #680 stub when it was externalized, as
+  the shape without a user row already was; the recovered context stays within the cap and the stub is not stored.
+  Capped assembly outside forced recovery is unchanged. (#636)
+- Fix: a slow plugin load no longer leaves Hermes silently without LCM-X. When Hermes 0.21.5+ ignores
+  `register_context_engine()` because the load overran `plugins.load_timeout_seconds`, `register()` logs one ERROR
+  with the load time and the setting, and does not print "LCM plugin loaded — … active"; another engine in the slot
+  gets a WARNING. The affected process leaves `lcm-x-not-active.json` in the Hermes home, and `lcm_status` and
+  `/lcm doctor` in other processes report it while that process runs. The active line now carries the load time.
+  The store open no longer waits for the write lock in steady state: a due FTS deep check whose claim cannot get
+  the lock within 50 ms is skipped for that open (a later open runs it), the `ingested_at` NULL backfill scan runs
+  once per store behind a migration marker, and with temporal rollups on the rollup marker and range normalization
+  write only when needed. The lossless-claw importer writes `ingested_at` itself. (#622)
+- Fix: when the host refuses a compaction of an LCM-bypassed session (an auxiliary side channel or a stateless
+  session) as larger, the foreground session's automatic compaction is no longer held for up to 600 seconds; the
+  same refusal on the foreground session still arms the no-progress hold. (#665)
+- Doctor: `/lcm doctor repair level3` (and `lcm_doctor` with `action: repair_level3`) finds the level 3 truncation
+  fragments that a refused summary route wrote before v0.24.6/v0.24.7, and every condensed node built on them, per
+  session, with a check that each fragment's source rows are still stored. It is a read-only scan and changes
+  nothing. `/lcm doctor repair level3 apply` (slash command only) takes a backup, then re-summarises each affected
+  group in place from the stored raw rows, leaves first and each condensed node from its repaired children, one
+  transaction per group; node ids, source links and raw rows are kept and the summary FTS index is updated in the same
+  transaction. It refuses while no summary route is available, never writes a level 3 result, skips a group with any
+  source row or child node missing, rolls a group back if it changed during the repair, and ends with a second scan. (#667)
+
+## v0.24.7 - 2026-09-30 (P0 for long-running sessions: the survival fit keeps the summary, no in-turn thrash below the threshold, no level-3 fragments, a bounded summary prefix, steer rows stored)
 
 - Config: the leaf summary target is configurable with `LCM_LEAF_TARGET_RATIO` (default 0.20),
   `LCM_LEAF_TARGET_MIN_TOKENS` (default 2000) and `LCM_LEAF_TARGET_MAX_TOKENS` (default 12000). With the defaults every
@@ -36,6 +100,18 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   row leaves with its reply, then re-formed as assembly forms it. The notice goes only into a real system row. When no
   whole-turn cut can hold the prefix, the v0.24.6 rule applies with one WARNING `LCM survival fit dropped the summary
   prefix (emergency: …)`, and the result is never larger than v0.24.6's. (#650)
+- Fix (rc2): a Hermes update that brings in the new plugin package manager (`pm/`, after v2026.9.24) no longer disables
+  `hermes-lcm-x`. The lint settings moved from `pyproject.toml` to `ruff.toml` and `pyproject.toml` is gone, so the
+  checkout is not a uv workspace member; the stale root `uv.lock` is removed too. Before, the manager staged the
+  lint-only `pyproject.toml` with a name and no version, `uv lock` failed and the plugin went into
+  `plugins.disabled`. PR #632 diagnosed the same failure. (#631)
+- Fix (rc2): below the host's compaction threshold the host count decides on every preflight branch: an automatic
+  `compress()` after any preflight request is cleanup-only when the host's `current_tokens` is known and below the
+  threshold, and an automatic call the #651 hold blocks is cleanup-only (the hold never blocks the survival ceiling).
+  The one-shot flags clear on a session reset or rebind. Forced, `/compress` and provider-overflow calls are
+  unchanged. (#677)
+- Fix (rc2): the survival fit protects only DAG-verified summary rows as its prefix; a row quoting a summary header for a
+  missing or foreign node is an ordinary row, so its turn leaves whole (the v0.24.6 rule). (#678)
 
 ## v0.24.6 - 2026-09-30 (#628, #627: a summary circuit that counts rejections apart from failures, and images priced per image)
 

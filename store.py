@@ -25,6 +25,7 @@ from .db_bootstrap import (
     add_column_if_missing,
     configure_connection,
     ensure_external_content_fts,
+    mark_migration_step_complete,
     refuse_schema_version_too_new,
     run_versioned_migrations,
 )
@@ -57,6 +58,8 @@ from .sqlite_util import (
 from .tokens import count_message_tokens
 
 logger = logging.getLogger(__name__)
+
+INGESTED_AT_BACKFILL_STEP = "messages_ingested_at_backfill_v1"
 
 
 _MESSAGE_ROLE_BIAS_SQL = "CASE m.role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 WHEN 'tool' THEN 2 ELSE 1 END"
@@ -396,12 +399,21 @@ class MessageStore:
             "observed_at_source",
             "ALTER TABLE messages ADD COLUMN observed_at_source TEXT",
         )
+        # The NULL probe has no index and scans the whole table, so run it once
+        # per store and remember that it ran; register() opens the store under
+        # Hermes' plugin load deadline (#622).
+        if self._conn.execute(
+            "SELECT 1 FROM lcm_migration_state WHERE step_name = ?",
+            (INGESTED_AT_BACKFILL_STEP,),
+        ).fetchone():
+            return
         if self._conn.execute(
             "SELECT 1 FROM messages WHERE ingested_at IS NULL LIMIT 1"
         ).fetchone():
             self._conn.execute(
                 "UPDATE messages SET ingested_at = timestamp WHERE ingested_at IS NULL"
             )
+        mark_migration_step_complete(self._conn, INGESTED_AT_BACKFILL_STEP)
 
     # -- Write operations ---------------------------------------------------
 

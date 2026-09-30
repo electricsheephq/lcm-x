@@ -283,7 +283,7 @@ On the `main` line, typical output is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.24.7 (15 tools)
+  ✓ hermes-lcm-x v0.24.8 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -291,9 +291,9 @@ Provider Plugins:
 
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. `0.24.7` is the identity the next patch release carries: the `v0.24.7-rc1`
+and tag. `0.24.8` is the identity the next patch release carries: the `v0.24.8-rc1`
 tag carries it first, the gauntlet runs at that tag, and the GA tree is the rc
-tree plus the GA release-notes file (`v0.24.6` at `ae0e996d` shipped the same way).
+tree plus the GA release-notes file (`v0.24.7` at `417432b3` shipped the same way).
 
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
 `lcm_doctor`, and `/lcm doctor` also report the loaded plugin path and
@@ -381,6 +381,7 @@ environment variables:
 | `LCM_EXPANSION_MODEL` | summary model / auxiliary | Override `lcm_expand_query` synthesis model |
 | `LCM_EXPANSION_CONTEXT_TOKENS` | `32000` | Context budget used by the auxiliary LLM for `lcm_expand_query` |
 | `LCM_SUMMARY_TIMEOUT_MS` | `60000` | Timeout for one summarization call |
+| `LCM_SUMMARY_PROMPT_VERSION` | `1` | Summariser prompt version: `1` (original prompts) or `2` (opt-in v2 prompts); other values fall back to `1` with a config warning. See [Summary prompt version](#summary-prompt-version) |
 | `LCM_TEMPORAL_ROLLUPS_ENABLED` | `false` | Enable derived UTC day/week/month summary rollups and their maintenance hooks |
 | `LCM_ROLLUP_DAILY_TARGET_TOKENS` | `5000` | Target size for daily rollup summarization |
 | `LCM_ROLLUP_DAILY_MAX_TOKENS` | `15000` | Hard token ceiling for a daily rollup |
@@ -419,6 +420,16 @@ fault, not load shedding: proactive injection is disabled until the embedding-pr
 is fixed, one WARNING is logged per engine instance, and `lcm_recall` raises rather than degrading to
 full-text on the same fault (#370).
 
+### Summary prompt version
+
+`LCM_SUMMARY_PROMPT_VERSION` (env only, default `1`) selects the summariser prompts for leaves, condensed nodes and
+rollups. Version `1` is unchanged: the same prompts and the same output ceiling (2x the summary budget) as before.
+Version `2` is opt-in: level 1 asks for six fixed headings and exact values, the focus directives move from the
+untrusted topical data into the trusted policy (only the topic label stays in the transcript message, tagged
+`<lcm-focus-topic>`), and the output ceiling rises to 3x the budget. The ceiling only applies on routes where the
+host forwards `max_tokens`. The integrity envelope and the `Expand for details about:` closing line are the same
+in both versions. `lcm_status` shows the active value as `summary_prompt_version` (#646).
+
 ### Summary circuit breaker
 
 A summary call that raises or times out is a failure and counts toward
@@ -430,9 +441,12 @@ follows a line that names the kind (`LCM summary discarded empty output`, `... r
 source. A route opens with `LCM summary route circuit opened for <route> after N failure(s)` or
 `... after N rejected result(s)`.
 
-A leaf whose own level 1 and level 2 results were rejected is written at level 3: a deterministic cut of its
-source that keeps the start and the end. Its rows stay stored; read them with `lcm_expand` on that leaf. The
-compaction line counts these leaves (`, N level 3 leaves`).
+When a leaf's own level 1 and level 2 results are rejected and the survival fit can keep the request under the
+window, the compaction writes no leaf and no node for it and keeps its rows for a later pass (#652). A level 3
+leaf, a deterministic cut of its source that keeps the start and the end, is still written when the cut is the
+whole source, in a forced overflow recovery, with the survival fit off (`LCM_SURVIVAL_FIT=false`) or when the
+model window is unknown; its rows stay stored, and `lcm_expand` on that leaf reads them. The compaction line
+counts these leaves (`, N level 3 leaves`).
 
 An open circuit now pauses compaction instead of writing level 3 truncations: while every summary route is
 refused, a compaction that is not a forced overflow recovery writes no new leaf or condensed node, keeps the rows
@@ -443,6 +457,26 @@ With a summary route that never works, compaction pauses and the survival fit ke
 the rows stay stored and are summarised once a route works again, and the WARNING line repeats until then. With the
 survival fit off (`LCM_SURVIVAL_FIT=false`) or the model window unknown, the plugin converges through level 3 as
 before.
+
+A summary route that cannot serve its model is a configuration error, not a transient failure (#682): an HTTP 400
+or 404 whose message says the model is unknown, not found, does not exist or is not supported (context-length,
+rate-limit, billing, timeout and 5xx errors are ordinary failures). It opens that route's circuit on the first
+failure, so level 2 is not attempted, and logs one WARNING per episode:
+`LCM summary route cannot serve the summary model: provider=<p> model=<m>; LCM-X sent no model (summary_model unset)
+...`. The route is the one the host reports it used (`route_info`; "host default route" on a host that reports
+none). Fix it in the profile's `config.yaml`: set `auxiliary.compression.provider` and `auxiliary.compression.model`
+together, or make `model.provider` and `model.default` a pair the provider can serve. Each retry after the cooldown
+that fails the same way logs at DEBUG; a successful summary ends the episode. Other failures keep the threshold and
+cooldown above. `lcm_status` reports the circuit as `summary_route`: `state` (`open` while every summary route is
+refused, else `closed`), `seconds_left`, and for the primary route `last_error_class` (`config_error`,
+`provider_failure`, `rejected` or null after a success) and the `provider` and `model` the host reported.
+
+Each new leaf and condensed node records the level that produced it (1, 2 or 3) and the model that answered
+(`""` for the host's default route, `deterministic` for level 3) in the `summary_node_provenance` table.
+`lcm_describe(node_id=...)` shows them as `escalation_level` and `model`, and `lcm_status` counts the session's nodes
+under `dag.nodes_by_escalation_level`. Nodes written before this change, and imported nodes, have no record and count
+as `unrecorded`; they are not backfilled. The table sits beside `summary_nodes`, so the schema version does not
+change and a rollback to an older plugin still opens the store (the older build ignores the table).
 
 ### Evidence and adaptive retrieval (0.21 RC)
 
@@ -985,6 +1019,8 @@ Available commands:
 - `/lcm doctor clean lifecycle apply` - backup-first cleanup of empty lifecycle rows; requires `LCM_DOCTOR_CLEAN_APPLY_ENABLED=true`
 - `/lcm doctor repair` - read-only SQLite/FTS repair diagnostics
 - `/lcm doctor repair apply` - backup-first SQLite/FTS repair
+- `/lcm doctor repair level3` - read-only scan for level 3 truncation fragments and the condensed nodes built on them (also `lcm_doctor` with `action: repair_level3`)
+- `/lcm doctor repair level3 apply` - backup-first repair of those nodes in place: each connected group (fragments plus the nodes built on them) is re-summarised bottom-up by the configured summary route and committed in one transaction; ids, links and raw rows are kept. Refused before the backup while no summary route is available; a group with missing raw rows, a level 3 result or a concurrent change is left untouched and reported. Slash command only; the `lcm_doctor` tool refuses `apply`. Run it while the agent is idle: a group a condensation in this process has selected is rolled back, but a condensation in another process that finishes during the apply can still build a parent on the old fragment text (no data is lost; that parent is as it would have been without the repair). Without the `summary_node_provenance` table the scan's detection is a heuristic (the truncation marker within the truncation bound): a short model summary that quotes the marker is flagged, and a fragment written under a larger bound is missed.
 - `/lcm doctor source` - read-only scan for legacy blank-source rows
 - `/lcm doctor source apply` - backup-first normalization of legacy blank-source rows to `unknown`
 - `/lcm doctor retention` - read-only retention analysis

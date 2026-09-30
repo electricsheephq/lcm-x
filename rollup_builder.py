@@ -12,7 +12,7 @@ from typing import Callable, Sequence
 
 from .config import LCMConfig
 from .dag import SummaryDAG
-from .escalation import _deterministic_truncate, summarize_with_escalation
+from .escalation import _deterministic_truncate, summarize_with_escalation, summary_route_available
 from .rollup_periods import CoverageNode, canonical_frontier, load_source_lineage
 from .rollup_store import RollupBuildToken, RollupStore
 from .sqlite_util import _sqlite_savepoint
@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 Summarizer = Callable[..., tuple[str, int]]
 _FAILED_ROLLUP_BACKOFF = timedelta(seconds=30)
 _FRONTIER_WORK_LIMIT = 4_096
+# #669: rollups record circuit results under their own keys, never the live route's.
+_ROLLUP_ROUTE_KEY_PREFIX = "<rollup>:"
 
 _PENDING_ROLLUPS_SQL = """
     SELECT period_kind, period_start
@@ -69,6 +71,20 @@ _FAILED_AGGREGATES_SQL = """
 
 class RollupWorkLimitExceeded(RuntimeError):
     """Raised when correctness would require more than one bounded work pass."""
+
+
+class RollupLevel3NotStored(RuntimeError):
+    """#669: the summary came back as a level 3 cut; the rollup stays pending."""
+
+    def __init__(self, source_tokens: int):
+        super().__init__("summary at level 3")
+        self.source_tokens = source_tokens
+
+
+def _defer_level3(store: RollupStore, token: RollupBuildToken, kind: str, exc: RollupLevel3NotStored) -> None:
+    store.defer_incomplete(token, "incomplete: summary at level 3; not stored")
+    logger.warning("LCM rollup not stored: summary at level 3 (rollup %d %s, source_tokens=%d)",
+                   token.rollup_id, kind, exc.source_tokens)
 
 
 def initialize_rollup_invalidation_outbox(dag: SummaryDAG) -> None:
@@ -251,6 +267,7 @@ def _summary_controls(config: LCMConfig) -> dict[str, object]:
         "l2_budget_ratio": config.l2_budget_ratio,
         "custom_instructions": config.custom_instructions,
         "fallback_models": config.summary_fallback_models,
+        "prompt_version": getattr(config, "summary_prompt_version", 1),
     }
 
 
@@ -271,16 +288,19 @@ def _summarize_capped(
     previous_tokens = count_tokens(candidate)
 
     while True:
-        summary, _level = summarizer(
+        summary, level = summarizer(
             candidate,
             source_tokens=max(1, previous_tokens),
             token_budget=target,
             l3_truncate_tokens=hard_max,
             circuit_breaker=circuit_breaker,
             spend_guard=spend_guard,
+            route_key_prefix=_ROLLUP_ROUTE_KEY_PREFIX,
             **_summary_controls(config),
         )
         summary = str(summary)
+        if level == 3 and summary != text:  # #669: a verbatim level 3 (#652) is still stored
+            raise RollupLevel3NotStored(max(1, previous_tokens))
         summary_tokens = count_tokens(summary)
         if summary_tokens <= hard_max:
             return summary, summary_tokens
@@ -362,6 +382,9 @@ def build_day(
             # from the new daily (maintainer #388 blocker 5 — aggregate rebuild).
             store.stale_aggregates_for_day(day, scope)
         return store.get_rollup("day", day.isoformat(), scope)
+    except RollupLevel3NotStored as exc:
+        _defer_level3(store, token, "day", exc)
+        return None
     except Exception as exc:
         _mark_failed(store, token, exc)
         return None
@@ -636,6 +659,9 @@ def _build_aggregate(
         )
         store.mark_ready(token, summary, token_count, source_ids, fingerprint)
         return store.get_rollup(period_kind, start.isoformat(), scope)
+    except RollupLevel3NotStored as exc:
+        _defer_level3(store, token, period_kind, exc)
+        return None
     except Exception as exc:
         _mark_failed(store, token, exc)
         return None
@@ -738,6 +764,15 @@ def mark_stale_for_deleted_nodes(dag: SummaryDAG, node_ids: Sequence[int]) -> in
             store.close()
 
 
+def _rollup_route_available(config: LCMConfig, circuit_breaker: object | None) -> bool:
+    """#669: the #628 route stop for rollups: the live route, then the rollup's own keys."""
+    return all(
+        summary_route_available(config.summary_model, config.summary_fallback_models, circuit_breaker,
+                                route_key_prefix=prefix)
+        for prefix in ("", _ROLLUP_ROUTE_KEY_PREFIX)
+    )
+
+
 def run_rollup_maintenance(
     dag: SummaryDAG,
     config: LCMConfig,
@@ -804,6 +839,9 @@ def run_rollup_maintenance(
         builds_started = 0
         for row in rows:
             if (monotonic() - started_at) * 1000 >= budget_ms:
+                break
+            if not _rollup_route_available(config, circuit_breaker):  # #669: no build while refused
+                logger.info("LCM rollup maintenance skipped: summary route refused")
                 break
             builder = builders[str(row[0])]
             builder(

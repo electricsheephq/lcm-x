@@ -39,8 +39,8 @@ arguments documented below.
 | `lcm_retrieve` | With `LCM_ADAPTIVE_RETRIEVAL_ENABLED=true`, coordinate one bounded retrieval episode inside the existing answerer turn. Named evidence requirements close only against exact observed refs; at most three calls to `lcm_recall`, `lcm_recent`, `lcm_query_state`, `lcm_load_session`, or `lcm_expand` are allowed. Warm reuse validates exact positive dependencies and the corpus coverage watermark. Final prose is never cached. |
 | `lcm_recent` | Retrieve recent summaries with natural UTC periods. Ready temporal rollups are preferred; missing, stale, disabled, and sub-day windows transparently use leaf summaries instead. |
 | `lcm_load_session` | Load one ordered raw-message transcript page for an explicit `session_id`. This is not search: it returns raw rows in `store_id` order, bounded by `limit`, with per-message content bounded by `max_content_chars`, and continues with `after_store_id` from `next_cursor`. Set `include_exact_ref=true` when rows will feed exact citation or computation; the default response stays byte-compatible. |
-| `lcm_describe` | Inspect the current-session DAG by default, or pass `session_id` to inspect a known node/DAG in another LCM session; a node must belong to the requested session. Previews an `externalized_ref` without loading full content; `externalized_ref` remains current-session only and cannot be combined with `session_id`. |
-| `lcm_expand` | Recover source messages, child summaries, or externalized payloads with pagination. `node_id` lookup defaults to the current session; cross-session DAG expansion requires a matching explicit `session_id` (rejected in the other two modes). Use `store_id` to fetch a single raw message regardless of session, suitable for drilling into a cross-session `lcm_grep` result; in `store_id` mode, `include_exact_ref=true` adds the exact returned slice without changing default bytes. `externalized_ref` remains current-session only. |
+| `lcm_describe` | Inspect the current-session DAG by default, or pass `session_id` to inspect a known node/DAG in another LCM session; a node must belong to the requested session. Previews an `externalized_ref` without loading full content; `externalized_ref` reads a payload of the current session or of a session it replaced at a compression-boundary rotation, and cannot be combined with `session_id`. |
+| `lcm_expand` | Recover source messages, child summaries, or externalized payloads with pagination. `node_id` lookup defaults to the current session; cross-session DAG expansion requires a matching explicit `session_id` (rejected in the other two modes). Use `store_id` to fetch a single raw message regardless of session, suitable for drilling into a cross-session `lcm_grep` result; in `store_id` mode, `include_exact_ref=true` adds the exact returned slice without changing default bytes. `externalized_ref` reads a payload of the current session or of a session it replaced at a compression-boundary rotation. |
 | `lcm_expand_query` | Retrieve from the active session by default or up to 20 explicit `session_ids`. `output='answer'` runs bounded synthesis; `output='evidence'` returns bounded serialized context without an LLM call. Responses include bounded, tool-extracted `evidence_provenance` for the context supplied to synthesis. |
 | `lcm_status` | Show runtime health, context pressure, config, source lineage, and lifecycle stats. |
 | `lcm_inspect` | Read-only operator inventory for current-session lineage, message/frontier metadata, fresh tail, externalized refs/readability, compaction skip/no-op reasons, and matched ignore/stateless patterns. It returns metadata only; use `lcm_load_session`/`lcm_expand` when you need content. |
@@ -62,8 +62,9 @@ the requested node; `lcm_expand` rejects `session_id` in `store_id` and
 20 `session_ids`; omitted means the current session. Explicit `node_ids` are
 admitted only when they belong to one of those sessions. Search results from
 multiple sessions are merged and bounded by `max_results` before context
-expansion. `externalized_ref` inspection and payload hydration stay
-current-session only in every one of these tools.
+expansion. `externalized_ref` inspection and payload hydration read only the
+current session and the sessions it replaced at compression-boundary rotations,
+in every one of these tools.
 
 `lcm_expand_query(output='evidence')` uses the same `context_max_tokens` budget,
 recursive DAG traversal, raw-hit deduplication, and pagination metadata as answer

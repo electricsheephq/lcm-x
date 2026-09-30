@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from enum import Enum
@@ -42,6 +43,7 @@ from .ingest_protection import (
     validate_embedding_privacy_dispatch,
 )
 from .dag import SummaryDAG, build_nodes_fts_spec
+from .inactive_record import inactive_record_notice
 from .presets import (
     explicit_operator_overrides,
     get_preset,
@@ -54,6 +56,7 @@ from .presets import (
     unsupported_runtime_fields_text,
 )
 from .maintenance import backup_database, rotate_backup_database
+from .level3_repair import repair_level3_fragments, scan_level3_fragments
 from .assertion_rebuild import rebuild_assertions
 from .assertion_store import AssertionSchemaUnavailableError, AssertionStore
 from . import rollup_builder
@@ -481,6 +484,8 @@ def _help_text(error: str | None = None) -> str:
         "- /lcm doctor clean lifecycle apply: backup-first cleanup of empty lifecycle rows only",
         "- /lcm doctor repair: read-only scan for SQLite/FTS index repair needs",
         "- /lcm doctor repair apply: backup-first repair/rebuild of message and summary FTS indexes",
+        "- /lcm doctor repair level3: read-only scan for level 3 truncation fragments and the condensed nodes built on them",
+        "- /lcm doctor repair level3 apply: backup-first re-summary of those nodes in place (ids and links kept)",
         "- /lcm doctor repair schema-stamp: read-only scan for an interim-build schema_version stamp ahead of the actual v5 shape",
         "- /lcm doctor repair schema-stamp apply: backup-first reset of an interim schema_version stamp back to the supported version",
         "- /lcm doctor source: read-only scan for legacy blank-source rows",
@@ -1047,6 +1052,79 @@ def _doctor_repair_apply_text(engine) -> str:
         f"nodes_fts_degraded: {_fmt_bool(nodes_result['degraded'])}",
         "note: backup created before repair apply",
     ])
+
+
+def _doctor_repair_level3_text(engine) -> str:
+    """#667: read-only report of level 3 fragment nodes and their condensed ancestors."""
+    scan = scan_level3_fragments(engine)
+    flagged = scan["flagged"]
+    detection = f"truncation marker, at most {scan['bound_tokens']} tokens"
+    if scan["provenance_table"]:
+        detection += "; the recorded level where the node has one"
+    lines = [
+        "LCM doctor repair level3",
+        f"status: {'repair-needed' if flagged else 'ok'}",
+        f"detection: {detection}",
+        f"flagged_leaves: {sum(item['leaf'] for item in flagged)}",
+        f"flagged_nodes: {sum(not item['leaf'] for item in flagged)}",
+        f"affected_ancestors: {len(scan['ancestors'])}",
+    ]
+    for session_id, counts in scan["sessions"].items():
+        by_depth = ", ".join(f"d{depth}={count}" for depth, count in counts["ancestors_by_depth"].items())
+        lines.append(
+            f"session {session_id}: flagged_leaves={counts['flagged_leaves']} "
+            f"flagged_nodes={counts['flagged_nodes']} ancestors_by_depth={by_depth or 'none'}"
+        )
+    for item in flagged:
+        label = "raw_rows_stored" if item["leaf"] else "source_nodes_stored"
+        complete = bool(item["sources"]) and item["sources_stored"] == item["sources"]
+        lines.append(
+            f"node {item['node_id']} (session {item['session_id']}, d{item['depth']}): "
+            f"{label}={_fmt_bool(complete)} ({item['sources_stored']}/{item['sources']})"
+        )
+    lines.append("note: read-only scan only — nothing was changed")
+    return "\n".join(lines)
+
+
+def _doctor_repair_level3_apply_text(engine) -> str:
+    """#667: backup-first in-place repair; one line per group, totals, then a second scan."""
+    join_background_integrity_scans()
+    result = repair_level3_fragments(engine)
+    lines = ["LCM doctor repair level3 apply", f"status: {result['status']}"]
+    if result["reason"]:
+        lines.append(f"reason: {result['reason']}")
+    backup = result["backup"]
+    if backup and backup["ok"]:
+        lines += [f"backup_path: {backup['backup_path']}", f"backup_size: {_fmt_size(int(backup['backup_size']))}"]
+    for number, group in enumerate(result["groups"], 1):
+        head = f"group {number} (session {group['session_id']}, top node {group['top']}): {group['outcome']}"
+        if group["outcome"] == "repaired":
+            nodes = ", ".join(
+                f"node {node_id} d{depth} {kind} -> level {group['levels'][node_id]}"
+                for node_id, depth, kind in group["nodes"])
+            lines.append(f"{head} — {nodes} (ids and links unchanged)")
+        else:
+            lines.append(f"{head} — {group['reason']}")
+    outcomes = Counter(group["outcome"] for group in result["groups"])
+    lines += [
+        f"groups_repaired: {outcomes['repaired']}",
+        f"groups_skipped: {outcomes['skipped']}",
+        f"groups_rolled_back: {outcomes['rolled back']}",
+        f"nodes_repaired: {sum(len(g['nodes']) for g in result['groups'] if g['outcome'] == 'repaired')}",
+        f"summariser_calls: {result['calls']}",
+    ]
+    second = result.get("second_scan")
+    if second is not None:
+        lines.append(
+            f"second_scan: flagged_leaves={sum(i['leaf'] for i in second['flagged'])} "
+            f"flagged_nodes={sum(not i['leaf'] for i in second['flagged'])} "
+            f"affected_ancestors={len(second['ancestors'])}"
+        )
+    lines.append("note: raw rows are never changed; a rerun repairs whatever the scan still finds")
+    lines.append("note: run apply while the agent is idle; a condensation in another process that finishes during "
+                 "the apply can still build a parent on the old fragment text (no data is lost; that parent is as it "
+                 "would have been without the repair)")
+    return "\n".join(lines)
 
 
 def _classify_schema_stamp(db_path: Path) -> dict[str, Any]:
@@ -1780,6 +1858,9 @@ def _doctor_text(engine) -> str:
         f"unreferenced_externalized_payload_files: {externalized_integrity['unreferenced_externalized_payload_files']}",
         f"survival_fit_count: {'unknown' if fit_count is None else fit_count}",
     ]
+    inactive_process = inactive_record_notice(getattr(engine, "_hermes_home", ""))
+    if inactive_process:
+        lines.append(f"inactive_process: {inactive_process}")
     if issues:
         lines.append(f"issues: {', '.join(issues)}")
     else:
@@ -5342,6 +5423,10 @@ def handle_lcm_command(raw_args: str | None, engine) -> str:
             return _doctor_clean_lifecycle_apply_text(engine)
         if len(rest) == 2 and rest[0].lower() == "repair" and rest[1].lower() == "apply":
             return _doctor_repair_apply_text(engine)
+        if len(rest) == 2 and rest[0].lower() == "repair" and rest[1].lower() == "level3":
+            return _doctor_repair_level3_text(engine)
+        if len(rest) == 3 and [part.lower() for part in rest] == ["repair", "level3", "apply"]:
+            return _doctor_repair_level3_apply_text(engine)
         if len(rest) == 2 and rest[0].lower() == "repair" and rest[1].lower() == "schema-stamp":
             return _doctor_repair_schema_stamp_text(engine)
         if (
@@ -5353,7 +5438,7 @@ def handle_lcm_command(raw_args: str | None, engine) -> str:
             return _doctor_repair_schema_stamp_apply_text(engine)
         if len(rest) == 2 and rest[0].lower() == "source" and rest[1].lower() == "apply":
             return _doctor_source_apply_text(engine)
-        return _help_text("`/lcm doctor` currently supports `clean`, `clean apply`, `clean lifecycle`, `clean lifecycle apply`, `repair`, `repair apply`, `repair schema-stamp`, `repair schema-stamp apply`, `source`, `source apply`, and `retention` as extra subcommands.")
+        return _help_text("`/lcm doctor` currently supports `clean`, `clean apply`, `clean lifecycle`, `clean lifecycle apply`, `repair`, `repair apply`, `repair schema-stamp`, `repair schema-stamp apply`, `source`, `source apply`, and `retention` as extra subcommands, plus `repair level3` and `repair level3 apply`.")
 
     if head == "backup":
         if rest:
