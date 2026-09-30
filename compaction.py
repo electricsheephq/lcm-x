@@ -571,9 +571,10 @@ class CompactionMixin:
             self._no_progress_candidate = False
             if bypass_cooldown:  # #651: a host recovery attempt is never cleanup-only maintenance
                 self._preflight_below_threshold_cleanup_only = self._preflight_automatic_request = False
-            elif not force and self._no_progress_hold_active():
-                # #677: an automatic call while the #651 hold runs (a caller that skipped the host gate) is
-                # held maintenance; _compress_impl still summarises at the survival ceiling or forced overflow.
+            elif not force and self._no_progress_hold_active() and self._no_progress_hold_blocks(
+                    current_tokens if current_tokens is not None else count_messages_tokens(messages)):
+                # #677: an automatic call the #651 hold blocks (a caller that skipped the host gate) is held
+                # maintenance; the survival ceiling and forced overflow are never blocked, so they summarise.
                 self._preflight_below_threshold_cleanup_only = True
             with self._fresh_tail_pressure_yield_invocation():
                 result = self._compress_impl(

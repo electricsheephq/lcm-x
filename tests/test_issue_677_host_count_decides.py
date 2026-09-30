@@ -207,3 +207,46 @@ def test_unknown_host_count_keeps_todays_behaviour(tmp_path, summaries, host_tok
         assert engine._last_compression_status == "compacted"
     finally:
         engine.shutdown()
+
+
+# -- round 3 (#679 review): lifecycle boundaries and the survival ceiling ------------------------------------
+
+@pytest.mark.parametrize("boundary", ["reset", "rebind"])
+def test_a_request_never_crosses_a_reset_or_rebind(tmp_path, summaries, boundary):
+    engine, view, rough, host = _divergent(tmp_path)
+    threshold = engine.threshold_tokens
+    try:
+        assert engine.should_compress_preflight(view) is True  # the previous binding's request
+        if boundary == "reset":
+            engine.on_session_reset()
+        else:
+            engine.on_session_start("S2", platform="telegram", context_length=200_000, conversation_id="conv2")
+        assert engine._preflight_automatic_request is False
+        assert engine._preflight_below_threshold_cleanup_only is False
+        engine.threshold_tokens = threshold
+        # an automatic call below the threshold with no request of its own runs as before #677
+        engine.compress(view, current_tokens=host)
+        assert summaries and _leaves(engine) >= 1
+        assert engine._last_compression_status == "compacted"
+    finally:
+        engine.shutdown()
+
+
+def test_the_hold_guard_never_makes_a_call_at_the_survival_ceiling_cleanup_only(tmp_path, summaries):
+    """A threshold above the survival ceiling (95,000 over 85,000): the hold never blocks a call at the ceiling,
+    so the direct-entry guard leaves it a normal pass."""
+    engine = _engine(tmp_path)
+    view = _view()
+    try:
+        engine.context_length = 100_000
+        engine.threshold_tokens = 95_000
+        ceiling = int(engine.context_length * (1 - engine._config.survival_reserve))
+        assert ceiling == 85_000 < engine.threshold_tokens
+        engine.record_rejected_compaction()
+        assert engine._no_progress_hold_active() is True
+        assert engine._no_progress_hold_blocks(ceiling) is False
+        engine.compress(view, current_tokens=ceiling)
+        assert summaries and _leaves(engine) >= 1, engine._last_compression_noop_reason
+        assert engine._last_compression_status == "compacted"
+    finally:
+        engine.shutdown()
