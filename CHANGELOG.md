@@ -6,6 +6,11 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Config: the leaf summary target is configurable with `LCM_LEAF_TARGET_RATIO` (default 0.20),
+  `LCM_LEAF_TARGET_MIN_TOKENS` (default 2000) and `LCM_LEAF_TARGET_MAX_TOKENS` (default 12000). With the defaults every
+  target and `max_tokens` value is unchanged; an out-of-range value falls back to its default with a config warning.
+  (#614)
+
 ## v0.24.6 - (unreleased; rc1) (#628, #627: a summary circuit that counts rejections apart from failures, and images priced per image)
 
 - Fix: a summary result rejected for its content (empty, reasoning only, output contract violated, not shorter than

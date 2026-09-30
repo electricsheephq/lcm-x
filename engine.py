@@ -1908,6 +1908,14 @@ class LCMEngine(
 
         return current_chunk[: tool_group_safe_end(current_chunk, len(current_chunk) - 1)]
 
+    def _leaf_target_tokens(self, source_tokens: int) -> int:
+        """Leaf summary target (#614); the defaults reproduce min(12000, max(2000, 20%))."""
+        cfg = self._config
+        return min(
+            cfg.leaf_target_max_tokens,
+            max(cfg.leaf_target_min_tokens, int(source_tokens * cfg.leaf_target_ratio)),
+        )
+
     def _summarize_leaf_chunk_with_rescue(
         self,
         initial_chunk: List[Dict[str, Any]],
@@ -1922,8 +1930,7 @@ class LCMEngine(
             attempt_number += 1
             source_tokens = count_messages_tokens(attempt_chunk)
             serialized = self._serialize_messages(attempt_chunk)
-            token_budget = max(2000, int(source_tokens * 0.20))
-            token_budget = min(token_budget, 12000)
+            token_budget = self._leaf_target_tokens(source_tokens)
 
             try:
                 timeout_seconds = self._config.summary_timeout_ms / 1000
