@@ -47,6 +47,12 @@ def normalize_content_value(content: Any) -> str | None:
         return str(content)
 
 
+def _part_type(part: Any) -> str | None:
+    """The ``type`` of a content part when it is a dict with a string type; else None."""
+    kind = part.get("type") if isinstance(part, dict) else None
+    return kind if isinstance(kind, str) else None
+
+
 def split_image_parts(content: Any) -> tuple[Any, int]:
     """Return ``content`` with structured image parts stripped, and their number.
 
@@ -57,12 +63,12 @@ def split_image_parts(content: Any) -> tuple[Any, int]:
     """
     if isinstance(content, list):
         count = sum(
-            1 for part in content if isinstance(part, dict) and part.get("type") in _IMAGE_PART_TYPES
+            1 for part in content if _part_type(part) in _IMAGE_PART_TYPES
         )
         if count:
             return [
                 {"type": part.get("type"), "image": "[stripped]"}
-                if isinstance(part, dict) and part.get("type") in _IMAGE_PART_TYPES
+                if _part_type(part) in _IMAGE_PART_TYPES
                 else part
                 for part in content
             ], count
@@ -72,7 +78,7 @@ def split_image_parts(content: Any) -> tuple[Any, int]:
             count = sum(
                 1
                 for part in parts
-                if isinstance(part, dict) and part.get("type") in _MULTIMODAL_IMAGE_PART_TYPES
+                if _part_type(part) in _MULTIMODAL_IMAGE_PART_TYPES
             )
             if count:
                 return content.get("text_summary") or "", count

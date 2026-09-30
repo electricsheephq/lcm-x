@@ -20,7 +20,7 @@ from hermes_lcm import tokens as tokens_mod
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.fresh_tail import resolve_fresh_tail_boundary
-from hermes_lcm.message_content import normalize_content_value
+from hermes_lcm.message_content import normalize_content_value, split_image_parts
 from hermes_lcm.tokens import count_message_tokens, count_messages_tokens, count_tokens
 
 PRICE = 1500
@@ -279,3 +279,39 @@ def test_t8_real_host_price_is_used():
 
     expected_text = count_tokens(_stripped_json([text_part, _placeholder("image_url")]))
     assert count_message_tokens(msg) == 4 + expected_text + host.current_image_token_cost()
+
+
+# -- T9: non-string part types ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        [{"type": []}],
+        [{"type": {}}],
+        [{"type": None}],
+        [{"type": 3}],
+        [{"type": ["image"]}, {"type": "text", "text": "x"}],
+        {"_multimodal": True, "content": [{"type": []}], "text_summary": "s"},
+    ],
+    ids=["list", "dict", "none", "int", "list-image", "multimodal-list"],
+)
+def test_non_string_part_types_never_raise_and_count_as_base(monkeypatch, content):
+    monkeypatch.setattr(tokens_mod, "image_token_cost", _no_price_call, raising=False)
+
+    stripped, image_count = split_image_parts(content)
+    assert stripped is content
+    assert image_count == 0
+    msg = {"role": "tool", "tool_call_id": "call-9", "content": content}
+    assert count_message_tokens(msg) == 4 + count_tokens(normalize_content_value(content) or "")
+
+
+def test_non_string_part_type_next_to_an_image_part_prices_one_image(price):
+    image = _image_url_part("data:image/png;base64," + "QUJD" * 5_000)
+    content = [{"type": []}, image]
+    msg = {"role": "tool", "tool_call_id": "call-9b", "content": content}
+
+    stripped, image_count = split_image_parts(content)
+    assert image_count == 1
+    assert stripped == [{"type": []}, _placeholder("image_url")]
+    assert count_message_tokens(msg) == 4 + count_tokens(_stripped_json(stripped)) + price
