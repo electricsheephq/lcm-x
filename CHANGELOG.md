@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+## v0.24.6 - (unreleased; rc1) (#628, #627: a summary circuit that counts rejections apart from failures, and images priced per image)
+
 - Fix: a summary result rejected for its content (empty, reasoning only, output contract violated, not shorter than
   its source) no longer counts as a failure of the summary route. Only a call that raises or times out counts toward
   the failure threshold (2); rejections open the route at their own threshold,
