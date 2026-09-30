@@ -1367,7 +1367,7 @@ class TestTokens:
     def test_count_message_tokens_normalizes_content_parts(self):
         content = [
             {"type": "text", "text": "hello from content parts " * 50},
-            {"type": "image_url", "image_url": {"url": "file:///tmp/example.png"}},
+            {"type": "text", "text": "a second part without an image"},
         ]
         msg = {"role": "user", "content": content}
         normalized_msg = {

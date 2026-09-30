@@ -12,6 +12,8 @@ import json
 from typing import Any
 
 _TEXT_PART_TYPES = {"text", "input_text", "output_text"}
+_IMAGE_PART_TYPES = {"image", "image_url", "input_image"}
+_MULTIMODAL_IMAGE_PART_TYPES = {"image", "image_url"}
 
 
 def _extract_text_part_value(value: Any) -> str | None:
@@ -43,6 +45,38 @@ def normalize_content_value(content: Any) -> str | None:
         return json.dumps(content, ensure_ascii=False, sort_keys=True)
     except (TypeError, ValueError):
         return str(content)
+
+
+def split_image_parts(content: Any) -> tuple[Any, int]:
+    """Return ``content`` with structured image parts stripped, and their number.
+
+    Mirrors the host's token estimate: a list part of an image type becomes
+    ``{"type": <type>, "image": "[stripped]"}``, and a ``_multimodal`` tool
+    result with image parts becomes its ``text_summary``. Every other value,
+    strings included, is returned unchanged with a count of 0.
+    """
+    if isinstance(content, list):
+        count = sum(
+            1 for part in content if isinstance(part, dict) and part.get("type") in _IMAGE_PART_TYPES
+        )
+        if count:
+            return [
+                {"type": part.get("type"), "image": "[stripped]"}
+                if isinstance(part, dict) and part.get("type") in _IMAGE_PART_TYPES
+                else part
+                for part in content
+            ], count
+    elif isinstance(content, dict) and content.get("_multimodal"):
+        parts = content.get("content")
+        if isinstance(parts, list):
+            count = sum(
+                1
+                for part in parts
+                if isinstance(part, dict) and part.get("type") in _MULTIMODAL_IMAGE_PART_TYPES
+            )
+            if count:
+                return content.get("text_summary") or "", count
+    return content, 0
 
 
 def text_content_for_pattern_matching(content: Any) -> str | None:
