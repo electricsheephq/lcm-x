@@ -30,6 +30,20 @@ def _tool_call_id(tool_call: Any) -> str:
     return str(value).strip() if value else ""
 
 
+def _tool_names_by_call_id(messages: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Map each assistant tool call id to its function name (#680 stub text)."""
+    names: Dict[str, str] = {}
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for tool_call in msg.get("tool_calls") or []:
+            function = tool_call.get("function") if isinstance(tool_call, dict) else None
+            name = str(function.get("name") or "") if isinstance(function, dict) else ""
+            if _tool_call_id(tool_call) and name:
+                names[_tool_call_id(tool_call)] = name
+    return names
+
+
 def _assistant_tool_call_ids(messages: List[Dict[str, Any]]) -> set[str]:
     call_ids: set[str] = set()
     for msg in messages:

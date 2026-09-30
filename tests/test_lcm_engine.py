@@ -26239,7 +26239,8 @@ class TestEngineTools:
         config = LCMConfig(
             database_path=str(tmp_path / "lcm_gc_embed.db"),
             large_output_externalization_enabled=True,
-            large_output_externalization_threshold_chars=200,
+            # 1000 (was 200): the #680 stub is ~255 chars, so the quoting row must stay below the threshold.
+            large_output_externalization_threshold_chars=1000,
             large_output_transcript_gc_enabled=True,
         )
         engine = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))

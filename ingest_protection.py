@@ -2613,6 +2613,7 @@ def protect_message_for_ingest(
     config,
     hermes_home: str = "",
     session_id: str = "",
+    tool_name_hint: str = "",
 ) -> Dict[str, Any]:
     """Return a copy of ``message`` safe to persist in SQLite.
 
@@ -2623,6 +2624,8 @@ def protect_message_for_ingest(
     """
     msg = dict(message or {})
     role = str(msg.get("role") or "unknown")
+    # #680: the tool name the externalized-tool-output stub shows.
+    tool_name = str(msg.get("tool_name") or msg.get("name") or tool_name_hint or "") if role == "tool" else ""
     raw_content = msg.get("content")
     raw_normalized_content = normalize_content_value(raw_content)
     original_content = redact_sensitive_value(
@@ -2667,6 +2670,7 @@ def protect_message_for_ingest(
                 hermes_home=hermes_home,
                 force=True,
                 metadata=persisted_output_metadata,
+                tool_name=tool_name,
             )
 
     # A host-side truncation marker without durable recovered storage is not
@@ -2747,6 +2751,7 @@ def protect_message_for_ingest(
                     role=role,
                     config=config,
                     hermes_home=hermes_home,
+                    tool_name=tool_name,
                 )
             if externalized:
                 msg["content"] = externalized["placeholder"]
@@ -2857,6 +2862,7 @@ def protect_messages_for_ingest(
     config,
     hermes_home: str = "",
     session_id: str = "",
+    tool_names_by_call_id: Dict[str, str] | None = None,
 ) -> List[Dict[str, Any]]:
     return [
         protect_message_for_ingest(
@@ -2864,6 +2870,7 @@ def protect_messages_for_ingest(
             config=config,
             hermes_home=hermes_home,
             session_id=session_id,
+            tool_name_hint=(tool_names_by_call_id or {}).get(str((message or {}).get("tool_call_id") or ""), ""),
         )
         for message in messages
     ]

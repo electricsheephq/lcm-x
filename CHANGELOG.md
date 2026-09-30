@@ -6,6 +6,18 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: a tool-output stub names the tool and says how to read the original, for example
+  `[Externalized tool output: tool=read_file; tool_call_id=…; chars=N; bytes=N; read it with
+  lcm_expand(externalized_ref="R"); ref=R]`. `ref=` stays the last field and the stub stays one line of at most 512
+  characters, so v0.24.7 still reads it after a rollback; stored old stubs keep their text. The payload records the
+  tool name; the LCM system note says how to read any tool-output stub. A ref written before a compression-boundary
+  rotation resolves in `lcm_expand` and `lcm_describe` through the recorded rotation lineage (up to 32 sessions back);
+  payload files are not rewritten, and a ref from an unrelated session still does not resolve. (#680)
+- Fix: forced overflow recovery keeps the newest tool call when a user row precedes it and its result is over the
+  recovery cap. The call is answered by the tool-pair stub, or by the result's #680 stub when it was externalized, as
+  the shape without a user row already was; the recovered context stays within the cap and the stub is not stored.
+  Capped assembly outside forced recovery is unchanged. (#636)
+
 ## v0.24.7 - (unreleased; rc2) (P0 for long-running sessions: the survival fit keeps the summary, no in-turn thrash below the threshold, no level-3 fragments, a bounded summary prefix, steer rows stored)
 
 - Config: the leaf summary target is configurable with `LCM_LEAF_TARGET_RATIO` (default 0.20),
