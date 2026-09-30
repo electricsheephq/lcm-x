@@ -22,6 +22,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   recovery cap. The call is answered by the tool-pair stub, or by the result's #680 stub when it was externalized, as
   the shape without a user row already was; the recovered context stays within the cap and the stub is not stored.
   Capped assembly outside forced recovery is unchanged. (#636)
+- Fix: when the host refuses a compaction of an LCM-bypassed session (an auxiliary side channel or a stateless
+  session) as larger, the foreground session's automatic compaction is no longer held for up to 600 seconds; the
+  same refusal on the foreground session still arms the no-progress hold. (#665)
 
 ## v0.24.7 - (unreleased; rc2) (P0 for long-running sessions: the survival fit keeps the summary, no in-turn thrash below the threshold, no level-3 fragments, a bounded summary prefix, steer rows stored)
 
