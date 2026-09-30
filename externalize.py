@@ -562,7 +562,13 @@ def _externalized_summary(path: Path, payload: Dict[str, Any]) -> Dict[str, Any]
         "content_chars": payload.get("content_chars", len(payload.get("content", ""))),
         "content_bytes": payload.get("content_bytes", len((payload.get("content", "") or "").encode("utf-8"))),
         "created_at": payload.get("created_at"),
-    }
+    } | ({"tool_name": payload["tool_name"]} if payload.get("tool_name") else {})
+
+
+# #680: the tool name is capped so the stub stays one line within the 512-character
+# placeholder limit that v0.24.7 readers (``is_externalized_placeholder``) enforce.
+_PLACEHOLDER_TOOL_NAME_MAX_CHARS = 64
+_PLACEHOLDER_MAX_CHARS = 512
 
 
 def _build_externalized_placeholder(summary: Dict[str, Any]) -> str:
@@ -574,10 +580,18 @@ def _build_externalized_placeholder(summary: Dict[str, Any]) -> str:
             f"chars={summary.get('content_chars', 0)}; bytes={summary.get('content_bytes', 0)}; "
             f"ref={summary.get('ref', '')}]"
         )
-    return (
-        f"[Externalized tool output: tool_call_id={_placeholder_metadata(summary.get('tool_call_id') or '?')}; "
-        f"chars={summary.get('content_chars', 0)}; bytes={summary.get('content_bytes', 0)}; ref={summary.get('ref', '')}]"
+    # #680: name the tool and say how to read the original. ``ref=`` stays the last
+    # field so the v0.24.7 ref regex (and a rollback to it) reads the same ref.
+    ref = summary.get("ref", "")
+    rest = (
+        f"; tool_call_id={_placeholder_metadata(summary.get('tool_call_id') or '?')}; "
+        f"chars={summary.get('content_chars', 0)}; bytes={summary.get('content_bytes', 0)}; "
+        f'read it with lcm_expand(externalized_ref="{ref}"); ref={ref}]'
     )
+    head = "[Externalized tool output: tool="
+    room = _PLACEHOLDER_MAX_CHARS - len(head) - len(rest)
+    tool = _placeholder_metadata(summary.get("tool_name") or "?")[: max(1, min(_PLACEHOLDER_TOOL_NAME_MAX_CHARS, room))]
+    return f"{head}{tool}{rest}"
 
 
 def build_transcript_gc_placeholder(summary: Dict[str, Any]) -> str:
@@ -1160,6 +1174,7 @@ def maybe_externalize_tool_output(
     config,
     hermes_home: str = "",
     force: bool = False,
+    tool_name: str = "",
 ) -> Dict[str, Any] | None:
     return maybe_externalize_payload(
         content,
@@ -1170,6 +1185,7 @@ def maybe_externalize_tool_output(
         config=config,
         hermes_home=hermes_home,
         force=force,
+        tool_name=tool_name,
     )
 
 
@@ -1184,6 +1200,7 @@ def maybe_externalize_payload(
     hermes_home: str = "",
     force: bool = False,
     metadata: Dict[str, Any] | None = None,
+    tool_name: str = "",
 ) -> Dict[str, Any] | None:
     """Externalize one normalized payload if configured.
 
@@ -1228,6 +1245,9 @@ def maybe_externalize_payload(
                     existing = _externalized_summary(existing_path, existing_payload)
                 except OSError as exc:
                     logger.warning("Large payload metadata update skipped (non-blocking): %s", exc)
+        if tool_name and existing.get("tool_name") != tool_name:
+            # #680: the supplied name wins (an older payload may hold none, or another call's).
+            existing = {**existing, "tool_name": tool_name}
         return {
             "placeholder": _build_externalized_placeholder(existing),
             "path": existing_path,
@@ -1258,6 +1278,8 @@ def maybe_externalize_payload(
         "content_bytes": len(content.encode("utf-8")),
         "created_at": time.time(),
     }
+    if tool_name and kind == "tool_result":
+        payload["tool_name"] = str(tool_name)
     if metadata:
         payload.update(_safe_persisted_output_metadata(metadata))
         _merge_persisted_output_marker_metadata(payload, metadata)
@@ -1271,6 +1293,7 @@ def maybe_externalize_payload(
         {
             "kind": kind,
             "tool_call_id": tool_call_id,
+            "tool_name": payload.get("tool_name", ""),
             "role": role,
             "content_chars": payload["content_chars"],
             "content_bytes": payload["content_bytes"],

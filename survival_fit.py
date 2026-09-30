@@ -135,10 +135,12 @@ class SurvivalFitMixin:
             system += 1
         # #650: LCM's summary prefix right after the system slot (on Hermes the first row, role user) stays
         # when whole oldest turns can leave instead and the final list fits the budget; else the old rule.
-        # Only rows of proven provenance (scaffold, a verified carrier) are the prefix, never a phrase match.
+        # Only rows of proven provenance are the prefix, never a phrase match: a summary row whose DAG node
+        # exists in this session at the same depth with equal bytes, a preserved objective/todo row, or a
+        # verified carrier (#678). A genuine summary that fails verification falls back to the v0.24.6 rule.
         prefix = system
         while prefix < len(result) and isinstance(result[prefix], dict) and (
-                self._is_replayed_context_scaffold_message(result[prefix])
+                self._is_verified_replay_scaffold_message(result[prefix])
                 or self._generated_context_carrier_remainder(result[prefix]) is not None):
             prefix += 1
         # The ingest cursor indexes this list with nothing to reconcile: every row of it is persisted,

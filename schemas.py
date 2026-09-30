@@ -1010,7 +1010,8 @@ LCM_DESCRIBE = {
         "Inspect a summary node's subtree metadata WITHOUT loading full content. "
         "Node and overview lookup default to the current session; pass an explicit session_id "
         "to inspect a known node or DAG from another LCM session. A node must belong to the "
-        "requested session. externalized_ref remains current-session only. Returns token counts, "
+        "requested session. externalized_ref reads the current session or one it replaced at a "
+        "compression-boundary rotation. Returns token counts, "
         "child manifest, expand hints, or externalized payload metadata/preview. If called with "
         "no node_id or externalized_ref, returns the top-level overview for the selected session. "
         "This tool cannot discover session ids; for Hermes-tracked session history outside the "
@@ -1168,7 +1169,16 @@ LCM_DOCTOR = {
     ),
     "parameters": {
         "type": "object",
-        "properties": {},
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["repair_level3"],
+                "description": (
+                    "Optional. repair_level3: read-only scan for level 3 truncation fragments and the condensed "
+                    "summary nodes built on them; writes nothing. The repair itself is operator-only."
+                ),
+            },
+        },
         "required": [],
     },
 }

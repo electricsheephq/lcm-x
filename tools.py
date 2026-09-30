@@ -42,6 +42,8 @@ from .db_bootstrap import (
     load_integrity_failed,
 )
 from .extraction import sanitize_pre_compaction_content
+from .inactive_record import inactive_record_notice
+from .level3_repair import scan_level3_fragments
 from .ingest_protection import (
     EmbeddingPrivacyPolicyError,
     embedding_provider_requires_privacy,
@@ -177,7 +179,11 @@ def _get_externalized_payload(
     if payload is None:
         return None
     payload_session_id = payload.get("session_id") or ""
-    allowed = allowed_session_ids or {engine.current_session_id}
+    allowed = allowed_session_ids
+    if not allowed:
+        # #680: a ref written before a compression-boundary rotation stays readable.
+        lineage = getattr(engine, "_rotation_predecessor_session_ids", None)
+        allowed = {engine.current_session_id, *(lineage(engine.current_session_id) if callable(lineage) else [])}
     if payload_session_id and payload_session_id not in allowed:
         return None
     return payload
@@ -6611,6 +6617,9 @@ def lcm_describe(args: Dict[str, Any], **kwargs) -> str:
             )
             return json.dumps({"error": f"Node {node_id} not found in {scope}"})
         info = engine._dag.describe_subtree(node_id)
+        provenance = engine._dag.get_node_provenance(node.node_id)  # #441
+        if provenance is not None:
+            info.update(provenance)
         if session_id_explicit:
             info["session_id"] = node.session_id
             info["expand_hint"] = _session_expand_hint(node.node_id, node.session_id)
@@ -8099,11 +8108,15 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
     # been bound, so cron-only or stateless-only deployments still report
     # something usable.
     session_id = engine.current_session_id
+    # #622: another process of this profile where Hermes did not take LCM-X.
+    inactive_process = inactive_record_notice(getattr(engine, "_hermes_home", ""))
+    inactive_payload = {"inactive_process": inactive_process} if inactive_process else {}
     if not session_id:
         return json.dumps({
             "error": "No active session",
             "runtime_identity": engine.get_runtime_identity(),
             "identity_migration": getattr(engine, "identity_migration", None),
+            **inactive_payload,
         })
 
     # Store stats
@@ -8169,6 +8182,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         },
         "dag": {
             "total_nodes": total_dag_nodes,
+            "nodes_by_escalation_level": engine._dag.count_nodes_by_escalation_level(session_id),
             "total_tokens": total_dag_tokens,
             "compression_ratio": f"{compression_ratio}:1",
             "depths": {
@@ -8205,6 +8219,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
             "summary_model": engine._config.summary_model or "(auxiliary)",
             "summary_reasoning_effort": engine._config.summary_reasoning_effort or "(task default)",
             "summary_timeout_ms": engine._config.summary_timeout_ms,
+            "summary_prompt_version": getattr(engine._config, "summary_prompt_version", 1),
             "summary_spend_max_calls": engine._config.summary_spend_max_calls,
             "summary_spend_window_seconds": engine._config.summary_spend_window_seconds,
             "summary_spend_backoff_seconds": engine._config.summary_spend_backoff_seconds,
@@ -8251,6 +8266,8 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         "identity_migration": full_status.get("identity_migration"),
         "lifecycle": lifecycle,
         "lifecycle_fragmentation": lifecycle_fragmentation,
+        "summary_route": engine._summary_route_status(),
+        **inactive_payload,
     })
 
 
@@ -8259,6 +8276,16 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     engine = _require_engine(kwargs)
     if engine is None:
         return json.dumps({"error": "LCM engine not initialized"})
+    action = str(args.get("action") or "").strip().lower()
+    if action:
+        if action != "repair_level3":
+            return json.dumps({"error": f"unknown lcm_doctor action: {action}"})
+        if args.get("apply"):
+            return json.dumps({"error": "apply is operator-only: use `/lcm doctor repair level3 apply`"})
+        scan = scan_level3_fragments(engine)  # #667: read-only, like `/lcm doctor repair level3`
+        return json.dumps({
+            "action": action, "status": "repair-needed" if scan["flagged"] else "ok", "read_only": True, **scan,
+        })
 
     checks: list[dict] = []
     # Diagnose the foreground session, not whatever side-channel session

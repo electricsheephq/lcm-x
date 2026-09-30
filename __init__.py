@@ -9,10 +9,15 @@ Based on the LCM paper by Ehrlich & Blackman (Voltropy PBC, Feb 2026).
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Hermes' plugin load deadline (plugins.load_timeout_seconds) covers import plus
+# register(); measure the load from here (#622).
+_MODULE_IMPORTED_AT = time.monotonic()
 
 
 def get_recall_policy() -> str:
@@ -410,6 +415,48 @@ def _warn_if_embedding_provider_unavailable(config) -> None:
         logger.debug("LCM embedding provider startup probe failed: %s", exc)
 
 
+def _engine_took_slot(ctx, engine, hermes_home: str) -> bool:
+    """Whether Hermes made *engine* this process's context engine (#622).
+
+    Say so loudly when it did not: Hermes ignores registrations from a load that
+    overran ``plugins.load_timeout_seconds`` and then runs the built-in
+    compressor. A host whose state cannot be read counts as active.
+    """
+    abandoned = getattr(ctx, "_load_abandoned", False) is True
+    unknown = object()
+    holder = getattr(getattr(ctx, "_manager", None), "_context_engine", unknown)
+    if not abandoned and (holder is unknown or holder is engine):
+        return True
+    elapsed = time.monotonic() - _MODULE_IMPORTED_AT
+    if abandoned:
+        reason = f"plugin load took {elapsed:.1f} s, over plugins.load_timeout_seconds"
+        logger.error(
+            "LCM-X is NOT active in this process: Hermes ignored "
+            "register_context_engine() because the plugin load took %.1f s, over "
+            "plugins.load_timeout_seconds. This process uses the built-in "
+            "compressor and does not write lcm.db. Restart Hermes; if it recurs, "
+            "set plugins.load_timeout_seconds: 60.",
+            elapsed,
+        )
+    else:
+        holder_name = type(holder).__name__ if holder is not None else "no engine"
+        reason = f"context engine slot held by {holder_name}"
+        logger.warning(
+            "LCM-X is NOT the active context engine in this process: Hermes kept "
+            "the context engine %s (%r) and did not take lcm-x. Enable only one "
+            "context-engine plugin, set context.engine: lcm-x, and restart Hermes.",
+            holder_name,
+            getattr(holder, "name", None),
+        )
+    try:
+        from .inactive_record import write_inactive_record
+
+        write_inactive_record(hermes_home, elapsed_s=elapsed, reason=reason)
+    except Exception as exc:
+        logger.warning("LCM-X could not record the inactive state for /lcm doctor: %s", exc)
+    return False
+
+
 def register(ctx):
     """Plugin entry point — register the LCM context engine and tools."""
     from .config import LCMConfig
@@ -484,6 +531,7 @@ def register(ctx):
 
     # Register as the context engine (replaces ContextCompressor)
     ctx.register_context_engine(engine)
+    active = _engine_took_slot(ctx, engine, hermes_home)
 
     # Ship the same recall contract through both Hermes plugin skill
     # registration (explicit qualified loads) and the installer's ordinary
@@ -609,6 +657,8 @@ def register(ctx):
                     name,
                     exc,
                 )
+    elif not active:
+        pass  # Hermes did not take the engine, so its schemas are not served.
     elif callable(register_tool):
         logger.info(
             "LCM tools are available through context-engine schemas "
@@ -725,4 +775,13 @@ def register(ctx):
 
     _warn_if_embedding_provider_unavailable(config)
 
-    logger.info("LCM plugin loaded — lossless context management active")
+    # The load deadline can also expire after the engine registered.
+    if active and _engine_took_slot(ctx, engine, hermes_home):
+        logger.info(
+            "LCM plugin loaded — lossless context management active (load %.2f s)",
+            time.monotonic() - _MODULE_IMPORTED_AT,
+        )
+        # A slow log sink can outlast the deadline, so check once more. An
+        # abandonment after this check, before register() returns, cannot be
+        # seen from inside the plugin.
+        _engine_took_slot(ctx, engine, hermes_home)

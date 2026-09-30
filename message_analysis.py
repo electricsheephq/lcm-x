@@ -30,6 +30,28 @@ def _tool_call_id(tool_call: Any) -> str:
     return str(value).strip() if value else ""
 
 
+def _tool_result_names(messages: List[Dict[str, Any]]) -> Dict[int, str]:
+    """Map each tool result's index to the function name of the nearest preceding
+    assistant call with its id (#680 stub text; a call id may be reused)."""
+    latest: Dict[str, str] = {}
+    names: Dict[int, str] = {}
+    for index, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") == "tool":
+            name = latest.get(str(msg.get("tool_call_id") or "").strip(), "")
+            if name:
+                names[index] = name
+            continue
+        if msg.get("role") != "assistant":
+            continue
+        for tool_call in msg.get("tool_calls") or []:
+            function = tool_call.get("function") if isinstance(tool_call, dict) else None
+            if _tool_call_id(tool_call):
+                latest[_tool_call_id(tool_call)] = str(function.get("name") or "") if isinstance(function, dict) else ""
+    return names
+
+
 def _assistant_tool_call_ids(messages: List[Dict[str, Any]]) -> set[str]:
     call_ids: set[str] = set()
     for msg in messages:
