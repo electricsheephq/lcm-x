@@ -6,6 +6,24 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: a summary route that cannot serve its model (HTTP 400/404 whose message names the model as unknown, not
+  found, not existing or not supported) opens its circuit on the first failure instead of the second, so level 2 is not
+  attempted, and logs one WARNING per episode that names the provider and model the host used (`route_info`, on
+  hosts that take it), says whether LCM-X sent a model, and names the fix (`auxiliary.compression.provider` +
+  `auxiliary.compression.model` in the profile's `config.yaml`, or a consistent `model.provider` / `model.default`
+  pair). Repeats log at DEBUG; a success ends the episode. Other failures keep the threshold and cooldown. `lcm_status`
+  gains `summary_route` (`state`, `seconds_left`, `last_error_class`, `provider`, `model`). Rollups get their own
+  config-error episode under their own breaker keys (#669); the live key is still the configured model, not the
+  effective route. (#682)
+- Fix: a host retry after a cancelled but committed compaction adopts the committed summary (#457) while every
+  summary route is refused: on the first pass the adoption runs before the summary-route stop (#628), since it needs no
+  summary route. With nothing to adopt the stop applies as before, and no new leaf is written while the circuit is
+  open. (#640)
+- Fix: a host recovery call (`compress(..., bypass_cooldown=True)`, #608) after a preflight that saw a
+  compaction-boundary cooldown runs the summariser: it also clears the cooldown's cleanup-only handoff, so a list at
+  or over the threshold and under the survival ceiling is summarised instead of only sanitised and fitted. An ordinary
+  automatic call during the cooldown is still cleanup-only, and forced overflow is unchanged. The native-recovery
+  handoff is kept (native recovery owns a below-threshold list). (#684)
 - Feature: every new leaf and condensed summary node records its escalation level (1, 2 or 3) and the model that
   produced it, in a new `summary_node_provenance` table written in the node's own transaction. `lcm_describe` shows
   both; `lcm_status` counts nodes by level (`unrecorded` for older and imported nodes, which are not backfilled). No

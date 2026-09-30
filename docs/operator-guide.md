@@ -459,6 +459,19 @@ the rows stay stored and are summarised once a route works again, and the WARNIN
 survival fit off (`LCM_SURVIVAL_FIT=false`) or the model window unknown, the plugin converges through level 3 as
 before.
 
+A summary route that cannot serve its model is a configuration error, not a transient failure (#682): an HTTP 400
+or 404 whose message says the model is unknown, not found, does not exist or is not supported (context-length,
+rate-limit, billing, timeout and 5xx errors are ordinary failures). It opens that route's circuit on the first
+failure, so level 2 is not attempted, and logs one WARNING per episode:
+`LCM summary route cannot serve the summary model: provider=<p> model=<m>; LCM-X sent no model (summary_model unset)
+...`. The route is the one the host reports it used (`route_info`; "host default route" on a host that reports
+none). Fix it in the profile's `config.yaml`: set `auxiliary.compression.provider` and `auxiliary.compression.model`
+together, or make `model.provider` and `model.default` a pair the provider can serve. Each retry after the cooldown
+that fails the same way logs at DEBUG; a successful summary ends the episode. Other failures keep the threshold and
+cooldown above. `lcm_status` reports the circuit as `summary_route`: `state` (`open` while every summary route is
+refused, else `closed`), `seconds_left`, and for the primary route `last_error_class` (`config_error`,
+`provider_failure`, `rejected` or null after a success) and the `provider` and `model` the host reported.
+
 Each new leaf and condensed node records the level that produced it (1, 2 or 3) and the model that answered
 (`""` for the host's default route, `deterministic` for level 3) in the `summary_node_provenance` table.
 `lcm_describe(node_id=...)` shows them as `escalation_level` and `model`, and `lcm_status` counts the session's nodes
