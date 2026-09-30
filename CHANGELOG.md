@@ -6,6 +6,11 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: a temporal rollup whose summary comes back as a level 3 truncation is not stored; the rollup stays pending for
+  its next build and one warning is logged (a level 3 result that is the whole source is still stored). Rollup
+  maintenance starts no build while the summary route is refused, and rollups record circuit results under their own
+  breaker keys, so a rollup burst can neither open nor close the live compaction route's circuit. (#669)
+
 ## v0.24.7 - (unreleased; rc2) (P0 for long-running sessions: the survival fit keeps the summary, no in-turn thrash below the threshold, no level-3 fragments, a bounded summary prefix, steer rows stored)
 
 - Config: the leaf summary target is configurable with `LCM_LEAF_TARGET_RATIO` (default 0.20),
