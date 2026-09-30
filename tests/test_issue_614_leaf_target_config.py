@@ -178,3 +178,14 @@ def test_t5_default_env_config_equals_the_constructor_defaults():
     d = LCMConfig()
     assert (c.leaf_target_ratio, c.leaf_target_min_tokens, c.leaf_target_max_tokens) == (
         d.leaf_target_ratio, d.leaf_target_min_tokens, d.leaf_target_max_tokens)
+
+
+def test_t6_config_without_the_614_fields_keeps_the_historical_targets():
+    """A config object built before the knobs existed (no leaf_target_* attributes) must not raise."""
+    current = LCMConfig()
+    old = SimpleNamespace(**{
+        name: getattr(current, name) for name in vars(current) if not name.startswith("leaf_target_")})
+    assert not hasattr(old, "leaf_target_ratio")
+    engine = SimpleNamespace(_config=old)
+    assert [LCMEngine._leaf_target_tokens(engine, n) for n in (8_000, 20_000, 100_000)] == [
+        2_000, 4_000, 12_000]
