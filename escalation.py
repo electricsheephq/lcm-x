@@ -648,6 +648,7 @@ def _invoke_summary_llm_chain(
     spend_guard: "SummarySpendGuard | None" = None,
     accepts_result: Callable[[str], bool] | None = None,
     source_tokens: int | None = None,
+    provenance: dict | None = None,
     deadline: float | None = None,
     route_key_prefix: str = "",
 ) -> Optional[str]:
@@ -692,6 +693,8 @@ def _invoke_summary_llm_chain(
         if result and (accepts_result is None or accepts_result(result)):
             if circuit_breaker is not None:
                 circuit_breaker.record_success(route_key)
+            if provenance is not None:  # #441: the route that actually answered
+                provenance["model"] = candidate_model
             return result
         if result is not None:  # #628: a content rejection, not a provider failure
             logger.warning(
@@ -877,6 +880,7 @@ def summarize_with_escalation(
     circuit_breaker: SummaryCircuitBreaker | None = None,
     spend_guard: "SummarySpendGuard | None" = None,
     prompt_version: int = 1,
+    provenance: dict | None = None,
     deadline: float | None = None,
     *,
     route_key_prefix: str = "",
@@ -885,11 +889,13 @@ def summarize_with_escalation(
 
     Guarantees convergence: level 3 is deterministic and always produces
     output shorter than the source. ``prompt_version`` 2 (#646) selects the v2
-    prompts and a 3x output ceiling; 1 keeps the original prompts and 2x. With
-    ``deadline`` (absolute ``time.monotonic()``), every route attempt gets at most
-    the time left and SweepBudgetExhausted is raised instead of starting one with
-    less than ``_THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS`` (#666); it never falls
-    through to level 3.
+    prompts and a 3x output ceiling; 1 keeps the original prompts and 2x. When
+    ``provenance`` is a dict, its ``"model"`` is set to the model that produced
+    the accepted summary (``""`` = host default route, ``"deterministic"`` =
+    level 3) (#441). With ``deadline`` (absolute ``time.monotonic()``), every
+    route attempt gets at most the time left and SweepBudgetExhausted is raised
+    instead of starting one with less than ``_THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS``
+    (#666); it never falls through to level 3.
     """
     # Level 1: detailed summary
     l1_prompt = _build_l1_prompt(text, token_budget, depth,
@@ -907,6 +913,7 @@ def summarize_with_escalation(
         spend_guard=spend_guard,
         accepts_result=lambda result: count_tokens(result) < source_tokens,
         source_tokens=source_tokens,
+        provenance=provenance,
         deadline=deadline,
         route_key_prefix=route_key_prefix,
     )
@@ -932,6 +939,7 @@ def summarize_with_escalation(
         spend_guard=spend_guard,
         accepts_result=lambda result: count_tokens(result) < source_tokens,
         source_tokens=source_tokens,
+        provenance=provenance,
         deadline=deadline,
         route_key_prefix=route_key_prefix,
     )
@@ -944,5 +952,7 @@ def summarize_with_escalation(
         raise SweepBudgetExhausted("threshold full sweep time budget exhausted")  # #666: time never yields L3
     # Level 3: deterministic truncation — guaranteed convergence
     l3_result = _deterministic_truncate(text, l3_truncate_tokens)
+    if provenance is not None:
+        provenance["model"] = "deterministic"
     logger.debug("L3 deterministic truncation (%d tokens)", count_tokens(l3_result))
     return l3_result, 3

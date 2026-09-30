@@ -317,6 +317,7 @@ _KNOWN_FEATURE_TABLE_PREFIXES = (
     "lcm_assertion",
     "lcm_query",
     "lcm_trajectory",
+    "summary_node_provenance",  # #441 per-node level/model sidecar, not a derived cache
 )
 
 # The known opt-in feature families whose derived tables an interim build may

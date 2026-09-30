@@ -6,6 +6,10 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Feature: every new leaf and condensed summary node records its escalation level (1, 2 or 3) and the model that
+  produced it, in a new `summary_node_provenance` table written in the node's own transaction. `lcm_describe` shows
+  both; `lcm_status` counts nodes by level (`unrecorded` for older and imported nodes, which are not backfilled). No
+  schema version change and no new `summary_nodes` column, so a plugin rollback still opens the store. Refs #441
 - Feature: `LCM_SUMMARY_PROMPT_VERSION` (default `1`, unchanged prompts) opts in to summariser prompt v2: six fixed
   headings, focus directives in the trusted policy with only the tagged topic in the transcript message, and a 3x
   output ceiling. Refs #646

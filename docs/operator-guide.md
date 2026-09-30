@@ -459,6 +459,13 @@ the rows stay stored and are summarised once a route works again, and the WARNIN
 survival fit off (`LCM_SURVIVAL_FIT=false`) or the model window unknown, the plugin converges through level 3 as
 before.
 
+Each new leaf and condensed node records the level that produced it (1, 2 or 3) and the model that answered
+(`""` for the host's default route, `deterministic` for level 3) in the `summary_node_provenance` table.
+`lcm_describe(node_id=...)` shows them as `escalation_level` and `model`, and `lcm_status` counts the session's nodes
+under `dag.nodes_by_escalation_level`. Nodes written before this change, and imported nodes, have no record and count
+as `unrecorded`; they are not backfilled. The table sits beside `summary_nodes`, so the schema version does not
+change and a rollback to an older plugin still opens the store (the older build ignores the table).
+
 ### Evidence and adaptive retrieval (0.21 RC)
 
 Hermes exposes all 15 LCM tool schemas whenever LCM is the active context
