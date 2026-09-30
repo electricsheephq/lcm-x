@@ -1947,7 +1947,7 @@ class LCMEngine(
                     l3_truncate_tokens=self._config.l3_truncate_tokens,
                     focus_topic=focus_topic or "",
                     custom_instructions=self._config.custom_instructions,
-                    prompt_version=self._config.summary_prompt_version,
+                    prompt_version=getattr(self._config, "summary_prompt_version", 1),
                 )
                 return attempt_chunk, source_tokens, summary_text, level, attempt_number
             except Exception as exc:
@@ -6780,7 +6780,7 @@ class LCMEngine(
             l3_truncate_tokens=self._config.l3_truncate_tokens,
             focus_topic=focus_topic or "",
             custom_instructions=self._config.custom_instructions,
-            prompt_version=self._config.summary_prompt_version,
+            prompt_version=getattr(self._config, "summary_prompt_version", 1),
         )
         earliest_at, latest_at = self._dag.get_source_time_window(
             [node.node_id for node in nodes]

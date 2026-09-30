@@ -258,3 +258,29 @@ def test_engine_passes_the_version_at_the_condensation_site(v2_engine, monkeypat
 def test_rollups_follow_the_configured_version():
     assert _summary_controls(LCMConfig())["prompt_version"] == 1
     assert _summary_controls(LCMConfig(summary_prompt_version=2))["prompt_version"] == 2
+
+
+def test_t19_config_without_the_field_uses_version_1_everywhere():
+    """A config object built before #646 (no summary_prompt_version) selects version 1 and never raises."""
+    from dataclasses import fields
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+
+    current = LCMConfig()
+    old = SimpleNamespace(**{f.name: getattr(current, f.name) for f in fields(current)
+                             if f.name != "summary_prompt_version"})
+    assert not hasattr(old, "summary_prompt_version")
+    assert _summary_controls(old)["prompt_version"] == 1
+
+    engine = object.__new__(LCMEngine)
+    engine._config = old
+    engine._summary_circuit_breaker = None
+    engine._summary_spend_guard = None
+    engine._serialize_messages = lambda messages: "historical transcript"
+    with patch("hermes_lcm.engine.count_messages_tokens", return_value=8000), \
+            patch("hermes_lcm.engine.summarize_with_escalation",
+                  return_value=("valid summary", 1)) as summarize:
+        engine._summarize_leaf_chunk_with_rescue([{"role": "user", "content": "historical transcript"}])
+    assert summarize.call_count == 1
+    assert summarize.call_args.kwargs["prompt_version"] == 1

@@ -251,7 +251,7 @@ def _summary_controls(config: LCMConfig) -> dict[str, object]:
         "l2_budget_ratio": config.l2_budget_ratio,
         "custom_instructions": config.custom_instructions,
         "fallback_models": config.summary_fallback_models,
-        "prompt_version": config.summary_prompt_version,
+        "prompt_version": getattr(config, "summary_prompt_version", 1),
     }
 
 
