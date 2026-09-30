@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+## v0.24.7 - (unreleased; rc1) (P0 for long-running sessions: the survival fit keeps the summary, no in-turn thrash below the threshold, no level-3 fragments, a bounded summary prefix, steer rows stored)
+
 - Config: the leaf summary target is configurable with `LCM_LEAF_TARGET_RATIO` (default 0.20),
   `LCM_LEAF_TARGET_MIN_TOKENS` (default 2000) and `LCM_LEAF_TARGET_MAX_TOKENS` (default 12000). With the defaults every
   target and `max_tokens` value is unchanged; an out-of-range value falls back to its default with a config warning.
@@ -29,8 +31,13 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   newest uncondensed summaries of each depth (oldest first), and a summary budget keeps the newest parts of a depth.
   At or below the target the sweep is unchanged. Every summariser attempt of a sweep (each route, each level) is
   bounded by the sweep's deadline, and one with less than 15 s left is not started. (#653)
+- Fix: the survival fit keeps LCM's summary prefix and removes only whole oldest turns after it, choosing the cut by
+  the final list's size, notice included. A carrier (the summary joined to the first user row) is split so the user
+  row leaves with its reply, then re-formed as assembly forms it. The notice goes only into a real system row. When no
+  whole-turn cut can hold the prefix, the v0.24.6 rule applies with one WARNING `LCM survival fit dropped the summary
+  prefix (emergency: …)`, and the result is never larger than v0.24.6's. (#650)
 
-## v0.24.6 - (unreleased; rc1) (#628, #627: a summary circuit that counts rejections apart from failures, and images priced per image)
+## v0.24.6 - 2026-09-30 (#628, #627: a summary circuit that counts rejections apart from failures, and images priced per image)
 
 - Fix: a summary result rejected for its content (empty, reasoning only, output contract violated, not shorter than
   its source) no longer counts as a failure of the summary route. Only a call that raises or times out counts toward
