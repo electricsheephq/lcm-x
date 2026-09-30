@@ -6,6 +6,11 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: a Hermes update that brings in the new plugin package manager (`pm/`, after v2026.9.24) no longer disables
+  `hermes-lcm-x`. The lint settings moved from `pyproject.toml` to `ruff.toml` and `pyproject.toml` is gone, so the
+  checkout is not a uv workspace member; the stale root `uv.lock` is removed too. Before, the manager staged the
+  lint-only `pyproject.toml` with a name and no version, `uv lock` failed and the plugin went into
+  `plugins.disabled`. The open PR #632 diagnosed the same failure. (#631)
 - Fix: below the host's compaction threshold the host count decides on every preflight branch: an automatic
   `compress()` after any preflight request is cleanup-only when the host's `current_tokens` is known and below the
   threshold, and an automatic call while the #651 hold runs is cleanup-only. Forced, `/compress` and provider-overflow
