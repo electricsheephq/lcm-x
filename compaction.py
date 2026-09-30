@@ -1400,6 +1400,44 @@ class CompactionMixin:
             sweep_step_seconds[step] = sweep_step_seconds.get(step, 0.0) + now - started
             return now
 
+        # #653: a sweep stopped by its budget never reaches the post-drain condensation, so an oversized
+        # summary prefix is condensed first, in half the sweep's passes and time; the leaves use the rest.
+        pre_leaf_condensation_passes, pre_leaf_condensation_reason = 0, ""
+        if (
+            threshold_full_sweep_active
+            and sweep_summary_prefix_before > sweep_target_tokens
+            and self._summary_route_available()
+        ):
+            try:
+                pre_leaf_condensation_passes, pre_leaf_condensation_reason = (
+                    self._run_threshold_sweep_condensation(
+                        target_tokens=sweep_target_tokens,
+                        pass_budget=_THRESHOLD_FULL_SWEEP_MAX_PASSES // 2,
+                        deadline=sweep_deadline - _THRESHOLD_FULL_SWEEP_MAX_SECONDS / 2,
+                        focus_topic=focus_topic,
+                    )
+                )
+            except Exception as exc:
+                if not _is_sqlite_locked_error(exc):
+                    raise
+                return self._fail_open_after_publication_failure(
+                    working_messages,
+                    exc,
+                    compress_started=_compress_started,
+                    threshold_full_sweep_active=threshold_full_sweep_active,
+                    recovery_assembly_cap=recovery_assembly_cap,
+                    leaf_passes=0,
+                    condensation_passes=int(getattr(exc, "lcm_completed_condensation_passes", 0)),
+                )
+            max_leaf_passes -= pre_leaf_condensation_passes
+        if threshold_full_sweep_active:
+            self._last_threshold_full_sweep.update(
+                condensation_passes=pre_leaf_condensation_passes,
+                total_passes=pre_leaf_condensation_passes,
+                pre_leaf_condensation_passes=pre_leaf_condensation_passes,
+                pre_leaf_condensation_stop_reason=pre_leaf_condensation_reason,
+            )
+
         while leaf_passes < max_leaf_passes:
             if threshold_full_sweep_active and time.monotonic() >= sweep_deadline:
                 sweep_stop_reason = "time_budget_exhausted"
@@ -1752,6 +1790,7 @@ class CompactionMixin:
                     self._schedule_pre_compaction_assertions(summary_input_chunk)
 
                 step_started = time.monotonic() if threshold_full_sweep_active else 0.0
+                self._last_leaf_level_3_verbatim = False
                 try:
                     summary_kwargs: dict[str, Any] = {"focus_topic": focus_topic}
                     if threshold_full_sweep_active:
@@ -1784,6 +1823,11 @@ class CompactionMixin:
                 finally:
                     if threshold_full_sweep_active:
                         sweep_step_done("summariser", step_started)
+                # #652: no truncated level 3 leaf while the fit can rescue; the backlog stays. A level 3 that
+                # is the whole source (it already fits the truncation budget) loses nothing and is written.
+                if _level == 3 and self._fit_can_rescue(force_overflow) and not self._last_leaf_level_3_verbatim:
+                    sweep_stop_reason = "summary_result_rejected"
+                    break
             anchor_claimed_ids = sorted({  # #436 R4: only claims whose text the summarizer actually read
                 store_id for message in compacted_chunk for store_id in anchor_claims.get(id(message), ())
             })
@@ -1990,6 +2034,13 @@ class CompactionMixin:
             if not leaf_compacted_this_turn:
                 noop_reason = "summary route unavailable"
                 self._start_sweep_budget_hold(seconds_left)
+        elif sweep_stop_reason == "summary_result_rejected":
+            logger.warning(
+                "LCM compaction stopped: summary result rejected at level 3; %d leaves written, backlog kept",
+                leaf_passes,
+            )
+            if not leaf_compacted_this_turn:
+                noop_reason = "summary result rejected"
 
         if not leaf_compacted_this_turn:
             if sweep_stop_reason == "time_budget_exhausted":
@@ -2103,7 +2154,7 @@ class CompactionMixin:
                 if sweep_raw_drained:
                     remaining_passes = max(
                         0,
-                        _THRESHOLD_FULL_SWEEP_MAX_PASSES - leaf_passes,
+                        _THRESHOLD_FULL_SWEEP_MAX_PASSES - leaf_passes - pre_leaf_condensation_passes,
                     )
                     condensation_passes, sweep_stop_reason = (
                         self._run_threshold_sweep_condensation(
@@ -2190,13 +2241,14 @@ class CompactionMixin:
         # edge cases (e.g. forced overflow recovery bypassing _assemble_context).
         compressed = self._sanitize_active_context_messages(compressed)
         if threshold_full_sweep_active:
-            total_passes = leaf_passes + condensation_passes
+            total_passes = leaf_passes + pre_leaf_condensation_passes + condensation_passes
             duration_ms = (time.perf_counter() - _compress_started) * 1000.0
             final_stop_reason = sweep_stop_reason or "raw_prefix_drained"
             partial_stop_reasons = {
                 "pass_budget_exhausted",
                 "time_budget_exhausted",
                 "summary_route_unavailable",
+                "summary_result_rejected",
                 "leaf_summary_error",
                 "condensation_error",
                 "condensation_no_progress",
@@ -2205,7 +2257,9 @@ class CompactionMixin:
             self._last_threshold_full_sweep = {
                 "status": "partial" if final_stop_reason in partial_stop_reasons else "completed",
                 "leaf_passes": leaf_passes,
-                "condensation_passes": condensation_passes,
+                "condensation_passes": pre_leaf_condensation_passes + condensation_passes,
+                "pre_leaf_condensation_passes": pre_leaf_condensation_passes,
+                "pre_leaf_condensation_stop_reason": pre_leaf_condensation_reason,
                 "total_passes": total_passes,
                 "duration_ms": round(duration_ms, 3),
                 "tokens_before": self._last_threshold_full_sweep["tokens_before"],

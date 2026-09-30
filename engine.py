@@ -387,6 +387,10 @@ class SweepBudgetExhausted(TimeoutError):
     """The threshold sweep's own time budget is spent: a stop condition, not a provider failure."""
 
 
+class SummaryResultRejected(RuntimeError):
+    """#652: a level 3 condensation while the survival fit can rescue the request; no node was written."""
+
+
 def _normalize_total_compactions(value: Any) -> int:
     """Return a persisted compaction total only when it is a valid counter."""
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -1564,12 +1568,15 @@ class LCMEngine(
         return summary_route_available(
             self._config.summary_model, self._config.summary_fallback_models, self._summary_circuit_breaker)
 
+    def _fit_can_rescue(self, force_overflow: bool) -> bool:
+        """#652: false when forced or no survival fit can keep the request under the window (fit off, or
+        window unknown); only then does a level 3 truncation still converge as before."""
+        return not force_overflow and int(self.context_length or 0) > 0 and bool(
+            getattr(self._config, "survival_fit", True))
+
     def _summary_route_stop_applies(self, force_overflow: bool) -> bool:
-        """#628: write no leaf or node while every route is refused, unless forced or no survival fit can keep
-        the request under the window (fit off, or window unknown): then level 3 converges as before."""
-        if force_overflow or int(self.context_length or 0) <= 0 or not getattr(self._config, "survival_fit", True):
-            return False
-        return not self._summary_route_available()
+        """#628: write no leaf or node while every route is refused, unless the fit cannot rescue."""
+        return self._fit_can_rescue(force_overflow) and not self._summary_route_available()
 
     def _summary_route_seconds_left(self) -> float:
         return self._summary_circuit_breaker.seconds_until_allowed(
@@ -1958,6 +1965,7 @@ class LCMEngine(
                     focus_topic=focus_topic or "",
                     custom_instructions=self._config.custom_instructions,
                 )
+                self._last_leaf_level_3_verbatim = level == 3 and summary_text == serialized  # #652: no fragment
                 return attempt_chunk, source_tokens, summary_text, level, attempt_number
             except Exception as exc:
                 if isinstance(exc, SweepBudgetExhausted):
@@ -6696,7 +6704,7 @@ class LCMEngine(
 
         condensation_passes = 0
         suppression_reason = ""
-        route_stopped = False
+        route_stopped = result_rejected = False
         fanin = max(1, self._config.condensation_fanin)
 
         for depth in range(upper):
@@ -6726,7 +6734,11 @@ class LCMEngine(
                 source_tokens, summary_tokens, level = self._condense_summary_nodes(
                     to_condense,
                     focus_topic=focus_topic,
+                    force_overflow=force_overflow,
                 )
+            except SummaryResultRejected:
+                result_rejected = True  # #652: the nodes stay on the frontier
+                break
             except Exception as exc:
                 if _is_sqlite_locked_error(exc):
                     setattr(
@@ -6750,6 +6762,8 @@ class LCMEngine(
             self._last_condensation_suppressed_reason = suppression_reason
         if route_stopped:
             self._last_condensation_suppressed_reason = "summary_route_unavailable"
+        if result_rejected:
+            self._last_condensation_suppressed_reason = "summary_result_rejected"
         return condensation_passes
 
     def _condense_summary_nodes(
@@ -6758,6 +6772,7 @@ class LCMEngine(
         *,
         focus_topic: Optional[str] = None,
         deadline: Optional[float] = None,
+        force_overflow: bool = False,
     ) -> tuple[int, int, int]:
         """Persist one same-depth condensation and return source/output tokens and level."""
         if not nodes:
@@ -6790,6 +6805,8 @@ class LCMEngine(
             focus_topic=focus_topic or "",
             custom_instructions=self._config.custom_instructions,
         )
+        if level == 3 and summary_text != combined_text and self._fit_can_rescue(force_overflow):
+            raise SummaryResultRejected("summary result rejected at level 3")  # a truncation, not the whole text
         earliest_at, latest_at = self._dag.get_source_time_window(
             [node.node_id for node in nodes]
         )
@@ -6877,6 +6894,8 @@ class LCMEngine(
                 )
             except SweepBudgetExhausted:
                 return passes, "time_budget_exhausted"
+            except SummaryResultRejected:
+                return passes, "summary_result_rejected"  # #652: no level 3 node; the group stays on the frontier
             except Exception as exc:
                 if _is_sqlite_locked_error(exc):
                     setattr(exc, "lcm_completed_condensation_passes", passes)
@@ -7285,10 +7304,13 @@ class LCMEngine(
             summary_role = "user"
         else:
             summary_role = "assistant" if last_role != "assistant" else "user"
+        # #653: (selection group, node id) per part; the anchor goes first, then each depth, deepest first.
+        part_keys: list[tuple[int, Optional[int]]] = []
         if anchor_part is not None:
             anchor_msg = {"role": summary_role, "content": anchor_part}
             if summary_budget is None or count_message_tokens(anchor_msg) <= summary_budget:
                 summary_parts.append(anchor_part)
+                part_keys.append((-1, None))
 
         # Node ids placed in the summary prefix — used to dedupe proactive-recall
         # injection against summaries already visible in the active context.
@@ -7299,10 +7321,10 @@ class LCMEngine(
             # For active context, we want the highest-level summaries
             # that haven't been condensed into even higher levels
             depths = sorted(set(n.depth for n in all_nodes), reverse=True)
-            for d in depths:
-                uncondensed = self._dag.get_uncondensed_at_depth(self._session_id, d)
+            for group, d in enumerate(depths):
+                uncondensed = self._dag.get_uncondensed_at_depth(self._session_id, d, newest=True)
                 for node in uncondensed:
-                    active_summary_node_ids.add(node.node_id)
+                    part_keys.append((group, node.node_id))
                     depth_label = {
                         0: "Recent",
                         1: "Session Arc",
@@ -7317,17 +7339,20 @@ class LCMEngine(
         retained_generated_context_parts: list[str] = []
         summary_message: Optional[Dict[str, Any]] = None
         if summary_parts:
-            selected_parts = summary_parts
+            kept_indexes = list(range(len(summary_parts)))
             if summary_budget is not None:
-                selected_parts = []
-                for part in summary_parts:
-                    candidate = "\n\n---\n\n".join(selected_parts + [part])
+                # #653: within a depth the newest parts are kept first; kept parts render in the order above.
+                kept_indexes = []
+                for index in sorted(range(len(summary_parts)), key=lambda i: (part_keys[i][0], -i)):
+                    candidate = "\n\n---\n\n".join(summary_parts[i] for i in sorted(kept_indexes + [index]))
                     candidate_msg = {"role": summary_role, "content": candidate}
                     if count_message_tokens(candidate_msg) > summary_budget:
-                        if part == anchor_part:
-                            continue
                         continue
-                    selected_parts.append(part)
+                    kept_indexes.append(index)
+                kept_indexes.sort()
+            selected_parts = [summary_parts[i] for i in kept_indexes]
+            active_summary_node_ids.update(
+                part_keys[i][1] for i in kept_indexes if part_keys[i][1] is not None)
             if selected_parts:
                 combined = "\n\n---\n\n".join(selected_parts)
                 if retained_user_msg is not None:
