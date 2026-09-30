@@ -431,9 +431,12 @@ follows a line that names the kind (`LCM summary discarded empty output`, `... r
 source. A route opens with `LCM summary route circuit opened for <route> after N failure(s)` or
 `... after N rejected result(s)`.
 
-A leaf whose own level 1 and level 2 results were rejected is written at level 3: a deterministic cut of its
-source that keeps the start and the end. Its rows stay stored; read them with `lcm_expand` on that leaf. The
-compaction line counts these leaves (`, N level 3 leaves`).
+When a leaf's own level 1 and level 2 results are rejected and the survival fit can keep the request under the
+window, the compaction writes no leaf and no node for it and keeps its rows for a later pass (#652). A level 3
+leaf, a deterministic cut of its source that keeps the start and the end, is still written when the cut is the
+whole source, in a forced overflow recovery, with the survival fit off (`LCM_SURVIVAL_FIT=false`) or when the
+model window is unknown; its rows stay stored, and `lcm_expand` on that leaf reads them. The compaction line
+counts these leaves (`, N level 3 leaves`).
 
 An open circuit now pauses compaction instead of writing level 3 truncations: while every summary route is
 refused, a compaction that is not a forced overflow recovery writes no new leaf or condensed node, keeps the rows

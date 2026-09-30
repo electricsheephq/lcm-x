@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Docs (#685): the operator guide and the skill reference now say that since #652 a leaf whose level 1 and level 2 results are rejected is not stored while the survival fit can rescue the request; level 3 is still written when the cut is the whole source, in a forced overflow recovery, with the survival fit off or when the model window is unknown.
+
 ## v0.24.7 - (unreleased; rc2) (P0 for long-running sessions: the survival fit keeps the summary, no in-turn thrash below the threshold, no level-3 fragments, a bounded summary prefix, steer rows stored)
 
 - Config: the leaf summary target is configurable with `LCM_LEAF_TARGET_RATIO` (default 0.20),
