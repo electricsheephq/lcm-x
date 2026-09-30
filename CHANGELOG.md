@@ -14,6 +14,10 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   pair). Repeats log at DEBUG; a success ends the episode. Other failures keep the threshold and cooldown. `lcm_status`
   gains `summary_route` (`state`, `seconds_left`, `last_error_class`, `provider`, `model`). The circuit is still keyed
   by the configured model, not by the effective route. (#682)
+- Fix: a host retry after a cancelled but committed compaction adopts the committed summary (#457) while every
+  summary route is refused: on the first pass the adoption runs before the summary-route stop (#628), since it needs no
+  summary route. With nothing to adopt the stop applies as before, and no new leaf is written while the circuit is
+  open. (#640)
 ## v0.24.7 - (unreleased; rc2) (P0 for long-running sessions: the survival fit keeps the summary, no in-turn thrash below the threshold, no level-3 fragments, a bounded summary prefix, steer rows stored)
 
 - Config: the leaf summary target is configurable with `LCM_LEAF_TARGET_RATIO` (default 0.20),

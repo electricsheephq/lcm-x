@@ -1515,7 +1515,10 @@ class CompactionMixin:
             if threshold_full_sweep_active and time.monotonic() >= sweep_deadline:
                 sweep_stop_reason = "time_budget_exhausted"
                 break
-            if self._summary_route_stop_applies(force_overflow):
+            route_stop = self._summary_route_stop_applies(force_overflow)
+            # #640: the first pass adopts a committed summary (#457) before the route stop; adoption needs no route.
+            adopt_before_stop = route_stop and leaf_passes == 0 and not resumed_prefix
+            if route_stop and not adopt_before_stop:
                 sweep_stop_reason = "summary_route_unavailable"  # #628: no level 3 leaf while every route is refused
                 break
             fresh_tail_start = self._fresh_tail_start(pressure_messages)
@@ -1525,6 +1528,9 @@ class CompactionMixin:
             # turn; that must remain eligible for compaction instead of being
             # replayed forever as fresh-looking intent.
             leading_anchor_count = self._leading_anchor_count(working_messages)
+            if adopt_before_stop and fresh_tail_start <= leading_anchor_count:  # nothing to adopt
+                sweep_stop_reason = "summary_route_unavailable"
+                break
             step_started = time.monotonic() if threshold_full_sweep_active else 0.0
             publication_excluded_store_ids = self._get_store_ids_for_messages(
                 working_messages[:leading_anchor_count]
@@ -1583,6 +1589,9 @@ class CompactionMixin:
                     resumed_tokens = count_messages_tokens([working_messages[index] for index in resumed])
                     estimated_active_tokens = max(0, estimated_active_tokens - resumed_tokens + summary_tokens)
                 drops.update(resumed)
+            if adopt_before_stop and not resumed_prefix:  # #640: nothing adopted, so the #628 stop applies now
+                sweep_stop_reason = "summary_route_unavailable"
+                break
             if drops:
                 publication_excluded_store_ids.extend(
                     self._get_store_ids_for_messages(
@@ -1599,6 +1608,9 @@ class CompactionMixin:
                 if fresh_tail_start <= leading_anchor_count or (resumed_prefix and kept):
                     noop_reason = "selected leaf chunk lacks raw store lineage"
                     break
+            if adopt_before_stop:  # #640: the committed summary is adopted; no new leaf while every route is refused
+                sweep_stop_reason = "summary_route_unavailable"
+                break
 
             if candidate_start < fresh_tail_start:
                 step_started = time.monotonic() if threshold_full_sweep_active else 0.0
