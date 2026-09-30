@@ -1,0 +1,29 @@
+# Optional dependencies for LCM-X semantic/hybrid retrieval (#674).
+#
+# Semantic retrieval is OPT-IN. With LCM_EMBEDDINGS_ENABLED unset or false,
+# LCM-X needs nothing from this file and retrieval stays FTS-only.
+#
+# This file exists so the semantic dependency set is machine-readable rather
+# than prose buried in docs/embeddings-setup.md. LCM-X is installed by symlink
+# (scripts/install.sh), not by pip, so nothing installs this automatically --
+# it must go into the virtualenv that runs Hermes:
+#
+#     pip install -r requirements-semantic.txt
+#
+# IMPORTANT: `hermes update` can build a NEW environment under
+# installs/<id>/environments/<hash>/venv. It carries over the dependencies
+# Hermes itself records (its extras and the dependencies plugins declare), but
+# a package installed by hand from this file is not recorded, so it can be
+# dropped by a host update. After an update, run `/lcm doctor` (the
+# embedding_provider_health check reports an unavailable provider) and
+# reinstall if it names a missing dependency. No restart
+# is needed once the dependency is present: the provider import is lazy and
+# existing vectors are untouched.
+#
+# Provider-specific. Only install what LCM_EMBEDDING_PROVIDER selects:
+#   fastembed          -> this file (local ONNX, no signup, no daemon)
+#   voyage             -> nothing to install; set VOYAGE_API_KEY
+#   openai-compatible  -> nothing to install; set the API key + base URL
+#   ollama             -> nothing to install; run the Ollama daemon
+
+fastembed

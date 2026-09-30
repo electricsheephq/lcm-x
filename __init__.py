@@ -377,6 +377,45 @@ def _pre_llm_context(active_engine, payload: dict) -> dict | None:
     return {"context": "\n\n".join(augmentations)}
 
 
+def _warn_if_embedding_provider_unavailable(config) -> None:
+    """Say so at load when semantics is configured but cannot run (#674).
+
+    The provider import is lazy, so without this the plugin logs a plain
+    "loaded" success line and stays silent until the first semantic query --
+    which then degrades to full-text rather than raising. On a real host that
+    hid a 14-day semantic-recall outage after a Hermes update rebuilt the
+    virtualenv without the optional ``fastembed`` dependency.
+
+    Uses the inert, offline-safe probe: one ``importlib.util.find_spec`` or an
+    environment-variable read. No model download, no socket, no provider API
+    call. Never raises -- a diagnostic must not be able to break plugin load.
+    """
+    try:
+        if not bool(getattr(config, "embeddings_enabled", False)):
+            return
+        from .embedding_provider import probe_provider_availability
+
+        probe = probe_provider_availability(config)
+        if probe.get("available"):
+            return
+        logger.warning(
+            "LCM semantic embeddings are ENABLED but the configured provider is "
+            "unavailable: %s (provider=%s, model=%s). Semantic retrieval is "
+            "degraded to full-text: lcm_recall reports degraded=true and "
+            "lcm_grep mode=semantic falls back to FTS. Stored history is intact "
+            "and nothing is lost. Fix what the detail names (a missing dependency "
+            "or provider credential); a dependency installed by hand, such as "
+            "fastembed, can be dropped by a Hermes update. Then run `/lcm doctor` "
+            "to confirm. No restart is needed once the dependency is present "
+            "(the import is lazy).",
+            probe.get("detail"),
+            probe.get("provider"),
+            probe.get("model"),
+        )
+    except Exception as exc:  # pragma: no cover - defensive; must never break load
+        logger.debug("LCM embedding provider startup probe failed: %s", exc)
+
+
 def _engine_took_slot(ctx, engine, hermes_home: str) -> bool:
     """Whether Hermes made *engine* this process's context engine (#622).
 
@@ -734,6 +773,8 @@ def register(ctx):
         logger.debug("LCM registered post_llm_call hook for per-turn ingest")
     except Exception as exc:
         logger.debug("LCM could not register post_llm_call hook: %s", exc)
+
+    _warn_if_embedding_provider_unavailable(config)
 
     # The load deadline can also expire after the engine registered.
     if active and _engine_took_slot(ctx, engine, hermes_home):
