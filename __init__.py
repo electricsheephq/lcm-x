@@ -741,3 +741,7 @@ def register(ctx):
             "LCM plugin loaded — lossless context management active (load %.2f s)",
             time.monotonic() - _MODULE_IMPORTED_AT,
         )
+        # A slow log sink can outlast the deadline, so check once more. An
+        # abandonment after this check, before register() returns, cannot be
+        # seen from inside the plugin.
+        _engine_took_slot(ctx, engine, hermes_home)

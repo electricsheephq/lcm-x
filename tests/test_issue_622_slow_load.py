@@ -493,3 +493,73 @@ def test_t8_rollups_on_open_does_not_wait_for_another_writer(tmp_path):
     finally:
         timer.join()
     assert elapsed < 1.0, f"rollups-on store open took {elapsed:.2f} s behind a held write lock"
+
+
+# --- review round 2 (#691) -----------------------------------------------------
+
+
+class _AbandonOnActiveLine(logging.Handler):
+    """A log sink slow enough that Hermes' deadline expires while the active line is logged."""
+
+    def __init__(self, ctx):
+        super().__init__()
+        self.ctx = ctx
+
+    def emit(self, record):
+        if ACTIVE_LINE in record.getMessage():
+            self.ctx._abandon_load()
+
+
+def test_b1_abandonment_during_the_active_line_is_still_reported(tmp_path, monkeypatch, caplog):
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    _install_host(monkeypatch, home)
+    module_name = "hermes_lcm_622_b1"
+    module = _load_plugin(module_name)
+    ctx = _Ctx(_Manager())
+    sink = _AbandonOnActiveLine(ctx)
+    logging.getLogger(module_name).addHandler(sink)
+    caplog.set_level(logging.INFO)
+    try:
+        module.register(ctx)
+    finally:
+        logging.getLogger(module_name).removeHandler(sink)
+        _shutdown(ctx)
+
+    assert ctx._load_abandoned is True
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1, errors
+    assert "LCM-X is NOT active in this process" in errors[0]
+    record = json.loads((home / RECORD_NAME).read_text(encoding="utf-8"))
+    assert "plugins.load_timeout_seconds" in record["reason"]
+
+
+def test_n3_null_ingested_at_falls_back_to_timestamp_in_reasoning(tmp_path):
+    from hermes_lcm.reasoning import _ground_one
+    from hermes_lcm.store import MessageStore
+
+    store = MessageStore(tmp_path / "lcm.db")
+    try:
+        quote = "The deck has 12 slides."
+        store_id = store.append("s-622", {"role": "user", "content": quote})
+        store._conn.execute(
+            "UPDATE messages SET ingested_at = NULL, observed_at = NULL WHERE store_id = ?",
+            (store_id,),
+        )
+        store._conn.commit()
+        row = store.get(store_id)
+        assert row["ingested_at"] is None and row["observed_at"] is None
+        assert row["timestamp"] is not None
+
+        grounded, error = _ground_one(
+            {"store_id": store_id, "span_start": 0, "span_end": len(quote), "quote": quote},
+            messages=store,
+            assertions=None,
+            as_of=time.time() + 3600,
+            session_dates=None,
+        )
+    finally:
+        store.close()
+
+    assert error is None
+    assert grounded is not None and grounded.store_id == store_id
