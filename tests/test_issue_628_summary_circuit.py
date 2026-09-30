@@ -434,3 +434,35 @@ def test_t12_t13_without_a_survival_fit_the_leaf_is_written_at_level_3(tmp_path,
         assert engine._sweep_budget_hold_until == 0.0 and _count(caplog, STOP_LINE) == 0
     finally:
         engine.shutdown()
+
+
+# -- T14: _maybe_condense checks the route before every depth ------------------------------------------------
+
+def _condensation_state(engine) -> None:
+    """Two depth-0 nodes and one depth-1 node, uncondensed; the route has 4 rejections already."""
+    for index, depth in enumerate((0, 0, 1)):
+        text = f"group {index} at depth {depth}"
+        engine._dag.add_node(SummaryNode(session_id="S", depth=depth, summary=text,
+                                         token_count=escalation.count_tokens(text), source_token_count=0,
+                                         source_ids=[], source_type="messages", created_at=index))
+    for _ in range(4):
+        engine._summary_circuit_breaker.record_rejection(engine._config.summary_model)
+    assert engine._summary_circuit_breaker.allows(engine._config.summary_model)
+
+
+@pytest.mark.parametrize("force_overflow", [False, True], ids=["not-forced", "forced"])
+def test_condensation_rechecks_route_before_every_depth(tmp_path, monkeypatch, levels, force_overflow):
+    engine = _engine(tmp_path, condensation_fanin=2, threshold_full_sweep_enabled=False)
+    provider = _provider(monkeypatch, "reject")  # never shorter than its source
+    _condensation_state(engine)
+    try:
+        passes = engine._maybe_condense(force_overflow=force_overflow)
+        new = sorted(node.depth for node in _nodes(engine)[3:])
+        assert len(provider.calls) == 2  # depth 0: level 1 and level 2, rejected; the counts 5 and 6 open the route
+        if force_overflow:
+            assert passes == 2 and new == [1, 2] and levels == [3, 3]
+        else:
+            assert passes == 1 and new == [1] and levels == [3]
+            assert engine._last_condensation_suppressed_reason == "summary_route_unavailable"
+    finally:
+        engine.shutdown()

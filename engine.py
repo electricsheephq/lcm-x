@@ -6686,6 +6686,7 @@ class LCMEngine(
 
         condensation_passes = 0
         suppression_reason = ""
+        route_stopped = False
         fanin = max(1, self._config.condensation_fanin)
 
         for depth in range(upper):
@@ -6704,6 +6705,10 @@ class LCMEngine(
             if not allow_condense:
                 suppression_reason = reason or suppression_reason
                 continue
+            if self._summary_route_stop_applies(force_overflow):  # #628: checked before every depth
+                suppression_reason = "summary_route_unavailable"
+                route_stopped = True
+                break
 
             # Take the first fanin nodes and condense
             to_condense = uncondensed[:fanin]
@@ -6733,6 +6738,8 @@ class LCMEngine(
 
         if not condensation_passes and leaf_compacted_this_turn and self._config.cache_friendly_condensation_enabled:
             self._last_condensation_suppressed_reason = suppression_reason
+        if route_stopped:
+            self._last_condensation_suppressed_reason = "summary_route_unavailable"
         return condensation_passes
 
     def _condense_summary_nodes(
