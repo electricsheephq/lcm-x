@@ -68,7 +68,7 @@ worker slots).
 external service — just a pip package.
 
 ```bash
-pip install fastembed
+pip install fastembed          # or: pip install -r requirements-semantic.txt
 export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=fastembed
 export LCM_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5   # 384-dim, compact and quick on CPU
@@ -81,6 +81,32 @@ If you skip warmup, semantic search simply stays off and the tools tell you why.
 model's query-specific encoding (distinct from document encoding) so query/passage asymmetry is
 preserved. When `LCM_EMBEDDINGS_ENABLED=false`, `warmup` is inert: it does not resolve a provider,
 download a model, create embedding tables, or create the configured database.
+
+### A host update can remove fastembed
+
+`fastembed` lives in the virtualenv that runs Hermes, not in LCM-X (which is installed by symlink
+and pulls in no Python packages of its own). `hermes update` can build a **new** environment under
+`installs/<id>/environments/<hash>/venv`. It carries over the dependencies Hermes itself records
+(its extras and the dependencies plugins declare), but a package installed by hand with
+`pip install fastembed` is not recorded, so **a hand-installed embedding dependency can be dropped
+by a host update**.
+
+Nothing about your LCM data changes when this happens — the store stays lossless and existing
+vectors are untouched — but new content stops being embedded and semantic retrieval quietly falls
+back to full-text (`lcm_recall` returns `degraded: true`, `lcm_grep mode=semantic` degrades to FTS).
+
+To recover, reinstall into the active environment and confirm:
+
+```bash
+pip install -r requirements-semantic.txt
+/lcm doctor                 # embedding_provider_health must report pass
+/lcm embed backfill --apply # embed anything written while the provider was missing
+```
+
+No restart and no re-warmup are needed: the provider import is lazy and the downloaded model cache
+survives in `~/.cache/fastembed`. The plugin also logs a `WARNING` at startup when embeddings are
+enabled but the configured provider is unavailable, and `/lcm doctor` reports it through the
+`embedding_provider_health` check — so this no longer fails silently.
 
 ## Option 3 — Ollama (trusted local daemon)
 
