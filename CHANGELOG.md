@@ -24,6 +24,13 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   or over the threshold and under the survival ceiling is summarised instead of only sanitised and fitted. An ordinary
   automatic call during the cooldown is still cleanup-only, and forced overflow is unchanged. The native-recovery
   handoff is kept (native recovery owns a below-threshold list). (#684)
+- Feature: every new leaf and condensed summary node records its escalation level (1, 2 or 3) and the model that
+  produced it, in a new `summary_node_provenance` table written in the node's own transaction. `lcm_describe` shows
+  both; `lcm_status` counts nodes by level (`unrecorded` for older and imported nodes, which are not backfilled). No
+  schema version change and no new `summary_nodes` column, so a plugin rollback still opens the store. Refs #441
+- Feature: `LCM_SUMMARY_PROMPT_VERSION` (default `1`, unchanged prompts) opts in to summariser prompt v2: six fixed
+  headings, focus directives in the trusted policy with only the tagged topic in the transcript message, and a 3x
+  output ceiling. Refs #646
 - Fix: a temporal rollup whose summary comes back as a level 3 truncation is not stored; the rollup stays pending for
   its next build and one warning is logged (a level 3 result that is the whole source is still stored). Rollup
   maintenance starts no build while the summary route is refused, and rollups record circuit results under their own

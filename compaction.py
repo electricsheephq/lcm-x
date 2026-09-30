@@ -2004,7 +2004,12 @@ class CompactionMixin:
                             carried_ranges,
                         )
                     before_commit = stage_frontier
-                self._dag.add_node(node, before_commit=before_commit)
+                self._dag.add_node(
+                    node,
+                    before_commit=before_commit,
+                    escalation_level=_level or None,  # #441; 0 = placeholder, no model call
+                    model=self._take_leaf_summary_model(),
+                )
             except Exception as exc:
                 if (
                     not _is_sqlite_locked_error(exc)

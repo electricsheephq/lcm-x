@@ -6606,6 +6606,9 @@ def lcm_describe(args: Dict[str, Any], **kwargs) -> str:
             )
             return json.dumps({"error": f"Node {node_id} not found in {scope}"})
         info = engine._dag.describe_subtree(node_id)
+        provenance = engine._dag.get_node_provenance(node.node_id)  # #441
+        if provenance is not None:
+            info.update(provenance)
         if session_id_explicit:
             info["session_id"] = node.session_id
             info["expand_hint"] = _session_expand_hint(node.node_id, node.session_id)
@@ -8074,6 +8077,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         },
         "dag": {
             "total_nodes": total_dag_nodes,
+            "nodes_by_escalation_level": engine._dag.count_nodes_by_escalation_level(session_id),
             "total_tokens": total_dag_tokens,
             "compression_ratio": f"{compression_ratio}:1",
             "depths": {
@@ -8110,6 +8114,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
             "summary_model": engine._config.summary_model or "(auxiliary)",
             "summary_reasoning_effort": engine._config.summary_reasoning_effort or "(task default)",
             "summary_timeout_ms": engine._config.summary_timeout_ms,
+            "summary_prompt_version": getattr(engine._config, "summary_prompt_version", 1),
             "summary_spend_max_calls": engine._config.summary_spend_max_calls,
             "summary_spend_window_seconds": engine._config.summary_spend_window_seconds,
             "summary_spend_backoff_seconds": engine._config.summary_spend_backoff_seconds,
