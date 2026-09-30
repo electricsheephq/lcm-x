@@ -159,7 +159,7 @@ def test_build_day_honors_target_and_hard_cap_after_oversize_result(rollup_parts
         calls.append((text, kwargs))
         if len(calls) == 1:
             return "oversize " * 30, 1
-        return "bounded fallback", 3
+        return "bounded fallback", 2  # #669: a level 3 cut is not stored
 
     result = build_day(store, dag, config, scope, target_day, summarizer=summarize)
 
