@@ -41,8 +41,10 @@ from .engine_registry import (
     resolve_active_lcm_engine,  # noqa: F401  (re-exported: hosts import it from .engine)
 )
 from .escalation import (
+    _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS,
     SummaryCircuitBreaker,
     SummarySpendGuard,
+    SweepBudgetExhausted,  # re-exported: compaction and tests import it from .engine
     _summary_model_chain,
     summarize_with_escalation,
     summary_route_available,
@@ -377,14 +379,9 @@ _AUTO_FOCUS_MAX_CHARS = 700
 
 _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across context compression]"
 
-# #608: a threshold sweep does not start a summariser call with less time than this left, and after a
-# sweep that spent its budget before the first leaf, the threshold answer is no for the hold time.
-_THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS = 15.0
+# #608: after a sweep that spent its budget before the first leaf, the threshold answer is no for the hold
+# time. The minimum time for a summariser call and SweepBudgetExhausted live in escalation (#666).
 _SWEEP_BUDGET_HOLD_SECONDS = 600.0
-
-
-class SweepBudgetExhausted(TimeoutError):
-    """The threshold sweep's own time budget is spent: a stop condition, not a provider failure."""
 
 
 class SummaryResultRejected(RuntimeError):
@@ -2021,6 +2018,7 @@ class LCMEngine(
                     l3_truncate_tokens=self._config.l3_truncate_tokens,
                     focus_topic=focus_topic or "",
                     custom_instructions=self._config.custom_instructions,
+                    **({"deadline": deadline} if deadline is not None else {}),  # #666: bounds every attempt
                 )
                 self._last_leaf_level_3_verbatim = level == 3 and summary_text == serialized  # #652: no fragment
                 return attempt_chunk, source_tokens, summary_text, level, attempt_number
@@ -6862,6 +6860,7 @@ class LCMEngine(
             l3_truncate_tokens=self._config.l3_truncate_tokens,
             focus_topic=focus_topic or "",
             custom_instructions=self._config.custom_instructions,
+            **({"deadline": deadline} if deadline is not None else {}),  # #666: bounds every attempt
         )
         if level == 3 and summary_text != combined_text and self._fit_can_rescue(force_overflow):
             raise SummaryResultRejected("summary result rejected at level 3")  # a truncation, not the whole text

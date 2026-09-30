@@ -1989,6 +1989,7 @@ class CompactionMixin:
                     threshold_full_sweep_active=threshold_full_sweep_active,
                     recovery_assembly_cap=recovery_assembly_cap,
                     leaf_passes=leaf_passes,
+                    condensation_passes=pre_leaf_condensation_passes,  # #653: completed pre-leaf passes
                     context_is_assembled=context_is_assembled,
                 )
             self._last_compacted_store_id = published_frontier
@@ -2027,6 +2028,7 @@ class CompactionMixin:
                         threshold_full_sweep_active=threshold_full_sweep_active,
                         recovery_assembly_cap=recovery_assembly_cap,
                         leaf_passes=leaf_passes,
+                        condensation_passes=pre_leaf_condensation_passes,
                         context_is_assembled=True,
                     )
 
@@ -2198,6 +2200,7 @@ class CompactionMixin:
             recovery_assembly_cap,
         )
         condensation_passes = 0
+        rejection_warned = sweep_stop_reason == "summary_result_rejected"  # the leaf loop logged it
         # #652: a route that just rejected the pre-leaf condensation is not asked again in this call.
         post_drain_condensation_skipped = ""
         try:
@@ -2235,10 +2238,19 @@ class CompactionMixin:
                 threshold_full_sweep_active=threshold_full_sweep_active,
                 recovery_assembly_cap=recovery_assembly_cap,
                 leaf_passes=leaf_passes,
-                condensation_passes=int(
+                condensation_passes=pre_leaf_condensation_passes + int(
                     getattr(exc, "lcm_completed_condensation_passes", 0)
                 ),
                 context_is_assembled=True,
+            )
+        if not rejection_warned and (
+            sweep_stop_reason == "summary_result_rejected"
+            or (not threshold_full_sweep_active  # _maybe_condense sets it fresh on this path only
+                and self._last_condensation_suppressed_reason == "summary_result_rejected")
+        ):
+            logger.warning(  # #652: a condensation rejection, once per compaction
+                "LCM compaction stopped: summary result rejected at level 3; %d leaves written, backlog kept",
+                leaf_passes,
             )
 
         # Step 7: Assemble new active context

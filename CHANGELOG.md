@@ -23,7 +23,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix: a threshold sweep whose summary prefix is over its target condenses it before the leaves, in at most half of
   the sweep's passes and time, so sweeps stopped by their budget no longer grow the prefix. Assembly renders the
   newest uncondensed summaries of each depth (oldest first), and a summary budget keeps the newest parts of a depth.
-  At or below the target the sweep is unchanged. (#653)
+  At or below the target the sweep is unchanged. Every summariser attempt of a sweep (each route, each level) is
+  bounded by the sweep's deadline, and one with less than 15 s left is not started. (#653)
 
 ## v0.24.6 - (unreleased; rc1) (#628, #627: a summary circuit that counts rejections apart from failures, and images priced per image)
 
