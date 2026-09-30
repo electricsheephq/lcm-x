@@ -143,11 +143,11 @@ class SurvivalFitMixin:
         # back): durability is then the store-id map and DAG-verified scaffold only.
         persisted = (not after_exception and not self._ingest_cursor_needs_reconcile
                      and self._ingest_cursor == len(result))
-        cut = self._survival_cut(result, prefix, budget, persisted, reason, True) if prefix > system else None
-        if cut is not None and self._survival_measure(cut[0]) > budget:
-            cut = None
+        # one map of the whole conversation part: its occurrence and order evidence needs every row (#650)
+        store_ids = self._get_store_id_map_for_messages(result[system:])
+        cut = self._survival_cut(result, prefix, budget, persisted, reason, store_ids, True) if prefix > system else None
         emergency = prefix > system and cut is None
-        cut = cut or self._survival_cut(result, system, budget, persisted, reason, False)
+        cut = cut or self._survival_cut(result, system, budget, persisted, reason, store_ids, False)
         if cut is None:
             return result
         fitted, count, ids, projected, notice = cut
@@ -166,43 +166,62 @@ class SurvivalFitMixin:
         self._survival_record(reason, count, ids, before, after, budget, projected, notice)
         return fitted
 
-    def _survival_cut(self, result, lead: int, budget: int, persisted: bool, reason: str, whole_turns: bool):
-        """``(fitted, count, ids, projected, notice)`` with ``result[:lead]`` kept, else None. With
-        ``whole_turns`` only whole oldest turns may leave (no projection)."""
+    def _survival_cut(self, result, lead: int, budget: int, persisted: bool, reason: str, store_ids,
+                      whole_turns: bool):
+        """``(fitted, count, ids, projected, notice)`` with ``result[:lead]`` kept, else None. The cut is the
+        oldest whole-turn one whose FINAL list (notice included) fits; with ``whole_turns`` there is no
+        projection. A carrier ending the kept prefix is split: its user row leaves with its turn, and the
+        summary is re-formed around the first kept user row as assembly forms it."""
         head, body = list(result[:lead]), list(result[lead:])
-        store_ids = self._get_store_id_map_for_messages(body)
+        summary = None
+        remainder = self._generated_context_carrier_remainder(head[-1]) if whole_turns and head else None
+        if remainder is not None:
+            carrier = head.pop()
+            summary = carrier["content"][:self._verified_lcm_summary_prefix_end(carrier["content"])]
+            body.insert(0, {**carrier, "content": remainder})
+            if id(carrier) in store_ids:
+                store_ids = {**store_ids, id(body[0]): store_ids[id(carrier)]}
 
         def durable(message) -> bool:  # unproven rows: only DAG-verified scaffold, never a phrase match
             return persisted or id(message) in store_ids or self._is_verified_replay_scaffold_message(message)
 
+        def build(cut: int, kept):
+            dropped = body[:cut]
+            ids = sorted(store_ids[id(message)] for message in dropped if id(message) in store_ids)
+            count = sum(1 for message in dropped if not self._survival_generated(message))
+            notice = _NOTICE.format(n=count, first=ids[0] if ids else "-", last=ids[-1] if ids else "-")
+            out = list(head)
+            if out and out[0].get("role") == "system":  # the notice never edits a generated summary row
+                out[0] = {**out[0], "content": self._survival_with_notice(out[0].get("content"), notice)}
+            if summary is not None:
+                merged = {"role": "user", "content": f"{summary}\n\n{kept[0].get('content')}"} if kept else None
+                if (merged and kept[0].get("role") == "user" and isinstance(kept[0].get("content"), str)
+                        and any(message.get("role") == "user" for message in kept[1:])
+                        and self._generated_context_carrier_remainder(merged) == kept[0]["content"]):
+                    kept = [merged, *kept[1:]]
+                else:
+                    out.append({"role": "user", "content": summary})
+            return out + kept or result[-1:], count, ids, notice
+
         users = [i for i, message in enumerate(body) if isinstance(message, dict) and message.get("role") == "user"]
-        cut, projected = None, False
         for index in users:
             if index and not all(durable(message) for message in body[:index]):
                 break  # never omit a row that is not durably stored
-            if index and self._survival_measure(head + body[index:]) <= budget:
-                cut = index
-                break
-        if cut is None and whole_turns:
+            if index:
+                fitted, count, ids, notice = build(index, body[index:])
+                if self._survival_measure(fitted) <= budget:
+                    return fitted, count, ids, False, notice
+        if whole_turns:
             return None
-        if cut is None:  # the newest user turn alone is over budget: a bounded projection of it
-            cut = users[-1] if users else 0
-            if not all(durable(message) for message in body[:cut]):
-                logger.warning("LCM survival fit skipped: an over-budget list holds rows not yet stored (reason=%s)", reason)
-                return None
-            kept = self._survival_projection(body[cut:], store_ids, budget - self._survival_measure(head))
-            projected = any(new is not old for new, old in zip(kept, body[cut:]))  # a row was actually replaced
-        else:
-            kept = body[cut:]
-        dropped = body[:cut]
-        ids = sorted(store_ids[id(message)] for message in dropped if id(message) in store_ids)
-        # raw rows only; a carrier (summary + a real user row) counts as that row
-        count = sum(1 for message in dropped if not self._survival_generated(message)
-                    or self._generated_context_carrier_remainder(message) is not None)
-        notice = _NOTICE.format(n=count, first=ids[0] if ids else "-", last=ids[-1] if ids else "-")
-        if head and head[0].get("role") == "system":  # the notice never edits a generated summary row
-            head[0] = {**head[0], "content": self._survival_with_notice(head[0].get("content"), notice)}
-        return head + kept or result[-1:], count, ids, projected, notice
+        # the newest user turn alone is over budget: a bounded projection of it
+        cut = users[-1] if users else 0
+        if not all(durable(message) for message in body[:cut]):
+            logger.warning("LCM survival fit skipped: an over-budget list holds rows not yet stored (reason=%s)", reason)
+            return None
+        noticed = build(cut, body[cut:])[0][:len(head)]  # the head as returned: its notice counts too
+        kept = self._survival_projection(body[cut:], store_ids, budget - self._survival_measure(noticed))
+        fitted, count, ids, notice = build(cut, kept)
+        return fitted, count, ids, any(new is not old for new, old in zip(kept, body[cut:])), notice
 
     @staticmethod
     def _survival_with_notice(content: Any, notice: str) -> Any:
