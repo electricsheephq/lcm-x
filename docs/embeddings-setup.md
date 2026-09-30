@@ -85,9 +85,11 @@ download a model, create embedding tables, or create the configured database.
 ### A host update can remove fastembed
 
 `fastembed` lives in the virtualenv that runs Hermes, not in LCM-X (which is installed by symlink
-and pulls in no Python packages of its own). `hermes update` builds a **new** environment under
-`installs/<id>/environments/<hash>/venv` and installs only mandatory dependencies, so **an optional
-embedding dependency is dropped on every host update**.
+and pulls in no Python packages of its own). `hermes update` can build a **new** environment under
+`installs/<id>/environments/<hash>/venv`. It carries over the dependencies Hermes itself records
+(its extras and the dependencies plugins declare), but a package installed by hand with
+`pip install fastembed` is not recorded, so **a hand-installed embedding dependency can be dropped
+by a host update**.
 
 Nothing about your LCM data changes when this happens — the store stays lossless and existing
 vectors are untouched — but new content stops being embedded and semantic retrieval quietly falls
