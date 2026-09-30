@@ -283,7 +283,7 @@ On the `main` line, typical output is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.24.6 (15 tools)
+  ✓ hermes-lcm-x v0.24.7 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -291,9 +291,9 @@ Provider Plugins:
 
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. `0.24.6` is the identity the next patch release carries: the `v0.24.6-rc1`
+and tag. `0.24.7` is the identity the next patch release carries: the `v0.24.7-rc1`
 tag carries it first, the gauntlet runs at that tag, and the GA tree is the rc
-tree plus the GA release-notes file (`v0.24.5` at `19ed6341` shipped the same way).
+tree plus the GA release-notes file (`v0.24.6` at `ae0e996d` shipped the same way).
 
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
 `lcm_doctor`, and `/lcm doctor` also report the loaded plugin path and
