@@ -490,7 +490,8 @@ def _build_focus_policy_v2(focus_topic: str) -> str:
 
 
 def _v2_transcript_part(text: str, focus_topic: str) -> str:
-    topic = _normalized_focus_topic(focus_topic)
+    # Tag delimiters are stripped so the topic can never close or reopen its own label.
+    topic = _normalized_focus_topic(focus_topic).replace("<", "").replace(">", "")
     topic_tag = f"\n<lcm-focus-topic>{topic}</lcm-focus-topic>" if topic else ""
     return f"{_SUMMARY_CONTENT_SEPARATOR}{text}{topic_tag}"
 
