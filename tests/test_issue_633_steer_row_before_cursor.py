@@ -199,6 +199,31 @@ def test_t4_an_unstamped_user_row_the_last_view_lacked_is_explained_by_its_store
         engine.shutdown()
 
 
+@pytest.mark.parametrize("new_steer", [STEER_BLOCK, STEER_BLOCK + "\n"], ids=["identical", "edge-whitespace"])
+def test_t6_a_repeated_steer_is_stored_again(tmp_path, new_steer):
+    """The user repeats an earlier /steer verbatim (or up to edge whitespace). The earlier row's stored copy
+    belongs to the earlier occurrence the view still shows: it never explains the new insertion."""
+    engine = _engine(tmp_path)
+    try:
+        old = {"role": "user", "content": STEER_BLOCK, "display_kind": "steer"}
+        host = [{"role": "user", "content": "Plan the migration", "timestamp": 50.0}, old,
+                {"role": "assistant", "content": "Planned.", "timestamp": 51.0}]
+        engine.ingest(host)
+        host += _turn_one(stamped=True)
+        engine.ingest(host)  # [U, old_steer, A, U, A_call, T, reply]
+        before = len(_stored(engine))
+        host = host + [{"role": "user", "content": "now deploy it", "timestamp": 200.0},
+                       {"role": "assistant", "content": "Deploying to staging.", "timestamp": 201.0}]
+        host.insert(6, {"role": "user", "content": new_steer, "display_kind": "steer"})
+        engine.ingest(host)
+        rows = _stored(engine)
+        assert len(_steer_rows(engine)) == 2
+        assert sum(1 for row in rows if row.get("content") == STEER_BLOCK) == (2 if new_steer == STEER_BLOCK else 1)
+        assert len(rows) == before + 3 and _duplicates(engine) == 0
+    finally:
+        engine.shutdown()
+
+
 @pytest.mark.xfail(strict=True, reason="#633 out of scope: Hermes <= 0.21.1 appends the steer block in place "
                                        "to an ingested tool row; the audit skips tool rows")
 def test_t5_in_place_shape_is_out_of_scope(tmp_path):

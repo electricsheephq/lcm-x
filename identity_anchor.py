@@ -335,7 +335,7 @@ class IdentityAnchorMixin:
             for row in self._store.get_session_tail(session, limit=span):
                 if int(row["store_id"]) not in consumed:
                     held[_proof_user_identity(self._message_replay_identity(row, stored_row=True))].append(row)
-        missed = []
+        missed, deferred, audited = [], [], set()
         inserted = None
         for idx in range(start, cursor):
             identity = identity_at(idx)
@@ -344,8 +344,9 @@ class IdentityAnchorMixin:
                     continue
                 if inserted is None:
                     inserted = self._identity_anchor_inserted(messages, start, cursor)
-                if idx not in inserted:
-                    continue
+                if idx in inserted:
+                    deferred.append(idx)
+                continue
             if idx in plan["remainders"]:  # a held head plus a new remainder: the remainder is unstored
                 missed.append(idx)
                 continue
@@ -354,19 +355,36 @@ class IdentityAnchorMixin:
                     or self._message_replay_identity(identity_messages[idx]) != identity  # carries LCM's carrier (R8)
                     or self._matches_ignore_message_patterns(messages[idx])):
                 continue
+            audited.add(idx)
             copies = [row for row in held.get(_proof_user_identity(identity), ()) if int(row["store_id"]) not in consumed]
-            ws = self._identity_anchor_ws_row(identity, stamps[idx], copies, consumed) if idx in stamps else None
+            ws = self._identity_anchor_ws_row(identity, stamps[idx], copies, consumed)
             if ws is not None:  # R1-ws: the same occurrence (same stamp, edge whitespace only), recorded
                 consumed.add(int(ws["store_id"]))
                 plan.setdefault("ws", []).append((ws, identity_messages[idx]))
                 continue
             if copies:
                 consumed.add(int(copies[0]["store_id"]))
-                if (idx in stamps and len(copies) == 1 and copies[0].get("observed_at") is None
+                if (len(copies) == 1 and copies[0].get("observed_at") is None
                         and self._message_replay_identity(copies[0], stored_row=True) == identity):
                     plan["backfill"].append((int(copies[0]["store_id"]), stamps[idx]))
                 continue
             missed.append(idx)
+        if deferred:  # #633: an inserted row is explained only by a stored copy no other row of the view holds
+            reserved = Counter(_proof_user_identity(identity_at(i)) for i in range(cursor)
+                               if i not in inserted and i not in plan["replayed"] and i not in audited
+                               and identity_at(i) is not None)
+            for idx in deferred:
+                identity = identity_at(idx)
+                if (idx in plan["replayed"] or identity_messages[idx].get("tool_calls")
+                        or self._message_replay_identity(identity_messages[idx]) != identity  # carries LCM's carrier (R8)
+                        or self._matches_ignore_message_patterns(messages[idx])):
+                    continue
+                key = _proof_user_identity(identity)
+                copies = [row for row in held.get(key, ()) if int(row["store_id"]) not in consumed]
+                if len(copies) > reserved[key]:
+                    consumed.add(int(copies[-1]["store_id"]))
+                    continue
+                missed.append(idx)
         if missed:
             plan["cursor"] = min(missed)
             plan["positional"] = {idx for idx in range(min(missed), cursor) if idx not in missed}
