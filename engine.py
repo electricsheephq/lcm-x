@@ -1624,7 +1624,10 @@ class LCMEngine(
 
     def record_rejected_compaction(self) -> None:
         """#651 host breaker hook: the host refused the last compaction (the result would be larger). Called
-        without arguments inside an error-swallowing wrapper; a rejection counts as no progress."""
+        without arguments inside an error-swallowing wrapper; a rejection counts as no progress. #665: a refusal
+        of a bypassed (auxiliary or stateless) session never holds the foreground's automatic compaction."""
+        if self._bypasses_lcm_context_management():
+            return
         self._start_no_progress_hold("host_rejected")
 
     def _automatic_compression_blocked(self, *, ignore_cooldown: bool = False) -> bool:
@@ -2027,6 +2030,7 @@ class LCMEngine(
                     l3_truncate_tokens=self._config.l3_truncate_tokens,
                     focus_topic=focus_topic or "",
                     custom_instructions=self._config.custom_instructions,
+                    prompt_version=getattr(self._config, "summary_prompt_version", 1),
                     provenance=provenance,
                     **({"deadline": deadline} if deadline is not None else {}),  # #666: bounds every attempt
                 )
@@ -6872,6 +6876,7 @@ class LCMEngine(
             l3_truncate_tokens=self._config.l3_truncate_tokens,
             focus_topic=focus_topic or "",
             custom_instructions=self._config.custom_instructions,
+            prompt_version=getattr(self._config, "summary_prompt_version", 1),
             provenance=provenance,
             **({"deadline": deadline} if deadline is not None else {}),  # #666: bounds every attempt
         )
