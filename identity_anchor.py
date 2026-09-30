@@ -44,6 +44,7 @@ _POOL_WINDOW = 256  # store ids either side of a stamp donor searched for a comp
 _MAX_DECOMPOSITIONS = 3
 _DECOMPOSE_BUDGET = 2048  # T3: prefixes visited per decomposition (ingest thread)
 _DECOMPOSE_MAX_PARTS = 64
+_INSERT_DIFF_BUDGET = 1_000_000  # #633: old x new rows compared per insertion diff (quadratic worst case ~40 ms)
 _MATCH_WORK_PER_ITEM, _MATCH_WORK_FLOOR = 32, 4096  # matching search budget per row + occurrence + key (see below)
 
 
@@ -395,9 +396,10 @@ class IdentityAnchorMixin:
     def _identity_anchor_inserted(self, messages, start: int, cursor: int) -> set:
         """#633: indexes in ``[start, cursor)`` the host inserted into the last list LCM ingested (Hermes
         0.21.2+ inserts a /steer row after the newest tool result), by an identity diff of the two lists
-        from ``start``. A row that replaces, rewrites or re-merges an ingested one is not inserted."""
+        from ``start``. A row that replaces, rewrites or re-merges an ingested one is not inserted. Over
+        the diff budget nothing counts as inserted (the v0.24.6 behaviour: the row is not audited)."""
         before = getattr(self, "_last_active_replay_source_identities", None)
-        if not before:
+        if not before or max(0, len(before) - start) * (len(messages) - start) > _INSERT_DIFF_BUDGET:
             return set()
         now = [self._message_replay_identity(message, strip_carrier=False) for message in messages[start:]]
         opcodes = SequenceMatcher(None, list(before[start:]), now, autojunk=False).get_opcodes()

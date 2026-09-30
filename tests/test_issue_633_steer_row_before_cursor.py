@@ -224,6 +224,45 @@ def test_t6_a_repeated_steer_is_stored_again(tmp_path, new_steer):
         engine.shutdown()
 
 
+def test_t6_a_repeated_steer_inserted_ahead_of_the_first_is_stored(tmp_path):
+    """No new tool result since the first /steer: Hermes inserts the identical second steer after the same
+    tool row, ahead of the first. The prefix then first differs at the displaced first steer; the row the
+    host shows unchanged at the old position is the new occurrence, and its copy is reserved for it."""
+    engine = _engine(tmp_path)
+    try:
+        host = _turn_one(stamped=True)
+        engine.ingest(host)
+        host = _turn_two(host, "host")  # [U, A_call, T, steer, reply, U2, A2]
+        engine.ingest(host)
+        assert len(_steer_rows(engine)) == 1
+        before = len(_stored(engine))
+        host = host + [{"role": "user", "content": "and verify it", "timestamp": 300.0},
+                       {"role": "assistant", "content": "Verified.", "timestamp": 301.0}]
+        host.insert(3, {"role": "user", "content": STEER_BLOCK, "display_kind": "steer"})
+        engine.ingest(host)
+        assert len(_steer_rows(engine)) == 2
+        assert len(_stored(engine)) == before + 3 and _duplicates(engine) == 0
+    finally:
+        engine.shutdown()
+
+
+def test_t7_the_insertion_diff_is_bounded_on_a_long_repetitive_list(tmp_path):
+    """A long list of equal identities: the diff is skipped (nothing counts as inserted) instead of
+    running quadratic work on the ingest path."""
+    import time
+
+    engine = _engine(tmp_path)
+    try:
+        messages = [{"role": "user", "content": "ok"} for _ in range(8000)]
+        engine._last_active_replay_source_identities = [
+            engine._message_replay_identity(message, strip_carrier=False) for message in messages[1:]]
+        started = time.monotonic()
+        assert engine._identity_anchor_inserted(messages, 0, len(messages)) == set()
+        assert time.monotonic() - started < 1.0
+    finally:
+        engine.shutdown()
+
+
 @pytest.mark.xfail(strict=True, reason="#633 out of scope: Hermes <= 0.21.1 appends the steer block in place "
                                        "to an ingested tool row; the audit skips tool rows")
 def test_t5_in_place_shape_is_out_of_scope(tmp_path):
