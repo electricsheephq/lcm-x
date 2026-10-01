@@ -1,6 +1,6 @@
 # LCM-X project state
 
-This page separates released product identity, current development source, evaluation evidence, and later roadmap work. GitHub issues, pull requests, tags, releases, and exact commit heads are the live source of truth. This snapshot was reconciled on 2026-09-05; the naming table and latest-stable identity were updated on 2026-09-24 for the #471 rename and on 2026-09-25 for the v0.24.1 GA, and on 2026-09-26 for the v0.24.2 GA, and on 2026-09-28 for the v0.24.3 GA; and on 2026-09-28 for the v0.24.4 GA; and on 2026-09-29 for the v0.24.5 GA; and on 2026-09-30 for the v0.24.6 GA; and on 2026-09-30 for the v0.24.7 GA; and on 2026-09-30 for the v0.24.8 GA; the main identity was updated on 2026-10-01 for the v0.24.9 release candidate.
+This page separates released product identity, current development source, evaluation evidence, and later roadmap work. GitHub issues, pull requests, tags, releases, and exact commit heads are the live source of truth. This snapshot was reconciled on 2026-09-05; the naming table and latest-stable identity were updated on 2026-09-24 for the #471 rename and on 2026-09-25 for the v0.24.1 GA, and on 2026-09-26 for the v0.24.2 GA, and on 2026-09-28 for the v0.24.3 GA; and on 2026-09-28 for the v0.24.4 GA; and on 2026-09-29 for the v0.24.5 GA; and on 2026-09-30 for the v0.24.6 GA; and on 2026-09-30 for the v0.24.7 GA; and on 2026-09-30 for the v0.24.8 GA; the main identity was updated on 2026-10-01 for the v0.24.9 release candidate; and on 2026-10-01 for the v0.24.9 GA and the roadmap reset (#658).
 
 ## Naming and compatibility
 
@@ -12,17 +12,17 @@ The project is **LCM-X — Lossless Context Memory eXtension**. From v0.24.0 (#4
 | Plugin manifest and install directory | `hermes-lcm-x` (legacy, v0.23.x and earlier: `hermes-lcm`) |
 | Runtime context engine | `lcm-x` (legacy alias `lcm` accepted with a deprecation warning) |
 | Bundled skill | `hermes-lcm` (unchanged) |
-| Latest stable | `v0.24.8@7ed790c84b493395bdc1c929c1ee4d7ea0eaaceb` (ships `hermes-lcm-x` / `lcm-x`; `v0.24.9` follows its rc gauntlet) |
+| Latest stable | `v0.24.9@e36ae9c866757d531292db2bf64f5f0b59710bc8` (ships `hermes-lcm-x` / `lcm-x`) |
 
 The rename is a breaking change with a documented migration path; see the operator guide's migration section. Historical notes and upstream evidence retain the names and identities used when they were created.
 
 ## Released product and development source
 
-The latest stable release is `v0.24.8` at `7ed790c84b493395bdc1c929c1ee4d7ea0eaaceb`. GitHub publishes it as a non-prerelease release. Because GitHub reports the tag as mutable, operators and evidence packets must verify the exact SHA rather than trust the tag name alone.
+The latest stable release is `v0.24.9` at `e36ae9c866757d531292db2bf64f5f0b59710bc8`. GitHub publishes it as a non-prerelease release. Because GitHub reports the tag as mutable, operators and evidence packets must verify the exact SHA rather than trust the tag name alone.
 
-The source snapshot used for this reconciliation is `main@b50f8a61e84bf52bf97e7aa905791e5ab870e176` (the #745 merge). Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits.
+The source snapshot used for this reconciliation is `main@e36ae9c866757d531292db2bf64f5f0b59710bc8` (the v0.24.9 GA merge). Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits.
 
-Main carries the forward identity `0.24.9` (`hermes-lcm-x`) for the next patch release (rc-first under `bench/specs/RELEASE-READINESS-V1.md`); the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
+Main keeps the identity `0.24.9` (`hermes-lcm-x`) until the first v0.25.0 release candidate bumps it (rc-first under `bench/specs/RELEASE-READINESS-V1.md`); the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
 
 v0.23.2 (2026-08-27) shipped those contracts: durable redaction and cloud-embedding privacy are
 independent flags (`LCM_SENSITIVE_PATTERNS_ENABLED` vs `LCM_EMBEDDING_PRIVACY_ENABLED`, #374),
@@ -51,36 +51,13 @@ That result establishes `runtime_safe` for Eva's hosted privacy-safe configurati
 
 Reranking, binary prescreen/int8, proactive recall, V4 assertion/adaptive/pre-answer features, raw-chunk embeddings, and local-model switching remain off for Eva.
 
-## Current evaluation program
+## Current program
 
-Milestone **v0.23.1 Retrieval Provenance Audit** and issue #341 own the next finite program. The audit keeps product bytes pinned to exact stable and adds a separately identified, default-off benchmark instrument.
+Issue #658 is the tracker, and [ROADMAP.md](../ROADMAP.md) lays the work out by horizon and milestone: H1 compaction in the v0.25.0 to v0.28.0 milestones, and the H2 recall re-baseline on the v0.24.9 GA (the default configuration, then embeddings on) in its own milestone.
 
-The registered flow is:
+## History
 
-```text
-public/scrubbed LongMemEval corpus
-  -> exact-v0.23.1 product harness
-  -> FTS / summary / chunk candidates
-  -> shipped lcm_recall fusion
-  -> content-free reference validation
-  -> answer-blind metrics
-```
-
-Issue `#252` contains the score-sensitive dossier and conditional `LAND` verdict. No reader or judge is used. Historical F53-F58 rows used older product/provider identities and remain context only.
-
-The audit can decide `KEEP CURRENT` or record `FUSION DESIGN EARNED` as oracle headroom. It cannot change retrieval behavior or claim achievable uplift. Any behavior change requires a separate accepted issue and fresh baseline.
-
-## Later accepted work
-
-Roadmap #323 retains the later quality dependencies:
-
-- provider trust and state authority: #317, #298, #89;
-- summarizer provenance and contracts: #324, #318, #319, #240;
-- bounded assembly: PR #206, #320, and #90/PR #297;
-- retrieval/diagnostics: #265 and #321;
-- compaction publication/semantics: #247 and #314.
-
-Deferred privacy/scale follow-ups #334-#337 and the P4 telemetry test #328 remain outside v0.23.1 and outside the retrieval audit.
+The v0.23.1 Retrieval Provenance Audit (#341, closed) and the post-v0.23.1 roadmap (#323, closed) are history. #252 still holds the score-sensitive dossier and the conditional `LAND` verdict; historical F53-F58 rows used older product and provider identities and remain context only. Any retrieval behavior change still requires a separate accepted issue and a fresh baseline.
 
 Teams remains a separate dormant/pilot program with its own milestones and host acceptance. No current LCM-X evidence should be presented as Teams enablement.
 
@@ -96,4 +73,4 @@ Keep these claims separate:
 - one-profile runtime safety;
 - fleet/customer readiness.
 
-A passing clone, benchmark, or Eva acceptance packet proves only its named plane. Current details and ownership live in #323, #341, and #252.
+A passing clone, benchmark, or Eva acceptance packet proves only its named plane. Current details and ownership live in #658 and the GitHub milestones; #252 holds the score-sensitive eval queue.

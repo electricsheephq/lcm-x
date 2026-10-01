@@ -4,6 +4,8 @@ This page holds the detailed install, activation, configuration, diagnostics,
 and slash-command reference for LCM-X. The README stays focused on first-run
 adoption; this file is the operator reference.
 
+`LCM_NATIVE_RECOVERY`: removed in v0.25.0; ignored if set
+
 ## Requirements
 
 - Hermes Agent with the pluggable context engine slot ([PR #7464](https://github.com/NousResearch/hermes-agent/pull/7464))
@@ -291,10 +293,10 @@ Provider Plugins:
 
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. `0.24.9` is the identity the next patch release carries: the `v0.24.9-rc1`
-tag carried it first, the gauntlet runs at the latest rc tag (`v0.24.9-rc2`), and the
-GA tree is that rc tree plus the GA release-notes file (`v0.24.8` at `7ed790c8`
-shipped the same way).
+and tag. `0.24.9` is the identity of the `v0.24.9` release: the `v0.24.9-rc1`
+tag carried it first, the gauntlet ran at the last rc tag (`v0.24.9-rc4`), and the
+GA tree (`v0.24.9` at `e36ae9c8`) is that rc tree plus the GA release-notes file
+(`v0.24.8` at `7ed790c8` shipped the same way).
 
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
 `lcm_doctor`, and `/lcm doctor` also report the loaded plugin path and

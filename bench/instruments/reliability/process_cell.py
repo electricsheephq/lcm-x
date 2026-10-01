@@ -1,7 +1,7 @@
 """R2: run one R1 cell through a REAL host process (``run_matrix.py --transport acp-process``).
 
-The host is ``<host venv>/bin/hermes acp`` over stdio (acp_driver.py), with an isolated HERMES_HOME/HOME under the
-cell dir, and every model route (main, LCM summariser, host aux) pointed at the localhost fake provider
+The host is ``<host venv>/bin/hermes acp`` over stdio (acp_driver.py), with an isolated HERMES_HOME/HOME in a
+$TMPDIR scratch dir (deleted once the cell is scored), and every model route (main, LCM summariser, host aux) pointed at the localhost fake provider
 (fake_provider.py), so the summariser and aux LLM are real HTTP code paths. The cell scenario is R1's (prompts,
 replies, tool plans, faults) and the scorers are R1's: the host observer (observer/) writes the same transcript
 events R1's probe writes in-process, the scenario writes what the provider emitted, and the runner writes what
@@ -176,10 +176,12 @@ class PhaseDeadline(AD.DriverError):
 
 
 class ProcessCell:
-    def __init__(self, cell, d: Path, host: dict, transport: str, turn_timeout: float, phase_timeout: float | None = None):
+    def __init__(self, cell, d: Path, host: dict, transport: str, turn_timeout: float, phase_timeout: float | None = None,
+                 scratch: Path | None = None):
+        """``d`` gets the records; ``scratch`` (default ``d``) the host's HERMES_HOME and HOME/TMPDIR."""
         self.cell, self.d, self.host, self.transport, self.turn_timeout = cell, d, host, transport, turn_timeout
-        self.phase_timeout, self.deadline = phase_timeout, None
-        self.home, self.files, self.work = d / "hermes-home", d / "files", d / "home" / "work"
+        self.phase_timeout, self.deadline, self.scratch = phase_timeout, None, scratch or d
+        self.home, self.files, self.work = self.scratch / "hermes-home", d / "files", self.scratch / "home" / "work"
         self.transcript, self.proc, self.sid, self.text_tag = d / "transcript.jsonl", None, None, None
         self.phase, self.log_mark, self.fired, self.backlog_log, self.last_turn = "A", 0, set(), [], 0
         self.scenario = Scenario(self)
@@ -231,8 +233,8 @@ class ProcessCell:
         return min(self.turn_timeout, left)
 
     def env(self) -> dict:
-        env = {"HOME": str(self.d / "home"), "PATH": "/usr/bin:/bin", "HERMES_HOME": str(self.home),
-               "TMPDIR": str(self.d / "home"), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPYCACHEPREFIX": str(self.d / "pycache"), "PYTHONUNBUFFERED": "1",
+        env = {"HOME": str(self.scratch / "home"), "PATH": "/usr/bin:/bin", "HERMES_HOME": str(self.home),
+               "TMPDIR": str(self.scratch / "home"), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPYCACHEPREFIX": str(self.d / "pycache"), "PYTHONUNBUFFERED": "1",
                "PYTHONPATH": str(OBSERVER), "REL_OBSERVER_DIR": str(self.d), "REL_PHASE": self.phase,
                "HERMES_ACP_SKIP_CONFIGURED_MCP": "1", "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost",
                "LCM_SUMMARY_MODEL": "rel/lcm-summary",
@@ -404,8 +406,9 @@ def session_count(home: Path) -> int | None:
 
 
 def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: Path, timeout: int, keep: bool,
-                     keep_dbs: str = "fail", lcm_env: dict | None = None, identity: dict | None = None,
-                     transport: str = "acp-process", turn_timeout: float = 300.0) -> dict:
+                     keep_dbs: str = "none", lcm_env: dict | None = None, identity: dict | None = None,
+                     transport: str = "acp-process", turn_timeout: float = 300.0,
+                     scratch_root: str | Path | None = None) -> dict:
     cell = RM.with_lcm_env(cell, plugin, lcm_env)
     d = RM.checked_cell_dir(out, out / "cells" / host_name / plugin["sha"][:12] / f"{RM.slug(cell['id'])}@{transport}")
     if d.exists():
@@ -426,56 +429,56 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
         return done(verdict="UNSUPPORTED", reason=gateway_unsupported(host["src"]))
     if cell.get("api") == "anthropic" and not has_dist(host["python"], "anthropic"):
         return done(verdict="UNSUPPORTED", reason="the host venv has no anthropic SDK (hermes-agent[anthropic] not installed)")
-    home = d / "hermes-home"
-    for sub in (home / "plugins", d / "home" / "work", d / "db", d / "files"):
-        sub.mkdir(parents=True)
-    (home / "plugins" / plugin["dir"]).symlink_to(plugin["tree"])
-    # A fresh, non-empty models.dev disk cache (agent/models_dev.py serves it for 4 h), so model metadata
-    # resolution never fetches models.dev; the main model's context_length is pinned in config.yaml.
-    (home / "models_dev_cache.json").write_text(json.dumps({"rel": {"id": "rel", "name": "reliability fake", "models": {}}}))
-    (d / "files" / "small.txt").write_text("small deterministic file\n")
-    (d / "files" / "big.txt").write_text("".join(f"line {i:05d}: " + P1.FILLER * 8 + "\n" for i in range(cell.get("big_lines", 400))))
-    run = ProcessCell(cell, d, host, transport, turn_timeout, phase_timeout=timeout)
-    run.provider.start()
-    (home / "config.yaml").write_text(config_yaml(cell, plugin, run.provider.base_url))
-    (d / "cell.json").write_text(json.dumps({**cell, "plugin": plugin, "host": host_name, "host_src": host["src"],
-                                             "host_python": host["python"], "transport": transport}, indent=1))
-    started, first, last, phases = time.time(), 1, {}, []
-    try:
-        for phase in RM.PHASES:
-            run.phase = phase
-            last = run.run_phase(first)
-            (d / f"phase-{phase}.json").write_text(json.dumps(run.phase_record(first, last), indent=1, default=str))
-            phases.append(phase)
-            if last["exit"] != "crash":
-                break
-            first = last["next_turn"]
+    s = RM.scratch_dir(scratch_root)
+    try:  # every exit below, ERROR included, releases the scratch: no Hermes DB outlives its cell by default
+        home = s / "hermes-home"
+        for sub in (home / "plugins", s / "home" / "work", s / "db", d / "files"):
+            sub.mkdir(parents=True)
+        (home / "plugins" / plugin["dir"]).symlink_to(plugin["tree"])
+        # A fresh, non-empty models.dev disk cache (agent/models_dev.py serves it for 4 h), so model metadata
+        # resolution never fetches models.dev; the main model's context_length is pinned in config.yaml.
+        (home / "models_dev_cache.json").write_text(json.dumps({"rel": {"id": "rel", "name": "reliability fake", "models": {}}}))
+        (d / "files" / "small.txt").write_text("small deterministic file\n")
+        (d / "files" / "big.txt").write_text("".join(f"line {i:05d}: " + P1.FILLER * 8 + "\n" for i in range(cell.get("big_lines", 400))))
+        run = ProcessCell(cell, d, host, transport, turn_timeout, phase_timeout=timeout, scratch=s)
+        run.provider.start()
+        (home / "config.yaml").write_text(config_yaml(cell, plugin, run.provider.base_url))
+        (d / "cell.json").write_text(json.dumps({**cell, "plugin": plugin, "host": host_name, "host_src": host["src"],
+                                                 "host_python": host["python"], "transport": transport}, indent=1))
+        started, first, last, phases = time.time(), 1, {}, []
+        try:
+            for phase in RM.PHASES:
+                run.phase = phase
+                last = run.run_phase(first)
+                (d / f"phase-{phase}.json").write_text(json.dumps(run.phase_record(first, last), indent=1, default=str))
+                phases.append(phase)
+                if last["exit"] != "crash":
+                    break
+                first = last["next_turn"]
+        finally:
+            run.provider.stop()
+            run.proxy.stop()
+        backup_errors = RM.copy_dbs(home, s / "db")
+        events = read_jsonl(d / "transcript.jsonl")
+        records = [json.loads(p.read_text()) for p in sorted(d.glob("phase-*.json"))]
+        acct = accounting(d, events)
+        network = [n for r in records for n in r.get("network_attempts", [])] + read_jsonl(d / "proxy-attempts.jsonl")
+        prov = [v for r in records for v in ((r.get("provenance") or {}).get("violations") or [])]
+        observer = [n for r in records for n in r.get("observer_errors", [])]
+        rec.update(phases=phases, wall_s=round(time.time() - started, 1), acp_session=run.sid, accounting=acct,
+                   citations=records[0]["citations"] if records else {}, sandbox=os.path.exists(SANDBOX_EXEC))
+        if network:  # stop condition: a host process tried to leave localhost
+            return done(verdict="ERROR", reason=f"STOP: host attempted non-localhost network access: {network[:3]}")
+        if prov or observer:
+            return done(verdict="ERROR", reason=f"import provenance / observer failure: {(prov + observer)[:3]}")
+        if acct["unexpected_requests"]:
+            return done(verdict="ERROR", reason=f"unexpected provider requests: {acct['unexpected_requests'][:3]}")
+        if run.scenario.unexpected:
+            return done(verdict="ERROR", reason=f"unexpected main-model requests: {run.scenario.unexpected[:3]}")
+        if last.get("exit") == "done" and not acct["ok"]:
+            return done(verdict="ERROR", reason=f"provider request log does not account for the transcript: {acct}")
+        rec.update(RM.verdict_fields({**cell, "chat_root": run.sid}, d, last, run.fired, rec["citations"], backup_errors,
+                                     s / "db"))
+        return done()
     finally:
-        run.provider.stop()
-        run.proxy.stop()
-    backup_errors = RM.copy_dbs(home, d / "db")
-    events = read_jsonl(d / "transcript.jsonl")
-    records = [json.loads(p.read_text()) for p in sorted(d.glob("phase-*.json"))]
-    acct = accounting(d, events)
-    network = [n for r in records for n in r.get("network_attempts", [])] + read_jsonl(d / "proxy-attempts.jsonl")
-    prov = [v for r in records for v in ((r.get("provenance") or {}).get("violations") or [])]
-    observer = [n for r in records for n in r.get("observer_errors", [])]
-    rec.update(phases=phases, wall_s=round(time.time() - started, 1), acp_session=run.sid, accounting=acct,
-               citations=records[0]["citations"] if records else {}, sandbox=os.path.exists(SANDBOX_EXEC))
-    if network:  # stop condition: a host process tried to leave localhost
-        return done(verdict="ERROR", reason=f"STOP: host attempted non-localhost network access: {network[:3]}")
-    if prov or observer:
-        return done(verdict="ERROR", reason=f"import provenance / observer failure: {(prov + observer)[:3]}")
-    if acct["unexpected_requests"]:
-        return done(verdict="ERROR", reason=f"unexpected provider requests: {acct['unexpected_requests'][:3]}")
-    if run.scenario.unexpected:
-        return done(verdict="ERROR", reason=f"unexpected main-model requests: {run.scenario.unexpected[:3]}")
-    if last.get("exit") == "done" and not acct["ok"]:
-        return done(verdict="ERROR", reason=f"provider request log does not account for the transcript: {acct}")
-    rec.update(RM.verdict_fields({**cell, "chat_root": run.sid}, d, last, run.fired, rec["citations"], backup_errors))
-    done()
-    if keep_dbs == "fail" and rec["verdict"] == "PASS" and not any(RM.report.licensed(rec)):
-        shutil.rmtree(d / "db", ignore_errors=True)
-    if not keep:
-        shutil.rmtree(home, ignore_errors=True)
-    return rec
+        RM.release_scratch(s, d, rec, keep_dbs, keep)

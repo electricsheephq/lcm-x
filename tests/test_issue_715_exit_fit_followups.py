@@ -10,27 +10,8 @@ from hermes_lcm.survival_fit import SURVIVAL_FIT_COUNTER_KEY
 
 from tests.test_issue_668_exit_fit import engine as _engine_fixture, estimators, _counter  # noqa: F401
 from tests.test_issue_650_survival_fit_keeps_summary import _hidden_backlog, _spy
-from tests.test_native_publication_fallback import candidate as _native_fixture, history, install_native
 
 engine = _engine_fixture
-candidate = _native_fixture
-
-
-def test_native_result_keeps_plain_fit(candidate, monkeypatch, caplog):
-    calls = install_native(monkeypatch)
-    messages = history()
-    expected = [{"role": "assistant", "content": "native summary"}] + messages[-5:]
-    candidate.threshold_tokens = candidate._survival_measure(expected)
-    seen = _spy(candidate, monkeypatch)
-    with caplog.at_level(logging.WARNING, logger="hermes_lcm"):
-        result = candidate.compress(messages, current_tokens=candidate._survival_measure(messages))
-    assert calls and candidate._config.native_recovery
-    assert candidate._last_compression_status == "host_native"
-    assert int(candidate.threshold_tokens * 0.95) < candidate._survival_measure(seen["input"])
-    assert candidate._survival_measure(seen["input"]) <= candidate._survival_fit_budget(messages, None)
-    assert result == seen["input"] and candidate._last_survival_fit is None
-    assert not _counter(candidate).get("last_reason", "").startswith("exit_fit:")
-    assert not any("exit_fit:" in row.getMessage() for row in caplog.records)
 
 
 def test_automatic_forced_overflow_keeps_plain_fit(engine, monkeypatch, caplog):

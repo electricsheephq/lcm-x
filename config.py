@@ -985,7 +985,7 @@ class LCMConfig:
 
     # Appended for positional-constructor compatibility with every field that
     # predates native recovery. Keyword construction remains preferred.
-    # Opt-in native context recovery; preserves LCM sources and never changes the frontier.
+    # Removed in v0.25.0; parsed and ignored.
     native_recovery: bool = False
     # #582: fit an over-window compress() result by dropping the oldest stored user turns (never a row).
     survival_fit: bool = True
