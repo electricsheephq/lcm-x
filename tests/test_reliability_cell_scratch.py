@@ -144,6 +144,17 @@ def test_a_failed_keep_move_deletes_nothing(setup, monkeypatch, held):
     assert {"db/lcm.db", "db/state.db", "hermes-home/state.db"} <= set(db_files(s))
 
 
+def test_a_scratch_dir_that_cannot_be_deleted_is_an_error(setup, monkeypatch, held):
+    """Review (#786): rmtree(ignore_errors=True) hid a failed cleanup, leaving the cell's DBs in $TMPDIR silently."""
+    real = RM.shutil.rmtree
+    monkeypatch.setattr(RM.shutil, "rmtree", lambda path, **kw: None if Path(path).parent == setup.scratch.resolve()
+                        else real(path, **kw))  # the scratch dir's own delete fails: nothing is removed
+    with pytest.raises(OSError, match="could not be fully deleted"):
+        r1(setup, monkeypatch, held)
+    [s] = list(setup.scratch.iterdir())
+    assert {"db/lcm.db", "db/state.db"} <= set(db_files(s))
+
+
 def test_default_scratch_root_is_tmpdir(setup, monkeypatch, held, tmp_path):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmpdir"))
     (tmp_path / "tmpdir").mkdir()

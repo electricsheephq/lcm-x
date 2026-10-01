@@ -90,7 +90,9 @@ def release_scratch(scratch: Path, d: Path, rec: dict, keep_dbs: str, keep_home:
             shutil.move(scratch / "hermes-home", d / "hermes-home")
     except OSError as exc:  # shutil.Error included
         raise OSError(f"keeping the cell's copies failed, nothing deleted: see {scratch} and {d}: {exc!r}") from exc
-    shutil.rmtree(scratch, ignore_errors=True)
+    shutil.rmtree(scratch, ignore_errors=True)  # delete all it can, then say so if anything is left
+    if scratch.exists():
+        raise OSError(f"the cell scratch dir {scratch} could not be fully deleted")
 
 
 def verdict_fields(cell: dict, d: Path, last: dict, fired: set, citations: dict, backup_errors: list[str],
