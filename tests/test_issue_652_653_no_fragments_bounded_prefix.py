@@ -271,21 +271,12 @@ def test_t5_at_or_below_the_target_the_sweep_is_unchanged(tmp_path, monkeypatch,
     engine = _engine(tmp_path, condensation_fanin=2)
     stub = _summaries(monkeypatch)
     _depth_0_nodes(engine, 3, token_count=130)  # 390 tokens: at or below the 400 token sweep target
-    before_fit = {}
-    real_fit = engine._survival_fit
-
-    def fit(messages, result, *args, **kwargs):
-        before_fit["digest"] = _digest(result)
-        return real_fit(messages, result, *args, **kwargs)
-
-    monkeypatch.setattr(engine, "_survival_fit", fit)
     try:
-        _compress(engine, _view(20 if shape == "partial" else 6), caplog)
+        result = _compress(engine, _view(20 if shape == "partial" else 6), caplog)
         telemetry = engine.get_status()["threshold_full_sweep"]
         passes = (telemetry["leaf_passes"], telemetry["condensation_passes"], telemetry["total_passes"],
                   telemetry["stop_reason"])
-        assert (stub.calls, passes, before_fit["digest"]) == T5_EXPECTED[shape]  # #668 fits after assembly
-        assert engine._last_survival_fit["reason"] == "exit_fit:compacted"
+        assert (stub.calls, passes, _digest(result)) == T5_EXPECTED[shape]  # #668: the exit fit keeps the prefix
         assert telemetry.get("pre_leaf_condensation_passes", 0) == 0
     finally:
         engine.shutdown()

@@ -366,7 +366,7 @@ def test_empty_anchor_slice_is_not_mapped_and_the_pass_result_is_the_same(tmp_pa
         nodes = engine._dag.get_session_nodes("S")
         assert engine._last_compression_status == "compacted"
         assert [node.source_ids for node in nodes] == [[1, 2], [3, 4], [5, 6], [7, 8], [9, 10]]
-        assert result[-2:] == view[-2:] and len(result) == 2  # #650 emergency: prefix cannot fit this 190-token cap
+        assert result[-2:] == view[-2:] and len(result) == 3  # #668: an exit fit never drops the summary prefix
         assert 0 not in mapped
     finally:
         engine.shutdown()

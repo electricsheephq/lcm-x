@@ -127,6 +127,8 @@ class SurvivalFitMixin:
     def _survival_fit(self, messages, result, observed_tokens, reason: str, *, after_exception: bool = False,
                       window_cap: Optional[int] = None, request_cap: Optional[int] = None):
         """``result``, or the fitted list when ``result`` is over the survival budget."""
+        # #668: an exit fit's budget without the exit cap; a list it still holds needs no user warning
+        window_budget = self._survival_fit_budget(messages, observed_tokens) if reason.startswith("exit_fit:") else None
         budget = self._survival_fit_budget(messages, observed_tokens, window_cap, request_cap)
         if budget is None or not isinstance(result, list) or not result or not self._session_id or \
                 self._bypasses_lcm_context_management():
@@ -182,7 +184,8 @@ class SurvivalFitMixin:
             self._ingest_cursor = len(fitted)
         if after > budget:  # still the best list available: returned, but never reported as within budget
             logger.warning("LCM survival fit could not reach budget (after=%d, budget=%d, reason=%s)", after, budget, reason)
-        self._survival_record(reason, count, ids, before, after, budget, projected, notice)
+        routine = window_budget is not None and before <= window_budget  # routine headroom, not a session at risk
+        self._survival_record(reason, count, ids, before, after, budget, projected, notice, warn_user=not routine)
         return fitted
 
     def _survival_cut(self, result, lead: int, budget: int, persisted: bool, reason: str, store_ids,
@@ -390,7 +393,8 @@ class SurvivalFitMixin:
             return False
         return any(_normalize_observed_at(rel.get("observed_at")) == stamp for rel in aliases)
 
-    def _survival_record(self, reason, count, ids, before, after, budget, projected, notice, *, shortened=True) -> None:
+    def _survival_record(self, reason, count, ids, before, after, budget, projected, notice, *, shortened=True,
+                         warn_user=True) -> None:
         """Loud: a WARNING line, the doctor counter (metadata only) and one user warning per conversation."""
         uncovered = len(set(ids) - self._store_complete_node_covered(ids)) if reason.startswith("exit_fit:") else 0
         if shortened:
@@ -420,8 +424,7 @@ class SurvivalFitMixin:
             logger.warning("LCM survival-fit counter write failed (projected=%s); /lcm doctor under-counts survival fits "
                            "for this store", projected, exc_info=True)
         key = str(self._conversation_id or self._session_id or "")
-        # an exit fit (#668) is routine headroom, not a session at risk: the model's notice only, no user warning
-        if shortened and not reason.startswith("exit_fit:") and key not in self._survival_fit_warned:
+        if shortened and warn_user and key not in self._survival_fit_warned:
             self._survival_fit_warned.add(key)
             self._survival_fit_pending_warning = (key, _WARNING.format(n=count))  # R6-4: owned by its conversation
             self.emit_automatic_compaction_status = True  # the host asks the hook below once more
