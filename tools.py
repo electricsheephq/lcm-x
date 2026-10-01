@@ -6170,8 +6170,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             arm_hits["fts"] = hits
             coverage["fts"] = "ok"
         else:
-            # Same classification as an uncapped FTS failure: the re-run had
-            # the request deadline, so a timeout here IS request exhaustion.
+            # Same classification as an uncapped FTS failure, including a
+            # worker-capacity timeout reported before the deadline.
             degraded_reasons.append("full-text arm unavailable")
             timed_out = timed_out or bool(fts_error.get("timeout"))
 
