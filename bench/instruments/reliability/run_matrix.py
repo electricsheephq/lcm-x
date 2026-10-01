@@ -187,7 +187,8 @@ def env_refusal(lcm_env: dict) -> str | None:
             return f"--lcm-env key {k} must start with LCM_"
         if re.search(r"(_PATH|_DIR|_HOME|_FILE)$", k, re.I):
             return f"--lcm-env key {k} is path-valued; refused"
-        if re.search(r"KEY|TOKEN|SECRET|PASSWORD", k, re.I):
+        # "_TOKENS" names a token COUNT (LCM_LEAF_CHUNK_TOKENS, ..._THRESHOLD_TOKENS), not a credential.
+        if re.search(r"KEY|TOKEN|SECRET|PASSWORD", re.sub(r"_TOKENS(?=_|$)", "", k, flags=re.I), re.I):
             return f"--lcm-env key {k} is secret-shaped; refused"
     return None
 

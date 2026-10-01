@@ -607,6 +607,11 @@ def test_r14_safety_refusals(tmp_path):
     for key in ("LCM_DATABASE_PATH", "LCM_EXPORT_DIR", "LCM_EMBEDDING_API_KEY", "LCM_AUTH_TOKEN", "HOME"):
         assert run_matrix.env_refusal({key: "x"}), key
     assert run_matrix.env_refusal({"LCM_CONTEXT_THRESHOLD": "0.5"}) is None
+    # Token COUNT keys are tuning, not credentials (the fleet sets these two).
+    for key in ("LCM_LEAF_CHUNK_TOKENS", "LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS", "LCM_RESERVE_TOKENS_FLOOR"):
+        assert run_matrix.env_refusal({key: "8000"}) is None, key
+    for key in ("LCM_API_KEY_TOKENS", "LCM_AUTH_TOKENS_SECRET", "LCM_ACCESS_TOKEN"):
+        assert run_matrix.env_refusal({key: "x"}), key
     src = tmp_path / "src"
     src.mkdir()
     path = tmp_path / "hosts.json"
