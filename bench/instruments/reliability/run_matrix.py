@@ -160,6 +160,10 @@ def run_cell(cell: dict, host_name: str, host: dict, plugin: dict, out: Path, ti
         rec.update(verdict="ERROR", reason=f"host identity not verified: {(identity or {}).get('error')}")
         (d / "verdict.json").write_text(json.dumps(rec, indent=1, default=str))
         return rec
+    if (cell.get("drain") or {}).get("forget_host_rows"):  # decided before any probe: no host run, no DB to copy
+        rec.update(verdict="UNSUPPORTED", reason="the host-forgets-its-rows fixture runs only under --transport acp-process")
+        (d / "verdict.json").write_text(json.dumps(rec, indent=1, default=str))
+        return rec
     s = scratch_dir(scratch_root)
     try:
         home = s / "hermes-home"

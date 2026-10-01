@@ -173,3 +173,18 @@ def test_cli_refuses_a_scratch_root_under_the_live_hermes_and_unknown_keep_value
     assert not live.exists() and not out.exists()
     with pytest.raises(SystemExit):
         RM.main(args + ["--keep-dbs", "some"])
+
+
+def test_r1_declines_the_acp_process_only_drain_fixture_before_any_probe(tmp_path):
+    """#801: R1 (in-process) cannot make the host forget its rows; the cell is UNSUPPORTED before a probe runs, so
+    no scratch dir is made and no missing-DB copy turns it into an ERROR."""
+    from bench.instruments.reliability import cells, run_matrix
+    cell = next(c for c in cells.select("all") if c["id"] == "drain/hidden-backlog-large/in-place")
+    out, scratch = tmp_path / "out", tmp_path / "scratch"
+    out.mkdir()
+    scratch.mkdir()
+    rec = run_matrix.run_cell(cell, "h", {"src": "/nonexistent", "python": "/nonexistent", "sha": "b" * 40},
+                              {"sha": "a" * 40, "ref": "HEAD", "dir": "lcm-x", "tree": "/nonexistent"}, out, 1, False,
+                              identity={"sha": "b" * 40}, scratch_root=scratch)
+    assert rec["verdict"] == "UNSUPPORTED" and "acp-process" in rec["reason"], rec
+    assert list(scratch.iterdir()) == []
