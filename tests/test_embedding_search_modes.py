@@ -788,9 +788,13 @@ def test_hybrid_does_not_start_semantic_arm_after_fts_exhausts_deadline(
 ):
     semantic_engine._config.embedding_query_timeout_s = 0.02
     provider_calls = 0
+    release = threading.Event()
 
+    # The full-text arm blocks until the test releases it, so returning well
+    # before that proves lcm_grep did not wait for it, without a tight
+    # wall-clock bound that flakes on a busy runner (#791).
     def slow_full_text(_args, **_kwargs):
-        time.sleep(0.1)
+        release.wait(5.0)
         return json.dumps({"results": []})
 
     def resolve(_config):
@@ -801,13 +805,18 @@ def test_hybrid_does_not_start_semantic_arm_after_fts_exhausts_deadline(
     monkeypatch.setattr(lcm_tools, "_lcm_grep_full_text", slow_full_text)
     monkeypatch.setattr(lcm_tools, "resolve_provider", resolve)
     started = time.monotonic()
-    payload = json.loads(
-        lcm_tools.lcm_grep(
-            {"query": "deadline", "mode": "hybrid"}, engine=semantic_engine
+    try:
+        payload = json.loads(
+            lcm_tools.lcm_grep(
+                {"query": "deadline", "mode": "hybrid"}, engine=semantic_engine
+            )
         )
-    )
+        elapsed = time.monotonic() - started
+    finally:
+        # Free the abandoned worker's slot for the tests that follow.
+        release.set()
 
-    assert time.monotonic() - started < 0.08
+    assert elapsed < 1.0
     assert payload["timeout"] is True
     assert payload["mode"] == "hybrid"
     assert provider_calls == 0
