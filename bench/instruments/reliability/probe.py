@@ -74,13 +74,15 @@ LOG_COUNTS = {
     "recorded_replaced": "LCM recorded host-replaced rows",
     "survival_fit": "LCM survival fit applied",
     "exit_fit": "LCM survival fit applied (reason=exit_fit:",
+    "exit_fit_skipped": "LCM exit fit skipped",
 }
 FILLER = "alpha beta gamma delta "
 
 
 def _log_counts(log: str) -> dict:
     counts = {k: log.count(v) for k, v in LOG_COUNTS.items()}
-    counts["survival_fit"] -= counts["exit_fit"]  # #668: threshold headroom is not a compaction miss
+    # #668: routine threshold headroom is not a compaction miss; an exit over the window budget logs as a plain fit
+    counts["survival_fit"] -= counts["exit_fit"]
     return counts
 
 

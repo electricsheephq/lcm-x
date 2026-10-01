@@ -128,8 +128,7 @@ def test_t1_level_3_leaf_is_not_published_when_the_fit_can_rescue(tmp_path, monk
         assert _nodes(engine) == [] and stub.calls and [depth for depth, _ in stub.calls] == [0]
         assert engine._store.get_session_messages("S", limit=100_000) == rows
         assert _frontier(engine) == frontier and engine._last_compacted_store_id == compacted
-        assert engine._last_compression_status == "noop" and len(result) < len(view)
-        assert engine._last_survival_fit["reason"] == "exit_fit:noop"
+        assert engine._last_compression_status == "noop" and result == view
         assert engine._last_compression_noop_reason == "summary result rejected"
         if sweep:
             assert engine.get_status()["threshold_full_sweep"]["stop_reason"] == "summary_result_rejected"
@@ -276,7 +275,7 @@ def test_t5_at_or_below_the_target_the_sweep_is_unchanged(tmp_path, monkeypatch,
         telemetry = engine.get_status()["threshold_full_sweep"]
         passes = (telemetry["leaf_passes"], telemetry["condensation_passes"], telemetry["total_passes"],
                   telemetry["stop_reason"])
-        assert (stub.calls, passes, _digest(result)) == T5_EXPECTED[shape]  # #668: the exit fit keeps the prefix
+        assert (stub.calls, passes, _digest(result)) == T5_EXPECTED[shape]
         assert telemetry.get("pre_leaf_condensation_passes", 0) == 0
     finally:
         engine.shutdown()

@@ -108,6 +108,7 @@ def test_t5_exit_warning_counts_two_covered_three_uncovered_rows(engine, monkeyp
     # Same source IDs in another node must not double-count coverage.
     engine._dag.add_node(SummaryNode(session_id="S", summary="Earlier rows again", source_ids=ids[:2]))
     engine.threshold_tokens = 550
+    engine._config.fresh_tail_count = 2  # the newest turn (rows 5-6) is the protected tail; the exit fit keeps it
     engine._last_compression_status = "compressed"
     monkeypatch.setattr(engine, "_compress_impl", lambda messages, **kwargs: messages)
     with caplog.at_level(logging.WARNING, logger="hermes_lcm"):
@@ -246,3 +247,75 @@ def test_t11_a_failed_uncovered_count_never_fails_the_fit(engine, monkeypatch, c
     assert engine._survival_measure(result) + 2000 <= int(engine.threshold_tokens * 0.95)
     applied = [r.getMessage() for r in caplog.records if "LCM survival fit applied" in r.getMessage()]
     assert len(applied) == 1 and "uncovered_rows=unknown" in applied[0]
+
+
+def _stored_turns(engine, turns: int, words: int, *, newest_words: int = 0) -> list[dict]:
+    """``turns`` stored user/assistant turns with no summary prefix; the host's cursor covers the list."""
+    view = []
+    for i in range(turns):
+        size = newest_words if newest_words and i == turns - 1 else words
+        view += [{"role": "user", "content": f"[U{i}] question"}, {"role": "assistant", "content": "alpha " * size}]
+    engine.ingest(view)
+    engine._ingest_cursor = len(view)
+    return view
+
+
+def test_t12_exit_fit_never_projects_the_newest_turn(engine, caplog):
+    """No summary prefix, the newest turn alone over the exit cap: the list stays as it is (no projection)."""
+    view = _stored_turns(engine, 6, 40, newest_words=900)
+    measure = engine._survival_measure(view)
+    cap = engine._survival_measure(view[-2:]) - 50
+    assert cap < measure <= int(engine.context_length * 0.85)
+    with caplog.at_level(logging.INFO, logger="hermes_lcm"):
+        result = engine._survival_fit(view, view, measure, "exit_fit:compressed", request_cap=cap)
+    assert result is view
+    assert not any(survival_fit._PROJECTED_PREFIX in str(m.get("content")) for m in result)
+    assert any("LCM exit fit skipped" in r.getMessage() for r in caplog.records)
+    assert engine._last_survival_fit is None
+
+
+@pytest.mark.parametrize("room", ["tail_fits", "tail_over_cap"])
+def test_t13_exit_fit_keeps_the_fresh_tail(engine, caplog, room):
+    """Only whole turns before the fresh tail leave; when the tail alone is over the cap, nothing leaves."""
+    view = _stored_turns(engine, 10, 120)
+    tail = engine._fresh_tail_start(view)
+    assert 0 < tail < len(view) - 2
+    measure = engine._survival_measure(view)
+    tail_measure = engine._survival_measure(view[tail:])
+    cap = tail_measure + 400 if room == "tail_fits" else tail_measure - 50
+    with caplog.at_level(logging.INFO, logger="hermes_lcm"):
+        result = engine._survival_fit(view, view, measure, "exit_fit:compressed", request_cap=cap)
+    if room == "tail_fits":
+        assert len(result) < len(view) and result[-(len(view) - tail):] == view[tail:]
+        assert engine._last_survival_fit["reason"] == "exit_fit:compressed"
+    else:
+        assert result is view and engine._last_survival_fit is None
+        assert any("LCM exit fit skipped" in r.getMessage() for r in caplog.records)
+
+
+def test_t14_exit_over_the_window_budget_is_a_plain_fit_that_warns(engine, caplog):
+    """A list the window budget no longer holds is a session at risk: the plain fit, its reason, the user warning."""
+    view = _stored_turns(engine, 20, 600)
+    measure = engine._survival_measure(view)
+    observed = measure + 30_000  # host overhead 20,000 (half the window): window budget 34,000 - 20,000
+    assert measure > engine._survival_fit_budget(view, observed)
+    with caplog.at_level(logging.WARNING, logger="hermes_lcm"):
+        result = engine._survival_fit(view, view, observed, "exit_fit:compressed",
+                                      request_cap=int(engine.threshold_tokens * 0.95))
+    assert len(result) < len(view)
+    assert engine._last_survival_fit["reason"] == "compressed"
+    assert engine._survival_fit_pending_warning is not None
+    applied = [r.getMessage() for r in caplog.records if "LCM survival fit applied" in r.getMessage()]
+    assert len(applied) == 1 and "reason=compressed" in applied[0]
+    assert probe.phase_log_fields("\n".join(applied))["log_counts"]["survival_fit"] == 1
+
+
+def test_t15_probe_reports_skipped_exit_fits_without_failing_b8(tmp_path):
+    log = ("LCM compaction #1: done\n"
+           "LCM exit fit skipped: no whole-turn cut between the summary prefix and the fresh tail reaches the exit "
+           "cap (tokens=900, budget=500)\n")
+    fields = probe.phase_log_fields(log)
+    assert fields["log_counts"]["exit_fit_skipped"] == 1 and fields["log_counts"]["survival_fit"] == 0
+    out = make(tmp_path, rows=clean_rows(), events=clean_events(), phase=fields)
+    assert "B8" not in out["failed_bars"]
+    assert "exit_fits_skipped=1" in report.signature(out)

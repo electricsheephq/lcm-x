@@ -105,13 +105,6 @@ def _count(caplog, text: str) -> int:
     return sum(text in record.getMessage() for record in caplog.records)
 
 
-def _assert_exit_fit(engine, view, result):
-    """#668: the leaf stop still holds, but stored turns can leave on the way out."""
-    assert len(result) < len(view)
-    assert engine._last_survival_fit["reason"] == "exit_fit:noop"
-    assert _dropped_rows_are_stored(engine, view, result)
-
-
 def _spend_budget_before_first_leaf(engine, view, clock, monkeypatch, caplog):
     """Test 1's state: the first store-id map of pass 0 takes the whole budget."""
     _advance_on_call(monkeypatch, engine, "_get_store_id_map_for_messages", clock, 121.0)
@@ -122,13 +115,13 @@ def _spend_budget_before_first_leaf(engine, view, clock, monkeypatch, caplog):
 
 # -- 1. the budget is spent before the first leaf ------------------------------------------------------
 
-def test_budget_spent_in_the_first_map_returns_the_exit_fitted_input(tmp_path, summaries, clock, monkeypatch, caplog):
+def test_budget_spent_in_the_first_map_returns_the_input_unchanged(tmp_path, summaries, clock, monkeypatch, caplog):
     engine = _engine(tmp_path, leaf_chunk_tokens=2000)  # a multi-row chunk: the base logs two retry lines
     view = _view()
     try:
         result = _spend_budget_before_first_leaf(engine, view, clock, monkeypatch, caplog)
         telemetry = engine.get_status()["threshold_full_sweep"]
-        _assert_exit_fit(engine, view, result)
+        assert result is view
         assert engine._last_compression_status == "noop"
         assert engine._last_compression_noop_reason == "threshold sweep time budget spent before the first leaf"
         assert telemetry["status"] == "noop" and telemetry["leaf_passes"] == 0
@@ -184,8 +177,7 @@ def test_pass_leaves_right_after_the_step_that_spends_the_budget(
         engine.ingest(view)
         with caplog.at_level(logging.WARNING, logger="hermes_lcm"):
             result = engine.compress(view, current_tokens=engine.threshold_tokens + 1)
-        _assert_exit_fit(engine, view, result)
-        assert summaries == [] and engine._last_compression_status == "noop"
+        assert result is view and summaries == [] and engine._last_compression_status == "noop"
         line = next(r.getMessage() for r in caplog.records if BUDGET_LINE in r.getMessage())
         assert line.endswith(f"{step}=121.0s")  # the last timed step: nothing ran after it
     finally:
@@ -210,8 +202,7 @@ def test_budget_spent_in_a_provider_timeout_names_the_summariser_step(tmp_path, 
         with caplog.at_level(logging.WARNING, logger="hermes_lcm"):
             result = engine.compress(view, current_tokens=engine.threshold_tokens + 1)
         telemetry = engine.get_status()["threshold_full_sweep"]
-        _assert_exit_fit(engine, view, result)
-        assert calls == [1] and telemetry["stop_reason"] == "time_budget_exhausted"
+        assert calls == [1] and result is view and telemetry["stop_reason"] == "time_budget_exhausted"
         assert _count(caplog, RETRY_LINE) == 1 and _count(caplog, BUDGET_LINE) == 1
         line = next(r.getMessage() for r in caplog.records if BUDGET_LINE in r.getMessage())
         assert "summariser=110.0s" in line
@@ -232,8 +223,7 @@ def test_five_seconds_left_at_the_pre_call_check_makes_no_summariser_call(
             result = engine.compress(view, current_tokens=engine.threshold_tokens + 1)
         telemetry = engine.get_status()["threshold_full_sweep"]
         assert summaries == []
-        _assert_exit_fit(engine, view, result)
-        assert telemetry["stop_reason"] == "time_budget_exhausted"
+        assert result is view and telemetry["stop_reason"] == "time_budget_exhausted"
         assert _count(caplog, RETRY_LINE) == 0
         with pytest.raises(lcm_engine.SweepBudgetExhausted, match="threshold full sweep time budget exhausted"):
             engine._summarize_leaf_chunk_with_rescue(view[1:5], deadline=clock() + 5.0)
@@ -366,7 +356,7 @@ def test_empty_anchor_slice_is_not_mapped_and_the_pass_result_is_the_same(tmp_pa
         nodes = engine._dag.get_session_nodes("S")
         assert engine._last_compression_status == "compacted"
         assert [node.source_ids for node in nodes] == [[1, 2], [3, 4], [5, 6], [7, 8], [9, 10]]
-        assert result[-2:] == view[-2:] and len(result) == 3  # #668: an exit fit never drops the summary prefix
+        assert result[-2:] == view[-2:] and len(result) == 3
         assert 0 not in mapped
     finally:
         engine.shutdown()
@@ -532,11 +522,12 @@ def test_rejected_request_after_a_no_leaf_stop_comes_back_shorter(tmp_path, summ
 
 
 def test_same_state_without_a_recovery_attempt_uses_the_exit_cap(tmp_path, summaries, clock, monkeypatch):
-    """C2 + #668: threshold exit gets headroom without the recovery request-size cap."""
+    """C2 + #668: threshold exit gets headroom (whole turns before the fresh tail) without the recovery cap."""
     engine, view = _rejected_state(tmp_path, monkeypatch, clock)
     try:
         result = engine.compress(view, current_tokens=engine._survival_measure(view) + 1_000, bypass_cooldown=False)
-        _assert_exit_fit(engine, view, result)
+        assert len(result) < len(view) and engine._last_survival_fit["reason"] == "exit_fit:noop"
+        assert result[-2:] == view[-2:]  # the fresh tail (two rows) stays
         assert engine._survival_measure(result) + HOST_TOKENS <= int(THRESHOLD * 0.95)
     finally:
         engine.shutdown()

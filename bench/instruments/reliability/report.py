@@ -54,6 +54,8 @@ def signature(r: dict) -> str:
         parts.append(f"survival_fits={n['B8']['survival_fit']}")
     if n.get("B8", {}).get("exit_fit"):
         parts.append(f"exit_fits={n['B8']['exit_fit']}")
+    if n.get("B8", {}).get("exit_fit_skipped"):
+        parts.append(f"exit_fits_skipped={n['B8']['exit_fit_skipped']}")
     if b2.get("surplus_rows") or b2.get("deficit_rows"):
         parts.append(f"surplus/deficit={b2.get('surplus_rows')}/{b2.get('deficit_rows')}")
     if failed:
