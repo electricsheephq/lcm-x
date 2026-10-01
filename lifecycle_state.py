@@ -747,6 +747,20 @@ class LifecycleStateStore:
         return self.get_by_conversation(conversation_id)
 
     @_synchronized
+    def preserve_finalized_after_reset(self, conversation_id, session_id, previous_reset_at) -> None:
+        """A non-deleting reset keeps an already finalized frontier backed by its summaries."""
+        self._conn.execute(
+            """
+            UPDATE lcm_lifecycle_state
+            SET last_finalized_at = MAX(COALESCE(last_finalized_at, 0), last_reset_at)
+            WHERE conversation_id = ? AND current_session_id IS NULL AND last_finalized_session_id = ?
+              AND last_reset_at IS NOT NULL AND last_reset_at IS NOT ? AND (? IS NULL OR COALESCE(last_finalized_at, 0) >= ?)
+            """,
+            (conversation_id, session_id, previous_reset_at, previous_reset_at, previous_reset_at),
+        )
+        self._conn.commit()
+
+    @_synchronized
     def prune_empty_sessions(
         self,
         *,
