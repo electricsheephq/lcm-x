@@ -431,6 +431,32 @@ _POLICY_NEUTRAL_REDACTION = SimpleNamespace(
     sensitive_patterns_enabled=True,
     sensitive_patterns=[name for name in _SENSITIVE_PATTERN_CATALOG if name != "password_assignment"],
 )
+_SENSITIVE_PLACEHOLDER_TEXT_RE = re.compile(re.escape(_SENSITIVE_PLACEHOLDER_PREFIX) + r" [^\]]*\]")
+
+
+def _host_literal_placeholders(messages: List[Dict[str, Any]]) -> frozenset:
+    """#758: placeholder TEXT the host itself holds (typed, pasted, or LCM output it kept), as opposed
+    to a placeholder this process's redaction produced from a raw secret. Read from the unredacted rows."""
+    found: set = set()
+    for message in messages:
+        for text in (normalize_content_value(message.get("content")) or "", str(message.get("tool_calls") or "")):
+            if _SENSITIVE_PLACEHOLDER_PREFIX in text:
+                found.update(_SENSITIVE_PLACEHOLDER_TEXT_RE.findall(text))
+    return frozenset(found)
+
+
+def _mark_literal_placeholders(
+    identity: tuple[str, str, str, str, str], literal: frozenset
+) -> tuple[str, str, str, str, str]:
+    """#758: tag host-held placeholder text so the policy-neutral form never equates it with the raw
+    secret its digest names; a row holding the same text on both sides still compares equal."""
+    if not literal:
+        return identity
+    role, content, tool_call_id, tool_calls, tool_name = identity
+    for text in literal:
+        tagged = text.replace(_SENSITIVE_PLACEHOLDER_PREFIX + " ", _SENSITIVE_PLACEHOLDER_PREFIX + " literal=1; ", 1)
+        content, tool_calls = content.replace(text, tagged), tool_calls.replace(text, tagged)
+    return (role, content, tool_call_id, tool_calls, tool_name)
 
 
 def _todo_annotation_span(content: str, start: int) -> int:
@@ -2641,22 +2667,40 @@ class ReconcileMixin:
             raw_session_count=session_count,
             allow_session_end_replay_proof=allow_session_end_replay_proof,
         )
+        effective_prefixes: dict = {}
+
+        def effective_prefix(at: int):
+            if at not in effective_prefixes:
+                effective_prefixes[at] = self._effective_replay_identities(messages[:at])
+            return effective_prefixes[at]
+
         across_policy_change = False
-        if self._window_has_redaction_placeholder(messages, stored_tail) and not (
-            cursor and self._effective_replay_identities(messages[:cursor])
-        ):
+        # #758: the retry needs the host's unredacted rows (provenance of every placeholder), runs only
+        # when nothing was proven, and only when a placeholder shows on one side of the window.
+        policy_retry = (
+            unredacted_messages is not None
+            and len(unredacted_messages) == len(messages)
+            and not (cursor and effective_prefix(cursor))
+            and self._window_has_redaction_placeholder(messages, stored_tail)
+        )
+        if policy_retry:
+            literal = _host_literal_placeholders(unredacted_messages)
+
+            def neutral(identity):
+                return self._policy_neutral_identity(_mark_literal_placeholders(identity, literal))
+
             # #758: the stored rows and the replay may be redacted under different policies (the
             # setting, the pattern list or a catalog entry changed). Retry the same matcher with
             # both sides in one digest-bearing form; it may extend the cursor, never shrink it.
             neutral_cursor = self._find_reconciled_cursor_for_store_tail(
                 messages,
-                [self._policy_neutral_identity(identity) for identity in stored_tail],
+                [neutral(identity) for identity in stored_tail],
                 stored_tail_rows=stored_tail_rows,
                 allow_empty_prefix=True,
                 session_count=len(stored_tail),
                 raw_session_count=session_count,
                 allow_session_end_replay_proof=allow_session_end_replay_proof,
-                normalize_identity=self._policy_neutral_identity,
+                normalize_identity=neutral,
             )
             if neutral_cursor is not None and neutral_cursor > (cursor or 0):
                 cursor, across_policy_change = neutral_cursor, True
@@ -2664,19 +2708,12 @@ class ReconcileMixin:
         if head_cursor is not None and head_cursor > (cursor or 0):
             cursor, across_policy_change = head_cursor, False  # the greatest independently proven cursor wins
         proof_cursor = self._cursor_from_durable_commit_proof(messages)
-        if (
-            proof_cursor is None
-            and unredacted_messages is not None
-            and len(unredacted_messages) == len(messages)
-            and self._window_has_redaction_placeholder(messages, stored_tail)
-        ):
+        if proof_cursor is None and policy_retry and not across_policy_change:
             # #758: the proof binds the rows LCM returned at compaction, which the host holds as
             # written under that compaction's policy; re-redacting them under a changed policy
             # breaks the binding. Prove those positions on the host's own rows, and the rows
             # stored after the compaction in the policy-neutral form.
-            proof_cursor = self._cursor_from_durable_commit_proof(
-                unredacted_messages, normalize_identity=self._policy_neutral_identity
-            )
+            proof_cursor = self._cursor_from_durable_commit_proof(unredacted_messages, normalize_identity=neutral)
         if proof_cursor is not None and proof_cursor > (cursor or 0):
             # The last compaction's durable output proof covers more of this
             # snapshot than content matching could (e.g. it stopped at the
@@ -2727,7 +2764,7 @@ class ReconcileMixin:
         if cursor is not None and cursor > 0:
             reason = (
                 "skipped scaffold-only prefix"
-                if not self._effective_replay_identities(messages[:cursor])
+                if not effective_prefix(cursor)
                 else "replayed durable tail across a redaction policy change"
                 if across_policy_change
                 else "replayed durable tail"
