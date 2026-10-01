@@ -166,6 +166,30 @@ def test_cross_session_store_row_hint_round_trips(tmp_path):
         engine.shutdown()
 
 
+def test_legacy_store_row_without_session_has_no_dangling_hint(tmp_path):
+    engine = _rotation_engine(tmp_path)
+    try:
+        content = "RESULT from legacy row " * 50
+        ref = _externalize(engine, "", content)
+        placeholder = (
+            "[Externalized tool output: tool_call_id=call-legacy; "
+            f"chars={len(content)}; bytes={len(content.encode())}; ref={ref}]"
+        )
+        store_id = engine._store.append(
+            "", {"role": "tool", "content": placeholder, "tool_call_id": "call-legacy"}
+        )
+        result = _expand(engine, store_id=store_id)
+        assert result["session_id"] == ""
+        assert result["externalized_ref"] == ref
+        assert "externalized_expand_hint" not in result
+        assert result["externalized_note"] == (
+            "Externalized payload metadata is session-scoped; "
+            "cross-session ref is surfaced for traceability only and cannot be expanded in this version."
+        )
+    finally:
+        engine.shutdown()
+
+
 def test_no_session_id_responses_unchanged(tmp_path):
     engine = _rotation_engine(tmp_path)
     try:

@@ -1082,7 +1082,8 @@ LCM_EXPAND = {
                     "content paged by content_offset. If the row references an externalized payload, "
                     "the ref is surfaced via 'externalized_ref'; payload metadata and content are "
                     "session-scoped, so a cross-session row also includes 'externalized_note' "
-                    "and 'externalized_expand_hint' with the explicit-session call to read the payload."
+                    "and, for rows with a recorded session, 'externalized_expand_hint' with the "
+                    "explicit-session call to read the payload."
                 ),
             },
             "max_tokens": {

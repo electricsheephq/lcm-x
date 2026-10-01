@@ -62,9 +62,9 @@ but rejects it with `store_id`. `lcm_expand_query` accepts a non-empty list of a
 20 `session_ids`; omitted means the current session. Explicit `node_ids` are
 admitted only when they belong to one of those sessions. Search results from
 multiple sessions are merged and bounded by `max_results` before context
-expansion. Payload inspection and hydration default to the current session and
+expansion. For `externalized_ref` reads, the default is the current session and
 its compression-rotation predecessors; only `lcm_expand(externalized_ref=..., session_id=...)`
-can select another session, which must own the payload or have replaced its owner at a compression-boundary rotation.
+selects another session, which must own the payload or have replaced its owner at a compression-boundary rotation.
 
 `lcm_expand_query(output='evidence')` uses the same `context_max_tokens` budget,
 recursive DAG traversal, raw-hit deduplication, and pagination metadata as answer

@@ -6859,13 +6859,18 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
                     result["externalized_payloads"] = payload_summaries
                     result["externalized"] = payload_summaries[0]
             else:
-                result["externalized_note"] = (
-                    "Externalized payload metadata is session-scoped; "
-                    "to read this payload from another session call lcm_expand with externalized_ref "
-                    "and the row's session_id (see externalized_expand_hint)."
-                )
                 if stored_session_id:
+                    result["externalized_note"] = (
+                        "Externalized payload metadata is session-scoped; "
+                        "to read this payload from another session call lcm_expand with externalized_ref "
+                        "and the row's session_id (see externalized_expand_hint)."
+                    )
                     result["externalized_expand_hint"] = _externalized_expand_hint(refs[0], stored_session_id)
+                else:
+                    result["externalized_note"] = (
+                        "Externalized payload metadata is session-scoped; "
+                        "cross-session ref is surfaced for traceability only and cannot be expanded in this version."
+                    )
         return json.dumps(result)
 
     assert raw_node_id_arg is not None
