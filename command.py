@@ -1821,9 +1821,9 @@ def _doctor_text(engine) -> str:
     try:
         from .tools import _embedding_provider_health_check
         embedding_check = _embedding_provider_health_check(engine)
-    except Exception:
-        embedding_check = None
-    if embedding_check and embedding_check["status"] == "warn":
+    except Exception as exc:  # as the lcm_doctor tool does: a check that raises reports fail, never a silent ok
+        embedding_check = {"check": "embedding_provider_health", "status": "fail", "detail": str(exc)}
+    if embedding_check and embedding_check["status"] in {"warn", "fail"}:
         issues.append("embedding_provider_health")
         triage_checks.append(embedding_check)
         recommended_actions.append(doctor_guidance_for_check(embedding_check)["operator_action"])

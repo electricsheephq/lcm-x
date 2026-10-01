@@ -97,10 +97,15 @@ def test_t4_check_exception_does_not_break_doctor(make_engine, monkeypatch):
     monkeypatch.setattr(lcm_tools, "_embedding_provider_health_check", raise_check)
     text = handle_lcm_command("doctor", engine)
 
+    # The doctor still answers, and a check that raised is reported as fail (never a silent ok),
+    # with the same status and detail as the lcm_doctor tool.
     assert "LCM doctor" in text
-    assert "embedding_provider_health" not in text
-    assert "status: ok" in text
+    assert "embedding_provider_health: fail synthetic probe failure" in text
+    assert "status: ok" not in text
     assert calls == [engine]
+    payload = json.loads(engine.handle_tool_call("lcm_doctor", {}))
+    check = next(item for item in payload["checks"] if item["check"] == "embedding_provider_health")
+    assert check["status"] == "fail" and check["detail"] == "synthetic probe failure"
 
 
 @pytest.mark.parametrize("scenario", ["unavailable", "active_profile", "no_profile"])
