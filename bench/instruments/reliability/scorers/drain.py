@@ -85,14 +85,15 @@ def score(cell: dict, phases: list[dict], cell_dir: Path | None = None) -> tuple
     if not crossed:
         why = "phase 2 has no recorded clean exit" if exits_cleanly(cell) else "phase 2 has no recorded host rotation/session change"
         return failed, {b: f"{why} at or before turn {first}" for b in ("D1", "D2", "D3")}, numbers
+    errors = [{k: c.get(k) for k in ("turn", "error", "secs")} for c in phase2
+              if c.get("error") or c.get("status") == "error"]
+    if errors:  # decided before any INCONCLUSIVE return: an errored phase-2 call always fails D2
+        failed["D2"] = {"errored_calls": errors}
     if spec.get("forget_host_rows"):
         numbers["fixture"] = fixture(cell_dir)
         if not any(f.get("kind") == "forget_host_rows" and f.get("rows") for f in numbers["fixture"]):
-            return failed, {b: "Fixture B: the host-forget step archived no row" for b in ("D1", "D2", "D3")}, numbers
-    errors = [{k: c.get(k) for k in ("turn", "error", "secs")} for c in phase2
-              if c.get("error") or c.get("status") == "error"]
-    if errors:
-        failed["D2"] = {"errored_calls": errors}
+            return failed, {b: "Fixture B: the host-forget step archived no row" for b in ("D1", "D2", "D3")
+                            if b not in failed}, numbers
     if len(done) < 2:
         why = f"phase 2 reached {len(done)} compaction(s) (< 2)" if every else "no compaction counters recorded"
         return failed, {b: why for b in ("D1", "D2", "D3") if b not in failed}, numbers

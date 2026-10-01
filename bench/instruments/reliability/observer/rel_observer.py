@@ -224,30 +224,47 @@ def patch_engine(agent):
     etype._rel_patched = True
     orig_compress, orig_tool = etype.compress, etype.handle_tool_call
 
+    def observer_failed(where, exc):
+        try:  # an observer failure is evidence (the cell ERRORs on it), never a change to the engine call
+            note("observer_error", where=where, error=repr(exc)[:300])
+        except Exception:
+            pass
+
     def traced_compress(self, messages, *args, **kwargs):
-        given, cover0, started = list(messages) if isinstance(messages, list) else messages, store_cover(), time.monotonic()
+        started = time.monotonic()
+        try:
+            given, cover0 = list(messages) if isinstance(messages, list) else messages, store_cover()
+        except Exception as exc:
+            observer_failed("traced_compress:before", exc)
+            given, cover0 = messages, (None, None)
         try:
             result = orig_compress(self, messages, *args, **kwargs)
         except BaseException as exc:
-            counters["compactions"].append({"turn": cur["turn"], **list_counts(given, None), "status": "error",
-                                            "final": cur["final"], "secs": round(time.monotonic() - started, 3),
-                                            "error": f"{type(exc).__name__}: {exc}"[:300]})
+            try:
+                counters["compactions"].append({"turn": cur["turn"], **list_counts(given, None), "status": "error",
+                                                "final": cur["final"], "secs": round(time.monotonic() - started, 3),
+                                                "error": f"{type(exc).__name__}: {exc}"[:300]})
+            except Exception as obs:
+                observer_failed("traced_compress:error-record", obs)
             raise
-        secs = round(time.monotonic() - started, 3)
-        status = getattr(self, "_last_compression_status", None)
-        cover = store_cover()  # leaves written by this call and the stored rows they newly cover (hidden or host)
-        delta = [None if a is None or b is None else b - a for a, b in zip(cover0, cover)]
-        counters["compactions"].append({"turn": cur["turn"], **list_counts(given, result), "status": status,
-                                        "final": cur["final"], "secs": secs, "leaves": delta[0], "rows_covered": delta[1]})
-        self._probe_calls, self._probe_status = getattr(self, "_probe_calls", 0) + 1, status
-        if status in ("compacted", "host_native"):
-            counters["compacted_turns"].append(cur["turn"])
-            note("compaction_committed", turn=cur["turn"], prefix=cur["prefix"], status=status, final=cur["final"])
-        event(turn=cur["turn"], event="compaction", session=getattr(self, "_session_id", None), final=cur["final"],
-              session_prefix=cur["prefix"], compression_status=status,
-              noop_reason=getattr(self, "_last_compression_noop_reason", None),
-              depth0_nodes=depth0() if status == "compacted" else None, rejection=_r1.rejection(self),
-              native_attempts=cur["native"])
+        try:
+            secs = round(time.monotonic() - started, 3)
+            status = getattr(self, "_last_compression_status", None)
+            cover = store_cover()  # leaves written by this call and the stored rows they newly cover (hidden or host)
+            delta = [None if a is None or b is None else b - a for a, b in zip(cover0, cover)]
+            counters["compactions"].append({"turn": cur["turn"], **list_counts(given, result), "status": status,
+                                            "final": cur["final"], "secs": secs, "leaves": delta[0], "rows_covered": delta[1]})
+            self._probe_calls, self._probe_status = getattr(self, "_probe_calls", 0) + 1, status
+            if status in ("compacted", "host_native"):
+                counters["compacted_turns"].append(cur["turn"])
+                note("compaction_committed", turn=cur["turn"], prefix=cur["prefix"], status=status, final=cur["final"])
+            event(turn=cur["turn"], event="compaction", session=getattr(self, "_session_id", None), final=cur["final"],
+                  session_prefix=cur["prefix"], compression_status=status,
+                  noop_reason=getattr(self, "_last_compression_noop_reason", None),
+                  depth0_nodes=depth0() if status == "compacted" else None, rejection=_r1.rejection(self),
+                  native_attempts=cur["native"])
+        except Exception as exc:
+            observer_failed("traced_compress:after", exc)
         return result
     etype.compress = traced_compress
 

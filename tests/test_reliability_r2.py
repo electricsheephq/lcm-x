@@ -683,3 +683,64 @@ def test_drain_fixture_b_rotation_crosses_on_the_clean_exit_not_a_rotation(tmp_p
     assert drain.boundary(cell, tmp_path, first) is False
     PC.append(tmp_path / "faults-fired.jsonl", {"kind": "clean_exit_before_turn", "phase": "A", "turn": first})
     assert drain.boundary(cell, tmp_path, first) is True
+
+
+@pytest.mark.parametrize("where", ["before", "after", "error-record"])
+def test_observer_failures_never_change_the_engine_call(tmp_path, monkeypatch, where):
+    """Review round 2 (#801): an exception inside the observer's own bookkeeping is recorded as an observer_error
+    (the cell ERRORs on it) and never blocks the engine call, replaces its result or replaces its exception."""
+    obs = load_observer()
+    monkeypatch.setattr(obs, "DIR", tmp_path)
+    monkeypatch.setattr(obs, "_r1", probe)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
+    monkeypatch.setitem(sys.modules, "agent.context_compressor", types.ModuleType("agent.context_compressor"))
+    engine_exc, calls = RuntimeError("engine failed"), []
+    covers = iter([RuntimeError("before")] if where == "before" else [(1, 1), RuntimeError("after")])
+
+    def store_cover():
+        value = next(covers, (1, 1))
+        if isinstance(value, Exception):
+            raise value
+        return value
+    monkeypatch.setattr(obs, "store_cover", store_cover)
+
+    class Engine:
+        _last_compression_status = "compacted"
+
+        def compress(self, messages):
+            calls.append(len(messages))
+            if where == "error-record":
+                raise engine_exc
+            return messages[:1]
+
+        def handle_tool_call(self, *a, **k):
+            return "{}"
+    engine = Engine()
+    obs.patch_engine(types.SimpleNamespace(context_compressor=engine))
+    obs.cur.update(turn=7)
+    given = [{"role": "user", "content": "one"}, {"role": "assistant", "content": "two"}]
+    if where == "error-record":
+        monkeypatch.setattr(obs, "counters", {"compactions": None, "compacted_turns": []})  # .append raises
+        with pytest.raises(RuntimeError) as caught:
+            engine.compress(given)
+        assert caught.value is engine_exc
+    else:
+        assert engine.compress(given) == given[:1]
+    assert calls == [2]
+    errors = [n for n in PC.read_jsonl(tmp_path / "observer.jsonl") if n["kind"] == "observer_error"]
+    assert [e["where"] for e in errors] == [f"traced_compress:{where}"]
+
+
+def test_drain_fixture_b_keeps_an_errored_call_failing_d2_when_nothing_was_archived(tmp_path):
+    """Review round 2 (#801): Fixture B's 'archived no row' INCONCLUSIVE must not hide an errored phase-2 call."""
+    from bench.instruments.reliability.scorers import drain
+    cell = next(c for c in cells.select("all") if c["id"] == "drain/hidden-backlog-large/in-place")
+    first = cell["drain"]["phase2_turn"]
+    PC.append(tmp_path / "faults-fired.jsonl", {"kind": "clean_exit_before_turn", "phase": "A", "turn": first})
+    PC.append(tmp_path / "fixture.jsonl", {"kind": "forget_host_rows", "after_phase": "A", "before_turn": first, "rows": 0})
+    calls = [{"turn": first + 1, "in": 10, "out": None, "host_rows_summarized": None, "status": "error", "final": False,
+              "secs": 0.2, "error": "RuntimeError: x"}]
+    failed, unsure, _ = drain.score(cell, [{"phase": "B", "counters": {"compactions": calls}}], tmp_path)
+    assert failed["D2"]["errored_calls"] == [{"turn": first + 1, "error": "RuntimeError: x", "secs": 0.2}]
+    assert set(unsure) == {"D1", "D3"} and all("archived no row" in why for why in unsure.values())
