@@ -92,6 +92,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Embedding provider. 'stub' is deterministic/offline (scores meaningless).",
     )
     run.add_argument("--model", default="", help="Embedding model id (required for non-stub).")
+    run.add_argument(
+        "--embeddings", choices=("on", "off"), default="on",
+        help="Enable embedding arms (default: on); off requires --provider stub.",
+    )
     run.add_argument("--limit", type=int, default=None, help="Score only the first N questions.")
     run.add_argument(
         "--rerank",
@@ -192,6 +196,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     probe.add_argument("--seed", type=int, default=0)
     probe.add_argument("--timeout", type=float, default=300.0)
     args = parser.parse_args(argv)
+    if args.command == "run" and args.embeddings == "off" and args.provider != "stub":
+        parser.error("--embeddings off requires --provider stub")
     args._recall_rerank_window_given = any(
         token == "--recall-rerank-window"
         or token.startswith("--recall-rerank-window=")
@@ -416,6 +422,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 questions,
                 provider_name=args.provider,
                 model=args.model,
+                embeddings_enabled=False if args.embeddings == "off" else None,
                 tmp_dir=tmp_dir,
                 use_rerank=args.rerank,
                 recall_rerank=args.recall_rerank,

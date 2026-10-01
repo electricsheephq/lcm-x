@@ -3922,6 +3922,7 @@ def _accumulate_question_checkpoint(
     ingest_samples: list[float],
     rerank_mode_counts: dict[str, int],
     recall_rerank_status_counts: dict[str, int] | None = None,
+    embeddings_enabled: bool = True,
 ) -> tuple[int, int]:
     """Seed aggregate state from one live or resumed per-question record."""
     if record.get("abstention") is True:
@@ -3958,6 +3959,10 @@ def _accumulate_question_checkpoint(
     bucket = by_category.setdefault(category, _new_arm_samples())
     try:
         for arm in ARMS:
+            # Keep per-question checkpoint compatibility, but do not present
+            # disabled vector/hybrid arms as measurements of that configuration.
+            if not embeddings_enabled and arm not in {"fts", "lcm_recall"}:
+                continue
             metrics = arms[arm]
             turn = metrics["turn"]
             for k in (1, 5, 10):
@@ -4111,6 +4116,7 @@ def run_harness(
     for record in checkpoint_records:
         scored_delta, abstention_delta = _accumulate_question_checkpoint(
             record,
+            embeddings_enabled=embeddings_enabled,
             by_category=by_category,
             overall=overall,
             ingest_samples=ingest_samples,
@@ -4303,6 +4309,7 @@ def run_harness(
                 )
                 scored_delta, abstention_delta = _accumulate_question_checkpoint(
                     record,
+                    embeddings_enabled=embeddings_enabled,
                     by_category=by_category,
                     overall=overall,
                     ingest_samples=ingest_samples,
@@ -4431,6 +4438,11 @@ def run_harness(
         "model": model,
         "embeddings_enabled": embeddings_enabled,
         "question_count": consumed_count,
+        "retrieval_config": {
+            "embeddings_enabled": embeddings_enabled,
+            "provider": provider_name,
+            "lcm_recall_mode": "semantic_or_hybrid" if embeddings_enabled else "full_text",
+        },
         "scored_count": scored_count,
         "abstention_excluded": abstention_count,
         "rerank": {
@@ -4453,18 +4465,27 @@ def run_harness(
 
 
 def _arm_report(samples: ArmSamples) -> dict[str, Any]:
+    ran = bool(samples.ndcg10)
+
+    def mean(values: Sequence[float]) -> float | None:
+        return _mean(values) if ran else None
+
     return {
-        "recall@1": _mean(samples.recalls[1]),
-        "recall@5": _mean(samples.recalls[5]),
-        "recall@10": _mean(samples.recalls[10]),
-        "ndcg@10": _mean(samples.ndcg10),
+        "run": ran,
+        "recall@1": mean(samples.recalls[1]),
+        "recall@5": mean(samples.recalls[5]),
+        "recall@10": mean(samples.recalls[10]),
+        "ndcg@10": mean(samples.ndcg10),
         "n": len(samples.ndcg10),
-        "latency_ms": percentiles(samples.latency_ms),
+        "latency_ms": {
+            key: value if ran else None
+            for key, value in percentiles(samples.latency_ms).items()
+        },
         "turn": {
-            "recall@1": _mean(samples.turn_recalls[1]),
-            "recall@5": _mean(samples.turn_recalls[5]),
-            "recall@10": _mean(samples.turn_recalls[10]),
-            "ndcg@10": _mean(samples.turn_ndcg10),
+            "recall@1": mean(samples.turn_recalls[1]),
+            "recall@5": mean(samples.turn_recalls[5]),
+            "recall@10": mean(samples.turn_recalls[10]),
+            "ndcg@10": mean(samples.turn_ndcg10),
             "session_granularity": samples.session_granularity,
         },
     }
@@ -4496,6 +4517,9 @@ def render_markdown(report: dict[str, Any]) -> str:
     ]
     for arm in ARMS:
         row = report["arms"][arm]
+        if row.get("run") is False:
+            lines.append(f"| {arm} | " + " | ".join(["not run"] * 10) + " |")
+            continue
         turn = row["turn"]
         label = f"{arm}*" if turn.get("session_granularity") else arm
         lines.append(
