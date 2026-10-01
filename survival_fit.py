@@ -257,9 +257,12 @@ class SurvivalFitMixin:
                 break  # the cut would drop a protected row
             if index and not all(durable(message) for message in body[:index]):
                 break  # never omit a row that is not durably stored
-            if index and covered is not None and not (
-                    {store_ids[id(m)] for m in body[:index] if id(m) in store_ids} or {None}) <= covered:
-                break  # #738: a row no summary covers (or a region with no stored row) stays
+            if index and covered is not None:  # #738: every dropped row is a covered stored row or verified scaffold
+                if not all(store_ids.get(id(m)) in covered or self._is_verified_replay_scaffold_message(m)
+                           for m in body[:index]):
+                    break  # an unmapped, merged, stubbed or uncovered row stays, and so does every longer region
+                if not any(id(m) in store_ids for m in body[:index]):
+                    continue  # scaffold alone is not cut; a longer region may add covered stored rows
             if index:
                 fitted, count, ids, notice = build(index, body[index:])
                 if self._survival_measure(fitted) <= budget:

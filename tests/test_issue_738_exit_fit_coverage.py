@@ -385,7 +385,8 @@ def test_d5_rejected_level_3_passes_at_the_ceiling_call_no_more_than_rc1(tmp_pat
 @pytest.mark.parametrize("unpinned", [False, True], ids=["mapped_rows", "an_unpinned_row"])
 def test_d6_an_exit_fit_still_cuts_turns_a_summary_covers(tmp_path, monkeypatch, summaries, unpinned):
     """The sweep on, 24 stored turns, and a message-sourced leaf covering the oldest 8 that the host list still
-    shows: the automatic exit fit cuts those turns (#668 headroom kept), never an uncovered one."""
+    shows: the automatic exit fit cuts those turns (#668 headroom kept). A row the store-id map cannot pin (a stub)
+    is no coverage proof: the cut never passes it."""
     from hermes_lcm.dag import SummaryNode
 
     engine = _engine(tmp_path, monkeypatch, sweep=True)
@@ -402,9 +403,111 @@ def test_d6_an_exit_fit_still_cuts_turns_a_summary_covers(tmp_path, monkeypatch,
         args = engine._survival_fit_args(view, observed, "compacted", False, automatic=True)
         result = engine._survival_fit(view, view, observed, **args)
         fit = engine._last_survival_fit
-        assert fit and fit["reason"] == "exit_fit:compacted" and fit["dropped_rows"] > 0, fit
-        assert fit["uncovered_rows"] == (None if unpinned else 0)  # None: a dropped row has no store id to count
-        assert _stranded(engine, result, 25) == []
-        assert engine._survival_measure(result) + 800 <= int(engine.threshold_tokens * 0.95)
+        if unpinned:  # only turn 1 could leave before the stub, and that cut does not reach the cap: no cut
+            assert result is view and fit is None
+        else:
+            assert fit and fit["reason"] == "exit_fit:compacted" and fit["dropped_rows"] > 0, fit
+            assert fit["uncovered_rows"] == 0 and _stranded(engine, result, 25) == []
+            assert engine._survival_measure(result) + 800 <= int(engine.threshold_tokens * 0.95)
+    finally:
+        engine.shutdown()
+
+
+# -- D7: a merged live row stands for an uncovered stored row (review of 6e1739b3) -----------------------------------
+
+@pytest.mark.parametrize("sweep", [False, True], ids=["sweep_off", "sweep_on"])
+def test_d7_a_merged_row_hiding_an_uncovered_stored_row_is_not_cut(tmp_path, monkeypatch, summaries, sweep):
+    """Stored: user1, assistant1, assistant2 ("UNCOVERED reply"), user2, assistant3; a message leaf over rows 1-2.
+    Held maintenance sanitizes the list, merging assistant1 + assistant2 into one row the map cannot pin; the
+    exit fit (threshold 600, cap 570) must not drop it, since it carries row 3, which no summary covers."""
+    from hermes_lcm.dag import SummaryNode
+
+    engine = _engine(tmp_path, monkeypatch, sweep=sweep, fresh_tail_count=2)
+    try:
+        body = " alpha beta gamma delta" * 30
+        view = [{"role": "user", "content": "[T01] user one" + body},
+                {"role": "assistant", "content": "assistant one" + body},
+                {"role": "assistant", "content": "UNCOVERED reply" + body},
+                {"role": "user", "content": "[T02] user two" + body},
+                {"role": "assistant", "content": "assistant three" + body}]
+        engine.ingest(view)
+        ids = [int(r["store_id"]) for r in engine._store.get_session_messages("S", limit=100)]
+        engine._dag.add_node(SummaryNode(session_id="S", depth=0, summary=SUMMARY, token_count=20,
+                                         source_token_count=400, source_type="messages", created_at=1.0,
+                                         source_ids=ids[:2]))
+        engine.threshold_tokens = 600
+        observed = engine._survival_measure(view) + 20
+        engine.record_rejected_compaction()
+        assert engine._no_progress_hold_blocks(observed)
+        engine._last_survival_fit = None
+        result = engine.compress(view, current_tokens=observed)
+        assert engine._last_compression_status == "sanitized"
+        assert any("UNCOVERED reply" in str(m.get("content")) for m in result)
+        fit = engine._last_survival_fit
+        assert not (fit and fit["reason"].startswith("exit_fit:") and fit["dropped_rows"]), fit
+    finally:
+        engine.shutdown()
+
+
+# -- D8: an uncovered stored tool reply shown as a stub -------------------------------------------------------------
+
+def test_d8_a_stubbed_uncovered_tool_reply_is_not_cut(tmp_path, monkeypatch, summaries):
+    """Turn 1 (user, tool call, tool reply, assistant) is covered except its tool reply, which the live list shows
+    as a stub the map cannot pin: the exit fit keeps turn 1."""
+    from hermes_lcm.dag import SummaryNode
+
+    engine = _engine(tmp_path, monkeypatch, fresh_tail_count=2)
+    try:
+        body = " alpha beta gamma delta" * 30
+        call = {"id": "call-1", "type": "function", "function": {"name": "read", "arguments": "{}"}}
+        view = [{"role": "user", "content": "[T01] user one" + body},
+                {"role": "assistant", "content": "", "tool_calls": [call]},
+                {"role": "tool", "tool_call_id": "call-1", "content": "UNCOVERED tool output" + body * 3},
+                {"role": "assistant", "content": "assistant one" + body},
+                {"role": "user", "content": "[T02] user two" + body},
+                {"role": "assistant", "content": "assistant two" + body}]
+        engine.ingest(view)
+        mapping = engine._get_store_id_map_for_messages(view)
+        engine._dag.add_node(SummaryNode(session_id="S", depth=0, summary=SUMMARY, token_count=20,
+                                         source_token_count=400, source_type="messages", created_at=1.0,
+                                         source_ids=[mapping[id(view[i])] for i in (0, 1, 3)]))
+        view[2] = {**view[2], "content": "[tool output stubbed: stored verbatim]"}
+        assert id(view[2]) not in engine._get_store_id_map_for_messages(view) and engine._ingest_cursor == len(view)
+        engine.threshold_tokens = 600
+        observed = engine._survival_measure(view) + 20
+        args = engine._survival_fit_args(view, observed, "compacted", False, automatic=True)
+        assert args["reason"] == "exit_fit:compacted"
+        result = engine._survival_fit(view, view, observed, **args)
+        assert result is view and engine._last_survival_fit is None
+    finally:
+        engine.shutdown()
+
+
+# -- D9: verified scaffold first, then covered stored turns: the cut passes the scaffold row ------------------------
+
+def test_d9_a_region_of_scaffold_alone_is_skipped_not_final(tmp_path, monkeypatch, summaries):
+    """A body that starts with a verified scaffold row (a preserved objective): the scaffold-only region is not cut
+    (no stored row), and the next region, which adds covered stored turns, is (``continue``, not ``break``)."""
+    from hermes_lcm.dag import SummaryNode
+
+    engine = _engine(tmp_path, monkeypatch, sweep=True, fresh_tail_count=2)
+    try:
+        engine.threshold_tokens = 600
+        view = [row for turn in range(1, 5) for row in (_user(turn, 40), _reply(turn))]
+        engine.ingest(view)
+        mapping = engine._get_store_id_map_for_messages(view)
+        node = SummaryNode(session_id="S", depth=0, summary=SUMMARY, token_count=20, source_token_count=900,
+                           source_type="messages", created_at=1.0, source_ids=[mapping[id(m)] for m in view[:4]])
+        engine._dag.add_node(node)
+        scaffold = {"role": "user", "content": "[Current user objective preserved from compacted history]\nship it"}
+        assert engine._is_verified_replay_scaffold_message(scaffold)
+        listed = [scaffold, *view]
+        store_ids = engine._get_store_id_map_for_messages(listed)
+        budget = engine._survival_measure(listed[5:]) + 10  # reachable once turns 1-2 leave
+        cut = engine._survival_cut(listed, 0, budget, True, "exit_fit:compacted", store_ids, True,
+                                   keep_from=len(listed) - 2)
+        assert cut is not None
+        fitted = cut[0]
+        assert all(m is not listed[1] for m in fitted) and any(m is listed[5] for m in fitted)
     finally:
         engine.shutdown()
