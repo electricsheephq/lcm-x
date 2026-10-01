@@ -1172,6 +1172,10 @@ class LCMEngine(
             )
         except (TypeError, ValueError):
             absolute_threshold_tokens = 0
+        if absolute_threshold_tokens <= 0:
+            # config.yaml lcm.context_threshold_tokens, resolved by LCMConfig.from_env()
+            # with LCM_ABSOLUTE_THRESHOLD_TOKENS taking precedence (#48).
+            absolute_threshold_tokens = int(getattr(self._config, "absolute_threshold_tokens", 0) or 0)
         if absolute_threshold_tokens > 0:
             self.threshold_tokens = absolute_threshold_tokens
             # Keep route-specific ratio auto-raise from re-climbing the

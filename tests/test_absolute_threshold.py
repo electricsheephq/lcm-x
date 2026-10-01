@@ -33,6 +33,7 @@ class TestAbsoluteThresholdTokens:
     def test_unset_absolute_keeps_ratio_behavior(self, tmp_path, monkeypatch):
         from hermes_lcm.engine import LCMEngine
 
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
         monkeypatch.delenv("LCM_ABSOLUTE_THRESHOLD_TOKENS", raising=False)
         monkeypatch.setenv("LCM_CONTEXT_THRESHOLD", "0.35")
 
@@ -80,6 +81,7 @@ class TestAbsoluteThresholdTokens:
     def test_invalid_absolute_env_falls_back_to_ratio(self, tmp_path, monkeypatch):
         from hermes_lcm.engine import LCMEngine
 
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
         monkeypatch.setenv("LCM_ABSOLUTE_THRESHOLD_TOKENS", "not-a-number")
         monkeypatch.setenv("LCM_CONTEXT_THRESHOLD", "0.40")
 

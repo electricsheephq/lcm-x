@@ -207,6 +207,7 @@ def _load_hermes_config_yaml() -> dict[str, Any]:
 
 _SUPPORTED_LCM_CONFIG_YAML_KEYS = {
     "context_threshold",
+    "context_threshold_tokens",
     "model_thresholds",
     "summary_reasoning_effort",
     "expansion_reasoning_effort",
@@ -319,6 +320,40 @@ def _hermes_compression_threshold_with_source(default: float) -> tuple[float, st
     except Exception:
         return default, "default"
     return default, "default"
+
+
+def _lcm_absolute_threshold_tokens_with_source(default: int) -> tuple[int, str, str | None]:
+    """Resolve the absolute compaction trigger (#48).
+
+    ``LCM_ABSOLUTE_THRESHOLD_TOKENS`` wins whenever it holds an integer, including
+    ``0`` (which turns a config.yaml value off), mirroring LCM_CONTEXT_THRESHOLD over
+    lcm.context_threshold. An empty env value counts as unset, as the engine has
+    always treated it. Otherwise ``lcm.context_threshold_tokens`` applies; 0 or an
+    absent key means no absolute trigger.
+    """
+    value, source, warning = default, "default", None
+    cfg = _load_hermes_config_yaml()
+    lcm_section = cfg.get("lcm") if isinstance(cfg, dict) else None
+    raw_yaml = lcm_section.get("context_threshold_tokens") if isinstance(lcm_section, dict) else None
+    if raw_yaml is not None:
+        parsed = None
+        if not isinstance(raw_yaml, bool):
+            try:
+                parsed = int(str(raw_yaml).strip())
+            except ValueError:
+                parsed = None
+        if parsed is None or parsed < 0:
+            warning = (f"invalid config.yaml lcm.context_threshold_tokens={raw_yaml!r} ignored "
+                       "(must be a non-negative integer)")
+        elif parsed > 0:
+            value, source = parsed, "config_yaml:lcm.context_threshold_tokens"
+    raw_env = os.environ.get("LCM_ABSOLUTE_THRESHOLD_TOKENS")
+    if raw_env is not None and raw_env.strip():
+        try:
+            return int(raw_env), "env:LCM_ABSOLUTE_THRESHOLD_TOKENS", None
+        except ValueError:
+            return value, source, f"invalid env LCM_ABSOLUTE_THRESHOLD_TOKENS={raw_env!r} ignored"
+    return value, source, warning
 
 
 def _hermes_auxiliary_compression_timeout_ms(default: int) -> int:
@@ -999,6 +1034,9 @@ class LCMConfig:
     # Summariser prompt version (#646): 1 = original prompts and 2x output
     # ceiling; 2 = v2 prompts, focus directives in the policy, 3x ceiling.
     summary_prompt_version: int = 1
+    # #48: absolute compaction trigger in tokens (0 = ratio-based). from_env() reads
+    # LCM_ABSOLUTE_THRESHOLD_TOKENS, then config.yaml lcm.context_threshold_tokens.
+    absolute_threshold_tokens: int = 0
 
     @classmethod
     def from_env(cls) -> "LCMConfig":
@@ -1065,6 +1103,10 @@ class LCMConfig:
             default_source=context_source,
         )
         _record("context_threshold", source, warning)
+        c.absolute_threshold_tokens, source, warning = _lcm_absolute_threshold_tokens_with_source(
+            c.absolute_threshold_tokens
+        )
+        _record("absolute_threshold_tokens", source, warning)
         # Per-model threshold overrides: load from lcm.model_thresholds in
         # config.yaml, then LCM_MODEL_THRESHOLDS env var (comma-separated
         # key:value pairs). Env overrides config.yaml.

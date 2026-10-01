@@ -15,9 +15,10 @@ each feature does and why, see [Feature overview](features-overview.md).
 2. **`~/.hermes/config.yaml`** participates in three narrow, deliberate ways:
    - `plugins.enabled: [hermes-lcm-x]` + `context.engine: lcm-x` activate the
      plugin (see [Operator guide → Activate](operator-guide.md#activate));
-   - four LCM keys are supported in YAML, each used only when its
+   - five LCM keys are supported in YAML, each used only when its
      environment variable is not set: `lcm.context_threshold`
-     (`LCM_CONTEXT_THRESHOLD`), `lcm.model_thresholds`
+     (`LCM_CONTEXT_THRESHOLD`), `lcm.context_threshold_tokens`
+     (`LCM_ABSOLUTE_THRESHOLD_TOKENS`), `lcm.model_thresholds`
      (`LCM_MODEL_THRESHOLDS`), `lcm.summary_reasoning_effort`
      (`LCM_SUMMARY_REASONING_EFFORT`) and `lcm.expansion_reasoning_effort`
      (`LCM_EXPANSION_REASONING_EFFORT`); other keys under `lcm:` are ignored
