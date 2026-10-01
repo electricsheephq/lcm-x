@@ -4,6 +4,8 @@ This page holds the detailed install, activation, configuration, diagnostics,
 and slash-command reference for LCM-X. The README stays focused on first-run
 adoption; this file is the operator reference.
 
+`LCM_NATIVE_RECOVERY`: removed in v0.25.0; ignored if set
+
 ## Requirements
 
 - Hermes Agent with the pluggable context engine slot ([PR #7464](https://github.com/NousResearch/hermes-agent/pull/7464))

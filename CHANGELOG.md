@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Removed native recovery (`LCM_NATIVE_RECOVERY`), which was off by default and on every managed profile; the key is ignored (#777, #509)
+
 ## v0.24.9 - (unreleased; rc3) (drain: one foreground time budget, stub-first exit, exit fit, scan allowance)
 
 - Fix: with semantic embeddings enabled and the provider package missing or misconfigured, `lcm_doctor` and

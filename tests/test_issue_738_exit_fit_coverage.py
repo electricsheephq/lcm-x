@@ -218,7 +218,6 @@ _UNCHANGED_RC1 = {
     "manual": "a15e17a6d9d528acafca68e160a804dcf2a2fac340572f22074fb2d2d0345cc9",
     "recovery": "aeb06806911cc146266835229d4b870b0b89957a4c92790590673be88e4a02d3",
     "below_threshold": "a15e17a6d9d528acafca68e160a804dcf2a2fac340572f22074fb2d2d0345cc9",
-    "native": "dbd68c16d1a89a454aa7d526ad3c9cdd95c8e5b291d369be8d7206424cccae20",
 }
 
 
@@ -233,8 +232,6 @@ def _small_backlog_view(engine, turns: int = 24) -> tuple[list[dict], int]:
 @pytest.mark.parametrize("cell", sorted(_UNCHANGED_RC1))
 def test_t4_passes_that_are_not_automatic_threshold_passes_are_unchanged(tmp_path, monkeypatch, summaries, cell):
     config = {"max_assembly_tokens": 20_000} if cell == "forced_overflow" else {}
-    if cell == "native":
-        config["native_recovery"] = True
     engine = _engine(tmp_path, monkeypatch, **config)
     try:
         view, observed = _small_backlog_view(engine)
