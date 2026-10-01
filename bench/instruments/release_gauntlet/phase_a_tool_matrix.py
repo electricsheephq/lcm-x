@@ -462,23 +462,19 @@ def _planted_secret(mod, engine, outbound, *, expect_365_fixed):
         assert chunk_outbound, "chunk backfill made no embedding dispatch"
         assert any("Chunk safety sentence" in text for text in chunk_outbound)
     else:
-        # Fail-closed chunk refusal is a VALID no-leak outcome: the engine's
-        # chunk splitter can cut a dense planted-secret fixture mid-key, and
-        # the #383/#384 residual backstops then refuse that chunk's dispatch
-        # (the backfill REPORTS the refusal — it does not raise). The battery
-        # invariant is NO RAW SECRET DISPATCHES — a loud refusal satisfies it.
-        # Assert the SPECIFIC refusal shape so a different failure (provider,
-        # config) still fails the battery; the outbound leak sweep below still
-        # covers everything that DID dispatch.
-        assert "status: error" in chunk_report, f"chunk backfill failed for a non-privacy reason: {chunk_report[:200]}"
-        assert "stop_reason: privacy_refused" in chunk_report, f"chunk backfill error was not a privacy refusal: {chunk_report[:200]}"
+        # A split planted secret may refuse one chunk under the stable policy.
+        # #759 withholds it and dispatches the protected remainder; policy or
+        # provider errors still fail. The leak sweep below audits every dispatch.
+        assert "status: partial" in chunk_report, f"chunk backfill failed for a non-privacy reason: {chunk_report[:200]}"
         blocked = re.search(r"privacy_blocked: (\d+)", chunk_report)
-        assert blocked is not None and int(blocked.group(1)) >= 1, "privacy_refused report carries no privacy_blocked count"
+        assert blocked is not None and int(blocked.group(1)) >= 1, "partial report carries no privacy_blocked count"
         # Guard chunk-coverage COLLAPSE (#391 review F6a): a refusal is only a
         # valid no-leak outcome if chunks were actually SELECTED for processing —
-        # a "refused" report over zero selected chunks would vacuously pass.
+        # a partial report over zero selected chunks would vacuously pass.
         selected = re.search(r"selected: (\d+)", chunk_report)
         assert selected is not None and int(selected.group(1)) >= 1, "chunk refusal processed zero chunks (coverage collapse)"
+        assert chunk_outbound, "partial chunk backfill made no embedding dispatch"
+        assert any("Chunk safety sentence" in text for text in chunk_outbound)
     revision = mod["ingest_protection"].embedding_privacy_revision(engine._config)
     assert revision != "privacy:off"
     for text in outbound:
