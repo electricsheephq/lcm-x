@@ -7110,6 +7110,8 @@ class LCMEngine(
             if (budget := self._sweep_budget(deadline)) is not None:
                 budget.progress = budget.progress or "condensation"
             after = self._summary_frontier_tokens()
+            if after < before:
+                self._no_progress_candidate = False  # #651: a condensation that shrank the summary prefix is progress
             if after >= before:
                 return passes, "condensation_no_progress"
         return passes, "summary_prefix_target_reached"

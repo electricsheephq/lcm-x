@@ -291,6 +291,48 @@ def test_r21_d_a_failed_condensation_leaves_rule_1_to_the_first_leaf(tmp_path, m
         engine.shutdown()
 
 
+def test_r3_a_condensation_that_shrinks_the_frontier_is_progress_and_arms_no_hold(
+        tmp_path, monkeypatch, clock, caplog):
+    """#651 with lane A: one over-target condensation shrinks the summary prefix, the leaf is refused by the soft
+    target and the result rows are unchanged; the compaction made progress, so no no-progress hold is armed."""
+    engine = _engine(tmp_path)
+    for _ in range(8):
+        engine._foreground_estimates.record_call("", 31.0)
+    _provider(monkeypatch, clock, default=31.0)
+    _depth_0_nodes(engine, 6)
+    view = _view()
+    try:
+        before = engine._summary_frontier_tokens()
+        result = _compress(engine, view, caplog)
+        assert len(_condensations(engine)) == 1 and engine._summary_frontier_tokens() < before
+        assert engine.get_status()["threshold_full_sweep"]["leaf_passes"] == 0 and len(result) >= len(view)
+        assert engine._no_progress_hold is None and not engine._no_progress_hold_active()
+    finally:
+        engine.shutdown()
+
+
+def test_r3_b_a_stored_condensation_whose_frontier_did_not_fall_still_arms_the_hold(
+        tmp_path, monkeypatch, clock, caplog):
+    """Control: the condensation is stored, but the frontier reads the same after it; the pass stays a no-progress
+    candidate and the #651 hold is armed."""
+    engine = _engine(tmp_path)
+    for _ in range(8):
+        engine._foreground_estimates.record_call("", 31.0)
+    _provider(monkeypatch, clock, default=31.0)
+    _depth_0_nodes(engine, 6)
+    monkeypatch.setattr(engine, "_summary_frontier_tokens", lambda: 6000)  # over target, and it never falls
+    view = _view()
+    try:
+        result = _compress(engine, view, caplog)
+        telemetry = engine.get_status()["threshold_full_sweep"]
+        assert len(_condensations(engine)) == 1
+        assert telemetry["pre_leaf_condensation_stop_reason"] == "condensation_no_progress"
+        assert telemetry["leaf_passes"] == 0 and len(result) >= len(view)
+        assert engine._no_progress_hold is not None and engine._no_progress_hold[1] == "no_progress"
+    finally:
+        engine.shutdown()
+
+
 # -- Astra counterexample (b): a stale high estimate never starves the first leaf ---------------------------------
 
 def test_b_stale_115s_estimate_and_56s_of_pre_work_still_attempt_the_first_leaf_across_a_hold_expiry(
