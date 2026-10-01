@@ -244,3 +244,36 @@ def test_anchor_off_is_out_of_scope(tmp_path, monkeypatch):
         assert any(row["content"] == repaired[4]["content"] for row in _stored(engine))
     finally:
         engine.shutdown()
+
+
+@pytest.mark.xfail(strict=True, reason="#7 remaining: a replacement after the host truncated its list is not audited; main loses this row too")
+def test_truncated_then_replaced_row_stores_the_new_row(tmp_path):
+    """Review r4 shape 1: the host truncates its list, then puts a new row where an old one was."""
+    engine = _engine(tmp_path)
+    try:
+        host = [_u("U1" + PAD, None), _a("A1" + PAD, None), _u("U2" + PAD, None), _a("A2" + PAD, None)]
+        engine.ingest(host)
+        engine.ingest(host[:2])
+        new = _u("NEW question" + PAD, None)
+        engine.ingest([host[0], new])
+        texts = [row["content"] for row in _stored(engine)]
+        assert texts.count(new["content"]) == 1
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.xfail(strict=True, reason="#7 remaining: a short user row equal to an older row's last paragraph is not audited; main loses this row too")
+def test_short_reply_matching_an_earlier_paragraph_is_stored(tmp_path):
+    """Review r4 shape 2: a new short user row equals the last paragraph of an older stored row."""
+    engine = _engine(tmp_path)
+    try:
+        host = [_u("old paragraph" + PAD + "\n\nyes", None), _a("A1" + PAD, None),
+                _u("U2" + PAD, None), _a("A2" + PAD, None)]
+        engine.ingest(host)
+        replay = [_u("new question" + PAD, None), _a("new answer" + PAD, None),
+                  _u("yes", None), _a("new final" + PAD, None)]
+        engine.ingest(replay)
+        texts = [row["content"] for row in _stored(engine)]
+        assert texts.count("yes") == 1
+    finally:
+        engine.shutdown()
