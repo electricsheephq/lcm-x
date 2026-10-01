@@ -1818,6 +1818,15 @@ def _doctor_text(engine) -> str:
         inactive_check = {"check": "inactive_process", "status": "warn", "detail": inactive_process}
         triage_checks.append(inactive_check)
         recommended_actions.append(doctor_guidance_for_check(inactive_check)["operator_action"])
+    try:
+        from .tools import _embedding_provider_health_check
+        embedding_check = _embedding_provider_health_check(engine)
+    except Exception:
+        embedding_check = None
+    if embedding_check and embedding_check["status"] == "warn":
+        issues.append("embedding_provider_health")
+        triage_checks.append(embedding_check)
+        recommended_actions.append(doctor_guidance_for_check(embedding_check)["operator_action"])
     triage_guidance = doctor_guidance_for_checks(triage_checks)
 
     doctor_status = "issues-found" if integrity != "ok" or issues else (
@@ -1878,6 +1887,13 @@ def _doctor_text(engine) -> str:
     ]
     if inactive_process:
         lines.append(f"inactive_process: {inactive_process}")
+    if embedding_check is not None:
+        detail = embedding_check.get("detail")
+        reason = detail.get("reason") if isinstance(detail, dict) else None
+        suffix = f" ({reason})" if reason else ""
+        if isinstance(detail, str):
+            suffix = f" {detail}"
+        lines.append(f"embedding_provider_health: {embedding_check['status']}{suffix}")
     if issues:
         lines.append(f"issues: {', '.join(issues)}")
     else:
