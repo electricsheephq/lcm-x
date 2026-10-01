@@ -2187,7 +2187,9 @@ class ReconcileMixin:
                 coalesced.append((source, start, end))
         return coalesced
 
-    def _cursor_from_durable_commit_proof(self, messages, allow_replaced_tail: Optional[list] = None) -> Optional[int]:
+    def _cursor_from_durable_commit_proof(
+        self, messages, allow_replaced_tail: Optional[list] = None, normalize_identity=None,
+    ) -> Optional[int]:
         """Cursor proven by the last compaction's durable output proof, else None.
 
         The host prefix must carry exactly the compress() output's non-scaffold
@@ -2314,9 +2316,10 @@ class ReconcileMixin:
                     if index >= n:
                         return None
                     identity = proof_identity(messages[index], stored_row=index + 1 == composite)
-                    if _has_lossy_redacted_identity(identity) or identity != proof_identity(
-                        row, stored_row=True, with_host_rewrite=True
-                    ):
+                    stored_identity = proof_identity(row, stored_row=True, with_host_rewrite=True)
+                    if normalize_identity is not None:  # #758: rows stored under another redaction policy
+                        identity, stored_identity = normalize_identity(identity), normalize_identity(stored_identity)
+                    if _has_lossy_redacted_identity(identity) or identity != stored_identity:
                         return None
                     index += 1
                 after_store_id = int(page[-1]["store_id"])
@@ -2532,6 +2535,7 @@ class ReconcileMixin:
         messages: List[Dict[str, Any]],
         *,
         allow_session_end_replay_proof: bool = False,
+        unredacted_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> int:
         """Infer the in-memory cursor for an existing session after process restart."""
         if not self._session_id or not messages:
@@ -2660,6 +2664,19 @@ class ReconcileMixin:
         if head_cursor is not None and head_cursor > (cursor or 0):
             cursor, across_policy_change = head_cursor, False  # the greatest independently proven cursor wins
         proof_cursor = self._cursor_from_durable_commit_proof(messages)
+        if (
+            proof_cursor is None
+            and unredacted_messages is not None
+            and len(unredacted_messages) == len(messages)
+            and self._window_has_redaction_placeholder(messages, stored_tail)
+        ):
+            # #758: the proof binds the rows LCM returned at compaction, which the host holds as
+            # written under that compaction's policy; re-redacting them under a changed policy
+            # breaks the binding. Prove those positions on the host's own rows, and the rows
+            # stored after the compaction in the policy-neutral form.
+            proof_cursor = self._cursor_from_durable_commit_proof(
+                unredacted_messages, normalize_identity=self._policy_neutral_identity
+            )
         if proof_cursor is not None and proof_cursor > (cursor or 0):
             # The last compaction's durable output proof covers more of this
             # snapshot than content matching could (e.g. it stopped at the
