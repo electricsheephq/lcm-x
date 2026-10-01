@@ -586,7 +586,7 @@ class CompactionMixin:
             self._compress_occurrences = None
             self._survival_fit_reason = None
             self._no_progress_candidate = False
-            self._stub_first_exit_now = None
+            self._stub_first_exit_now = self._last_stub_first_exit = None  # #671: the latest compaction only
             if bypass_cooldown:  # #651: a host recovery attempt is never cleanup-only maintenance
                 self._preflight_below_threshold_cleanup_only = self._preflight_automatic_request = False
                 # #684: nor held by a boundary cooldown; native recovery keeps its own handoff (#463/#464).
@@ -1138,8 +1138,9 @@ class CompactionMixin:
         working_messages: List[Dict[str, Any]],
         anchor_source_messages: List[Dict[str, Any]],
         recovery_assembly_cap: int | None,
+        persist: bool = True,
     ) -> List[Dict[str, Any]]:
-        """Assemble and register replay proof for every committed leaf."""
+        """Assemble and register replay proof for every committed leaf (``persist=False``: a no-write trial)."""
         leading_anchor_count = self._leading_anchor_count(working_messages)
         anchor_leading_count = self._leading_anchor_count(anchor_source_messages)
         self._pending_context_anchor_messages = anchor_source_messages[anchor_leading_count:]
@@ -1148,6 +1149,7 @@ class CompactionMixin:
                 working_messages[0] if leading_anchor_count else None,
                 working_messages[leading_anchor_count:],
                 assembly_cap_override=recovery_assembly_cap,
+                **({} if persist else {"persist": False}),  # the leaf path's call is unchanged
                 **(
                     {"retained_user_message": working_messages[1]}
                     if leading_anchor_count == 2
@@ -1190,19 +1192,21 @@ class CompactionMixin:
             self._load_generated_ignored_dependent_reply_records(),
         )
         cap = self._effective_assembly_token_cap()
-        pending_emissions = getattr(self, "_pending_emission_candidates", [])
-        # Only free cuts count: an assembly cap must not drop unsummarised rows to reach the target.
-        candidate = self._assemble_committed_compaction_context(
-            rows, anchor_source_messages, None if cap is None else sys.maxsize
-        )
-        after = self._survival_measure(candidate) + self._survival_host_overhead(messages, observed_tokens)
+        # Only free cuts count: an assembly cap must not drop unsummarised rows to reach the target. The trial
+        # writes nothing and runs no proactive recall (its block is reserved at its budget); a taken exit assembles
+        # once more with the writes and the recall a final assembly makes.
+        override = None if cap is None else sys.maxsize
+        candidate = self._assemble_committed_compaction_context(rows, anchor_source_messages, override, persist=False)
+        recall = int(self._config.proactive_recall_budget_tokens) if self._config.proactive_recall_enabled else 0
+        overhead = self._survival_host_overhead(messages, observed_tokens)
         if (
-            after > target
-            or (cap is not None and count_messages_tokens(candidate) > cap)
+            self._survival_measure(candidate) + overhead + recall > target
+            or (cap is not None and count_messages_tokens(candidate) + recall > cap)
             or self._committed_replay_drops(working_messages, start)[0]  # #457: a resumed prefix takes today's path
         ):
-            self._pending_emission_candidates = pending_emissions
             return None
+        candidate = self._assemble_committed_compaction_context(rows, anchor_source_messages, override)
+        after = self._survival_measure(candidate) + overhead
         backlog_rows = len(self._raw_backlog_messages(rows))
         self._refresh_raw_backlog_debt(rows, observed_tokens=observed_tokens)
         self._ingest_cursor = len(candidate)

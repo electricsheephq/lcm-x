@@ -315,9 +315,17 @@ def test_a_trial_that_misses_leaves_no_emission_candidates_behind(make_engine):
     view = tool_view()
     engine._pending_emission_candidates = ["before the trial"]
 
+    from pathlib import Path
+
+    from hermes_lcm.reconcile import _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX as prefix
+    key = engine._replay_snapshot_metadata_key(prefix)
+    digests = engine._store.read_metadata_json(key)
+
     assert _trial(engine, view, count_messages_tokens(view) + 50_000) is None  # the overhead misses the target
     assert engine._pending_emission_candidates == ["before the trial"]
     assert engine._last_stub_first_exit is None
+    assert engine._store.read_metadata_json(key) == digests  # no snapshot digest (#726 round 2: no write at all)
+    assert not list((Path(engine._hermes_home) / "lcm-large-outputs").glob("*.json"))  # no payload file
 
 
 def test_a_resumed_committed_prefix_takes_todays_path(make_engine, monkeypatch):
@@ -347,3 +355,98 @@ def test_the_fit_only_hold_at_the_ceiling_runs_first(make_engine, summaries, cap
 
     assert engine._last_stub_first_exit is None and summaries == []
     assert engine.last_compression_noop_reason == "held"
+
+
+# -- #726 round 2 ---------------------------------------------------------------------------------------------------
+
+import copy  # noqa: E402
+import time  # noqa: E402
+
+from hermes_lcm.dag import SummaryNode  # noqa: E402
+
+
+def _fold_engine(tmp_path, name="fold-671"):
+    engine = LCMEngine(config=LCMConfig(
+        database_path=str(tmp_path / "fold.db"), fresh_tail_count=2, leaf_chunk_tokens=1_000, l3_truncate_tokens=1,
+        fresh_tail_pressure_yield_enabled=False, large_output_externalization_enabled=True,
+        large_output_externalization_threshold_chars=1_000_000, large_output_active_replay_stubbing_enabled=True,
+    ), hermes_home=str(tmp_path / "hermes"))
+    engine.on_session_start(name, conversation_id=name + "-conversation", context_length=200_000)
+    engine.threshold_tokens = 12_000
+    return engine
+
+
+def test_a_missed_exit_leaves_the_folded_row_lineage_alone(tmp_path, summaries):
+    """F1 (review of #726): retained sole user, a folded assistant/tool-call row, refused routes, a missed target."""
+    engine = _fold_engine(tmp_path)
+    system, anchor = {"role": "system", "content": "system"}, {"role": "user", "content": "sole retained question"}
+    ids = engine._store.append_batch(engine._session_id, [system, anchor, {"role": "assistant", "content": "older"}])
+    engine._last_compacted_store_id = ids[2]
+    engine._dag.add_node(SummaryNode(
+        session_id=engine._session_id, depth=0, summary="Folded carrier summary.", token_count=6,
+        source_token_count=8, source_ids=[ids[2]], source_type="messages", created_at=time.time(),
+        expand_hint="folded carrier summary"))
+    tail = tool_pair("fold-call", "short result") + [{"role": "assistant", "content": "historical answer"}]
+    engine._store.append_batch(engine._session_id, tail)
+    engine._prepare_retained_user_anchor([system, anchor, *tail])
+    view = engine._assemble_committed_compaction_context([system, anchor, *tail], [system, anchor, *tail], None)
+    engine._last_compression_status, engine._ingest_cursor = "compacted", len(view)
+    mapped = engine._get_store_ids_for_messages(view)
+    engine._summary_route_available = lambda: False
+    engine._summary_route_stop_applies = lambda *args, **kwargs: True
+
+    out = engine.compress(view, current_tokens=12_000)  # the host overhead misses the target
+
+    assert out == view and engine._last_stub_first_exit is None and summaries == []
+    assert engine._get_store_ids_for_messages(out) == mapped  # the fold still maps to its durable source
+    stored = engine._store.get_session_count(engine._session_id)
+    engine.shutdown()
+    cold = _fold_engine(tmp_path)
+    cold._ingest_messages(copy.deepcopy(out) + [{"role": "user", "content": "fresh-new-question"}])
+    assert cold._store.get_session_count(cold._session_id) - stored == 1
+    cold.shutdown()
+
+
+@pytest.mark.parametrize(("aged", "tokens"), [(2_000, 3_001), (0, 11_000)])
+def test_no_stub_inside_a_protected_tool_group(make_engine, aged, tokens):
+    """F2 (review of #726): one assistant opens 33 calls; the resolved fresh tail protects the whole group."""
+    engine = make_engine(fresh_tail_count=32, large_output_active_replay_stub_aged_threshold_tokens=aged)
+    calls = [{"id": f"c{i}", "type": "function", "function": {"name": "read_file", "arguments": "{}"}} for i in range(33)]
+    rows = [{"role": "user", "content": "ask"}, {"role": "assistant", "content": "", "tool_calls": calls}]
+    rows += [{"role": "tool", "tool_call_id": f"c{i}", "content": payload_of(tokens) if i == 0 else "ok"} for i in range(33)]
+    rows.append({"role": "assistant", "content": "done"})
+
+    result = engine._assemble_context({"role": "system", "content": "system"}, rows)
+
+    assert not tool_content(result, "c0").startswith(STUB)
+
+
+def test_proactive_recall_runs_once_on_a_taken_exit_and_never_in_the_trial(make_engine, summaries, caplog, monkeypatch):
+    built = []
+    engine = exit_engine(make_engine, proactive_recall_enabled=True, l3_truncate_tokens=1)
+    monkeypatch.setattr(engine, "_build_proactive_recall_message", lambda *args: built.append(1))
+    run(engine, tool_view(), caplog)
+    assert engine._stub_first_exit_now is not None and built == [1]
+
+    built.clear()
+    missed = exit_engine(make_engine, proactive_recall_enabled=True, l3_truncate_tokens=1)
+    monkeypatch.setattr(missed, "_build_proactive_recall_message", lambda *args: built.append(1))
+    missed._summary_route_available = lambda: False
+    missed._summary_route_stop_applies = lambda *args, **kwargs: True
+    view = tool_view()
+    run(missed, view, caplog, current_tokens=count_messages_tokens(view) + 11_000)
+    assert missed._last_stub_first_exit is None and built == []
+
+
+def test_the_exit_record_describes_only_the_latest_compaction(make_engine, summaries, caplog):
+    engine = exit_engine(make_engine)
+    result = run(engine, tool_view(), caplog)
+    assert engine.get_status()["last_stub_first_exit"] is not None
+
+    run(engine, result, caplog, force=True)  # a later non-exit compaction
+
+    assert engine.get_status()["last_stub_first_exit"] is None
+    assert "stub_first_exit: " not in _doctor_text(engine)
+    run(engine, tool_view(), caplog)
+    engine._reset_session_counters()  # a reset or rebind
+    assert engine.get_status()["last_stub_first_exit"] is None

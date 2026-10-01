@@ -1175,6 +1175,7 @@ def maybe_externalize_tool_output(
     hermes_home: str = "",
     force: bool = False,
     tool_name: str = "",
+    write: bool = True,
 ) -> Dict[str, Any] | None:
     return maybe_externalize_payload(
         content,
@@ -1186,6 +1187,7 @@ def maybe_externalize_tool_output(
         hermes_home=hermes_home,
         force=force,
         tool_name=tool_name,
+        write=write,
     )
 
 
@@ -1201,8 +1203,9 @@ def maybe_externalize_payload(
     force: bool = False,
     metadata: Dict[str, Any] | None = None,
     tool_name: str = "",
+    write: bool = True,
 ) -> Dict[str, Any] | None:
-    """Externalize one normalized payload if configured.
+    """Externalize one normalized payload if configured (``write=False``: the placeholder it would get, no file).
 
     Returns a dict with a compact placeholder and the durable JSON payload path,
     or ``None`` when disabled, below threshold and not forced, or storage is
@@ -1284,7 +1287,8 @@ def maybe_externalize_payload(
         payload.update(_safe_persisted_output_metadata(metadata))
         _merge_persisted_output_marker_metadata(payload, metadata)
     try:
-        _write_externalized_payload(path, payload)
+        if write:
+            _write_externalized_payload(path, payload)
     except OSError as exc:
         logger.warning("Large payload externalization skipped (non-blocking): %s", exc)
         return None

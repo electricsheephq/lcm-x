@@ -6706,6 +6706,7 @@ class LCMEngine(
         is_recovery_tool_result: bool,
         tool_name: str = "",
         threshold_tokens: int | None = None,
+        write: bool = True,
     ) -> Dict[str, Any] | None:
         """``threshold_tokens`` overrides the first-sight threshold (#671: the aged tier at assembly)."""
         if not getattr(self._config, "large_output_active_replay_stubbing_enabled", False):
@@ -6738,6 +6739,7 @@ class LCMEngine(
             hermes_home=self._hermes_home,
             force=True,
             tool_name=str(message.get("tool_name") or tool_name or ""),
+            write=write,
         )
         if externalized is None:
             return None
@@ -6774,6 +6776,7 @@ class LCMEngine(
     def _stub_large_tool_results_for_active_replay(
         self,
         messages: List[Dict[str, Any]],
+        write: bool = True,
     ) -> List[Dict[str, Any]]:
         """Replace eligible old tool payloads with durable refs for assembly.
 
@@ -6786,7 +6789,8 @@ class LCMEngine(
         if not getattr(self._config, "large_output_externalization_enabled", False):
             return messages
         protected_tail_count = max(0, int(getattr(self._config, "fresh_tail_count", 0) or 0))
-        eligible_end = max(0, len(messages) - protected_tail_count)
+        # #671: never inside the resolved fresh tail, which widens to whole tool groups
+        eligible_end = max(0, min(len(messages) - protected_tail_count, self._fresh_tail_start(messages)))
         if eligible_end <= 0:
             return messages
 
@@ -6805,6 +6809,7 @@ class LCMEngine(
                 is_recovery_tool_result=(idx in recovery_tool_result_indices),
                 tool_name=tool_result_names.get(idx, ""),
                 threshold_tokens=aged_threshold,
+                write=write,
             )
             if replacement is None:
                 continue
@@ -7510,8 +7515,10 @@ class LCMEngine(
         include_lcm_note: bool = True,
         retained_user_message: Optional[Dict[str, Any]] = None,
         stub_over_cap_tool_results: bool = False,
+        persist: bool = True,
     ) -> List[Dict[str, Any]]:
-        """Build the active context from DAG summaries + fresh tail.
+        """Build the active context from DAG summaries + fresh tail. ``persist=False`` (#671: the stub-first
+        trial) writes nothing: no payload file, fold lineage, snapshot digest or emission candidates, no recall.
 
         Structure:
           [leading anchors: system and, when proven, the sole real user]
@@ -7553,7 +7560,7 @@ class LCMEngine(
         # Stub durably externalized evictable tool payloads before the assembly
         # budget pass so the selector sees their reduced provider-visible cost.
         # The helper protects the configured fresh tail and is fail-open.
-        assembly_tail_messages = self._stub_large_tool_results_for_active_replay(tail_messages)
+        assembly_tail_messages = self._stub_large_tool_results_for_active_replay(tail_messages, write=persist)
         tail_selected = assembly_tail_messages
         anchor_source = getattr(self, "_pending_context_anchor_messages", None)
         if anchor_source is None:
@@ -7732,7 +7739,7 @@ class LCMEngine(
             proactive_query_messages,
             summary_role,
             active_summary_node_ids,
-        )
+        ) if persist else None
         if proactive_msg is not None:
             if retained_user_msg is not None:
                 proactive_content = normalize_content_value(
@@ -7856,6 +7863,8 @@ class LCMEngine(
                     trimmed["content"] = "\n\n---\n\n".join(parts)
                     trimmed_result.append(trimmed)
             result = self._sanitize_active_context_messages(trimmed_result)
+        if not persist:
+            return result
 
         existing_folded_lineage = self._load_folded_tail_lineage(result)
         if (

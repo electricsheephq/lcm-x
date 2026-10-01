@@ -33,6 +33,7 @@ class ResetStateMixin:
         self._last_condensation_suppressed_reason = ""
         self._last_compression_status = "idle"
         self._last_compression_noop_reason = ""
+        self._last_stub_first_exit = None  # #671: the record describes the latest compaction of this binding
         self._last_boundary_skip_time = 0
         self._compaction_telemetry_counter_rebaseline_pending = True
         self._compaction_telemetry_turn_reset_pending = False
