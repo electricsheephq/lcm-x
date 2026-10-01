@@ -226,7 +226,13 @@ def patch_engine(agent):
 
     def traced_compress(self, messages, *args, **kwargs):
         given, cover0, started = list(messages) if isinstance(messages, list) else messages, store_cover(), time.monotonic()
-        result = orig_compress(self, messages, *args, **kwargs)
+        try:
+            result = orig_compress(self, messages, *args, **kwargs)
+        except BaseException as exc:
+            counters["compactions"].append({"turn": cur["turn"], **list_counts(given, None), "status": "error",
+                                            "final": cur["final"], "secs": round(time.monotonic() - started, 3),
+                                            "error": f"{type(exc).__name__}: {exc}"[:300]})
+            raise
         secs = round(time.monotonic() - started, 3)
         status = getattr(self, "_last_compression_status", None)
         cover = store_cover()  # leaves written by this call and the stored rows they newly cover (hidden or host)

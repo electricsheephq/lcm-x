@@ -100,8 +100,9 @@ def config_yaml(cell: dict, plugin: dict, base_url: str) -> str:
 
 
 def phase_lcm_env(cell: dict, phase: str) -> dict:
-    """The cell's LCM env; after the first phase, overlaid with ``drain.phase2_lcm_env`` (Fixture B)."""
-    return {**cell["lcm_env"], **((cell.get("drain") or {}).get("phase2_lcm_env") or {} if phase != "A" else {})}
+    """Phase defaults (Fixture B), with the global override winning in every phase."""
+    return {**cell["lcm_env"], **((cell.get("drain") or {}).get("phase2_lcm_env") or {} if phase != "A" else {}),
+            **(cell.get("global_lcm_env") or {})}
 
 
 def forget_host_rows(state_db: Path, session_id: str) -> int:
@@ -321,6 +322,7 @@ class ProcessCell:
         self.first = first
         self.deadline = time.monotonic() + self.phase_timeout if self.phase_timeout else None
         self.proc = AD.AcpProcess(self.argv(), self.env(), self.work, self.d / f"host-{self.phase}.stderr")
+        closed = False
         try:
             self.proc.initialize(self.budget())
             if self.phase == "A":
@@ -331,7 +333,11 @@ class ProcessCell:
             clean = next((f for f in self.cell["faults"] if f["kind"] == "clean_exit_before_turn"), None)
             for t in P1.extend_turns(self.cell, first, self.low_backlog):
                 if clean and t == clean.get("turn") and t != first and "clean_exit_before_turn" not in self.fired:
-                    self.fire("clean_exit_before_turn", t)  # between turns: stdin EOF + SIGTERM (close), no SIGKILL
+                    rc = self.proc.close()
+                    closed = True
+                    if self.proc.killed or rc != 0:
+                        return {"exit": "error", "reason": f"clean exit failed: returncode={rc}, killed={self.proc.killed}"}
+                    self.fire("clean_exit_before_turn", t)  # recorded only after a graceful host exit
                     return {"exit": "clean_exit", "next_turn": t}
                 if cancel and t == cancel["turn"] and "cancel_then_retry" not in self.fired:
                     self.turn(t, "cancel")
@@ -358,7 +364,8 @@ class ProcessCell:
                 exc = PhaseDeadline(f"phase {self.phase} exceeded its {self.phase_timeout}s deadline ({exc})")
             return {"exit": "error", "reason": f"{type(exc).__name__}: {exc}; stderr: {self.stderr_tail()}"[:600]}
         finally:
-            rc = self.proc.close()
+            if not closed:
+                rc = self.proc.close()
             self.event(event="host_exit", returncode=rc, killed=self.proc.killed)
 
     def low_backlog(self, last_turn: int) -> bool:

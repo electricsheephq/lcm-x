@@ -259,8 +259,8 @@ def main():
     needed += ["cron_agent", "cron_close"] if cell.get("cron_every") else []
     needed += ["tool_dispatch", "engine_tool_dispatch"] if cell.get("tool_plan") else []
     cited_modules += sorted({ANCHORS[k][0][:-3].replace("/", ".") for k in needed})
-    if (cell.get("drain") or {}).get("forget_host_rows"):
-        finish("unsupported", reason="the host-forgets-its-rows fixture runs only under --transport acp-process")
+    if cell.get("drain"):
+        finish("unsupported", reason="drain cells need the R2 observer's per-compaction counters (acp-process only)")
         return
     if missing := [k for k in needed if not out["citations"][k]]:
         finish("unsupported", reason=f"host shape not citable at this sha: {missing}")

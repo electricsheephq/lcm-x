@@ -536,18 +536,19 @@ def test_observer_counts_host_rows_a_leaf_replaced_by_identity(tmp_path, monkeyp
 
 def test_drain_bars_fail_a_hidden_only_leaf_and_are_inconclusive_below_two_compactions(tmp_path):
     from bench.instruments.reliability.scorers import drain
-    cell = {"drain": {"phase2_turn": 41, "hold_seconds": 10.0}}
+    cell = {"in_place": True, "drain": {"phase2_turn": 41, "hold_seconds": 10.0}}
+    PC.append(tmp_path / "faults-fired.jsonl", {"kind": "clean_exit_before_turn", "turn": 41})
 
     def phase(*calls):
         return {"phase": "B", "counters": {"compactions": [dict(zip(("turn", "in", "out", "host_rows_summarized",
                                                                       "status", "secs"), c), final=False) for c in calls]}}
     stuck = phase((30, 80, 50, 32, "compacted", 0.2), (55, 60, 61, 0, "compacted", 11.0), (57, 62, 63, 0, "compacted", 0.1))
-    failed, unsure, numbers = drain.score(cell, [stuck])
+    failed, unsure, numbers = drain.score(cell, [stuck], tmp_path)
     assert set(failed) == {"D1", "D2", "D3"} and not unsure
     assert numbers["D2"]["turns"] == [55, 57] and numbers["D3"]["over_hold"] == [{"turn": 55, "secs": 11.0}]
     drains = phase((55, 60, 61, 0, "compacted", 0.1), (57, 62, 40, 24, "compacted", 0.1), (58, 42, 42, 0, "noop", 0.0))
-    assert drain.score(cell, [drains])[:2] == ({"D2": {"compactions": 2, "no_host_row_and_no_shrink": 1, "turns": [55]}}, {})
-    failed, unsure, _ = drain.score(cell, [phase((55, 60, 61, 0, "compacted", 0.1))])
+    assert drain.score(cell, [drains], tmp_path)[:2] == ({"D2": {"compactions": 2, "no_host_row_and_no_shrink": 1, "turns": [55]}}, {})
+    failed, unsure, _ = drain.score(cell, [phase((55, 60, 61, 0, "compacted", 0.1))], tmp_path)
     assert not failed and set(unsure) == {"D1", "D2", "D3"}
     by = {c["id"]: c for c in cells.select("drain/*")}
     assert set(by) == {f"drain/{f}/{m}" for f in ("hidden-backlog", "hidden-backlog-large") for m in ("in-place", "rotation")}
@@ -580,6 +581,7 @@ def test_fixture_b_forgets_host_rows_switches_threshold_and_counts_the_plateau(t
                 "final": False, "secs": 0.1, "leaves": 1, "rows_covered": covered}
     phases = [{"phase": "B", "counters": {"compactions": [call(165, 29, 29, 0, 36), call(166, 31, 31, 0, 36),
                                                           call(167, 33, 21, 14, 30)]}}]
+    PC.append(tmp_path / "faults-fired.jsonl", {"kind": "clean_exit_before_turn", "turn": 151})
     unsure = drain.score(big, phases, tmp_path)[1]
     assert set(unsure) == {"D1", "D2", "D3"} and "archived no row" in unsure["D1"]
     (tmp_path / "fixture.jsonl").write_text(json.dumps({"kind": "forget_host_rows", "rows": 300}) + "\n")
@@ -587,3 +589,97 @@ def test_fixture_b_forgets_host_rows_switches_threshold_and_counts_the_plateau(t
     assert set(failed) == {"D1", "D2"} and not unsure
     assert numbers["D4"] == {"plateau_compactions": 2, "plateau_turns": [165, 166], "first_shrink_pass": 3,
                              "hidden_rows_covered_per_pass": [36, 36, 16], "hidden_rows_covered_running": [36, 72, 88]}
+
+
+@pytest.mark.parametrize("in_place", [True, False], ids=["in-place", "rotation"])
+@pytest.mark.parametrize("shrinks", [True, False], ids=["would-pass", "would-fail"])
+@pytest.mark.parametrize("boundary_turn", [None, 41, 42], ids=["missing", "on-time", "late"])
+def test_drain_needs_a_boundary_before_phase_two(tmp_path, in_place, shrinks, boundary_turn):
+    from bench.instruments.reliability.scorers import drain
+    cell = {"in_place": in_place, "drain": {"phase2_turn": 41},
+            "faults": [{"kind": "clean_exit_before_turn", "turn": 41}] if in_place else []}
+    calls = [{"turn": t, "in": 10, "out": 5 if shrinks else 10, "host_rows_summarized": 5 if shrinks else 0,
+              "status": "compacted", "final": False, "secs": 0.1} for t in (30, 43, 44)]
+    if boundary_turn:
+        PC.append(tmp_path / "faults-fired.jsonl", {"kind": "clean_exit_before_turn", "turn": boundary_turn})
+        PC.append(tmp_path / "transcript.jsonl", {"event": "host_prompt", "turn": 1, "session": "parent"})
+        PC.append(tmp_path / "transcript.jsonl", {"event": "turn_end", "turn": boundary_turn,
+                                                 "session_prefix": "T", "session": "child"})
+    failed, unsure, numbers = drain.score(cell, [{"phase": "A", "counters": {"compactions": calls}}], tmp_path)
+    assert len(numbers["phase1_compactions"]) == 1  # a commit alone is not proof of the host boundary
+    if boundary_turn != 41:
+        assert not failed and set(unsure) == {"D1", "D2", "D3"}
+        assert numbers["phase2_compactions"] == [] and numbers["D4"]["plateau_compactions"] == 0
+        assert all("no recorded" in why for why in unsure.values())
+    else:
+        assert not unsure and set(failed) == (set() if shrinks else {"D1", "D2"})
+
+
+@pytest.mark.parametrize("successes", [0, 1, 2])
+def test_observer_records_raised_compaction_and_drain_d2_keeps_the_error(tmp_path, monkeypatch, successes):
+    from bench.instruments.reliability.scorers import drain
+    obs = load_observer()
+    monkeypatch.setattr(obs, "DIR", tmp_path)
+    monkeypatch.setattr(obs, "_r1", probe)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
+    monkeypatch.setitem(sys.modules, "agent.context_compressor", types.ModuleType("agent.context_compressor"))
+    exc = RuntimeError("compression failed")
+
+    class Engine:
+        _last_compression_status = "compacted"  # stale success must not mark a raised call as committed
+        broken = True
+
+        def compress(self, messages):
+            if self.broken:
+                time.sleep(0.005)
+                raise exc
+            return messages[:1]
+
+        def handle_tool_call(self, *a, **k):
+            return "{}"
+    engine = Engine()
+    obs.patch_engine(types.SimpleNamespace(context_compressor=engine))
+    obs.cur.update(turn=42)
+    with pytest.raises(RuntimeError) as caught:
+        engine.compress([{"role": "user", "content": "one"}, {"role": "assistant", "content": "two"}])
+    assert caught.value is exc
+    [error] = obs.counters["compactions"]
+    assert error["status"] == "error" and error["error"] == "RuntimeError: compression failed"
+    assert error["in"] == 2 and error["out"] is None and error["secs"] >= 0.001
+    engine.broken = False
+    for t in range(43, 43 + successes):
+        obs.cur.update(turn=t)
+        engine.compress([{"role": "user", "content": "one"}, {"role": "assistant", "content": "two"}])
+    PC.append(tmp_path / "faults-fired.jsonl", {"kind": "clean_exit_before_turn", "turn": 41})
+    failed, unsure, _ = drain.score({"in_place": True, "drain": {"phase2_turn": 41}},
+                                   [{"phase": "B", "counters": obs.counters}], tmp_path)
+    assert set(failed) == {"D2"} and "D2" not in unsure
+    assert failed["D2"]["errored_calls"] == [{"turn": 42, "error": "RuntimeError: compression failed", "secs": error["secs"]}]
+
+
+@pytest.mark.parametrize("cell_id", [c["id"] for c in cells.select("drain/*")])
+def test_r1_probe_declines_every_drain_cell(tmp_path, monkeypatch, capsys, cell_id):
+    cell = tmp_path / "cell.json"
+    cell.write_text(json.dumps(cells.select(cell_id)[0]))
+    monkeypatch.setattr(probe, "refusal", lambda *a: None)
+    monkeypatch.setattr(probe, "cite", lambda *a: "anchor")
+    monkeypatch.setattr(probe, "session_count", lambda: None)
+    monkeypatch.setattr(probe, "guard_sockets", lambda **k: pytest.fail("R1 started a drain host"))
+    monkeypatch.setattr(sys, "argv", ["probe", "--cell", str(cell), "--phase", "A", "--cell-dir", str(tmp_path)])
+    probe.main()
+    result = json.loads(capsys.readouterr().out)
+    assert result == {"exit": "unsupported",
+                      "reason": "drain cells need the R2 observer's per-compaction counters (acp-process only)"}
+
+
+def test_drain_fixture_b_rotation_crosses_on_the_clean_exit_not_a_rotation(tmp_path):
+    """drain/hidden-backlog-large/rotation: phase 1 runs at threshold 0.99 (no compaction, so no rotation); its
+    boundary is the clean host exit at phase2_turn, so the fired fault alone opens phase 2."""
+    from bench.instruments.reliability import cells
+    from bench.instruments.reliability.scorers import drain
+    cell = next(c for c in cells.select("all") if c["id"] == "drain/hidden-backlog-large/rotation")
+    first = cell["drain"]["phase2_turn"]
+    assert drain.boundary(cell, tmp_path, first) is False
+    PC.append(tmp_path / "faults-fired.jsonl", {"kind": "clean_exit_before_turn", "phase": "A", "turn": first})
+    assert drain.boundary(cell, tmp_path, first) is True

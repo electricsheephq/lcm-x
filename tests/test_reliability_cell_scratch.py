@@ -175,16 +175,81 @@ def test_cli_refuses_a_scratch_root_under_the_live_hermes_and_unknown_keep_value
         RM.main(args + ["--keep-dbs", "some"])
 
 
-def test_r1_declines_the_acp_process_only_drain_fixture_before_any_probe(tmp_path):
-    """#801: R1 (in-process) cannot make the host forget its rows; the cell is UNSUPPORTED before a probe runs, so
-    no scratch dir is made and no missing-DB copy turns it into an ERROR."""
+@pytest.mark.parametrize("cell_id", [f"drain/{size}/{mode}" for size in ("hidden-backlog", "hidden-backlog-large")
+                                    for mode in ("in-place", "rotation")])
+def test_r1_declines_the_acp_process_only_drain_fixture_before_any_probe(tmp_path, monkeypatch, cell_id):
+    """R1 has no per-compaction counters: every drain cell is declined before any scratch or probe."""
     from bench.instruments.reliability import cells, run_matrix
-    cell = next(c for c in cells.select("all") if c["id"] == "drain/hidden-backlog-large/in-place")
+    cell = cells.select(cell_id)[0]
+    monkeypatch.setattr(run_matrix.subprocess, "run", lambda *a, **k: pytest.fail("R1 ran a drain probe"))
     out, scratch = tmp_path / "out", tmp_path / "scratch"
     out.mkdir()
     scratch.mkdir()
     rec = run_matrix.run_cell(cell, "h", {"src": "/nonexistent", "python": "/nonexistent", "sha": "b" * 40},
-                              {"sha": "a" * 40, "ref": "HEAD", "dir": "lcm-x", "tree": "/nonexistent"}, out, 1, False,
+                              {"sha": "a" * 40, "ref": "HEAD", "dir": "lcm-x", "tree": "/nonexistent",
+                               "engine": "lcm-x", "enabled": "lcm-x"}, out, 1, False,
                               identity={"sha": "b" * 40}, scratch_root=scratch)
-    assert rec["verdict"] == "UNSUPPORTED" and "acp-process" in rec["reason"], rec
+    assert rec["verdict"] == "UNSUPPORTED", rec
+    assert rec["reason"] == "drain cells need the R2 observer's per-compaction counters (acp-process only)"
     assert list(scratch.iterdir()) == []
+
+
+def test_global_lcm_override_wins_in_both_process_phases_and_config(setup, monkeypatch, held):
+    setup.cell = cells.select("drain/hidden-backlog-large/in-place")[0]
+    seen = []
+
+    def phase(self, first):
+        live_dbs(self.home, held)
+        seen.append((self.phase, self.env()["LCM_CONTEXT_THRESHOLD"], (self.home / "config.yaml").read_text()))
+        self.fired.add("clean_exit_before_turn")
+        return {"exit": "clean_exit", "next_turn": 151} if self.phase == "A" else {"exit": "done"}
+    monkeypatch.setattr(PC.ProcessCell, "run_phase", phase)
+    monkeypatch.setattr(PC, "forget_host_rows", lambda *a: 1)
+    rec = PC.run_cell_process(setup.cell, "h", setup.host, setup.plugin, setup.out, 5, False,
+                               lcm_env={"LCM_CONTEXT_THRESHOLD": "0.75"}, identity={"method": "test"},
+                               scratch_root=setup.scratch)
+    assert rec["verdict"] == "PASS" and [p for p, _, _ in seen] == ["A", "B"]
+    assert all(value == "0.75" and "context_threshold: 0.75" in config for _, value, config in seen)
+
+
+@pytest.mark.parametrize("returncode,killed", [(0, False), (1, False), (-15, False), (-9, True), (0, True)])
+def test_clean_exit_checks_close_before_mutation_or_restore(setup, monkeypatch, held, returncode, killed):
+    setup.cell = {**cells.select("drain/hidden-backlog-large/in-place")[0], "turns": 2,
+                  "faults": [{"kind": "clean_exit_before_turn", "turn": 2}], "final_compaction_check": False}
+    steps = []
+
+    class Peer:
+        killed = False
+
+        def __init__(self, *a):
+            pass
+
+        def initialize(self, *a):
+            pass
+
+        def new_session(self, *a):
+            return "session"
+
+        def load_session(self, *a):
+            steps.append("restore")
+
+        def close(self):
+            steps.append("close")
+            self.killed = killed
+            return returncode
+    monkeypatch.setattr(PC.AD, "AcpProcess", Peer)
+    monkeypatch.setattr(PC.ProcessCell, "argv", lambda self: [])
+    monkeypatch.setattr(PC.ProcessCell, "turn", lambda self, t: live_dbs(self.home, held))
+    monkeypatch.setattr(PC, "forget_host_rows", lambda *a: steps.append("forget") or 1)
+    rec = PC.run_cell_process(setup.cell, "h", setup.host, setup.plugin, setup.out, 5, False,
+                               identity={"method": "test"}, scratch_root=setup.scratch)
+    d = Path(rec["dir"])
+    first = json.loads((d / "phase-A.json").read_text())
+    if returncode == 0 and not killed:
+        assert first["exit"] == "clean_exit" and steps == ["close", "forget", "restore", "close"]
+    else:
+        assert first["exit"] == "error" and "clean exit failed" in first["reason"]
+        assert str(returncode) in first["reason"] and f"killed={killed}" in first["reason"]
+        assert rec["verdict"] == "ERROR" and steps == ["close"]
+        assert not (d / "phase-B.json").exists() and not (d / "fixture.jsonl").exists()
+        assert not (d / "faults-fired.jsonl").exists()
