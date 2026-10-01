@@ -1,88 +1,38 @@
-# LCM-X Product Roadmap
+# LCM-X roadmap
 
-Status: living document, reconciled 2026-08-24. GitHub issue #323 is the canonical work graph; this page explains the durable tracks without duplicating issue lifecycle state.
+Status: reconciled 2026-10-01. The [vision](VISION.md) says what we are building and why. Issue [#658](https://github.com/electricsheephq/lcm-x/issues/658) is the tracker; GitHub milestones hold the issues for each release. The current stable release is recorded in [docs/project-status.md](docs/project-status.md).
 
-## What LCM-X is
+## How releases work
 
-LCM-X is Lossless Context Memory eXtension: a Hermes-compatible context engine that preserves raw source, builds a recoverable summary DAG, and exposes exact and semantic retrieval with explicit provenance and failure states. The tested host contract includes Hermes Agent v0.16 through its context-engine schema path; no newer unreleased host capability is assumed.
+- **One themed minor about every two weeks.** Each minor has one theme and a written "GA accepts when" line. Scope freezes at the first release candidate. After the third candidate, a minor ships only with known, non-blocking items; otherwise the failing change is taken out.
+- **Patches only for release-blocking defects reachable in real deployments:** data loss, duplicate rows, a wedged or reset session, or a request over the context window. At most one patch a week unless an incident is live.
+- **Behaviour and default changes ship only in minors.**
+- **Every release candidate passes the gauntlet** in [bench/specs/RELEASE-READINESS-V1.md](bench/specs/RELEASE-READINESS-V1.md) before GA, and the GA tree differs from the passing candidate only by its release notes.
 
-## Current product baseline
+## H1 — compaction you don't notice
 
-Latest stable at the time of this roadmap snapshot was `v0.23.1@81d8d41197dddc4c09b57097f4955ebae32366a9` (the current stable is recorded in [docs/project-status.md](docs/project-status.md)). The source snapshot for this roadmap is `main@3d4fbb4c979dc09aef0b831bb50d928e0e18d68f`.
+Today every compaction LCM-X starts runs on the turn thread, so the user waits for it (median ~37 s, p90 ~63 s on our synthetic long-session run). Each compaction also costs one prompt-cache break. H1 removes the wait in steps.
 
-Stable and main are separate identities. Stable is the product-under-test and installed-runtime baseline; main is the continuing development line. #342 owns main's deferred version-metadata policy.
+| Release | Theme | GA accepts when |
+|---|---|---|
+| **v0.24.9** | Drain: bounded foreground compaction, capped hidden leaves, exit fit | The release gauntlet passes |
+| **v0.25.0** | Long sessions: drain speed and correctness. The first background step: leaves prepared below the threshold (#610, minimal). Also #597, #750, #626, #605, #625, #84, #7, the cache-break measurement (#788), and removal of native recovery | Compaction p90 ≤ 60 s and never above 120 s on the field-window counter and the gauntlet; no release-blocking defects |
+| **v0.26.0** | Host message identity: use the host's stable message id (shadow mode first), then simplify LCM-X's own row matching | Shadow mode agrees with content matching on ≥ 99% of rows over 24 h; the full reliability matrix passes |
+| **v0.27.0** | Summary quality: prompt v3 by default, cue lines (#611), instruction continuity (#659) | Facts kept at least as high as the best compaction we measure against, within the three-seed band; continuity checks pass |
+| **v0.28.0** | Invisible compaction: summaries prepared in the background and published at the threshold (#787) | Visible-wait p90 ≤ 5 s, and no compaction slower than v0.24.9 |
 
-Eva has accepted v0.23.1 with hosted `voyage-4-large`, 1024-dimensional float32 summary
-vectors under that release's fail-closed privacy identity (v0.23.1 coupled cloud embedding
-to durable redaction; main has since split the two flags — see docs/features-overview.md).
-The proof ceiling is Eva only.
+## H2 — memory that measurably wins (in parallel)
 
-## Track A — Exact-stable retrieval provenance
+1. Re-baseline recall on a pinned release: LongMemEval retrieval and QA, and LoCoMo, for the default configuration (full-text recall) and, as a separate row, with embeddings on.
+2. B3-A provenance: sender and timestamp provenance at the summarizer boundary (#317 → #324), then re-measure.
+3. Publish the results in the repository scoreboard with tokens per query and cost; add BEAM.
 
-Milestone **v0.23.1 Retrieval Provenance Audit** and #341 are the active finite program.
+Milestone: **H2 — memory that measurably wins**.
 
-The default-off benchmark instrument traces public LongMemEval evidence through FTS, summary-vector, and chunk-vector candidate generation, shipped `lcm_recall` fusion, and content-free reference validation. Product and instrument hashes remain separate. #252 owns preregistration, score-sensitive disposition, and the post-merge ledger.
+## H3 — later
 
-The audit is answer-blind. It may decide `KEEP CURRENT` or establish oracle headroom sufficient to earn a separate fusion-design issue. It does not authorize a product retrieval change.
+Teams and multi-agent use, dormant features (assertions, query views, rollups), and memory-provider integration. Revisited after v0.28.0. Milestone: **H3 — later**.
 
-## Track B — Provider trust and hierarchical context quality
+## Backlog
 
-Roadmap ordering remains:
-
-1. #317 and #298 define untrusted retrieved/history presentation; #89 defines current task-state precedence.
-2. #324 supplies bounded timestamp/role/sender provenance.
-3. #318 defines depth-specific differential summary semantics and consumes #89/#324.
-4. #319 defines bounded durable tool-result evidence.
-5. #240 retains local auxiliary summary-envelope compatibility.
-
-Every score-sensitive prompt, summary, selection, or retrieval change requires #252 disposition and a comparable baseline.
-
-## Track C — Bounded active assembly
-
-PR #206 retains the cap/reserve candidate. #320 owns deterministic recency/query-aware frontier selection after the cap contract, with #90/PR #297 newest-user authority preserved.
-
-No node may become unreachable. Prompt-sensitive ranking remains default-off until a separate accepted design proves value against exact-stable provenance and cache/noise gates.
-
-## Track D — Compaction, recovery, and diagnostics
-
-Issue `#247` owns the reproduced multi-session `publication_invariant_conflict` defect. Issue `#314` is a current-main `needs-repro` semantics issue and must not drive threshold tuning until publication failure is separated from attempt frequency.
-
-Issues `#36` and `#74` retain background-compaction and persistence/recovery architecture. Issue `#265` owns degraded semantic/FTS behavior, and issue `#321` owns bounded fast doctor plus explicit deep integrity checks.
-
-## Track E — Deferred privacy and scale work
-
-Issues `#334`-`#337` are accepted deferred privacy/identity/locality contracts. They do not reopen v0.23.1 or enable trajectory embeddings, binary prescreen, cloud reranking, or remote Ollama on Eva.
-
-Issue `#328` is a P4 deterministic telemetry-test follow-up. Issue `#342` is the next-release version-policy follow-up.
-
-## Track F — Teams and host integration
-
-Teams remains separate from the current product/evaluation program. Dormant code, pilot enablement, host identity, connector behavior, and customer acceptance keep their own issues and milestones. Default-off code is not proof of safe enablement.
-
-## Release discipline
-
-Release work requires:
-
-- an accepted issue and bounded change;
-- exact-head CI and independent semantic review for the changed risk lane;
-- required non-author code-owner approval and zero unresolved blocker threads;
-- merge commits through normal protection;
-- detached release validation and exact tag/release readback;
-- rc-first delivery for any release touching product code: a `vX.Y.Z-rcN` prerelease that
-  passes the live gauntlet in `bench/specs/RELEASE-READINESS-V1.md` (Phase A all-tools
-  matrix on a fresh clone across privacy postures, Phase B multi-agent P0/P1 sweep of the
-  full release diff, Phase C 30+ turn `hermes acp` soak) before the GA tag, with the GA
-  commit differing from the passing rc tree by exactly the added release notes;
-- explicit proof boundaries and rollback ownership.
-
-Never restamp stable from main casually, move an existing tag, bypass the ruleset, or treat a benchmark result as runtime/customer proof.
-
-## Near-term sequence
-
-1. Finish canonical documentation and the default-off instrument through separate protected PRs.
-2. Bind the exact merged instrument to stable v0.23.1 without changing product bytes.
-3. Run seeded smoke, registered 95-question cached A/A-prime, then the full public 500-question audit within the privacy and cost caps.
-4. Record `KEEP CURRENT` or `FUSION DESIGN EARNED`, run the two blind final reviews, and close only the finite audit milestone.
-5. Resume later quality work through the accepted issue/dependency graph rather than an all-features campaign.
-
-Benchmark discipline remains registration before spend, seeded sampling instead of first-N, deterministic A/A-prime noise floors, fail-closed accounting, and append-only corrections.
+Verified items outside the current themes sit in the **Backlog (unscheduled)** milestone. They are pulled into a themed minor by priority (agent-experience impact × exposure × fit ÷ effort), not merged ad hoc.

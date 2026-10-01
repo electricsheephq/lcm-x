@@ -26,7 +26,11 @@ Based on the [LCM paper](https://papers.voltropy.com/LCM) by Ehrlich & Blackman
 (Voltropy PBC, Feb 2026). Inspired by
 [lossless-claw](https://github.com/martian-engineering/lossless-claw) for
 OpenClaw. For an interactive visualization of the LCM idea, see
-[losslesscontext.ai](https://losslesscontext.ai/).
+[losslesscontext.com](https://losslesscontext.com/).
+
+What we are building and why: [VISION.md](VISION.md). What ships when:
+[ROADMAP.md](ROADMAP.md) and the tracker
+[#658](https://github.com/electricsheephq/lcm-x/issues/658).
 
 ## Table of contents
 
@@ -137,17 +141,15 @@ scan allowance — on top of the
 This is the forward bump for the next patch release, never a restamp
 of any past commit's own recorded identity (#385 fixed the earlier drift).
 
-Eva has accepted exact stable v0.23.1 with hosted `voyage-4-large`,
-1024-dimensional float32 summary vectors under one privacy-bound identity.
-That evidence establishes runtime safety for Eva only, not fleet, customer,
-Teams, answer-accuracy, or universal benchmark readiness.
-
-The active finite evaluation is [#341](https://github.com/electricsheephq/lcm-x/issues/341):
-an answer-blind, exact-stable LongMemEval retrieval-provenance audit. It keeps
-product and benchmark-instrument identities separate and cannot change product
-retrieval behavior. See [Current project state](docs/project-status.md), the
-[roadmap](ROADMAP.md), and [Benchmark methodology](benchmarks/METHODOLOGY.md)
-for current identities, gaps, and proof boundaries.
+Every compaction LCM-X starts today runs on the turn thread, so the user waits
+for it. The roadmap removes that wait in steps (v0.25.0 prepares leaves in the
+background; v0.28.0 prepares summaries in the background and publishes them at
+the threshold) and re-baselines recall on the shipped default configuration.
+See [VISION.md](VISION.md), the [roadmap](ROADMAP.md), the tracker
+[#658](https://github.com/electricsheephq/lcm-x/issues/658),
+[Current project state](docs/project-status.md) and
+[Benchmark methodology](benchmarks/METHODOLOGY.md) for current identities,
+gaps, and proof boundaries.
 
 ## LCM vs built-in compression
 
