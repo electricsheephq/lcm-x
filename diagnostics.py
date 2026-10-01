@@ -209,6 +209,9 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
                    "rows and does not avoid the conflict) — and revert the v0.24.0 config migration (plugins.enabled "
                    "back to hermes-lcm, context.engine: lcm; restore the pre-migration config.yaml) before restarting "
                    "Hermes.")
+        if detail.get("ever_shortened") is False:
+            command = ("inspect the 'LCM survival fit could not shorten the list' log lines and the compaction "
+                       "reason; these attempts removed no rows from live context")
         warning_only = True
         rationale = ("a survival fit could not shorten the list; the request still exceeds its budget"
                      if detail.get("last_shortened") is False else
