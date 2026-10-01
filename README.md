@@ -26,6 +26,7 @@ Based on the [LCM paper](https://papers.voltropy.com/LCM) by Ehrlich & Blackman
 (Voltropy PBC, Feb 2026). Inspired by
 [lossless-claw](https://github.com/martian-engineering/lossless-claw) for
 OpenClaw. For an interactive visualization of the LCM idea, see
+[losslesscontext.ai](https://losslesscontext.ai/). Project site:
 [losslesscontext.com](https://losslesscontext.com/).
 
 What we are building and why: [VISION.md](VISION.md). What ships when:
