@@ -1,6 +1,6 @@
 # LCM-X project state
 
-This page separates released product identity, current development source, evaluation evidence, and later roadmap work. GitHub issues, pull requests, tags, releases, and exact commit heads are the live source of truth. This snapshot was reconciled on 2026-09-05; the naming table and latest-stable identity were updated on 2026-09-24 for the #471 rename and on 2026-09-25 for the v0.24.1 GA, and on 2026-09-26 for the v0.24.2 GA, and on 2026-09-28 for the v0.24.3 GA; and on 2026-09-28 for the v0.24.4 GA; and on 2026-09-29 for the v0.24.5 GA; and on 2026-09-30 for the v0.24.6 GA; and on 2026-09-30 for the v0.24.7 GA; the main identity was updated on 2026-09-30 for the v0.24.8 release candidate.
+This page separates released product identity, current development source, evaluation evidence, and later roadmap work. GitHub issues, pull requests, tags, releases, and exact commit heads are the live source of truth. This snapshot was reconciled on 2026-09-05; the naming table and latest-stable identity were updated on 2026-09-24 for the #471 rename and on 2026-09-25 for the v0.24.1 GA, and on 2026-09-26 for the v0.24.2 GA, and on 2026-09-28 for the v0.24.3 GA; and on 2026-09-28 for the v0.24.4 GA; and on 2026-09-29 for the v0.24.5 GA; and on 2026-09-30 for the v0.24.6 GA; and on 2026-09-30 for the v0.24.7 GA; and on 2026-09-30 for the v0.24.8 GA; the main identity was updated on 2026-10-01 for the v0.24.9 release candidate.
 
 ## Naming and compatibility
 
@@ -12,17 +12,17 @@ The project is **LCM-X — Lossless Context Memory eXtension**. From v0.24.0 (#4
 | Plugin manifest and install directory | `hermes-lcm-x` (legacy, v0.23.x and earlier: `hermes-lcm`) |
 | Runtime context engine | `lcm-x` (legacy alias `lcm` accepted with a deprecation warning) |
 | Bundled skill | `hermes-lcm` (unchanged) |
-| Latest stable | `v0.24.7@417432b3d74cfdef11769094fde13696fecbd9ab` (ships `hermes-lcm-x` / `lcm-x`; `v0.24.8` follows its rc gauntlet) |
+| Latest stable | `v0.24.8@7ed790c84b493395bdc1c929c1ee4d7ea0eaaceb` (ships `hermes-lcm-x` / `lcm-x`; `v0.24.9` follows its rc gauntlet) |
 
 The rename is a breaking change with a documented migration path; see the operator guide's migration section. Historical notes and upstream evidence retain the names and identities used when they were created.
 
 ## Released product and development source
 
-The latest stable release is `v0.24.7` at `417432b3d74cfdef11769094fde13696fecbd9ab`. GitHub publishes it as a non-prerelease release. Because GitHub reports the tag as mutable, operators and evidence packets must verify the exact SHA rather than trust the tag name alone.
+The latest stable release is `v0.24.8` at `7ed790c84b493395bdc1c929c1ee4d7ea0eaaceb`. GitHub publishes it as a non-prerelease release. Because GitHub reports the tag as mutable, operators and evidence packets must verify the exact SHA rather than trust the tag name alone.
 
-The source snapshot used for this reconciliation is `main@e4213424e1cacbcfa7e0d22777f212af858fa86d` (the #689 merge). Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits.
+The source snapshot used for this reconciliation is `main@3961ed68c28df3d80482e369da376c695e59f39d` (the #726 merge). Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits.
 
-Main carries the forward identity `0.24.8` (`hermes-lcm-x`) for the next patch release (rc-first under `bench/specs/RELEASE-READINESS-V1.md`); the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
+Main carries the forward identity `0.24.9` (`hermes-lcm-x`) for the next patch release (rc-first under `bench/specs/RELEASE-READINESS-V1.md`); the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
 
 v0.23.2 (2026-08-27) shipped those contracts: durable redaction and cloud-embedding privacy are
 independent flags (`LCM_SENSITIVE_PATTERNS_ENABLED` vs `LCM_EMBEDDING_PRIVACY_ENABLED`, #374),

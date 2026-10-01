@@ -6,6 +6,23 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+## v0.24.9 - (unreleased; rc1) (drain: one foreground time budget, stub-first exit, exit fit, scan allowance)
+
+- Fix: with semantic embeddings enabled and the provider package missing or misconfigured, `lcm_doctor` and
+  `/lcm doctor` report an `embedding_provider_health` warning (provider, model, reason, fix); it also warns when
+  embeddings are off but the store still holds an active embedding profile. The probe is offline. (#672, contributor PR #673)
+- Fix: with embeddings enabled and the provider unavailable, plugin load logs one WARNING with the fix;
+  `requirements-semantic.txt` names the dependency and `docs/embeddings-setup.md` covers recovery after a host update.
+  Load logging with embeddings off is unchanged. (#674, contributor PR #675)
+- Fix: when a cancelled compaction had committed a leaf through the fresh-tail pressure yield, the host's retry adopts
+  it before the summary-route stop applies, so the retry returns the shorter list with no summariser call. (#695)
+- Fix: exit-fit follow-ups: a host-native result and an automatic call that turns into forced overflow recovery take
+  no exit cap; a survival-fit record whose fits never shortened the list gets log guidance instead of rollback advice;
+  the uncovered-row count reads unknown when dropped rows have no store id. (#715)
+- Fix: on the foreground leaf and condensation paths, a source of at most 2 x `l3_truncate_tokens` (counted on the
+  serialized text) whose first non-empty summary is not shorter is stored whole as a level 3 node: the route gets no
+  circuit event (#628), one INFO line replaces the rejection WARNING, and no further route or level 2 call runs.
+  Larger sources, empty results and callers without the small-source flag are unchanged. (#722)
 - Fix: an automatic compaction whose input reached the threshold first tries its free cuts (#671): the summary
   prefix, the externalized placeholders and the aged-tier stubs, assembled without a model call. When the list is at
   or under min(threshold - leaf chunk, 0.95 x threshold) by the survival fit's host measure, it is returned with no
@@ -99,7 +116,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   the engine handles as designed, and receipts published as GA release assets. (#427)
 - Docs: the embedding-dependency recovery note is linked from the README, the operator guide and the bundled skill, and two doctor messages say that a hand-installed dependency (not every optional dependency) can be dropped by a Hermes update. (#702)
 
-## v0.24.8 - (unreleased; rc1) (repairs: level 3 fragment repair, tool-output stubs that name the read-back call, rollup stop, no silent fallback on a slow load)
+## v0.24.8 - 2026-09-30 (repairs: level 3 fragment repair, tool-output stubs that name the read-back call, rollup stop, no silent fallback on a slow load)
 
 - Fix: a summary route that cannot serve its model (HTTP 400/404 whose message names the model as unknown, not
   found, not existing or not supported) opens its circuit on the first failure instead of the second, so level 2 is not
