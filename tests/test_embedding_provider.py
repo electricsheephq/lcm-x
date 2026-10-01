@@ -962,13 +962,28 @@ def test_voyage_does_not_dispatch_next_split_after_deadline(monkeypatch):
     monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
     monkeypatch.setattr(provider_mod, "count_tokens", lambda _text: 1)
     transport = FakeTransport(_voyage_success(1), _voyage_success(1))
+    # The deadline is moved past by skewing the provider's clock, not by
+    # sleeping, so a slow runner cannot expire it during the first split
+    # (#791). The generous timeout only bounds the real worker joins.
+    clock = SimpleNamespace(skew=0.0)
+    real_time = provider_mod.time
+
+    class _SkewedTime:
+        def __getattr__(self, name):
+            return getattr(real_time, name)
+
+        @staticmethod
+        def monotonic():
+            return real_time.monotonic() + clock.skew
+
+    monkeypatch.setattr(provider_mod, "time", _SkewedTime())
     provider = VoyageProvider(
-        "voyage-test", transport=transport, timeout=0.02, max_batch_items=1
+        "voyage-test", transport=transport, timeout=5.0, max_batch_items=1
     )
 
     batches = provider.embed_document_batches(["first", "second"])
     assert next(batches).indexes == (0,)
-    time.sleep(0.03)
+    clock.skew = 10.0
     with pytest.raises(VoyageError, match="deadline exceeded"):
         next(batches)
     assert len(transport.calls) == 1
