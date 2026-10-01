@@ -458,7 +458,7 @@ outside the LCM database.
 | `lcm_expand_query` | Answer a question using expanded current-session LCM context while returning a bounded answer. |
 | `lcm_status` | Show runtime health, context pressure, config, source lineage, and lifecycle stats. |
 | `lcm_inspect` | Read-only operator inventory for current-session lineage, frontier/fresh-tail metadata, externalized refs/readability, compaction skip/no-op reasons, and matched ignore/stateless patterns. Returns metadata only; use retrieval tools for content. |
-| `lcm_doctor` | Run database, FTS, lifecycle, config, and context-pressure diagnostics. |
+| `lcm_doctor` | Run diagnostics. Default `mode: fast` is bounded (schema, SQLite `quick_check`, ingest/lifecycle, config); `mode: deep` adds full SQLite/FTS integrity and store-wide payload/lineage scans. |
 
 ## Recall skill and policy
 
@@ -890,9 +890,10 @@ placeholder `ref` and `lcm_expand(externalized_ref=...)`. If externalization
 fails, LCM logs a warning and leaves the original text inline rather than
 dropping data.
 
-`lcm_doctor` reports SQLite `journal_mode`, `quick_check`, database/WAL sizes,
-largest content/tool-call rows, suspicious inline payload rows, and aggregate
-externalized-payload stats. Doctor output is metadata-only for these scans.
+`lcm_doctor` reports SQLite `journal_mode`, `quick_check`, and database/WAL sizes
+in both modes. In `mode: deep`, it also scans largest content/tool-call rows,
+suspicious inline payload rows, and aggregate externalized-payload stats;
+fast mode reports `payload_storage` as `not_run`. Doctor output is metadata-only for these scans.
 
 This guard is scoped to LCM's own `lcm.db` write boundary. It does not prevent
 Hermes core, or any other host layer, from writing inline payloads to Hermes

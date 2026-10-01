@@ -310,6 +310,12 @@ prepends the policy. The canonical file and digest source is
 
 ## Troubleshooting
 
+### lcm_doctor fast and deep modes
+
+The default `mode: fast` runs bounded checks; exhaustive checks show `not_run`.
+Use `mode: deep` or `/lcm doctor` for full SQLite/FTS integrity and payload/lineage scans.
+Deep mode can take minutes on a large store. Both modes are read-only.
+
 ### `hermes plugins` shows `lcm-x (not found)` but LCM tools exist
 
 If `plugins.enabled` contains `hermes-lcm-x`, `context.engine: lcm-x` is set, and

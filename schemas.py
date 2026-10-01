@@ -1165,11 +1165,22 @@ LCM_DOCTOR = {
         "Run diagnostics on the LCM database and configuration. Checks database "
         "integrity, detects orphaned DAG nodes, validates configuration, and "
         "reports potential issues. Use this to troubleshoot problems or verify "
-        "a healthy setup."
+        "a healthy setup. Defaults to a bounded fast check; pass mode=deep for the full integrity scan."
     ),
     "parameters": {
         "type": "object",
         "properties": {
+            "mode": {
+                "type": "string",
+                "enum": ["fast", "deep"],
+                "description": (
+                    "Optional. fast (default): bounded checks — schema, SQLite quick_check, ingest/lifecycle state, "
+                    "session-scoped FTS sync, recorded background FTS-corruption flags, config. The exhaustive "
+                    "checks are reported as not_run. deep: also runs full SQLite integrity_check, FTS5 integrity "
+                    "checks, store-wide payload scans and source-lineage counts; can take minutes on a large store. "
+                    "Ignored when action is set."
+                ),
+            },
             "action": {
                 "type": "string",
                 "enum": ["repair_level3"],

@@ -26749,7 +26749,7 @@ class TestEngineTools:
         assert result["dag"]["compression_ratio"] == "10.0:1"
 
     def test_handle_doctor_returns_healthy(self, engine):
-        result = json.loads(engine.handle_tool_call("lcm_doctor", {}))
+        result = json.loads(engine.handle_tool_call("lcm_doctor", {"mode": "deep"}))
 
         assert result["overall"] == "healthy"
         check_names = [c["check"] for c in result["checks"]]
@@ -26772,7 +26772,7 @@ class TestEngineTools:
 
         monkeypatch.setattr(lcm_tools, "check_external_content_fts_integrity", fake_fts_integrity)
 
-        result = json.loads(engine.handle_tool_call("lcm_doctor", {}))
+        result = json.loads(engine.handle_tool_call("lcm_doctor", {"mode": "deep"}))
 
         checks = {check["check"]: check for check in result["checks"]}
         assert result["overall"] == "unhealthy"
@@ -26794,7 +26794,7 @@ class TestEngineTools:
             )
         engine._store._conn.commit()
 
-        result = json.loads(engine.handle_tool_call("lcm_doctor", {}))
+        result = json.loads(engine.handle_tool_call("lcm_doctor", {"mode": "deep"}))
 
         assert result["overall"] == "healthy"
         lineage_check = next(c for c in result["checks"] if c["check"] == "source_lineage_hygiene")
