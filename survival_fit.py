@@ -426,7 +426,11 @@ class SurvivalFitMixin:
 
         def counted(record):  # runs inside the store's write transaction: concurrent engines add, never overwrite
             record = record if isinstance(record, dict) else {}
-            return {"count": int(record.get("count") or 0) + 1, "last_reason": reason, "last_at": time.time(),
+            try:
+                count = int(record.get("count") or 0)
+            except (TypeError, ValueError, OverflowError):  # #618 item 14: a damaged count restarts the record
+                return {**counted({}), "count_lost": True}
+            return {"count": count + 1, "last_reason": reason, "last_at": time.time(),
                     "last_conversation": str(self._conversation_id or self._session_id or ""),
                     "last_reached_budget": after <= budget,
                     "last_shortened": shortened,
@@ -434,7 +438,8 @@ class SurvivalFitMixin:
                     "unreached_budget_count": int(record.get("unreached_budget_count") or 0) + (after > budget),
                     # fits that projected a row (#601); a record from before the key stays unknown (no key)
                     **({"projected_count": int(record.get("projected_count") or 0) + bool(projected)}
-                       if "projected_count" in record or not record.get("count") else {})}
+                       if "projected_count" in record or not record.get("count") else {}),
+                    **({"count_lost": True} if record.get("count_lost") else {})}  # #618 item 14: kept
 
         try:
             self._store.update_metadata_json(SURVIVAL_FIT_COUNTER_KEY, counted)

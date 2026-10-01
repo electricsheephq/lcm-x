@@ -231,7 +231,7 @@ def test_u7_a_time_stop_before_the_sweep_off_leaf_stores_nothing_and_holds(tmp_p
         assert provider.calls == [] and _nodes(engine) == [] and isinstance(result, list)
         assert engine._last_compression_status != "error"  # a stop, not an exception
         assert engine._last_compression_noop_reason.endswith("time budget spent before the first leaf")
-        assert engine._sweep_budget_hold_until > time.time()  # the #608 hold ends at its time
+        assert engine._sweep_budget_hold_until > time.monotonic()  # the #608 hold ends at its time
     finally:
         engine.shutdown()
 
