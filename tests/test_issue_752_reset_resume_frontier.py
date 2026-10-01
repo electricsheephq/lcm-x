@@ -152,3 +152,39 @@ def test_in_place_compression_boundary_after_resume_keeps_frontier_zero(tmp_path
         assert resumed._last_compacted_store_id == 0
     finally:
         resumed.shutdown()
+
+
+@pytest.mark.parametrize("retain", [2, 0])
+def test_a_reset_whose_deletion_fails_keeps_the_frontier_resumable(tmp_path, monkeypatch, retain):
+    # The summaries survive a failed deletion, so the frontier must stay resumable as on main;
+    # binding at 0 would make every later leaf collide with the surviving one.
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _summarize)
+    engine = _engine(tmp_path, new_session_retain_depth=retain)
+    engine.on_session_start("S1", platform="cli", context_length=200_000)
+    host = []
+    _ingest_turns(engine, host, range(1, 13))
+    engine.compress(list(host), force=True)
+    assert engine._last_compacted_store_id == 18
+    engine.on_session_end("S1", host)
+
+    def _locked(*args, **kwargs):
+        raise lcm_engine_module.sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(engine._dag, "delete_below_depth", _locked)
+    monkeypatch.setattr(engine._dag, "delete_session_nodes", _locked)
+    with pytest.raises(lcm_engine_module.sqlite3.OperationalError):
+        engine.on_session_reset()
+    monkeypatch.undo()
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _summarize)
+    engine.on_session_start("S2", platform="cli", context_length=200_000)
+    engine.shutdown()
+    resumed = _engine(tmp_path, new_session_retain_depth=retain)
+    try:
+        resumed.on_session_start("S1", platform="cli", context_length=200_000)
+        assert _covered_max(resumed) == 18
+        assert resumed._last_compacted_store_id == 18
+        _ingest_turns(resumed, host, range(13, 21))
+        resumed.compress(list(host), force=True)
+        assert resumed._last_compression_status == "compacted"
+    finally:
+        resumed.shutdown()
