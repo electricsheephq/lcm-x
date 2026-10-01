@@ -406,13 +406,17 @@ class IdentityAnchorMixin:
         now = [self._message_replay_identity(message, strip_carrier=False) for message in messages[start:]]
         old = list(before[start:])
         inserted, replaced = set(), {}
+        # #7: a replace span counts only while the cursor ends the last list LCM ingested. After a
+        # compaction the cursor indexes compress()'s output (proven by the commit proof), and the span
+        # the diff calls "replaced" is the compaction itself (a summary, a retained row re-shown).
+        steady = len(before) == getattr(self, "_ingest_cursor", None)
         for tag, i1, i2, j1, j2 in SequenceMatcher(None, old, now, autojunk=False).get_opcodes():
             for j in range(j1, j2):
                 if start + j >= cursor:
                     continue
                 if tag == "insert":
                     inserted.add(start + j)
-                elif tag == "replace":
+                elif tag == "replace" and steady:
                     replaced[start + j] = (tuple(old[i1:i2]), now[j])
         return inserted, replaced
 
@@ -1093,9 +1097,13 @@ def _composite_relation(group, stamp) -> list:
 
 def _merged_from_replaced(identity, old) -> bool:
     """#7: a plain user row that is exactly the Hermes consecutive-user merge (``"\\n\\n"`` joiner) of
-    two or more contiguous user rows of the span it replaced: rows LCM already ingested, re-shown merged."""
+    two or more contiguous user rows of the span it replaced, or one ``"\\n\\n"`` part of one such row:
+    rows LCM already ingested, re-shown merged or split."""
     if identity is None or identity[0] != "user" or tuple(identity[2:]) != ("", "", ""):
         return False
+    if any(entry is not None and entry[0] == "user" and tuple(entry[2:]) == ("", "", "") and entry[1] != identity[1]
+           and "\n\n" + identity[1] + "\n\n" in "\n\n" + entry[1] + "\n\n" for entry in old):
+        return True  # #535: Hermes' persist step re-shows NEW alone where LCM ingested R + "\n\n" + NEW
     for i in range(len(old)):
         parts = []
         for entry in old[i:]:
