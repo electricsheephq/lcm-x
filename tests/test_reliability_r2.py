@@ -685,11 +685,16 @@ def test_drain_fixture_b_rotation_crosses_on_the_clean_exit_not_a_rotation(tmp_p
     assert drain.boundary(cell, tmp_path, first) is True
 
 
-@pytest.mark.parametrize("where", ["before", "after", "error-record"])
+@pytest.mark.parametrize("where", ["before", "after", "error-record", "clock"])
 def test_observer_failures_never_change_the_engine_call(tmp_path, monkeypatch, where):
     """Review round 2 (#801): an exception inside the observer's own bookkeeping is recorded as an observer_error
-    (the cell ERRORs on it) and never blocks the engine call, replaces its result or replaces its exception."""
+    (the cell ERRORs on it) and never blocks the engine call, replaces its result or replaces its exception.
+    'clock' (delta review): the monotonic clock itself fails; the call still runs once, with no timing recorded."""
     obs = load_observer()
+    if where == "clock":
+        def no_clock():
+            raise OSError("clock unavailable")
+        monkeypatch.setattr(obs, "time", types.SimpleNamespace(time=time.time, monotonic=no_clock))
     monkeypatch.setattr(obs, "DIR", tmp_path)
     monkeypatch.setattr(obs, "_r1", probe)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -729,7 +734,9 @@ def test_observer_failures_never_change_the_engine_call(tmp_path, monkeypatch, w
         assert engine.compress(given) == given[:1]
     assert calls == [2]
     errors = [n for n in PC.read_jsonl(tmp_path / "observer.jsonl") if n["kind"] == "observer_error"]
-    assert [e["where"] for e in errors] == [f"traced_compress:{where}"]
+    assert [e["where"] for e in errors] == [f"traced_compress:{'before' if where == 'clock' else where}"]
+    if where == "clock":
+        assert [c["secs"] for c in obs.counters["compactions"]] == [None]
 
 
 def test_drain_fixture_b_keeps_an_errored_call_failing_d2_when_nothing_was_archived(tmp_path):

@@ -230,25 +230,28 @@ def patch_engine(agent):
         except Exception:
             pass
 
+    def elapsed(started):
+        return None if started is None else round(time.monotonic() - started, 3)
+
     def traced_compress(self, messages, *args, **kwargs):
-        started = time.monotonic()
+        started, given, cover0 = None, messages, (None, None)
         try:
+            started = time.monotonic()
             given, cover0 = list(messages) if isinstance(messages, list) else messages, store_cover()
         except Exception as exc:
             observer_failed("traced_compress:before", exc)
-            given, cover0 = messages, (None, None)
         try:
             result = orig_compress(self, messages, *args, **kwargs)
         except BaseException as exc:
             try:
                 counters["compactions"].append({"turn": cur["turn"], **list_counts(given, None), "status": "error",
-                                                "final": cur["final"], "secs": round(time.monotonic() - started, 3),
+                                                "final": cur["final"], "secs": elapsed(started),
                                                 "error": f"{type(exc).__name__}: {exc}"[:300]})
             except Exception as obs:
                 observer_failed("traced_compress:error-record", obs)
             raise
         try:
-            secs = round(time.monotonic() - started, 3)
+            secs = elapsed(started)
             status = getattr(self, "_last_compression_status", None)
             cover = store_cover()  # leaves written by this call and the stored rows they newly cover (hidden or host)
             delta = [None if a is None or b is None else b - a for a, b in zip(cover0, cover)]
