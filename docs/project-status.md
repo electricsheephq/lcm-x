@@ -20,7 +20,7 @@ The rename is a breaking change with a documented migration path; see the operat
 
 The latest stable release is `v0.24.8` at `7ed790c84b493395bdc1c929c1ee4d7ea0eaaceb`. GitHub publishes it as a non-prerelease release. Because GitHub reports the tag as mutable, operators and evidence packets must verify the exact SHA rather than trust the tag name alone.
 
-The source snapshot used for this reconciliation is `main@3961ed68c28df3d80482e369da376c695e59f39d` (the #726 merge). Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits.
+The source snapshot used for this reconciliation is `main@b50f8a61e84bf52bf97e7aa905791e5ab870e176` (the #745 merge). Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits.
 
 Main carries the forward identity `0.24.9` (`hermes-lcm-x`) for the next patch release (rc-first under `bench/specs/RELEASE-READINESS-V1.md`); the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
 
