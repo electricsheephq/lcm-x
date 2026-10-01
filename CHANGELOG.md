@@ -6,9 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
-## v0.24.9 - (unreleased; rc2) (drain: one foreground time budget, stub-first exit, exit fit, scan allowance)
+## v0.24.9 - (unreleased; rc3) (drain: one foreground time budget, stub-first exit, exit fit, scan allowance)
 
-- Fix: after a stub-first exit, the next turn keeps the tool-output stubs the agent already holds, so a cleanup-only pass never returns a larger list and no tool output is stored twice. (#772)
 - Fix: with semantic embeddings enabled and the provider package missing or misconfigured, `lcm_doctor` and
   `/lcm doctor` report an `embedding_provider_health` warning (provider, model, reason, fix); it also warns when
   embeddings are off but the store still holds an active embedding profile. The probe is offline. (#672, contributor PR #673)
@@ -118,6 +117,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Docs: the embedding-dependency recovery note is linked from the README, the operator guide and the bundled skill, and two doctor messages say that a hand-installed dependency (not every optional dependency) can be dropped by a Hermes update. (#702)
 - Fix (rc2): `/lcm doctor` now runs the `embedding_provider_health` check; in v0.24.9-rc1 only the `lcm_doctor` tool ran it, while the docs and the check's own fix text pointed users to `/lcm doctor`. (#734)
 - Fix (rc2): with the full threshold sweep off (the default), an automatic compaction forms a leaf even when the backlog outside the fresh tail is under `leaf_chunk_tokens`, and an automatic exit fit drops only older turns a summary covers; before, the exit fit could drop uncovered turns at every compaction. (#738)
+- Fix (rc3): after a stub-first exit, the next turn keeps the tool-output stubs the agent already holds, so a cleanup-only pass never returns a larger list and no tool output is stored twice. (#772)
 
 ## v0.24.8 - 2026-09-30 (repairs: level 3 fragment repair, tool-output stubs that name the read-back call, rollup stop, no silent fallback on a slow load)
 
