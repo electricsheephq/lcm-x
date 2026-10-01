@@ -104,6 +104,8 @@ Run `actionlint` when workflows change. Record exact commands and results in the
   maintainer decision. Classification alone does not elevate routine reversible issue metadata.
 - Use `.agents/skills/triage-backlog/SKILL.md` read-only unless a maintainer explicitly
   authorizes one exact mutation; never use it for an automatic backlog sweep.
+  A bounded sweep that a maintainer starts and authorizes as one saved plan uses
+  `.agents/skills/issue-sweep/SKILL.md`; it is not an automatic sweep.
 - Invoking a skill never creates write authority. Routine reversible issue metadata needs one
   exact maintainer authorization and live read-back; public sensitive disclosure and terminal
   lifecycle actions retain the stronger owner and lifecycle gates in `triage-backlog`.

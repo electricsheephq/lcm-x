@@ -81,7 +81,7 @@ re-confirm it with a comment, or close it with evidence. Larger sweeps use
 
 These apply to every comment, PR body, and document:
 
-- no customer, deployment, or person names;
+- no customer, deployment, or person names (existing label names are the exception);
 - no internal agent names or aliases;
 - no local machine paths (repository-relative paths are fine);
 - no secrets or tokens.
