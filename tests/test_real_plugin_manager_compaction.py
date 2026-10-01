@@ -240,15 +240,20 @@ _NATIVE_PROOF_PROBE = textwrap.dedent(
                 return summary_text(" ".join(str(row.get("content")) for row in turns))
     host_cc.ContextCompressor = Native
     # Seed historical writer output for the persisted-proof reader probe only.
-    import types
+    # tests/conftest.py (which aliases the plugin as ``hermes_lcm``) does not run in this subprocess: alias the
+    # plugin package the plugin manager loaded, after importing the fixture's modules under that real name, so
+    # the fixture reuses those module objects instead of loading a second copy.
+    import importlib, types
+    package = engine_module.__package__
+    for name in ("message_analysis", "message_content", "tokens", "reconcile"):
+        importlib.import_module(f"{package}.{name}")
+    for name, module in list(sys.modules.items()):
+        if name == package or name.startswith(package + "."):
+            sys.modules.setdefault("hermes_lcm" + name[len(package):], module)
     sys.path.insert(0, str(Path(engine_module.__file__).resolve().parent))
-    from tests.legacy_native_state import legacy_adoption, legacy_commit_proof
-    def old_impl(self, messages, current_tokens=None, **kwargs):
-        working = self._ingest_messages(messages)
-        self._prepare_retained_user_anchor(working)
-        return legacy_adoption(self, working, current_tokens=current_tokens)
-    engine._compress_impl = types.MethodType(old_impl, engine)
-    engine._record_compress_commit_proof = types.MethodType(legacy_commit_proof, engine)
+    from tests.legacy_native_state import install_legacy_writer
+    # The same historical writer the in-process reader tests install (compress wrapper, adoption, proof).
+    install_legacy_writer(types.SimpleNamespace(setattr=setattr), type(engine))
     def turn_rows(index):
         call_id = f"call-{index:02d}"
         return [
