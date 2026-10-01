@@ -82,6 +82,10 @@ _POPCOUNT_TABLE = tuple(bin(value).count("1") for value in range(256))
 # the flag on a populated identity leaves a mixed corpus the two-stage INNER JOIN
 # silently truncates. See VectorStore._prescreen_revision / FIX 1.
 _BINARY_PRESCREEN_REVISION_TAG = "binprescreen"
+# A cloud provider's identity revision is the embedding-privacy revision
+# (ingest_protection.embedding_privacy_revision: "privacy:v3:<digest>" or "privacy:off").
+_PRIVACY_REVISION_PREFIX = "privacy:"
+_PRESCREEN_REVISION_SEPARATOR = "+"
 _DEFAULT_TASK = "summary"
 _CHUNK_TASK = "chunk"
 # Tasks this store can encode. Summary and chunk corpora coexist in the shared
@@ -99,6 +103,19 @@ _SCAN_ALL_ROWS = -1
 # table in bounded chunks and JOINs instead, so it scales past that limit.
 _ID_INSERT_CHUNK = 500
 _SOURCE_LINEAGE_WORK_LIMIT = 4096
+
+
+def strip_prescreen_revision(revision: str) -> str:
+    """Return the privacy revision a stored profile revision was composed from.
+
+    Inverse of the composition in VectorStore._prescreen_revision for privacy
+    revisions; any other value is returned stripped but otherwise unchanged.
+    """
+    value = str(revision or "").strip()
+    suffix = _PRESCREEN_REVISION_SEPARATOR + _BINARY_PRESCREEN_REVISION_TAG
+    if value.startswith(_PRIVACY_REVISION_PREFIX) and value.endswith(suffix):
+        return value[: -len(suffix)]
+    return value
 
 
 class _UnverifiableProvenance(RuntimeError):
@@ -330,9 +347,9 @@ class VectorStore:
         # just int8). A float32-vec identity carrying the prescreen gets the
         # full-corpus two-stage path with EXACT float rescore of survivors — the
         # high-recall, low-RAM config. Default-off keeps stock float32 identities
-        # byte-identical AND binary-free (legacy bounded path). Operators pick a
-        # distinct identity (e.g. via revision) so prescreen rows never mix into a
-        # legacy float32 identity.
+        # byte-identical AND binary-free (legacy bounded path). The opt-in is
+        # folded into empty and privacy revisions automatically, separating the
+        # prescreen corpus from the legacy float32 identity.
         self._write_binary_prescreen = bool(
             getattr(resolved_config, "embedding_binary_prescreen", False)
         )
@@ -652,16 +669,22 @@ class VectorStore:
         sign-bits, the rest without) that the two-stage INNER JOIN silently
         truncates while reporting coverage='full' (FIX 1).
 
-        Only the default (empty) revision is auto-tagged: an operator who set an
-        explicit revision has already taken ownership of identity separation (the
-        documented manual escape hatch), so their value is respected verbatim.
+        Empty revisions are auto-tagged; privacy-derived revisions are composed
+        with the tag. Other explicit revisions stay verbatim as the operator's
+        manual escape hatch for identity separation.
         int8 identities always carry the prescreen and are already distinguished
         by dtype, so the tag is float32-only — int8 identity hashes stay stable.
         """
         base = str(revision).strip()
-        if base or str(dtype).strip().lower() == _INT8_DTYPE:
+        if str(dtype).strip().lower() == _INT8_DTYPE or not self._write_binary_prescreen:
             return base
-        return _BINARY_PRESCREEN_REVISION_TAG if self._write_binary_prescreen else base
+        if not base:
+            return _BINARY_PRESCREEN_REVISION_TAG
+        if base.startswith(_PRIVACY_REVISION_PREFIX) and not base.endswith(
+            _PRESCREEN_REVISION_SEPARATOR + _BINARY_PRESCREEN_REVISION_TAG
+        ):
+            return f"{base}{_PRESCREEN_REVISION_SEPARATOR}{_BINARY_PRESCREEN_REVISION_TAG}"
+        return base
 
     def register_profile(
         self,

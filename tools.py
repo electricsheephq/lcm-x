@@ -94,7 +94,7 @@ from .search_query import AGE_DECAY_RATE, normalize_search_sort
 from .session_patterns import build_session_match_keys, compile_session_pattern
 from .sqlite_util import _sqlite_savepoint
 from .store import build_message_fts_spec
-from .vector_store import VectorStore
+from .vector_store import VectorStore, strip_prescreen_revision
 from .config import LCMConfig
 
 if TYPE_CHECKING:
@@ -3750,7 +3750,7 @@ def _lcm_active_embedding_revision(
             f"no active {task} vector identity matches the configured cloud provider; "
             "run `/lcm embed warmup` before semantic retrieval"
         )
-    return str(row[0] or "")
+    return strip_prescreen_revision(str(row[0] or ""))
 
 
 def _lcm_grep_embed_query(
