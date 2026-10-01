@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.maintainer.postmerge_issue_check import parse_issue_refs
+from scripts.maintainer.postmerge_issue_check import main, parse_issue_refs
 
 
 def test_one_keyword_with_a_list_targets_every_listed_issue():
@@ -62,3 +62,8 @@ def test_pr_number_is_excluded_from_refs():
 
 def test_keyword_inside_a_word_is_not_a_target():
     assert parse_issue_refs("prefixes #5 and suffixed #6").closing == set()
+
+
+@pytest.mark.parametrize("argv", [["check"], ["check", "abc"], ["check", "#12"]])
+def test_usage_errors_exit_2_before_any_github_call(argv):
+    assert main(argv) == 2

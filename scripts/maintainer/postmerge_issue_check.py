@@ -58,6 +58,9 @@ def main(argv: list[str]) -> int:
         print(__doc__, file=sys.stderr)
         return 2
     pr = argv[1]
+    if not pr.isdigit():
+        print(__doc__, file=sys.stderr)
+        return 2
     repo = argv[2] if len(argv) > 2 else DEFAULT_REPO
 
     info = _gh("pr", "view", pr, "-R", repo, "--json", "state,body,commits,mergedAt,title")

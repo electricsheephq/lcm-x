@@ -39,6 +39,7 @@ Agents that maintainers run follow [AGENTS.md](../../AGENTS.md) and the document
 
 ## Security reports
 
-Never in public issues. Use the private advisory path in [SECURITY.md](../../SECURITY.md). If a
-security report arrives in a public issue or PR, do not discuss the details there; point the
-reporter to the private path.
+Vulnerability details never go in a public issue or PR. Reporters use the private advisory path
+in [SECURITY.md](../../SECURITY.md); when private reporting is unavailable, SECURITY.md allows a
+minimal public issue that only asks for a private contact. If details arrive in a public issue or
+PR, do not discuss them there; point the reporter to the private path.
