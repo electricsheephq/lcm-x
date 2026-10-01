@@ -143,7 +143,12 @@ from .fresh_tail import FreshTailBoundary, resolve_fresh_tail_boundary, tool_gro
 from .message_patterns import compile_message_patterns, matches_message_pattern
 from .aux_session import AuxiliarySessionMixin
 from .placeholder_ledger import PlaceholderLedgerMixin
-from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
+from .reconcile import (
+    _COMPACTION_COMMIT_PROOF_METADATA_PREFIX,
+    _FORCED_OVERFLOW_REPLAY_METADATA_PREFIX,
+    _PRESERVED_OBJECTIVE_CONTEXT_PREFIX,
+    ReconcileMixin,
+)
 from .reconcile import _emission_identity
 from .reconcile import _has_lossy_redacted_identity, _merge_append_cut, _proof_user_identity
 from .compaction import CompactionMixin
@@ -3496,6 +3501,11 @@ class LCMEngine(
             if can_reassign
             else []
         )
+        boundary_forced_overflow_snapshot_digests = (  # #534: carried, never steers the branch below
+            self._load_forced_overflow_replay_snapshot_digests(source_session_id)
+            if can_reassign
+            else []
+        )
         boundary_placeholder_budget = {}
         boundary_placeholder_ordinals: dict[str, set[int]] = {}
         if can_reassign:
@@ -3595,6 +3605,8 @@ class LCMEngine(
         self._bind_lifecycle_state(session_id, conversation_id=conversation_id)
         for digest in boundary_native_recovery_snapshot_digests:
             self._remember_native_recovery_replay_snapshot_digest(digest)
+        for digest in boundary_forced_overflow_snapshot_digests:
+            self._remember_forced_overflow_replay_snapshot_digest(digest)
         commit_proof = getattr(self, "_compress_commit_proof", None)
         native_proof_carries = bool(
             commit_proof and commit_proof.get("native") and commit_proof.get("end_consumed")
@@ -4411,7 +4423,11 @@ class LCMEngine(
         if self._session_id:
             try:
                 self._store.write_metadata_json(
-                    [self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)], "null"
+                    [
+                        self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX),
+                        self._replay_snapshot_metadata_key(_FORCED_OVERFLOW_REPLAY_METADATA_PREFIX),
+                    ],
+                    "null",
                 )
             except Exception:
                 logger.debug("LCM durable compaction-commit proof reset failed", exc_info=True)
@@ -5052,7 +5068,7 @@ class LCMEngine(
                 # re-index the host's post-compaction list (#483, C7), from a
                 # commit proof or a carried native recovery proof.
                 or self._durable_commit_proof_payload() is not None
-                or bool(self._load_native_recovery_replay_snapshot_digests())
+                or bool(self._exact_handoff_replay_snapshot_digests())
             )
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
@@ -7977,6 +7993,11 @@ class LCMEngine(
         if compressed != original_messages or ingest_cleanup_changed_active_context:
             self._last_compression_status = "overflow_recovery"
             self._last_compression_noop_reason = ""
+            # #534: provenance for the exact returned list (generated rows included), so a
+            # boundary or cold-restart reconcile re-indexes it instead of re-storing it.
+            self._remember_forced_overflow_replay_snapshot_digest(
+                self._native_recovery_replay_snapshot_digest(compressed)
+            )
             self._ingest_cursor = len(compressed)
             self._ingest_cursor_needs_reconcile = False
             logger.info(

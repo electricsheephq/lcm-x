@@ -128,6 +128,10 @@ _OOB_DURABILITY_SCAN_LIMIT = 512
 _COMPACTED_ACTIVE_REPLAY_METADATA_PREFIX = "compacted_active_replay_snapshot_digests"
 _SESSION_END_REPLAY_METADATA_PREFIX = "session_end_replay_snapshot_digests"
 _NATIVE_RECOVERY_REPLAY_METADATA_PREFIX = "native_recovery_replay_snapshot_digests"
+# FORCED-OVERFLOW snapshots (#534): the exact list a forced-overflow recovery returned (its
+# generated rows included). Consumed like native recovery by exact prefix, but kept apart so
+# they never steer a compression boundary's proof-carry decision.
+_FORCED_OVERFLOW_REPLAY_METADATA_PREFIX = "forced_overflow_replay_snapshot_digests"
 _COMPACTION_COMMIT_PROOF_METADATA_PREFIX = "compaction_commit_proof"
 # Version 3 hashes proof identities (_proof_user_identity). A version-2 (rc3)
 # proof hashed exact identities and is still verified with them. Version 4 adds
@@ -1236,6 +1240,18 @@ class ReconcileMixin:
             self._native_recovery_replay_snapshot_digest(messages),
         )
 
+    def _load_forced_overflow_replay_snapshot_digests(self, session_id: str | None = None) -> list[str]:
+        return self._load_replay_snapshot_digests(_FORCED_OVERFLOW_REPLAY_METADATA_PREFIX, session_id)
+
+    def _remember_forced_overflow_replay_snapshot_digest(self, digest: str) -> None:
+        self._remember_replay_snapshot(_FORCED_OVERFLOW_REPLAY_METADATA_PREFIX, digest)
+
+    def _exact_handoff_replay_snapshot_digests(self) -> set:
+        """Exact engine-emitted host handoffs: native recovery and forced-overflow recovery (#534)."""
+        return set(self._load_native_recovery_replay_snapshot_digests()) | set(
+            self._load_forced_overflow_replay_snapshot_digests()
+        )
+
     # -- Session-end full-history proof (consumed ONLY by current-session
     #    full-history session-end ingest) --
 
@@ -1500,9 +1516,7 @@ class ReconcileMixin:
         # ingest/compress/tool-call reconciliation must never consume it, so a
         # host-supplied session-end history cannot silently skip a fresh delta.
         engine_snapshot_digests = set(self._load_compacted_active_replay_snapshot_digests())
-        native_recovery_snapshot_digests = set(
-            self._load_native_recovery_replay_snapshot_digests()
-        )
+        native_recovery_snapshot_digests = self._exact_handoff_replay_snapshot_digests()
         session_end_snapshot_digests = (
             set(self._load_session_end_replay_snapshot_digests())
             if allow_session_end_replay_proof
@@ -2516,9 +2530,7 @@ class ReconcileMixin:
                     effective_incoming=proof_cursor,
                 )
                 return proof_cursor
-            native_recovery_snapshot_digests = set(
-                self._load_native_recovery_replay_snapshot_digests()
-            )
+            native_recovery_snapshot_digests = self._exact_handoff_replay_snapshot_digests()
             if native_recovery_snapshot_digests:
                 for cursor in range(len(messages), 0, -1):
                     digest = self._native_recovery_replay_snapshot_digest(
