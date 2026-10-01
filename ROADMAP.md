@@ -17,7 +17,7 @@ Today every compaction LCM-X starts runs on the turn thread, so the user waits f
 |---|---|---|
 | **v0.24.9** | Drain: bounded foreground compaction, capped hidden leaves, exit fit | The release gauntlet passes |
 | **v0.25.0** | Long sessions: drain speed and correctness. The first background step: leaves prepared below the threshold (#610, minimal). Also #597, #750, #626, #605, #625, #84, #7, the cache-break measurement (#788), and removal of native recovery | Compaction p90 ≤ 60 s and never above 120 s on the field-window counter and the gauntlet; no release-blocking defects |
-| **v0.26.0** | Host message identity: use the host's stable message id (shadow mode first), then simplify LCM-X's own row matching | Shadow mode agrees with content matching on ≥ 99% of rows over 24 h; the full reliability matrix passes |
+| **v0.26.0** | Host message identity: use the host's stable message id (shadow mode first), then simplify LCM-X's own row matching | Shadow mode agrees with content matching on ≥ 99% of rows over 24 h, and every mismatch is explained; the full reliability matrix passes |
 | **v0.27.0** | Summary quality: prompt v3 by default (#660), summariser input cue lines and, if latency permits, a wider per-message clip (#611), instruction continuity (#659) | Facts kept at least as high as the best compaction we measure against, within the three-seed band; continuity checks pass |
 | **v0.28.0** | Invisible compaction: summaries prepared in the background and published at the threshold (#787) | Visible-wait p90 ≤ 5 s, and no compaction slower than v0.24.9 |
 

@@ -6,7 +6,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
-## v0.24.9 - (unreleased; rc4) (drain: one foreground time budget, stub-first exit, exit fit, scan allowance)
+## v0.24.9 - 2026-10-01 (drain: one foreground time budget, stub-first exit, exit fit, scan allowance)
 
 - Fix: with semantic embeddings enabled and the provider package missing or misconfigured, `lcm_doctor` and
   `/lcm doctor` report an `embedding_provider_health` warning (provider, model, reason, fix); it also warns when
