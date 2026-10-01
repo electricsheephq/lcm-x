@@ -8283,9 +8283,16 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
             return json.dumps({"error": f"unknown lcm_doctor action: {action}"})
         if args.get("apply"):
             return json.dumps({"error": "apply is operator-only: use `/lcm doctor repair level3 apply`"})
-        scan = scan_level3_fragments(engine)  # #667: read-only, like `/lcm doctor repair level3`
+        cursor = args.get("cursor", 0)
+        if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
+            return json.dumps({"error": "cursor must be a non-negative integer"})
+        scan = scan_level3_fragments(engine, session_id=engine.current_session_id or "")
+        total_flagged, total_ancestors = len(scan["flagged"]), len(scan["ancestors"])
         return json.dumps({
             "action": action, "status": "repair-needed" if scan["flagged"] else "ok", "read_only": True, **scan,
+            "flagged": scan["flagged"][cursor:cursor + 50], "ancestors": scan["ancestors"][cursor:cursor + 50],
+            "total_flagged": total_flagged, "total_ancestors": total_ancestors,
+            **({"next_cursor": cursor + 50} if cursor + 50 < max(total_flagged, total_ancestors) else {}),
         })
 
     checks: list[dict] = []

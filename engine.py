@@ -17,7 +17,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections import deque
+from collections import Counter, deque
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -449,7 +449,7 @@ class LCMEngine(
         self._hermes_home = hermes_home
         self._stable_use_lock = threading.Lock()
         # #667: node ids a condensation has selected, until it publishes or fails; the level 3 repair skips them.
-        self._condensation_inflight_ids: set[int] = set()
+        self._condensation_inflight_ids: Counter[int] = Counter()
         self._condensation_inflight_lock = threading.Lock()
         self._stable_use_owner_thread: int | None = None
         self._stable_use_closed = False
@@ -6953,11 +6953,11 @@ class LCMEngine(
 
     @contextmanager
     def _condensation_in_flight(self, nodes: List[SummaryNode]):
-        """#667: hold the selected node ids in the in-flight set until publish or failure, and yield fresh copies read
+        """#667: count reservations for selected node ids until publish or failure, and yield fresh copies read
         after registration (None when a node is gone or moved), so a repair commit before registration is seen."""
         node_ids = {node.node_id for node in nodes}
         with self._condensation_inflight_lock:
-            self._condensation_inflight_ids |= node_ids
+            self._condensation_inflight_ids.update(node_ids)
         try:
             with self._dag._db_lock:  # waits for a repair transaction in progress
                 fresh = [self._dag.get_node(node.node_id) for node in nodes]
@@ -6965,7 +6965,10 @@ class LCMEngine(
             yield None if moved else fresh
         finally:
             with self._condensation_inflight_lock:
-                self._condensation_inflight_ids -= node_ids
+                for node_id in node_ids:
+                    self._condensation_inflight_ids[node_id] -= 1
+                    if self._condensation_inflight_ids[node_id] == 0:
+                        del self._condensation_inflight_ids[node_id]
 
     def _condense_summary_nodes(
         self,
