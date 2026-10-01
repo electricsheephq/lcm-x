@@ -81,14 +81,16 @@ def keeps_dbs(keep_dbs: str, rec: dict) -> bool:
 
 
 def release_scratch(scratch: Path, d: Path, rec: dict, keep_dbs: str, keep_home: bool) -> None:
-    """Once the cell is scored (or has failed): move what the keep flags ask for into the cell dir, delete the rest."""
+    """Once the cell is scored (or has failed): move what the keep flags ask for into the cell dir, delete the rest.
+    A failed move (cross-filesystem copy, disk full) deletes nothing: a copy the flags asked to keep is never lost."""
     try:
         if keeps_dbs(keep_dbs, rec) and (scratch / "db").is_dir():
             shutil.move(scratch / "db", d / "db")
         if keep_home and (scratch / "hermes-home").is_dir():
             shutil.move(scratch / "hermes-home", d / "hermes-home")
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+    except OSError as exc:  # shutil.Error included
+        raise OSError(f"keeping the cell's copies failed, nothing deleted: see {scratch} and {d}: {exc!r}") from exc
+    shutil.rmtree(scratch, ignore_errors=True)
 
 
 def verdict_fields(cell: dict, d: Path, last: dict, fired: set, citations: dict, backup_errors: list[str],

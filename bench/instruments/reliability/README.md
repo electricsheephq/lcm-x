@@ -30,8 +30,9 @@ uv run --no-project python bench/instruments/reliability/run_matrix.py \
   several GB per cell, so no Hermes database is left in `<out>` by default.
 - Debugging: `--keep-dbs fail` keeps the `db/` copies of non-PASS cells and of a PASS that carries host-parity
   licences, `--keep-dbs all` those of every cell, and `--keep-homes` the hermes-home; each is moved into the cell
-  dir (`<cell>/db/`, `<cell>/hermes-home/`). A caller that sandboxes host writes to one dir passes a
-  `--scratch-root` inside it.
+  dir (`<cell>/db/`, `<cell>/hermes-home/`); re-scoring a cell later (`scorers/cli.py --cell-dir`) needs its kept
+  `db/`. If a move fails, nothing is deleted and the error names both dirs. A caller that sandboxes host writes to one
+  dir passes a `--scratch-root` inside it.
 - `--lcm-env` overrides LCM_* on every cell and is recorded in run.json and MATRIX.md.
 - Output: `results.jsonl`, `MATRIX.md`, `ISSUE-MAP.md`. Re-render: `python report.py <out>`.
 - Standalone scoring: `python -m bench.instruments.reliability.scorers.cli --db <lcm.db> --gauntlet-run <dir>`

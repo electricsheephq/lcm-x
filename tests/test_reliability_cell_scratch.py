@@ -3,6 +3,7 @@ $TMPDIR) and are deleted once the cell is scored, so no state.db / lcm.db (or -w
 --keep-dbs / --keep-homes asks for it. No Hermes: the host phase is faked and writes live WAL-mode databases."""
 from __future__ import annotations
 
+import errno
 import json
 import sqlite3
 import sys
@@ -129,6 +130,18 @@ def test_a_harness_failure_releases_the_scratch(setup, monkeypatch):
         RM.run_cell(setup.cell, "h", setup.host, setup.plugin, setup.out, 5, False, identity={"method": "test"},
                     scratch_root=setup.scratch)
     assert list(setup.scratch.iterdir()) == []
+
+
+def test_a_failed_keep_move_deletes_nothing(setup, monkeypatch, held):
+    """Review (#786): the cleanup deleted the scratch even when moving a kept copy into the cell dir failed
+    (a cross-filesystem copy that runs out of space), so the copies the flags asked to keep were lost."""
+    def disk_full(src, dst):
+        raise OSError(errno.ENOSPC, "injected disk full")
+    monkeypatch.setattr(RM.shutil, "move", disk_full)
+    with pytest.raises(OSError, match="nothing deleted"):
+        r1(setup, monkeypatch, held, keep_dbs="all")
+    [s] = list(setup.scratch.iterdir())
+    assert {"db/lcm.db", "db/state.db", "hermes-home/state.db"} <= set(db_files(s))
 
 
 def test_default_scratch_root_is_tmpdir(setup, monkeypatch, held, tmp_path):
