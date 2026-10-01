@@ -1175,8 +1175,14 @@ LCM_DOCTOR = {
                 "enum": ["repair_level3"],
                 "description": (
                     "Optional. repair_level3: read-only scan for level 3 truncation fragments and the condensed "
-                    "summary nodes built on them; writes nothing. The repair itself is operator-only."
+                    "summary nodes built on them in the foreground session; returns at most 50 of each, with "
+                    "totals and next_cursor for more. Writes nothing. The repair itself is operator-only."
                 ),
+            },
+            "cursor": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Optional offset for repair_level3; use next_cursor from the previous page. Default: 0.",
             },
         },
         "required": [],

@@ -7,7 +7,9 @@ condensations were then built from those fragments.
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
+import time
 from collections import Counter, defaultdict
 from typing import Any
 
@@ -31,7 +33,7 @@ def _stored_sources(conn, source_ids: str, source_type: str) -> tuple[list[int],
     return ids, int(stored)
 
 
-def scan_level3_fragments(engine) -> dict[str, Any]:
+def scan_level3_fragments(engine, session_id: str | None = None) -> dict[str, Any]:
     """Return the fragment nodes, their ancestors and per-session counts. Runs SELECTs only.
 
     A fragment carries the ``_deterministic_truncate`` marker and fits its token bound. Where the #649 sidecar
@@ -47,13 +49,14 @@ def scan_level3_fragments(engine) -> dict[str, Any]:
         f"(SELECT p.escalation_level FROM {_PROVENANCE_TABLE} p WHERE p.node_id = n.node_id)"
         if has_provenance else "NULL"
     )
+    scope_sql = " AND n.session_id = ?" if session_id is not None else ""
     rows = conn.execute(
         "SELECT n.node_id, n.session_id, n.depth, n.summary, n.token_count, n.source_ids, n.source_type, "
-        f"{level_sql} FROM summary_nodes n WHERE instr(n.summary, ?) > 0 ORDER BY n.node_id",
-        (_L3_TRUNCATION_MARKER,),
+        f"{level_sql} FROM summary_nodes n WHERE instr(n.summary, ?) > 0{scope_sql} ORDER BY n.node_id",
+        (_L3_TRUNCATION_MARKER, session_id) if session_id is not None else (_L3_TRUNCATION_MARKER,),
     ).fetchall()
     flagged: list[dict[str, Any]] = []
-    for node_id, session_id, depth, summary, token_count, source_ids, source_type, level in rows:
+    for node_id, node_session_id, depth, summary, token_count, source_ids, source_type, level in rows:
         if level is not None:
             if int(level) != 3:
                 continue  # a recorded model summary that quotes the marker
@@ -65,7 +68,7 @@ def scan_level3_fragments(engine) -> dict[str, Any]:
                 continue
         ids, stored = _stored_sources(conn, source_ids, source_type)
         flagged.append({
-            "node_id": int(node_id), "session_id": session_id, "depth": int(depth),
+            "node_id": int(node_id), "session_id": node_session_id, "depth": int(depth),
             "leaf": source_type == "messages", "sources": len(ids), "sources_stored": int(stored),
         })
     flagged_ids = {item["node_id"] for item in flagged}
@@ -75,9 +78,10 @@ def scan_level3_fragments(engine) -> dict[str, Any]:
                UNION
                SELECT p.node_id FROM summary_nodes p, json_each(p.source_ids) j, up
                WHERE p.source_type = 'nodes' AND CAST(j.value AS INTEGER) = up.node_id
+                 AND (? IS NULL OR p.session_id = ?)
            ) SELECT n.node_id, n.session_id, n.depth FROM summary_nodes n JOIN up ON n.node_id = up.node_id
            ORDER BY n.depth, n.node_id""",
-        (json.dumps(sorted(flagged_ids)),),
+        (json.dumps(sorted(flagged_ids)), session_id, session_id),
     ).fetchall() if flagged_ids else []
     ancestors = [
         {"node_id": int(row[0]), "session_id": row[1], "depth": int(row[2])}
@@ -186,14 +190,25 @@ def _commit_group(engine, rows, group, new) -> str:
                 conn.rollback()
                 return "a node changed or a new parent linked in during the repair"
             for node_id in group:
+                ids, stored = _stored_sources(conn, rows[node_id][5], rows[node_id][6])
+                if not ids or stored < len(ids):
+                    conn.rollback()
+                    return "a source was removed during the repair"
+            for node_id in group:
                 text, tokens, level, source_tokens, model = new[node_id]
                 conn.execute(
                     "UPDATE summary_nodes SET summary = ?, token_count = ?, expand_hint = ?, "
                     "source_token_count = COALESCE(?, source_token_count) WHERE node_id = ?",
                     (text, tokens, engine._extract_expand_hint(text), source_tokens, node_id))
                 if _PROVENANCE_TABLE in tables:  # #649 sidecar: the repair's level and model; created_at kept
-                    conn.execute(f"UPDATE {_PROVENANCE_TABLE} SET escalation_level = ?, model = ? WHERE node_id = ?",
-                                 (level, model, node_id))
+                    updated = conn.execute(
+                        f"UPDATE {_PROVENANCE_TABLE} SET escalation_level = ?, model = ? WHERE node_id = ?",
+                        (level, model, node_id))
+                    if not updated.rowcount:
+                        conn.execute(
+                            f"INSERT INTO {_PROVENANCE_TABLE} (node_id, escalation_level, model, created_at) "
+                            "SELECT node_id, ?, ?, COALESCE(created_at, ?) FROM summary_nodes WHERE node_id = ?",
+                            (level, model, time.time(), node_id))
                 if "nodes_fts" in tables:  # nodes_fts has no update trigger: mirror its delete + insert triggers
                     conn.execute("INSERT INTO nodes_fts(nodes_fts, rowid, summary) VALUES('delete', ?, ?)",
                                  (node_id, rows[node_id][3]))
@@ -213,7 +228,9 @@ def repair_level3_fragments(engine) -> dict[str, Any]:
     flagged = {item["node_id"] for item in scan["flagged"]}
     conn = engine._dag.connection
     rows, groups = _groups(conn, scan)
-    result: dict[str, Any] = {"status": "ok", "reason": "", "backup": None, "groups": [], "calls": 0}
+    result: dict[str, Any] = {
+        "status": "ok", "reason": "", "backup": None, "groups": [], "calls": 0, "rollups_scheduled": 0,
+    }
     for group in groups:
         missing = []  # any node of the group, fragment or ancestor, with a source that is no longer stored (M1)
         for i in group:
@@ -243,14 +260,28 @@ def repair_level3_fragments(engine) -> dict[str, Any]:
     spend_guard = SummarySpendGuard(max_calls=int(cfg.summary_spend_max_calls),
                                     window_seconds=float(cfg.summary_spend_window_seconds),
                                     backoff_seconds=float(cfg.summary_spend_backoff_seconds))
+    affected_sessions: set[str] = set()
     for entry, group in todo:
         new, refusal = _summarise_group(engine, rows, group, result, spend_guard)
         if refusal:
             entry.update(outcome="skipped", reason=refusal)
-        elif rollback := _commit_group(engine, rows, group, new):
+            continue
+        try:
+            rollback = _commit_group(engine, rows, group, new)
+        except sqlite3.Error as exc:
+            entry.update(outcome="error", reason=f"{type(exc).__name__}: {exc}")
+            continue
+        if rollback:
             entry.update(outcome="rolled back", reason=rollback)
-        else:
-            entry.update(outcome="repaired", levels={i: new[i][2] for i in group})
+            continue
+        entry.update(outcome="repaired", levels={i: new[i][2] for i in group})
+        affected_sessions.update(rows[i][1] for i in group)
+    if cfg.temporal_rollups_enabled:
+        # Mutation triggers queued the changed nodes in the rollup outbox in the commit transaction.
+        # The existing background path drains it; never drain synchronously in the operator command.
+        for session_id in sorted(affected_sessions):
+            engine._schedule_rollup_maintenance(session_id)
+        result["rollups_scheduled"] = len(affected_sessions)
     if any(entry["outcome"] != "repaired" for entry in result["groups"]):
         result["status"] = "partial"
     result["second_scan"] = scan_level3_fragments(engine)
