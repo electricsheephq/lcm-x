@@ -193,6 +193,10 @@ def _answer_ready_baseline(active_engine, question: str, payload: dict):
         },
     )
     recalled = json.loads(raw) if isinstance(raw, str) else raw
+    if isinstance(recalled, dict) and recalled.get("error_code") == "embedding_privacy_policy":
+        from .ingest_protection import EmbeddingPrivacyPolicyError
+
+        raise EmbeddingPrivacyPolicyError(str(recalled.get("error") or "embedding privacy policy error"))
     hits = recalled.get("hits") if isinstance(recalled, dict) else None
     candidates = []
     for hit in hits if isinstance(hits, list) else []:
