@@ -218,8 +218,8 @@ class IdentityAnchorMixin:
         """Rows at or after ``cursor`` recognised as replays of stored occurrences, plus the R3
         remainders to store, the relations to record and the R5 backfills. ``audit_from``: the host
         changed its list before the cursor from there (a positional cursor no longer proves those rows
-        stored): a stamped row -- or an unstamped user row (#633) -- there that no stored occurrence
-        explains moves ``plan["cursor"]`` back."""
+        stored): a stamped row -- or an unstamped user row inserted or replaced there (#633/#7) -- that
+        no stored occurrence explains moves ``plan["cursor"]`` back."""
         plan: Dict[str, Any] = {"replayed": set(), "remainders": {}, "relations": [], "carry": [], "backfill": [],
                                 "cursor": cursor}
         self._identity_anchor_text_memo: dict[int, str] = {}
@@ -323,7 +323,7 @@ class IdentityAnchorMixin:
 
     def _identity_anchor_audit(self, messages, identity_messages, cursor, start, stamps, identity_at, consumed, plan) -> None:
         """Rows in ``[start, cursor)`` of a list the host changed before the cursor: a stamped host row,
-        or an unstamped user row the host inserted there (#633: a /steer row; by content alone), that
+        or an unstamped user row the host inserted or replaced there (#633/#7; by content alone), that
         no stored occurrence explains (key, witness, alias, or a stored copy of its content -- up to
         edge whitespace, under another stamp or none -- in the tail of this session or a verified
         ancestor, each copy used once) and no ignore pattern drops was never stored. The cursor moves back
@@ -337,16 +337,18 @@ class IdentityAnchorMixin:
                 if int(row["store_id"]) not in consumed:
                     held[_proof_user_identity(self._message_replay_identity(row, stored_row=True))].append(row)
         missed, deferred, audited = [], [], set()
-        inserted = None
+        inserted = replaced = None
         for idx in range(start, cursor):
             identity = identity_at(idx)
-            if idx not in stamps:  # #633: an unstamped user row the host inserted (a /steer), not a rewrite
+            if idx not in stamps:  # #633 inserted / #7 replaced: an unstamped user row the positional cursor never proved
                 if identity is None or identity[0] != "user":
                     continue
                 if inserted is None:
-                    inserted = self._identity_anchor_inserted(messages, start, cursor)
+                    inserted, replaced = self._identity_anchor_changes(messages, start, cursor)
                 if idx in inserted:
                     deferred.append(idx)
+                elif idx in replaced and not _merged_from_replaced(replaced[idx][1], replaced[idx][0]):
+                    deferred.append(idx)  # #497/#493: a replaced or re-merged span; a held stored copy still explains it
                 continue
             if idx in plan["remainders"]:  # a held head plus a new remainder: the remainder is unstored
                 missed.append(idx)
@@ -372,7 +374,7 @@ class IdentityAnchorMixin:
             missed.append(idx)
         if deferred:  # #633: an inserted row is explained only by a stored copy no other row of the view holds
             reserved = Counter(_proof_user_identity(identity_at(i)) for i in range(cursor)
-                               if i not in inserted and i not in plan["replayed"] and i not in audited
+                               if i not in inserted and i not in replaced and i not in plan["replayed"] and i not in audited
                                and identity_at(i) is not None)
             for idx in deferred:
                 identity = identity_at(idx)
@@ -393,18 +395,33 @@ class IdentityAnchorMixin:
             logger.info("LCM identity-anchor: host changed its list before the cursor; %d unstored rows from %d: session=%s",
                         len(missed), min(missed), self._session_id)
 
+    def _identity_anchor_changes(self, messages, start: int, cursor: int) -> tuple[set, dict]:
+        """#633/#7: the identity diff of the last list LCM ingested against this one from ``start``.
+        Returns (inserted, replaced): indexes in [start, cursor) the host inserted, and, for indexes in
+        [start, cursor) inside a ``replace`` opcode, the old identities that opcode replaced. Over the
+        diff budget (or with no last list) both are empty (the v0.24.6 behaviour: nothing is audited)."""
+        before = getattr(self, "_last_active_replay_source_identities", None)
+        if not before or max(0, len(before) - start) * (len(messages) - start) > _INSERT_DIFF_BUDGET:
+            return set(), {}
+        now = [self._message_replay_identity(message, strip_carrier=False) for message in messages[start:]]
+        old = list(before[start:])
+        inserted, replaced = set(), {}
+        for tag, i1, i2, j1, j2 in SequenceMatcher(None, old, now, autojunk=False).get_opcodes():
+            for j in range(j1, j2):
+                if start + j >= cursor:
+                    continue
+                if tag == "insert":
+                    inserted.add(start + j)
+                elif tag == "replace":
+                    replaced[start + j] = (tuple(old[i1:i2]), now[j])
+        return inserted, replaced
+
     def _identity_anchor_inserted(self, messages, start: int, cursor: int) -> set:
         """#633: indexes in ``[start, cursor)`` the host inserted into the last list LCM ingested (Hermes
         0.21.2+ inserts a /steer row after the newest tool result), by an identity diff of the two lists
         from ``start``. A row that replaces, rewrites or re-merges an ingested one is not inserted. Over
         the diff budget nothing counts as inserted (the v0.24.6 behaviour: the row is not audited)."""
-        before = getattr(self, "_last_active_replay_source_identities", None)
-        if not before or max(0, len(before) - start) * (len(messages) - start) > _INSERT_DIFF_BUDGET:
-            return set()
-        now = [self._message_replay_identity(message, strip_carrier=False) for message in messages[start:]]
-        opcodes = SequenceMatcher(None, list(before[start:]), now, autojunk=False).get_opcodes()
-        return {start + j for tag, _i1, _i2, j1, j2 in opcodes if tag == "insert" for j in range(j1, j2)
-                if start + j < cursor}
+        return self._identity_anchor_changes(messages, start, cursor)[0]
 
     def _identity_anchor_user_row(self, idx, identity, stamp, by_stamp, consumed, matched, plan, view_count, shown) -> None:
         """R2/R3/R5 for one unmatched user row: a recorded witness, an exact unique decomposition,
@@ -1072,6 +1089,22 @@ def _composite_relation(group, stamp) -> list:
     """One composite relation group, keyed by the constituent whose host stamp the composite carries."""
     head = next((row for row in group if row.get("observed_at") == stamp), group[0])
     return [(int(head["store_id"]), "composite", int(row["store_id"]), ordinal, stamp) for ordinal, row in enumerate(group)]
+
+
+def _merged_from_replaced(identity, old) -> bool:
+    """#7: a plain user row that is exactly the Hermes consecutive-user merge (``"\\n\\n"`` joiner) of
+    two or more contiguous user rows of the span it replaced: rows LCM already ingested, re-shown merged."""
+    if identity is None or identity[0] != "user" or tuple(identity[2:]) != ("", "", ""):
+        return False
+    for i in range(len(old)):
+        parts = []
+        for entry in old[i:]:
+            if entry is None or entry[0] != "user" or tuple(entry[2:]) != ("", "", ""):
+                break
+            parts.append(entry[1])
+            if len(parts) >= 2 and "\n\n".join(parts) == identity[1]:
+                return True
+    return False
 
 
 def _lossy(identity) -> bool:
