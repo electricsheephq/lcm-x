@@ -6,6 +6,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Docs: the release gauntlet spec requires at least one committed compaction in the Phase C soak (else the soak is
+  inconclusive), states the Phase C lossless multiset bar, and scopes the differential rule's row identity to one
+  fixture session; the AGENTS.md summary carries the "no worse than the base" guard. (#705)
 - Fix: a Hermes process in which LCM-X did not become active (a slow load or another context engine in the slot) keeps its own
   record file, so overlapping processes no longer overwrite each other's notice; `lcm_doctor` and `/lcm doctor` report
   a live one as an `inactive_process` warning with the fix to apply; after a slot conflict the already-registered

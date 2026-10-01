@@ -75,7 +75,9 @@ hands-on results together in `PHASE-B-RECEIPT.md`.
 candidate is no worse than the base in every compared cell, is pre-existing, not a regression of
 the candidate. It is established by a base-versus-candidate probe whose pass rule is written
 down before it runs (same host pin, fixture and configuration; counts per cell on both trees).
-A cell compares the affected rows by identity (role, turn and content hash), not only by count:
+A cell compares the affected rows by identity (role, turn and content hash, inside one fixture
+session; a multi-session fixture adds the session and, for a tool row, its tool-call id), not
+only by count:
 the candidate is no worse only when its affected rows are the base's rows or a subset of them.
 A pre-existing shape is recorded as KNOWN with a tracked issue and does not force a respin. A
 cell where the candidate is worse than the base follows the P0/P1 rule above. A shape the base does not show follows the P0/P1 rule above; in
@@ -89,6 +91,10 @@ A scripted multi-turn session battery over `hermes acp` (the measured headless s
 transport) against the clone: ingest-heavy turns, recall probes, compaction crossing at least
 one threshold, doctor at close. Minimum 30 turns. Green =
 
+- at least one compaction committed during the soak. A soak in which every compaction stopped
+  (on a handled provider failure or otherwise) proves little: it is inconclusive and re-runs;
+- lossless: the stored rows equal the transcript per key as a multiset (every transcript row,
+  not only the recall-probe rows; a missing or an extra copy of a row fails);
 - zero unexpected errors in engine logs. A provider failure the engine handles as designed (a
   rejected summary result logged with its reason, after which the compaction commits or stops)
   is not unexpected; the receipt lists each one;
