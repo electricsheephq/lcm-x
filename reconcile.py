@@ -433,6 +433,7 @@ _POLICY_NEUTRAL_REDACTION = SimpleNamespace(
     sensitive_patterns=[name for name in _SENSITIVE_PATTERN_CATALOG if name != "password_assignment"],
 )
 _SENSITIVE_PLACEHOLDER_TEXT_RE = re.compile(re.escape(_SENSITIVE_PLACEHOLDER_PREFIX) + r" [^\]]*\]")
+_LITERAL_PLACEHOLDER_TAG = _SENSITIVE_PLACEHOLDER_PREFIX + " literal=1;"
 
 
 def _host_literal_placeholders(messages: List[Dict[str, Any]]) -> frozenset:
@@ -455,7 +456,7 @@ def _mark_literal_placeholders(
         return identity
     role, content, tool_call_id, tool_calls, tool_name = identity
     for text in literal:
-        tagged = text.replace(_SENSITIVE_PLACEHOLDER_PREFIX + " ", _SENSITIVE_PLACEHOLDER_PREFIX + " literal=1; ", 1)
+        tagged = text.replace(_SENSITIVE_PLACEHOLDER_PREFIX + " ", _LITERAL_PLACEHOLDER_TAG + " ", 1)
         content, tool_calls = content.replace(text, tagged), tool_calls.replace(text, tagged)
     return (role, content, tool_call_id, tool_calls, tool_name)
 
@@ -2555,15 +2556,14 @@ class ReconcileMixin:
 
     @staticmethod
     def _window_has_redaction_placeholder(
-        messages: List[Dict[str, Any]], stored_tail: list[tuple[str, str, str, str, str]]
+        messages: List[Dict[str, Any]],
+        stored_tail: list[tuple[str, str, str, str, str]],
+        marker: str = _SENSITIVE_PLACEHOLDER_PREFIX,
     ) -> bool:
         """#758: a redaction policy change can only show as a placeholder on one side."""
-        return any(
-            _SENSITIVE_PLACEHOLDER_PREFIX in identity[1] or _SENSITIVE_PLACEHOLDER_PREFIX in identity[3]
-            for identity in stored_tail
-        ) or any(
-            _SENSITIVE_PLACEHOLDER_PREFIX in (normalize_content_value(message.get("content")) or "")
-            or _SENSITIVE_PLACEHOLDER_PREFIX in str(message.get("tool_calls") or "")
+        return any(marker in identity[1] or marker in identity[3] for identity in stored_tail) or any(
+            marker in (normalize_content_value(message.get("content")) or "")
+            or marker in str(message.get("tool_calls") or "")
             for message in messages
         )
 
@@ -2694,6 +2694,8 @@ class ReconcileMixin:
             and len(unredacted_messages) == len(messages)
             and not (cursor and effective_prefix(cursor))
             and self._window_has_redaction_placeholder(messages, stored_tail)
+            # the reserved tag already present as text would make the tagging ambiguous: keep main's path
+            and not self._window_has_redaction_placeholder(unredacted_messages, stored_tail, _LITERAL_PLACEHOLDER_TAG)
         )
         if policy_retry:
             literal = _host_literal_placeholders(unredacted_messages)

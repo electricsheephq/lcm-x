@@ -117,3 +117,21 @@ def test_a_proven_restart_never_scans_for_placeholders(tmp_path, monkeypatch):
     _direct, contents, reason = _two_runs(tmp_path, monkeypatch, rows, host, ON_ALL, ON_ALL)
     assert (len(contents), reason) == (21, "replayed durable tail")
     assert calls == []  # neither the default call nor the ingest scans
+
+
+def test_user_text_holding_the_reserved_tag_keeps_mains_outcome(tmp_path, monkeypatch):
+    """Delta review D5: redaction on in both runs; the store holds the tagged form as text, the host
+    holds the plain placeholder. The tags would collide, so the retry is skipped and the batch is
+    stored whole, as on main."""
+    plain = ip._sensitive_placeholder("api_key", SECRET)
+    tagged = plain.replace(ip._SENSITIVE_PLACEHOLDER_PREFIX + " ", ip._SENSITIVE_PLACEHOLDER_PREFIX + " literal=1; ", 1)
+    context = {"role": "user", "content": "context row"}
+    _direct, contents, reason = _two_runs(
+        tmp_path, monkeypatch,
+        [context, {"role": "assistant", "content": f"note {tagged}"}],
+        [context, {"role": "assistant", "content": f"note {plain}"}],
+        ON_ALL, ON_ALL,
+    )
+    assert reason == "persisted ambiguous delta"
+    assert len(contents) == 4 and contents[-1] == f"note {plain}"
+
