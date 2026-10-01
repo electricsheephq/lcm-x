@@ -4413,7 +4413,7 @@ class LCMEngine(
         self._pending_reset_session_id = self._session_id
         self._pending_reset_conversation_id = self._conversation_id
         self._pending_reset_frontier_store_id = self._last_compacted_store_id
-        self._pending_reset_drops_summaries = bool(self._session_id) and self._config.new_session_retain_depth != -1
+        self._pending_reset_drops_summaries = bool(self._session_id) and self._config.new_session_retain_depth >= 0
         super().on_session_reset()
         self._lifecycle.record_reset(self._conversation_id)
         if self._session_id:
