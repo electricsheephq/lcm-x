@@ -285,3 +285,68 @@ def test_u9_a_recovery_attempt_with_a_slow_route_fits_under_95_percent_and_respe
         assert engine._summary_circuit_breaker._failures.get("<task-default>", 0) == 0  # a budget cut
     finally:
         engine.shutdown()
+
+
+# -- #597: the sweep's drained check re-reads the owned hidden backlog -----------------------------------------
+
+@pytest.fixture
+def stub_summaries(monkeypatch, clock):
+    import hermes_lcm.engine as lcm_engine
+
+    captured: list[str] = []
+
+    def summarize(**kwargs):
+        captured.append(kwargs["text"])
+        clock.offset += summarize.seconds
+        return SUMMARY, 1
+
+    summarize.seconds = 1.0
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", summarize)
+    return summarize, captured
+
+
+def _hidden_backlog_state(tmp_path, hidden_turns: int) -> tuple[LCMEngine, list[dict]]:
+    engine = _engine(tmp_path, threshold_full_sweep_enabled=True)
+    old = [row for i in range(hidden_turns) for row in _turn(f"H{i}", 100.0 + i)]
+    tail = _turn("T9", 900.0)
+    engine.ingest([*old, *tail])
+    return engine, list(tail)
+
+
+def test_597_a_hidden_only_leaf_that_empties_the_raw_prefix_continues_while_hidden_backlog_remains(
+        tmp_path, stub_summaries):
+    _summarize, captured = stub_summaries
+    engine, view = _hidden_backlog_state(tmp_path, hidden_turns=6)  # several leaf chunks of hidden rows
+    try:
+        engine.compress(view, current_tokens=engine.threshold_tokens + 1)
+        telemetry = engine.get_status()["threshold_full_sweep"]
+        assert len(captured) >= 2 and telemetry["leaf_passes"] >= 2  # 1 at the base
+        assert telemetry["stop_reason"] not in {"soft_target_reached", "time_budget_exhausted"}
+        assert not engine._store_complete_backlog(view, 0)  # the owned hidden backlog is drained
+    finally:
+        engine.shutdown()
+
+
+def test_597_the_continued_sweep_still_stops_at_the_soft_target(tmp_path, stub_summaries):
+    summarize, captured = stub_summaries
+    summarize.seconds = 40.0  # the next leaf would end past +60
+    engine, view = _hidden_backlog_state(tmp_path, hidden_turns=6)
+    try:
+        engine.compress(view, current_tokens=engine.threshold_tokens + 1)
+        telemetry = engine.get_status()["threshold_full_sweep"]
+        assert len(captured) == 1 and telemetry["stop_reason"] == "soft_target_reached"
+    finally:
+        engine.shutdown()
+
+
+def test_597_a_sweep_with_no_hidden_backlog_exits_as_before(tmp_path, stub_summaries):
+    _summarize, captured = stub_summaries
+    engine = _engine(tmp_path, threshold_full_sweep_enabled=True)
+    view = _view(2)  # one leaf chunk outside the fresh tail, nothing hidden
+    try:
+        engine.ingest(view)
+        engine.compress(view, current_tokens=engine.threshold_tokens + 1)
+        telemetry = engine.get_status()["threshold_full_sweep"]
+        assert len(captured) == 1 and telemetry["leaf_passes"] == 1 and telemetry["status"] == "completed"
+    finally:
+        engine.shutdown()

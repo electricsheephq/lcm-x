@@ -43,6 +43,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   recovery assembles to its cap with no call; the others keep their rows and hold the threshold answer as after a
   sweep budget stop. A leaf or condensation source within `LCM_L3_TRUNCATE_TOKENS` (512) is written whole as a
   level 3 node with no summariser call; rollups and the level 3 repair still call the model. (#605)
+- Fix: a threshold sweep whose raw prefix empties re-reads the owned hidden backlog before it reports the prefix
+  drained, and takes the next hidden-only leaf while one remains, inside the same time and pass budget. (#597)
 - Fix: on a host that offers `aux_stream_deadline`, each sweep summariser call runs under the earlier of the host's
   deadline and the budget's (#605). A timeout is a budget cut only when the budget bound the call (its timeout was the
   time left, below the configured one) or the host deadline fired: it ends the chain without counting against the

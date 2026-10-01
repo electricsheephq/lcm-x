@@ -2139,6 +2139,13 @@ class CompactionMixin:
                     leading_anchor_count:remaining_fresh_tail_start
                 ]
                 if not remaining_raw:
+                    # #597: owned hidden backlog left above the frontier is not drained; the next pass takes it
+                    # (the loop's admission, deadline and pass budget still bound it).
+                    step_started = time.monotonic()
+                    hidden_left = self._store_complete_backlog(working_messages, leading_anchor_count)
+                    sweep_step_done("store_complete", step_started)
+                    if hidden_left:
+                        continue
                     sweep_raw_drained = True
                     sweep_stop_reason = "raw_prefix_drained"
                     break
