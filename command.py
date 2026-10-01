@@ -1785,9 +1785,16 @@ def _doctor_text(engine) -> str:
     except Exception:
         survival_fit = None
     survival_fit = survival_fit if isinstance(survival_fit, dict) else {}
+    lost = getattr(engine, "_survival_counter_write_lost", None)
+    if lost is not None:
+        survival_fit = {**survival_fit, "ever_shortened": True}
+        if lost:
+            survival_fit.pop("projected_count", None)
     try:
         fit_count = int(survival_fit.get("count") or 0)
     except (TypeError, ValueError, OverflowError):  # a damaged record: a fit with an unknown count
+        fit_count = None
+    if fit_count == 0 and lost is not None:
         fit_count = None
     if fit_count != 0:
         projected = survival_fit.get("projected_count")  # absent on a record from before the key: unknown
@@ -1796,7 +1803,8 @@ def _doctor_text(engine) -> str:
                   "default lcm.db, with its -wal and -shm companions) aside and keep it, then restore the database "
                   "backup taken before the first v0.24.5 install with the plugin; a rollback of the plugin alone to "
                   "v0.24.5 or later is fine")
-        applied = ("applied an unknown number of times (the stored count is unreadable)" if fit_count is None
+        unknown = "a counter write failed" if lost is not None else "the stored count is unreadable"
+        applied = (f"applied an unknown number of times ({unknown})" if fit_count is None
                    else f"applied {fit_count} time(s)")
         if survival_fit.get("last_shortened") is False:
             applied = applied.replace("applied", "attempted", 1) + "; could not shorten the list on the last attempt"
