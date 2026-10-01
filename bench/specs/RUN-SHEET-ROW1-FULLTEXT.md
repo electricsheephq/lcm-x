@@ -1,0 +1,81 @@
+# RUN SHEET — Row 1: recall on the shipped default (full-text recall, embeddings off)
+
+Status: REGISTERED (2026-10-02), after the v0.24.9 GA cut. The kit is merged first: lcm-x #811 adds the LongMemEval
+`--embeddings` arm, and memorybench PR #7 adds the full-text arm to `feat/locomo-hermes-prep` at `b47f92f7`.
+Nothing in this sheet spends money. Plan reference: PLAN v101 §I row 1 and H2 exit criteria.
+Public-copy rule: the merged copy carries no customer, box or person names, no internal aliases, no local paths.
+
+## 0. Why this row
+- The product default is `embeddings_enabled=False` and every managed profile runs that way: recall is full-text.
+- Every recall row we hold (V1-M r@10 95.6, V1-S QA 91.0, LoCoMo 54.6 / 67.4) was measured with embeddings ON.
+- So no number exists for the configuration users run. This row is a NEW baseline. It is never scored against the
+  embeddings-on history; the history is shown beside it, labelled with its own configuration.
+
+## 1. Sub-rows (each is its own registered row; same product sha)
+| Sub-row | Instrument | Data | Configuration | Scored output |
+|---|---|---|---|---|
+| R1-M retrieval | `scripts/lcm_longmemeval.py run --embeddings off --provider stub` | LongMemEval-M, 500 q (`prepared-m`, the F53 manifest), 6 shards `qid[i::6]` | arms `fts` + `lcm_recall` only; vector arms report `run: false` | r@1 / r@5 / r@10 / ndcg@10, session and turn level |
+| R1-S QA | memorybench LongMemEval-S, hermes-lcm provider, `HERMES_MB_EMBEDDINGS=off`, fusion unset | LongMemEval-S cleaned, 500 q (dataset sha pinned at prep) | stores rebuilt from scratch with no embedder | QA accuracy (judge verdicts), per-category |
+| R1-L QA | memorybench LoCoMo, hermes-lcm provider, `HERMES_MB_EMBEDDINGS=off`, fusion unset | LoCoMo-10, 1,986 q (adversarial gold per the harness pin) | stores rebuilt from scratch | QA accuracy, strict judge rubric (the F46/F61 lineage) |
+
+## 2. Pins (every value from a command at launch, none typed)
+- Product: the v0.24.9 GA tag commit (`git rev-parse v0.24.9^{commit}`); plugin version line; `config.py` blob sha.
+- Instruments: the lcm-x commit holding the `--embeddings` arm (#811's merge or later); the memorybench commit holding
+  `HERMES_MB_EMBEDDINGS` and `scripts/run-with-watchdog.sh` (`b47f92f7` or later on `feat/locomo-hermes-prep`); blob
+  shas of the harness files.
+- Data: dataset file sha256 and prepared-dir manifest sha for each sub-row; question-id list sha.
+- Reader and judge (R1-S, R1-L): model id, reasoning effort, codex CLI version + binary sha256. Reader = the current
+  Sol generation at medium; judge = Sol at low with the strict rubric. The reader differs from the 07-29 row
+  (gpt-5.6-sol), which is one more reason R1-S is a new baseline.
+- Recorded configuration: `retrieval_config` from every R1-M report; `embeddings_enabled` from every bridge
+  `initialize` reply; full `LCM_*` / `HERMES_MB_*` environment inventory (keys and values; no secrets exist in it).
+
+## 3. Proof before any scored run (positive controls)
+1. Kit unit tests green at the pinned instrument commits (off path, on path unchanged, refusal cases).
+2. R1-M control: `--limit 10` off vs on (stub provider) on `prepared-s`. Off: `embeddings_enabled false`, vector arms
+   `run: false` with null metrics, `fts` + `lcm_recall` with n = 10 minus abstentions. On: vector arms `run: true`.
+3. R1-S / R1-L control: one conversation, three searches, off vs on. Off: 0 embed calls and a full-text answer. On: > 0.
+4. A control that does not separate its two arms stops the row (no scored run on an unproven arm).
+
+## 4. Pre-declared reporting bars
+1. Headline metric with fail-closed accounting: every question scored, failed, or excluded (abstentions) is counted
+   and listed; a failed question is never dropped.
+2. Noise floor before any claim. R1-M: deterministic, A/A′ on the F53 100-question subset must give 0 discordant
+   rows (any discordance is a finding). R1-S: A′ on the same fixed 100-question subset. R1-L: A/A′ full run;
+   the discordant count is the floor.
+3. Cost and size per query, recorded or marked UNMEASURED with the reason: delivered context tokens per question,
+   reader input and output tokens (from the transport log), wall time p50 / p90, metered dollars (expected $0:
+   subscription lanes only, no embedding provider).
+4. Comparison rule: within this configuration only. The embeddings-on rows stay visible with their own pins; a
+   difference between the two is reported as "configuration difference", never as a regression or a gain.
+5. Negative results ship at the same resolution as positive ones.
+
+## 5. Operations
+- Snapshot outputs first: copy every run's output dir to the evidence folder before any analysis touches it.
+- memorybench runs go through `scripts/run-with-watchdog.sh <run-id> -- <command>` (lcm-x #236: a stalled pool
+  is stopped by process group and resumed with the same run id, at most 3 times; every action logged with UTC time).
+- R1-M: own `HERMES_HOME` / `TMPDIR` / output dir per shard, fresh output roots (no resume across instruments).
+- Off-mode recall reports `degraded: true` with `coverage.fts: "ok"`: this is the product's label for recall without
+  the semantic arm, the configuration under test, not a failure. Record it; never filter a hit on it.
+- A watchdog resume is safe to rerun: the bridge records each fully ingested session per container and refuses a
+  session cut off mid-ingest (rebuild that container's store, then resume). Count any such refusal in the run log.
+- Readers run one lane at a time per machine; no other heavy local run in parallel.
+
+## 6. Abort / park
+- Any arm reports the wrong `embeddings_enabled` or a non-null vector metric with embeddings off → stop, root-cause.
+- Any embed call counted in an off run → stop.
+- Watchdog used all resumes on one run → park that sub-row, report the stall with the log.
+- More than 2 R1-M shards dead of one cause → park, root-cause first.
+
+## 7. Procedure
+1. Merge the kit PRs; merge this sheet (fact-check of every pin source).
+2. Fresh worktrees at the pinned commits; record pins (§2).
+3. Positive controls (§3) → evidence folder.
+4. R1-M full 500 (6 shards) + A/A′ subset → snapshot → score.
+5. R1-S 500 with A′ subset → snapshot → judge → score.
+6. R1-L 1,986 A and A′ → snapshot → judge → score.
+7. Finding per sub-row, scoreboard rows (new rows; nothing superseded), ledger lines, issue on the H2 milestone.
+
+## 8. What this row does not prove
+- Nothing about the embeddings-on configuration (row 2) or production privacy with embeddings (row 3, INCOMPLETE).
+- Nothing about recall inside live sessions on customer profiles; it measures the plugin's recall path on public data.
