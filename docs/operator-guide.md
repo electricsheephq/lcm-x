@@ -972,6 +972,8 @@ base64-looking rows, and aggregate externalized-payload stats.
 Doctor output is metadata-only for these scans; it intentionally does not print
 raw payload previews.
 
+The `embedding_provider_health` check warns when the configured provider cannot run in this process; see the [embedding-dependency recovery note](embeddings-setup.md#a-host-update-can-remove-fastembed).
+
 `lcm_doctor` JSON includes a top-level `guidance` array for every warning or
 failure. The slash-command text also reports `triage_guidance` for the warning
 and failure classes surfaced in the command output, using the same operator

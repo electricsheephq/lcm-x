@@ -2048,8 +2048,8 @@ def probe_provider_availability(config: LCMConfig) -> dict[str, Any]:
             return result(
                 False,
                 "FastEmbed is not installed; install the optional fastembed "
-                "dependency (a Hermes update rebuilds the virtualenv and drops "
-                "optional dependencies, so reinstall it after every update)",
+                "dependency (a dependency installed by hand can be dropped by a "
+                "Hermes update; see docs/embeddings-setup.md)",
             )
         return result(True, "fastembed is importable")
 
