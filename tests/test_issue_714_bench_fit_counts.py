@@ -4,7 +4,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import bench.instruments.reliability.process_cell as PC
-from tests.test_reliability_scorers import clean_events, clean_rows, make, probe
+from tests.test_reliability_scorers import bars, clean_events, clean_rows, make, probe, report
 
 EXIT = ("LCM survival fit applied (reason=exit_fit:compressed, conversation=c, dropped_rows=4, store_ids=1..4, "
         "before=900, after=700, budget=760)")
@@ -35,3 +35,15 @@ def test_process_cell_counts_a_routine_exit_fit_once(tmp_path, monkeypatch):
     assert rec["log_counts"]["exit_fit"] == 1 and rec["log_counts"]["survival_fit"] == 0
     assert rec["log_counts"] == probe._log_counts(cell.host_log())
     assert rec["session_count"] == 3  # the record keeps the session count next to the log counts
+
+
+def test_unshortened_fit_shows_in_the_signature_and_the_pre_publication_split():
+    """#716 threads: a B8 failure that comes only from a fit that could not shorten names it in the failure
+    signature, and native-on-off cells report its pre-publication share like the other B8 count."""
+    fields = probe.phase_log_fields("LCM compaction #1: done\n" + UNSHORTENED.format("compressed") + "\n")
+    assert fields["log_counts_after_commit"]["fit_unshortened"] == 1
+    out = {"verdict": "FAIL", "failed_bars": {"B8": {}}, "numbers": {"B8": {"survival_fit": 0, "fit_unshortened": 2}}}
+    assert report.signature(out) == "B8 fits_unshortened=2"
+    old = {"exit": "plugin_switch", "log_counts": {"fit_unshortened": 4}}
+    first = {"exit": "done", "log_counts": {"fit_unshortened": 3}, "log_counts_after_commit": {"fit_unshortened": 1}}
+    assert bars.pre_publication({"from_ref": "v0.24.3"}, [old, first], "fit_unshortened") == 2

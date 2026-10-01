@@ -98,7 +98,7 @@ def phase_log_fields(log: str) -> dict:
             "log_counts": _log_counts(log),
             "log_counts_after_commit": None if first_commit < 0 else {
                 k: v for k, v in _log_counts(log[first_commit:]).items()
-                if k in ("publication_invariant_conflict", "survival_fit")}}
+                if k in ("publication_invariant_conflict", "survival_fit") or (k == "fit_unshortened" and v)}}
 
 
 def provenance(cell, extra=()):
