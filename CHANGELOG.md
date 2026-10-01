@@ -6,6 +6,11 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: after the host refuses a compaction or a summary publication fails (the 10-minute no-progress hold, #651),
+  an automatic compaction at or over the survival ceiling summarises again, as in v0.24.8. In v0.24.9-rc3 it only fitted
+  the list: a rotation session could stop compacting, and an in-place hidden-backlog drain waited up to 10 minutes
+  (#802). Only the #608 sweep hold still makes that pass fit-only. (#541)
+
 ## v0.24.9 - (unreleased; rc3) (drain: one foreground time budget, stub-first exit, exit fit, scan allowance)
 
 - Fix: with semantic embeddings enabled and the provider package missing or misconfigured, `lcm_doctor` and
@@ -38,7 +43,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix: the 10-minute sweep hold after a sweep spent its budget before the first leaf (#608) holds only the
   conversation it was armed for, and a session reset or a profile re-bind clears it. Both holds and the 60 s boundary
   cooldown read the monotonic clock, so a wall clock set back or forward neither extends nor ends them (`lcm_status`
-  still shows a wall-clock `until`). While either hold is active and the request is at or over the survival ceiling,
+  still shows a wall-clock `until`). While the #608 hold is active and the request is at or over the survival ceiling,
   an automatic compaction runs no sweep and no summariser call: it returns the list through the survival fit (status
   `noop`, reason `held`); a manual `/compress`, forced overflow and the host's recovery attempt are unchanged. A stored
   survival-fit count that is not a number no longer makes every later count write fail: the record restarts at 1 with
