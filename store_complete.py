@@ -17,7 +17,8 @@ existing summary already covers, a stored system prompt (the anchor rule) and a 
 ignored hidden prompt are excluded.
 Duplicate copies are summarized like any other row (no duplicate-exclusion machinery).
 Parity: with nothing hidden, claimed or excluded the leaf is today's input, except that one pass
-reads at most ``_SCAN_LIMIT`` owned rows per source; a longer backlog is taken as a prefix and
+reads ``_SCAN_LIMIT`` owned rows per source (up to ``_SCAN_EXTEND`` pages when only excluded rows
+are read); a longer backlog is taken as a prefix and
 drains over later passes (never past a row the scan did not read).
 """
 from __future__ import annotations
@@ -31,7 +32,7 @@ from .tokens import count_message_tokens
 
 logger = logging.getLogger(__name__)
 
-_SCAN_LIMIT = 2000  # owned rows read per source and pass; a larger backlog drains over later passes
+_SCAN_LIMIT = 2000  # owned rows per source page; a larger eligible backlog drains over later passes
 _SCAN_EXTEND = 4  # a first tool group open at the cap is re-read once with this many times the page
 
 
@@ -44,9 +45,11 @@ class StoreCompleteMixin:
         state = self._lifecycle.get_by_conversation(self._conversation_id) if self._conversation_id else None
         return max(int(self._last_compacted_store_id or 0), int(getattr(state, "current_frontier_store_id", 0) or 0))
 
-    def _store_complete_owned_rows(self, frontier: int, end: Optional[int], carry, scale: int = 1) -> tuple[list, bool]:
+    def _store_complete_owned_rows(self, frontier: int, end: Optional[int], carry, scale: int = 1,
+                                   excluded_ids=()) -> tuple[list, bool]:
         """Owned rows in (frontier, end] in store order, and whether a source was cut at ``_SCAN_LIMIT``
-        x ``scale`` (the rows then stop at the lowest id every source reached)."""
+        x ``scale`` (the rows then stop at the lowest id every source reached). Excluded-only pages
+        advance at most ``_SCAN_EXTEND`` pages; retain them for the leaf's contiguity checks."""
         limit = _SCAN_LIMIT * scale
         sources = [(str(self._session_id), frontier, end)] + [
             (source, max(start, frontier), stop if end is None else min(stop, end))
@@ -54,9 +57,20 @@ class StoreCompleteMixin:
         ]
         rows, reached = {}, None
         for source, start, stop in sources:
-            page = self._store.get_range(source, start_id=start + 1, end_id=stop, limit=limit,
-                                         conversation_id=self._conversation_id, include_blank_conversation=True)
-            if len(page) >= limit:
+            page = []
+            for _ in range(_SCAN_EXTEND if scale == 1 else 1):
+                batch = self._store.get_range(source, start_id=start + 1, end_id=stop, limit=limit,
+                                              conversation_id=self._conversation_id, include_blank_conversation=True)
+                page.extend(batch)
+                covered = self._store_complete_node_covered([int(row["store_id"]) for row in batch])
+                if len(batch) < limit or any(
+                    int(row["store_id"]) not in covered and int(row["store_id"]) not in excluded_ids
+                    and row.get("role") != "system" and not self._matches_ignore_message_patterns(row, stored_row=True)
+                    for row in batch
+                ):
+                    break
+                start = int(batch[-1]["store_id"])
+            if len(batch) >= limit:
                 last = int(page[-1]["store_id"])
                 reached = last if reached is None else min(reached, last)
             rows.update((int(row["store_id"]), row) for row in page if self._identity_anchor_owned(row, carry))
@@ -107,7 +121,7 @@ class StoreCompleteMixin:
         return True
 
     def _store_complete_input(self, chunk, claims, full_map, view, raw_chunk, frontier, carry, budget,
-                              accounted_ids=(), scale: int = 1) -> Optional[list]:
+                              accounted_ids=(), scale: int = 1, scanned=None) -> Optional[list]:
         """``[(input_row, [store_id, ...]), ...]`` in store order; ``[]`` when the leaf cannot start
         (the first owned row above the frontier is a retained occurrence); None: today's input."""
         from .identity_anchor import _match_occurrences
@@ -123,7 +137,9 @@ class StoreCompleteMixin:
         top = max(taken, default=0)
         end = top - 1 if top > frontier else min(  # no host row: hidden backlog below the first retained row
             (store_id - 1 for store_id in set(full_map.values()) - passive if store_id > frontier), default=None)
-        rows, truncated = self._store_complete_owned_rows(frontier, end, carry, scale) if end is None or end > frontier else ([], False)
+        rows, truncated = scanned if scanned is not None else (
+            self._store_complete_owned_rows(frontier, end, carry, scale, passive)
+            if end is None or end > frontier else ([], False))
         loose = [row for row in rows if int(row["store_id"]) not in taken | passive | set(full_map.values())]
         ignored = {int(row["store_id"]) for row in loose if self._matches_ignore_message_patterns(row, stored_row=True)}
         covered = self._store_complete_node_covered([int(row["store_id"]) for row in loose if int(row["store_id"]) not in ignored])
@@ -213,8 +229,11 @@ class StoreCompleteMixin:
                 del out[group[1]:]
                 complete = False
             elif scale == 1:  # a first group is never deferred: one bounded larger scan reads its results
+                call = min(ids_of(*out[group[1]]), default=frontier + 1)
+                extended, truncated = self._store_complete_owned_rows(max(frontier, call - 1), end, carry, _SCAN_EXTEND)
+                scanned = ([row for row in rows if int(row["store_id"]) < call] + extended, truncated)
                 return self._store_complete_input(chunk, given_claims, full_map, view, raw_chunk, frontier, carry,
-                                                  budget, accounted_ids, scale=_SCAN_EXTEND)
+                                                  budget, accounted_ids, scale=_SCAN_EXTEND, scanned=scanned)
             else:  # the documented oversized-group exception: admitted as read
                 logger.warning("LCM store-complete leaf: a first tool group is still open after a %d-row scan; "
                                "admitted as read (frontier=%d)", _SCAN_LIMIT * scale, frontier)
