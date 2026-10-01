@@ -18,13 +18,13 @@ Today every compaction LCM-X starts runs on the turn thread, so the user waits f
 | **v0.24.9** | Drain: bounded foreground compaction, capped hidden leaves, exit fit | The release gauntlet passes |
 | **v0.25.0** | Long sessions: drain speed and correctness. The first background step: leaves prepared below the threshold (#610, minimal). Also #597, #750, #626, #605, #625, #84, #7, the cache-break measurement (#788), and removal of native recovery | Compaction p90 ≤ 60 s and never above 120 s on the field-window counter and the gauntlet; no release-blocking defects |
 | **v0.26.0** | Host message identity: use the host's stable message id (shadow mode first), then simplify LCM-X's own row matching | Shadow mode agrees with content matching on ≥ 99% of rows over 24 h; the full reliability matrix passes |
-| **v0.27.0** | Summary quality: prompt v3 by default, cue lines (#611), instruction continuity (#659) | Facts kept at least as high as the best compaction we measure against, within the three-seed band; continuity checks pass |
+| **v0.27.0** | Summary quality: prompt v3 by default (#660), summariser input cue lines and, if latency permits, a wider per-message clip (#611), instruction continuity (#659) | Facts kept at least as high as the best compaction we measure against, within the three-seed band; continuity checks pass |
 | **v0.28.0** | Invisible compaction: summaries prepared in the background and published at the threshold (#787) | Visible-wait p90 ≤ 5 s, and no compaction slower than v0.24.9 |
 
 ## H2 — memory that measurably wins (in parallel)
 
 1. Re-baseline recall on a pinned release: LongMemEval retrieval and QA, and LoCoMo, for the default configuration (full-text recall) and, as a separate row, with embeddings on.
-2. B3-A provenance: sender and timestamp provenance at the summarizer boundary (#317 → #324), then re-measure.
+2. B3-A: treat retrieved context as untrusted evidence (#317), then keep timestamp, role and sender provenance in summariser inputs (#324), then re-measure.
 3. Publish the results in the repository scoreboard with tokens per query and cost; add BEAM.
 
 Milestone: **H2 — memory that measurably wins**.
