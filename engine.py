@@ -169,6 +169,7 @@ from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 from . import tools as lcm_tools
 
 logger = logging.getLogger(__name__)
+_NATIVE_RECOVERY_WARNING_LOGGED = False
 
 _ASSERTION_EXTRACTION_PROCESS_SLOT = threading.BoundedSemaphore(1)
 
@@ -452,6 +453,13 @@ class LCMEngine(
     def __init__(self, config: LCMConfig | None = None,
                  hermes_home: str = ""):
         self._config = config or LCMConfig.from_env()
+        global _NATIVE_RECOVERY_WARNING_LOGGED
+        if self._config.native_recovery and not _NATIVE_RECOVERY_WARNING_LOGGED:
+            _NATIVE_RECOVERY_WARNING_LOGGED = True
+            logger.warning(
+                "LCM_NATIVE_RECOVERY is no longer supported (removed in v0.25.0) and is ignored; "
+                "compaction uses the LCM path"
+            )
         self._hermes_home = hermes_home
         self._stable_use_lock = threading.Lock()
         # #667: node ids a condensation has selected, until it publishes or fails; the level 3 repair skips them.
@@ -678,7 +686,6 @@ class LCMEngine(
         self._stub_first_exit_now: Optional[dict[str, int]] = None
         self._last_compression_status = "idle"
         self._last_compression_noop_reason = ""
-        self._last_native_recovery_rejection = ""
         # Ingest-failure tracking. The core promise is that nothing is ever
         # lost, but a swallowed persistence error (disk full, DB locked,
         # corruption) silently breaks it: the turn continues while messages
@@ -722,9 +729,6 @@ class LCMEngine(
         # One-shot handoff from preflight: adopt an already-durable replay
         # cleanup during boundary cooldown without running summary work.
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
-        # One-shot handoff for native recovery: deterministic ingest cleanup at
-        # low pressure must be adopted without invoking the native summarizer.
-        self._native_recovery_preflight_cleanup_only = False
         # Temporary source window used only while compress() assembles context.
         # _assemble_context also serves tests and recovery paths directly, so
         # keep anchoring opt-in rather than changing its public behavior.
@@ -6134,13 +6138,7 @@ class LCMEngine(
                 # invisible to both.  The store still holds the externalized
                 # version for durable recovery via lcm_expand.
                 _orig_role = str(active_replay_messages[absolute_idx].get("role") or "")
-                # Native recovery summarizes this active replay, not the LCM
-                # storage references. Keep already-redacted/filtered user text
-                # visible to that compressor and subsequent turns. The protected
-                # durable copy remains externalized below, as before.
-                if _orig_role == "assistant" or (
-                    _orig_role == "user" and self._config.native_recovery
-                ):
+                if _orig_role == "assistant":
                     continue
                 if active_replay_messages is replay_messages:
                     active_replay_messages = self._copy_active_replay_messages_preserving_generated_ids(
