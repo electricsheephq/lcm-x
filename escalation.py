@@ -161,6 +161,7 @@ class ForegroundBudget:
         self.reserve = estimates.finalize_reserve()
         self.slot_taken = self.sweep_active = False
         self.progress = ""
+        self.stop_reason = ""  # the reason of the last stop(), for the stop line with the sweep off
         self.leaves, self.first_call_started, self.last_call_ended = 0, None, None
 
     @property
@@ -176,12 +177,18 @@ class ForegroundBudget:
         estimate, usable_left = self.estimate(route_key), self.usable_deadline - now
         if not self.progress:  # the progress call (an over-target condensation, else the first leaf): no estimate
             if usable_left < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
-                raise SweepBudgetExhausted()
+                raise self.stop()
         elif estimate > usable_left:
-            raise SweepBudgetExhausted()
+            raise self.stop()
         elif self.soft > 0 and now + estimate > self.t0 + self.soft:
-            raise SweepBudgetExhausted("foreground soft target reached", reason="soft_target_reached")
+            raise self.stop("foreground soft target reached", reason="soft_target_reached")
         return usable_left
+
+    def stop(self, message="threshold full sweep time budget exhausted",
+             reason="time_budget_exhausted") -> SweepBudgetExhausted:
+        """The stop to raise; its reason is kept for the stop line, which reads it with the sweep off."""
+        self.stop_reason = reason
+        return SweepBudgetExhausted(message, reason=reason)
 
     def record_call(self, route_key: str, started: float, ended: float) -> None:
         self.estimates.record_call(route_key, ended - started)
@@ -934,7 +941,7 @@ def _invoke_summary_llm_chain(
             budget.record_call(route_key, started, ended)
             if result is None and _is_budget_cut(error, budget, budget_bound, ended - started, call_timeout):
                 # #605 F4: the budget, not the route, ended the call: no circuit failure, no fallback.
-                raise SweepBudgetExhausted("summariser call cut by the foreground budget")
+                raise budget.stop("summariser call cut by the foreground budget")
         if circuit_breaker is not None and route:
             circuit_breaker.note_route(route_key, route)
         if result and (accepts_result is None or accepts_result(result)):
@@ -1126,6 +1133,11 @@ def _deterministic_truncate(text: str, max_tokens: int) -> str:
     return best
 
 
+def verbatim_source(text: str, l3_truncate_tokens: int) -> bool:
+    """#605 F2: a source within ``l3_truncate_tokens`` is stored whole as level 3, with no call."""
+    return count_tokens(text) <= l3_truncate_tokens
+
+
 def summarize_with_escalation(
     text: str,
     source_tokens: int,
@@ -1164,7 +1176,7 @@ def summarize_with_escalation(
     ``l3_truncate_tokens`` is returned whole as level 3, with no call. Up to twice that bound, the first
     non-empty, not-shorter result returns the source whole as level 3 without a circuit event (#722).
     """
-    if verbatim_small_source and count_tokens(text) <= l3_truncate_tokens:
+    if verbatim_small_source and verbatim_source(text, l3_truncate_tokens):
         if provenance is not None:
             provenance["model"] = "deterministic"
         return text, 3
@@ -1232,7 +1244,8 @@ def summarize_with_escalation(
     if budget is not None:
         deadline = budget.usable_deadline
     if deadline is not None and deadline - time.monotonic() < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
-        raise SweepBudgetExhausted("threshold full sweep time budget exhausted")  # #666: time never yields L3
+        message = "threshold full sweep time budget exhausted"  # #666: time never yields L3
+        raise budget.stop(message) if budget is not None else SweepBudgetExhausted(message)
     # Level 3: deterministic truncation — guaranteed convergence
     l3_result = _deterministic_truncate(text, l3_truncate_tokens)
     if provenance is not None:

@@ -101,6 +101,14 @@ def _advance_on_call(monkeypatch, engine, name: str, clock: _Clock, seconds: flo
     monkeypatch.setattr(engine, name, wrapped)
 
 
+def _step_seconds(line: str, step: str, last: bool = False) -> float:
+    """#618 item 6: a step's logged seconds. The clock is real plus an offset, so a step logs its offset plus the
+    real time it took: tests assert a range from the offset, never an exact figure."""
+    match = re.search(rf"\b{step}=(\d+\.\d)s{'$' if last else ''}", line)
+    assert match, line
+    return float(match.group(1))
+
+
 def _count(caplog, text: str) -> int:
     return sum(text in record.getMessage() for record in caplog.records)
 
@@ -130,7 +138,7 @@ def test_budget_spent_in_the_first_map_returns_the_input_unchanged(tmp_path, sum
         assert _count(caplog, RETRY_LINE) == 0
         assert _count(caplog, BUDGET_LINE) == 1
         line = next(r.getMessage() for r in caplog.records if BUDGET_LINE in r.getMessage())
-        assert "(budget 120s); steps: " in line and "anchor_ids=121.0s" in line  # numbers and step names only
+        assert "(budget 120s); steps: " in line and 121.0 <= _step_seconds(line, "anchor_ids") < 151.0  # numbers and step names only
         assert "user turn" not in line and "alpha" not in line
     finally:
         engine.shutdown()
@@ -179,7 +187,7 @@ def test_pass_leaves_right_after_the_step_that_spends_the_budget(
             result = engine.compress(view, current_tokens=engine.threshold_tokens + 1)
         assert result is view and summaries == [] and engine._last_compression_status == "noop"
         line = next(r.getMessage() for r in caplog.records if BUDGET_LINE in r.getMessage())
-        assert line.endswith(f"{step}=121.0s")  # the last timed step: nothing ran after it
+        assert 121.0 <= _step_seconds(line, step, last=True) < 151.0  # the last timed step: nothing ran after it
     finally:
         engine.shutdown()
 
@@ -205,7 +213,7 @@ def test_budget_spent_in_a_provider_timeout_names_the_summariser_step(tmp_path, 
         assert calls == [1] and result is view and telemetry["stop_reason"] == "time_budget_exhausted"
         assert _count(caplog, RETRY_LINE) == 1 and _count(caplog, BUDGET_LINE) == 1
         line = next(r.getMessage() for r in caplog.records if BUDGET_LINE in r.getMessage())
-        assert "summariser=110.0s" in line
+        assert 110.0 <= _step_seconds(line, "summariser") < 140.0
     finally:
         engine.shutdown()
 
@@ -317,15 +325,13 @@ def test_no_leaf_budget_stop_holds_the_threshold_answer_only(tmp_path, summaries
     view = _view()
     try:
         _spend_budget_before_first_leaf(engine, view, clock, monkeypatch, caplog)
-        assert engine._sweep_budget_hold_until > time.time()
+        assert engine._sweep_budget_hold_until > time.monotonic()
         assert engine.should_compress(engine.threshold_tokens + 1) is False
         assert engine.should_compress_preflight(view) is False
         assert engine.should_compress(150_000) is True  # over the 100k assembly cap: overflow recovery
-        real_time = time.time
-        with monkeypatch.context() as later:
-            later.setattr(lcm_engine.time, "time", lambda: real_time() + 601.0)
-            assert engine.should_compress(engine.threshold_tokens + 1) is True
-        engine._sweep_budget_hold_until = time.time() + 600.0
+        clock.offset += 601.0  # #618: the hold reads the monotonic clock
+        assert engine.should_compress(engine.threshold_tokens + 1) is True
+        engine._start_sweep_budget_hold()
         assert engine.should_compress(engine.threshold_tokens + 1) is False
         clock.offset = 0.0  # a normal budget: compress() is not gated, and a stored leaf clears the hold
         monkeypatch.setattr(engine, "_get_store_id_map_for_messages",
@@ -365,7 +371,7 @@ def test_empty_anchor_slice_is_not_mapped_and_the_pass_result_is_the_same(tmp_pa
 # -- 8. the hold never applies at or over the survival ceiling ------------------------------------------------
 
 def _hold(engine) -> None:
-    engine._sweep_budget_hold_until = time.time() + 600.0
+    engine._start_sweep_budget_hold()  # #618: armed for the bound conversation, on the monotonic clock
 
 
 def test_hold_ends_at_the_survival_ceiling_in_should_compress(tmp_path):

@@ -29,7 +29,8 @@ ACCEPTED = "Earlier turns.\nExpand for details about: turns"
 STOP_LINE = "LCM compaction stopped: summary route unavailable"
 REJECTED_LINE = "LCM summary result rejected"
 COMPACTION_LINE = re.compile(
-    r"^LCM compaction #\d+: \d+ messages → \d+ \(\d+ leaf pass(?:es)?, \d+→\d+ tokens, \d+ DAG nodes"
+    r"^LCM compaction #\d+: \d+ messages → \d+ \(\d+ leaf pass(?:es)?, \d+→\d+ tokens(?:, host_tokens=\d+)?, "
+    r"\d+ DAG nodes"
     r"(?P<rest>.*)\)$")
 
 
@@ -195,7 +196,7 @@ def test_t3_rejection_threshold_is_configured(monkeypatch, tmp_path):
 # -- T4: a threshold sweep with every route refused ----------------------------------------------------------
 
 def test_t4_sweep_with_every_route_refused_writes_nothing_and_holds(tmp_path, monkeypatch, levels, caplog):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path, l3_truncate_tokens=2)  # sources over the level 3 bound: a no-call source passes
     provider = _provider(monkeypatch, ACCEPTED)
     view = _view()
     try:
@@ -208,7 +209,7 @@ def test_t4_sweep_with_every_route_refused_writes_nothing_and_holds(tmp_path, mo
         assert engine._last_compression_noop_reason == "summary route unavailable"
         assert engine.get_status()["threshold_full_sweep"]["stop_reason"] == "summary_route_unavailable"
         cooldown = engine._summary_circuit_breaker.cooldown_seconds
-        assert time.time() < engine._sweep_budget_hold_until <= time.time() + cooldown
+        assert time.monotonic() < engine._sweep_budget_hold_until <= time.monotonic() + cooldown
         assert engine.should_compress(engine.threshold_tokens + 1) is False
         assert _count(caplog, STOP_LINE) == 1
         line = next(r.getMessage() for r in caplog.records if STOP_LINE in r.getMessage())
@@ -368,7 +369,7 @@ HOST_TOKENS = 1_000
 def test_t10_recovery_attempt_with_every_route_refused_meets_the_recovery_budget(
         tmp_path, monkeypatch, levels, caplog):
     """The #617 recovery assertions of test_issue_608_sweep_budget_stop.py (C1), with the circuit open."""
-    engine = _engine(tmp_path, context_length=6_000)
+    engine = _engine(tmp_path, context_length=6_000, l3_truncate_tokens=2)  # no source within the level 3 bound
     engine.threshold_tokens = THRESHOLD
     provider = _provider(monkeypatch, ACCEPTED)
     view = _view(8)
@@ -415,7 +416,7 @@ def test_t11_sweep_condensation_with_every_route_refused_writes_no_node(tmp_path
 
 
 def test_t11_condensation_not_forced_writes_no_node_and_forced_converges(tmp_path, monkeypatch, levels):
-    engine = _engine(tmp_path, condensation_fanin=2)
+    engine = _engine(tmp_path, condensation_fanin=2, l3_truncate_tokens=2)  # a group over the level 3 bound
     provider = _provider(monkeypatch, ACCEPTED)
     _depth_0_nodes(engine, 2)
     try:
@@ -466,7 +467,8 @@ def _condensation_state(engine) -> None:
 @pytest.mark.parametrize("force_overflow", [False, True], ids=["not-forced", "forced"])
 def test_condensation_rechecks_route_before_every_depth(tmp_path, monkeypatch, levels, force_overflow):
     """#605 F2: each group is within the level 3 bound, so it is written verbatim with no call (it was: two
-    rejected calls whose counts 5 and 6 opened the route); the route now opens after the depth 0 pass."""
+    rejected calls whose counts 5 and 6 opened the route); the route now opens after the depth 0 pass. A group
+    stored whole needs no route, so the depth 1 group is written forced or not (#628 follow-up)."""
     engine = _engine(tmp_path, condensation_fanin=2, threshold_full_sweep_enabled=False)
     provider = _provider(monkeypatch, "reject")  # never shorter than its source
     _condensation_state(engine)
@@ -482,10 +484,6 @@ def test_condensation_rechecks_route_before_every_depth(tmp_path, monkeypatch, l
         passes = engine._maybe_condense(force_overflow=force_overflow)
         new = sorted(node.depth for node in _nodes(engine)[3:])
         assert provider.calls == []
-        if force_overflow:
-            assert passes == 2 and new == [1, 2] and levels == [3, 3]
-        else:
-            assert passes == 1 and new == [1] and levels == [3]
-            assert engine._last_condensation_suppressed_reason == "summary_route_unavailable"
+        assert passes == 2 and new == [1, 2] and levels == [3, 3]
     finally:
         engine.shutdown()

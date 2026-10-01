@@ -181,8 +181,8 @@ def test_t3_the_hold_expires_by_time(tmp_path, summaries, monkeypatch):
     try:
         engine.compress(view, current_tokens=rough)
         assert engine.should_compress(rough) is False
-        now = lcm_engine.time.time()
-        monkeypatch.setattr(lcm_engine.time, "time", lambda: now + HOLD + 1)
+        now = lcm_engine.time.monotonic()  # #618: the hold reads the monotonic clock
+        monkeypatch.setattr(lcm_engine.time, "monotonic", lambda: now + HOLD + 1)
         assert engine.should_compress(rough) is True
         assert engine.get_status()["no_progress_hold"] is None and engine._no_progress_hold is None
     finally:
@@ -352,7 +352,9 @@ def test_g1_at_the_survival_ceiling_a_held_pass_is_not_forced_cleanup_only(tmp_p
     try:
         assert engine._no_progress_hold_blocks(ceiling) is False
         engine.compress(view, current_tokens=ceiling)
-        assert summaries and _leaves(engine) >= 1, engine._last_compression_noop_reason
+        # #618 item 3: not cleanup-only, and no sweep either: a held pass at the ceiling only fits
+        assert summaries == [] and _leaves(engine) == 0
+        assert (engine._last_compression_status, engine._last_compression_noop_reason) == ("noop", "held")
     finally:
         engine.shutdown()
 

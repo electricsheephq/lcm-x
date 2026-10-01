@@ -59,7 +59,7 @@ def _view(turns: int = 6) -> list[dict]:
 
 def _cooldown_preflight(engine, view, monkeypatch) -> None:
     """A boundary cooldown, then a preflight whose replay diff requests an ingest cleanup."""
-    engine._last_boundary_skip_time = time.time()
+    engine._last_boundary_skip_time = time.monotonic()
     real_ingest = engine._ingest_messages
     with monkeypatch.context() as patch:
         patch.setattr(engine, "_replay_diff_requests_ingest_cleanup", lambda original, replay: True)
@@ -124,7 +124,7 @@ def test_the_native_recovery_handoff_is_kept_by_a_recovery_call(tmp_path, monkey
     engine = _engine(tmp_path, native_recovery=True, context_threshold=0.5)
     view = _view()
     try:
-        engine._last_boundary_skip_time = time.time()
+        engine._last_boundary_skip_time = time.monotonic()
         with monkeypatch.context() as patch:
             real_ingest = engine._ingest_messages
             patch.setattr(engine, "_replay_diff_requests_ingest_cleanup", lambda original, replay: True)

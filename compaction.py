@@ -593,6 +593,10 @@ class CompactionMixin:
                 # #677: an automatic call the #651 hold blocks (a caller that skipped the host gate) is held
                 # maintenance; the survival ceiling and forced overflow are never blocked, so they summarise.
                 self._preflight_below_threshold_cleanup_only = True
+            # #618 item 3: at or over the survival ceiling a held automatic call runs no sweep, only the fit below
+            # (forced overflow is decided in _compress_impl and still summarises).
+            self._hold_fit_only_requested = bool(not force and not bypass_cooldown and self._hold_fit_only_applies(
+                current_tokens if current_tokens is not None else count_messages_tokens(messages)))
             with self._fresh_tail_pressure_yield_invocation():
                 result = self._compress_impl(
                     messages,
@@ -675,6 +679,8 @@ class CompactionMixin:
             reason = str(self._last_compression_status or "unknown")
             if budget.sweep_active and reason != "error":
                 reason = str(self._last_threshold_full_sweep.get("stop_reason") or reason)
+            elif reason != "error" and budget.stop_reason:  # a time stop with the sweep off (#605)
+                reason = budget.stop_reason
             logger.info("LCM compaction stop: reason=%s leaves=%d progress=%s elapsed=%.1fs pre=%.1fs calls=%.1fs "
                         "finalize=%.1fs backlog_tokens=%d", reason, budget.leaves, budget.progress or "none", elapsed,
                         pre, calls, finalize, self._raw_backlog_tokens(result) if isinstance(result, list) else 0)
@@ -1275,10 +1281,12 @@ class CompactionMixin:
             self._preflight_below_threshold_cleanup_only
         )
         automatic_preflight_requested = bool(self._preflight_automatic_request)
+        hold_fit_only_requested = bool(self._hold_fit_only_requested)
         self._native_recovery_preflight_cleanup_only = False
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
         self._preflight_below_threshold_cleanup_only = False
         self._preflight_automatic_request = False
+        self._hold_fit_only_requested = False
 
         if not messages:
             self._last_compression_status = "noop"
@@ -1414,6 +1422,24 @@ class CompactionMixin:
                 self._generated_placeholder_digest_ordinals_for_active_replay(
                     sanitized_messages
                 )
+            )
+            return sanitized_messages
+        if hold_fit_only_requested and not force and not force_overflow:
+            # #618 item 3: a hold of this conversation is active at the survival ceiling: no sweep and no
+            # summariser call; compress() fits the sanitized list.
+            sanitized_messages = self._sanitize_active_context_messages(
+                working_messages,
+                insert_missing_tool_stubs=False,
+            )
+            self._ingest_cursor = len(sanitized_messages)
+            self._last_compression_status = "noop"
+            self._last_compression_noop_reason = "held"
+            logger.info("LCM compression no-op: held at the survival ceiling; survival fit only")
+            self._write_generated_ignored_placeholder_hash_counts(
+                self._generated_placeholder_digest_budget_for_active_replay(sanitized_messages)
+            )
+            self._write_generated_ignored_placeholder_hash_ordinals(
+                self._generated_placeholder_digest_ordinals_for_active_replay(sanitized_messages)
             )
             return sanitized_messages
         if self._config.native_recovery:
@@ -1568,6 +1594,7 @@ class CompactionMixin:
                 pre_leaf_condensation_stop_reason=pre_leaf_condensation_reason,
             )
 
+        no_call_only, refused_input = False, None
         while leaf_passes < max_leaf_passes:
             if threshold_full_sweep_active and time.monotonic() >= sweep_deadline:
                 sweep_stop_reason = "time_budget_exhausted"
@@ -1581,9 +1608,12 @@ class CompactionMixin:
             route_stop = self._summary_route_stop_applies(force_overflow)
             # #640: the first pass adopts a committed summary (#457) before the route stop; adoption needs no route.
             adopt_before_stop = route_stop and leaf_passes == 0 and not resumed_prefix
-            if route_stop and not adopt_before_stop:
-                sweep_stop_reason = "summary_route_unavailable"  # #628: no level 3 leaf while every route is refused
-                break
+            # #628: no level 3 leaf while every route is refused; a source stored whole with no call (#605 F2)
+            # needs no route, so the stop is decided at the selected source.
+            no_call_only = route_stop and not adopt_before_stop
+            # review of #723: the input of refused passes since the last stored leaf, returned if none stores one
+            refused_input = (refused_input or (working_messages, pressure_messages,
+                                               dropped_replayed_scaffold_messages)) if route_stop else None
             fresh_tail_start = self._fresh_tail_start(pressure_messages)
 
             # Keep only a real system prompt anchored. Gateway sessions may
@@ -1651,8 +1681,10 @@ class CompactionMixin:
                     estimated_active_tokens = max(0, estimated_active_tokens - resumed_tokens + summary_tokens)
                 drops.update(resumed)
             if adopt_before_stop and not resumed_prefix:  # #640: nothing adopted, so the #628 stop applies now
-                sweep_stop_reason = "summary_route_unavailable"
-                break
+                if fresh_tail_start <= leading_anchor_count:  # a full tail stops here, as before the no-call source
+                    sweep_stop_reason = "summary_route_unavailable"
+                    break
+                no_call_only, adopt_before_stop = True, False
             if drops:
                 publication_excluded_store_ids.extend(
                     self._get_store_ids_for_messages(
@@ -1918,16 +1950,19 @@ class CompactionMixin:
                 _level = 0
                 _rescue_attempts = 0
             else:
+                if no_call_only and self._summary_route_stop_applies(
+                        force_overflow, self._serialize_messages(summary_input_chunk)):
+                    sweep_stop_reason = "summary_route_unavailable"
+                    break
                 # Pre-compaction extraction: best-effort, never blocks compaction.
                 # Use the same dependency-filtered view as summarization so ignored
                 # turns cannot leak through derived assistant/tool replies.
                 if self._config.extraction_enabled:
-                    extraction_timeout = None
-                    if threshold_full_sweep_active:
-                        extraction_timeout = max(0.001, sweep_deadline - time.monotonic())
+                    # #605: every foreground path, sweep on or off: extraction never outlasts the hard bound.
                     self._run_pre_compaction_extraction(
                         summary_input_chunk,
-                        timeout_seconds=extraction_timeout,
+                        timeout_seconds=max(0.001, min(self._config.summary_timeout_ms / 1000,
+                                                       sweep_deadline - time.monotonic())),
                     )
                 if bool(
                     getattr(
@@ -2102,7 +2137,7 @@ class CompactionMixin:
             pressure_remaining_messages = pressure_messages[leading_anchor_count + selected_raw_len:]
             working_messages = working_messages[:leading_anchor_count] + remaining_messages
             pressure_messages = pressure_messages[:leading_anchor_count] + pressure_remaining_messages
-            leaf_compacted_this_turn = True
+            leaf_compacted_this_turn, no_call_only, refused_input = True, False, None
             budget.progress, budget.leaves = budget.progress or "leaf", budget.leaves + 1
             self._sweep_budget_hold_until = 0.0  # #608: a stored leaf ends the hold
             self._no_progress_hold, self._no_progress_candidate = None, False  # #651: hidden-only leaves too
@@ -2178,6 +2213,10 @@ class CompactionMixin:
                     if not (deferred_maintenance_active and critical_budget_pressure):
                         break
 
+        if no_call_only:  # #628: this pass stored no leaf while every route is refused
+            sweep_stop_reason, sweep_raw_drained = "summary_route_unavailable", False
+            # review of #723: and returns the list it started with (no scaffold or ignored-backlog edit of its own)
+            working_messages, pressure_messages, dropped_replayed_scaffold_messages = refused_input
         if (
             threshold_full_sweep_active
             and not sweep_raw_drained
@@ -2403,7 +2442,7 @@ class CompactionMixin:
         self._ingest_cursor_needs_reconcile = False
 
         logger.info(
-            "LCM compaction #%d: %d messages → %d (%d leaf pass%s, %d→%d tokens, %d DAG nodes%s%s)",
+            "LCM compaction #%d: %d messages → %d (%d leaf pass%s, %d→%d tokens%s, %d DAG nodes%s%s)",
             self.compression_count,
             len(messages),
             len(compressed),
@@ -2411,6 +2450,7 @@ class CompactionMixin:
             "es" if leaf_passes != 1 else "",
             count_messages_tokens(messages),
             count_messages_tokens(compressed),
+            f", host_tokens={current_tokens}" if current_tokens is not None and current_tokens > 0 else "",  # #627
             len(self._dag.get_session_nodes(self._session_id)),
             f", {level3_leaves} level 3 leaves" if level3_leaves else "",
             ", forced overflow recovery" if force_overflow else "",

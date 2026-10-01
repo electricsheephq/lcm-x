@@ -6,6 +6,25 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: the 10-minute sweep hold after a sweep spent its budget before the first leaf (#608) holds only the
+  conversation it was armed for, and a session reset or a profile re-bind clears it. Both holds and the 60 s boundary
+  cooldown read the monotonic clock, so a wall clock set back or forward neither extends nor ends them (`lcm_status`
+  still shows a wall-clock `until`). While either hold is active and the request is at or over the survival ceiling,
+  an automatic compaction runs no sweep and no summariser call: it returns the list through the survival fit (status
+  `noop`, reason `held`); a manual `/compress`, forced overflow and the host's recovery attempt are unchanged. A stored
+  survival-fit count that is not a number no longer makes every later count write fail: the record restarts at 1 with
+  `count_lost: true`. The `LCM compaction #` line prints the host's token figure (`host_tokens=`) when the host passed
+  one. (#618)
+- Fix: the #608 sweep hold is published through the host's transient-block interface like the #651 hold:
+  `_automatic_compression_blocked` blocks while it holds this conversation (not for a recovery attempt, forced overflow,
+  the survival ceiling, a pending cleanup-only pass or a bypassed session) and `_compression_block_reason` returns
+  `cooldown:lcm_sweep_budget`. The host's forced preflight after a recovery attempt does not consult this gate, so that
+  path is not changed by this fix. (#625)
+- Fix: with the sweep off, the `LCM compaction stop:` line names a time stop (`time_budget_exhausted`,
+  `soft_target_reached`) instead of `compacted`; pre-compaction extraction (`LCM_EXTRACTION_ENABLED`) gets at most the
+  time left to the foreground hard bound on every foreground path, not the full summary timeout; and while every
+  summary route is refused (#628), a leaf or condensation source within `LCM_L3_TRUNCATE_TOKENS`, which is stored whole
+  with no call, is no longer stopped. (#605)
 - Fix: level 3 repair continues after a group's SQLite error, rechecks sources during commit, records legacy-node
   provenance and schedules rollups; overlapping condensations retain reservations, and the read-only tool scan
   pages up to 50 fragments and ancestors from the foreground session. (#698)

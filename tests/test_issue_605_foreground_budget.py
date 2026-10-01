@@ -350,12 +350,10 @@ def test_b_stale_115s_estimate_and_56s_of_pre_work_still_attempt_the_first_leaf_
         _compress(engine, view, caplog)
         assert len(provider.calls) == 1 and provider.calls[0][1] == pytest.approx(59.0, abs=0.5)
         assert engine.get_status()["threshold_full_sweep"]["stop_reason"] == "time_budget_exhausted"
-        assert _leaves(engine) == [] and engine._sweep_budget_hold_until > time.time()
+        assert _leaves(engine) == [] and engine._sweep_budget_hold_until > time.monotonic()
         assert engine._summary_circuit_breaker._failures.get("<task-default>", 0) == 0  # a budget cut
-        real_time = time.time
-        monkeypatch.setattr(time, "time", lambda: real_time() + 601.0)  # both holds have ended
+        clock.offset += 601.0  # both holds have ended (#618: they read the monotonic clock)
         provider.default = 20.0
-        clock.offset = 0.0
         _compress(engine, view, caplog)
         assert len(provider.calls) == 2 and len(_leaves(engine)) == 1
     finally:
