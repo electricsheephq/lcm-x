@@ -23,7 +23,11 @@ API = "api_key=sk-test1234567890abcdefXYZ"
 API_OTHER = "api_key=sk-other0987654321zyxwvUTS"
 PWD = "password=hunter2-synthetic-pw"
 ENV = 'export OPENAI_API_KEY="sk-proj-abcdefghijklmnop1234"'
-NARROW_API = ip._SENSITIVE_PATTERN_CATALOG["api_key"]
+# Keep the pre-#491 miss as the old policy even after the shipped catalog widens.
+NARROW_API = re.compile(
+    ip._SENSITIVE_PATTERN_CATALOG["api_key"].pattern.replace(r"(?<![A-Za-z0-9])(?:api", r"\b(?:api", 1),
+    ip._SENSITIVE_PATTERN_CATALOG["api_key"].flags,
+)
 # The #491 widening: ``\b`` -> ``(?<![^\W_])`` before the key names.
 WIDE_API = re.compile(
     NARROW_API.pattern.replace(r"(?:\\?[\"']?)\b(?:api", r"(?:\\?[\"']?)(?<![^\W_])(?:api", 1),

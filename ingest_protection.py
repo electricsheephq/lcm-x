@@ -409,7 +409,7 @@ _EMBEDDING_PRIVACY_CLOUD_PROVIDERS = frozenset(
 )
 _SENSITIVE_PATTERN_CATALOG: dict[str, re.Pattern[str]] = {
     "api_key": re.compile(
-        r"(?P<prefix>(?:\\?[\"']?)\b(?:api[_-]?key|api[_-]?token|access[_-]?token|secret[_-]?key|client[_-]?secret)\b\s*(?:\\?[\"']?)\s*[:=]\s*(?:\\?[\"']?))"
+        r"(?P<prefix>(?:\\?[\"']?)(?<![A-Za-z0-9])(?:api[_-]?key|api[_-]?token|access[_-]?token|secret[_-]?key|client[_-]?secret)\b\s*(?:\\?[\"']?)\s*[:=]\s*(?:\\?[\"']?))"
         r"(?P<secret>[A-Za-z0-9._~+/=-]{12,})"
         r"(?P<suffix>\\?[\"']?)",
         re.IGNORECASE,

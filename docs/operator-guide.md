@@ -599,7 +599,8 @@ unrecoverable after redaction.
 Supported named catalog entries are:
 
 - `api_key`: `api_key`, `api_token`, `access_token`, `secret_key`, and
-  `client_secret` assignments or JSON keys.
+  `client_secret` assignments or JSON keys, including env-style names such as
+  `OPENROUTER_API_KEY` and `MY_SERVICE_ACCESS_TOKEN` in shell, JSON, or YAML text.
 - `bearer_token`: `Bearer ...` strings and token-like JSON keys.
 - `password_assignment`: `password`, `passwd`, `pwd`, and `passphrase`
   assignments or JSON keys, including quoted values with spaces.

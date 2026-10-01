@@ -59,6 +59,10 @@ Use `docs/operator-guide.md` as the complete current source. Start with:
 - `LCM_IGNORE_SESSION_PATTERNS` and `LCM_STATELESS_SESSION_PATTERNS`: storage ownership boundaries;
 - summary/embedding provider settings only after confirming credentials, cost, and data handling; see `docs/embeddings-setup.md`, section "A host update can remove fastembed", for the embedding-dependency recovery note. Known cloud providers protect provider-bound copies automatically with the configured nonempty known pattern list while durable storage stays raw. `LCM_SENSITIVE_PATTERNS_ENABLED=true` is a separate irreversible durable-ingest opt-in. `LCM_EMBEDDING_PRIVACY_ENABLED=false` explicitly sends raw cloud copies under the `privacy:off` vector revision; warmup binds the chosen posture and later query/backfill calls fail closed on identity drift.
 
+The `api_key` pattern covers `api_key`, `api_token`, `access_token`, `secret_key`,
+and `client_secret` assignments or JSON keys, including env-style names such as
+`OPENROUTER_API_KEY` and `MY_SERVICE_ACCESS_TOKEN` in shell, JSON, or YAML text.
+
 Optional slash commands are disabled by default with `LCM_ENABLE_SLASH_COMMAND=false`. Destructive cleanup apply is separately guarded. Do not enable mutation surfaces merely to diagnose a problem.
 
 Change one tuning variable at a time, then re-check `lcm_status`, context pressure, summary health, latency, and actual answer quality.
