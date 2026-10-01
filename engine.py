@@ -673,6 +673,9 @@ class LCMEngine(
             "stop_reason": "",
             "budget_exhausted": False,
         }
+        # #671: the latest stub-first exit (tokens before/after, target, backlog rows) and this compress()'s.
+        self._last_stub_first_exit: Optional[dict[str, int]] = None
+        self._stub_first_exit_now: Optional[dict[str, int]] = None
         self._last_compression_status = "idle"
         self._last_compression_noop_reason = ""
         self._last_native_recovery_rejection = ""
@@ -4791,6 +4794,7 @@ class LCMEngine(
             "last_compression_noop_reason": self._last_compression_noop_reason,
             "last_survival_fit": dict(self._last_survival_fit) if self._last_survival_fit else None,
             "threshold_full_sweep": dict(self._last_threshold_full_sweep),
+            "last_stub_first_exit": dict(self._last_stub_first_exit) if self._last_stub_first_exit else None,
             "no_progress_hold": self._no_progress_hold_status(),
             "ingest_failure_count": self._ingest_failure_count,
             "consecutive_ingest_failures": self._consecutive_ingest_failures,

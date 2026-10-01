@@ -965,18 +965,30 @@ from summaries. They remain inspectable later through
 `lcm_describe(externalized_ref=...)` and `lcm_expand(externalized_ref=...)`.
 
 Active-replay stubbing is separately opt-in and requires ordinary large-output
-externalization. Newly ingested textual tool results above the token threshold
+externalization. Newly ingested textual tool results above the first-sight token threshold (10,000)
 are durably externalized and immediately replaced in provider-visible replay,
 including results in the protected fresh tail. Preflight adopts that replay
-change even if no leaf compaction is eligible. A second historical assembly
-pass replaces older eligible results before evaluating the assembly budget and
-respects the protected fresh tail. Tool roles, `tool_call_id` values, and
+change even if no leaf compaction is eligible. At a compaction, a second historical
+assembly pass replaces older eligible results from the aged threshold (2,000 tokens)
+before evaluating the assembly budget and respects the protected fresh tail. Tool roles, `tool_call_id` values, and
 compatible structured text block types/keys are retained; the historical pass
 does not rewrite raw SQLite/DAG lineage. Structured image/media tool results
 remain inline, preserving the provider-replay contract established by PR #226.
 Failure to durably externalize is fail-open: the provider receives the original
 inline payload. Results from `lcm_describe` and `lcm_expand` also stay inline so
 recovery does not recursively create another drilldown step.
+
+An automatic compaction whose input reached the threshold first tries these free
+cuts (#671): it assembles the summary prefix, the externalized placeholders and the
+aged-tier stubs without a model call and, when the host-measured list is at or under
+min(threshold - `LCM_LEAF_CHUNK_TOKENS`, 0.95 x threshold), returns it with no leaf,
+no condensation and no summariser call. The rows no leaf summarised stay stored and
+are recorded as raw backlog; the stop reason `stub_first_exit` is a partial stop in
+`lcm_status` (`last_stub_first_exit`, and the threshold sweep record when the sweep is
+on), the doctor and the `LCM compaction stop:` line, with the tokens before and after,
+the target and the backlog rows left. Recovery attempts, forced overflow and calls
+below the threshold never take this exit; when the cuts miss the target the
+compaction runs as before.
 
 `lcm_grep` keeps history-only behavior by default. Operators and agents may opt
 into bounded active-session payload search with

@@ -8155,6 +8155,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         "last_compression_status": full_status.get("last_compression_status", "idle"),
         "last_compression_noop_reason": full_status.get("last_compression_noop_reason", ""),
         "threshold_full_sweep": full_status.get("threshold_full_sweep"),
+        "last_stub_first_exit": full_status.get("last_stub_first_exit"),
         "no_progress_hold": full_status.get("no_progress_hold"),
         "model": full_status.get("model", ""),
         "provider": full_status.get("provider", ""),

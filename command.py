@@ -1808,6 +1808,10 @@ def _doctor_text(engine) -> str:
                             f"{survival_fit.get('unreached_budget_count', 0)}; last_reached_budget "
                             f"{survival_fit.get('last_reached_budget', 'unknown')}{rollback}")
         triage_checks.append({"check": "survival_fit", "status": "warn", "detail": survival_fit})
+    stub_first_exit = getattr(engine, "_last_stub_first_exit", None)
+    if stub_first_exit:  # #671: a partial stop; the rows no leaf summarised stay stored as backlog
+        observations.append("stub_first_exit: the last threshold compaction stopped on its free cuts without a "
+                            "model call (partial); " + " ".join(f"{k}={v}" for k, v in stub_first_exit.items()))
     inactive_process = inactive_record_notice(getattr(engine, "_hermes_home", ""))
     if inactive_process:
         issues.append("inactive_process")
