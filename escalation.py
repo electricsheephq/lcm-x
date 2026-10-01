@@ -104,15 +104,18 @@ def is_summary_route_config_error(exc: BaseException | None) -> bool:
 # #751: the provider refused the request for its size; a property of the chunk, not of the route.
 _CONTEXT_LENGTH_ERROR_TOKENS = (
     "context length", "context_length", "context window", "maximum context", "max context", "too many tokens",
-    "token limit", "prompt is too long", "input too long", "request too large",
+    "token limit", "prompt is too long", "input too long", "request too large", "context limit",
+    "maximum number of tokens",
 )
-_NOT_CONTEXT_LENGTH_TOKENS = ("rate limit", "rate_limit", "too many requests")
+_NOT_CONTEXT_LENGTH_TOKENS = ("rate limit", "rate_limit", "too many requests", "quota")
 
 
 def is_summary_context_length_error(exc: BaseException | None) -> bool:
     """#751: a summary call refused because the request does not fit the route's window. A timeout or a
     rate limit is not one."""
     if exc is None or isinstance(exc, TimeoutError):
+        return False
+    if 429 in (getattr(exc, "status_code", None), getattr(exc, "status", None)):
         return False
     message = str(exc).lower()
     if any(token in message for token in _NOT_CONTEXT_LENGTH_TOKENS):

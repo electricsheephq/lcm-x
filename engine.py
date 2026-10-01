@@ -2138,7 +2138,8 @@ class LCMEngine(
                     **({"budget": budget} if budget is not None else
                        {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt
                     verbatim_small_source=True,  # #605 F2
-                    context_length_rescue=True,  # #751: a refusal for size reaches the rescue below
+                    # #751: a refusal for size reaches the rescue below; the last attempt counts as before
+                    context_length_rescue=attempt_number < max_attempts,
                 )
                 if (level == 3 and provenance.get("context_length_error") and summary_text != serialized
                         and attempt_number < max_attempts):

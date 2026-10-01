@@ -110,7 +110,8 @@ def test_t2_a_chunk_no_attempt_fits_keeps_level_3_and_the_652_stop(tmp_path, mon
         assert engine._dag.get_session_nodes("S", limit=1000) == []
         assert engine._last_compression_noop_reason == "summary result rejected"
         assert len(engine._store.get_session_messages("S", limit=1000)) == len(view)
-        assert CIRCUIT_LINE not in caplog.text  # a refusal for size is not a route failure
+        # the first two attempts record no route failure; the last one counts as before, so the circuit opens
+        assert CIRCUIT_LINE in caplog.text and not engine._summary_route_available()
     finally:
         engine.shutdown()
 
@@ -176,6 +177,9 @@ def test_t6_without_the_flag_a_context_length_refusal_still_counts(monkeypatch):
     ("This request exceeds the model's context window", True),
     ("Rate limit reached: too many tokens per minute", False),
     ("Error code: 429 - rate_limit_exceeded", False),
+    ("prompt is too long: 210000 tokens, exceed context limit: 200000", True),
+    ("The input token count exceeds the maximum number of tokens allowed", True),
+    ("You exceeded your current quota; token limit reached", False),
     (SERVER_ERROR, False),
     ("Request timed out", False),
 ])
@@ -184,3 +188,11 @@ def test_t7_context_length_classifier(message, expected):
     assert is_summary_context_length_error(RuntimeError(message)) is expected
     assert is_summary_context_length_error(None) is False
     assert is_summary_context_length_error(TimeoutError("context length")) is False
+
+
+def test_t8_a_429_status_is_never_a_context_length_refusal():
+    class _StatusError(RuntimeError):
+        status_code = 429
+
+    assert escalation.is_summary_context_length_error(_StatusError("too many tokens in this window")) is False
+    assert escalation.is_summary_context_length_error(RuntimeError("too many tokens in this window")) is True
