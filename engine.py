@@ -739,6 +739,7 @@ class LCMEngine(
         self._pending_reset_session_id: str = ""
         self._pending_reset_conversation_id: str = ""
         self._pending_reset_frontier_store_id: int = 0
+        self._pending_reset_drops_summaries = False
         self._compression_boundary_ingest_pending = False
         self._compression_boundary_active_placeholder_digest_budget: dict[str, int] = {}
         self._compression_boundary_active_placeholder_digest_ordinals: dict[str, set[int]] = {}
@@ -2423,6 +2424,7 @@ class LCMEngine(
         self._pending_reset_session_id = ""
         self._pending_reset_conversation_id = ""
         self._pending_reset_frontier_store_id = 0
+        self._pending_reset_drops_summaries = False
 
     def _finalize_pending_reset_boundary(self, session_id: str) -> None:
         if not self._pending_reset_session_id:
@@ -2445,6 +2447,11 @@ class LCMEngine(
             self._pending_reset_session_id,
             frontier_store_id=frontier_store_id,
         )
+        if self._pending_reset_drops_summaries and int(self._last_compacted_store_id or 0) < frontier_store_id:
+            # #752: the reset deleted the summaries behind this pre-reset frontier and nothing
+            # published since covers it. Keep the reset newer than this finalize, so a later
+            # resume binds at 0 instead of skipping the rows no summary covers any more.
+            self._lifecycle.record_reset(self._pending_reset_conversation_id)
         self._clear_pending_reset_boundary()
 
     def _raw_backlog_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -4406,6 +4413,7 @@ class LCMEngine(
         self._pending_reset_session_id = self._session_id
         self._pending_reset_conversation_id = self._conversation_id
         self._pending_reset_frontier_store_id = self._last_compacted_store_id
+        self._pending_reset_drops_summaries = bool(self._session_id) and self._config.new_session_retain_depth != -1
         super().on_session_reset()
         self._lifecycle.record_reset(self._conversation_id)
         if self._session_id:
