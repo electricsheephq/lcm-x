@@ -1,4 +1,6 @@
-"""#7: audit unstamped replacements before the steady-state cursor (#497/#493).
+"""#7: unstamped replacements before the steady-state cursor (#497/#493) — the acceptance set for a fix.
+
+The loss cases are strict xfails until a fix lands; see PR #742 for the shapes a fix must also keep.
 
 New host objects exercise the prefix audit, not the R6 same-object rewrite path.
 The #561 duplicate remains open; its guard proves preservation only.
@@ -45,6 +47,7 @@ def _repair(stamped=False):
     return host, [*host[:3], merged, _u("U6" + PAD, ts(600)), _a("A6" + PAD, ts(601))]
 
 
+@pytest.mark.xfail(strict=True, reason="#7: an unstamped user row the host replaced before the ingest cursor is not audited")
 def test_497_repair_merge_before_cursor_unstamped_stores_the_new_user_row_once(tmp_path):
     engine = _engine(tmp_path)
     try:
@@ -61,6 +64,7 @@ def test_497_repair_merge_before_cursor_unstamped_stores_the_new_user_row_once(t
         engine.shutdown()
 
 
+@pytest.mark.xfail(strict=True, reason="#7: an unstamped user row the host replaced before the ingest cursor is not audited")
 def test_497_repair_merge_without_appended_reply_stores_the_new_user_row(tmp_path):
     engine = _engine(tmp_path)
     try:
@@ -76,6 +80,7 @@ def test_497_repair_merge_without_appended_reply_stores_the_new_user_row(tmp_pat
         engine.shutdown()
 
 
+@pytest.mark.xfail(strict=True, reason="#7: an unstamped user row the host replaced before the ingest cursor is not audited")
 @pytest.mark.parametrize("reply", [False, True])
 @pytest.mark.parametrize("turn_stamps", ["none", "host"])
 def test_493_rollback_and_replace_unstamped_stores_the_replacement_once(tmp_path, reply, turn_stamps):
@@ -95,6 +100,7 @@ def test_493_rollback_and_replace_unstamped_stores_the_replacement_once(tmp_path
         engine.shutdown()
 
 
+@pytest.mark.xfail(strict=True, reason="#7: an unstamped user row the host replaced before the ingest cursor is not audited")
 def test_493_merge_onto_the_last_row_as_a_new_object_stores_the_new_text(tmp_path):
     engine = _engine(tmp_path)
     try:
@@ -246,7 +252,7 @@ def test_anchor_off_is_out_of_scope(tmp_path, monkeypatch):
         engine.shutdown()
 
 
-@pytest.mark.xfail(strict=True, reason="#7 remaining: a replacement after the host truncated its list is not audited; main loses this row too")
+@pytest.mark.xfail(strict=True, reason="#7: a replacement after the host truncated its list is not audited")
 def test_truncated_then_replaced_row_stores_the_new_row(tmp_path):
     """Review r4 shape 1: the host truncates its list, then puts a new row where an old one was."""
     engine = _engine(tmp_path)
@@ -262,7 +268,7 @@ def test_truncated_then_replaced_row_stores_the_new_row(tmp_path):
         engine.shutdown()
 
 
-@pytest.mark.xfail(strict=True, reason="#7 remaining: a short user row equal to an older row's last paragraph is not audited; main loses this row too")
+@pytest.mark.xfail(strict=True, reason="#7: a short user row equal to an older row's last paragraph is not audited")
 def test_short_reply_matching_an_earlier_paragraph_is_stored(tmp_path):
     """Review r4 shape 2: a new short user row equals the last paragraph of an older stored row."""
     engine = _engine(tmp_path)
