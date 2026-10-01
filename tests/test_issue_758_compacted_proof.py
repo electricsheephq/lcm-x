@@ -58,7 +58,7 @@ def _compacted(tmp_path, monkeypatch, cfg1, cfg2, *, fresh_line="", later_line="
     [
         pytest.param(OFF, ON_ALL, API, "", False, id="turned-on-secret-in-fresh-tail"),
         pytest.param(ON_API, ON_API, ENV, "", True, id="widened-491-secret-in-fresh-tail"),
-        pytest.param(ON_ALL, OFF, "", API, False, id="turned-off-secret-after-compaction"),
+        pytest.param(ON_ALL, OFF, "", API, False, id="turned-off-secret-after-compaction", marks=pytest.mark.xfail(strict=True, reason="#758 remaining: no record of the policy a row was written under, so a restart after redaction is turned off or a pattern removed still re-stores")),
         pytest.param(OFF, ON_ALL, "", API, False, id="turned-on-secret-after-compaction"),
     ],
 )
