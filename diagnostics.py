@@ -194,13 +194,15 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
         warning_only = True
         rationale = "context pressure is an operating state, not persisted-state corruption"
     elif name == "survival_fit":
+        detail = detail if isinstance(detail, dict) else {}
         within = ("to a 0.24.x version older than v0.24.5, that plugin cannot compact stored rows that a survival fit "
                   "removed from the live context, with or without a projection, so stop Hermes, move the configured "
                   "database file (by default lcm.db, with its -wal and -shm companions) aside and keep it, then "
                   "restore the database backup taken before the first v0.24.5 install together with the plugin (rows "
                   "stored after that backup leave the LCM store and stay in the file you moved aside); a rollback of "
                   "the plugin alone to v0.24.5 or later is fine")
-        command = ("inspect the 'LCM survival fit applied' log lines and the compaction failure reason; the dropped "
+        command = ("inspect the 'LCM survival fit applied' or 'LCM survival fit could not shorten the list' log lines "
+                   "and the compaction reason; the dropped "
                    "turns stay stored verbatim (lcm_grep / lcm_load_session); nothing needs deleting. Rollback "
                    f"(#601, #603): {within}. To v0.23.3: reinstall it with LCM_NATIVE_RECOVERY=true and keep the "
                    "database file as it is — never with native recovery off, and never a backup restore (it drops "
@@ -208,7 +210,11 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
                    "back to hermes-lcm, context.engine: lcm; restore the pre-migration config.yaml) before restarting "
                    "Hermes.")
         warning_only = True
-        rationale = "a survival fit kept an over-window session alive; it points at a compaction that could not publish"
+        rationale = ("a survival fit could not shorten the list; the request still exceeds its budget"
+                     if detail.get("last_shortened") is False else
+                     "an exit fit tried to leave threshold headroom; uncovered_rows names unsummarised stored rows"
+                     if str(detail.get("last_reason") or "").startswith("exit_fit:") else
+                     "a survival fit kept an over-window session alive; it points at a compaction that could not publish")
     elif name == "cleanup_candidates":
         action = DOCTOR_ACTION_BACKUP_FIRST_CLEANUP
         command = "run `/lcm doctor clean` first; if candidates are expected junk/noise, run `/lcm backup` before `/lcm doctor clean apply`"

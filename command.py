@@ -1796,9 +1796,13 @@ def _doctor_text(engine) -> str:
                   "v0.24.5 or later is fine")
         applied = ("applied an unknown number of times (the stored count is unreadable)" if fit_count is None
                    else f"applied {fit_count} time(s)")
+        if survival_fit.get("last_shortened") is False:
+            applied = applied.replace("applied", "attempted", 1) + "; could not shorten the list on the last attempt"
         observations.append(f"survival_fit: {applied}; last reason "
                             f"{survival_fit.get('last_reason') or '(unknown)'}; projected_count "
-                            f"{'unknown' if projected is None else projected}; {within}; a rollback to v0.23.3 "
+                            f"{'unknown' if projected is None else projected}; unreached_budget_count "
+                            f"{survival_fit.get('unreached_budget_count', 0)}; last_reached_budget "
+                            f"{survival_fit.get('last_reached_budget', 'unknown')}; {within}; a rollback to v0.23.3 "
                             "keeps the database file and needs native recovery ON (see triage_guidance)")
         triage_checks.append({"check": "survival_fit", "status": "warn", "detail": survival_fit})
     inactive_process = inactive_record_notice(getattr(engine, "_hermes_home", ""))

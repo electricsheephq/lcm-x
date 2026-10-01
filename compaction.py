@@ -614,7 +614,8 @@ class CompactionMixin:
                 result = messages
             reason = self._survival_fit_reason or str(self._last_compression_status or "unknown")
             result = self._survival_fit(messages, result, current_tokens,
-                                        **self._survival_fit_args(messages, current_tokens, reason, bypass_cooldown))
+                                        **self._survival_fit_args(messages, current_tokens, reason, bypass_cooldown,
+                                                                  automatic=not force and self._last_compression_status != "error"))
             if self._no_progress_candidate and not bypass_cooldown and len(result) >= len(messages) and (
                     count_messages_tokens(result) >= count_messages_tokens(messages)):
                 self._start_no_progress_hold("no_progress")  # #651: no leaf, and neither rows nor tokens fell

@@ -97,13 +97,13 @@ def _post_compaction_turns(turns: int) -> list[dict]:
 
 
 def _seed_compacted_session(tmp_path: Path, monkeypatch) -> tuple[str, dict, int]:
-    """Run one real compaction; return (db path, LCM summary message, row count)."""
+    """Force one manual compaction to seed the scaffold; return (db path, summary, row count)."""
     monkeypatch.setattr(lcm_engine, "summarize_with_escalation", _deterministic_summary)
     database_path = str(tmp_path / "issue-255.db")
 
     engine = _open_engine(database_path)
     try:
-        active_context = engine.compress(_pre_compaction_history(), current_tokens=100000)
+        active_context = engine.compress(_pre_compaction_history(), current_tokens=100000, force=True)
         durable_rows = engine._store.get_session_count(SESSION_ID)
         summary_message = next(
             message
@@ -272,7 +272,7 @@ class TestPostCompactionInterceptionBoundary:
 
         engine = _open_engine(database_path)
         try:
-            active_context = engine.compress(_pre_compaction_history(), current_tokens=100000)
+            active_context = engine.compress(_pre_compaction_history(), current_tokens=100000, force=True)
             durable_rows = engine._store.get_session_count(SESSION_ID)
         finally:
             engine.shutdown()
@@ -302,7 +302,7 @@ class TestPostCompactionInterceptionBoundary:
 
         engine = _open_engine(database_path)
         try:
-            active_context = engine.compress(_pre_compaction_history(), current_tokens=100000)
+            active_context = engine.compress(_pre_compaction_history(), current_tokens=100000, force=True)
             durable_rows = engine._store.get_session_count(SESSION_ID)
         finally:
             engine.shutdown()

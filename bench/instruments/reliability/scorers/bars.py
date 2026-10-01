@@ -260,7 +260,10 @@ def score(cell: dict, cell_dir: Path) -> dict:
     if conflicts:
         failed["B3"] = numbers["B3"]
     fits = counted(cell, phases, "survival_fit")  # #582: a fit is a compaction miss
-    numbers["B8"] = {"survival_fit": fits}
+    exit_fits = counted(cell, phases, "exit_fit")  # diagnostic only: exit headroom does not fail B8
+    skipped = counted(cell, phases, "exit_fit_skipped")
+    numbers["B8"] = {"survival_fit": fits, **({"exit_fit": exit_fits} if exit_fits else {}),
+                     **({"exit_fit_skipped": skipped} if skipped else {})}
     if fits:
         failed["B8"] = numbers["B8"]
     if cell.get("from_ref"):  # diagnostic only: how many of those came before the candidate first published

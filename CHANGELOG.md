@@ -10,6 +10,12 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   rows an earlier summary covers no longer use it up and the group's results reach a summary; when a full page
   holds only rows the leaf excludes (covered, ignored, passive, system), the scan reads up to four pages before
   it stops, so a session that resumes above a long covered run compacts again instead of no-oping. (#621)
+- Fix: an automatic threshold compaction now fits its result below 95% of the host threshold (an exit fit), so the next
+  API call does not compact again. The exit fit drops only whole older turns between the summary prefix and the fresh
+  tail (never the summary prefix, a fresh-tail row or part of the newest turn); when no such cut reaches 95% the list
+  stays as it is (an INFO `LCM exit fit skipped` line), and a list over the survival budget gets today's fit and its
+  user warning. A routine exit fit shows the user no warning; its log line names how many dropped rows no summary covers
+  yet. A list the fit cannot shorten now logs a WARNING and shows in `/lcm doctor`. (#668, #599)
 - Fix: forced overflow recovery now counts the plain stub the final pass adds for every tool result it does not keep,
   before it keeps the tool call, so the assembled request stays inside the cap; when a call's externalized-output stub
   does not fit, the call keeps a plain stub instead of being dropped; a failed rotation-lineage write is logged at
