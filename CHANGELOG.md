@@ -6,7 +6,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
-## v0.24.9 - (unreleased; rc3) (drain: one foreground time budget, stub-first exit, exit fit, scan allowance)
+## v0.24.9 - (unreleased; rc4) (drain: one foreground time budget, stub-first exit, exit fit, scan allowance)
 
 - Fix: with semantic embeddings enabled and the provider package missing or misconfigured, `lcm_doctor` and
   `/lcm doctor` report an `embedding_provider_health` warning (provider, model, reason, fix); it also warns when
@@ -38,7 +38,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix: the 10-minute sweep hold after a sweep spent its budget before the first leaf (#608) holds only the
   conversation it was armed for, and a session reset or a profile re-bind clears it. Both holds and the 60 s boundary
   cooldown read the monotonic clock, so a wall clock set back or forward neither extends nor ends them (`lcm_status`
-  still shows a wall-clock `until`). While either hold is active and the request is at or over the survival ceiling,
+  still shows a wall-clock `until`). While the #608 hold is active and the request is at or over the survival ceiling,
   an automatic compaction runs no sweep and no summariser call: it returns the list through the survival fit (status
   `noop`, reason `held`); a manual `/compress`, forced overflow and the host's recovery attempt are unchanged. A stored
   survival-fit count that is not a number no longer makes every later count write fail: the record restarts at 1 with
@@ -118,6 +118,11 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix (rc2): `/lcm doctor` now runs the `embedding_provider_health` check; in v0.24.9-rc1 only the `lcm_doctor` tool ran it, while the docs and the check's own fix text pointed users to `/lcm doctor`. (#734)
 - Fix (rc2): with the full threshold sweep off (the default), an automatic compaction forms a leaf even when the backlog outside the fresh tail is under `leaf_chunk_tokens`, and an automatic exit fit drops only older turns a summary covers; before, the exit fit could drop uncovered turns at every compaction. (#738)
 - Fix (rc3): after a stub-first exit, the next turn keeps the tool-output stubs the agent already holds, so a cleanup-only pass never returns a larger list and no tool output is stored twice. (#772)
+- Fix (rc4): after the host refuses a compaction, or a pass stores nothing and shortens nothing (as after a failed
+  summary publication; the 10-minute no-progress hold, #651),
+  an automatic compaction at or over the survival ceiling summarises again, as in v0.24.8. In v0.24.9-rc3 it only fitted
+  the list: a rotation session could stop compacting, and an in-place hidden-backlog drain waited up to 10 minutes
+  (#802). Only the #608 sweep hold still makes that pass fit-only. (#541)
 
 ## v0.24.8 - 2026-09-30 (repairs: level 3 fragment repair, tool-output stubs that name the read-back call, rollup stop, no silent fallback on a slow load)
 

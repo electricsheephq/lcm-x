@@ -352,9 +352,9 @@ def test_g1_at_the_survival_ceiling_a_held_pass_is_not_forced_cleanup_only(tmp_p
     try:
         assert engine._no_progress_hold_blocks(ceiling) is False
         engine.compress(view, current_tokens=ceiling)
-        # #618 item 3: not cleanup-only, and no sweep either: a held pass at the ceiling only fits
-        assert summaries == [] and _leaves(engine) == 0
-        assert (engine._last_compression_status, engine._last_compression_noop_reason) == ("noop", "held")
+        # rc4: the #651 hold is exempt at the ceiling, including after cleanup-only preflight.
+        assert summaries and _leaves(engine) >= 1
+        assert engine._last_compression_status == "compacted"
     finally:
         engine.shutdown()
 
