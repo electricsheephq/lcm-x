@@ -6701,7 +6701,9 @@ class LCMEngine(
         *,
         is_recovery_tool_result: bool,
         tool_name: str = "",
+        threshold_tokens: int | None = None,
     ) -> Dict[str, Any] | None:
+        """``threshold_tokens`` overrides the first-sight threshold (#671: the aged tier at assembly)."""
         if not getattr(self._config, "large_output_active_replay_stubbing_enabled", False):
             return None
         if not getattr(self._config, "large_output_externalization_enabled", False):
@@ -6717,16 +6719,10 @@ class LCMEngine(
         normalized_content = normalize_content_value(content) or ""
         if not normalized_content or is_externalized_placeholder(normalized_content):
             return None
-        threshold = max(
-            1,
-            int(
-                getattr(
-                    self._config,
-                    "large_output_active_replay_stub_threshold_tokens",
-                    25_000,
-                )
-                or 0
-            ),
+        threshold = (
+            self._active_replay_stub_threshold_tokens()
+            if threshold_tokens is None
+            else max(1, int(threshold_tokens))
         )
         if count_tokens(normalized_content) <= threshold:
             return None
@@ -6747,6 +6743,29 @@ class LCMEngine(
             externalized["placeholder"],
         )
         return replacement
+
+    def _active_replay_stub_threshold_tokens(self) -> int:
+        """First-sight stub threshold: the live interceptor at ingest (#671)."""
+        return max(
+            1,
+            int(
+                getattr(
+                    self._config,
+                    "large_output_active_replay_stub_threshold_tokens",
+                    10_000,
+                )
+                or 0
+            ),
+        )
+
+    def _active_replay_stub_aged_threshold_tokens(self) -> int:
+        """#671 aged tier: assembly at compaction, outside the fresh tail. 0 = the first-sight
+        threshold; never above it, so an aged row is never kept whole where first sight stubs it."""
+        first_sight = self._active_replay_stub_threshold_tokens()
+        aged = int(
+            getattr(self._config, "large_output_active_replay_stub_aged_threshold_tokens", 0) or 0
+        )
+        return min(aged, first_sight) if aged > 0 else first_sight
 
     def _stub_large_tool_results_for_active_replay(
         self,
@@ -6775,11 +6794,13 @@ class LCMEngine(
         stubbed_count = 0
         tokens_saved = 0
         tool_result_names = _tool_result_names(messages)
+        aged_threshold = self._active_replay_stub_aged_threshold_tokens()
         for idx, message in enumerate(messages[:eligible_end]):
             replacement = self._maybe_stub_active_tool_result(
                 message,
                 is_recovery_tool_result=(idx in recovery_tool_result_indices),
                 tool_name=tool_result_names.get(idx, ""),
+                threshold_tokens=aged_threshold,
             )
             if replacement is None:
                 continue

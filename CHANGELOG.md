@@ -6,6 +6,11 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Change: active-replay tool-result stubbing has two tiers (#671). A new tool result is stubbed at ingest from
+  10,000 tokens (`LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS`, code default was 25,000), and at a
+  compaction a tool result outside the fresh tail is stubbed from 2,000 tokens (new
+  `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS`, `0` = the first-sight value). Both still need the
+  two opt-in flags; the stub text is unchanged; results answering `lcm_describe` / `lcm_expand` stay whole (#587).
 - Fix: the 10-minute sweep hold after a sweep spent its budget before the first leaf (#608) holds only the
   conversation it was armed for, and a session reset or a profile re-bind clears it. Both holds and the 60 s boundary
   cooldown read the monotonic clock, so a wall clock set back or forward neither extends nor ends them (`lcm_status`

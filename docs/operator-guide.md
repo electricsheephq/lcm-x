@@ -370,7 +370,8 @@ environment variables:
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `false` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS` | `12000` | Externalization threshold for normalized payload text |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `false` | Replace token-heavy textual tool results with recoverable externalized refs in active replay; current-turn ingest is immediate and historical assembly respects the protected fresh tail; requires large-output externalization |
-| `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `25000` | Token-aware threshold for active-replay tool-result stubbing |
+| `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `10000` | First-sight threshold: a new tool result over this many tokens is stubbed at ingest |
+| `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` | `2000` | Aged tier: at a compaction, a tool result outside the fresh tail is stubbed from this many tokens (`0` = the first-sight threshold; never above it) |
 | `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `false` | Rewrite already-externalized summarized tool rows to compact placeholders |
 | `LCM_CRITICAL_BUDGET_PRESSURE_RATIO` | `0.0` | Disabled at `0.0`; when set, permits critical-pressure bypasses for bounded deferred catch-up and cache-friendly follow-on condensation only |
 | `LCM_SURVIVAL_FIT` | `true` | When compaction cannot bring the returned list under the model window (a publication failure, a sweep deadline, a lock), drop the oldest whole user turns from live context until it fits; an oversized newest turn gets a bounded projection. Nothing is deleted: the rows stay stored and reachable with `lcm_grep` / `lcm_load_session`. Logs `LCM survival fit applied`, warns the user once, and `/lcm doctor` reports `survival_fit` |

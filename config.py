@@ -486,6 +486,11 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("large_output_externalization_path", "LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH", str),
     _EnvFieldSpec("large_output_active_replay_stubbing_enabled", "LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED", bool),
     _EnvFieldSpec("large_output_active_replay_stub_threshold_tokens", "LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS", int),
+    _EnvFieldSpec(
+        "large_output_active_replay_stub_aged_threshold_tokens",
+        "LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS",
+        int,
+    ),
     _EnvFieldSpec("large_output_transcript_gc_enabled", "LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED", bool),
     _EnvFieldSpec("summary_model", "LCM_SUMMARY_MODEL", str),
     _EnvFieldSpec("native_recovery", "LCM_NATIVE_RECOVERY", bool),
@@ -748,7 +753,12 @@ class LCMConfig:
     # Token-aware active-replay threshold. The character threshold above still
     # controls ordinary ingest externalization; this threshold controls when a
     # provider-visible textual tool result is replaced by its durable ref.
-    large_output_active_replay_stub_threshold_tokens: int = 25_000
+    # It applies at first sight (the live interceptor at ingest) (#671).
+    large_output_active_replay_stub_threshold_tokens: int = 10_000
+    # Aged tier (#671): at a compaction, a tool result outside the fresh tail is
+    # stubbed from this many tokens. 0 = use the first-sight threshold above; a
+    # value above the first-sight threshold is capped at it.
+    large_output_active_replay_stub_aged_threshold_tokens: int = 2_000
     # When enabled, already-externalized summarized tool-result transcript rows may
     # be rewritten to compact GC placeholders after successful leaf compaction.
     large_output_transcript_gc_enabled: bool = False
