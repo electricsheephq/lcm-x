@@ -244,11 +244,25 @@ class SurvivalFitMixin:
             return out + kept or result[-1:], count, ids, notice
 
         users = [i for i, message in enumerate(body) if isinstance(message, dict) and message.get("role") == "user"]
+        covered = None
+        if reason.startswith("exit_fit:"):  # #738: an exit fit drops only rows a summary node covers
+            droppable = body if keep_from is None else body[:max(0, keep_from - len(head))]
+            try:
+                covered = self._store_complete_node_covered([store_ids[id(m)] for m in droppable if id(m) in store_ids])
+            except Exception:  # unknown coverage drops nothing
+                logger.debug("LCM exit fit: the coverage read failed; no cut", exc_info=True)
+                covered = set()
         for index in users:
             if keep_from is not None and len(head) + index > keep_from:
                 break  # the cut would drop a protected row
             if index and not all(durable(message) for message in body[:index]):
                 break  # never omit a row that is not durably stored
+            if index and covered is not None:  # #738: every dropped row is a covered stored row or verified scaffold
+                if not all(store_ids.get(id(m)) in covered or self._is_verified_replay_scaffold_message(m)
+                           for m in body[:index]):
+                    break  # an unmapped, merged, stubbed or uncovered row stays, and so does every longer region
+                if not any(id(m) in store_ids for m in body[:index]):
+                    continue  # scaffold alone is not cut; a longer region may add covered stored rows
             if index:
                 fitted, count, ids, notice = build(index, body[index:])
                 if self._survival_measure(fitted) <= budget:
