@@ -175,7 +175,9 @@ claim that Hermes core has no persisted record of pre-compression history.
 - No required third-party runtime dependencies
 
 `tiktoken` is used if available; otherwise LCM falls back to character-based
-token estimates. `regex` is used if available to apply timeouts to message ignore
+token estimates. `/lcm status` and `/lcm doctor` show which one is active
+(`token_counter: tiktoken` or `token_counter: char_estimate`).
+`regex` is used if available to apply timeouts to message ignore
 patterns; without it, message-level regex filtering is disabled with a warning
 rather than running unbounded stdlib `re` matches.
 
