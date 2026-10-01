@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 
 from .dag import SummaryNode
 from .escalation import ForegroundBudget, ForegroundEstimates, SweepBudgetExhausted
+from .externalize import ingest_payload_writes
 from .fresh_tail import tool_group_safe_end
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
 from .message_analysis import _matched_tool_call_ids
@@ -1144,6 +1145,7 @@ class CompactionMixin:
         leading_anchor_count = self._leading_anchor_count(working_messages)
         anchor_leading_count = self._leading_anchor_count(anchor_source_messages)
         self._pending_context_anchor_messages = anchor_source_messages[anchor_leading_count:]
+        no_write = None if persist else ingest_payload_writes.set(False)  # #726: sanitizing writes no payload file
         try:
             return self._assemble_context(
                 working_messages[0] if leading_anchor_count else None,
@@ -1158,6 +1160,8 @@ class CompactionMixin:
             )
         finally:
             self._pending_context_anchor_messages = None
+            if no_write is not None:
+                ingest_payload_writes.reset(no_write)
 
     def _stub_first_exit(
         self,
@@ -1205,8 +1209,19 @@ class CompactionMixin:
             or self._committed_replay_drops(working_messages, start)[0]  # #457: a resumed prefix takes today's path
         ):
             return None
+        # #726: a write that fails in the final assembly keeps a full result; re-check the list it returns.
+        keys = [self._folded_tail_lineage_metadata_key(), self._active_replay_snapshot_metadata_key()]
+        saved = [self._store.read_metadata_json(key) for key in keys]
+        pending = list(getattr(self, "_pending_emission_candidates", None) or [])
         candidate = self._assemble_committed_compaction_context(rows, anchor_source_messages, override)
         after = self._survival_measure(candidate) + overhead
+        if after > target or (cap is not None and count_messages_tokens(candidate) > cap):
+            for key, value in zip(keys, saved):
+                self._store.write_metadata_json([key], json.dumps(value, sort_keys=True), skip_unchanged=True)
+            self._pending_emission_candidates = pending
+            logger.warning("LCM stub-first exit: the final assembly missed the target (tokens=%d, target=%d); "
+                           "taking the normal path", after, target)
+            return None
         backlog_rows = len(self._raw_backlog_messages(rows))
         self._refresh_raw_backlog_debt(rows, observed_tokens=observed_tokens)
         self._ingest_cursor = len(candidate)

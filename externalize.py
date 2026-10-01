@@ -9,6 +9,7 @@ recoverable through the LCM inspection and expansion tools.
 from __future__ import annotations
 
 import codecs
+import contextvars
 import hashlib
 import json
 import logging
@@ -1112,6 +1113,10 @@ def find_externalized_tool_result_content_for_call(
     return None
 
 
+# #671: a no-write assembly (the stub-first trial) builds ingest-payload placeholders without writing their files.
+ingest_payload_writes = contextvars.ContextVar("lcm_ingest_payload_writes", default=True)
+
+
 def externalize_ingest_payload(
     content: str,
     *,
@@ -1148,7 +1153,8 @@ def externalize_ingest_payload(
         "created_at": time.time(),
     }
     try:
-        _write_externalized_payload(path, payload)
+        if ingest_payload_writes.get():
+            _write_externalized_payload(path, payload)
     except OSError as exc:
         logger.warning("LCM ingest payload externalization skipped (non-blocking): %s", exc)
         return None

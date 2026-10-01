@@ -450,3 +450,51 @@ def test_the_exit_record_describes_only_the_latest_compaction(make_engine, summa
     run(engine, tool_view(), caplog)
     engine._reset_session_counters()  # a reset or rebind
     assert engine.get_status()["last_stub_first_exit"] is None
+
+
+def test_a_missed_trial_writes_no_ingest_payload_through_a_preserved_objective(make_engine):
+    """G1 (#726 round 3): a preserved-objective scaffold with inline media after an ordinary tool result."""
+    from pathlib import Path
+
+    from hermes_lcm.reconcile import _PRESERVED_OBJECTIVE_CONTEXT_PREFIX as prefix
+    engine = exit_engine(make_engine)
+    view = tool_view(pairs=1)
+    view.insert(4, {"role": "user", "content": prefix + "\ndata:image/png;base64," + "YWJjZGVmZ2hp" * 300})
+    files = lambda: set(Path(engine._hermes_home).rglob("*.json"))  # noqa: E731
+    working = engine._ingest_messages(view)
+    engine._compress_occurrences = None
+    before = files()
+
+    assert engine._stub_first_exit(view, working, list(working), working, count_messages_tokens(view) + 50_000) is None
+    assert sum(str(m.get("content", "")).startswith(prefix) for m in working) == 1  # the scaffold reached the trial
+    assert files() == before  # no ingest-payload file
+
+
+def test_a_final_assembly_that_misses_the_target_takes_the_normal_path(make_engine, summaries, caplog, monkeypatch):
+    """G2 (#726 round 3): the trial fits, every payload write of the final assembly fails, the survival fit is off."""
+    import hermes_lcm.externalize as externalize
+
+    engine = exit_engine(make_engine, survival_fit=False)
+    engine.context_length = 16_000
+    keys = [engine._folded_tail_lineage_metadata_key(), engine._active_replay_snapshot_metadata_key()]
+    for key, value in zip(keys, [{"version": 1, "source_store_id": 0}, {"version": 1, "digests": ["a" * 64]}]):
+        engine._store.write_metadata_json([key], json.dumps(value, sort_keys=True))
+    saved = [engine._store.read_metadata_json(key) for key in keys]
+    seen, trial = [], engine._stub_first_exit
+
+    def recorded(*args):
+        exited = trial(*args)
+        seen.append((exited, [engine._store.read_metadata_json(key) for key in keys], engine._pending_emission_candidates))
+        return exited
+
+    def refuse(*args, **kwargs):
+        raise OSError("synthetic ENOSPC")
+
+    monkeypatch.setattr(engine, "_stub_first_exit", recorded)
+    monkeypatch.setattr(externalize, "_write_externalized_payload", refuse)
+    result = run(engine, tool_view(pairs=6), caplog)
+
+    assert seen == [(None, saved, [])]  # lineage, snapshot and emissions are their pre-final values
+    assert engine._last_stub_first_exit is None and summaries
+    assert "the final assembly missed the target" in caplog.text
+    assert count_messages_tokens(result) <= engine.context_length
