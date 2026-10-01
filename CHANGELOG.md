@@ -6,17 +6,17 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
-- Fix: a threshold sweep has one time budget counted from `compress()` entry, not from after ingest (#605). No
-  summariser call or condensation pass starts unless it is expected to end, with a finalize reserve (5-20 s, the
-  p90 of recent finalize steps), by the hard bound (`LCM_FOREGROUND_HARD_SECONDS`, 120), and each call's timeout is
-  at most the time left; after the first stored leaf, a call starts only if its route's recent duration (p90 of the
-  last 8 calls, 15 s floor, 30 s cold) says it ends by the new soft target (`LCM_FOREGROUND_SOFT_SECONDS`, default 60,
-  `0` = off). The stop reason `soft_target_reached` is a partial stop in `lcm_status` and the doctor. The first leaf is
-  always tried while 15 s of usable time is left, so a stale estimate cannot starve a compaction; the pre-leaf
-  condensation (#653) now runs only while a first leaf still fits after it (its first pass against the hard bound,
-  later passes inside the soft target) instead of half the passes and half the time. One INFO line per compaction,
-  `LCM compaction stop:`, gives the reason, leaves, elapsed seconds, the seconds before, during and after the calls,
-  and the backlog left. A step already running (a store step, assembly, the fit, the host's stream read between
+- Fix: a threshold sweep has one time budget counted from `compress()` entry, not from after ingest (#605). Its
+  progress call (a condensation pass when the summary frontier is over its target, #653, else the first leaf) is
+  tried while at least 15 s of usable time is left: the hard bound (`LCM_FOREGROUND_HARD_SECONDS`, 120) less a
+  finalize reserve (5-20 s, the p90 of recent finalize steps), so a stale estimate cannot starve a compaction. After
+  a stored leaf or condensed node, a call starts only if its route's recent duration (p90 of the last 8 calls, 15 s
+  floor, 30 s cold) says it ends, with the reserve, by the hard bound and by the new soft target
+  (`LCM_FOREGROUND_SOFT_SECONDS`, default 60, `0` = off); the pre-leaf condensation no longer takes half the passes
+  and half the time. Each call's timeout is at most the usable time left. The stop reason `soft_target_reached` is a
+  partial stop in `lcm_status` and the doctor. One INFO line per compaction, `LCM compaction stop:`, gives the reason,
+  leaves, the progress call kind, elapsed seconds, the seconds before, during and after the calls, and the backlog
+  left. A step already running (a store step, assembly, the fit, the host's stream read between
   two chunks) is not interrupted, so a compaction can still end past the hard bound; the stop line measures it. The
   sweep-off, forced-overflow and below-threshold paths keep their behaviour.
 - Fix: on a host that offers `aux_stream_deadline`, each sweep summariser call runs under the earlier of the host's

@@ -7108,7 +7108,7 @@ class LCMEngine(
                 return passes, "condensation_error"
             passes += 1
             if (budget := self._sweep_budget(deadline)) is not None:
-                budget.condensed = True
+                budget.progress = budget.progress or "condensation"
             after = self._summary_frontier_tokens()
             if after >= before:
                 return passes, "condensation_no_progress"

@@ -812,16 +812,17 @@ What the main knobs do:
   invocation is bounded to 12 summary calls, persists each completed DAG pass,
   and publishes one active context at the end. It remains synchronous and does
   not enable deferred/background maintenance.
-- Its time is one budget counted from `compress()` entry (#605). No summariser
-  call or condensation pass starts unless it is expected to end, with a finalize
-  reserve (5-20 s, from recent finalize steps), before
-  `LCM_FOREGROUND_HARD_SECONDS` (`120`); each call's timeout is at most the time
-  left, and on a host that offers `aux_stream_deadline` a streamed call runs
-  under that deadline too. After the first stored leaf, a call starts only if
-  its recent duration (p90 of the route's last 8 calls, 15 s floor, 30 s before
-  any) says it ends by `LCM_FOREGROUND_SOFT_SECONDS` (`60`; `0` turns the soft
-  target off); the stop reason is then `soft_target_reached`, a partial stop. The
-  first leaf is always tried while at least 15 s of usable time is left. The
+- Its time is one budget counted from `compress()` entry (#605). The progress
+  call (a condensation pass when the summary frontier is over its target, else
+  the first leaf) is tried while at least 15 s of usable time is left before
+  `LCM_FOREGROUND_HARD_SECONDS` (`120`) less a finalize reserve (5-20 s, from
+  recent finalize steps). After a stored leaf or condensed node, a call starts
+  only if its recent duration (p90 of the route's last 8 calls, 15 s floor, 30 s
+  before any) says it ends, with the reserve, by the hard bound and by
+  `LCM_FOREGROUND_SOFT_SECONDS` (`60`; `0` turns the soft target off); the stop
+  reason is then `soft_target_reached`, a partial stop. Each call's timeout is at
+  most the usable time left, and on a host that offers `aux_stream_deadline` a
+  streamed call runs under that deadline too. The
   plugin cannot interrupt a step that is already running (a store step, the
   host's stream read between two chunks, assembly, the fit), so a compaction can
   still end past the hard bound; the INFO line `LCM compaction stop:` gives the

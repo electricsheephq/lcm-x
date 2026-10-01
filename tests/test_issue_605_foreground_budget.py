@@ -26,7 +26,7 @@ from hermes_lcm.engine import LCMEngine
 
 PAD = " alpha beta gamma delta" * 30
 SUMMARY = "Earlier turns.\nExpand for details about: turns"
-STOP_LINE = re.compile(r"LCM compaction stop: reason=(\S+) leaves=(\d+) elapsed=([\d.]+)s pre=([\d.]+)s "
+STOP_LINE = re.compile(r"LCM compaction stop: reason=(\S+) leaves=(\d+) progress=\S+ elapsed=([\d.]+)s pre=([\d.]+)s "
                        r"calls=([\d.]+)s finalize=([\d.]+)s backlog_tokens=(\d+)")
 
 
@@ -126,9 +126,9 @@ def _leaves(engine) -> list:
     return [node for node in engine._dag.get_session_nodes("S", limit=100_000) if node.depth == 0]
 
 
-def _depth_0_nodes(engine, count: int) -> None:
+def _depth_0_nodes(engine, count: int, pad: str = "") -> None:
     for index in range(count):
-        engine._dag.add_node(SummaryNode(session_id="S", depth=0, summary=f"group {index}", token_count=1000,
+        engine._dag.add_node(SummaryNode(session_id="S", depth=0, summary=f"group {index}{pad}", token_count=1000,
                                          source_token_count=2000, source_ids=[], source_type="messages",
                                          created_at=float(index + 1)))
 
@@ -180,7 +180,12 @@ def test_soft_zero_keeps_the_hard_admission_only(tmp_path, monkeypatch, clock, c
 
 # -- Astra counterexample (a): pre-leaf condensation leaves the first leaf inside the soft target -----------------
 
-def test_a_oversized_frontier_condenses_at_0_only_and_the_first_leaf_ends_by_60(tmp_path, monkeypatch, clock, caplog):
+def test_a_oversized_frontier_ends_by_60_and_no_leaf_starts_past_the_soft_target(
+        tmp_path, monkeypatch, clock, caplog):
+    """Updated for addendum r2.1: the over-target condensation is the progress call; after it every call needs
+    the soft target. With 29 s calls a second condensation fits (+29..+58); a third or the first leaf would end
+    near +87, so the compaction stops at +58 with no leaf. (r2 asserted one condensation and a leaf ending by +58;
+    the r1 half-budget split admitted condensations at +0 and +29 and a first leaf ending at +87.)"""
     engine = _engine(tmp_path)
     for _ in range(8):  # 29 s walls (30 s would sit on the 60 s boundary with the real clock's slack)
         engine._foreground_estimates.record_call("", 29.0)
@@ -189,13 +194,99 @@ def test_a_oversized_frontier_condenses_at_0_only_and_the_first_leaf_ends_by_60(
     try:
         _compress(engine, _view(), caplog)
         telemetry = engine.get_status()["threshold_full_sweep"]
-        assert telemetry["pre_leaf_condensation_passes"] == 1
+        assert telemetry["pre_leaf_condensation_passes"] == 2
         assert telemetry["pre_leaf_condensation_stop_reason"] == "soft_target_reached"
-        # At +29 a second condensation would leave the first leaf ending at +87: refused. Without the #605 rule
-        # the half-budget split admitted condensations at +0 and +29, and the first leaf ended at +87.
-        assert [round(started) for _model, _timeout, started in provider.calls] == [0, 29]  # condensation, leaf
-        assert telemetry["leaf_passes"] == 1 and clock.offset == pytest.approx(58.0)
+        assert [round(started) for _model, _timeout, started in provider.calls] == [0, 29]  # two condensations
+        assert telemetry["leaf_passes"] == 0 and clock.offset == pytest.approx(58.0)
         assert telemetry["stop_reason"] == "soft_target_reached"
+    finally:
+        engine.shutdown()
+
+
+# -- addendum r2.1: an over-target condensation is the progress call ---------------------------------------------
+
+def _condensations(engine) -> list:
+    return [node for node in engine._dag.get_session_nodes("S", limit=100_000) if node.depth > 0]
+
+
+def test_r21_a_31s_estimates_and_3s_pre_work_condense_once_and_refuse_the_leaf(tmp_path, monkeypatch, clock, caplog):
+    engine = _engine(tmp_path)
+    for _ in range(8):
+        engine._foreground_estimates.record_call("", 31.0)
+    provider = _provider(monkeypatch, clock, default=31.0)
+    _advance_on(monkeypatch, engine, "_prepare_retained_user_anchor", clock, 3.0)
+    _depth_0_nodes(engine, 6)
+    try:
+        _compress(engine, _view(), caplog)
+        telemetry = engine.get_status()["threshold_full_sweep"]
+        assert [round(started) for _model, _timeout, started in provider.calls] == [3]  # the condensation
+        assert len(_condensations(engine)) == 1 and _leaves(engine) == [n for n in _leaves(engine) if n.summary
+                                                                          .startswith("group")]  # no new leaf
+        assert telemetry["leaf_passes"] == 0 and telemetry["stop_reason"] == "soft_target_reached"
+        assert not any("deterministic truncation" in node.summary
+                       for node in engine._dag.get_session_nodes("S", limit=100_000))
+        assert "progress=condensation" in caplog.text
+    finally:
+        engine.shutdown()
+
+
+def test_r21_b_15s_estimates_condense_then_store_a_leaf_by_60(tmp_path, monkeypatch, clock, caplog):
+    engine = _engine(tmp_path)
+    provider = _provider(monkeypatch, clock, default=14.0)  # the estimate is the 15 s floor
+    for _ in range(8):
+        engine._foreground_estimates.record_call("", 14.0)
+    _depth_0_nodes(engine, 2)  # one condensation brings the frontier under its target
+    try:
+        _compress(engine, _view(), caplog)
+        telemetry = engine.get_status()["threshold_full_sweep"]
+        assert telemetry["pre_leaf_condensation_passes"] == 1 and len(_condensations(engine)) == 1
+        assert telemetry["leaf_passes"] >= 1
+        assert all(started + 14.0 <= 60.0 for _model, _timeout, started in provider.calls)
+        assert telemetry["stop_reason"] == "soft_target_reached"
+    finally:
+        engine.shutdown()
+
+
+def test_r21_c_a_frontier_under_its_target_keeps_r2(tmp_path, monkeypatch, clock, caplog):
+    engine = _engine(tmp_path)
+    provider = _provider(monkeypatch, clock, default=29.0)
+    for index in range(3):  # 390 tokens: at or below the 400 token target
+        engine._dag.add_node(SummaryNode(session_id="S", depth=0, summary=f"group {index}", token_count=130,
+                                         source_token_count=2000, source_ids=[], source_type="messages",
+                                         created_at=float(index + 1)))
+    try:
+        _compress(engine, _view(), caplog)
+        telemetry = engine.get_status()["threshold_full_sweep"]
+        assert telemetry.get("pre_leaf_condensation_passes", 0) == 0 and _condensations(engine) == []
+        assert [round(started) for _model, _timeout, started in provider.calls] == [0, 29]
+        assert telemetry["leaf_passes"] == 2 and telemetry["stop_reason"] == "soft_target_reached"
+        assert "progress=leaf" in caplog.text
+    finally:
+        engine.shutdown()
+
+
+def test_r21_d_a_failed_condensation_leaves_rule_1_to_the_first_leaf(tmp_path, monkeypatch, clock, caplog):
+    engine = _engine(tmp_path)
+    provider = _provider(monkeypatch, clock, default=30.0)
+    real = provider.__call__
+
+    def condensation_rejected(prompt, max_tokens, model="", timeout=None, reasoning_effort=""):
+        if "user turn" not in prompt:  # a condensation: 20 s, then a result longer than its source
+            provider.calls.append((model, timeout, clock.offset))
+            clock.offset += 20.0
+            return prompt * 3
+        return real(prompt, max_tokens, model=model, timeout=timeout, reasoning_effort=reasoning_effort)
+
+    monkeypatch.setattr(escalation, "_invoke_summary_llm", condensation_rejected)
+    _depth_0_nodes(engine, 6, pad=PAD * 4)  # level 3 would truncate: the condensation writes nothing
+    try:
+        _compress(engine, _view(), caplog)
+        telemetry = engine.get_status()["threshold_full_sweep"]
+        assert telemetry["pre_leaf_condensation_stop_reason"] == "summary_result_rejected"
+        assert _condensations(engine) == []
+        # Level 1 and level 2 were rejected by +40; under rule 3 a 30 s leaf would end at +70, past the target.
+        assert [round(started) for _model, _timeout, started in provider.calls] == [0, 20, 40]
+        assert telemetry["leaf_passes"] == 1 and len(_leaves(engine)) == 7
     finally:
         engine.shutdown()
 

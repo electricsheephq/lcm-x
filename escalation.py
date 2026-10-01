@@ -152,15 +152,15 @@ class ForegroundBudget:
     """#605: one clock per foreground compress(), started at its entry.
 
     It decides when a summariser call or condensation pass may START and the timeout it gets; it cannot
-    interrupt a step already running. ``pre_leaf`` marks the pre-leaf condensation, ``leaf_stored`` the
-    first stored leaf of this compaction, ``condensed`` its first stored pre-leaf condensation; ``slot_taken`` its
-    one spend-guard slot."""
+    interrupt a step already running. ``progress`` names the first stored leaf or condensed node of this
+    compaction ("leaf" or "condensation"; empty before it); ``slot_taken`` its one spend-guard slot."""
 
     def __init__(self, *, soft: float, hard: float, configured_timeout: float, estimates: ForegroundEstimates):
         self.t0 = time.monotonic()
         self.soft, self.hard, self.configured_timeout, self.estimates = soft, hard, configured_timeout, estimates
         self.reserve = estimates.finalize_reserve()
-        self.pre_leaf = self.condensed = self.leaf_stored = self.slot_taken = self.sweep_active = False
+        self.slot_taken = self.sweep_active = False
+        self.progress = ""
         self.leaves, self.first_call_started, self.last_call_ended = 0, None, None
 
     @property
@@ -174,14 +174,7 @@ class ForegroundBudget:
         """Raise SweepBudgetExhausted unless an attempt on ``route_key`` may start now; return the time left."""
         now = time.monotonic()
         estimate, usable_left = self.estimate(route_key), self.usable_deadline - now
-        if self.pre_leaf:  # condensation before the first leaf: a first leaf must still fit after it
-            if 2 * estimate > usable_left:
-                raise SweepBudgetExhausted()
-            # The first pass is bounded by hard - reserve, like the first leaf, so an oversized prefix still
-            # shrinks while two calls do not fit the soft target (#653); later passes need the soft target.
-            if self.condensed and self.soft > 0 and now + 2 * estimate > self.t0 + self.soft:
-                raise SweepBudgetExhausted("foreground soft target reached", reason="soft_target_reached")
-        elif not self.leaf_stored:  # the first leaf is never starved by an estimate
+        if not self.progress:  # the progress call (an over-target condensation, else the first leaf): no estimate
             if usable_left < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
                 raise SweepBudgetExhausted()
         elif estimate > usable_left:

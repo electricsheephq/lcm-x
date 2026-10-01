@@ -660,9 +660,9 @@ class CompactionMixin:
             reason = str(self._last_compression_status or "unknown")
             if budget.sweep_active and reason != "error":
                 reason = str(self._last_threshold_full_sweep.get("stop_reason") or reason)
-            logger.info("LCM compaction stop: reason=%s leaves=%d elapsed=%.1fs pre=%.1fs calls=%.1fs "
-                        "finalize=%.1fs backlog_tokens=%d", reason, budget.leaves, elapsed, pre, calls, finalize,
-                        self._raw_backlog_tokens(result) if isinstance(result, list) else 0)
+            logger.info("LCM compaction stop: reason=%s leaves=%d progress=%s elapsed=%.1fs pre=%.1fs calls=%.1fs "
+                        "finalize=%.1fs backlog_tokens=%d", reason, budget.leaves, budget.progress or "none", elapsed,
+                        pre, calls, finalize, self._raw_backlog_tokens(result) if isinstance(result, list) else 0)
         except Exception:
             logger.debug("LCM compaction stop line failed", exc_info=True)
 
@@ -1512,15 +1512,14 @@ class CompactionMixin:
                 )
 
         # #653: a sweep stopped by its budget never reaches the post-drain condensation, so an oversized
-        # summary prefix is condensed first. #605: each pass only while a first leaf still fits after it (inside
-        # the soft target when one is set), and never the pass the first leaf needs; the leaves use the rest.
+        # summary prefix is condensed first. #605: its first pass is the compaction's progress call (admitted while
+        # usable time is left); later passes and the leaves need the soft target; the leaves use the passes left.
         pre_leaf_condensation_passes, pre_leaf_condensation_reason = 0, ""
         if (
             threshold_full_sweep_active
             and sweep_summary_prefix_before > sweep_target_tokens
             and self._summary_route_available()
         ):
-            budget.pre_leaf = True
             try:
                 pre_leaf_condensation_passes, pre_leaf_condensation_reason = (
                     self._run_threshold_sweep_condensation(
@@ -1542,8 +1541,6 @@ class CompactionMixin:
                     leaf_passes=0,
                     condensation_passes=int(getattr(exc, "lcm_completed_condensation_passes", 0)),
                 )
-            finally:
-                budget.pre_leaf = False
             max_leaf_passes -= pre_leaf_condensation_passes
         if threshold_full_sweep_active:
             self._last_threshold_full_sweep.update(
@@ -1557,7 +1554,7 @@ class CompactionMixin:
             if threshold_full_sweep_active and time.monotonic() >= sweep_deadline:
                 sweep_stop_reason = "time_budget_exhausted"
                 break
-            if threshold_full_sweep_active and budget.leaf_stored:
+            if threshold_full_sweep_active and budget.progress:
                 try:  # #605: no pass work for a later leaf whose call could not start
                     budget.admit(self._primary_summary_route())
                 except SweepBudgetExhausted as exc:
@@ -2087,7 +2084,7 @@ class CompactionMixin:
             working_messages = working_messages[:leading_anchor_count] + remaining_messages
             pressure_messages = pressure_messages[:leading_anchor_count] + pressure_remaining_messages
             leaf_compacted_this_turn = True
-            budget.leaf_stored, budget.leaves = True, budget.leaves + 1
+            budget.progress, budget.leaves = budget.progress or "leaf", budget.leaves + 1
             self._sweep_budget_hold_until = 0.0  # #608: a stored leaf ends the hold
             self._no_progress_hold, self._no_progress_candidate = None, False  # #651: hidden-only leaves too
             leaf_passes += 1
