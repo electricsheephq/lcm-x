@@ -1594,7 +1594,7 @@ class CompactionMixin:
                 pre_leaf_condensation_stop_reason=pre_leaf_condensation_reason,
             )
 
-        no_call_only = False
+        no_call_only, refused_input = False, None
         while leaf_passes < max_leaf_passes:
             if threshold_full_sweep_active and time.monotonic() >= sweep_deadline:
                 sweep_stop_reason = "time_budget_exhausted"
@@ -1611,6 +1611,9 @@ class CompactionMixin:
             # #628: no level 3 leaf while every route is refused; a source stored whole with no call (#605 F2)
             # needs no route, so the stop is decided at the selected source.
             no_call_only = route_stop and not adopt_before_stop
+            # review of #723: the input of refused passes since the last stored leaf, returned if none stores one
+            refused_input = (refused_input or (working_messages, pressure_messages,
+                                               dropped_replayed_scaffold_messages)) if route_stop else None
             fresh_tail_start = self._fresh_tail_start(pressure_messages)
 
             # Keep only a real system prompt anchored. Gateway sessions may
@@ -1678,6 +1681,9 @@ class CompactionMixin:
                     estimated_active_tokens = max(0, estimated_active_tokens - resumed_tokens + summary_tokens)
                 drops.update(resumed)
             if adopt_before_stop and not resumed_prefix:  # #640: nothing adopted, so the #628 stop applies now
+                if fresh_tail_start <= leading_anchor_count:  # a full tail stops here, as before the no-call source
+                    sweep_stop_reason = "summary_route_unavailable"
+                    break
                 no_call_only, adopt_before_stop = True, False
             if drops:
                 publication_excluded_store_ids.extend(
@@ -2131,7 +2137,7 @@ class CompactionMixin:
             pressure_remaining_messages = pressure_messages[leading_anchor_count + selected_raw_len:]
             working_messages = working_messages[:leading_anchor_count] + remaining_messages
             pressure_messages = pressure_messages[:leading_anchor_count] + pressure_remaining_messages
-            leaf_compacted_this_turn, no_call_only = True, False
+            leaf_compacted_this_turn, no_call_only, refused_input = True, False, None
             budget.progress, budget.leaves = budget.progress or "leaf", budget.leaves + 1
             self._sweep_budget_hold_until = 0.0  # #608: a stored leaf ends the hold
             self._no_progress_hold, self._no_progress_candidate = None, False  # #651: hidden-only leaves too
@@ -2209,6 +2215,8 @@ class CompactionMixin:
 
         if no_call_only:  # #628: this pass stored no leaf while every route is refused
             sweep_stop_reason, sweep_raw_drained = "summary_route_unavailable", False
+            # review of #723: and returns the list it started with (no scaffold or ignored-backlog edit of its own)
+            working_messages, pressure_messages, dropped_replayed_scaffold_messages = refused_input
         if (
             threshold_full_sweep_active
             and not sweep_raw_drained

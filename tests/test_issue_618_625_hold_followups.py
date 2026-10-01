@@ -508,3 +508,74 @@ def test_condensation_with_every_route_refused_passes_only_a_no_call_group(tmp_p
             assert engine._last_condensation_suppressed_reason == "summary_route_unavailable"
     finally:
         engine.shutdown()
+
+
+# -- review of #723: a refused-route pass that stores nothing returns the list it started with ------------------
+
+def _task_list_view(turns: int = 12) -> list[dict]:
+    """A leading preserved-task-list row (scaffold, not ingested) ahead of raw backlog, as in the reviewer's case."""
+    view = _view(turns, pad=" alpha")
+    task_list = {"role": "user", "content": "[Your active task list was preserved across context compression]\n"
+                                             "- [>] 1. keep the task list (in_progress)"}
+    return [view[0], task_list, *view[1:]]
+
+
+@pytest.mark.parametrize("sweep", [True, False], ids=["sweep-on", "sweep-off"])
+def test_a_refused_pass_that_stores_nothing_returns_its_input(tmp_path, monkeypatch, sweep):
+    engine = _engine(tmp_path, threshold_full_sweep_enabled=sweep, leaf_chunk_tokens=100, l3_truncate_tokens=2)
+    provider = _Calls()
+    monkeypatch.setattr(escalation, "_call_llm_for_summary", provider)
+    view = _task_list_view()
+    original = [dict(message) for message in view]
+    try:
+        _open_circuit(engine)
+        engine.ingest(view)
+        # force: a manual call has no exit fit, so the pass's own output is what returns
+        out = engine.compress(view, current_tokens=engine.threshold_tokens + 1, force=True)
+        assert out == original  # the same rows in the same order: the task-list row is kept
+        assert provider.calls == [] and _nodes(engine) == []
+        assert engine._last_compression_status == "noop"
+        assert engine._last_compression_noop_reason == "summary route unavailable"
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("sweep", [True, False], ids=["sweep-on", "sweep-off"])
+def test_a_refused_pass_still_stores_a_small_oldest_source_whole(tmp_path, monkeypatch, sweep):
+    engine = _engine(tmp_path, threshold_full_sweep_enabled=sweep, leaf_chunk_tokens=100)
+    provider = _Calls()
+    monkeypatch.setattr(escalation, "_call_llm_for_summary", provider)
+    view = _task_list_view()
+    try:
+        _open_circuit(engine)
+        engine.ingest(view)
+        engine.compress(view, current_tokens=engine.threshold_tokens + 1)
+        leaves = _nodes(engine, 0)
+        assert leaves and provider.calls == []
+        assert all("user turn alpha" in leaf.summary for leaf in leaves)  # #605 F2: the source text, stored whole
+    finally:
+        engine.shutdown()
+
+
+def test_a_full_tail_with_nothing_adopted_stops_before_the_scan(tmp_path, monkeypatch):
+    engine = _engine(tmp_path, leaf_chunk_tokens=100, l3_truncate_tokens=2, fresh_tail_count=100,
+                     fresh_tail_pressure_yield_enabled=True, fresh_tail_pressure_yield_min_observations=1)
+    provider = _Calls()
+    monkeypatch.setattr(escalation, "_call_llm_for_summary", provider)
+    view = _view(12, pad=" alpha")
+    scans = []
+    real_scan = engine._store_complete_backlog
+    monkeypatch.setattr(engine, "_store_complete_backlog", lambda *args: scans.append(args) or real_scan(*args))
+    try:
+        _open_circuit(engine)
+        engine.ingest(view)
+        assert engine._fresh_tail_start(view) <= engine._leading_anchor_count(view)
+        streak = engine._pressure_yield_blocked_streak
+        out = engine.compress(view, current_tokens=engine.threshold_tokens + 1, force=True)
+        assert out == view
+        assert scans == [] and engine._pressure_yield_blocked_streak == streak
+        assert provider.calls == [] and _nodes(engine) == []
+        assert engine._last_compression_status == "noop"
+        assert engine._last_compression_noop_reason == "summary route unavailable"
+    finally:
+        engine.shutdown()
