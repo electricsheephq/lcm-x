@@ -566,8 +566,8 @@ class LCMEngine(
         self._pressure_yield_preflight_candidate: bool = False
         # Final verdict of the current outermost invocation, applied at scope
         # exit: "blocked" keeps the streak (the invocation counted a genuine
-        # tail blockage), "neutral" leaves it untouched (the invocation says
-        # nothing about the pressured session — LCM-bypassed traffic), and
+        # tail blockage), "neutral" leaves it untouched (LCM-bypassed traffic,
+        # a host-pressured preflight, or a #651 no-progress hold return), and
         # "clear"/None resets it (the invocation was not blocked by fresh-tail
         # eligibility). Last writer wins within an invocation, so an early
         # blocked observation is overridden when the same invocation later
@@ -2510,11 +2510,11 @@ class LCMEngine(
         Two cross-invocation effects happen at exit:
 
         - Streak verdict (outermost, non-exception exits only): an invocation
-          whose final verdict is not "blocked" resets the sustained-pressure
-          streak, so the streak counts strictly consecutive tail-blocked
-          invocations. "neutral" (LCM-bypassed traffic) leaves the streak
-          untouched, and an exception is not an observation in either
-          direction.
+          whose final verdict is "clear" or None resets the sustained-pressure
+          streak. "blocked" counts tail blockage; "neutral" (LCM-bypassed
+          traffic, a host-pressured preflight, or a #651 no-progress hold
+          return) leaves it untouched. An exception is not an observation
+          in either direction.
         - Reset authority: if a session reset ran inside this scope (the reset
           epoch advanced), the exit does NOT restore its saved pre-reset
           state; the reset's cleared state wins after every enclosing scope
@@ -2563,6 +2563,9 @@ class LCMEngine(
         not happening, so the streak starts over. Also settles the invocation
         verdict as clear so a stale earlier blocked mark cannot outlive the
         relief at scope exit.
+        Preflight relief requires both the engine estimate and the host's
+        last prompt to be under threshold; host-pressured preflights and
+        #651 no-progress hold returns instead leave a neutral verdict.
         """
         self._pressure_yield_blocked_streak = 0
         self._pressure_yield_invocation_verdict = "clear"

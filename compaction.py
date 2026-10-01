@@ -128,8 +128,13 @@ class CompactionMixin:
             return self.threshold_tokens > 0 and rough >= self.threshold_tokens
         rough = count_messages_tokens(messages)
         self._last_gate_tokens = rough
-        if self.threshold_tokens > 0 and rough < self.threshold_tokens:
+        host_pressure = max(rough, int(self.last_prompt_tokens or 0))
+        if self.threshold_tokens > 0 and host_pressure < self.threshold_tokens:
             self._note_fresh_tail_pressure_relieved()
+        elif self.threshold_tokens > 0 and rough < self.threshold_tokens:
+            # The host reported pressure that the estimate cannot see; this
+            # preflight is no evidence of relief and must not reset the streak.
+            self._pressure_yield_invocation_verdict = "neutral"
         pre_ingest_placeholder_ambiguous_noop = False
         pre_ingest_noop_reason = ""
         pre_ingest_placeholder_cleanup_requested = False
@@ -152,7 +157,7 @@ class CompactionMixin:
             eligible, reason = self._leaf_compaction_candidate_status(
                 messages,
                 allow_partial_leaf=self._config.threshold_full_sweep_enabled,
-                observed_tokens=rough,
+                observed_tokens=host_pressure,
             )
             pre_ingest_placeholder_cleanup_requested = bool(
                 not eligible and self._pressure_yield_tail_token_limit > 0
@@ -221,6 +226,8 @@ class CompactionMixin:
                 and max(rough, replay_rough) >= self.threshold_tokens
                 and self._sweep_budget_hold_applies(max(rough, replay_rough, self.last_prompt_tokens or 0))
             ):
+                if self._pressure_yield_invocation_verdict is None and self._no_progress_hold_active():
+                    self._pressure_yield_invocation_verdict = "neutral"
                 return False
             if (
                 self._config.native_recovery
@@ -246,7 +253,7 @@ class CompactionMixin:
                     and self.threshold_tokens > 0
                     and replay_rough >= self.threshold_tokens
                 ),
-                observed_tokens=replay_rough,
+                observed_tokens=max(replay_rough, host_pressure),
             )
             if eligible:
                 if self.threshold_tokens > 0 and replay_rough >= self.threshold_tokens:
@@ -295,6 +302,8 @@ class CompactionMixin:
             return self._mark_preflight_compression_requested()
         if self.threshold_tokens > 0 and rough >= self.threshold_tokens:
             if self._sweep_budget_hold_applies(max(rough, self.last_prompt_tokens or 0)):
+                if self._pressure_yield_invocation_verdict is None and self._no_progress_hold_active():
+                    self._pressure_yield_invocation_verdict = "neutral"
                 return False
             if self._config.native_recovery:
                 return self._mark_preflight_compression_requested(
@@ -312,7 +321,7 @@ class CompactionMixin:
             eligible, reason = self._leaf_compaction_candidate_status(
                 messages,
                 allow_partial_leaf=self._config.threshold_full_sweep_enabled,
-                observed_tokens=rough,
+                observed_tokens=host_pressure,
             )
             if eligible:
                 return self._mark_preflight_compression_requested(
