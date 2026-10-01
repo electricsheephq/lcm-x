@@ -294,6 +294,7 @@ def _scenario(engine, tool, ctx, *, patterns, posture):
         assert inspected["read_only"] is True and inspected["session_id"] == "gauntlet-c" and inspected["messages"]["total"] == inspected["messages"]["fresh_tail"]["returned"] == 10
     elif tool == "lcm_doctor":
         value = _payload(engine, tool, {})
+        assert next(c for c in value["checks"] if c["check"] == "inactive_process")["status"] == "pass"
         # #672: the embedding check warns when the configured provider cannot run in this
         # process; the local posture configures fastembed, an optional dependency.
         embedding_ok = posture != "local" or importlib.util.find_spec("fastembed") is not None

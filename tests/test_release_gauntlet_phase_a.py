@@ -139,6 +139,7 @@ def test_dev_posture_covers_every_tool_despite_disabled_tools_env(tmp_path):
     assert "Missing matrix rows: `none`" in receipt
     assert "Unexpected scenario rows: `none`" in receipt
     assert receipt.count("| local | `lcm_") == 15
+    assert "| local | `lcm_doctor` | PASS |" in receipt
     assert "| cloud-default | `lcm_recall` | SKIP | SKIP: VOYAGE_API_KEY is absent |" in receipt
     for battery in (
         "planted-secret",
