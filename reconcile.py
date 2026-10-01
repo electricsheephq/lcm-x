@@ -1227,15 +1227,6 @@ class ReconcileMixin:
             digest,
         )
 
-    def _remember_native_recovery_replay_snapshot(
-        self,
-        messages: List[Dict[str, Any]],
-    ) -> None:
-        self._remember_replay_snapshot(
-            _NATIVE_RECOVERY_REPLAY_METADATA_PREFIX,
-            self._native_recovery_replay_snapshot_digest(messages),
-        )
-
     # -- Session-end full-history proof (consumed ONLY by current-session
     #    full-history session-end ingest) --
 

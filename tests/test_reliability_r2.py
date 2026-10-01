@@ -377,7 +377,7 @@ def full_set(transport=None, **over):
 
 def test_ci_gate_fails_on_error_and_on_untracked_g_rel_1_fail():
     rows = full_set(**{"crash-after-rotation/rotation": {"verdict": "FAIL", "targets": [519, 549]},
-                       "native-long-prefix/in-place": {"verdict": "FAIL"},
+                       "multi-session-one-process/in-place": {"verdict": "FAIL"},
                        "baseline/in-place/acp": {"verdict": "INCONCLUSIVE"}})
     assert ci.gate(rows, {549}) == []  # an open targeted issue, a cell outside G-REL-1, a non-FAIL
     assert len(ci.gate(rows, {1})) == 1

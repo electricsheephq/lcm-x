@@ -4,7 +4,7 @@ runs the summariser; the cooldown handoff no longer makes it cleanup-only.
 The preflight is the real one: a boundary cooldown is active and the replay diff requests an ingest cleanup, so it
 sets ``_preflight_cleanup_only_due_to_boundary_cooldown``. Only the cleanup verdict and the replay list the
 preflight sees are stubbed; compress() then runs on the real store. Forced overflow, an ordinary automatic call
-during the cooldown and the native-recovery handoff (kept by decision, #463/#464) are pinned unchanged."""
+during the cooldown are pinned unchanged."""
 
 from __future__ import annotations
 
@@ -114,28 +114,5 @@ def test_forced_overflow_after_a_cooldown_preflight_is_unchanged(tmp_path, monke
         assert engine._should_force_overflow_recovery(observed_tokens=150_000)
         engine.compress(view, current_tokens=150_000)
         assert provider and _nodes(engine) and engine._last_compression_status == "compacted"
-    finally:
-        engine.shutdown()
-
-
-def test_the_native_recovery_handoff_is_kept_by_a_recovery_call(tmp_path, monkeypatch, provider):
-    """Decision on #684: native recovery keeps ownership of a below-threshold list; bypass_cooldown does not
-    clear ``_native_recovery_preflight_cleanup_only``."""
-    engine = _engine(tmp_path, native_recovery=True, context_threshold=0.5)
-    view = _view()
-    try:
-        engine._last_boundary_skip_time = time.monotonic()
-        with monkeypatch.context() as patch:
-            real_ingest = engine._ingest_messages
-            patch.setattr(engine, "_replay_diff_requests_ingest_cleanup", lambda original, replay: True)
-            patch.setattr(engine, "_ingest_messages", lambda messages: [
-                *real_ingest(messages)[:-1], {**messages[-1], "_replay_cleanup": True}])
-            engine.should_compress_preflight(view)
-        assert engine._native_recovery_preflight_cleanup_only is True
-        assert engine._preflight_cleanup_only_due_to_boundary_cooldown is True
-        host_tokens = engine.threshold_tokens - 1
-        engine.compress(view, current_tokens=host_tokens, bypass_cooldown=True)
-        assert provider == [] and _nodes(engine) == []
-        assert engine._last_compression_status == "sanitized"
     finally:
         engine.shutdown()

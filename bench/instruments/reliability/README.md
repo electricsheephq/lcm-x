@@ -117,9 +117,9 @@ publication; the next child compaction must commit. `publication-failure/rotatio
 rotation-child publication: a data cell (no target, `ci.NON_GATE`) for the degraded mode where no child compaction can
 ever publish, a product question outside stabilization.
 
-Native cells: `native-short-prefix/*` are rejected before the host summary call (`prefix_too_short`) and are
-data; `native-long-prefix/*` (default tuning, 1M window) run the host ContextCompressor summary (stubbed aux
-LLM, so no slow-summary timeouts) and LCM's post-summary checks; every rejection reason is recorded.
+Native cells: native recovery was removed (#777), so the native-only cells (`native-short-prefix/*`,
+`native-long-prefix/*`) were retired with it. `native-on-off/*` remain: an older lcm-x runs with native recovery ON,
+then the candidate (which ignores the key) takes over the same store.
 
 Verdicts: PASS, FAIL (failed bars with numbers), INCONCLUSIVE (no bar fails, one could not decide), ERROR (harness or host failure; never a PASS),
 UNSUPPORTED (with the reason). A cell must prove its scenario ran or it is UNSUPPORTED, never PASS: every
