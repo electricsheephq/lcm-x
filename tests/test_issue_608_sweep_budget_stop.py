@@ -521,12 +521,14 @@ def test_rejected_request_after_a_no_leaf_stop_comes_back_shorter(tmp_path, summ
         engine.shutdown()
 
 
-def test_same_state_without_a_recovery_attempt_returns_the_identical_list(tmp_path, summaries, clock, monkeypatch):
-    """C2: bypass_cooldown False (turn start, threshold): the identical list, no fit."""
+def test_same_state_without_a_recovery_attempt_uses_the_exit_cap(tmp_path, summaries, clock, monkeypatch):
+    """C2 + #668: threshold exit gets headroom (whole turns before the fresh tail) without the recovery cap."""
     engine, view = _rejected_state(tmp_path, monkeypatch, clock)
     try:
         result = engine.compress(view, current_tokens=engine._survival_measure(view) + 1_000, bypass_cooldown=False)
-        assert result is view and engine._last_survival_fit is None
+        assert len(result) < len(view) and engine._last_survival_fit["reason"] == "exit_fit:noop"
+        assert result[-2:] == view[-2:]  # the fresh tail (two rows) stays
+        assert engine._survival_measure(result) + HOST_TOKENS <= int(THRESHOLD * 0.95)
     finally:
         engine.shutdown()
 

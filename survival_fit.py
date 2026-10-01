@@ -104,12 +104,16 @@ class SurvivalFitMixin:
             ceiling = min(ceiling, request_cap)
         return max(1, ceiling - overhead)
 
-    def _survival_fit_args(self, messages, observed_tokens, reason: str, recovery: bool) -> Dict[str, Any]:
+    def _survival_fit_args(self, messages, observed_tokens, reason: str, recovery: bool, *,
+                           automatic: bool = False) -> Dict[str, Any]:
         """#608: the fit's reason and caps. A recovery attempt (the host's ``bypass_cooldown``) fits under the
         rejected request's size (``observed_tokens``, else the input's measure) and under the threshold."""
-        if not recovery:
-            return {"reason": reason}
         threshold = int(getattr(self, "threshold_tokens", 0) or 0)
+        if not recovery:
+            # #668: normal threshold exits leave headroom; exceptions and below-threshold cleanup do not.
+            if automatic and threshold > 0 and (observed_tokens or 0) >= threshold and self._config.survival_fit:
+                return {"reason": f"exit_fit:{reason}", "request_cap": int(threshold * _RECOVERY_THRESHOLD_SHARE)}
+            return {"reason": reason}
         return {"reason": f"recovery_attempt:{reason}",
                 "window_cap": observed_tokens if _positive_int(observed_tokens) else self._survival_measure(messages),
                 "request_cap": int(threshold * _RECOVERY_THRESHOLD_SHARE) if threshold > 0 else None}
@@ -123,6 +127,9 @@ class SurvivalFitMixin:
     def _survival_fit(self, messages, result, observed_tokens, reason: str, *, after_exception: bool = False,
                       window_cap: Optional[int] = None, request_cap: Optional[int] = None):
         """``result``, or the fitted list when ``result`` is over the survival budget."""
+        exit_fit = reason.startswith("exit_fit:")
+        # #668: an exit fit's budget without the exit cap; a list over it is a session at risk, not headroom
+        window_budget = self._survival_fit_budget(messages, observed_tokens) if exit_fit else None
         budget = self._survival_fit_budget(messages, observed_tokens, window_cap, request_cap)
         if budget is None or not isinstance(result, list) or not result or not self._session_id or \
                 self._bypasses_lcm_context_management():
@@ -130,6 +137,9 @@ class SurvivalFitMixin:
         before = self._survival_measure(result)
         if before <= budget:
             return result
+        if exit_fit and window_budget is not None and before > window_budget:
+            return self._survival_fit(messages, result, observed_tokens, reason[len("exit_fit:"):],
+                                      after_exception=after_exception)
         system = 0
         while system < len(result) and isinstance(result[system], dict) and result[system].get("role") == "system":
             system += 1
@@ -151,14 +161,28 @@ class SurvivalFitMixin:
                      and self._ingest_cursor == len(result))
         # one map of the whole conversation part: its occurrence and order evidence needs every row (#650)
         store_ids = self._get_store_id_map_for_messages(result[system:])
-        cut = self._survival_cut(result, prefix, budget, persisted, reason, store_ids, True) if prefix > system else None
-        emergency = prefix > system and cut is None
-        cut = cut or self._survival_cut(result, system, budget, persisted, reason, store_ids, False)
+        if exit_fit:
+            # #668: headroom drops only whole turns between the summary prefix and the fresh tail: never the
+            # prefix, a protected fresh-tail row or a projection. The window budget still holds the list.
+            cut = self._survival_cut(result, prefix, budget, persisted, reason, store_ids, True,
+                                     keep_from=self._fresh_tail_start(result))
+            if cut is None:
+                logger.info("LCM exit fit skipped: no whole-turn cut between the summary prefix and the fresh tail "
+                            "reaches the exit cap (tokens=%d, budget=%d)", before, budget)
+                return result
+            emergency = False
+        else:
+            cut = self._survival_cut(result, prefix, budget, persisted, reason, store_ids, True) if prefix > system else None
+            emergency = prefix > system and cut is None
+            cut = cut or self._survival_cut(result, system, budget, persisted, reason, store_ids, False)
         if cut is None:
             return result
         fitted, count, ids, projected, notice = cut
         after = self._survival_measure(fitted)
         if after >= before:  # nothing stored could leave: the list is already as small as it gets
+            logger.warning("LCM survival fit could not shorten the list (before=%d, budget=%d, reason=%s)",
+                           before, budget, reason)
+            self._survival_record(reason, 0, [], before, before, budget, False, "", shortened=False)
             return result
         if emergency and any(all(m is not row for m in fitted) for row in result[system:prefix]):
             logger.warning("LCM survival fit dropped the summary prefix (emergency: prefix=%d tokens, budget=%d)",
@@ -169,15 +193,16 @@ class SurvivalFitMixin:
             self._ingest_cursor = len(fitted)
         if after > budget:  # still the best list available: returned, but never reported as within budget
             logger.warning("LCM survival fit could not reach budget (after=%d, budget=%d, reason=%s)", after, budget, reason)
-        self._survival_record(reason, count, ids, before, after, budget, projected, notice)
+        self._survival_record(reason, count, ids, before, after, budget, projected, notice, warn_user=not exit_fit)
         return fitted
 
     def _survival_cut(self, result, lead: int, budget: int, persisted: bool, reason: str, store_ids,
-                      whole_turns: bool):
+                      whole_turns: bool, keep_from: Optional[int] = None):
         """``(fitted, count, ids, projected, notice)`` with ``result[:lead]`` kept, else None. The cut is the
         oldest whole-turn one whose FINAL list (notice included) fits; with ``whole_turns`` there is no
         projection. A carrier ending the kept prefix is split: its user row leaves with its turn, and the
-        summary is re-formed around the first kept user row as assembly forms it."""
+        summary is re-formed around the first kept user row as assembly forms it. ``keep_from``: no cut drops
+        ``result[keep_from:]`` (#668: an exit fit keeps the fresh tail)."""
         head, body = list(result[:lead]), list(result[lead:])
         summary = None
         remainder = self._generated_context_carrier_remainder(head[-1]) if whole_turns and head else None
@@ -211,6 +236,8 @@ class SurvivalFitMixin:
 
         users = [i for i, message in enumerate(body) if isinstance(message, dict) and message.get("role") == "user"]
         for index in users:
+            if keep_from is not None and len(head) + index > keep_from:
+                break  # the cut would drop a protected row
             if index and not all(durable(message) for message in body[:index]):
                 break  # never omit a row that is not durably stored
             if index:
@@ -377,22 +404,32 @@ class SurvivalFitMixin:
             return False
         return any(_normalize_observed_at(rel.get("observed_at")) == stamp for rel in aliases)
 
-    def _survival_record(self, reason, count, ids, before, after, budget, projected, notice) -> None:
+    def _survival_record(self, reason, count, ids, before, after, budget, projected, notice, *, shortened=True,
+                         warn_user=True) -> None:
         """Loud: a WARNING line, the doctor counter (metadata only) and one user warning per conversation."""
-        logger.warning(
-            "LCM survival fit applied (reason=%s, conversation=%s, dropped_rows=%d, store_ids=%s..%s, "
-            "projected=%s, tokens=%d->%d, budget=%d)",
-            reason, self._conversation_id or self._session_id, count, ids[0] if ids else "-", ids[-1] if ids else "-",
-            projected, before, after, budget,
-        )
+        uncovered = 0
+        if reason.startswith("exit_fit:"):
+            try:  # a diagnostic: its failure never fails the fit
+                uncovered = len(set(ids) - self._store_complete_node_covered(ids))
+            except Exception:
+                logger.debug("LCM exit fit: the uncovered-row count failed", exc_info=True)
+                uncovered = None
+        if shortened:
+            logger.warning(
+                "LCM survival fit applied (reason=%s, conversation=%s, dropped_rows=%d, store_ids=%s..%s, "
+                "uncovered_rows=%s, projected=%s, tokens=%d->%d, budget=%d)",
+                reason, self._conversation_id or self._session_id, count, ids[0] if ids else "-", ids[-1] if ids else "-",
+                "unknown" if uncovered is None else uncovered, projected, before, after, budget,
+            )
         self._last_survival_fit = {"reason": reason, "dropped_rows": count, "notice": notice, "at": time.time(),
-                                   "reached_budget": after <= budget}
+                                   "uncovered_rows": uncovered, "reached_budget": after <= budget}
 
         def counted(record):  # runs inside the store's write transaction: concurrent engines add, never overwrite
             record = record if isinstance(record, dict) else {}
             return {"count": int(record.get("count") or 0) + 1, "last_reason": reason, "last_at": time.time(),
                     "last_conversation": str(self._conversation_id or self._session_id or ""),
                     "last_reached_budget": after <= budget,
+                    "last_shortened": shortened,
                     "unreached_budget_count": int(record.get("unreached_budget_count") or 0) + (after > budget),
                     # fits that projected a row (#601); a record from before the key stays unknown (no key)
                     **({"projected_count": int(record.get("projected_count") or 0) + bool(projected)}
@@ -404,7 +441,7 @@ class SurvivalFitMixin:
             logger.warning("LCM survival-fit counter write failed (projected=%s); /lcm doctor under-counts survival fits "
                            "for this store", projected, exc_info=True)
         key = str(self._conversation_id or self._session_id or "")
-        if key not in self._survival_fit_warned:
+        if shortened and warn_user and key not in self._survival_fit_warned:
             self._survival_fit_warned.add(key)
             self._survival_fit_pending_warning = (key, _WARNING.format(n=count))  # R6-4: owned by its conversation
             self.emit_automatic_compaction_status = True  # the host asks the hook below once more

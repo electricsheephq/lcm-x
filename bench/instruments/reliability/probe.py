@@ -73,8 +73,17 @@ LOG_COUNTS = {
     "skipped_ingest_resident_conflict": "skipped ingest: stable engine use ended with resident_engine_conflict",
     "recorded_replaced": "LCM recorded host-replaced rows",
     "survival_fit": "LCM survival fit applied",
+    "exit_fit": "LCM survival fit applied (reason=exit_fit:",
+    "exit_fit_skipped": "LCM exit fit skipped",
 }
 FILLER = "alpha beta gamma delta "
+
+
+def _log_counts(log: str) -> dict:
+    counts = {k: log.count(v) for k, v in LOG_COUNTS.items()}
+    # #668: routine threshold headroom is not a compaction miss; an exit over the window budget logs as a plain fit
+    counts["survival_fit"] -= counts["exit_fit"]
+    return counts
 
 
 def phase_log_fields(log: str) -> dict:
@@ -82,9 +91,10 @@ def phase_log_fields(log: str) -> dict:
     native-on-off, the pre_publication_counts diagnostic) the counts after this phase's first publication."""
     first_commit = log.find("LCM compaction #")
     return {"compactions_logged": len(re.findall(r"LCM compaction #\d+", log)),
-            "log_counts": {k: log.count(v) for k, v in LOG_COUNTS.items()},
+            "log_counts": _log_counts(log),
             "log_counts_after_commit": None if first_commit < 0 else {
-                k: log[first_commit:].count(LOG_COUNTS[k]) for k in ("publication_invariant_conflict", "survival_fit")}}
+                k: v for k, v in _log_counts(log[first_commit:]).items()
+                if k in ("publication_invariant_conflict", "survival_fit")}}
 
 
 def provenance(cell, extra=()):
