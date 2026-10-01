@@ -358,15 +358,31 @@ def _proof_user_identity(identity):
 def _merge_append_cut(identity, is_base, start: int = 0) -> bool:
     """#535: plain user ``identity`` is a row ``is_base`` accepts, the exact joiner of Hermes'
     consecutive-user merge (``prev + "\\n\\n" + next``), then a non-blank row. Bounded: the
-    first 64 cuts at or after ``start``."""
-    cut = start - 1 if identity[0] == "user" and tuple(identity[2:]) == ("", "", "") else None
-    for _ in range(64 if cut is not None else 0):
-        cut = identity[1].find("\n\n", cut + 1)
+    first 64 cuts at or after ``start``, then the last 64 cuts after those (#545), so a miss
+    needs both the base row and the merged row to carry 64+ paragraph breaks."""
+    if identity[0] != "user" or tuple(identity[2:]) != ("", "", ""):
+        return False
+    text = identity[1]
+
+    def fits(cut):
+        head = (identity[0], text[:cut], *identity[2:])
+        return bool(head[1].strip() and text[cut + 2:].strip() and is_base(head))
+
+    cut = start - 1
+    for _ in range(64):
+        cut = text.find("\n\n", cut + 1)
         if cut < 0:
             return False
-        head = (identity[0], identity[1][:cut], *identity[2:])
-        if head[1].strip() and identity[1][cut + 2:].strip() and is_base(head):
+        if fits(cut):
             return True
+    floor, end = cut, len(text)  # #545: a long base row's joiner sits near the row end
+    for _ in range(64):
+        cut = text.rfind("\n\n", floor + 1, end)
+        if cut < 0:
+            return False
+        if fits(cut):
+            return True
+        end = cut + 1  # overlapping runs probed one position at a time, like the forward pass
     return False
 
 
