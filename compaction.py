@@ -1591,9 +1591,6 @@ class CompactionMixin:
             # turn; that must remain eligible for compaction instead of being
             # replayed forever as fresh-looking intent.
             leading_anchor_count = self._leading_anchor_count(working_messages)
-            if adopt_before_stop and fresh_tail_start <= leading_anchor_count:  # nothing to adopt
-                sweep_stop_reason = "summary_route_unavailable"
-                break
             step_started = time.monotonic() if threshold_full_sweep_active else 0.0
             publication_excluded_store_ids = self._get_store_ids_for_messages(
                 working_messages[:leading_anchor_count]
@@ -1603,7 +1600,8 @@ class CompactionMixin:
                 break
             filter_exclusion_proofs: Dict[int, Any] = {}
             hidden_backlog = False
-            if fresh_tail_start <= leading_anchor_count:
+            # #695: adoption checks committed lineage even when the retry's normal tail covers the whole list.
+            if fresh_tail_start <= leading_anchor_count and not adopt_before_stop:
                 # Also reached with threshold_full_sweep_active: a sweep whose
                 # "drained" raw prefix is really a tail covering the whole
                 # session must yield like any other blocked pass, or the sweep
@@ -1619,7 +1617,7 @@ class CompactionMixin:
                 if threshold_full_sweep_active and sweep_step_done("store_complete", step_started) >= sweep_deadline:
                     sweep_stop_reason = "time_budget_exhausted"
                     break
-            if fresh_tail_start <= leading_anchor_count and not hidden_backlog:
+            if fresh_tail_start <= leading_anchor_count and not hidden_backlog and not adopt_before_stop:
                 noop_reason = "no eligible raw backlog outside fresh tail"
                 if threshold_full_sweep_active:
                     sweep_raw_drained = True
