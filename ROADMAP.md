@@ -5,13 +5,13 @@ Status: reconciled 2026-10-01. The [vision](VISION.md) says what we are building
 ## How releases work
 
 - **One themed minor about every two weeks.** Each minor has one theme and a written "GA accepts when" line. Scope freezes at the first release candidate. After the third candidate, a minor ships only with known, non-blocking items; otherwise the failing change is taken out.
-- **Patches only for release-blocking defects reachable in real deployments:** data loss, duplicate rows, a wedged or reset session, or a request over the context window. At most one patch a week unless an incident is live.
-- **Behaviour and default changes ship only in minors.**
-- **Every release candidate passes the gauntlet** in [bench/specs/RELEASE-READINESS-V1.md](bench/specs/RELEASE-READINESS-V1.md) before GA, and the GA tree differs from the passing candidate only by its release notes.
+- **Patches only for release-blocking defects reachable in real deployments:** data loss, duplicate rows, a wedged or reset session, a request over the context window, or a security defect such as a secret exposure or an access-control bypass. At most one patch a week unless an incident is live.
+- **Behaviour and default changes ship only in minors.** v0.24.9 was scoped before this policy was written; it is the last release under the old rule.
+- **Every release candidate runs the gauntlet** in [bench/specs/RELEASE-READINESS-V1.md](bench/specs/RELEASE-READINESS-V1.md). A candidate that fails is fixed and respun; only a candidate that passes can become GA, and the GA tree differs from it only by its release notes.
 
 ## H1 — compaction you don't notice
 
-Today every compaction LCM-X starts runs on the turn thread, so the user waits for it. v0.24.9 bounds that wait with a 60 s soft target and a 120 s hard bound; a summary call already running can still end past the hard bound. Each compaction also costs one prompt-cache break. H1 removes the wait in steps.
+Today every compaction LCM-X starts runs on the turn thread, so the user waits for it. v0.24.9 bounds that wait: it aims to finish within 60 s and starts no summary call that would run past 120 s, but it does not interrupt a call already running, so a compaction can still end past 120 s. Making 120 s a true maximum is part of the v0.25.0 exit below. Each compaction also costs one prompt-cache break. H1 removes the wait in steps.
 
 | Release | Theme | GA accepts when |
 |---|---|---|

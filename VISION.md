@@ -28,7 +28,7 @@ LCM-X is a lossless context engine for Hermes Agent. It is built on Lossless Con
 - **Lossless before clever.** A change that can lose or duplicate a stored row does not ship, however much it improves anything else.
 - **The user's wait is a product metric.** Compaction time and prompt-cache breaks count as much as summary quality.
 - **Default configuration is the product.** The numbers we publish are for the configuration users actually run.
-- **Release in themes.** One themed minor about every two weeks, each with a written exit criterion. Patches only for defects that lose data, duplicate rows, wedge or reset a session, or send an over-window request.
+- **Release in themes.** One themed minor about every two weeks, each with a written exit criterion. Patches only for defects that lose data, duplicate rows, wedge or reset a session, send an over-window request, or break security.
 
 ## Three horizons
 
