@@ -135,12 +135,11 @@ Stable release identity and the continuing `main` development line are
 separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
-The `main` line now identifies itself as
+The `main` line identifies itself as
 `hermes-lcm-x v0.24.9 (15 tools)` — drain: one foreground time budget, stub-first exit, exit fit,
-scan allowance — on top of the
-`v0.24.8` release tag, which identifies itself as `hermes-lcm-x v0.24.8 (15 tools)`.
-This is the forward bump for the next patch release, never a restamp
-of any past commit's own recorded identity (#385 fixed the earlier drift).
+scan allowance — the identity of the `v0.24.9` release tag, until the first v0.25.0 release
+candidate bumps it. An identity is never a restamp of any past commit's own recorded identity
+(#385 fixed the earlier drift).
 
 Every compaction LCM-X starts today runs on the turn thread, so the user waits
 for it. The roadmap removes that wait in steps (v0.25.0 prepares leaves in the
