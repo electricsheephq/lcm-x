@@ -7,6 +7,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 ## Unreleased
 
 - Fix: `/lcm doctor` now runs the `embedding_provider_health` check; in v0.24.9-rc1 only the `lcm_doctor` tool ran it, while the docs and the check's own fix text pointed users to `/lcm doctor`. (#734)
+- Fix: with the full threshold sweep off (the default), a compaction whose backlog outside the fresh tail is under
+  `leaf_chunk_tokens` now forms a leaf before a fit would drop older turns no summary covers, and a held pass at the
+  survival ceiling summarises that backlog instead of returning the fit; with the sweep on nothing changes. (#738)
 
 ## v0.24.9 - (unreleased; rc1) (drain: one foreground time budget, stub-first exit, exit fit, scan allowance)
 
