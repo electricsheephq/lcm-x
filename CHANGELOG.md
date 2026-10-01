@@ -6,6 +6,16 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: a Hermes process in which LCM-X did not become active (a slow load or another context engine in the slot) keeps its own
+  record file, so overlapping processes no longer overwrite each other's notice; `lcm_doctor` and `/lcm doctor` report
+  a live one as an `inactive_process` warning with the fix to apply; after a slot conflict the already-registered
+  `post_llm_call` hook no longer writes `lcm.db` in that process. (#696)
+- Docs: the release gauntlet spec (`bench/specs/RELEASE-READINESS-V1.md`) now states the rules the releases since
+  v0.23.2 ran under: the differential rule for Phase B shapes and Phase C conflicts the previous GA also shows, the
+  Phase B hands-on lane, recall-probe scoring (`exact` / `recoverable` / `LOSS`; only LOSS fails), provider failures
+  the engine handles as designed, and receipts published as GA release assets. (#427)
+- Docs: the embedding-dependency recovery note is linked from the README, the operator guide and the bundled skill, and two doctor messages say that a hand-installed dependency (not every optional dependency) can be dropped by a Hermes update. (#702)
+
 ## v0.24.8 - (unreleased; rc1) (repairs: level 3 fragment repair, tool-output stubs that name the read-back call, rollup stop, no silent fallback on a slow load)
 
 - Fix: a summary route that cannot serve its model (HTTP 400/404 whose message names the model as unknown, not

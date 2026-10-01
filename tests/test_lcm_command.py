@@ -536,6 +536,17 @@ def test_lcm_doctor_reports_health_checks(engine):
     assert "triage_guidance:\n- none" in result
 
 
+def test_lcm_doctor_inactive_peer_changes_summary_and_recommended_action(engine):
+    from hermes_lcm.inactive_record import write_inactive_record
+
+    write_inactive_record(engine._hermes_home, elapsed_s=12.5,
+                          reason="plugin load took 12.5 s, over plugins.load_timeout_seconds")
+    result = handle_lcm_command("doctor", engine)
+    assert "status: issues-found" in result
+    assert "issues: inactive_process" in result
+    assert "recommended_actions:\n- restart Hermes; if it recurs, raise plugins.load_timeout_seconds" in result
+
+
 @pytest.mark.parametrize("projected", [2, None, 0], ids=["projected", "unknown", "none-projected"])
 def test_lcm_doctor_survival_fit_guidance_names_the_backup_restore_rollback(engine, projected):
     """A persisted survival fit (#601, #603, #620): for a rollback to a version older than v0.24.5, with or

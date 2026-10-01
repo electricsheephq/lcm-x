@@ -213,6 +213,8 @@ When it finds a pre-0.24 install (`plugins/hermes-lcm`, or a `config.yaml` that
 enables `hermes-lcm` / selects `context.engine: lcm`), it prints the migration
 steps below. It never edits `config.yaml` and never deletes the old directory.
 
+Semantic retrieval is optional; its dependency and recovery after a host update are described in the [embedding setup doc](docs/embeddings-setup.md#a-host-update-can-remove-fastembed).
+
 ### Activate it
 
 The plugin has two names:

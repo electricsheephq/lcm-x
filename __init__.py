@@ -704,6 +704,8 @@ def register(ctx):
     # later the same turn.
     try:
         def _on_post_llm_call(**kwargs):
+            if not active:
+                return
             history = kwargs.get("conversation_history")
             if not history:
                 return
@@ -777,7 +779,9 @@ def register(ctx):
     _warn_if_embedding_provider_unavailable(config)
 
     # The load deadline can also expire after the engine registered.
-    if active and _engine_took_slot(ctx, engine, hermes_home):
+    if active:
+        active = _engine_took_slot(ctx, engine, hermes_home)
+    if active:
         logger.info(
             "LCM plugin loaded — lossless context management active (load %.2f s)",
             time.monotonic() - _MODULE_IMPORTED_AT,
@@ -785,4 +789,4 @@ def register(ctx):
         # A slow log sink can outlast the deadline, so check once more. An
         # abandonment after this check, before register() returns, cannot be
         # seen from inside the plugin.
-        _engine_took_slot(ctx, engine, hermes_home)
+        active = _engine_took_slot(ctx, engine, hermes_home)

@@ -29,6 +29,7 @@ from .db_bootstrap import (
 from .diagnostics import (
     _has_lifecycle_fragmentation,
     _state_db_path_for_engine,
+    doctor_guidance_for_check,
     doctor_guidance_for_checks,
 )
 from .ingest_protection import (
@@ -1800,6 +1801,12 @@ def _doctor_text(engine) -> str:
                             f"{'unknown' if projected is None else projected}; {within}; a rollback to v0.23.3 "
                             "keeps the database file and needs native recovery ON (see triage_guidance)")
         triage_checks.append({"check": "survival_fit", "status": "warn", "detail": survival_fit})
+    inactive_process = inactive_record_notice(getattr(engine, "_hermes_home", ""))
+    if inactive_process:
+        issues.append("inactive_process")
+        inactive_check = {"check": "inactive_process", "status": "warn", "detail": inactive_process}
+        triage_checks.append(inactive_check)
+        recommended_actions.append(doctor_guidance_for_check(inactive_check)["operator_action"])
     triage_guidance = doctor_guidance_for_checks(triage_checks)
 
     doctor_status = "issues-found" if integrity != "ok" or issues else (
@@ -1858,7 +1865,6 @@ def _doctor_text(engine) -> str:
         f"unreferenced_externalized_payload_files: {externalized_integrity['unreferenced_externalized_payload_files']}",
         f"survival_fit_count: {'unknown' if fit_count is None else fit_count}",
     ]
-    inactive_process = inactive_record_notice(getattr(engine, "_hermes_home", ""))
     if inactive_process:
         lines.append(f"inactive_process: {inactive_process}")
     if issues:

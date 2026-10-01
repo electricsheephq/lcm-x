@@ -9,7 +9,7 @@ Use read-only product tools before changing configuration or running an apply pa
 3. `lcm_status`: inspect runtime identity, database path, context pressure, summary/store counts, filters, and lifecycle state.
    `dag.nodes_by_escalation_level` counts the session's summary nodes by the level that produced them (`1`, `2`, `3`, plus `unrecorded` for nodes written before the record existed); a growing `3` count means summaries are being truncated rather than written by the model.
 4. `lcm_inspect`: inspect current-session lineage, frontiers, fresh tail, externalized-ref readability, and skip/no-op reasons without retrieving content.
-5. `lcm_doctor`: run database, FTS, lifecycle, configuration, and context-pressure diagnostics.
+5. `lcm_doctor`: run database, FTS, lifecycle, configuration, and context-pressure diagnostics. `embedding_provider_health` warns when the configured provider cannot run in this process; see `docs/embeddings-setup.md`, section "A host update can remove fastembed", for the embedding-dependency recovery note.
 6. `lcm_doctor` with `action: repair_level3`: read-only scan for level 3 truncation fragments and the condensed summary nodes built on them, with per-session counts; it writes nothing. The tool refuses `apply`. The repair itself is the operator's slash command `/lcm doctor repair level3 apply` (backup first, then each group re-summarised in place); suggest it to the user, never run it yourself.
 
 If optional slash commands are enabled, `/lcm status` and `/lcm doctor` expose the corresponding operator views.
