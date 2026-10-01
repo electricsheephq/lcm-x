@@ -6948,8 +6948,8 @@ class LCMEngine(
         # the deepest existing node + 1, so condensation can always
         # create the next depth level.
         if max_depth < 0:
-            all_nodes = self._dag.get_session_nodes(self._session_id)
-            upper = (max(n.depth for n in all_nodes) + 1) if all_nodes else 1
+            depths = self._dag.get_session_depths(self._session_id)  # #750: every depth, not the first 1000 rows
+            upper = (max(depths) + 1) if depths else 1
         else:
             upper = max_depth
 
@@ -7674,12 +7674,12 @@ class LCMEngine(
         # Node ids placed in the summary prefix — used to dedupe proactive-recall
         # injection against summaries already visible in the active context.
         active_summary_node_ids: set = set()
-        all_nodes = self._dag.get_session_nodes(self._session_id)
-        if all_nodes:
+        # #750: every depth in the session, deepest first; get_session_nodes() stops at 1000 rows.
+        depths = self._dag.get_session_depths(self._session_id)[::-1]
+        if depths:
             # Group by depth, take the most recent uncondensed at each level
             # For active context, we want the highest-level summaries
             # that haven't been condensed into even higher levels
-            depths = sorted(set(n.depth for n in all_nodes), reverse=True)
             for group, d in enumerate(depths):
                 uncondensed = self._dag.get_uncondensed_at_depth(self._session_id, d, newest=True)
                 for node in uncondensed:
