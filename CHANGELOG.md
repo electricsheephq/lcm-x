@@ -36,8 +36,13 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   partial stop in `lcm_status`. One INFO line per compaction, `LCM compaction stop:`, gives the reason,
   leaves, the progress call kind, elapsed seconds, the seconds before, during and after the calls, and the backlog
   left. A step already running (a store step, assembly, the fit, the host's stream read between
-  two chunks) is not interrupted, so a compaction can still end past the hard bound; the stop line measures it. The
-  sweep-off, forced-overflow and below-threshold paths keep their behaviour.
+  two chunks) is not interrupted, so a compaction can still end past the hard bound; the stop line measures it.
+- Fix: the same budget now covers a compaction with the sweep off, a manual `/compress`, a forced overflow recovery
+  and a host recovery attempt, and the condensation passes after their leaf (#605). A manual `/compress` and a forced
+  overflow recovery use the hard bound only. A time stop writes no level 3 node: with no leaf, a forced overflow
+  recovery assembles to its cap with no call; the others keep their rows and hold the threshold answer as after a
+  sweep budget stop. A leaf or condensation source within `LCM_L3_TRUNCATE_TOKENS` (512) is written whole as a
+  level 3 node with no summariser call; rollups and the level 3 repair still call the model. (#605)
 - Fix: on a host that offers `aux_stream_deadline`, each sweep summariser call runs under the earlier of the host's
   deadline and the budget's (#605). A timeout is a budget cut only when the budget bound the call (its timeout was the
   time left, below the configured one) or the host deadline fired: it ends the chain without counting against the

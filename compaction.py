@@ -1448,6 +1448,8 @@ class CompactionMixin:
         # #605: one clock from compress() entry; the hard bound keeps today's step checks.
         budget = self._foreground_budget or self._new_foreground_budget()
         budget.sweep_active = threshold_full_sweep_active
+        if force or force_overflow:  # #605: the soft target is for automatic compactions; these keep the hard bound
+            budget.soft = 0.0
         sweep_deadline = budget.t0 + budget.hard
         configured_sweep_target = int(self._config.summary_prefix_target_tokens)
         sweep_target_tokens = max(
@@ -1566,8 +1568,8 @@ class CompactionMixin:
             if threshold_full_sweep_active and time.monotonic() >= sweep_deadline:
                 sweep_stop_reason = "time_budget_exhausted"
                 break
-            if threshold_full_sweep_active and budget.progress:
-                try:  # #605: no pass work for a later leaf whose call could not start
+            if budget.progress:
+                try:  # #605: no pass work for a later leaf whose call could not start (sweep on or off)
                     budget.admit(self._primary_summary_route())
                 except SweepBudgetExhausted as exc:
                     sweep_stop_reason = exc.reason
@@ -1948,8 +1950,8 @@ class CompactionMixin:
                         **summary_kwargs,
                     )
                 except Exception as exc:
-                    if threshold_full_sweep_active and isinstance(exc, SweepBudgetExhausted):
-                        sweep_stop_reason = exc.reason  # #608: a stop, with or without a leaf (#605: or soft)
+                    if isinstance(exc, SweepBudgetExhausted):
+                        sweep_stop_reason = exc.reason  # #608: a stop, with or without a leaf (#605: or soft; any path)
                         break
                     if threshold_full_sweep_active and leaf_compacted_this_turn:
                         sweep_stop_reason = "leaf_summary_error"
@@ -2199,7 +2201,8 @@ class CompactionMixin:
                     budget.hard,
                     ", ".join(f"{step}={seconds:.1f}s" for step, seconds in sweep_step_seconds.items()),
                 )
-                self._start_sweep_budget_hold()
+                if not force_overflow:  # #605: forced overflow fits to its cap below and is never held, as before
+                    self._start_sweep_budget_hold()
             self._refresh_raw_backlog_debt(
                 working_messages,
                 observed_tokens=observed_prompt_tokens,

@@ -1137,6 +1137,7 @@ def summarize_with_escalation(
     *,
     route_key_prefix: str = "",
     budget: ForegroundBudget | None = None,
+    verbatim_small_source: bool = False,
 ) -> tuple[str, int]:
     """Run 3-level escalation. Returns (summary, level_used).
 
@@ -1149,7 +1150,13 @@ def summarize_with_escalation(
     route attempt gets at most the time left and SweepBudgetExhausted is raised
     instead of starting one with less than ``_THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS``
     (#666); it never falls through to level 3. A foreground ``budget`` (#605) replaces ``deadline``.
+    ``verbatim_small_source`` (#605 F2; the foreground leaf and condensation callers): a source within
+    ``l3_truncate_tokens`` is returned whole as level 3, with no call.
     """
+    if verbatim_small_source and count_tokens(text) <= l3_truncate_tokens:
+        if provenance is not None:
+            provenance["model"] = "deterministic"
+        return text, 3
     # Level 1: detailed summary
     l1_prompt = _build_l1_prompt(text, token_budget, depth,
                                  focus_topic=focus_topic,

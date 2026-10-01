@@ -829,7 +829,15 @@ What the main knobs do:
   reason, the leaves and the seconds before, during and after the calls. A call
   cut by the budget is not a summary-route failure, and a compaction uses one
   spend-guard slot however many calls it makes; rollups count on their own guard.
-  The sweep-off and forced-overflow paths are not under this budget yet.
+  The same budget covers a compaction with the sweep off, a manual `/compress`, a
+  forced overflow recovery and a host recovery attempt, and their condensation
+  passes; a manual `/compress` and a forced overflow recovery use the hard bound
+  only. When no call fits, a forced overflow recovery assembles to its cap with
+  no call, and a recovery attempt is fitted under the threshold; time never makes
+  a level 3 cut.
+- A leaf or condensation source of at most `LCM_L3_TRUNCATE_TOKENS` (512) is
+  written whole as a level 3 node with no summariser call (#605). Rollups and
+  the level 3 repair still call the model.
 - `LCM_EXPANSION_CONTEXT_TOKENS` controls how much recovered material
   `lcm_expand_query` may feed to the auxiliary model. It does not change what
   LCM stores.
