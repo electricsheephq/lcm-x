@@ -28,9 +28,10 @@ def test_unshortened_exit_fit_is_not_a_miss(tmp_path):
 def test_process_cell_counts_a_routine_exit_fit_once(tmp_path, monkeypatch):
     (tmp_path / "observer.jsonl").write_text("")
     monkeypatch.setattr(PC, "cite_all", lambda src: {})
-    monkeypatch.setattr(PC, "session_count", lambda home: 0)
+    monkeypatch.setattr(PC, "session_count", lambda home: 3)
     cell = SimpleNamespace(d=tmp_path, phase="p1", transport="acp-process", sid="s", host={"src": str(tmp_path)},
                            home=tmp_path, host_log=lambda: "LCM compaction #1: done\n" + EXIT + "\n")
     rec = PC.ProcessCell.phase_record(cell, 1, {})
     assert rec["log_counts"]["exit_fit"] == 1 and rec["log_counts"]["survival_fit"] == 0
     assert rec["log_counts"] == probe._log_counts(cell.host_log())
+    assert rec["session_count"] == 3  # the record keeps the session count next to the log counts
