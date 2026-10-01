@@ -11,7 +11,7 @@ Status: reconciled 2026-10-01. The [vision](VISION.md) says what we are building
 
 ## H1 — compaction you don't notice
 
-Today every compaction LCM-X starts runs on the turn thread, so the user waits for it. v0.24.9 bounds that wait: it aims to finish within 60 s and starts no summary call that would run past 120 s, but it does not interrupt a call already running, so a compaction can still end past 120 s. Making 120 s a true maximum is part of the v0.25.0 exit below. Each compaction also costs one prompt-cache break. H1 removes the wait in steps.
+Today every compaction LCM-X starts runs on the turn thread, so the user waits for it. v0.24.9 bounds that wait: it aims to finish within 60 s, and it limits summary-call admission and request timeouts to a 120 s budget. It does not interrupt a call already running, so a compaction can still end past 120 s. Making 120 s a true maximum is part of the v0.25.0 exit below. Each compaction also costs one prompt-cache break. H1 removes the wait in steps.
 
 | Release | Theme | GA accepts when |
 |---|---|---|
