@@ -5532,7 +5532,7 @@ class LCMEngine(
         persisted_output_preview_sha256, allow_redacted_preview_match = self._persisted_output_marker_replay_proof(content)
         if expected_chars is None or not persisted_output_source_path or not persisted_output_preview_sha256:
             return False
-        if recover_hermes_persisted_output_with_file_stat(content) is None:
+        if recover_hermes_persisted_output_with_file_stat(content, hermes_home=self._hermes_home) is None:
             return False
         durable_content = find_externalized_tool_result_content_for_call(
             tool_call_id=str(msg.get("tool_call_id") or ""),
