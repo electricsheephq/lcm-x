@@ -397,7 +397,8 @@ def test_n3_the_provenance_level_follows_the_repair(engine, monkeypatch):
     assert "status: ok" in handle_lcm_command("doctor repair level3 apply", engine)
 
     assert dict((r[0], r[1:]) for r in conn.execute("SELECT * FROM summary_node_provenance")) == {
-        ids["truncated"]: (1, "", 7.0), ids["parent"]: (1, "", 7.0), ids["other_parent"]: (2, "m", 7.0)}
+        ids["truncated"]: (1, "", 7.0), ids["parent"]: (1, "", 7.0), ids["other_parent"]: (2, "m", 7.0),
+        ids["grandparent"]: (1, "", 2.0)}  # #698 item 3: a repaired node older than the table gains its row
 
 
 def test_n4_repair_rejections_do_not_touch_the_live_route_keys(engine, monkeypatch):

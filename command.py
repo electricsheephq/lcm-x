@@ -1111,8 +1111,10 @@ def _doctor_repair_level3_apply_text(engine) -> str:
         f"groups_repaired: {outcomes['repaired']}",
         f"groups_skipped: {outcomes['skipped']}",
         f"groups_rolled_back: {outcomes['rolled back']}",
+        f"groups_error: {outcomes['error']}",
         f"nodes_repaired: {sum(len(g['nodes']) for g in result['groups'] if g['outcome'] == 'repaired')}",
         f"summariser_calls: {result['calls']}",
+        f"rollups_scheduled: {result['rollups_scheduled']}",
     ]
     second = result.get("second_scan")
     if second is not None:

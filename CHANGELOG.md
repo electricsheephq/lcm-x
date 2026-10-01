@@ -6,6 +6,9 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: level 3 repair continues after a group's SQLite error, rechecks sources during commit, records legacy-node
+  provenance and schedules rollups; overlapping condensations retain reservations, and the read-only tool scan
+  pages up to 50 fragments and ancestors from the foreground session. (#698)
 - Bench: process-transport cells count a routine exit fit once (the in-process cells' normalization), and the
   reliability bar B8 also fails on a non-exit `LCM survival fit could not shorten the list` line. (#714)
 - Fix: a store-complete leaf counts its extended scan allowance from the first open tool group's call row, so
