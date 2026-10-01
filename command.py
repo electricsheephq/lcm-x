@@ -5456,14 +5456,14 @@ def _embedding_backfill_status(
     """Report the truthful terminal status — never a premature ``complete``."""
     if error:
         return "error"
-    if privacy_withheld:
-        return "partial"
     if lease_lost or budget_exhausted:
         return "partial"
     if uncertain or skipped:
         return "partial"
     if failed:
         return "failed" if embedded == 0 else "partial"
+    if privacy_withheld:
+        return "partial"
     if embedded >= selected_embeddable:
         return "complete"
     return "partial"
