@@ -2,19 +2,19 @@
 
 Status: REGISTERED (2026-10-02), after the v0.24.9 GA cut. The kit is merged first: lcm-x #811 adds the LongMemEval
 `--embeddings` arm, and memorybench PR #7 adds the full-text arm to `feat/locomo-hermes-prep` at `b47f92f7`.
-Nothing in this sheet spends money. Plan reference: PLAN v101 §I row 1 and H2 exit criteria.
+Nothing in this sheet spends money. Roadmap reference: H2 in `ROADMAP.md` (recall re-baseline).
 Public-copy rule: the merged copy carries no customer, box or person names, no internal aliases, no local paths.
 
 ## 0. Why this row
-- The product default is `embeddings_enabled=False` and every managed profile runs that way: recall is full-text.
-- Every recall row we hold (V1-M r@10 95.6, V1-S QA 91.0, LoCoMo 54.6 / 67.4) was measured with embeddings ON.
-- So no number exists for the configuration users run. This row is a NEW baseline. It is never scored against the
+- The product default is `embeddings_enabled=False`: recall is full-text unless a deployment turns embeddings on.
+- The headline recall rows (V1-M r@10 95.6, V1-S QA 91.0, LoCoMo 54.6 / 67.4) were all measured with embeddings ON.
+- So no registered number exists for the default configuration. This row is a NEW baseline. It is never scored against the
   embeddings-on history; the history is shown beside it, labelled with its own configuration.
 
 ## 1. Sub-rows (each is its own registered row; same product sha)
 | Sub-row | Instrument | Data | Configuration | Scored output |
 |---|---|---|---|---|
-| R1-M retrieval | `scripts/lcm_longmemeval.py run --embeddings off --provider stub` | LongMemEval-M, 500 q (`prepared-m`, the F53 manifest), 6 shards `qid[i::6]` | arms `fts` + `lcm_recall` only; vector arms report `run: false` | r@1 / r@5 / r@10 / ndcg@10, session and turn level |
+| R1-M retrieval | `scripts/lcm_longmemeval.py run --embeddings off --provider stub --dataset-label m` (shorthand: plus the prepared-directory and output arguments) | LongMemEval-M, 500 q (`prepared-m`, the F53 manifest), 6 shards `qid[i::6]` | arms `fts` + `lcm_recall` only; vector arms report `run: false` | r@1 / r@5 / r@10 / ndcg@10, session and turn level |
 | R1-S QA | memorybench LongMemEval-S, hermes-lcm provider, `HERMES_MB_EMBEDDINGS=off`, fusion unset | LongMemEval-S cleaned, 500 q (dataset sha pinned at prep) | stores rebuilt from scratch with no embedder | QA accuracy (judge verdicts), per-category |
 | R1-L QA | memorybench LoCoMo, hermes-lcm provider, `HERMES_MB_EMBEDDINGS=off`, fusion unset | LoCoMo-10, 1,986 q (adversarial gold per the harness pin) | stores rebuilt from scratch | QA accuracy, strict judge rubric (the F46/F61 lineage) |
 
@@ -28,7 +28,9 @@ Public-copy rule: the merged copy carries no customer, box or person names, no i
   Sol generation at medium; judge = Sol at low with the strict rubric. The reader differs from the 07-29 row
   (gpt-5.6-sol), which is one more reason R1-S is a new baseline.
 - Recorded configuration: `retrieval_config` from every R1-M report; `embeddings_enabled` from every bridge
-  `initialize` reply; full `LCM_*` / `HERMES_MB_*` environment inventory (keys and values; no secrets exist in it).
+  `initialize` reply; an allowlisted inventory of the non-secret `LCM_*` / `HERMES_MB_*` configuration values.
+  Credential variables (for example `LCM_EMBEDDING_API_KEY`) are recorded as present or absent only, never by value;
+  in this row they are expected absent. Never capture an unrestricted environment dump.
 
 ## 3. Proof before any scored run (positive controls)
 1. Kit unit tests green at the pinned instrument commits (off path, on path unchanged, refusal cases).
@@ -55,8 +57,10 @@ Public-copy rule: the merged copy carries no customer, box or person names, no i
 - memorybench runs go through `scripts/run-with-watchdog.sh <run-id> -- <command>` (lcm-x #236: a stalled pool
   is stopped by process group and resumed with the same run id, at most 3 times; every action logged with UTC time).
 - R1-M: own `HERMES_HOME` / `TMPDIR` / output dir per shard, fresh output roots (no resume across instruments).
-- Off-mode recall reports `degraded: true` with `coverage.fts: "ok"`: this is the product's label for recall without
-  the semantic arm, the configuration under test, not a failure. Record it; never filter a hit on it.
+- A healthy off-mode recall reports `degraded: true` (semantic retrieval disabled) with `provenance.coverage.fts: "ok"`:
+  this is the product's label for recall without the semantic arm, the configuration under test, not a failure.
+  Record it; never filter a hit on it. A full-text failure is different: `provenance.coverage.fts: "none"` is a
+  failed search and is counted as one.
 - A watchdog resume is safe to rerun: the bridge records each fully ingested session per container and refuses a
   session cut off mid-ingest (rebuild that container's store, then resume). Count any such refusal in the run log.
 - Readers run one lane at a time per machine; no other heavy local run in parallel.
