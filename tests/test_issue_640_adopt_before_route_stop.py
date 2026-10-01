@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import pytest
+
 import hermes_lcm.engine as lcm_engine_module
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
@@ -26,9 +28,10 @@ class _Provider:
         return f"Stub summary {self.calls} of ordered work.\nExpand for details about: stub", 1
 
 
-def _engine(tmp_path):
+def _engine(tmp_path, **config_overrides):
     config = LCMConfig(database_path=str(tmp_path / "lcm.db"),
-                       large_output_externalization_path=str(tmp_path / "externalized"))
+                       large_output_externalization_path=str(tmp_path / "externalized"),
+                       **config_overrides)
     engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
     engine.on_session_start(SID, platform="cli", conversation_id=CID, context_length=200_000)
     return engine
@@ -107,6 +110,82 @@ def test_with_nothing_committed_the_route_stop_still_writes_nothing(tmp_path, mo
         _open_every_route_by_rejections(engine)
         out = _compress(engine, messages)
         assert out is messages and provider.calls == 0 and _leaves(engine) == []
+        assert engine._last_compression_status == "noop"
+        assert engine._last_compression_noop_reason == "summary route unavailable"
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("route_refused", [True, False], ids=["circuit-open", "working-route"])
+@pytest.mark.parametrize("retry_can_yield", [True, False], ids=["yield-ready", "yield-disabled"])
+def test_retry_adopts_a_pressure_yield_commit(tmp_path, monkeypatch, route_refused, retry_can_yield):
+    """#695: the cancelled call's yield is scoped away before the host retries."""
+    provider = _Provider()
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", provider)
+    original = _transcript(prefix_tokens=6_000)
+    engine = _engine(tmp_path, fresh_tail_count=len(original) + 1,
+                     fresh_tail_pressure_yield_min_observations=1)
+    engine.threshold_tokens = 5_000
+    try:
+        assert engine._fresh_tail_start(original) == 0
+        engine.ingest(original)
+        first = _compress(engine, deepcopy(original))  # discard after commit, as a host cancellation would
+        (leaf,) = _leaves(engine)
+        assert len(first) < len(original) and provider.calls == 1
+        assert engine._pressure_yield_tail_token_limit == 0
+        assert engine._fresh_tail_start(original) == 0
+        nodes = engine._dag.get_session_nodes(SID)
+        rows = _rows(engine)
+        if route_refused:
+            _open_every_route_by_rejections(engine)
+        engine._config.fresh_tail_pressure_yield_enabled = retry_can_yield
+        adopted = []
+        real = engine._committed_replay_drops
+
+        def spy(working, start):
+            result = real(working, start)
+            adopted.append(result[0])
+            return result
+
+        monkeypatch.setattr(engine, "_committed_replay_drops", spy)
+        out = _compress(engine, deepcopy(original))
+        if not route_refused and not retry_can_yield:
+            # The working-route path keeps its existing full-tail no-op when yielding is disabled.
+            assert out == original and adopted == []
+        else:
+            assert len(out) < len(original)
+            assert adopted and len(adopted[0]) == len(leaf.source_ids) > 0
+            assert engine._last_compression_status == "compacted"
+            assert sum(HEADER in str(m.get("content")) for m in out) == 1
+            assert f"node {leaf.node_id}" in next(str(m["content"]) for m in out if HEADER in str(m.get("content")))
+            assert out[-1] == original[-1]
+        assert provider.calls == 1  # zero calls on the retry
+        assert engine._dag.get_session_nodes(SID) == nodes  # no new leaf or condensation node
+        assert _rows(engine) == rows and len(rows) == len(original)
+        if route_refused:
+            assert not engine._summary_route_available()
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("yield_enabled", [True, False])
+def test_full_tail_without_a_commit_and_refused_route_is_unchanged(tmp_path, monkeypatch, yield_enabled):
+    provider = _Provider()
+    monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", provider)
+    messages = _transcript(prefix_tokens=6_000)
+    engine = _engine(tmp_path, fresh_tail_count=len(messages) + 1,
+                     fresh_tail_pressure_yield_min_observations=1,
+                     fresh_tail_pressure_yield_enabled=yield_enabled)
+    engine.threshold_tokens = 5_000
+    try:
+        engine.ingest(messages)
+        rows = _rows(engine)
+        _open_every_route_by_rejections(engine)
+        assert engine._fresh_tail_start(messages) == 0
+        out = _compress(engine, messages)
+        assert out is messages and provider.calls == 0
+        assert engine._dag.get_session_nodes(SID) == []
+        assert _rows(engine) == rows
         assert engine._last_compression_status == "noop"
         assert engine._last_compression_noop_reason == "summary route unavailable"
     finally:
