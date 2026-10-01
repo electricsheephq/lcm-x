@@ -146,3 +146,42 @@ def test_manual_config_does_not_read_yaml_absolute(make_engine):
     _, engine = make_engine("lcm:\n  context_threshold_tokens: 20000\n", manual=True)
     _update_model(engine)
     assert engine.threshold_tokens == 40_000
+
+
+@pytest.mark.parametrize("yaml_value", (0, 20_000))
+@pytest.mark.parametrize("later_env", ("0", "-5", "", "   ", None, "not-a-number", "90000"))
+def test_runtime_env_change_remains_authoritative(make_engine, monkeypatch, yaml_value, later_env):
+    yaml_text = "lcm:\n  context_threshold: 0.4\n"
+    if yaml_value:
+        yaml_text += f"  context_threshold_tokens: {yaml_value}\n"
+    config, engine = make_engine(yaml_text, env="130000")
+    _update_model(engine)
+    assert engine.threshold_tokens == 130_000
+    if later_env is None:
+        monkeypatch.delenv("LCM_ABSOLUTE_THRESHOLD_TOKENS")
+    else:
+        monkeypatch.setenv("LCM_ABSOLUTE_THRESHOLD_TOKENS", later_env)
+    _update_model(engine, 120_000)
+    expected = 48_000 if later_env in ("0", "-5") else (yaml_value or 48_000)
+    if later_env == "90000":
+        expected = 90_000
+    assert engine.threshold_tokens == expected
+    assert config.absolute_threshold_tokens == yaml_value
+    assert config.config_sources["absolute_threshold_tokens"] == "env:LCM_ABSOLUTE_THRESHOLD_TOKENS"
+    clone = engine.clone_for_agent()
+    try:
+        assert clone.threshold_tokens == expected
+    finally:
+        clone.shutdown()
+
+
+@pytest.mark.parametrize("parser", ("pyyaml", "fallback"))
+@pytest.mark.parametrize("value", ("", "null", "~", '{}', '""'))
+def test_empty_yaml_absolute_is_absent_without_warning(make_engine, monkeypatch, parser, value):
+    _select_parser(monkeypatch, parser)
+    config, engine = make_engine(f"lcm:\n  context_threshold: 0.4\n  context_threshold_tokens: {value}\n")
+    _update_model(engine)
+    assert engine.threshold_tokens == 40_000
+    assert config.absolute_threshold_tokens == 0
+    assert config.config_sources["absolute_threshold_tokens"] == "default"
+    assert config.config_source_warnings == []

@@ -335,7 +335,7 @@ def _lcm_absolute_threshold_tokens_with_source(default: int) -> tuple[int, str, 
     cfg = _load_hermes_config_yaml()
     lcm_section = cfg.get("lcm") if isinstance(cfg, dict) else None
     raw_yaml = lcm_section.get("context_threshold_tokens") if isinstance(lcm_section, dict) else None
-    if raw_yaml is not None:
+    if raw_yaml not in (None, {}, "{}", "null", "~", ""):
         parsed = None
         if not isinstance(raw_yaml, bool):
             try:
@@ -350,7 +350,8 @@ def _lcm_absolute_threshold_tokens_with_source(default: int) -> tuple[int, str, 
     raw_env = os.environ.get("LCM_ABSOLUTE_THRESHOLD_TOKENS")
     if raw_env is not None and raw_env.strip():
         try:
-            return int(raw_env), "env:LCM_ABSOLUTE_THRESHOLD_TOKENS", None
+            int(raw_env)  # Validate provenance without caching the live env override.
+            return value, "env:LCM_ABSOLUTE_THRESHOLD_TOKENS", None
         except ValueError:
             return value, source, f"invalid env LCM_ABSOLUTE_THRESHOLD_TOKENS={raw_env!r} ignored"
     return value, source, warning
