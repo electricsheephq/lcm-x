@@ -4427,8 +4427,13 @@ class LCMEngine(
                 json.dumps(predecessor_session_id),
                 skip_unchanged=True,
             )
-        except Exception:  # pragma: no cover - defensive; lineage is best-effort
-            logger.debug("LCM rotation lineage write failed", exc_info=True)
+        except Exception as exc:  # lineage is best-effort; rotation still continues
+            logger.warning(
+                "LCM rotation lineage write failed: session=%s predecessor=%s exception=%s",
+                session_id,
+                predecessor_session_id,
+                type(exc).__name__,
+            )
 
     def _rotation_predecessor_session_ids(self, session_id: str, max_hops: int = 32) -> list[str]:
         """The recorded compression-boundary predecessors of ``session_id``, nearest first."""
@@ -7441,6 +7446,27 @@ class LCMEngine(
                 msg = tail_for_selection[index]
                 msg_tokens = count_message_tokens(msg)
                 pending_tokens = count_messages_tokens(pending_results) if pending_results else 0
+                if stub_over_cap_tool_results and msg.get("role") == "assistant":
+                    call_ids = [_tool_call_id(tc) for tc in (msg.get("tool_calls") or [])]
+                    result_ids = {str(r.get("tool_call_id") or "").strip() for r in pending_results}
+                    # Reserve precisely the plain stubs inserted by the final sanitizer.
+                    msg_tokens += count_messages_tokens([
+                        self._missing_tool_result_stub(call_id)
+                        for call_id in call_ids if call_id and call_id not in result_ids
+                    ])
+                    if (
+                        used + tail_token_total + pending_tokens + msg_tokens > assembly_cap
+                        and pending_results
+                        and result_ids <= set(call_ids)
+                    ):
+                        # A rich ref is useful only if its call survives the budget.
+                        pending_results = [
+                            self._missing_tool_result_stub(str(r.get("tool_call_id") or "").strip())
+                            if is_externalized_placeholder(normalize_content_value(r.get("content")) or "")
+                            else r
+                            for r in pending_results
+                        ]
+                        pending_tokens = count_messages_tokens(pending_results)
                 if used + tail_token_total + pending_tokens + msg_tokens > assembly_cap:
                     if (
                         stub_over_cap_tool_results
@@ -7456,6 +7482,10 @@ class LCMEngine(
                     break
                 if skipped_tail_gap:
                     break
+                if stub_over_cap_tool_results and msg.get("role") == "tool":
+                    # Queue even fitting results so the call sees its whole result set.
+                    pending_results.append(msg)
+                    continue
                 if pending_results:
                     call_ids = {_tool_call_id(tc) for tc in (msg.get("tool_calls") or [])}
                     if msg.get("role") == "tool":
