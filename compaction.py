@@ -23,6 +23,7 @@ from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from .dag import SummaryNode
+from .escalation import ForegroundBudget, ForegroundEstimates, SweepBudgetExhausted
 from .fresh_tail import tool_group_safe_end
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
 from .message_analysis import _matched_tool_call_ids
@@ -48,6 +49,17 @@ logger = logging.getLogger(__name__)
 
 _THRESHOLD_FULL_SWEEP_MAX_PASSES = 12
 _THRESHOLD_FULL_SWEEP_MAX_SECONDS = 120.0
+_THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS = frozenset({
+    "pass_budget_exhausted",
+    "time_budget_exhausted",
+    "soft_target_reached",
+    "summary_route_unavailable",
+    "summary_result_rejected",
+    "leaf_summary_error",
+    "condensation_error",
+    "condensation_no_progress",
+    "no_same_depth_condensation_group",
+})
 
 
 class CompactionMixin:
@@ -565,6 +577,8 @@ class CompactionMixin:
         """Run compaction and leave a terminal public status on every failure. ``bypass_cooldown`` is the
         host's mark of a recovery attempt (#608): the returned list fits under the compaction threshold."""
         self._compress_forced_overflow = False
+        budget = self._foreground_budget = self._new_foreground_budget()  # #605 K1: the clock starts here
+        returned = None
         try:
             self._pending_emission_candidates = []
             self._compress_occurrences = None
@@ -615,6 +629,7 @@ class CompactionMixin:
                 self._ingest_cursor = 0
                 self._ingest_cursor_needs_reconcile = True
             self._rekey_host_rewrite_watch(messages, result)
+            returned = result
             return result
         except BaseException as exc:
             self._compress_occurrences = None
@@ -633,10 +648,38 @@ class CompactionMixin:
                 if fitted is not messages:
                     logger.warning("LCM compress failed (%s); returning the survival-fitted list",
                                    type(exc).__name__, exc_info=True)
+                    returned = fitted
                     return fitted
             raise
         finally:
             self._compress_forced_overflow = False
+            self._foreground_budget = None
+            self._finish_foreground_budget(budget, returned)
+
+    def _new_foreground_budget(self) -> ForegroundBudget:
+        soft, hard = self._foreground_budget_seconds()
+        return ForegroundBudget(soft=soft, hard=hard, configured_timeout=self._config.summary_timeout_ms / 1000,
+                                estimates=self.__dict__.setdefault("_foreground_estimates", ForegroundEstimates()))
+
+    def _finish_foreground_budget(self, budget: ForegroundBudget, result) -> None:
+        """#605 K8: one INFO stop line per compaction, its seconds adding up to the elapsed time; a compaction
+        that made a summariser call records its finalize wall (last call end to return) for the next reserve."""
+        try:
+            ended = time.monotonic()
+            elapsed = ended - budget.t0
+            pre, calls, finalize = elapsed, 0.0, 0.0
+            if budget.last_call_ended is not None:
+                pre, calls = budget.first_call_started - budget.t0, budget.last_call_ended - budget.first_call_started
+                finalize = ended - budget.last_call_ended
+                budget.estimates.record_finalize(finalize)
+            reason = str(self._last_compression_status or "unknown")
+            if budget.sweep_active and reason != "error":
+                reason = str(self._last_threshold_full_sweep.get("stop_reason") or reason)
+            logger.info("LCM compaction stop: reason=%s leaves=%d progress=%s elapsed=%.1fs pre=%.1fs calls=%.1fs "
+                        "finalize=%.1fs backlog_tokens=%d", reason, budget.leaves, budget.progress or "none", elapsed,
+                        pre, calls, finalize, self._raw_backlog_tokens(result) if isinstance(result, list) else 0)
+        except Exception:
+            logger.debug("LCM compaction stop line failed", exc_info=True)
 
     @staticmethod
     def _public_compression_row(message: Any) -> Any:
@@ -1406,7 +1449,10 @@ class CompactionMixin:
             and self.threshold_tokens > 0
             and estimated_active_tokens >= self.threshold_tokens
         )
-        sweep_deadline = time.monotonic() + _THRESHOLD_FULL_SWEEP_MAX_SECONDS
+        # #605: one clock from compress() entry; the hard bound keeps today's step checks.
+        budget = self._foreground_budget or self._new_foreground_budget()
+        budget.sweep_active = threshold_full_sweep_active
+        sweep_deadline = budget.t0 + budget.hard
         configured_sweep_target = int(self._config.summary_prefix_target_tokens)
         sweep_target_tokens = max(
             1,
@@ -1482,7 +1528,8 @@ class CompactionMixin:
                 )
 
         # #653: a sweep stopped by its budget never reaches the post-drain condensation, so an oversized
-        # summary prefix is condensed first, in half the sweep's passes and time; the leaves use the rest.
+        # summary prefix is condensed first. #605: its first pass is the compaction's progress call (admitted while
+        # usable time is left); later passes and the leaves need the soft target; the leaves use the passes left.
         pre_leaf_condensation_passes, pre_leaf_condensation_reason = 0, ""
         if (
             threshold_full_sweep_active
@@ -1493,8 +1540,8 @@ class CompactionMixin:
                 pre_leaf_condensation_passes, pre_leaf_condensation_reason = (
                     self._run_threshold_sweep_condensation(
                         target_tokens=sweep_target_tokens,
-                        pass_budget=_THRESHOLD_FULL_SWEEP_MAX_PASSES // 2,
-                        deadline=sweep_deadline - _THRESHOLD_FULL_SWEEP_MAX_SECONDS / 2,
+                        pass_budget=_THRESHOLD_FULL_SWEEP_MAX_PASSES - 1,
+                        deadline=sweep_deadline,
                         focus_topic=focus_topic,
                     )
                 )
@@ -1523,6 +1570,12 @@ class CompactionMixin:
             if threshold_full_sweep_active and time.monotonic() >= sweep_deadline:
                 sweep_stop_reason = "time_budget_exhausted"
                 break
+            if threshold_full_sweep_active and budget.progress:
+                try:  # #605: no pass work for a later leaf whose call could not start
+                    budget.admit(self._primary_summary_route())
+                except SweepBudgetExhausted as exc:
+                    sweep_stop_reason = exc.reason
+                    break
             route_stop = self._summary_route_stop_applies(force_overflow)
             # #640: the first pass adopts a committed summary (#457) before the route stop; adoption needs no route.
             adopt_before_stop = route_stop and leaf_passes == 0 and not resumed_prefix
@@ -1899,10 +1952,8 @@ class CompactionMixin:
                         **summary_kwargs,
                     )
                 except Exception as exc:
-                    from .engine import SweepBudgetExhausted  # engine imports this module
-
                     if threshold_full_sweep_active and isinstance(exc, SweepBudgetExhausted):
-                        sweep_stop_reason = "time_budget_exhausted"  # #608: a stop, with or without a leaf
+                        sweep_stop_reason = exc.reason  # #608: a stop, with or without a leaf (#605: or soft)
                         break
                     if threshold_full_sweep_active and leaf_compacted_this_turn:
                         sweep_stop_reason = "leaf_summary_error"
@@ -2049,6 +2100,7 @@ class CompactionMixin:
             working_messages = working_messages[:leading_anchor_count] + remaining_messages
             pressure_messages = pressure_messages[:leading_anchor_count] + pressure_remaining_messages
             leaf_compacted_this_turn = True
+            budget.progress, budget.leaves = budget.progress or "leaf", budget.leaves + 1
             self._sweep_budget_hold_until = 0.0  # #608: a stored leaf ends the hold
             self._no_progress_hold, self._no_progress_candidate = None, False  # #651: hidden-only leaves too
             leaf_passes += 1
@@ -2147,8 +2199,8 @@ class CompactionMixin:
                 noop_reason = "threshold sweep time budget spent before the first leaf"
                 logger.warning(
                     "LCM threshold sweep spent its time budget before the first leaf: %.1fs (budget %.0fs); steps: %s",
-                    time.monotonic() - (sweep_deadline - _THRESHOLD_FULL_SWEEP_MAX_SECONDS),
-                    _THRESHOLD_FULL_SWEEP_MAX_SECONDS,
+                    time.monotonic() - budget.t0,
+                    budget.hard,
                     ", ".join(f"{step}={seconds:.1f}s" for step, seconds in sweep_step_seconds.items()),
                 )
                 self._start_sweep_budget_hold()
@@ -2224,9 +2276,14 @@ class CompactionMixin:
                 logger.info("LCM compression no-op: %s", noop_reason)
             if threshold_full_sweep_active:
                 duration_ms = (time.perf_counter() - _compress_started) * 1000.0
+                # #605: a stored pre-leaf condensation is progress, so its stop is a partial one, not a no-op.
+                condensed_then_stopped = (
+                    pre_leaf_condensation_passes > 0
+                    and sweep_stop_reason in _THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS
+                )
                 self._last_threshold_full_sweep = {
                     **self._last_threshold_full_sweep,
-                    "status": "noop",
+                    "status": "partial" if condensed_then_stopped else "noop",
                     "duration_ms": round(duration_ms, 3),
                     "stop_reason": sweep_stop_reason or noop_reason,
                     "budget_exhausted": sweep_stop_reason
@@ -2356,18 +2413,10 @@ class CompactionMixin:
             total_passes = leaf_passes + pre_leaf_condensation_passes + condensation_passes
             duration_ms = (time.perf_counter() - _compress_started) * 1000.0
             final_stop_reason = sweep_stop_reason or "raw_prefix_drained"
-            partial_stop_reasons = {
-                "pass_budget_exhausted",
-                "time_budget_exhausted",
-                "summary_route_unavailable",
-                "summary_result_rejected",
-                "leaf_summary_error",
-                "condensation_error",
-                "condensation_no_progress",
-                "no_same_depth_condensation_group",
-            }
             self._last_threshold_full_sweep = {
-                "status": "partial" if final_stop_reason in partial_stop_reasons else "completed",
+                "status": (
+                    "partial" if final_stop_reason in _THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS else "completed"
+                ),
                 "leaf_passes": leaf_passes,
                 "condensation_passes": pre_leaf_condensation_passes + condensation_passes,
                 "pre_leaf_condensation_passes": pre_leaf_condensation_passes,

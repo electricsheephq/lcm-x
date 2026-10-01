@@ -10,6 +10,7 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -42,6 +43,8 @@ from .engine_registry import (
 )
 from .escalation import (
     _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS,
+    ForegroundBudget,
+    ForegroundEstimates,
     SummaryCircuitBreaker,
     SummarySpendGuard,
     SweepBudgetExhausted,  # re-exported: compaction and tests import it from .engine
@@ -638,6 +641,16 @@ class LCMEngine(
             window_seconds=float(self._config.summary_spend_window_seconds),
             backoff_seconds=float(self._config.summary_spend_backoff_seconds),
         )
+        # #605 D3: rollups count every call on their own guard, so maintenance cannot blank the foreground,
+        # which takes one slot per compaction on the guard above.
+        self._rollup_spend_guard = SummarySpendGuard(
+            max_calls=int(self._config.summary_spend_max_calls),
+            window_seconds=float(self._config.summary_spend_window_seconds),
+            backoff_seconds=float(self._config.summary_spend_backoff_seconds),
+        )
+        # #605: process-local call and finalize walls; the budget of the running compress(), if any.
+        self._foreground_estimates = ForegroundEstimates()
+        self._foreground_budget: Optional[ForegroundBudget] = None
         self._last_overflow_recovery_failed = False
         self._last_condensation_suppressed_reason = ""
         self._last_threshold_full_sweep: dict[str, Any] = {
@@ -1577,6 +1590,29 @@ class LCMEngine(
         hold = _SWEEP_BUDGET_HOLD_SECONDS if seconds is None else min(_SWEEP_BUDGET_HOLD_SECONDS, max(1.0, seconds))
         self._sweep_budget_hold_until = time.time() + hold
 
+    def _sweep_budget(self, deadline: Optional[float]) -> Optional[ForegroundBudget]:
+        """#605: a sweep call (one given a deadline) inside compress() runs under that compress()'s budget."""
+        budget = getattr(self, "_foreground_budget", None) if deadline is not None else None
+        return budget if budget is not None and budget.sweep_active else None
+
+    def _primary_summary_route(self) -> str:
+        """#605: the route key whose estimate an engine-level admission reads: the first one the circuit allows."""
+        chain = _summary_model_chain(self._config.summary_model, self._config.summary_fallback_models)
+        return next((model for model in chain if self._summary_circuit_breaker.allows(model)), chain[0])
+
+    def _foreground_budget_seconds(self) -> tuple[float, float]:
+        """#605: (soft, hard) seconds; an invalid hard is 120, an invalid soft 60, and soft is at most hard."""
+        from .compaction import _THRESHOLD_FULL_SWEEP_MAX_SECONDS
+
+        def valid(value) -> bool:
+            return isinstance(value, (int, float)) and math.isfinite(value)
+
+        hard = getattr(self._config, "foreground_hard_seconds", None)
+        hard = float(hard) if valid(hard) and hard > 0 else _THRESHOLD_FULL_SWEEP_MAX_SECONDS
+        soft = getattr(self._config, "foreground_soft_seconds", None)
+        soft = float(soft) if valid(soft) and soft >= 0 else 60.0
+        return min(soft, hard), hard
+
     def _summary_route_available(self) -> bool:
         """#628: false while the circuit refuses every summary route."""
         return summary_route_available(
@@ -2011,6 +2047,7 @@ class LCMEngine(
         deadline: Optional[float] = None,
     ) -> tuple[List[Dict[str, Any]], int, str, int, int]:
         attempt_chunk = list(initial_chunk)
+        budget = self._sweep_budget(deadline)
         max_attempts = 3
         attempt_number = 0
 
@@ -2022,7 +2059,9 @@ class LCMEngine(
 
             try:
                 timeout_seconds = self._config.summary_timeout_ms / 1000
-                if deadline is not None:
+                if budget is not None:  # #605: the chain caps each attempt; refuse here before any work
+                    budget.admit(self._primary_summary_route())
+                elif deadline is not None:
                     remaining_seconds = deadline - time.monotonic()
                     if remaining_seconds < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
                         raise SweepBudgetExhausted("threshold full sweep time budget exhausted")
@@ -2045,7 +2084,8 @@ class LCMEngine(
                     custom_instructions=self._config.custom_instructions,
                     prompt_version=getattr(self._config, "summary_prompt_version", 1),
                     provenance=provenance,
-                    **({"deadline": deadline} if deadline is not None else {}),  # #666: bounds every attempt
+                    **({"budget": budget} if budget is not None else
+                       {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt
                 )
                 self._last_leaf_summary_model = provenance.get("model", "")
                 self._last_leaf_level_3_verbatim = level == 3 and summary_text == serialized  # #652: no fragment
@@ -2107,7 +2147,7 @@ class LCMEngine(
             key = self._rollup_maintenance_key(scope)
             config = copy.deepcopy(self._config)
             circuit_breaker = self._summary_circuit_breaker
-            spend_guard = self._summary_spend_guard
+            spend_guard = self._rollup_spend_guard
 
             def maintain() -> None:
                 private_dag = SummaryDAG(database_path)
@@ -6936,7 +6976,10 @@ class LCMEngine(
         source_tokens = sum(node.token_count for node in nodes)
         token_budget = max(1000, int(source_tokens * 0.40))
         timeout_seconds = self._config.summary_timeout_ms / 1000
-        if deadline is not None:
+        budget = self._sweep_budget(deadline)
+        if budget is not None:  # #605: the chain caps each attempt; refuse here before any work
+            budget.admit(self._primary_summary_route())
+        elif deadline is not None:
             remaining_seconds = deadline - time.monotonic()
             if remaining_seconds < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
                 raise SweepBudgetExhausted("threshold full sweep time budget exhausted")
@@ -6959,7 +7002,8 @@ class LCMEngine(
             custom_instructions=self._config.custom_instructions,
             prompt_version=getattr(self._config, "summary_prompt_version", 1),
             provenance=provenance,
-            **({"deadline": deadline} if deadline is not None else {}),  # #666: bounds every attempt
+            **({"budget": budget} if budget is not None else
+               {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt
         )
         if level == 3 and summary_text != combined_text and self._fit_can_rescue(force_overflow):
             raise SummaryResultRejected("summary result rejected at level 3")  # a truncation, not the whole text
@@ -7053,8 +7097,8 @@ class LCMEngine(
                         focus_topic=focus_topic,
                         deadline=deadline,
                     )
-            except SweepBudgetExhausted:
-                return passes, "time_budget_exhausted"
+            except SweepBudgetExhausted as exc:
+                return passes, getattr(exc, "reason", "time_budget_exhausted")  # #605: keep a soft stop
             except SummaryResultRejected:
                 return passes, "summary_result_rejected"  # #652: no level 3 node; the group stays on the frontier
             except Exception as exc:
@@ -7068,7 +7112,11 @@ class LCMEngine(
                 )
                 return passes, "condensation_error"
             passes += 1
+            if (budget := self._sweep_budget(deadline)) is not None:
+                budget.progress = budget.progress or "condensation"
             after = self._summary_frontier_tokens()
+            if after < before:
+                self._no_progress_candidate = False  # #651: a condensation that shrank the summary prefix is progress
             if after >= before:
                 return passes, "condensation_no_progress"
         return passes, "summary_prefix_target_reached"

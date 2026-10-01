@@ -262,13 +262,16 @@ def score(cell: dict, cell_dir: Path) -> dict:
     fits = counted(cell, phases, "survival_fit")  # #582: a fit is a compaction miss
     exit_fits = counted(cell, phases, "exit_fit")  # diagnostic only: exit headroom does not fail B8
     skipped = counted(cell, phases, "exit_fit_skipped")
+    unshortened = counted(cell, phases, "fit_unshortened")  # #714: an over-budget list the fit could not shorten
     numbers["B8"] = {"survival_fit": fits, **({"exit_fit": exit_fits} if exit_fits else {}),
-                     **({"exit_fit_skipped": skipped} if skipped else {})}
-    if fits:
+                     **({"exit_fit_skipped": skipped} if skipped else {}),
+                     **({"fit_unshortened": unshortened} if unshortened else {})}
+    if fits or unshortened:
         failed["B8"] = numbers["B8"]
     if cell.get("from_ref"):  # diagnostic only: how many of those came before the candidate first published
         numbers["pre_publication_counts"] = {key: pre_publication(cell, phases, key)
-                                             for key in ("publication_invariant_conflict", "survival_fit")}
+                                             for key in ("publication_invariant_conflict", "survival_fit",
+                                                         *(("fit_unshortened",) if unshortened else ()))}
     failed_turns = [t for p in phases for t in p.get("counters", {}).get("failed", [])]
     final = next((p["final_check"] for p in reversed(phases) if "final_check" in p), None)
     numbers["B4"] = {"failed_turns": failed_turns, "final_check": final}

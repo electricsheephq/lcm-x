@@ -16,6 +16,7 @@ import pytest
 
 import hermes_lcm.compaction as lcm_compaction
 import hermes_lcm.engine as lcm_engine
+import hermes_lcm.escalation as escalation
 import hermes_lcm.survival_fit as survival_fit
 import hermes_lcm.tokens as tokens
 from hermes_lcm.config import LCMConfig
@@ -284,20 +285,32 @@ def test_t5_at_or_below_the_target_the_sweep_is_unchanged(tmp_path, monkeypatch,
 # -- T6: several partial sweeps keep the prefix bounded ------------------------------------------------------
 
 def test_t6_partial_sweeps_do_not_grow_the_prefix(tmp_path, monkeypatch, caplog):
+    """#605: the pre-leaf split is no longer half the passes and half the time; each sweep is partial by its
+    60 s soft target, so the summariser takes 19 s per call on the clock (a call that takes no time would let
+    every later leaf in under the target while the condensation passes are bounded by time)."""
     engine = _engine(tmp_path, condensation_fanin=2, leaf_chunk_tokens=150)
     long_leaf = "Earlier turns." + " summary words" * 20 + "\nExpand for details about: turns"
-    _summaries(monkeypatch, leaf=long_leaf, merged=long_leaf)
+    offset = [0.0]
+    real_monotonic = time.monotonic
+    monkeypatch.setattr(time, "monotonic", lambda: real_monotonic() + offset[0])
+
+    def provider(prompt, max_tokens, model="", timeout=None, reasoning_effort=""):
+        offset[0] += 19.0
+        return long_leaf
+
+    monkeypatch.setattr(escalation, "_invoke_summary_llm", provider)
     view = _view(20)
     sizes = []
     try:
         for round_index in range(6):
             view = _compress(engine, view, caplog)
             sizes.append(engine._summary_frontier_tokens())
-            assert engine.get_status()["threshold_full_sweep"]["stop_reason"] == "pass_budget_exhausted"
+            assert engine.get_status()["threshold_full_sweep"]["stop_reason"] == "soft_target_reached"
             view = [*view, *_turns(100 + 20 * round_index, 20)]
         target = engine.get_status()["threshold_full_sweep"]["summary_prefix_target_tokens"]
         assert sizes[0] > target  # the first sweep leaves the prefix over its target
-        assert all(size <= max(target, sizes[0]) for size in sizes), sizes
+        # The first sweep has no prefix to condense, so the first two sweeps set the bound (#605).
+        assert all(size <= max(target, *sizes[:2]) for size in sizes), sizes
     finally:
         engine.shutdown()
 

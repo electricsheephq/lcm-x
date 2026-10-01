@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Bench: process-transport cells count a routine exit fit once (the in-process cells' normalization), and the
+  reliability bar B8 also fails on a non-exit `LCM survival fit could not shorten the list` line. (#714)
 - Fix: a store-complete leaf counts its extended scan allowance from the first open tool group's call row, so
   rows an earlier summary covers no longer use it up and the group's results reach a summary; when a full page
   holds only rows the leaf excludes (covered, ignored, passive, system), the scan reads up to four pages before
@@ -23,6 +25,25 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Docs: the release gauntlet spec requires at least one committed compaction in the Phase C soak (else the soak is
   inconclusive), states the Phase C lossless multiset bar as the scorer checks it, and defines the differential rule's
   row identity (tool calls included; one fixture session); the AGENTS.md summary carries the "no worse than the base" guard. (#705)
+- Fix: a threshold sweep has one time budget counted from `compress()` entry, not from after ingest (#605). Its
+  progress call (a condensation pass when the summary frontier is over its target, #653, else the first leaf) is
+  tried while at least 15 s of usable time is left: the hard bound (`LCM_FOREGROUND_HARD_SECONDS`, 120) less a
+  finalize reserve (5-20 s, the p90 of recent finalize steps), so a stale estimate cannot starve a compaction. After
+  a stored leaf or condensed node, a call starts only if its route's recent duration (p90 of the last 8 calls, 15 s
+  floor, 30 s cold) says it ends, with the reserve, by the hard bound and by the new soft target
+  (`LCM_FOREGROUND_SOFT_SECONDS`, default 60, `0` = off); the pre-leaf condensation no longer takes half the passes
+  and half the time. Each call's timeout is at most the usable time left. The stop reason `soft_target_reached` is a
+  partial stop in `lcm_status`. One INFO line per compaction, `LCM compaction stop:`, gives the reason,
+  leaves, the progress call kind, elapsed seconds, the seconds before, during and after the calls, and the backlog
+  left. A step already running (a store step, assembly, the fit, the host's stream read between
+  two chunks) is not interrupted, so a compaction can still end past the hard bound; the stop line measures it. The
+  sweep-off, forced-overflow and below-threshold paths keep their behaviour.
+- Fix: on a host that offers `aux_stream_deadline`, each sweep summariser call runs under the earlier of the host's
+  deadline and the budget's (#605). A timeout is a budget cut only when the budget bound the call (its timeout was the
+  time left, below the configured one) or the host deadline fired: it ends the chain without counting against the
+  route's circuit. A configured-timeout hit stays an ordinary route failure and the fallback route runs. A
+  foreground compaction takes one spend-guard slot, at its first call; rollups count every call on their own guard,
+  so maintenance cannot use up the foreground's. (#605)
 - Fix: a Hermes process in which LCM-X did not become active (a slow load or another context engine in the slot) keeps its own
   record file, so overlapping processes no longer overwrite each other's notice; `lcm_doctor` and `/lcm doctor` report
   a live one as an `inactive_process` warning with the fix to apply; after a slot conflict the already-registered
