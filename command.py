@@ -2622,7 +2622,7 @@ def _rollups_rebuild_text(tokens: list[str], engine) -> str:
                 scope,
                 period_start,
                 circuit_breaker=engine._summary_circuit_breaker,
-                spend_guard=engine._summary_spend_guard,
+                spend_guard=engine._rollup_spend_guard,  # #605 D3: rollups count on their own guard
             )
             row = store.get_rollup(period_kind, period_key, scope)
             outcome, detail = _classify_rollup_build_outcome(result, row)

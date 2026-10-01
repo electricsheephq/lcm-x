@@ -358,6 +358,8 @@ environment variables:
 | `LCM_DYNAMIC_LEAF_CHUNK_MAX` | `40000` | Upper bound for dynamic leaf chunk targets |
 | `LCM_THRESHOLD_FULL_SWEEP_ENABLED` | `false` | At threshold, opt into one synchronous bounded sweep that drains chunked raw history before publishing one new active context |
 | `LCM_SUMMARY_PREFIX_TARGET_TOKENS` | `0` | Sweep-only summary-frontier target; `0` derives one `LCM_LEAF_CHUNK_TOKENS` budget |
+| `LCM_FOREGROUND_SOFT_SECONDS` | `60` | Sweep soft target, counted from `compress()` entry: after the first stored leaf or condensed node, no summariser call starts unless its recent duration says it ends by then (`0` = none; at most the hard bound) |
+| `LCM_FOREGROUND_HARD_SECONDS` | `120` | Sweep hard bound, counted from `compress()` entry: no summariser call starts unless it is expected to end, with a finalize reserve, by then, and none gets a timeout past it (`0` or invalid = `120`) |
 | `LCM_NEW_SESSION_RETAIN_DEPTH` | `2` | DAG depth retained after manual `/new` (`-1` all, `0` none) |
 | `LCM_IGNORE_SESSION_PATTERNS` | empty | Comma-separated session globs excluded from LCM storage |
 | `LCM_STATELESS_SESSION_PATTERNS` | empty | Comma-separated session globs kept read-only |
@@ -807,9 +809,27 @@ What the main knobs do:
   pressure falls below the trigger. It always uses the configured working leaf
   size, then condenses a too-large summary frontier toward
   `LCM_SUMMARY_PREFIX_TARGET_TOKENS` (`0` means one leaf budget). The whole
-  invocation is bounded to 12 summary calls and 120 seconds between calls,
-  persists each completed DAG pass, and publishes one active context at the end.
-  It remains synchronous and does not enable deferred/background maintenance.
+  invocation is bounded to 12 summary calls, persists each completed DAG pass,
+  and publishes one active context at the end. It remains synchronous and does
+  not enable deferred/background maintenance.
+- Its time is one budget counted from `compress()` entry (#605). The progress
+  call (a condensation pass when the summary frontier is over its target, else
+  the first leaf) is tried while at least 15 s of usable time is left before
+  `LCM_FOREGROUND_HARD_SECONDS` (`120`) less a finalize reserve (5-20 s, from
+  recent finalize steps). After a stored leaf or condensed node, a call starts
+  only if its recent duration (p90 of the route's last 8 calls, 15 s floor, 30 s
+  before any) says it ends, with the reserve, by the hard bound and by
+  `LCM_FOREGROUND_SOFT_SECONDS` (`60`; `0` turns the soft target off); the stop
+  reason is then `soft_target_reached`, a partial stop in `lcm_status`. Each call's timeout is at
+  most the usable time left, and on a host that offers `aux_stream_deadline` a
+  streamed call runs under that deadline too. The
+  plugin cannot interrupt a step that is already running (a store step, the
+  host's stream read between two chunks, assembly, the fit), so a compaction can
+  still end past the hard bound; the INFO line `LCM compaction stop:` gives the
+  reason, the leaves and the seconds before, during and after the calls. A call
+  cut by the budget is not a summary-route failure, and a compaction uses one
+  spend-guard slot however many calls it makes; rollups count on their own guard.
+  The sweep-off and forced-overflow paths are not under this budget yet.
 - `LCM_EXPANSION_CONTEXT_TOKENS` controls how much recovered material
   `lcm_expand_query` may feed to the auxiliary model. It does not change what
   LCM stores.
