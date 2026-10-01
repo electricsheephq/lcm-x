@@ -15,9 +15,10 @@ import math
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Collection, Dict, List, Optional
+from typing import Any, Callable, Collection, Dict, Iterator, List, Optional
 
 from .db_bootstrap import (
     select_conversation_range,
@@ -303,6 +304,7 @@ class MessageStore:
         # change semantics for single-threaded callers and adds only a single
         # uncontended ``RLock.acquire``/``release`` pair per operation.
         self._write_lock = threading.RLock()
+        self._commit_deferred = False  # #574: an atomic() block owns the commit
         self._init_db()
 
     def _init_db(self):
@@ -1013,7 +1015,7 @@ class MessageStore:
                     [(int(s), k, r, o, ob, created_at) for s, k, r, o, ob in group],
                 )
                 added += len(group)
-            self._conn.commit()
+            self._commit()
         return added
 
     def get_message_relations(self, store_ids: List[int], kind: str, *, related: bool = False) -> List[Dict[str, Any]]:
@@ -1040,7 +1042,7 @@ class MessageStore:
                 "WHERE store_id = ? AND observed_at IS NULL",
                 (float(observed_at), int(store_id)),
             )
-            self._conn.commit()
+            self._commit()
             return cur.rowcount > 0
 
     def get_session_count(self, session_id: str) -> int:
@@ -1297,8 +1299,39 @@ class MessageStore:
                 )
                 wrote = True
             if wrote:
-                conn.commit()
+                self._commit()
         return wrote
+
+    def _commit(self) -> None:
+        """Commit the helper's write, unless an ``atomic()`` block owns the commit (#574)."""
+        if not self._commit_deferred:
+            self._conn.commit()
+
+    @contextmanager
+    def atomic(self) -> Iterator[None]:
+        """One commit/rollback boundary for ``add_message_relations``, ``backfill_observed_at`` and
+        ``write_metadata_json`` calls (#574): inside, they defer their commit and any exception rolls
+        every write back. No explicit BEGIN: the first write opens the transaction and takes the write
+        lock exactly as the helpers do alone, so a block that writes nothing locks nothing. Not for
+        ``executescript`` (it commits implicitly) or helpers that own their transaction
+        (``append_batch``, ``update_metadata_json``)."""
+        with self._write_lock:
+            conn = self._conn
+            if conn is None:
+                raise RuntimeError("MessageStore connection is closed")
+            if conn.in_transaction:
+                conn.commit()  # parity: the first helper's own commit would have flushed it
+            self._commit_deferred = True
+            try:
+                yield
+                if conn.in_transaction:
+                    conn.commit()
+            except BaseException:
+                if conn.in_transaction:
+                    conn.rollback()
+                raise
+            finally:
+                self._commit_deferred = False
 
     def update_metadata_json(self, key: str, update: Any) -> Any:
         """Atomic read-modify-write of one metadata JSON value: ``update(current)`` (None when absent) runs
