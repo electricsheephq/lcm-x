@@ -63,8 +63,10 @@ export LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED=true
 
 # Replace token-heavy tool results in the provider-visible prompt with refs
 export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED=true
-# Default stub threshold is 25000 tokens; lower it for chattier tools
-# export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS=25000
+# A new result is stubbed from 10000 tokens; at a compaction, older results
+# outside the fresh tail are stubbed from 2000 tokens (0 = the first-sight value)
+# export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS=10000
+# export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS=2000
 
 # Cap the protected fresh tail by tokens (0 = off). Prevents one giant recent
 # tool result from pinning the whole budget; newest message and complete

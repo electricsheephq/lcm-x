@@ -18,12 +18,14 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import sys
 import time
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from .dag import SummaryNode
 from .escalation import ForegroundBudget, ForegroundEstimates, SweepBudgetExhausted
+from .externalize import ingest_payload_writes
 from .fresh_tail import tool_group_safe_end
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
 from .message_analysis import _matched_tool_call_ids
@@ -41,6 +43,7 @@ from .reconcile import (
 )
 from .sanitize import _contains_sensitive_redaction
 from .sqlite_util import _is_sqlite_locked_error
+from .survival_fit import _RECOVERY_THRESHOLD_SHARE
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 
 _UNPROVEN_FILTER_EXCLUSION = object()
@@ -584,6 +587,7 @@ class CompactionMixin:
             self._compress_occurrences = None
             self._survival_fit_reason = None
             self._no_progress_candidate = False
+            self._stub_first_exit_now = self._last_stub_first_exit = None  # #671: the latest compaction only
             if bypass_cooldown:  # #651: a host recovery attempt is never cleanup-only maintenance
                 self._preflight_below_threshold_cleanup_only = self._preflight_automatic_request = False
                 # #684: nor held by a boundary cooldown; native recovery keeps its own handoff (#463/#464).
@@ -603,6 +607,7 @@ class CompactionMixin:
                     current_tokens=current_tokens,
                     focus_topic=focus_topic,
                     force=force,
+                    recovery_attempt=bypass_cooldown,
                 )
             self._compress_occurrences = None
             if (
@@ -681,9 +686,14 @@ class CompactionMixin:
                 reason = str(self._last_threshold_full_sweep.get("stop_reason") or reason)
             elif reason != "error" and budget.stop_reason:  # a time stop with the sweep off (#605)
                 reason = budget.stop_reason
+            exited = getattr(self, "_stub_first_exit_now", None) if reason != "error" else None
+            if exited:  # #671: the free cuts reached the target before any model call
+                reason = "stub_first_exit"
             logger.info("LCM compaction stop: reason=%s leaves=%d progress=%s elapsed=%.1fs pre=%.1fs calls=%.1fs "
-                        "finalize=%.1fs backlog_tokens=%d", reason, budget.leaves, budget.progress or "none", elapsed,
-                        pre, calls, finalize, self._raw_backlog_tokens(result) if isinstance(result, list) else 0)
+                        "finalize=%.1fs backlog_tokens=%d%s", reason, budget.leaves, budget.progress or "none", elapsed,
+                        pre, calls, finalize, self._raw_backlog_tokens(result) if isinstance(result, list) else 0,
+                        " tokens_before={tokens_before} tokens_after={tokens_after} target={target_tokens} "
+                        "backlog_rows={backlog_rows}".format(**exited) if exited else "")
         except Exception:
             logger.debug("LCM compaction stop line failed", exc_info=True)
 
@@ -1129,16 +1139,19 @@ class CompactionMixin:
         working_messages: List[Dict[str, Any]],
         anchor_source_messages: List[Dict[str, Any]],
         recovery_assembly_cap: int | None,
+        persist: bool = True,
     ) -> List[Dict[str, Any]]:
-        """Assemble and register replay proof for every committed leaf."""
+        """Assemble and register replay proof for every committed leaf (``persist=False``: a no-write trial)."""
         leading_anchor_count = self._leading_anchor_count(working_messages)
         anchor_leading_count = self._leading_anchor_count(anchor_source_messages)
         self._pending_context_anchor_messages = anchor_source_messages[anchor_leading_count:]
+        no_write = None if persist else ingest_payload_writes.set(False)  # #726: sanitizing writes no payload file
         try:
             return self._assemble_context(
                 working_messages[0] if leading_anchor_count else None,
                 working_messages[leading_anchor_count:],
                 assembly_cap_override=recovery_assembly_cap,
+                **({} if persist else {"persist": False}),  # the leaf path's call is unchanged
                 **(
                     {"retained_user_message": working_messages[1]}
                     if leading_anchor_count == 2
@@ -1147,6 +1160,87 @@ class CompactionMixin:
             )
         finally:
             self._pending_context_anchor_messages = None
+            if no_write is not None:
+                ingest_payload_writes.reset(no_write)
+
+    def _stub_first_exit(
+        self,
+        messages: List[Dict[str, Any]],
+        working_messages: List[Dict[str, Any]],
+        anchor_source_messages: List[Dict[str, Any]],
+        pressure_messages: List[Dict[str, Any]],
+        observed_tokens: int,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """#671: the list the leaf path returns when no leaf runs (summary prefix, externalized placeholders, the
+        aged stub tier), assembled without a model call, when the survival fit's host measure puts it at or under
+        min(threshold - leaf chunk, 0.95 x threshold); else None and the compaction goes on as before. No row is
+        deleted: the rows no leaf summarised stay stored and are recorded as backlog."""
+        if not (self._config.large_output_active_replay_stubbing_enabled
+                and self._config.large_output_externalization_enabled):
+            return None
+        threshold = int(self.threshold_tokens or 0)
+        target = min(threshold - int(self._config.leaf_chunk_tokens), int(threshold * _RECOVERY_THRESHOLD_SHARE))
+        if target <= 0:
+            return None
+        leading = self._leading_anchor_count(working_messages)
+        fresh_tail_start = self._fresh_tail_start(pressure_messages)
+        start = leading  # the replayed summary prefix: assembly emits it again from the DAG
+        while start < fresh_tail_start and (
+            self._is_replayed_context_scaffold_message(working_messages[start])
+            if self._compress_occurrences is None
+            else self._compress_occurrences.get(id(working_messages[start]), (None, ()))[1] is None
+        ):
+            start += 1
+        rows = self._drop_preexisting_generated_ignored_dependent_eof_replies(
+            working_messages[:leading] + working_messages[start:],
+            self._load_generated_ignored_dependent_reply_records(),
+        )
+        cap = self._effective_assembly_token_cap()
+        # Only free cuts count: an assembly cap must not drop unsummarised rows to reach the target. The trial
+        # writes nothing and runs no proactive recall (its block is reserved at its budget); a taken exit assembles
+        # once more with the writes and the recall a final assembly makes.
+        override = None if cap is None else sys.maxsize
+        candidate = self._assemble_committed_compaction_context(rows, anchor_source_messages, override, persist=False)
+        recall = int(self._config.proactive_recall_budget_tokens) if self._config.proactive_recall_enabled else 0
+        overhead = self._survival_host_overhead(messages, observed_tokens)
+        if (
+            self._survival_measure(candidate) + overhead + recall > target
+            or (cap is not None and count_messages_tokens(candidate) + recall > cap)
+            or self._committed_replay_drops(working_messages, start)[0]  # #457: a resumed prefix takes today's path
+        ):
+            return None
+        # #726: a write that fails in the final assembly keeps a full result; re-check the list it returns.
+        keys = [self._folded_tail_lineage_metadata_key(), self._active_replay_snapshot_metadata_key()]
+        saved = [self._store.read_metadata_json(key) for key in keys]
+        pending = list(getattr(self, "_pending_emission_candidates", None) or [])
+        candidate = self._assemble_committed_compaction_context(rows, anchor_source_messages, override)
+        after = self._survival_measure(candidate) + overhead
+        if after > target or (cap is not None and count_messages_tokens(candidate) > cap):
+            for key, value in zip(keys, saved):
+                self._store.write_metadata_json([key], json.dumps(value, sort_keys=True), skip_unchanged=True)
+            self._pending_emission_candidates = pending
+            logger.warning("LCM stub-first exit: the final assembly missed the target (tokens=%d, target=%d); "
+                           "taking the normal path", after, target)
+            return None
+        backlog_rows = len(self._raw_backlog_messages(rows))
+        self._refresh_raw_backlog_debt(rows, observed_tokens=observed_tokens)
+        self._ingest_cursor = len(candidate)
+        self._last_compression_status = "sanitized"
+        self._last_compression_noop_reason = ""
+        self._note_fresh_tail_pressure_relieved()
+        self._write_generated_ignored_placeholder_hash_counts(
+            self._generated_placeholder_digest_budget_for_active_replay(candidate)
+        )
+        self._write_generated_ignored_placeholder_hash_ordinals(
+            self._generated_placeholder_digest_ordinals_for_active_replay(candidate)
+        )
+        self._stub_first_exit_now = self._last_stub_first_exit = {
+            "tokens_before": int(observed_tokens or 0),
+            "tokens_after": int(after),
+            "target_tokens": target,
+            "backlog_rows": backlog_rows,
+        }
+        return candidate
 
     def _stored_publication_filter_exclusions(
         self,
@@ -1259,7 +1353,8 @@ class CompactionMixin:
     def _compress_impl(self, messages: List[Dict[str, Any]],
                        current_tokens: int = None,
                        focus_topic: Optional[str] = None,
-                       force: bool = False) -> List[Dict[str, Any]]:
+                       force: bool = False,
+                       recovery_attempt: bool = False) -> List[Dict[str, Any]]:
         """Main compaction entry point.
 
         1. Ingest any new messages into the store
@@ -1506,6 +1601,21 @@ class CompactionMixin:
                 "stop_reason": "",
                 "budget_exhausted": False,
             }
+        # #671: an automatic threshold pass (the #651 candidate; never a recovery attempt) first tries the free
+        # cuts: no leaf, no condensation, no model call when they reach the target.
+        if self._no_progress_candidate and not recovery_attempt:
+            exited = self._stub_first_exit(
+                messages, working_messages, anchor_source_messages, pressure_messages, observed_prompt_tokens
+            )
+            if exited is not None:
+                if threshold_full_sweep_active:
+                    self._last_threshold_full_sweep.update(
+                        status="partial",
+                        stop_reason="stub_first_exit",
+                        duration_ms=round((time.perf_counter() - _compress_started) * 1000.0, 3),
+                        tokens_after=count_messages_tokens(exited),
+                    )
+                return exited
         critical_budget_pressure = self._critical_budget_pressure_reached(
             observed_tokens=observed_prompt_tokens,
             messages=working_messages,

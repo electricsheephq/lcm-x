@@ -9,6 +9,7 @@ recoverable through the LCM inspection and expansion tools.
 from __future__ import annotations
 
 import codecs
+import contextvars
 import hashlib
 import json
 import logging
@@ -1112,6 +1113,10 @@ def find_externalized_tool_result_content_for_call(
     return None
 
 
+# #671: a no-write assembly (the stub-first trial) builds ingest-payload placeholders without writing their files.
+ingest_payload_writes = contextvars.ContextVar("lcm_ingest_payload_writes", default=True)
+
+
 def externalize_ingest_payload(
     content: str,
     *,
@@ -1148,7 +1153,8 @@ def externalize_ingest_payload(
         "created_at": time.time(),
     }
     try:
-        _write_externalized_payload(path, payload)
+        if ingest_payload_writes.get():
+            _write_externalized_payload(path, payload)
     except OSError as exc:
         logger.warning("LCM ingest payload externalization skipped (non-blocking): %s", exc)
         return None
@@ -1175,6 +1181,7 @@ def maybe_externalize_tool_output(
     hermes_home: str = "",
     force: bool = False,
     tool_name: str = "",
+    write: bool = True,
 ) -> Dict[str, Any] | None:
     return maybe_externalize_payload(
         content,
@@ -1186,6 +1193,7 @@ def maybe_externalize_tool_output(
         hermes_home=hermes_home,
         force=force,
         tool_name=tool_name,
+        write=write,
     )
 
 
@@ -1201,8 +1209,9 @@ def maybe_externalize_payload(
     force: bool = False,
     metadata: Dict[str, Any] | None = None,
     tool_name: str = "",
+    write: bool = True,
 ) -> Dict[str, Any] | None:
-    """Externalize one normalized payload if configured.
+    """Externalize one normalized payload if configured (``write=False``: the placeholder it would get, no file).
 
     Returns a dict with a compact placeholder and the durable JSON payload path,
     or ``None`` when disabled, below threshold and not forced, or storage is
@@ -1284,7 +1293,8 @@ def maybe_externalize_payload(
         payload.update(_safe_persisted_output_metadata(metadata))
         _merge_persisted_output_marker_metadata(payload, metadata)
     try:
-        _write_externalized_payload(path, payload)
+        if write:
+            _write_externalized_payload(path, payload)
     except OSError as exc:
         logger.warning("Large payload externalization skipped (non-blocking): %s", exc)
         return None

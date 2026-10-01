@@ -673,6 +673,9 @@ class LCMEngine(
             "stop_reason": "",
             "budget_exhausted": False,
         }
+        # #671: the latest stub-first exit (tokens before/after, target, backlog rows) and this compress()'s.
+        self._last_stub_first_exit: Optional[dict[str, int]] = None
+        self._stub_first_exit_now: Optional[dict[str, int]] = None
         self._last_compression_status = "idle"
         self._last_compression_noop_reason = ""
         self._last_native_recovery_rejection = ""
@@ -4791,6 +4794,7 @@ class LCMEngine(
             "last_compression_noop_reason": self._last_compression_noop_reason,
             "last_survival_fit": dict(self._last_survival_fit) if self._last_survival_fit else None,
             "threshold_full_sweep": dict(self._last_threshold_full_sweep),
+            "last_stub_first_exit": dict(self._last_stub_first_exit) if self._last_stub_first_exit else None,
             "no_progress_hold": self._no_progress_hold_status(),
             "ingest_failure_count": self._ingest_failure_count,
             "consecutive_ingest_failures": self._consecutive_ingest_failures,
@@ -6701,7 +6705,10 @@ class LCMEngine(
         *,
         is_recovery_tool_result: bool,
         tool_name: str = "",
+        threshold_tokens: int | None = None,
+        write: bool = True,
     ) -> Dict[str, Any] | None:
+        """``threshold_tokens`` overrides the first-sight threshold (#671: the aged tier at assembly)."""
         if not getattr(self._config, "large_output_active_replay_stubbing_enabled", False):
             return None
         if not getattr(self._config, "large_output_externalization_enabled", False):
@@ -6717,16 +6724,10 @@ class LCMEngine(
         normalized_content = normalize_content_value(content) or ""
         if not normalized_content or is_externalized_placeholder(normalized_content):
             return None
-        threshold = max(
-            1,
-            int(
-                getattr(
-                    self._config,
-                    "large_output_active_replay_stub_threshold_tokens",
-                    25_000,
-                )
-                or 0
-            ),
+        threshold = (
+            self._active_replay_stub_threshold_tokens()
+            if threshold_tokens is None
+            else max(1, int(threshold_tokens))
         )
         if count_tokens(normalized_content) <= threshold:
             return None
@@ -6738,6 +6739,7 @@ class LCMEngine(
             hermes_home=self._hermes_home,
             force=True,
             tool_name=str(message.get("tool_name") or tool_name or ""),
+            write=write,
         )
         if externalized is None:
             return None
@@ -6748,9 +6750,33 @@ class LCMEngine(
         )
         return replacement
 
+    def _active_replay_stub_threshold_tokens(self) -> int:
+        """First-sight stub threshold: the live interceptor at ingest (#671)."""
+        return max(
+            1,
+            int(
+                getattr(
+                    self._config,
+                    "large_output_active_replay_stub_threshold_tokens",
+                    10_000,
+                )
+                or 0
+            ),
+        )
+
+    def _active_replay_stub_aged_threshold_tokens(self) -> int:
+        """#671 aged tier: assembly at compaction, outside the fresh tail. 0 = the first-sight
+        threshold; never above it, so an aged row is never kept whole where first sight stubs it."""
+        first_sight = self._active_replay_stub_threshold_tokens()
+        aged = int(
+            getattr(self._config, "large_output_active_replay_stub_aged_threshold_tokens", 0) or 0
+        )
+        return min(aged, first_sight) if aged > 0 else first_sight
+
     def _stub_large_tool_results_for_active_replay(
         self,
         messages: List[Dict[str, Any]],
+        write: bool = True,
     ) -> List[Dict[str, Any]]:
         """Replace eligible old tool payloads with durable refs for assembly.
 
@@ -6763,7 +6789,8 @@ class LCMEngine(
         if not getattr(self._config, "large_output_externalization_enabled", False):
             return messages
         protected_tail_count = max(0, int(getattr(self._config, "fresh_tail_count", 0) or 0))
-        eligible_end = max(0, len(messages) - protected_tail_count)
+        # #671: never inside the resolved fresh tail, which widens to whole tool groups
+        eligible_end = max(0, min(len(messages) - protected_tail_count, self._fresh_tail_start(messages)))
         if eligible_end <= 0:
             return messages
 
@@ -6775,11 +6802,14 @@ class LCMEngine(
         stubbed_count = 0
         tokens_saved = 0
         tool_result_names = _tool_result_names(messages)
+        aged_threshold = self._active_replay_stub_aged_threshold_tokens()
         for idx, message in enumerate(messages[:eligible_end]):
             replacement = self._maybe_stub_active_tool_result(
                 message,
                 is_recovery_tool_result=(idx in recovery_tool_result_indices),
                 tool_name=tool_result_names.get(idx, ""),
+                threshold_tokens=aged_threshold,
+                write=write,
             )
             if replacement is None:
                 continue
@@ -7485,8 +7515,10 @@ class LCMEngine(
         include_lcm_note: bool = True,
         retained_user_message: Optional[Dict[str, Any]] = None,
         stub_over_cap_tool_results: bool = False,
+        persist: bool = True,
     ) -> List[Dict[str, Any]]:
-        """Build the active context from DAG summaries + fresh tail.
+        """Build the active context from DAG summaries + fresh tail. ``persist=False`` (#671: the stub-first
+        trial) writes nothing: no payload file, fold lineage, snapshot digest or emission candidates, no recall.
 
         Structure:
           [leading anchors: system and, when proven, the sole real user]
@@ -7528,7 +7560,7 @@ class LCMEngine(
         # Stub durably externalized evictable tool payloads before the assembly
         # budget pass so the selector sees their reduced provider-visible cost.
         # The helper protects the configured fresh tail and is fail-open.
-        assembly_tail_messages = self._stub_large_tool_results_for_active_replay(tail_messages)
+        assembly_tail_messages = self._stub_large_tool_results_for_active_replay(tail_messages, write=persist)
         tail_selected = assembly_tail_messages
         anchor_source = getattr(self, "_pending_context_anchor_messages", None)
         if anchor_source is None:
@@ -7707,7 +7739,7 @@ class LCMEngine(
             proactive_query_messages,
             summary_role,
             active_summary_node_ids,
-        )
+        ) if persist else None
         if proactive_msg is not None:
             if retained_user_msg is not None:
                 proactive_content = normalize_content_value(
@@ -7831,6 +7863,8 @@ class LCMEngine(
                     trimmed["content"] = "\n\n---\n\n".join(parts)
                     trimmed_result.append(trimmed)
             result = self._sanitize_active_context_messages(trimmed_result)
+        if not persist:
+            return result
 
         existing_folded_lineage = self._load_folded_tail_lineage(result)
         if (

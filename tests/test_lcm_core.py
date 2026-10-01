@@ -789,7 +789,8 @@ class TestConfig:
         assert c.large_output_externalization_threshold_chars == 12_000
         assert c.large_output_externalization_path == ""
         assert c.large_output_active_replay_stubbing_enabled is False
-        assert c.large_output_active_replay_stub_threshold_tokens == 25_000
+        assert c.large_output_active_replay_stub_threshold_tokens == 10_000
+        assert c.large_output_active_replay_stub_aged_threshold_tokens == 2_000
         assert c.large_output_transcript_gc_enabled is False
         assert c.deferred_maintenance_enabled is False
         assert c.deferred_maintenance_max_passes == 4

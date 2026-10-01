@@ -598,7 +598,8 @@ moved back to that assistant even when doing so exceeds a configured bound.
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `false` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS` | `12000` | Externalization threshold for normalized payload text |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `false` | Replace token-heavy textual tool results with recoverable externalized refs in active replay; current-turn ingest is immediate and historical assembly respects the protected fresh tail; requires large-output externalization |
-| `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `25000` | Token-aware threshold for active-replay tool-result stubbing |
+| `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `10000` | First-sight threshold: a new tool result over this many tokens is stubbed at ingest |
+| `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` | `2000` | Aged tier: at a compaction, a tool result outside the fresh tail is stubbed from this many tokens (`0` = the first-sight threshold; never above it) |
 | `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `false` | Rewrite already-externalized summarized tool rows to compact placeholders |
 | `LCM_DOCTOR_CLEAN_APPLY_ENABLED` | `false` | Permit destructive `/lcm doctor clean apply` in trusted operator contexts |
 | `LCM_EMPTY_LIFECYCLE_GC_ENABLED` | `true` | Master toggle for automatic pruning of lifecycle rows for sessions that never ingested any messages or summary nodes |
@@ -852,18 +853,30 @@ from summaries. They remain inspectable through
 
 Active-replay stubbing is a second, independently opt-in replay policy. When
 both externalization and active-replay stubbing are enabled, newly ingested
-textual tool results above the token threshold are durably externalized and
+textual tool results above the first-sight token threshold (10,000) are durably externalized and
 replaced immediately in provider-visible replay, including results in the
 protected fresh tail. This lets a stub-only replay change converge even when no
-leaf is eligible for compaction. A historical assembly pass applies the same
-policy to older tool results before budgeting, while respecting the protected
-fresh tail. Tool-call ids and compatible structured text block types/keys are
+leaf is eligible for compaction. At a compaction, a historical assembly pass
+stubs older tool results from the aged threshold (2,000 tokens) before budgeting,
+while respecting the protected fresh tail. Tool-call ids and compatible structured text block types/keys are
 retained; raw SQLite rows and DAG lineage are not rewritten by the historical
 pass. Structured image/media results remain inline, preserving the provider
 replay contract established by upstream Hermes-LCM PR #226. If durable externalization
 cannot be confirmed, replay keeps the original payload inline. Results from
 `lcm_describe` and `lcm_expand` also remain inline so recovery does not
 recursively produce another ref.
+
+An automatic compaction whose input reached the threshold first tries these free
+cuts (#671): it assembles the summary prefix, the externalized placeholders and the
+aged-tier stubs without a model call and, when the host-measured list is at or under
+min(threshold - `LCM_LEAF_CHUNK_TOKENS`, 0.95 x threshold), returns it with no leaf,
+no condensation and no summariser call. The rows no leaf summarised stay stored and
+are recorded as raw backlog; the stop reason `stub_first_exit` is a partial stop in
+`lcm_status` (`last_stub_first_exit`, and the threshold sweep record when the sweep is
+on), the doctor and the `LCM compaction stop:` line, with the tokens before and after,
+the target and the backlog rows left. Recovery attempts, forced overflow and calls
+below the threshold never take this exit; when the cuts miss the target the
+compaction runs as before.
 
 The storage-boundary payload guard is separate from that opt-in. LCM always
 scans messages at the store boundary before writing `messages.content` or
