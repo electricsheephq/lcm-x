@@ -393,6 +393,26 @@ def test_c_a_call_cut_by_the_budget_counts_no_failure_ends_the_chain_and_takes_o
     assert breaker._failures == {} and len(guard._calls) == 1
 
 
+@pytest.mark.parametrize(("pre_work", "budget_cut"), [(54.0, False), (56.0, True)])
+def test_c_a_configured_timeout_ending_near_the_deadline_is_a_failure_and_a_budget_bound_one_is_a_cut(
+        monkeypatch, clock, pre_work, budget_cut):
+    """Usable deadline +115 s. After 54 s the configured 60 s timeout binds (61 s left) and fires at +114 s: a route
+    failure. After 56 s the budget binds (59 s left) and the call is cut at +115 s: no failure is recorded."""
+    provider = _provider(monkeypatch, clock, default=None)
+    breaker = escalation.SummaryCircuitBreaker()
+    budget = escalation.ForegroundBudget(soft=0, hard=120.0, configured_timeout=60.0,
+                                         estimates=escalation.ForegroundEstimates())
+    clock.offset += pre_work
+    with pytest.raises(escalation.SweepBudgetExhausted):  # a cut, or the fallback refused with 1 s left
+        escalation.summarize_with_escalation(
+            "source text " * 400, source_tokens=4000, token_budget=50, model="m1", fallback_models=["m2"],
+            timeout=60.0, circuit_breaker=breaker, budget=budget)
+    (model, timeout, started), = provider.calls
+    assert model == "m1" and started == pytest.approx(pre_work)
+    assert timeout == pytest.approx(59.0 if budget_cut else 60.0, abs=0.5)
+    assert breaker._failures == ({} if budget_cut else {"m1": 1})
+
+
 # -- Astra counterexample (d): the classifier reads the error channel; the host deadline seam ----------------------
 
 def _host_module(monkeypatch, clock, seen: list):
@@ -529,6 +549,24 @@ def test_soft_target_reached_is_a_partial_stop_in_get_status_and_lcm_status(tmp_
         assert status["threshold_full_sweep"]["status"] == "partial"
         assert status["config"]["threshold_full_sweep_max_seconds"] == 120
         assert status["config"]["foreground_soft_seconds"] == 60
+    finally:
+        engine.shutdown()
+
+
+def test_a_stored_condensation_then_the_soft_target_is_a_partial_stop_not_a_noop(tmp_path, monkeypatch, clock, caplog):
+    engine = _engine(tmp_path)
+    for _ in range(8):
+        engine._foreground_estimates.record_call("", 31.0)
+    _provider(monkeypatch, clock, default=31.0)
+    _advance_on(monkeypatch, engine, "_prepare_retained_user_anchor", clock, 3.0)
+    _depth_0_nodes(engine, 6)
+    try:
+        _compress(engine, _view(), caplog)
+        assert len(_condensations(engine)) == 1
+        status = json.loads(lcm_tools.lcm_status({}, engine=engine))["threshold_full_sweep"]
+        assert status["leaf_passes"] == 0 and status["pre_leaf_condensation_passes"] == 1
+        assert status["stop_reason"] == "soft_target_reached" and status["status"] == "partial"
+        assert engine.get_status()["threshold_full_sweep"]["status"] == "partial"
     finally:
         engine.shutdown()
 

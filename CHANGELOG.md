@@ -25,7 +25,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   floor, 30 s cold) says it ends, with the reserve, by the hard bound and by the new soft target
   (`LCM_FOREGROUND_SOFT_SECONDS`, default 60, `0` = off); the pre-leaf condensation no longer takes half the passes
   and half the time. Each call's timeout is at most the usable time left. The stop reason `soft_target_reached` is a
-  partial stop in `lcm_status` and the doctor. One INFO line per compaction, `LCM compaction stop:`, gives the reason,
+  partial stop in `lcm_status`. One INFO line per compaction, `LCM compaction stop:`, gives the reason,
   leaves, the progress call kind, elapsed seconds, the seconds before, during and after the calls, and the backlog
   left. A step already running (a store step, assembly, the fit, the host's stream read between
   two chunks) is not interrupted, so a compaction can still end past the hard bound; the stop line measures it. The

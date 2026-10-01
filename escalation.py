@@ -826,15 +826,15 @@ def summary_route_available(
 
 def _is_budget_cut(error, budget: ForegroundBudget, budget_bound: bool, wall: float, call_timeout) -> bool:
     """#605 F4: a timeout is a budget cut when the budget's limit bound the call (its timeout was the usable
-    time left, below the configured one, and ran out; or the usable deadline passed), or the host deadline
-    fired. A configured-timeout hit stays an ordinary route failure."""
+    time left, below the configured one, and it ran out or the usable deadline passed), or the host deadline
+    fired. A configured-timeout hit stays an ordinary route failure, even one that ends near the deadline."""
     message = str(error or "").lower()
     if error is None or not (isinstance(error, TimeoutError) or "timed out" in message or "timeout" in message):
         return False
     return bool(
         "host compression deadline" in message
-        or time.monotonic() >= budget.usable_deadline - 1.0
-        or (budget_bound and call_timeout is not None and wall >= call_timeout - 1.0)
+        or (budget_bound and (time.monotonic() >= budget.usable_deadline - 1.0
+                              or (call_timeout is not None and wall >= call_timeout - 1.0)))
     )
 
 

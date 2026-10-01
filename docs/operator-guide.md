@@ -820,7 +820,7 @@ What the main knobs do:
   only if its recent duration (p90 of the route's last 8 calls, 15 s floor, 30 s
   before any) says it ends, with the reserve, by the hard bound and by
   `LCM_FOREGROUND_SOFT_SECONDS` (`60`; `0` turns the soft target off); the stop
-  reason is then `soft_target_reached`, a partial stop. Each call's timeout is at
+  reason is then `soft_target_reached`, a partial stop in `lcm_status`. Each call's timeout is at
   most the usable time left, and on a host that offers `aux_stream_deadline` a
   streamed call runs under that deadline too. The
   plugin cannot interrupt a step that is already running (a store step, the

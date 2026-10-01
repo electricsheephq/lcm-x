@@ -49,6 +49,17 @@ logger = logging.getLogger(__name__)
 
 _THRESHOLD_FULL_SWEEP_MAX_PASSES = 12
 _THRESHOLD_FULL_SWEEP_MAX_SECONDS = 120.0
+_THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS = frozenset({
+    "pass_budget_exhausted",
+    "time_budget_exhausted",
+    "soft_target_reached",
+    "summary_route_unavailable",
+    "summary_result_rejected",
+    "leaf_summary_error",
+    "condensation_error",
+    "condensation_no_progress",
+    "no_same_depth_condensation_group",
+})
 
 
 class CompactionMixin:
@@ -2260,9 +2271,14 @@ class CompactionMixin:
                 logger.info("LCM compression no-op: %s", noop_reason)
             if threshold_full_sweep_active:
                 duration_ms = (time.perf_counter() - _compress_started) * 1000.0
+                # #605: a stored pre-leaf condensation is progress, so its stop is a partial one, not a no-op.
+                condensed_then_stopped = (
+                    pre_leaf_condensation_passes > 0
+                    and sweep_stop_reason in _THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS
+                )
                 self._last_threshold_full_sweep = {
                     **self._last_threshold_full_sweep,
-                    "status": "noop",
+                    "status": "partial" if condensed_then_stopped else "noop",
                     "duration_ms": round(duration_ms, 3),
                     "stop_reason": sweep_stop_reason or noop_reason,
                     "budget_exhausted": sweep_stop_reason
@@ -2392,19 +2408,10 @@ class CompactionMixin:
             total_passes = leaf_passes + pre_leaf_condensation_passes + condensation_passes
             duration_ms = (time.perf_counter() - _compress_started) * 1000.0
             final_stop_reason = sweep_stop_reason or "raw_prefix_drained"
-            partial_stop_reasons = {
-                "pass_budget_exhausted",
-                "time_budget_exhausted",
-                "soft_target_reached",
-                "summary_route_unavailable",
-                "summary_result_rejected",
-                "leaf_summary_error",
-                "condensation_error",
-                "condensation_no_progress",
-                "no_same_depth_condensation_group",
-            }
             self._last_threshold_full_sweep = {
-                "status": "partial" if final_stop_reason in partial_stop_reasons else "completed",
+                "status": (
+                    "partial" if final_stop_reason in _THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS else "completed"
+                ),
                 "leaf_passes": leaf_passes,
                 "condensation_passes": pre_leaf_condensation_passes + condensation_passes,
                 "pre_leaf_condensation_passes": pre_leaf_condensation_passes,
