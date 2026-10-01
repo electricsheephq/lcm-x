@@ -78,7 +78,16 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
     warning_only = False
     rationale = "operator review required before changing persisted LCM state"
 
-    if name == "database_integrity":
+    if name == "inactive_process":
+        commands = []
+        if "plugins.load_timeout_seconds" in str(detail):
+            commands.append("restart Hermes; if it recurs, raise plugins.load_timeout_seconds")
+        if "context engine slot held by" in str(detail):
+            commands.append("enable only one context-engine plugin and set context.engine: lcm-x, then restart Hermes")
+        command = "; ".join(commands) or "restart Hermes and inspect the inactive-process reason if it recurs"
+        warning_only = True
+        rationale = "an inactive process is a configuration/load warning; no stored data is at risk"
+    elif name == "database_integrity":
         command = "stop and inspect the SQLite database path; restore from backup if integrity_check is not ok"
     elif name == "schema_core_tables":
         command = "verify HERMES_HOME/LCM_DATABASE_PATH points at the intended LCM database before repair or restore"

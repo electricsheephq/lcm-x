@@ -8288,6 +8288,12 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
         })
 
     checks: list[dict] = []
+    inactive_process = inactive_record_notice(getattr(engine, "_hermes_home", ""))
+    checks.append({
+        "check": "inactive_process",
+        "status": "warn" if inactive_process else "pass",
+        "detail": inactive_process or "no live inactive process",
+    })
     # Diagnose the foreground session, not whatever side-channel session
     # currently owns engine._session_id. Falls back to the bound id when no
     # foreground has ever been bound.
