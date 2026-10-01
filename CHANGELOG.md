@@ -6,7 +6,14 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
-- Fix: automatic threshold compactions fit below 95% of the host threshold and report unsummarised dropped rows; an unshortenable over-budget list now warns and records the failed fit in `/lcm doctor`. (#668, #599)
+- Fix: an automatic threshold compaction now fits its result below 95% of the host threshold (an exit fit), so the next
+  API call does not compact again; the summary prefix is never dropped for that headroom and the user sees no warning;
+  the fit's log line names how many dropped rows no summary covers yet; a list the fit cannot shorten now logs a WARNING
+  and shows in `/lcm doctor`. (#668, #599)
+- Fix: forced overflow recovery now counts the plain stub the final pass adds for every tool result it does not keep,
+  before it keeps the tool call, so the assembled request stays inside the cap; when a call's externalized-output stub
+  does not fit, the call keeps a plain stub instead of being dropped; a failed rotation-lineage write is logged at
+  WARNING (both session ids, the error class) and rotation continues. (#697)
 - Fix: a Hermes process in which LCM-X did not become active (a slow load or another context engine in the slot) keeps its own
   record file, so overlapping processes no longer overwrite each other's notice; `lcm_doctor` and `/lcm doctor` report
   a live one as an `inactive_process` warning with the fix to apply; after a slot conflict the already-registered
