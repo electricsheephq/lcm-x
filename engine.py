@@ -1590,10 +1590,10 @@ class LCMEngine(
         hold = _SWEEP_BUDGET_HOLD_SECONDS if seconds is None else min(_SWEEP_BUDGET_HOLD_SECONDS, max(1.0, seconds))
         self._sweep_budget_hold_until = time.time() + hold
 
-    def _sweep_budget(self, deadline: Optional[float]) -> Optional[ForegroundBudget]:
-        """#605: a sweep call (one given a deadline) inside compress() runs under that compress()'s budget."""
-        budget = getattr(self, "_foreground_budget", None) if deadline is not None else None
-        return budget if budget is not None and budget.sweep_active else None
+    def _foreground_call_budget(self) -> Optional[ForegroundBudget]:
+        """#605: a leaf or condensation call inside compress() runs under that compress()'s budget, sweep on or
+        off, forced or not; outside compress() there is none."""
+        return getattr(self, "_foreground_budget", None)
 
     def _primary_summary_route(self) -> str:
         """#605: the route key whose estimate an engine-level admission reads: the first one the circuit allows."""
@@ -2047,7 +2047,7 @@ class LCMEngine(
         deadline: Optional[float] = None,
     ) -> tuple[List[Dict[str, Any]], int, str, int, int]:
         attempt_chunk = list(initial_chunk)
-        budget = self._sweep_budget(deadline)
+        budget = self._foreground_call_budget()
         max_attempts = 3
         attempt_number = 0
 
@@ -2086,6 +2086,7 @@ class LCMEngine(
                     provenance=provenance,
                     **({"budget": budget} if budget is not None else
                        {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt
+                    verbatim_small_source=True,  # #605 F2
                 )
                 self._last_leaf_summary_model = provenance.get("model", "")
                 self._last_leaf_level_3_verbatim = level == 3 and summary_text == serialized  # #652: no fragment
@@ -6877,7 +6878,7 @@ class LCMEngine(
 
         condensation_passes = 0
         suppression_reason = ""
-        route_stopped = result_rejected = False
+        route_stopped = result_rejected = budget_stopped = False
         fanin = max(1, self._config.condensation_fanin)
 
         for depth in range(upper):
@@ -6915,6 +6916,10 @@ class LCMEngine(
             except SummaryResultRejected:
                 result_rejected = True  # #652: the nodes stay on the frontier
                 break
+            except SweepBudgetExhausted as exc:
+                suppression_reason = exc.reason  # #605: a time stop; the nodes stay on the frontier, no level 3
+                budget_stopped = True
+                break
             except Exception as exc:
                 if _is_sqlite_locked_error(exc):
                     setattr(
@@ -6924,6 +6929,8 @@ class LCMEngine(
                     )
                 raise
             condensation_passes += 1
+            if (budget := self._foreground_call_budget()) is not None:
+                budget.progress = budget.progress or "condensation"
 
             logger.info(
                 "LCM condensation: d%d × %d → d%d (L%d, %d→%d tokens)",
@@ -6940,6 +6947,8 @@ class LCMEngine(
             self._last_condensation_suppressed_reason = "summary_route_unavailable"
         if result_rejected:
             self._last_condensation_suppressed_reason = "summary_result_rejected"
+        if budget_stopped:
+            self._last_condensation_suppressed_reason = suppression_reason
         return condensation_passes
 
     @contextmanager
@@ -6979,7 +6988,7 @@ class LCMEngine(
         source_tokens = sum(node.token_count for node in nodes)
         token_budget = max(1000, int(source_tokens * 0.40))
         timeout_seconds = self._config.summary_timeout_ms / 1000
-        budget = self._sweep_budget(deadline)
+        budget = self._foreground_call_budget()
         if budget is not None:  # #605: the chain caps each attempt; refuse here before any work
             budget.admit(self._primary_summary_route())
         elif deadline is not None:
@@ -7007,6 +7016,7 @@ class LCMEngine(
             provenance=provenance,
             **({"budget": budget} if budget is not None else
                {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt
+            verbatim_small_source=True,  # #605 F2
         )
         if level == 3 and summary_text != combined_text and self._fit_can_rescue(force_overflow):
             raise SummaryResultRejected("summary result rejected at level 3")  # a truncation, not the whole text
@@ -7115,7 +7125,7 @@ class LCMEngine(
                 )
                 return passes, "condensation_error"
             passes += 1
-            if (budget := self._sweep_budget(deadline)) is not None:
+            if (budget := self._foreground_call_budget()) is not None:
                 budget.progress = budget.progress or "condensation"
             after = self._summary_frontier_tokens()
             if after < before:

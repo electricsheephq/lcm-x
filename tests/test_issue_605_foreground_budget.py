@@ -78,8 +78,10 @@ def _provider(monkeypatch, clock, default=30.0, **seconds) -> _Provider:
 
 
 def _engine(tmp_path, **config) -> LCMEngine:
+    # l3_truncate_tokens under every leaf and condensation source here: these cells time model calls, so none
+    # takes the no-call verbatim path (F2, PR 2) of a source within the level 3 bound.
     settings = {"fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
-                "threshold_full_sweep_enabled": True, "max_assembly_tokens": 100_000,
+                "threshold_full_sweep_enabled": True, "max_assembly_tokens": 100_000, "l3_truncate_tokens": 2,
                 "condensation_fanin": 2, "database_path": str(tmp_path / "lcm.db"), **config}
     engine = LCMEngine(config=LCMConfig(**settings))
     engine.on_session_start("S", platform="telegram", context_length=200_000, conversation_id="conv")
