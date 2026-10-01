@@ -4397,7 +4397,12 @@ class LCMEngine(
         with self._exclusive_lifecycle("reset"):
             if self._stable_use_closed:
                 return
-            self._on_session_reset_unlocked()
+            previous_reset_at = self._emission_binding()["reset_epoch"]
+            try:
+                self._on_session_reset_unlocked()
+            finally:
+                if not self._pending_reset_drops_summaries:
+                    self._lifecycle.preserve_finalized_after_reset(self._conversation_id, self._session_id, previous_reset_at)
 
     def _on_session_reset_unlocked(self) -> None:
         if self._host_fallback_compressor is not None:
@@ -4413,7 +4418,7 @@ class LCMEngine(
         self._pending_reset_session_id = self._session_id
         self._pending_reset_conversation_id = self._conversation_id
         self._pending_reset_frontier_store_id = self._last_compacted_store_id
-        # Set only after the deletion below returns: a reset whose deletion fails left the summaries in place.
+        # Committed deletion batches set the flag too, even if a later batch fails.
         drops_summaries = bool(self._session_id) and self._config.new_session_retain_depth >= 0
         self._pending_reset_drops_summaries = False
         super().on_session_reset()
@@ -4461,6 +4466,8 @@ class LCMEngine(
         """
         if not node_ids:
             return
+        if connection is None and self._pending_reset_session_id:
+            self._pending_reset_drops_summaries = True
         if not bool(getattr(self._config, "embeddings_enabled", False)):
             return
         try:
