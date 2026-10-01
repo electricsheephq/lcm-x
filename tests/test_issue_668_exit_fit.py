@@ -180,3 +180,38 @@ def test_t8_exception_path_never_gets_exit_cap(engine, monkeypatch, recovery):
     assert captured["after_exception"] is True
     assert not captured["reason"].startswith("exit_fit:")
     assert captured.get("request_cap") == (int(engine.threshold_tokens * 0.95) if recovery else None)
+
+
+def test_t9_exit_fit_arms_no_user_warning_but_another_fit_does(engine, monkeypatch):
+    view = _hidden_backlog(engine, list_users=True)
+    observed = engine._survival_measure(view) + 2000
+    engine.compress(view, current_tokens=observed)
+    assert engine._last_survival_fit["reason"].startswith("exit_fit:")
+    assert engine._last_survival_fit["dropped_rows"] > 0
+    assert engine._survival_fit_pending_warning is None
+    assert engine.emit_automatic_compaction_status is False
+    # the contrast: the same record for a fit that is not an exit fit still warns the user once
+    ids = [r["store_id"] for r in engine._store.get_session_messages("S", limit=3)]
+    engine._survival_record("recovery_attempt:compacted", len(ids), ids, 900, 500, 600, False, "")
+    assert engine._survival_fit_pending_warning is not None
+    assert engine.emit_automatic_compaction_status is True
+
+
+def test_t10_exit_fit_never_drops_the_summary_prefix(engine, monkeypatch, caplog):
+    """Prefix + newest turn over the exit cap: today's fit under the window budget decides, the summary stays."""
+    view = _hidden_backlog(engine, list_users=True, big_newest=3000)
+    overhead = 2000
+    observed = engine._survival_measure(view) + overhead
+    newest = view[-2:]
+    engine.threshold_tokens = int(engine._survival_measure(newest) / 0.95)  # cap below the newest turn alone
+    seen = _spy(engine, monkeypatch)
+    with caplog.at_level(logging.INFO, logger="hermes_lcm"):
+        result = engine.compress(view, current_tokens=observed)
+    pre = seen["input"]
+    assert engine._is_verified_replay_scaffold_message(pre[0])
+    assert engine._survival_measure([pre[0]] + newest) + overhead > int(engine.threshold_tokens * 0.95)
+    assert engine._survival_measure(pre) + overhead <= int(engine.context_length * 0.85)
+    assert result[0] is pre[0] and result == pre
+    assert not any("dropped the summary prefix" in r.getMessage() for r in caplog.records)
+    assert any("LCM exit fit skipped" in r.getMessage() for r in caplog.records)
+    assert engine._last_survival_fit is None

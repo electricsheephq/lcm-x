@@ -157,6 +157,12 @@ class SurvivalFitMixin:
         store_ids = self._get_store_id_map_for_messages(result[system:])
         cut = self._survival_cut(result, prefix, budget, persisted, reason, store_ids, True) if prefix > system else None
         emergency = prefix > system and cut is None
+        if emergency and reason.startswith("exit_fit:"):
+            # #668: headroom never costs the summary prefix; today's fit under the window budget decides instead
+            logger.info("LCM exit fit skipped: the summary prefix and the newest turn exceed the exit cap (budget=%d)",
+                        budget)
+            return self._survival_fit(messages, result, observed_tokens, reason[len("exit_fit:"):],
+                                      after_exception=after_exception)
         cut = cut or self._survival_cut(result, system, budget, persisted, reason, store_ids, False)
         if cut is None:
             return result
@@ -414,7 +420,8 @@ class SurvivalFitMixin:
             logger.warning("LCM survival-fit counter write failed (projected=%s); /lcm doctor under-counts survival fits "
                            "for this store", projected, exc_info=True)
         key = str(self._conversation_id or self._session_id or "")
-        if shortened and key not in self._survival_fit_warned:
+        # an exit fit (#668) is routine headroom, not a session at risk: the model's notice only, no user warning
+        if shortened and not reason.startswith("exit_fit:") and key not in self._survival_fit_warned:
             self._survival_fit_warned.add(key)
             self._survival_fit_pending_warning = (key, _WARNING.format(n=count))  # R6-4: owned by its conversation
             self.emit_automatic_compaction_status = True  # the host asks the hook below once more
