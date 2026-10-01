@@ -6,6 +6,10 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: a store-complete leaf counts its extended scan allowance from the first open tool group's call row, so
+  rows an earlier summary covers no longer use it up and the group's results reach a summary; when a full page
+  holds only rows the leaf excludes (covered, ignored, passive, system), the scan reads up to four pages before
+  it stops, so a session that resumes above a long covered run compacts again instead of no-oping. (#621)
 - Fix: forced overflow recovery now counts the plain stub the final pass adds for every tool result it does not keep,
   before it keeps the tool call, so the assembled request stays inside the cap; when a call's externalized-output stub
   does not fit, the call keeps a plain stub instead of being dropped; a failed rotation-lineage write is logged at
