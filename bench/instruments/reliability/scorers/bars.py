@@ -1,4 +1,4 @@
-"""Bars B1-B8 over one finished cell: its DB copy (db/lcm.db), transcript.jsonl and phase-*.json.
+"""Bars B1-B8 over one finished cell: its DB copies (lcm.db, state.db), transcript.jsonl and phase-*.json.
 
 The expected transcript is what the host HELD for each attempt (the probe records the user row the host
 kept after its persist override and consecutive-user merge), so the bars compare LCM's store with the
@@ -89,10 +89,10 @@ def attempts(events: list[dict]) -> list[dict]:
     return out
 
 
-def lineage(cell_dir: Path, root: str = "S0"):
+def lineage(cell_dir: Path, root: str = "S0", db_dir: Path | None = None):
     """store session id -> lineage: "chat" for ``root`` (R1: S0; R2: the ACP session id) and its compression
     descendants, else the root session."""
-    parents, state = {}, cell_dir / "db" / "state.db"
+    parents, state = {}, Path(db_dir or cell_dir / "db") / "state.db"
     if state.exists():
         con = sqlite3.connect(f"file:{state}?mode=ro", uri=True)
         try:
@@ -182,9 +182,11 @@ def tag_counts(texts, pattern):
     return counts
 
 
-def score(cell: dict, cell_dir: Path) -> dict:
+def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
+    """``db_dir`` holds the cell's lcm.db / state.db copies (run_matrix: the cell's scratch dir); default <cell>/db."""
     events, phases = load(cell_dir)
-    db = cell_dir / "db" / "lcm.db"
+    db_dir = Path(db_dir or cell_dir / "db")
+    db = db_dir / "lcm.db"
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
         full = con.execute("select store_id, session_id, role, content, tool_calls, tool_call_id from messages"
@@ -194,12 +196,12 @@ def score(cell: dict, cell_dir: Path) -> dict:
     finally:
         con.close()
     atts = attempts(events)
-    group = lineage(cell_dir, cell.get("chat_root", "S0"))
+    group = lineage(cell_dir, cell.get("chat_root", "S0"), db_dir)
     groups = sorted({attempt_group(a, group) for a in atts} | {group(sid) for _s, sid, _r, _c in stored})
     notices = {x for p in phases for x in p.get("failed_turn_notices") or []}
     plugin = cell.get("plugin") or (json.loads((cell_dir / "cell.json").read_text()).get("plugin")
                                     if (cell_dir / "cell.json").exists() else None) or {}
-    host, host_why = host_parity.load(cell_dir / "db" / "state.db", group, plugin.get("tree"))
+    host, host_why = host_parity.load(db_dir / "state.db", group, plugin.get("tree"))
     per = {g: (expected_items([a for a in atts if attempt_group(a, group) == g], notices),
                [r for r in stored if group(r[1]) == g]) for g in groups}
     applicable = [b for b in cell.get("bars") or ALL_BARS
