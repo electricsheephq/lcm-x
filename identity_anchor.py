@@ -837,21 +837,37 @@ class IdentityAnchorMixin:
 
     def _identity_anchor_commit(self, plan, remainder_ids: Optional[dict] = None) -> None:
         """Record what the pre-match proved: relation groups (witnesses, alternate stamps, remainders),
-        the R5 backfills and the R7 carry. Relations are durable before the carry that relies on them."""
-        if remainder_ids is None:
-            groups = [[(int(group[0]["store_id"]), "alt_stamp", None, None, stamp)] if kind == "alt_stamp"
-                      else _composite_relation(group, stamp) for kind, stamp, group, _extra in plan["relations"]]
-        else:  # after the store: only the remainders' groups, which need the new ids
+        the R1-ws overrides, the R5 backfills and the R7 carry -- all of them or none (#574)."""
+        if remainder_ids is not None:  # after the store: only the remainders' groups, which need the new ids
             groups = [_composite_relation(plan["remainders"][idx][2] + [{"store_id": store_id}], plan["remainders"][idx][1])
                       for idx, store_id in remainder_ids.items()]
+            if groups:
+                self._store.add_message_relations(groups)
+            return
+        groups = [[(int(group[0]["store_id"]), "alt_stamp", None, None, stamp)] if kind == "alt_stamp"
+                  else _composite_relation(group, stamp) for kind, stamp, group, _extra in plan["relations"]]
+        if not (groups or plan.get("ws") or plan["backfill"] or plan["carry"]):
+            return
         if groups:
-            self._store.add_message_relations(groups)
-        for row, message in plan.get("ws", ()) if remainder_ids is None else ():
-            self._record_ws_host_rewrite(row, message)
-        for store_id, stamp in plan["backfill"] if remainder_ids is None else ():
-            self._store.backfill_observed_at(store_id, stamp)
-        if remainder_ids is None and plan["carry"]:
-            self._register_identity_anchor_carry(plan["carry"])
+            self._store._ensure_identity_anchor_schema()  # its executescript commits: never inside atomic()
+        watch, overrides = self._host_rewrite_state()
+        saved = dict(watch), dict(overrides)
+        try:
+            with self._store.atomic():
+                if groups:
+                    self._store.add_message_relations(groups)
+                for row, message in plan.get("ws", ()):
+                    self._record_ws_host_rewrite(row, message)
+                for store_id, stamp in plan["backfill"]:
+                    self._store.backfill_observed_at(store_id, stamp)
+                if plan["carry"]:
+                    self._register_identity_anchor_carry(plan["carry"])
+        except BaseException:  # rolled back: the R1-ws watch and overrides must not outlive their rows
+            watch.clear()
+            watch.update(saved[0])
+            overrides.clear()
+            overrides.update(saved[1])
+            raise
 
     def _record_ws_host_rewrite(self, row, message) -> None:
         """R1-ws: record the view's form as a #498 host-rewrite override; the stored row is never modified."""
