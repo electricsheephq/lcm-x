@@ -294,7 +294,7 @@ Provider Plugins:
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
 and tag. `0.24.9` is the identity the next patch release carries: the `v0.24.9-rc1`
-tag carried it first, the gauntlet runs at the latest rc tag (`v0.24.9-rc3`), and the
+tag carried it first, the gauntlet runs at the latest rc tag (`v0.24.9-rc4`), and the
 GA tree is that rc tree plus the GA release-notes file (`v0.24.8` at `7ed790c8`
 shipped the same way).
 

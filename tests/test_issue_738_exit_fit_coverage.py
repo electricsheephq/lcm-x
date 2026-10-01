@@ -145,11 +145,11 @@ def test_t1_sweep_off_threshold_passes_strand_no_turn(tmp_path, monkeypatch, sum
         engine.shutdown()
 
 
-# -- T2: the hold is armed and the held fit-only return happens at the survival ceiling -----------------------------
+# -- T2: a no-progress hold is exempt at the ceiling; the sweep hold remains fit-only ------------------------------
 
 def test_t2_a_held_pass_makes_no_uncovered_exit_cut(tmp_path, monkeypatch, summaries):
     """The host rejects the first threshold compaction: the #651 hold blocks the gate until the context reaches
-    the survival ceiling, where the held fit-only return runs (#618 item 3). Its exit fit drops no uncovered row;
+    the survival ceiling, where a leaf pass runs (rc4). Its exit fit drops no uncovered row;
     over the window budget the plain fit (v0.24.8's protection) still applies."""
     engine = _engine(tmp_path, monkeypatch)
     try:
@@ -171,22 +171,30 @@ def test_t2_a_held_pass_makes_no_uncovered_exit_cut(tmp_path, monkeypatch, summa
         engine.shutdown()
 
 
-def test_t2_the_sweep_on_held_pass_at_the_ceiling_is_still_fit_only(tmp_path, monkeypatch, summaries):
-    """#618 item 3 with the sweep on (the fleet path) is unchanged."""
+@pytest.mark.parametrize("hold", ["sweep", "no_progress"])
+def test_t2_the_sweep_on_held_pass_at_the_ceiling(tmp_path, monkeypatch, summaries, hold):
+    """rc4: only a #608 sweep hold makes the automatic ceiling pass fit-only."""
     engine = _engine(tmp_path, monkeypatch, sweep=True)
     try:
         view = _turns(40)
         engine.ingest(view)
         request = engine._survival_measure(view) + 800
-        engine.record_rejected_compaction()
+        if hold == "sweep":
+            engine._start_sweep_budget_hold()
+        else:
+            engine.record_rejected_compaction()
         engine.compress(view, current_tokens=request)
-        assert summaries == [] and (engine._last_compression_status, engine._last_compression_noop_reason) == (
-            "noop", "held")
+        if hold == "sweep":
+            assert summaries == [] and (engine._last_compression_status, engine._last_compression_noop_reason) == (
+                "noop", "held")
+        else:
+            assert summaries and _nodes(engine)
+            assert engine._last_compression_status == "compacted"
     finally:
         engine.shutdown()
 
 
-# -- T3: the sweep on is byte-identical to v0.24.9-rc1 ---------------------------------------------------------------
+# -- T3: the ordinary sweep and sweep-held ceiling pass are byte-identical to v0.24.9-rc1 ---------------------------
 
 _SWEEP_ON_RC1 = {
     "loop": "092beb472ca7f5c13a48f6e5c1b874c458cb44ad2a3f859b746610cd946c13d9",
@@ -204,7 +212,7 @@ def test_t3_sweep_on_output_is_byte_identical_to_rc1(tmp_path, monkeypatch, summ
         else:
             view = _turns(40)
             engine.ingest(view)
-            engine.record_rejected_compaction()
+            engine._start_sweep_budget_hold()  # rc4: this unchanged fit-only pin belongs to #608 only
             outputs.append(engine.compress(view, current_tokens=engine._survival_measure(view) + 800))
         assert _digest(engine, outputs) == _SWEEP_ON_RC1[cell]
     finally:
@@ -305,11 +313,11 @@ def test_d3_held_maintenance_from_a_caller_that_skips_the_gate_drops_no_uncovere
         engine.shutdown()
 
 
-# -- D4: the native held path is unchanged (review of e965c62e, finding 3) ------------------------------------------
+# -- D4: the native sweep-held path is unchanged (review of e965c62e, finding 3) ------------------------------------
 
 def test_d4_a_held_native_recovery_pass_at_the_ceiling_never_reaches_the_native_compressor(
         tmp_path, monkeypatch, summaries):
-    """rc1: native.compress calls=0, status noop, reason held (e965c62e: 1 call, error, no_progress)."""
+    """The #608 sweep hold still gives native.compress calls=0, status noop, reason held."""
     calls: list = []
 
     class ContextCompressor:
@@ -329,7 +337,7 @@ def test_d4_a_held_native_recovery_pass_at_the_ceiling_never_reaches_the_native_
         view = _turns(40)
         engine.ingest(view)
         request = engine._survival_measure(view) + 800
-        engine.record_rejected_compaction()
+        engine._start_sweep_budget_hold()  # rc4: #651 no longer suppresses native recovery at the ceiling
         assert engine._hold_fit_only_applies(request)
         engine.compress(view, current_tokens=request)
         assert calls == []
@@ -338,13 +346,13 @@ def test_d4_a_held_native_recovery_pass_at_the_ceiling_never_reaches_the_native_
         engine.shutdown()
 
 
-# -- D5: rejected passes at the ceiling make no more summary calls than rc1 (review of e965c62e, finding 2) ----------
+# -- D5: sweep-held passes at the ceiling make no more summary calls than rc1 ---------------------------------------
 
-_REJECTED_CEILING_CALLS_RC1 = "[0, 0, 0, 0, 0, 0]"  # rc1: #618 item 3, the held pass at the ceiling only fits
+_REJECTED_CEILING_CALLS_RC1 = "[0, 0, 0, 0, 0, 0]"  # #618 item 3: the #608 sweep-held pass only fits
 
 
 def test_d5_rejected_level_3_passes_at_the_ceiling_call_no_more_than_rc1(tmp_path, monkeypatch):
-    """24 turns, a fixed host overhead of 19,661 tokens, the hold armed, every summary a non-verbatim level 3
+    """24 turns, a fixed host overhead of 19,661 tokens, the sweep hold armed, every summary a non-verbatim level 3
     result (#652 rejects it): six more turns through the gated host loop, summariser invocations per turn."""
     per_turn: list[int] = []
     calls: list = []
@@ -359,7 +367,7 @@ def test_d5_rejected_level_3_passes_at_the_ceiling_call_no_more_than_rc1(tmp_pat
     try:
         messages = _turns(24)
         engine.ingest(messages)
-        engine.record_rejected_compaction()
+        engine._start_sweep_budget_hold()  # rc4: the zero-call budget is a #608 invariant only
         for turn in range(25, 31):
             messages.append(_user(turn))
             observed = tokens.count_messages_tokens(messages) + 19_661

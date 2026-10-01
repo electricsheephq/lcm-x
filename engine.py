@@ -1750,13 +1750,15 @@ class LCMEngine(
         return int(window * (1 - reserve))
 
     def _hold_fit_only_applies(self, tokens: int) -> bool:
-        """#618 item 3: either hold is active for this conversation and the request is at or over the survival
-        ceiling, so an automatic pass only fits (no sweep would store a leaf). Never without a fit to run."""
+        """#618 item 3: the #608 sweep hold (a no-leaf budget stop: no sweep would store a leaf) is active for
+        this conversation and the request is at or over the survival ceiling, so an automatic pass only fits.
+        The #651 no-progress hold does not make a pass fit-only at the ceiling: there a sweep can store a leaf
+        (v0.24.8 behaviour; rc4 fix)."""
         ceiling = self._survival_ceiling()
         return bool(
             ceiling is not None and tokens >= ceiling and self._fit_can_rescue(False)
             and not self._bypasses_lcm_context_management()
-            and (self._sweep_budget_hold_active() or self._no_progress_hold_active()))
+            and self._sweep_budget_hold_active())
 
     def _sweep_budget_hold_applies(self, tokens: Optional[int]) -> bool:
         """#608: the hold never applies at or over the survival ceiling, whose fit only compress() runs.
