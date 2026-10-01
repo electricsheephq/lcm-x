@@ -6644,7 +6644,7 @@ class TestMessageFiltering:
                 {"role": "user", "content": "visible backlog objective " + "y" * 200},
                 {"role": "user", "content": "api_key=sk-ignore...cdef ignored fresh tail"},
             ],
-            current_tokens=10_000,
+            current_tokens=10_000, force=True,  # manual seed; synthetic pressure is not a host estimate
         )
         placeholder = next(
             str(msg.get("content", ""))
@@ -7613,7 +7613,7 @@ class TestMessageFiltering:
                 {"role": "user", "content": ignored_text},
                 {"role": "user", "content": "fresh tail"},
             ],
-            current_tokens=10_000,
+            current_tokens=10_000, force=True,  # manual seed; synthetic pressure is not a host estimate
         )
 
         assert all("LCM active replay placeholder: message ignored" not in str(msg.get("content", "")) for msg in result)
@@ -7685,7 +7685,7 @@ class TestMessageFiltering:
                     {"role": "user", "content": "api_key=sk-ignore...cdef duplicate ignored"},
                     {"role": "user", "content": "api_key=sk-ignore...cdef duplicate ignored"},
                 ],
-                current_tokens=10_000,
+                current_tokens=10_000, force=True,  # manual seed; synthetic pressure is not a host estimate
             )
             assert sum(
                 "LCM active replay placeholder: message ignored" in str(msg.get("content", ""))
@@ -7733,7 +7733,7 @@ class TestMessageFiltering:
                 {"role": "user", "content": "api_key=sk-ignore...cdef duplicate ignored"},
                 {"role": "user", "content": "api_key=sk-ignore...cdef duplicate ignored"},
             ],
-            current_tokens=10_000,
+            current_tokens=10_000, force=True,  # manual seed; synthetic pressure is not a host estimate
         )
         first.shutdown()
         assert sum(
@@ -8867,7 +8867,7 @@ class TestMessageFiltering:
                 {"role": "assistant", "content": dependent_reply},
                 {"role": "user", "content": "fresh tail request"},
             ],
-            current_tokens=10_000,
+            current_tokens=10_000, force=True,  # manual seed; synthetic pressure is not a host estimate
         )
         assert dependent_reply in "\n".join(str(msg.get("content", "")) for msg in first_result)
         assert engine._load_generated_ignored_dependent_reply_hashes()
@@ -8893,7 +8893,7 @@ class TestMessageFiltering:
                 {"role": "user", "content": "new visible backlog " + "z" * 200},
                 {"role": "assistant", "content": "new fresh tail response"},
             ],
-            current_tokens=10_000,
+            current_tokens=10_000, force=True,  # manual seed; synthetic pressure is not a host estimate
         )
 
         assert captured_texts
@@ -9024,7 +9024,7 @@ class TestMessageFiltering:
                 {"role": "assistant", "content": dependent_reply},
                 {"role": "user", "content": "fresh tail request"},
             ],
-            current_tokens=10_000,
+            current_tokens=10_000, force=True,  # manual seed; synthetic pressure is not a host estimate
         )
         assert dependent_reply in "\n".join(str(msg.get("content", "")) for msg in first_result)
         assert first._load_generated_ignored_dependent_reply_hashes()
@@ -9055,7 +9055,7 @@ class TestMessageFiltering:
             )
             second.compress(
                 first_result + [{"role": "assistant", "content": "new fresh tail response"}],
-                current_tokens=10_000,
+                current_tokens=10_000, force=True,  # manual seed; synthetic pressure is not a host estimate
             )
 
             assert captured_texts
@@ -9260,12 +9260,12 @@ class TestMessageFiltering:
                 {"role": "assistant", "content": "dependent assistant reply that must not summarize later"},
                 {"role": "user", "content": "fresh tail request"},
             ],
-            current_tokens=10_000,
+            current_tokens=10_000, force=True,  # manual seed; synthetic pressure is not a host estimate
         )
 
         engine.compress(
             first_result + [{"role": "assistant", "content": "new fresh assistant response"}],
-            current_tokens=10_000,
+            current_tokens=10_000, force=True,  # manual seed; synthetic pressure is not a host estimate
         )
 
         assert captured_texts
@@ -12652,7 +12652,7 @@ class TestPostCompactionIngestion:
 
         first = open_engine()
         try:
-            active_context = first.compress(messages, current_tokens=100000)
+            active_context = first.compress(messages, current_tokens=100000, force=True)
             baseline_rows = first._store.get_session_count(session_id)
             baseline_nodes = first._dag.get_session_node_count(session_id)
             assert baseline_rows == len(messages)

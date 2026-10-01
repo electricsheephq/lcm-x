@@ -148,9 +148,9 @@ def test_t2_manual_forced_and_recovery_passes_below_threshold_run_leaves(tmp_pat
 # -- T3. the no-progress hold -------------------------------------------------------------------------------
 
 def _stuck_engine(tmp_path):
-    """Over the threshold with less than one leaf chunk outside the fresh tail: a pass that stores no leaf."""
+    """One unshortenable newest turn: neither a leaf nor the #668 exit fit can make progress."""
     engine = _engine(tmp_path, leaf_chunk_tokens=100_000)
-    view = _view(3)
+    view = _view(1)
     rough = count_messages_tokens(view)
     engine.threshold_tokens = 100
     assert engine.should_compress(rough) is True
@@ -282,7 +282,7 @@ def _review_trace_engine(tmp_path):
     """The review's trace: window 100k, threshold 35k, reserve 0.15, assembly cap 90k; a foreground no-progress
     pass at 40k arms the hold; an in-process auxiliary (LCM-bypassed) call then runs on this thread."""
     engine = _engine(tmp_path, context_length=100_000, leaf_chunk_tokens=100_000, max_assembly_tokens=90_000)
-    view = _view(3)
+    view = _view(1)  # #668: an unshortenable newest turn still arms the no-progress hold
     assert engine.threshold_tokens == 35_000
     engine.last_prompt_tokens = 40_000
     assert engine.should_compress(40_000) is True

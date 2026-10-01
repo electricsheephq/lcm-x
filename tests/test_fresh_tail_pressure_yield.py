@@ -145,7 +145,9 @@ def test_kill_switch_preserves_noop_under_pressure(tmp_path, monkeypatch):
         assert engine._last_compression_noop_reason == (
             "no eligible raw backlog outside fresh tail"
         )
-        assert len(compressed) == len(messages)
+        assert len(compressed) < len(messages)  # no leaf, but #668 exits below the threshold
+        assert engine._last_survival_fit["reason"] == "exit_fit:noop"
+        assert engine._survival_measure(compressed) <= int(engine.threshold_tokens * 0.95)
     finally:
         engine.shutdown()
 
@@ -207,7 +209,9 @@ def test_single_blocked_observation_does_not_yield_at_default(tmp_path, monkeypa
         assert engine._last_compression_noop_reason == (
             "no eligible raw backlog outside fresh tail"
         )
-        assert len(compressed) == len(messages)
+        assert len(compressed) < len(messages)  # no leaf, but #668 exits below the threshold
+        assert engine._last_survival_fit["reason"] == "exit_fit:noop"
+        assert engine._survival_measure(compressed) <= int(engine.threshold_tokens * 0.95)
         assert engine._pressure_yield_blocked_streak == 1
     finally:
         engine.shutdown()
