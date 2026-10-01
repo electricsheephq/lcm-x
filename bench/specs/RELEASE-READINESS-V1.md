@@ -94,14 +94,15 @@ one threshold, doctor at close. Minimum 30 turns. Green =
 
 - at least one compaction committed during the soak. A soak in which every compaction stopped
   (on a handled provider failure or otherwise) proves little: it is inconclusive and re-runs;
-- lossless, as the Phase C scorer checks it: the scorer expects every user prompt the battery
-  sends and every final assistant answer it records (not only the recall-probe rows) and
-  compares them with every user and assistant row in the store, across all sessions, as a
-  multiset keyed by role and the hash of the content with leading and trailing whitespace
-  stripped (the strip the host applies to ACP prompts). A missing copy, an extra copy or a
-  stored row it does not expect fails, including assistant text stored next to a tool call.
-  Rows that are empty after the strip, tool-result rows, tool-call ids, names and arguments,
-  row order and the owning session are not part of this bar;
+- lossless, as the Phase C scorer (`bench/instruments/reliability/scorers/`) checks it; its
+  code is the exact rule. In short: for each turn with a recorded result, the prompt sent and
+  the final answer recorded (not only the recall-probe rows) are compared with every user and
+  assistant row in the store, across all sessions, as a multiset keyed by role and the hash of
+  the content with leading and trailing whitespace stripped (the strip the host applies to ACP
+  prompts). A missing copy, an extra copy or a stored row it does not expect fails, including
+  assistant text stored next to a tool call. Prompts without a recorded result, rows that are
+  empty after the strip, tool-result rows, tool-call ids, names and arguments, row order and
+  the owning session are not part of this bar (#710);
 - zero unexpected errors in engine logs. A provider failure the engine handles as designed (a
   rejected summary result logged with its reason, after which the compaction commits or stops)
   is not unexpected; the receipt lists each one;
