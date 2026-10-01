@@ -816,7 +816,8 @@ What the main knobs do:
   call or condensation pass starts unless it is expected to end, with a finalize
   reserve (5-20 s, from recent finalize steps), before
   `LCM_FOREGROUND_HARD_SECONDS` (`120`); each call's timeout is at most the time
-  left. After the first stored leaf, a call starts only if
+  left, and on a host that offers `aux_stream_deadline` a streamed call runs
+  under that deadline too. After the first stored leaf, a call starts only if
   its recent duration (p90 of the route's last 8 calls, 15 s floor, 30 s before
   any) says it ends by `LCM_FOREGROUND_SOFT_SECONDS` (`60`; `0` turns the soft
   target off); the stop reason is then `soft_target_reached`, a partial stop. The
@@ -824,7 +825,9 @@ What the main knobs do:
   plugin cannot interrupt a step that is already running (a store step, the
   host's stream read between two chunks, assembly, the fit), so a compaction can
   still end past the hard bound; the INFO line `LCM compaction stop:` gives the
-  reason, the leaves and the seconds before, during and after the calls.
+  reason, the leaves and the seconds before, during and after the calls. A call
+  cut by the budget is not a summary-route failure, and a compaction uses one
+  spend-guard slot however many calls it makes; rollups count on their own guard.
   The sweep-off and forced-overflow paths are not under this budget yet.
 - `LCM_EXPANSION_CONTEXT_TOKENS` controls how much recovered material
   `lcm_expand_query` may feed to the auxiliary model. It does not change what

@@ -9,6 +9,7 @@ Each level checks if Tokens(summary) < Tokens(source). If not, escalates.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import logging
 import math
@@ -152,13 +153,14 @@ class ForegroundBudget:
 
     It decides when a summariser call or condensation pass may START and the timeout it gets; it cannot
     interrupt a step already running. ``pre_leaf`` marks the pre-leaf condensation, ``leaf_stored`` the
-    first stored leaf of this compaction, ``condensed`` its first stored pre-leaf condensation."""
+    first stored leaf of this compaction, ``condensed`` its first stored pre-leaf condensation; ``slot_taken`` its
+    one spend-guard slot."""
 
     def __init__(self, *, soft: float, hard: float, configured_timeout: float, estimates: ForegroundEstimates):
         self.t0 = time.monotonic()
         self.soft, self.hard, self.configured_timeout, self.estimates = soft, hard, configured_timeout, estimates
         self.reserve = estimates.finalize_reserve()
-        self.pre_leaf = self.condensed = self.leaf_stored = self.sweep_active = False
+        self.pre_leaf = self.condensed = self.leaf_stored = self.slot_taken = self.sweep_active = False
         self.leaves, self.first_call_started, self.last_call_ended = 0, None, None
 
     @property
@@ -595,7 +597,8 @@ def _call_llm_for_summary(prompt: str, max_tokens: int,
             call_kwargs["timeout"] = timeout
         if _accepts_route_info(call_llm):  # #682: the host names the provider/model it used
             call_kwargs["route_info"] = route_info
-        response = call_llm(**call_kwargs)
+        with _host_stream_deadline_scope():
+            response = call_llm(**call_kwargs)
         content = response.choices[0].message.content
         if not isinstance(content, str):
             content = str(content) if content else ""
@@ -828,6 +831,38 @@ def summary_route_available(
                for candidate in _summary_model_chain(model, fallback_models))
 
 
+def _is_budget_cut(error, budget: ForegroundBudget, budget_bound: bool, wall: float, call_timeout) -> bool:
+    """#605 F4: a timeout is a budget cut when the budget's limit bound the call (its timeout was the usable
+    time left, below the configured one, and ran out; or the usable deadline passed), or the host deadline
+    fired. A configured-timeout hit stays an ordinary route failure."""
+    message = str(error or "").lower()
+    if error is None or not (isinstance(error, TimeoutError) or "timed out" in message or "timeout" in message):
+        return False
+    return bool(
+        "host compression deadline" in message
+        or time.monotonic() >= budget.usable_deadline - 1.0
+        or (budget_bound and call_timeout is not None and wall >= call_timeout - 1.0)
+    )
+
+
+def _host_stream_deadline_scope():
+    """#605 D4: run the call inside min(host deadline, budget deadline) where the host exports the seam."""
+    deadline = getattr(_summary_call, "stream_deadline", None)
+    if deadline is None:
+        return contextlib.nullcontext()
+    try:
+        from agent import auxiliary_client as host
+    except Exception:
+        return contextlib.nullcontext()
+    install, current = getattr(host, "aux_stream_deadline", None), getattr(host, "_current_aux_stream_deadline", None)
+    if not callable(install) or not callable(current):
+        return contextlib.nullcontext()  # no seam: the start-time admission is the bound
+    host_deadline = current()
+    if isinstance(host_deadline, (int, float)):
+        deadline = min(deadline, host_deadline)
+    return install(deadline)
+
+
 def _invoke_summary_llm_chain(
     prompt: str,
     max_tokens: int,
@@ -859,10 +894,11 @@ def _invoke_summary_llm_chain(
                 candidate_model or _DEFAULT_ROUTE_KEY,
             )
             continue
-        call_timeout = timeout
+        call_timeout, budget_bound = timeout, False
         if budget is not None:  # #605: admitted before the call, so nothing is recorded or spent
             usable_left = budget.admit(route_key)
-            call_timeout = usable_left if timeout is None else min(timeout, usable_left)
+            budget_bound = timeout is None or usable_left < timeout
+            call_timeout = usable_left if budget_bound else timeout
         elif deadline is not None:  # #666: checked before the call, so nothing is recorded or spent
             remaining = deadline - time.monotonic()
             if remaining < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
@@ -870,13 +906,18 @@ def _invoke_summary_llm_chain(
             call_timeout = remaining if timeout is None else min(timeout, remaining)
         # Check the spend guard per-route so a mid-chain trip stops the
         # remaining fallbacks instead of over-spending by up to len(chain)-1.
-        if spend_guard is not None and not spend_guard.try_record_call():
-            logger.warning(
-                "LCM summary spend guard active; skipping LLM summarization and "
-                "deferring to deterministic fallback"
-            )
-            break
+        # #605: a foreground compaction takes one slot, at its first admitted call.
+        if spend_guard is not None and not (budget is not None and budget.slot_taken):
+            if not spend_guard.try_record_call():
+                logger.warning(
+                    "LCM summary spend guard active; skipping LLM summarization and "
+                    "deferring to deterministic fallback"
+                )
+                break
+            if budget is not None:
+                budget.slot_taken = True
         _summary_call.route, _summary_call.error = {}, None  # #682: filled by _call_llm_for_summary
+        _summary_call.stream_deadline = budget.usable_deadline if budget is not None else None
         started = time.monotonic()
         try:
             result = _invoke_summary_llm(
@@ -891,9 +932,15 @@ def _invoke_summary_llm_chain(
             (logger.debug if is_summary_route_config_error(exc) else logger.warning)(
                 "LLM summarization failed: %s", exc)
             result = None
+        finally:
+            _summary_call.stream_deadline = None
         route, error = dict(_summary_call.route or {}), _summary_call.error
         if budget is not None:
-            budget.record_call(route_key, started, time.monotonic())
+            ended = time.monotonic()
+            budget.record_call(route_key, started, ended)
+            if result is None and _is_budget_cut(error, budget, budget_bound, ended - started, call_timeout):
+                # #605 F4: the budget, not the route, ended the call: no circuit failure, no fallback.
+                raise SweepBudgetExhausted("summariser call cut by the foreground budget")
         if circuit_breaker is not None and route:
             circuit_breaker.note_route(route_key, route)
         if result and (accepts_result is None or accepts_result(result)):

@@ -9,10 +9,13 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sys
 import time
+import types
 
 import pytest
 
+import hermes_lcm.engine as lcm_engine
 import hermes_lcm.escalation as escalation
 import hermes_lcm.survival_fit as survival_fit
 import hermes_lcm.tokens as tokens
@@ -213,6 +216,7 @@ def test_b_stale_115s_estimate_and_56s_of_pre_work_still_attempt_the_first_leaf_
         assert len(provider.calls) == 1 and provider.calls[0][1] == pytest.approx(59.0, abs=0.5)
         assert engine.get_status()["threshold_full_sweep"]["stop_reason"] == "time_budget_exhausted"
         assert _leaves(engine) == [] and engine._sweep_budget_hold_until > time.time()
+        assert engine._summary_circuit_breaker._failures.get("<task-default>", 0) == 0  # a budget cut
         real_time = time.time
         monkeypatch.setattr(time, "time", lambda: real_time() + 601.0)  # both holds have ended
         provider.default = 20.0
@@ -239,6 +243,84 @@ def test_c_configured_timeout_is_an_ordinary_failure_and_the_fallback_stores_by_
         assert engine.get_status()["threshold_full_sweep"]["stop_reason"] == "time_budget_exhausted"
     finally:
         engine.shutdown()
+
+
+def test_c_a_call_cut_by_the_budget_counts_no_failure_ends_the_chain_and_takes_one_slot(monkeypatch, clock):
+    provider = _provider(monkeypatch, clock, default=None)
+    breaker, guard = escalation.SummaryCircuitBreaker(), escalation.SummarySpendGuard()
+    budget = escalation.ForegroundBudget(soft=0, hard=120.0, configured_timeout=60.0,
+                                         estimates=escalation.ForegroundEstimates())
+    clock.offset += 75.0  # 40 s of usable time left: the budget, not the configured 60 s, bounds the call
+    with pytest.raises(escalation.SweepBudgetExhausted) as raised:
+        escalation.summarize_with_escalation(
+            "source text " * 400, source_tokens=4000, token_budget=50, model="m1", fallback_models=["m2"],
+            timeout=60.0, circuit_breaker=breaker, spend_guard=guard, budget=budget)
+    assert raised.value.reason == "time_budget_exhausted"
+    assert [(model, round(timeout)) for model, timeout, _started in provider.calls] == [("m1", 40)]
+    assert breaker._failures == {} and len(guard._calls) == 1
+
+
+# -- Astra counterexample (d): the classifier reads the error channel; the host deadline seam ----------------------
+
+def _host_module(monkeypatch, clock, seen: list):
+    module = types.ModuleType("agent.auxiliary_client")
+    module._deadline = None
+
+    def _current_aux_stream_deadline():
+        return module._deadline
+
+    class _Scope:
+        def __init__(self, deadline):
+            self.deadline, self.previous = deadline, None
+
+        def __enter__(self):
+            self.previous, module._deadline = module._deadline, self.deadline
+
+        def __exit__(self, *exc):
+            module._deadline = self.previous
+
+    def call_llm(**kwargs):
+        seen.append((kwargs.get("timeout"), module._deadline))
+        clock.offset += kwargs["timeout"]  # the host stops the stream at the deadline it was given
+        raise TimeoutError("auxiliary stream timed out at the host compression deadline")
+
+    module._current_aux_stream_deadline = _current_aux_stream_deadline
+    module.aux_stream_deadline = _Scope
+    module.call_llm = call_llm
+    monkeypatch.setitem(sys.modules, "agent.auxiliary_client", module)
+    return module
+
+
+def test_d_the_error_reaches_the_classifier_through_the_summary_call_channel(monkeypatch, clock):
+    seen: list = []
+    host = _host_module(monkeypatch, clock, seen)
+    host._deadline = original = clock() + 500.0  # the host waits longer: the budget's deadline is installed
+    breaker, guard = escalation.SummaryCircuitBreaker(), escalation.SummarySpendGuard()
+    budget = escalation.ForegroundBudget(soft=0, hard=120.0, configured_timeout=60.0,
+                                         estimates=escalation.ForegroundEstimates())
+    clock.offset += 80.0
+    with pytest.raises(escalation.SweepBudgetExhausted):
+        escalation.summarize_with_escalation(
+            "source text " * 400, source_tokens=4000, token_budget=50, timeout=60.0,
+            circuit_breaker=breaker, spend_guard=guard, budget=budget)
+    assert isinstance(escalation._summary_call.error, TimeoutError)  # caught inside _call_llm_for_summary
+    assert len(seen) == 1 and seen[0][0] == pytest.approx(35.0, abs=0.5)
+    assert seen[0][1] == pytest.approx(budget.t0 + 115.0, abs=0.01)  # min(host deadline, t0 + hard - reserve)
+    assert host._deadline == original  # restored on exit
+    assert breaker._failures == {}
+
+
+def test_d_a_tighter_host_deadline_is_kept(monkeypatch, clock):
+    seen: list = []
+    host = _host_module(monkeypatch, clock, seen)
+    host._deadline = clock() + 30.0
+    budget = escalation.ForegroundBudget(soft=0, hard=120.0, configured_timeout=60.0,
+                                         estimates=escalation.ForegroundEstimates())
+    tight = host._deadline
+    with pytest.raises(escalation.SweepBudgetExhausted):
+        escalation.summarize_with_escalation(
+            "source text " * 400, source_tokens=4000, token_budget=50, timeout=60.0, budget=budget)
+    assert seen[0][1] == tight and host._deadline == tight
 
 
 # -- Astra counterexample (e): a slow finalize step shows in the stop line and grows the reserve -------------------
@@ -274,6 +356,30 @@ def test_one_info_stop_line_per_compaction_whose_seconds_add_up(tmp_path, monkey
         assert float(pre) + float(calls) + float(finalize) == pytest.approx(float(elapsed), abs=0.15)
         stop = next(r for r in caplog.records if STOP_LINE.search(r.getMessage()))
         assert stop.levelno == logging.INFO and "alpha" not in stop.getMessage()
+    finally:
+        engine.shutdown()
+
+
+# -- the spend guard: one slot per compaction; rollups on their own guard ------------------------------------------
+
+def test_one_spend_slot_per_foreground_compaction_and_rollups_have_their_own_guard(
+        tmp_path, monkeypatch, clock, caplog):
+    engine = _engine(tmp_path)
+    provider = _provider(monkeypatch, clock, default=5.0)
+    try:
+        result = _compress(engine, _view(), caplog)
+        assert len(provider.calls) > 2 and len(engine._summary_spend_guard._calls) == 1
+        calls = len(provider.calls)
+        _compress(engine, [*result, *[row for i in range(12, 20) for row in _turn(f"T{i}", 10.0 * (i + 1))]], caplog)
+        assert len(provider.calls) > calls
+        assert len(engine._summary_spend_guard._calls) == 2
+        assert engine._rollup_spend_guard is not engine._summary_spend_guard
+        guards = []
+        monkeypatch.setattr(lcm_engine, "run_rollup_maintenance",
+                            lambda dag, config, scope, **kwargs: guards.append(kwargs["spend_guard"]))
+        engine._schedule_rollup_maintenance("profile")
+        engine.drain_rollup_maintenance(timeout=10.0)
+        assert guards == [engine._rollup_spend_guard]
     finally:
         engine.shutdown()
 

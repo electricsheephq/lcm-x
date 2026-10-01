@@ -641,6 +641,13 @@ class LCMEngine(
             window_seconds=float(self._config.summary_spend_window_seconds),
             backoff_seconds=float(self._config.summary_spend_backoff_seconds),
         )
+        # #605 D3: rollups count every call on their own guard, so maintenance cannot blank the foreground,
+        # which takes one slot per compaction on the guard above.
+        self._rollup_spend_guard = SummarySpendGuard(
+            max_calls=int(self._config.summary_spend_max_calls),
+            window_seconds=float(self._config.summary_spend_window_seconds),
+            backoff_seconds=float(self._config.summary_spend_backoff_seconds),
+        )
         # #605: process-local call and finalize walls; the budget of the running compress(), if any.
         self._foreground_estimates = ForegroundEstimates()
         self._foreground_budget: Optional[ForegroundBudget] = None
@@ -2140,7 +2147,7 @@ class LCMEngine(
             key = self._rollup_maintenance_key(scope)
             config = copy.deepcopy(self._config)
             circuit_breaker = self._summary_circuit_breaker
-            spend_guard = self._summary_spend_guard
+            spend_guard = self._rollup_spend_guard
 
             def maintain() -> None:
                 private_dag = SummaryDAG(database_path)

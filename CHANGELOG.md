@@ -19,6 +19,12 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   and the backlog left. A step already running (a store step, assembly, the fit, the host's stream read between
   two chunks) is not interrupted, so a compaction can still end past the hard bound; the stop line measures it. The
   sweep-off, forced-overflow and below-threshold paths keep their behaviour.
+- Fix: on a host that offers `aux_stream_deadline`, each sweep summariser call runs under the earlier of the host's
+  deadline and the budget's (#605). A timeout is a budget cut only when the budget bound the call (its timeout was the
+  time left, below the configured one) or the host deadline fired: it ends the chain without counting against the
+  route's circuit. A configured-timeout hit stays an ordinary route failure and the fallback route runs. A
+  foreground compaction takes one spend-guard slot, at its first call; rollups count every call on their own guard,
+  so maintenance cannot use up the foreground's. (#605)
 - Fix: a Hermes process in which LCM-X did not become active (a slow load or another context engine in the slot) keeps its own
   record file, so overlapping processes no longer overwrite each other's notice; `lcm_doctor` and `/lcm doctor` report
   a live one as an `inactive_process` warning with the fix to apply; after a slot conflict the already-registered
