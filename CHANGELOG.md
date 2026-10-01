@@ -6,6 +6,10 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: forced overflow recovery now counts the plain stub the final pass adds for every tool result it does not keep,
+  before it keeps the tool call, so the assembled request stays inside the cap; when a call's externalized-output stub
+  does not fit, the call keeps a plain stub instead of being dropped; a failed rotation-lineage write is logged at
+  WARNING (both session ids, the error class) and rotation continues. (#697)
 - Docs: the release gauntlet spec requires at least one committed compaction in the Phase C soak (else the soak is
   inconclusive), states the Phase C lossless multiset bar, and scopes the differential rule's row identity to one
   fixture session; the AGENTS.md summary carries the "no worse than the base" guard. (#705)
