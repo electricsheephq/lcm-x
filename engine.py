@@ -5232,7 +5232,7 @@ class LCMEngine(
     ) -> List[Dict[str, Any]]:
         """#772: a stub and its payload share an identity, so the cache would resurrect a host-held stub."""
         def is_stub(message: Dict[str, Any]) -> bool:
-            return is_externalized_placeholder(normalize_content_value(message.get("content")) or "")
+            return is_externalized_placeholder(text_content_for_pattern_matching(message.get("content")) or "")
 
         return [
             fresh[idx]

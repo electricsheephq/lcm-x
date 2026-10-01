@@ -8,6 +8,7 @@ import copy
 import hashlib
 import json
 
+from hermes_lcm.message_content import text_content_for_pattern_matching
 from hermes_lcm.tokens import count_messages_tokens
 from tests.test_issue_671_stub_first_exit import (  # noqa: F401 (fixtures)
     STUB,
@@ -31,13 +32,22 @@ def _adopt(engine, out, *, new_rows=({"role": "user", "content": "next ask"},)):
     return [dict(m) for m in out] + [dict(m) for m in new_rows]
 
 
+def _text(content):
+    return text_content_for_pattern_matching(content) or ""
+
+
 def _stubbed_ids(messages):
-    return [m["tool_call_id"] for m in messages if m.get("role") == "tool" and str(m["content"]).startswith(STUB)]
+    return [m["tool_call_id"] for m in messages if m.get("role") == "tool" and _text(m["content"]).startswith(STUB)]
 
 
-def _exit_and_adopt(build, caplog, **adopt):
+def _structured(view):
+    """The same rows with every tool output as one text block (a supported list shape)."""
+    return [dict(m, content=[{"type": "text", "text": m["content"]}]) if m.get("role") == "tool" else m for m in view]
+
+
+def _exit_and_adopt(build, caplog, view=None, **adopt):
     engine = exit_engine(build)
-    out = run(engine, tool_view()[1:], caplog)
+    out = run(engine, tool_view()[1:] if view is None else view, caplog)
     assert engine._stub_first_exit_now is not None
     host = _adopt(engine, out, **adopt)
     stubbed = _stubbed_ids(host)
@@ -132,3 +142,25 @@ def test_the_store_never_holds_a_tool_output_twice(make_engine, summaries, caplo
     call_ids = [r["tool_call_id"] for r in rows if r.get("role") == "tool"]
     assert len(call_ids) == len(set(call_ids))  # rc2: every cleared row stored again
     assert engine._store.get_session_count(engine._session_id) - stored == 1
+
+
+def test_structured_tool_stubs_survive_the_next_preflight(make_engine, summaries, caplog):  # noqa: F811
+    """Site A with list-shaped tool outputs: the stub keeps the text-block shape and must still count as a stub."""
+    engine, host, stubbed = _exit_and_adopt(make_engine, caplog, view=_structured(tool_view()[1:]))
+    assert all(isinstance(tool_content(host, cid), list) for cid in stubbed)
+
+    replay = engine._ingest_messages(host)
+
+    assert all(_text(tool_content(replay, cid)).startswith(STUB) for cid in stubbed)
+    assert all(_text(tool_content(engine._last_active_replay_messages, cid)).startswith(STUB) for cid in stubbed)
+
+
+def test_structured_tool_stubs_survive_a_turn_with_no_new_rows(make_engine, summaries, caplog):  # noqa: F811
+    """Site B with list-shaped tool outputs."""
+    engine, host, stubbed = _exit_and_adopt(make_engine, caplog, view=_structured(tool_view()[1:]), new_rows=())
+
+    replay = engine._ingest_messages(host)
+    again = engine._ingest_messages(copy.deepcopy(host))
+
+    assert all(_text(tool_content(replay, cid)).startswith(STUB) for cid in stubbed)
+    assert all(_text(tool_content(again, cid)).startswith(STUB) for cid in stubbed)
