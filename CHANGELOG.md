@@ -6,6 +6,10 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: a Hermes process in which LCM-X did not become active (a slow load or another context engine in the slot) keeps its own
+  record file, so overlapping processes no longer overwrite each other's notice; `lcm_doctor` and `/lcm doctor` report
+  a live one as an `inactive_process` warning with the fix to apply; after a slot conflict the already-registered
+  `post_llm_call` hook no longer writes `lcm.db` in that process. (#696)
 - Docs: the release gauntlet spec (`bench/specs/RELEASE-READINESS-V1.md`) now states the rules the releases since
   v0.23.2 ran under: the differential rule for Phase B shapes and Phase C conflicts the previous GA also shows, the
   Phase B hands-on lane, recall-probe scoring (`exact` / `recoverable` / `LOSS`; only LOSS fails), provider failures
