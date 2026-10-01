@@ -396,13 +396,19 @@ class SurvivalFitMixin:
     def _survival_record(self, reason, count, ids, before, after, budget, projected, notice, *, shortened=True,
                          warn_user=True) -> None:
         """Loud: a WARNING line, the doctor counter (metadata only) and one user warning per conversation."""
-        uncovered = len(set(ids) - self._store_complete_node_covered(ids)) if reason.startswith("exit_fit:") else 0
+        uncovered = 0
+        if reason.startswith("exit_fit:"):
+            try:  # a diagnostic: its failure never fails the fit
+                uncovered = len(set(ids) - self._store_complete_node_covered(ids))
+            except Exception:
+                logger.debug("LCM exit fit: the uncovered-row count failed", exc_info=True)
+                uncovered = None
         if shortened:
             logger.warning(
                 "LCM survival fit applied (reason=%s, conversation=%s, dropped_rows=%d, store_ids=%s..%s, "
-                "uncovered_rows=%d, projected=%s, tokens=%d->%d, budget=%d)",
+                "uncovered_rows=%s, projected=%s, tokens=%d->%d, budget=%d)",
                 reason, self._conversation_id or self._session_id, count, ids[0] if ids else "-", ids[-1] if ids else "-",
-                uncovered, projected, before, after, budget,
+                "unknown" if uncovered is None else uncovered, projected, before, after, budget,
             )
         self._last_survival_fit = {"reason": reason, "dropped_rows": count, "notice": notice, "at": time.time(),
                                    "uncovered_rows": uncovered, "reached_budget": after <= budget}

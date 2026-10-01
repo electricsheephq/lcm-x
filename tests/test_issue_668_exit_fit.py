@@ -215,3 +215,34 @@ def test_t10_exit_fit_never_drops_the_summary_prefix(engine, monkeypatch, caplog
     assert not any("dropped the summary prefix" in r.getMessage() for r in caplog.records)
     assert any("LCM exit fit skipped" in r.getMessage() for r in caplog.records)
     assert engine._last_survival_fit is None
+
+
+def test_t11_a_failed_uncovered_count_never_fails_the_fit(engine, monkeypatch, caplog):
+    import sqlite3
+
+    view = _hidden_backlog(engine, list_users=True)
+    observed = engine._survival_measure(view) + 2000
+
+    real_covered, real_fit, in_fit = engine._store_complete_node_covered, engine._survival_fit, []
+
+    def broken(store_ids):  # fails only inside the fit: the leaf path's own use of the query stays intact
+        if in_fit:
+            raise sqlite3.OperationalError("synthetic coverage query failure")
+        return real_covered(store_ids)
+
+    def fit(*args, **kwargs):
+        in_fit.append(1)
+        try:
+            return real_fit(*args, **kwargs)
+        finally:
+            in_fit.pop()
+
+    monkeypatch.setattr(engine, "_store_complete_node_covered", broken)
+    monkeypatch.setattr(engine, "_survival_fit", fit)
+    with caplog.at_level(logging.WARNING, logger="hermes_lcm"):
+        result = engine.compress(view, current_tokens=observed)
+    assert engine._last_survival_fit["reason"].startswith("exit_fit:")
+    assert engine._last_survival_fit["uncovered_rows"] is None
+    assert engine._survival_measure(result) + 2000 <= int(engine.threshold_tokens * 0.95)
+    applied = [r.getMessage() for r in caplog.records if "LCM survival fit applied" in r.getMessage()]
+    assert len(applied) == 1 and "uncovered_rows=unknown" in applied[0]
