@@ -111,13 +111,16 @@ _NOT_CONTEXT_LENGTH_TOKENS = ("rate limit", "rate_limit", "too many requests", "
 
 
 def is_summary_context_length_error(exc: BaseException | None) -> bool:
-    """#751: a summary call refused because the request does not fit the route's window. A timeout or a
-    rate limit is not one."""
+    """#751: a summary call refused because the request does not fit the route's window. A timeout, a
+    rate limit or a quota error is not one; the status is read as ``is_summary_route_config_error`` reads it."""
     if exc is None or isinstance(exc, TimeoutError):
         return False
-    if 429 in (getattr(exc, "status_code", None), getattr(exc, "status", None)):
-        return False
+    status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
     message = str(exc).lower()
+    if status is None and (match := _STATUS_IN_MESSAGE_RE.search(message)):
+        status = int(match.group(1))
+    if status == 429 or getattr(exc, "status", None) == 429:
+        return False
     if any(token in message for token in _NOT_CONTEXT_LENGTH_TOKENS):
         return False
     return any(token in message for token in _CONTEXT_LENGTH_ERROR_TOKENS)
