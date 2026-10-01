@@ -154,6 +154,7 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   obligation, issue acceptance, or a product/security owner decision.
 - Maintainers own feature acceptance, priority, compatibility decisions, terminal dispositions,
   and releases.
+- Start from `MAINTAINERS.md`: the maintainer index of roles, labels, triage, and outside PRs.
 
 ## Releases are rc-first (RELEASE-READINESS-V1)
 
